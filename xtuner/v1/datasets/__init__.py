@@ -8,6 +8,12 @@ from .config import (
     DatasetConfigList,
     DatasetConfigListAdatper,
 )
+from .dpo_collator import (
+    DPOColateItem,
+    qwen3_vl_dpo_collator
+)
+from .custom_pack import CustomPackDataset
+from .custom_sampler import CustomSampler
 from .ftdp import FTDPTokenizeFnConfig, FtdpTokenizeFunction
 from .jsonl import JsonlDataset
 from .mllm_tokenize_fn import (
@@ -17,8 +23,15 @@ from .mllm_tokenize_fn import (
     Qwen3VLTokenizeFunction,
 )
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
-from .preset_pack import PresetPackDataset
-from .preset_sampler import PresetSampler
+from .preference_dataset import (
+    InMemoryPreferenceDataset,
+    PreferenceDataItem,
+    PreferenceJsonlDataset,
+    PreferenceTokenizeFunction,
+    VLMPreferenceJsonlDataset,
+    Qwen3VLDPOTokenizeFnConfig,
+    Qwen3VLDPOTokenizeFunction,
+)
 from .pt_tokenize_fn import (
     LongTextPretrainTokenizeFunction,
     LongTextPretrainTokenizeFunctionConfig,
@@ -30,6 +43,7 @@ from .sampler import LengthGroupedSampler, ParallelSampler
 from .sft_tokenize_fn import OpenaiTokenizeFunction, OpenaiTokenizeFunctionConfig
 from .utils import CachableTokenizeFunction, calculate_file_sha256, calculate_xxhash, tokenizer_hash
 from .vlm_jsonl import VLMJsonlDataset
+from .qwen3vl_vision_process import process_vision_info
 
 
 from . import _hardcode_patch  # isort: skip
@@ -75,4 +89,16 @@ __all__ = [
     "DatasetConfig",
     "OpenaiTokenizeFunctionConfig",
     "OpenaiTokenizeFunction",
+    # DPO collators (xtuner v1 style)
+    "DPOColateItem",
+    "qwen3_vl_dpo_collator",
+    # Preference datasets
+    "PreferenceDataItem",
+    "PreferenceTokenizeFunction",
+    "PreferenceJsonlDataset",
+    "VLMPreferenceJsonlDataset",
+    "InMemoryPreferenceDataset",
+    "Qwen3VLDPOTokenizeFnConfig",
+    "Qwen3VLDPOTokenizeFunction",
+    "process_vision_info"
 ]

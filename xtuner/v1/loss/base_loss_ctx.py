@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Literal, TypeVar
+from typing import Annotated, Any, Generic, Literal, TypeVar
 
 import torch
 import torch.nn as nn
@@ -135,9 +135,10 @@ class BaseLossConfig(BaseModel):
 
 # NOTE: Self type for BaseLossContext subclasses (F-bounded polymorphism)
 _BaseLossContextT = TypeVar("_BaseLossContextT", bound="BaseLossContext")
+LossContextInputItem = TypeVar("LossContextInputItem")
 
 
-class BaseLossContext(nn.Module, ABC):
+class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
     def __init__(self, loss_cfg: BaseLossConfig, loss_kwargs: BaseLossKwargs):
         # LossContext需要负责几个功能：
         # 1. sequence parallel, 借助LossKwargs.sp_split 实现

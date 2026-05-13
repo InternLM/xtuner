@@ -628,7 +628,17 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
     ) -> dict:
         line = data.decode()
         tokenized: dict = tokenize_fn(json.loads(line))  # type: ignore[assignment]
-        res = {"num_tokens": tokenized["num_tokens"], "proxy_attn_flops": tokenized["proxy_attn_flops"]}
+        num_tokens = tokenized["num_tokens"]
+        # Some legacy tokenize fns in cache mode only return `num_tokens`.
+        # Fallback to token length as proxy_attn_flops to keep cache building compatible.
+        if "proxy_attn_flops" in tokenized:
+            proxy_attn_flops = tokenized["proxy_attn_flops"]
+        elif isinstance(num_tokens, list):
+            proxy_attn_flops = [float(nt) for nt in num_tokens]
+        else:
+            proxy_attn_flops = float(num_tokens)
+
+        res = {"num_tokens": num_tokens, "proxy_attn_flops": proxy_attn_flops}
         if "chunks" in tokenized:
             res["chunks"] = tokenized["chunks"]
         return res
