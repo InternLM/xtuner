@@ -242,7 +242,19 @@ async def send_abort_request(client: httpx.AsyncClient, url: str, timeout: float
 async def pause_generation(rollout_ctl: "RolloutControllerProxy", pause_time_out: float = 60.0) -> None:
     await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
     rollout_ctl_metadata = await rollout_ctl.get_rollout_metadata.remote()  # type: ignore[attr-defined]
-    infer_server_url = list(rollout_ctl_metadata["server_url_dict"].values())
+    worker_server_urls_status = rollout_ctl_metadata.get("worker_server_urls_status", {})
+    infer_server_url = []
+    rank_by_url: dict[str, int] = {}
+    for rank, urls in rollout_ctl_metadata["server_url_dict"].items():
+        urls = urls if isinstance(urls, list) else [urls]
+        for url in urls:
+            if worker_server_urls_status.get(url, True):
+                infer_server_url.append(url)
+                try:
+                    rank_by_url[url] = int(rank)
+                except (TypeError, ValueError):
+                    pass
+
     async with httpx.AsyncClient() as client:
         tasks = [send_abort_request(client, url, timeout=pause_time_out) for url in infer_server_url]
         results = await asyncio.gather(*tasks)
@@ -251,6 +263,14 @@ async def pause_generation(rollout_ctl: "RolloutControllerProxy", pause_time_out
     succeeded_count = len(infer_server_url) - len(failed_workers)
 
     if failed_workers:
+        try:
+            health_manager = await rollout_ctl.get_health_manager.remote()  # type: ignore[attr-defined]
+            for url in failed_workers:
+                rank = rank_by_url.get(url)
+                if rank is not None:
+                    await health_manager.report_worker_failure.remote(rank, f"abort_request_failed: {url}")
+        except Exception as e:
+            logger.error(f"Failed to report abort request failures to health manager: {e}")
         logger.warning(
             f"Abort requests completed. Succeeded: {succeeded_count}, "
             f"Failed: {len(failed_workers)}. Failed workers: {failed_workers}"

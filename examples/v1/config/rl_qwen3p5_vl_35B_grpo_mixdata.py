@@ -42,7 +42,7 @@ enable_evaluate = eval_data_path is not None and eval_data_path != ""
 # basic settings
 experimental_name = "grpo_mix_data"
 total_epochs = 15
-global_batch_size = 64
+global_batch_size = 256
 prompt_repeat_k = 8
 rollout_tp_size = 2
 rollout_ep_size = 1
