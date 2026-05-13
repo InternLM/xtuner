@@ -1,7 +1,9 @@
+import contextlib
 import json
 import math
 import os
 import time
+from contextlib import contextmanager
 from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, List, Sequence, TypeAlias, TypedDict, cast
@@ -39,6 +41,7 @@ from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
+from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, kl_penalty
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
@@ -167,6 +170,9 @@ class WorkerConfig(BaseModel):
     log_dir: str | Path | None = None
     update_weight_bucket_size_in_gb: float = 0.5  # 512MB
     seed: None | int = None  # if None, use RLTrainer seed
+    profile_step: list[int] | int | None = None  # 1-based global RL train_step ids to profile.
+    profile_time: bool = True
+    profile_memory: bool = False
 
     # sft config
     sft_dataloader_cfg: DataloaderConfig | None = None
@@ -268,6 +274,13 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
 
         self._optimizer_steps = worker_cfg.optimizer_steps
+        profile_step = worker_cfg.profile_step
+        if isinstance(profile_step, int):
+            profile_step = [profile_step]
+        self._profile_step = set(profile_step or [])
+        self._profile_time = worker_cfg.profile_time
+        self._profile_memory = worker_cfg.profile_memory
+        self._global_train_step = 0
 
         # Used to update weight to rollout engine
         self.rollout_device_mesh: DeviceMesh | None = None
@@ -494,6 +507,26 @@ class TrainingWorker(SingleAcceleratorWorker):
                 ray.internal.free(free_routed_expert_refs, local_only=False)
             del to_free_routed_expert_refs
 
+    @contextmanager
+    def _maybe_profiling(self, global_train_step: int, phase: str):
+        if global_train_step not in self._profile_step:
+            yield
+            return
+
+        if self.log_dir is not None:
+            profile_home = self.log_dir.parent
+        else:
+            profile_home = Path(os.environ.get("WORK_DIR", "."))
+
+        with contextlib.ExitStack() as stack:
+            if self._profile_time:
+                time_dir = profile_home / "profiling_time" / phase / f"global-step-{global_train_step}"
+                stack.enter_context(profiling_time(time_dir))
+            if self._profile_memory:
+                memory_dir = profile_home / "profiling_memory" / phase / f"global-step-{global_train_step}"
+                stack.enter_context(profiling_memory(memory_dir))
+            yield
+
     @ray_method
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:
         # NOTE: sglang会清除logger handle, 重新创建
@@ -511,6 +544,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_list: list[BaseRLLossContext] = []
         mtp_loss_ctx_list: list[list[MTPLossContext]] = []
+        prepare_inputs_begin = time.perf_counter()
         for data in data_batches:
             # update seq_ctx
             seq_ctx = data["seq_ctx"]
@@ -520,7 +554,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     assert isinstance(pixel_values, list), (
                         f"pixel_values should be list of tensor, got {type(pixel_values)}"
                     )
-                    pixel_values = [ray.get(pixel_obf) for pixel_obf in pixel_values]
+                    pixel_values = ray.get(list(pixel_values))
                     pixel_values = [torch.as_tensor(pixel_value) for pixel_value in pixel_values]
                     pixel_values = torch.cat(pixel_values, dim=0)
                     seq_ctx.pixel_values = pixel_values
@@ -571,6 +605,10 @@ class TrainingWorker(SingleAcceleratorWorker):
                     if mtp_ctx is not None:
                         mtp_loss_ctxs_per_batch.append(mtp_ctx)
                 mtp_loss_ctx_list.append(mtp_loss_ctxs_per_batch)
+        self.logger.debug(
+            f"Rank{self.rank} Rollout {rollout_idx} prepare_inputs elapsed="
+            f"{time.perf_counter() - prepare_inputs_begin:.4f}s"
+        )
 
         del data_batches
 
@@ -694,6 +732,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         # train optimizer steps
         for i in range(0, len(seq_ctx_list), iters_per_step):
+            global_train_step = self._global_train_step + 1
             batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
             batches_loss_ctx = batched_loss_ctx_list[i : i + iters_per_step]
 
@@ -717,8 +756,14 @@ class TrainingWorker(SingleAcceleratorWorker):
                     )
                 ]
 
-            train_step_info = self._engine.train_step(
-                data_batches=engine_input,
+            train_step_begin = time.perf_counter()
+            with self._maybe_profiling(global_train_step, "train_step"):
+                train_step_info = self._engine.train_step(
+                    data_batches=engine_input,
+                )
+            self.logger.debug(
+                f"Rank{self.rank} Rollout {rollout_idx} GlobalStep {global_train_step} "
+                f"train_step[{i}].engine_train_step elapsed={time.perf_counter() - train_step_begin:.4f}s"
             )
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
@@ -749,6 +794,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
             log_str = f"Rank{self.rank} Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)
+            self._global_train_step = global_train_step
 
         self._rollout_step += 1
         if self._sft_dataloader is not None and self._rollout_step % self._rollout_steps_per_sft == 0:
