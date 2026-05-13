@@ -784,7 +784,7 @@ class UpdateWeighter:
                     group=cpu_group,
                 )
             elif self.rollout_cfg_info["backend"] == "pytorch":
-                if use_flattened_tensor_bucket:
+                if use_flattened_tensor_bucket and state_dict:
                     state_dict_bytes = self._compute_state_dict_bytes(state_dict)
                     send_ipc_tensor = (
                         state_dict_bytes > self._ipc_tensor_bytes or self._update_params_ipc_tensor is None
@@ -908,7 +908,7 @@ class UpdateWeighter:
                 except Exception:
                     use_flattened_tensor_bucket = False
 
-                if use_flattened_tensor_bucket:
+                if use_flattened_tensor_bucket and state_dict:
                     data["load_format"] = "flattened_bucket"
                 response = requests.post(
                     f"{self.rollout_url}/{self.endpoints['update_weights']}", headers=headers, json=data

@@ -248,6 +248,7 @@ class SGLangWorker(RolloutWorker):
             log_level_http=log_level_http,
             tp_size=tp_size,
             ep_size=ep_size,
+            disable_piecewise_cuda_graph=True,
         )
         if self.enable_return_routed_experts:
             init_kwargs["enable_return_routed_experts"] = True
