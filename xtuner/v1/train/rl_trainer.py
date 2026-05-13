@@ -40,8 +40,11 @@ from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
 from xtuner.v1.rl.utils import (
     AcceleratorResourcesConfig,
     AutoAcceleratorWorkers,
+    ExternalCPUResourceManager,
+    ExternalCPUResourcesConfig,
     asyncio_run,
     create_task,
+    set_external_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
@@ -206,6 +209,7 @@ class BaseRLTrainerConfig(BaseModel):
     replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
     agent_loop_manager_cfg: AgentLoopManagerConfig
     eval_agent_loop_manager_cfg: AgentLoopManagerConfig | None = None
+    external_cpu_resources: ExternalCPUResourcesConfig | None = None
     evaluator_config: EvaluatorConfig | None = None
     load_from: str | Path
     total_train_steps: int | None = None
@@ -457,6 +461,7 @@ class BaseRLTrainer:
         self._init_rollout_config(cfg, log_dir)
         self._init_runtime_flags(cfg)
         self._advantage_estimator = cfg.advantage_estimator_config.build()
+        self._external_cpu_manager: ExternalCPUResourceManager | None = None
 
         self._exp_tracker = get_writer(writer_type=cfg.exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = False
@@ -1097,6 +1102,12 @@ class RLColocateTrainer(BaseRLTrainer):
         self._init_common(cfg, meta_path=self._META_PATH, logger_tag="RLTrainer")
 
         self._pg = AutoAcceleratorWorkers.build_placement_group(cfg.resources)
+        self._external_cpu_manager = ExternalCPUResourceManager(cfg.external_cpu_resources, self._pg)
+        if cfg.external_cpu_resources is not None and cfg.external_cpu_resources.pools:
+            self._external_cpu_manager.validate_or_raise()
+        else:
+            self._external_cpu_manager.log_initial_snapshot()
+        set_external_cpu_resource_manager(self._external_cpu_manager)
 
         if self._debug_rollout:
             if self._rollout_config.skip_load_weights:
@@ -1280,6 +1291,15 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             train_resources=cfg.train_resources,
             rollout_resources=cfg.rollout_resources,
         )
+        self._external_cpu_manager = ExternalCPUResourceManager(
+            cfg.external_cpu_resources,
+            [self._train_pg, self._rollout_pg],
+        )
+        if cfg.external_cpu_resources is not None and cfg.external_cpu_resources.pools:
+            self._external_cpu_manager.validate_or_raise()
+        else:
+            self._external_cpu_manager.log_initial_snapshot()
+        set_external_cpu_resource_manager(self._external_cpu_manager)
         self.train_controller = self._train_worker_cfg.build(self._train_pg)
         self.rollout_controller = self._rollout_config.build(self._rollout_pg)
         self._maybe_start_gateway(cfg)

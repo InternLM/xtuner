@@ -30,6 +30,15 @@ from .ray_utils import (
     get_ray_accelerator,
     register_cleanup,
 )
+from .external_cpu import (
+    ExternalCPUActorPoolAllocation,
+    ExternalCPUActorPoolConfig,
+    ExternalCPUResourceManager,
+    ExternalCPUResourcesConfig,
+    clear_external_cpu_resource_manager,
+    get_external_cpu_resource_manager,
+    set_external_cpu_resource_manager,
+)
 from .ray_worker import (
     AcceleratorResourcesConfig,
     AutoAcceleratorWorkers,
@@ -49,6 +58,13 @@ __all__ = [
     "CPUActorLauncher",
     "BaseCPUWorker",
     "AutoCPUWorkers",
+    "ExternalCPUActorPoolAllocation",
+    "ExternalCPUActorPoolConfig",
+    "ExternalCPUResourceManager",
+    "ExternalCPUResourcesConfig",
+    "clear_external_cpu_resource_manager",
+    "get_external_cpu_resource_manager",
+    "set_external_cpu_resource_manager",
     "get_ray_accelerator",
     "load_function",
     "find_master_addr_and_port",
