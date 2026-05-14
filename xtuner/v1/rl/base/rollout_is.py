@@ -338,7 +338,7 @@ def compute_is_metrics(
     in sequence/geometric mode via log-space) and safety-clamped values (for mean/std/ESS)
     to balance accuracy with numerical stability and avoid overflow.
     """
-    metrics = {}
+    metrics: dict[str, bool | int | float | torch.Tensor] = {}
     device = rollout_is_weights.device
     seq_valid = response_mask.sum(dim=-1, keepdim=True) > 0
     metrics["valid"] = response_mask.any().item()
@@ -544,12 +544,15 @@ def merge_rollout_is_metrics(rollout_is_metrics: list[dict[str, float]], device=
     metrics = {}
     keys = [k for k in rollout_is_metrics[0].keys() if k != "mismatch/valid"]
 
+    is_valids = [m.get("mismatch/valid", True) for m in rollout_is_metrics]
+    valid_tensor = torch.tensor(is_valids, dtype=torch.float32, device=device)
+    count_value = valid_tensor.sum()
+    dist.all_reduce(count_value, op=dist.ReduceOp.SUM)
+    count = count_value.item()
+
     for key in keys:
         values = []
-        valids = []
-        for m in rollout_is_metrics:
-            is_valid = m.get("mismatch/valid", True)
-            valids.append(float(is_valid))
+        for m, is_valid in zip(rollout_is_metrics, is_valids):
             if is_valid:
                 values.append(m[key])
             elif "max" in key:
@@ -559,12 +562,9 @@ def merge_rollout_is_metrics(rollout_is_metrics: list[dict[str, float]], device=
             else:
                 values.append(0.0)
         value_tensor = torch.tensor(values, dtype=torch.float32, device=device)
-        valid_tensor = torch.tensor(valids, dtype=torch.float32, device=device)
-        count_value = valid_tensor.sum()
-        dist.all_reduce(count_value, op=dist.ReduceOp.SUM)
 
         # Aggregate across all processes
-        if count_value.item() == 0:
+        if count == 0:
             metrics[key] = 0.0
         elif "max" in key:
             max_value = value_tensor.max()
@@ -577,6 +577,6 @@ def merge_rollout_is_metrics(rollout_is_metrics: list[dict[str, float]], device=
         else:
             sum_value = value_tensor.sum()
             dist.all_reduce(sum_value, op=dist.ReduceOp.SUM)
-            metrics[key] = sum_value.item() / count_value.item()
+            metrics[key] = sum_value.item() / count
 
     return metrics
