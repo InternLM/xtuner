@@ -239,6 +239,7 @@ class RolloutController:
 
     def pause_generation(self):
         self.health_checker.pause()
+        self._broadcast_to_active_workers("pause_generation")
 
     def continue_generation(self):
         self.health_checker.resume()

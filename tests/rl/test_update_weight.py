@@ -109,6 +109,7 @@ class TestUpdateWeight(unittest.TestCase):
         train_controller = TrainingController(
             workers=train_workers,
         )
+        train_controller.set_train_rollout_mode("colocate")
         # fixed sample params
         sample_params = SampleParams(temperature=0.0, max_tokens=128, top_k=1)
 
