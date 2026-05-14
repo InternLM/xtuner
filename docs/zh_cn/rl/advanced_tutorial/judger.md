@@ -57,14 +57,15 @@
 
 ```text
 JudgerConfig
-  ├─ num_ray_actors = 0  ──► NativeJudger
-  ├─ num_ray_actors = 1  ──► RemoteJudger
-  │                           └─ JudgerActor
-  │                                └─ NativeJudger
-  └─ num_ray_actors > 1  ──► JudgerPool
-                              ├─ RemoteJudger -> JudgerActor -> NativeJudger
-                              ├─ RemoteJudger -> JudgerActor -> NativeJudger
-                              └─ ...
+  ├─ cpu_resources = None  ──► NativeJudger
+  └─ cpu_resources = CPUResourcesConfig(...)
+       ├─ num_workers = 1  ──► RemoteJudger
+       │                        └─ JudgerActor
+       │                             └─ NativeJudger
+       └─ num_workers > 1  ──► JudgerPool
+                               ├─ RemoteJudger -> JudgerActor -> NativeJudger
+                               ├─ RemoteJudger -> JudgerActor -> NativeJudger
+                               └─ ...
 
 ComposedJudgerConfig
   └─ ComposedJudger
@@ -73,13 +74,15 @@ ComposedJudgerConfig
        └─ select_fn + merge_fn 控制路由和合并
 ```
 
-普通 `JudgerConfig` 根据 `num_ray_actors` 决定执行模式：
+普通 `JudgerConfig` 根据 `cpu_resources` 决定执行模式。`cpu_resources` 表示 PG 外 Ray CPU worker 的资源需求，类型为 `CPUResourcesConfig`：
 
 | 配置 | 构建结果 | 含义 |
 | --- | --- | --- |
-| `num_ray_actors = 0` | `NativeJudger` | 本地执行，不启动 Ray Judger actor |
-| `num_ray_actors = 1` | `RemoteJudger -> JudgerActor -> NativeJudger` | 单个 Ray actor 执行打分 |
-| `num_ray_actors > 1` | `JudgerPool` | 多个 Ray actor 副本并发打分 |
+| `cpu_resources = None` | `NativeJudger` | 本地执行，不启动 Ray Judger actor |
+| `cpu_resources=CPUResourcesConfig(num_workers=1, ...)` | `RemoteJudger -> JudgerActor -> NativeJudger` | 单个 Ray actor 执行打分 |
+| `cpu_resources=CPUResourcesConfig(num_workers>1, ...)` | `JudgerPool` | 多个 Ray actor 副本并发打分 |
+
+`CPUResourcesConfig.cpu_memory_per_worker` 默认是 `1024**3`，通常不需要额外配置。PG 外 CPU actor 资源会注册到全局 `CPUResourceManager`，资源不足时会在组件构建阶段报错，避免 Ray actor 长时间 pending。
 
 `ComposedJudgerConfig` 用于多分支场景：一个样本可以按 `select_fn` 路由到不同 Judger，也可以同时运行多个 Judger，再用 `merge_fn` 合并结果。
 
@@ -251,7 +254,6 @@ judger_config = JudgerConfig(
     judger_name="exact_match",
     reward_handler=exact_match_reward,
     extra_info={},
-    num_ray_actors=0,
 )
 ```
 
@@ -320,10 +322,17 @@ class ToolJudgerConfig(JudgerConfig):
         return ToolJudger()
 ```
 
-之后仍可通过 `num_ray_actors` 控制本地或 Ray actor 模式：
+之后仍可通过 `cpu_resources` 控制本地或 Ray actor 模式：
 
 ```python
-judger_config = ToolJudgerConfig(num_ray_actors=4)
+from xtuner.v1.rl.utils import CPUResourcesConfig
+
+judger_config = ToolJudgerConfig(
+    cpu_resources=CPUResourcesConfig(
+        num_workers=4,
+        num_cpus_per_worker=1,
+    ),
+)
 judger = judger_config.build()
 ```
 
@@ -335,8 +344,15 @@ judger = judger_config.build()
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import TaskSpecConfig
 from xtuner.v1.rl.judger import GSM8KJudgerConfig
+from xtuner.v1.rl.utils import CPUResourcesConfig
 
-judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
+judger_config = GSM8KJudgerConfig(
+    judger_name="openai/gsm8k",
+    cpu_resources=CPUResourcesConfig(
+        num_workers=1,
+        num_cpus_per_worker=1,
+    ),
+)
 
 task_config = TaskSpecConfig(
     task_name="train_task",
@@ -349,7 +365,7 @@ task_config = TaskSpecConfig(
 )
 ```
 
-`AgentLoopManagerConfig.build()` 会调用 `build_judger(task_cfg.judger_config)`。普通 `JudgerConfig` 会按 `num_ray_actors` 构建本地或 Ray 版本；`ComposedJudgerConfig` 会递归构建各个 branch。
+`AgentLoopManagerConfig.build()` 会调用 `build_judger(task_cfg.judger_config)`。普通 `JudgerConfig` 会按 `cpu_resources` 构建本地或 Ray 版本；`ComposedJudgerConfig` 会递归构建各个 branch。
 
 ## 预置 Judger
 

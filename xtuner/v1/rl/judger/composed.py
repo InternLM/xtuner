@@ -4,7 +4,6 @@ from copy import deepcopy
 from typing import Callable, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
-from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState
 
@@ -187,13 +186,10 @@ class ComposedJudgerConfig(BaseModel):
     merge_fn: JudgerMergeFn | None = Field(default=None, exclude=True)
     default_key: str | None = "default"
 
-    def get_num_placement_group_bundles(self) -> int:
-        return sum(branch.get_num_placement_group_bundles() for branch in self.branches.values())
-
-    def build(self, pg: PlacementGroup | None = None, start_bundle_idx: int = 0) -> Judger:
+    def build(self) -> Judger:
         from .factory import build_judger
 
-        return build_judger(self, pg=pg, start_bundle_idx=start_bundle_idx)
+        return build_judger(self)
 
 
 JudgerConfigLike: TypeAlias = JudgerConfig | ComposedJudgerConfig

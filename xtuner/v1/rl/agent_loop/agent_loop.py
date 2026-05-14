@@ -4,14 +4,19 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import TypeAlias, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
-from xtuner.v1.rl.utils import CPUActorLauncher, create_task
+from xtuner.v1.rl.utils import (
+    CPUActorLauncher,
+    CPUResourcesConfig,
+    create_task,
+    register_cpu_resources,
+)
 from xtuner.v1.utils import get_logger, ray_method
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 
@@ -20,36 +25,31 @@ class AgentLoopConfig(ABC, BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     hf_checkpoint: str
     sample_params: SampleParams
-    num_ray_actors: int = Field(
-        default=0,
-        ge=0,
-        description="Number of AgentLoop Ray actor instances. 0 means local mode.",
-    )
-    num_cpus: float = Field(default=1, gt=0, description="CPU cores required by the AgentLoop actor itself.")
-    cpu_memory: int = Field(default=1024**3, gt=0, description="CPU memory in bytes required by AgentLoop.")
-
-    @model_validator(mode="after")
-    def _validate_ray_actor_config(self) -> AgentLoopConfig:
-        if self.num_ray_actors == 0 and (self.num_cpus != 1 or self.cpu_memory != 1024**3):
-            logger = get_logger()
-            logger.warning("num_cpus and cpu_memory are ignored when AgentLoop runs in local mode.")
-        return self
+    cpu_resources: CPUResourcesConfig | None = None
 
     def build(self, rollout_controller, judger: Judger | None = None, logger=None) -> AgentLoopSpec:
-        if self.num_ray_actors == 0:
+        if self.cpu_resources is None:
             return self.build_local(
                 rollout_controller=rollout_controller,
                 judger=judger,
                 logger=logger,
             )
-        if self.num_ray_actors > 1:
+
+        register_cpu_resources(
+            name=f"agent_loop:{self.__class__.__name__}",
+            cpu_resources=self.cpu_resources,
+        )
+
+        if self.cpu_resources.num_workers > 1:
             return self._build_router(
                 rollout_controller=rollout_controller,
+                cpu_resources=self.cpu_resources,
                 judger=judger,
                 logger=logger,
             )
         return self._build_ray_actor(
             rollout_controller=rollout_controller,
+            cpu_resources=self.cpu_resources,
             judger=judger,
             logger=logger,
         )
@@ -65,6 +65,7 @@ class AgentLoopConfig(ABC, BaseModel):
     def _build_ray_actor(
         self,
         rollout_controller: RolloutController,
+        cpu_resources: CPUResourcesConfig,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
@@ -76,11 +77,10 @@ class AgentLoopConfig(ABC, BaseModel):
                 self,
                 rollout_controller,
                 judger,
-                logger,
                 pg=pg,
                 bundle_idx=0,
-                actor_num_cpus=self.num_cpus,
-                actor_memory=self.cpu_memory,
+                actor_num_cpus=cpu_resources.num_cpus_per_worker,
+                actor_memory=cpu_resources.cpu_memory_per_worker,
                 capture_child_tasks=True,
             ),
         )
@@ -88,7 +88,7 @@ class AgentLoopConfig(ABC, BaseModel):
     def _build_ray_actors(
         self,
         rollout_controller: RolloutController,
-        num_actors: int,
+        cpu_resources: CPUResourcesConfig,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
@@ -101,12 +101,11 @@ class AgentLoopConfig(ABC, BaseModel):
                 self,
                 rollout_controller,
                 judger,
-                logger,
                 pg=pg,
                 start_bundle_idx=start_bundle_idx,
-                num_workers=num_actors,
-                actor_num_cpus_per_worker=self.num_cpus,
-                actor_memory_per_worker=self.cpu_memory,
+                num_workers=cpu_resources.num_workers,
+                actor_num_cpus_per_worker=cpu_resources.num_cpus_per_worker,
+                actor_memory_per_worker=cpu_resources.cpu_memory_per_worker,
                 capture_child_tasks=True,
             ),
         )
@@ -114,6 +113,7 @@ class AgentLoopConfig(ABC, BaseModel):
     def _build_router(
         self,
         rollout_controller: RolloutController,
+        cpu_resources: CPUResourcesConfig,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
@@ -122,7 +122,7 @@ class AgentLoopConfig(ABC, BaseModel):
         return RouterAgentLoop(
             workers=self._build_ray_actors(
                 rollout_controller=rollout_controller,
-                num_actors=self.num_ray_actors,
+                cpu_resources=cpu_resources,
                 pg=pg,
                 judger=judger,
                 logger=logger,

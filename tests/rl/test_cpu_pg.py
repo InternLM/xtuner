@@ -6,13 +6,14 @@ from typing import Dict
 import httpx
 import ray
 
-from xtuner.v1.rl.utils import AutoCPUWorkers, BaseCPUWorker, CPUResourcesConfig
+from xtuner.v1.rl.utils import AutoCPUWorkers, CPUResourcesConfig
 
 
 @ray.remote(num_cpus=1)
-class NaiveCPUWorker(BaseCPUWorker):
+class NaiveCPUWorker:
     def __init__(self, config: Dict, num_cpus = 1):
-        super().__init__(config, num_cpus)
+        self.config = config
+        self.num_cpus = num_cpus
         if self.config["worker_type"] == "fake_receiver":
             from fastapi import FastAPI
             self.app = FastAPI()
@@ -87,10 +88,10 @@ class TestAutoCPUWorkers(unittest.TestCase):
     def test_create_cpu_workers(self):
         """Test creating CPU workers"""
         num_workers = 4
-        cpu_config = CPUResourcesConfig.from_total(
-            total_cpus=4,
-            total_memory=4 * 1024**3,
+        cpu_config = CPUResourcesConfig(
             num_workers=num_workers,
+            num_cpus_per_worker=1,
+            cpu_memory_per_worker=1024**3,
         )
         
         # Create a receiver worker
@@ -112,10 +113,10 @@ class TestAutoCPUWorkers(unittest.TestCase):
         """Test sending data multiple times"""
         # Create receiver worker
         receiver_config = dict(worker_type="fake_receiver")
-        cpu_resources_config = CPUResourcesConfig.from_total(
-            total_cpus=2,
-            total_memory=2 * 1024**3,
+        cpu_resources_config = CPUResourcesConfig(
             num_workers=2,
+            num_cpus_per_worker=1,
+            cpu_memory_per_worker=1024**3,
         )
         pg = AutoCPUWorkers.build_placement_group(cpu_resources_config)
         
