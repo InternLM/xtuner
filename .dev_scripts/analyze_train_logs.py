@@ -34,22 +34,26 @@ from typing import Iterable
 
 # Captures every metric we currently emit in xtuner's training INFO line. The
 # regex is intentionally permissive about field ordering changes (e.g. extra
-# fields appearing between known ones).
+# fields appearing between known ones). Rank is read from a ``[RANK N]`` token
+# when the launcher injects it; otherwise ``parse_logs`` falls back to the rank
+# encoded in the per-rank log filename.
 _LINE_RE = re.compile(
-    r"\[RANK (?P<rank>\d+)\].*?"
     r"Step (?P<step>\d+)/\d+\s+"
     r"data_time:\s*(?P<dt>[\d.]+)\s+"
     r"lr:\s*[\d.eE+\-]+\s+"
     r"time:\s*(?P<st>[\d.]+)\s+"
     r"text_tokens:\s*(?P<text_tokens>\d+)\s+"
-    r"img_tokens:\s*(?P<img_tokens>[\d.]+)\s+"
-    r".*?efficient_attn_ratio:\s*(?P<eff>[\d.]+),\s*"
-    r"img_efficient_attn_ratio:\s*(?P<img_eff>[\d.]+)\s+"
-    r".*?max_memory:\s*(?P<max_mem>[\d.]+)\s*GB\s+"
+    r"img_tokens:\s*(?P<img_tokens>[\d.]+).*?"
+    r"efficient_attn_ratio:\s*(?P<eff>[\d.]+),\s*"
+    r"img_efficient_attn_ratio:\s*(?P<img_eff>[\d.]+).*?"
+    r"max_memory:\s*(?P<max_mem>[\d.]+)\s*GB\s+"
     r"reserved_memory:\s*(?P<rsv_mem>[\d.]+)\s*GB\s+"
     r"tgs:\s*(?P<tgs>[\d.]+)\s+"
     r"exp_tgs:\s*(?P<exp_tgs>[\d.]+)"
 )
+
+_RANK_IN_LINE_RE = re.compile(r"\[RANK (\d+)\]")
+_RANK_IN_FILENAME_RE = re.compile(r"rank(\d+)", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -111,9 +115,22 @@ def parse_logs(log_dir: Path) -> dict[int, dict[int, RankRecord]]:
     by_step: dict[int, dict[int, RankRecord]] = {}
     files = sorted(log_dir.glob("node_*.txt"))
     if not files:
-        raise FileNotFoundError(f"No node_*.txt files found under {log_dir}")
+        files = sorted(log_dir.glob("rank*.log"))
+    if not files:
+        files = sorted(log_dir.glob("*.log"))  # fallback pattern
+
+    if not files:
+        raise FileNotFoundError(
+            f"No node_*.txt / rank*.log files found under {log_dir}"
+        )
 
     for path in files:
+        # Per-rank log files (e.g. ``rank3.log``) do not embed ``[RANK N]`` in
+        # every line; the filename is the authoritative source. We still prefer
+        # an in-line ``[RANK N]`` token when present (multi-rank aggregated logs).
+        fname_match = _RANK_IN_FILENAME_RE.search(path.name)
+        rank_from_file = int(fname_match.group(1)) if fname_match else None
+
         with path.open("r", errors="replace") as fh:
             for line in fh:
                 if "data_time:" not in line:
@@ -121,9 +138,16 @@ def parse_logs(log_dir: Path) -> dict[int, dict[int, RankRecord]]:
                 m = _LINE_RE.search(line)
                 if m is None:
                     continue
+                rank_match = _RANK_IN_LINE_RE.search(line)
+                if rank_match is not None:
+                    rank = int(rank_match.group(1))
+                elif rank_from_file is not None:
+                    rank = rank_from_file
+                else:
+                    continue
                 step = int(m["step"])
                 rec = RankRecord(
-                    rank=int(m["rank"]),
+                    rank=rank,
                     data_time=float(m["dt"]),
                     step_time=float(m["st"]),
                     text_tokens=int(m["text_tokens"]),
