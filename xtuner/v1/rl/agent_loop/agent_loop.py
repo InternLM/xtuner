@@ -13,11 +13,9 @@ from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import (
     CPUActorLauncher,
-    CPUResourceAllocation,
     CPUResourcesConfig,
     create_task,
-    format_cpu_resource_manager_uninitialized_error,
-    get_cpu_resource_manager,
+    register_cpu_resources,
 )
 from xtuner.v1.utils import get_logger, ray_method
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
@@ -27,34 +25,31 @@ class AgentLoopConfig(ABC, BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     hf_checkpoint: str
     sample_params: SampleParams
-    external_cpu: CPUResourcesConfig | None = None
+    cpu_resources: CPUResourcesConfig | None = None
 
     def build(self, rollout_controller, judger: Judger | None = None, logger=None) -> AgentLoopSpec:
-        if self.external_cpu is None:
+        if self.cpu_resources is None:
             return self.build_local(
                 rollout_controller=rollout_controller,
                 judger=judger,
                 logger=logger,
             )
 
-        cpu_manager = get_cpu_resource_manager()
-        if cpu_manager is None:
-            raise ValueError(format_cpu_resource_manager_uninitialized_error(f"AgentLoop {self.__class__.__name__!r}"))
-        allocation = cpu_manager.register(
+        register_cpu_resources(
             name=f"agent_loop:{self.__class__.__name__}",
-            config=self.external_cpu,
+            cpu_resources=self.cpu_resources,
         )
 
-        if allocation.num_workers > 1:
+        if self.cpu_resources.num_workers > 1:
             return self._build_router(
                 rollout_controller=rollout_controller,
-                external_cpu_allocation=allocation,
+                cpu_resources=self.cpu_resources,
                 judger=judger,
                 logger=logger,
             )
         return self._build_ray_actor(
             rollout_controller=rollout_controller,
-            external_cpu_allocation=allocation,
+            cpu_resources=self.cpu_resources,
             judger=judger,
             logger=logger,
         )
@@ -70,7 +65,7 @@ class AgentLoopConfig(ABC, BaseModel):
     def _build_ray_actor(
         self,
         rollout_controller: RolloutController,
-        external_cpu_allocation: CPUResourceAllocation,
+        cpu_resources: CPUResourcesConfig,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
@@ -85,8 +80,8 @@ class AgentLoopConfig(ABC, BaseModel):
                 logger,
                 pg=pg,
                 bundle_idx=0,
-                actor_num_cpus=external_cpu_allocation.num_cpus_per_worker,
-                actor_memory=external_cpu_allocation.cpu_memory_per_worker,
+                actor_num_cpus=cpu_resources.num_cpus_per_worker,
+                actor_memory=cpu_resources.cpu_memory_per_worker,
                 capture_child_tasks=True,
             ),
         )
@@ -94,7 +89,7 @@ class AgentLoopConfig(ABC, BaseModel):
     def _build_ray_actors(
         self,
         rollout_controller: RolloutController,
-        external_cpu_allocation: CPUResourceAllocation,
+        cpu_resources: CPUResourcesConfig,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
@@ -110,9 +105,9 @@ class AgentLoopConfig(ABC, BaseModel):
                 logger,
                 pg=pg,
                 start_bundle_idx=start_bundle_idx,
-                num_workers=external_cpu_allocation.num_workers,
-                actor_num_cpus_per_worker=external_cpu_allocation.num_cpus_per_worker,
-                actor_memory_per_worker=external_cpu_allocation.cpu_memory_per_worker,
+                num_workers=cpu_resources.num_workers,
+                actor_num_cpus_per_worker=cpu_resources.num_cpus_per_worker,
+                actor_memory_per_worker=cpu_resources.cpu_memory_per_worker,
                 capture_child_tasks=True,
             ),
         )
@@ -120,7 +115,7 @@ class AgentLoopConfig(ABC, BaseModel):
     def _build_router(
         self,
         rollout_controller: RolloutController,
-        external_cpu_allocation: CPUResourceAllocation,
+        cpu_resources: CPUResourcesConfig,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
@@ -129,7 +124,7 @@ class AgentLoopConfig(ABC, BaseModel):
         return RouterAgentLoop(
             workers=self._build_ray_actors(
                 rollout_controller=rollout_controller,
-                external_cpu_allocation=external_cpu_allocation,
+                cpu_resources=cpu_resources,
                 pg=pg,
                 judger=judger,
                 logger=logger,

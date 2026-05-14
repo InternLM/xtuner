@@ -114,7 +114,7 @@ from xtuner.v1.rl.utils import CPUResourcesConfig
 
 judger_config = GSM8KJudgerConfig(
     judger_name="openai/gsm8k",
-    external_cpu=CPUResourcesConfig(
+    cpu_resources=CPUResourcesConfig(
         num_workers=1,
         num_cpus_per_worker=1,
     ),
@@ -124,7 +124,7 @@ judger_config = GSM8KJudgerConfig(
 **Usage Instructions**:
 - `"openai/gsm8k"`: Dataset identifier, needs to match the `data_source` field in your dataset
 - `GSM8KJudgerConfig()`: Judge specifically for GSM8K math problems, will check if the numerical answer is correct
-- `external_cpu`: Runs the judge in PG-external Ray CPU actor(s). If omitted, the judge runs locally.
+- `cpu_resources`: Runs the judge in PG-external Ray CPU actor(s). If omitted, the judge runs locally.
 
 💡 **Extended Functionality**: XTuner also supports multiple judgment methods (functional, API service) and custom Judgers, related tutorials coming soon.
 

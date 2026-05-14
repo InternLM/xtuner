@@ -73,7 +73,7 @@ class TestJudgerController(unittest.TestCase):
 
     def setUp(self):
         ray.init(num_cpus=80, ignore_reinit_error=True)
-        set_cpu_resource_manager(CPUResourceManager(None, None))
+        set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=None))
         self.temp_dir = tempfile.TemporaryDirectory()
         self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
 
@@ -90,7 +90,7 @@ class TestJudgerController(unittest.TestCase):
 
         gsm8k_judger_config = GSM8KJudgerConfig(
             judger_name="openai/gsm8k",
-            external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+            cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
         )
         # Test Case 1: NativeJudger
         native_judger = GSM8KJudgerConfig(judger_name="openai/gsm8k").build()
@@ -124,7 +124,7 @@ class TestJudgerController(unittest.TestCase):
         # 定义 Judger Config
         config = DapoMathJudgerConfig(
             judger_name="dapo_math",
-            external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+            cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
             eos_token=eos_token_str,
             enable_overlong_buffer=True,
             max_response_len=32768,
@@ -143,7 +143,7 @@ class TestJudgerController(unittest.TestCase):
         from xtuner.v1.rl.judger.geo3k import GEO3KJudgerConfig
         config = GEO3KJudgerConfig(
             judger_name="geo3k",
-            external_cpu=CPUResourcesConfig(num_workers=4, num_cpus_per_worker=1),
+            cpu_resources=CPUResourcesConfig(num_workers=4, num_cpus_per_worker=1),
         )
         states, history_reward = construct_geo3k_dapo_judger_data(GEO_ROLLOUT_DATA_PATH)
         router = config.build()
@@ -160,11 +160,11 @@ class TestJudgerController(unittest.TestCase):
 
         gsm8k_config_1 = GSM8KJudgerConfig(
             judger_name="openai/gsm8k_1",
-            external_cpu=CPUResourcesConfig(num_workers=2, num_cpus_per_worker=1),
+            cpu_resources=CPUResourcesConfig(num_workers=2, num_cpus_per_worker=1),
         )
         gsm8k_config_2 = GSM8KJudgerConfig(
             judger_name="openai/gsm8k_2",
-            external_cpu=CPUResourcesConfig(num_workers=8, num_cpus_per_worker=2),
+            cpu_resources=CPUResourcesConfig(num_workers=8, num_cpus_per_worker=2),
         )
 
         gsm8k_router_1 = gsm8k_config_1.build()

@@ -57,8 +57,8 @@
 
 ```text
 JudgerConfig
-  ├─ external_cpu = None  ──► NativeJudger
-  └─ external_cpu = CPUResourcesConfig(...)
+  ├─ cpu_resources = None  ──► NativeJudger
+  └─ cpu_resources = CPUResourcesConfig(...)
        ├─ num_workers = 1  ──► RemoteJudger
        │                        └─ JudgerActor
        │                             └─ NativeJudger
@@ -74,13 +74,13 @@ ComposedJudgerConfig
        └─ select_fn + merge_fn 控制路由和合并
 ```
 
-普通 `JudgerConfig` 根据 `external_cpu` 决定执行模式。`external_cpu` 表示 PG 外 Ray CPU worker 的资源需求，类型为 `CPUResourcesConfig`：
+普通 `JudgerConfig` 根据 `cpu_resources` 决定执行模式。`cpu_resources` 表示 PG 外 Ray CPU worker 的资源需求，类型为 `CPUResourcesConfig`：
 
 | 配置 | 构建结果 | 含义 |
 | --- | --- | --- |
-| `external_cpu = None` | `NativeJudger` | 本地执行，不启动 Ray Judger actor |
-| `external_cpu=CPUResourcesConfig(num_workers=1, ...)` | `RemoteJudger -> JudgerActor -> NativeJudger` | 单个 Ray actor 执行打分 |
-| `external_cpu=CPUResourcesConfig(num_workers>1, ...)` | `JudgerPool` | 多个 Ray actor 副本并发打分 |
+| `cpu_resources = None` | `NativeJudger` | 本地执行，不启动 Ray Judger actor |
+| `cpu_resources=CPUResourcesConfig(num_workers=1, ...)` | `RemoteJudger -> JudgerActor -> NativeJudger` | 单个 Ray actor 执行打分 |
+| `cpu_resources=CPUResourcesConfig(num_workers>1, ...)` | `JudgerPool` | 多个 Ray actor 副本并发打分 |
 
 `CPUResourcesConfig.cpu_memory_per_worker` 默认是 `1024**3`，通常不需要额外配置。PG 外 CPU actor 资源会注册到全局 `CPUResourceManager`，资源不足时会在组件构建阶段报错，避免 Ray actor 长时间 pending。
 
@@ -322,13 +322,13 @@ class ToolJudgerConfig(JudgerConfig):
         return ToolJudger()
 ```
 
-之后仍可通过 `external_cpu` 控制本地或 Ray actor 模式：
+之后仍可通过 `cpu_resources` 控制本地或 Ray actor 模式：
 
 ```python
 from xtuner.v1.rl.utils import CPUResourcesConfig
 
 judger_config = ToolJudgerConfig(
-    external_cpu=CPUResourcesConfig(
+    cpu_resources=CPUResourcesConfig(
         num_workers=4,
         num_cpus_per_worker=1,
     ),
@@ -348,7 +348,7 @@ from xtuner.v1.rl.utils import CPUResourcesConfig
 
 judger_config = GSM8KJudgerConfig(
     judger_name="openai/gsm8k",
-    external_cpu=CPUResourcesConfig(
+    cpu_resources=CPUResourcesConfig(
         num_workers=1,
         num_cpus_per_worker=1,
     ),
@@ -365,7 +365,7 @@ task_config = TaskSpecConfig(
 )
 ```
 
-`AgentLoopManagerConfig.build()` 会调用 `build_judger(task_cfg.judger_config)`。普通 `JudgerConfig` 会按 `external_cpu` 构建本地或 Ray 版本；`ComposedJudgerConfig` 会递归构建各个 branch。
+`AgentLoopManagerConfig.build()` 会调用 `build_judger(task_cfg.judger_config)`。普通 `JudgerConfig` 会按 `cpu_resources` 构建本地或 Ray 版本；`ComposedJudgerConfig` 会递归构建各个 branch。
 
 ## 预置 Judger
 

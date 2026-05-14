@@ -1,4 +1,4 @@
-from xtuner.v1.rl.utils import format_cpu_resource_manager_uninitialized_error, get_cpu_resource_manager
+from xtuner.v1.rl.utils import register_cpu_resources
 
 from .composed import ComposedJudger, ComposedJudgerConfig, JudgerConfigLike, default_merge_fn
 from .native import Judger, JudgerConfig, JudgerPool
@@ -19,22 +19,18 @@ def build_judger(config: JudgerConfigLike) -> Judger:
 
 
 def _build_replicated_judger(config: JudgerConfig) -> Judger:
-    external_cpu_allocation = None
-    if config.external_cpu is not None:
-        external_cpu_manager = get_cpu_resource_manager()
-        if external_cpu_manager is None:
-            raise ValueError(format_cpu_resource_manager_uninitialized_error(f"Judger {config.judger_name!r}"))
-        external_cpu_allocation = external_cpu_manager.register(
-            name=f"judger:{config.judger_name}",
-            config=config.external_cpu,
-        )
-
-    if external_cpu_allocation is None:
+    if config.cpu_resources is None:
         return config.build_local()
-    if external_cpu_allocation.num_workers == 1:
-        return config._build_remote_judger(external_cpu_allocation=external_cpu_allocation)
+
+    register_cpu_resources(
+        name=f"judger:{config.judger_name}",
+        cpu_resources=config.cpu_resources,
+    )
+
+    if config.cpu_resources.num_workers == 1:
+        return config._build_remote_judger(cpu_resources=config.cpu_resources)
     return JudgerPool(
-        replicas=config._build_remote_judgers(external_cpu_allocation=external_cpu_allocation),
+        replicas=config._build_remote_judgers(cpu_resources=config.cpu_resources),
         judger_name=config.judger_name,
     )
 

@@ -78,7 +78,7 @@ dapomath_judger_config = DapoMathJudgerConfig(
     tokenizer=tokenizer)
 judger_config = DapoMathJudgerConfig(
     judger_name="dapo_math",
-    external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+    cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
 )
 
 # 4. train worker

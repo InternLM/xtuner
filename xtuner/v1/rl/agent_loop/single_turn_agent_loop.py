@@ -20,7 +20,7 @@ class SingleTurnAgentLoopConfig(AgentLoopConfig):
             backend, such as temperature and maximum generation length.
         hf_checkpoint (str): Hugging Face checkpoint path used to identify the
             policy checkpoint for the agent loop.
-        external_cpu (CPUResourcesConfig | None): PG-external CPU resources
+        cpu_resources (CPUResourcesConfig | None): PG-external CPU resources
             used to run this agent loop as Ray actors. ``None`` runs the loop
             in local mode. Defaults to None.
         enable_batch_judge (bool): Whether to judge a generated group in one

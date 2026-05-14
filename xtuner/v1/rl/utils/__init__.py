@@ -27,15 +27,13 @@ from .ray_accelerator_worker import (
 )
 from .ray_cpu_worker import (
     AutoCPUWorkers,
-    BaseCPUWorker,
     CPUActorLauncher,
-    CPUResourceAllocation,
     CPUResourceManager,
-    CPUResourceManagerConfig,
     CPUResourcesConfig,
     clear_cpu_resource_manager,
     format_cpu_resource_manager_uninitialized_error,
     get_cpu_resource_manager,
+    register_cpu_resources,
     set_cpu_resource_manager,
 )
 from .ray_utils import (
@@ -56,14 +54,12 @@ __all__ = [
     "AutoAcceleratorWorkers",
     "CPUResourcesConfig",
     "CPUActorLauncher",
-    "BaseCPUWorker",
     "AutoCPUWorkers",
-    "CPUResourceAllocation",
     "CPUResourceManager",
-    "CPUResourceManagerConfig",
     "clear_cpu_resource_manager",
     "format_cpu_resource_manager_uninitialized_error",
     "get_cpu_resource_manager",
+    "register_cpu_resources",
     "set_cpu_resource_manager",
     "get_ray_accelerator",
     "load_function",

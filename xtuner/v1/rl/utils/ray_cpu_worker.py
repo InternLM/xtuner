@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import threading
-from dataclasses import dataclass
 from typing import TypeAlias
 
 import ray
@@ -31,7 +30,7 @@ class CPUResourcesConfig(BaseModel):
 
     This class provides CPU resource options for Ray CPU workers. When used by
     ``AutoCPUWorkers`` the workers are launched in a CPU placement group. When
-    used as ``external_cpu`` by judgers or agent loops, the workers are managed
+    used as ``cpu_resources`` by judgers or agent loops, the workers are managed
     by ``CPUResourceManager`` outside accelerator placement groups.
 
     Args:
@@ -73,17 +72,42 @@ class CPUResourcesConfig(BaseModel):
         return v
 
 
-class BaseCPUWorker:
-    """Base class for CPU-based Ray workers in XTuner."""
-
-    def __init__(self, config, num_cpus: float | int = 1):
-        self.config = config
-        self.num_cpus = num_cpus
-
-
 class CPUActorLauncher:
-    """Infrastructure for launching CPU Ray actors from plain Python
-    classes."""
+    """Low-level helper for launching CPU Ray actors.
+
+    ``CPUActorLauncher`` only answers one question: given a class and explicit
+    Ray resource/scheduling options, how do we create one or more CPU actors?
+    It converts plain Python classes to Ray actor classes, optionally binds
+    actors to a placement-group bundle, and forwards constructor args.
+
+    It does **not** remember which placement-group bundles have already been
+    used. If ``build_actors`` is called twice with the same placement group and
+    no explicit ``start_bundle_idx``, both calls start from bundle 0.
+
+    Example:
+
+    .. code-block:: python
+
+        workers_a = CPUActorLauncher.build_actors(
+            WorkerA,
+            cfg_a,
+            pg=pg,
+            start_bundle_idx=0,
+            num_workers=2,
+            actor_num_cpus_per_worker=1,
+        )
+        workers_b = CPUActorLauncher.build_actors(
+            WorkerB,
+            cfg_b,
+            pg=pg,
+            start_bundle_idx=2,  # caller must manage this offset
+            num_workers=2,
+            actor_num_cpus_per_worker=1,
+        )
+
+    Use this class when the caller already knows exactly where the actor(s)
+    should be placed, or when no placement group is involved.
+    """
 
     _ACTOR_CLASS_CACHE: dict[type, ActorClass] = {}
 
@@ -212,7 +236,53 @@ class CPUActorLauncher:
 
 
 class AutoCPUWorkers(CPUActorLauncher):
-    """Convenience wrapper for homogeneous worker pools."""
+    """Convenience wrapper for homogeneous CPU worker pools.
+
+    ``AutoCPUWorkers`` builds on ``CPUActorLauncher`` for the common case where
+    a CPU placement group contains one bundle per worker and each worker should
+    consume the next available bundle.
+
+    Its main extra behavior is a per-process placement-group cursor. When
+    ``from_placement_group`` is called without ``start_bundle_idx``, it starts
+    from the first bundle not previously consumed through ``AutoCPUWorkers`` for
+    that placement group. This prevents repeated calls from accidentally placing
+    different worker pools on the same bundles.
+
+    Example:
+
+    .. code-block:: python
+
+        workers_a = AutoCPUWorkers.from_placement_group(
+            WorkerA,
+            cfg_a,
+            pg,
+            num_workers=2,
+        )  # uses bundle 0 and 1
+        workers_b = AutoCPUWorkers.from_placement_group(
+            WorkerB,
+            cfg_b,
+            pg,
+            num_workers=2,
+        )  # automatically uses bundle 2 and 3
+
+    ``from_config`` is an even higher-level shortcut: it first creates a CPU
+    placement group from ``CPUResourcesConfig`` and then launches workers from
+    it.
+
+    Example:
+
+    .. code-block:: python
+
+        workers, pg = AutoCPUWorkers.from_config(
+            MyCPUWorker,
+            worker_config,
+            CPUResourcesConfig(num_workers=4, num_cpus_per_worker=2),
+        )
+
+    Use this class for homogeneous CPU worker pools backed by a CPU placement
+    group. Use ``CPUActorLauncher`` directly when placement is explicit or when
+    the actor should run outside a placement group.
+    """
 
     _PG_NEXT_BUNDLE_INDEX: dict[str, int] = {}
     _PG_NEXT_BUNDLE_INDEX_LOCK = threading.Lock()
@@ -277,58 +347,14 @@ class AutoCPUWorkers(CPUActorLauncher):
         )
 
 
-class CPUResourceManagerConfig(BaseModel):
-    """Registry for Ray CPU actors that run outside accelerator placement
-    groups.
-
-    This config is a bookkeeping and validation layer. It does not reserve or isolate all PG-external CPUs; Ray actors
-    that bypass this config can still run if the Ray cluster has ordinary CPU resources available.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    strict: bool = True
-    pools: dict[str, CPUResourcesConfig] = Field(default_factory=dict)
-
-    @property
-    def total_cpus(self) -> float:
-        return sum(pool.num_workers * pool.num_cpus_per_worker for pool in self.pools.values())
-
-    @property
-    def total_memory(self) -> int:
-        return sum(pool.num_workers * pool.cpu_memory_per_worker for pool in self.pools.values())
-
-
-@dataclass(frozen=True)
-class CPUResourceAllocation:
-    name: str
-    config: CPUResourcesConfig
-
-    @property
-    def num_workers(self) -> int:
-        return self.config.num_workers
-
-    @property
-    def num_cpus_per_worker(self) -> float:
-        return self.config.num_cpus_per_worker
-
-    @property
-    def cpu_memory_per_worker(self) -> int:
-        return self.config.cpu_memory_per_worker
-
-    def actor_options(self) -> dict:
-        return {"num_cpus": self.num_cpus_per_worker, "memory": self.cpu_memory_per_worker}
-
-
 class CPUResourceManager:
     """Validates and serves PG-external CPU actor allocations."""
 
     def __init__(
         self,
-        config: CPUResourceManagerConfig | None,
         accelerator_placement_groups: PlacementGroups = None,
     ):
-        self.config = config or CPUResourceManagerConfig()
+        self.pools: dict[str, CPUResourcesConfig] = {}
         self._registration_counts: dict[str, int] = {}
         if accelerator_placement_groups is None:
             self._accelerator_placement_groups: tuple[PlacementGroup, ...] = ()
@@ -339,22 +365,19 @@ class CPUResourceManager:
         else:
             self._accelerator_placement_groups = tuple(accelerator_placement_groups)
 
-    def get(self, name: str) -> CPUResourceAllocation:
-        if name not in self.config.pools:
-            raise KeyError(
-                f"Unknown external CPU resource pool {name!r}. Available pools: {sorted(self.config.pools)}"
-            )
-        return CPUResourceAllocation(name=name, config=self.config.pools[name])
+    def get(self, name: str) -> CPUResourcesConfig:
+        if name not in self.pools:
+            raise KeyError(f"Unknown external CPU resource pool {name!r}. Available pools: {sorted(self.pools)}")
+        return self.pools[name]
 
-    def register(self, name: str, config: CPUResourcesConfig) -> CPUResourceAllocation:
+    def register(self, name: str, config: CPUResourcesConfig) -> None:
         registered_name = self._make_unique_registration_name(name)
-        self.config.pools[registered_name] = config
+        self.pools[registered_name] = config
         try:
             self.validate_or_raise()
         except Exception:
-            del self.config.pools[registered_name]
+            del self.pools[registered_name]
             raise
-        return CPUResourceAllocation(name=registered_name, config=config)
 
     def log_initial_snapshot(self) -> None:
         resource_summary = self._build_resource_summary()
@@ -363,8 +386,6 @@ class CPUResourceManager:
     def validate_or_raise(self) -> None:
         resource_summary = self._build_resource_summary()
         self._log_resource_summary(resource_summary, include_registered=True)
-        if not self.config.strict:
-            return
 
         cluster_cpus = resource_summary["cluster_cpus"]
         cluster_memory = int(resource_summary["cluster_memory"])
@@ -388,7 +409,7 @@ class CPUResourceManager:
                 f"{requested_memory}, available_outside_accelerator_pg={external_memory}, "
                 f"cluster_total={cluster_memory}, accelerator_pg_reserved={accelerator_memory}"
             )
-        for name, pool in self.config.pools.items():
+        for name, pool in self.pools.items():
             if pool.num_cpus_per_worker > max_node_external_cpus:
                 errors.append(
                     f"pool {name!r} requests {pool.num_cpus_per_worker:g} CPU per worker, "
@@ -398,7 +419,7 @@ class CPUResourceManager:
             pool_lines = [
                 f"  - {name}: {pool.num_workers} workers * {pool.num_cpus_per_worker:g} CPU"
                 f", {pool.cpu_memory_per_worker} memory each"
-                for name, pool in self.config.pools.items()
+                for name, pool in self.pools.items()
             ]
             raise RuntimeError(
                 "Insufficient PG-external Ray resources for registered external CPU pools:\n"
@@ -410,12 +431,12 @@ class CPUResourceManager:
     def _make_unique_registration_name(self, name: str) -> str:
         count = self._registration_counts.get(name, 0) + 1
         self._registration_counts[name] = count
-        if count == 1 and name not in self.config.pools:
+        if count == 1 and name not in self.pools:
             return name
 
         while True:
             candidate = f"{name}#{count}"
-            if candidate not in self.config.pools:
+            if candidate not in self.pools:
                 return candidate
             count += 1
             self._registration_counts[name] = count
@@ -436,8 +457,10 @@ class CPUResourceManager:
         available_memory = float(available_resources.get("memory", 0))
         accelerator_cpus = self._accelerator_pg_resource_total("CPU")
         accelerator_memory = self._accelerator_pg_resource_total("memory")
-        registered_external_cpus = self.config.total_cpus
-        registered_external_memory = float(self.config.total_memory)
+        registered_external_cpus = sum(pool.num_workers * pool.num_cpus_per_worker for pool in self.pools.values())
+        registered_external_memory = float(
+            sum(pool.num_workers * pool.cpu_memory_per_worker for pool in self.pools.values())
+        )
         external_capacity_cpus = cluster_cpus - accelerator_cpus
         external_capacity_memory = cluster_memory - accelerator_memory
         return {
@@ -504,7 +527,7 @@ class CPUResourceManager:
                         pool.num_workers * pool.cpu_memory_per_worker,
                         f"{pool.num_workers} worker(s) * {pool.num_cpus_per_worker:g} CPU.",
                     )
-                    for name, pool in self.config.pools.items()
+                    for name, pool in self.pools.items()
                 ]
             )
             title = "External CPU resource summary"
@@ -562,12 +585,12 @@ _CPU_RESOURCE_MANAGER: CPUResourceManager | None = None
 
 def format_cpu_resource_manager_uninitialized_error(owner: str) -> str:
     return (
-        f"{owner} sets external_cpu, but CPUResourceManager is not initialized.\n"
+        f"{owner} sets cpu_resources, but CPUResourceManager is not initialized.\n"
         "This usually means the config is being built outside RLTrainer. In normal training, build the trainer first "
         "so XTuner can initialize CPUResourceManager after accelerator placement groups are created.\n"
         "For standalone tests or scripts, initialize it explicitly before building this component:\n"
         "    from xtuner.v1.rl.utils import CPUResourceManager, set_cpu_resource_manager\n"
-        "    set_cpu_resource_manager(CPUResourceManager(None, accelerator_placement_groups=None))\n"
+        "    set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=None))\n"
         "Note: standalone initialization does not account for accelerator placement group reservation unless you pass "
         "the placement group(s)."
     )
@@ -580,6 +603,13 @@ def set_cpu_resource_manager(manager: CPUResourceManager | None) -> None:
 
 def get_cpu_resource_manager() -> CPUResourceManager | None:
     return _CPU_RESOURCE_MANAGER
+
+
+def register_cpu_resources(name: str, cpu_resources: CPUResourcesConfig) -> None:
+    if _CPU_RESOURCE_MANAGER is None:
+        raise ValueError(format_cpu_resource_manager_uninitialized_error(name))
+
+    _CPU_RESOURCE_MANAGER.register(name=name, config=cpu_resources)
 
 
 def clear_cpu_resource_manager() -> None:

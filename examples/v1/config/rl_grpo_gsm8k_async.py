@@ -69,14 +69,14 @@ rollout_config = RolloutConfig(
 # 3. judger
 train_judger_config = GSM8KJudgerConfig(
     judger_name="openai/gsm8k",
-    external_cpu=CPUResourcesConfig(
+    cpu_resources=CPUResourcesConfig(
         num_workers=1,
         num_cpus_per_worker=1,
     ),
 )
 eval_judger_config = GSM8KJudgerConfig(
     judger_name="openai/gsm8k",
-    external_cpu=CPUResourcesConfig(
+    cpu_resources=CPUResourcesConfig(
         num_workers=1,
         num_cpus_per_worker=1,
     ),
@@ -143,7 +143,7 @@ training_sample_params = SampleParams(
 agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=training_sample_params,
-    # external_cpu=CPUResourcesConfig(
+    # cpu_resources=CPUResourcesConfig(
     #     num_workers=4,
     #     num_cpus_per_worker=1,
     # ),
@@ -189,7 +189,7 @@ evaluation_sample_params = SampleParams(
 eval_agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=evaluation_sample_params,
-    # external_cpu=CPUResourcesConfig(
+    # cpu_resources=CPUResourcesConfig(
     #     num_workers=4,
     #     num_cpus_per_worker=1,
     # ),

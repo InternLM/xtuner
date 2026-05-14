@@ -68,7 +68,7 @@ rollout_config = RolloutConfig(
 
 # 3. judger
 judger_config = GEO3KJudgerConfig(
-    external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+    cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
 )
 
 # 4. train worker

@@ -107,14 +107,14 @@ from xtuner.v1.rl.utils import CPUResourcesConfig
 
 judger_config = GSM8KJudgerConfig(
     judger_name="openai/gsm8k",
-    external_cpu=CPUResourcesConfig(
+    cpu_resources=CPUResourcesConfig(
         num_workers=1,
         num_cpus_per_worker=1,
     ),
 )
 ```
 
-`judger_name` 需要和样本中的 `data_source` 对应。`external_cpu` 表示该 Judger 使用 PG 外 Ray CPU actor 执行打分；如果不配置 `external_cpu`，Judger 会在本地执行。打分后，训练流程会从 `RolloutState.reward["score"]` 读取分数并计算 advantage。
+`judger_name` 需要和样本中的 `data_source` 对应。`cpu_resources` 表示该 Judger 使用 PG 外 Ray CPU actor 执行打分；如果不配置 `cpu_resources`，Judger 会在本地执行。打分后，训练流程会从 `RolloutState.reward["score"]` 读取分数并计算 advantage。
 
 ### 1.4 AgentLoopConfig 和 AgentLoopManagerConfig
 

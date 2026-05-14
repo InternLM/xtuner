@@ -28,12 +28,12 @@ Sampler -> list[RolloutState]
 	                           ┌─────────────────────────────┐
 	                           │       AgentLoopConfig        │
 	                           │ hf_checkpoint, sample_params │
-	                           │ external_cpu                 │
+	                           │ cpu_resources                 │
 	                           └──────────────┬──────────────┘
 	                                          │ build(...)
 	             ┌────────────────────────────┼────────────────────────────┐
 	             │                            │                            │
-	    external_cpu = None       external_cpu.num_workers = 1  external_cpu.num_workers > 1
+	    cpu_resources = None       cpu_resources.num_workers = 1  cpu_resources.num_workers > 1
              │                            │                            │
              ▼                            ▼                            ▼
    ┌─────────────────┐          ┌─────────────────┐          ┌─────────────────┐

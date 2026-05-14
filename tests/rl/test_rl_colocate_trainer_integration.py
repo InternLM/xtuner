@@ -76,7 +76,7 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
         # Judger
         judger_config = GSM8KJudgerConfig(
             judger_name="openai/gsm8k",
-            external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+            cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
         )
 
         # Train worker

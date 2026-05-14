@@ -6,13 +6,14 @@ from typing import Dict
 import httpx
 import ray
 
-from xtuner.v1.rl.utils import AutoCPUWorkers, BaseCPUWorker, CPUResourcesConfig
+from xtuner.v1.rl.utils import AutoCPUWorkers, CPUResourcesConfig
 
 
 @ray.remote(num_cpus=1)
-class NaiveCPUWorker(BaseCPUWorker):
+class NaiveCPUWorker:
     def __init__(self, config: Dict, num_cpus = 1):
-        super().__init__(config, num_cpus)
+        self.config = config
+        self.num_cpus = num_cpus
         if self.config["worker_type"] == "fake_receiver":
             from fastapi import FastAPI
             self.app = FastAPI()

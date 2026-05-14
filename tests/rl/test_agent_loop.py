@@ -71,7 +71,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
  
     def setUp(self):
         ray.init(num_cpus=80, ignore_reinit_error=True)
-        set_cpu_resource_manager(CPUResourceManager(None, None))
+        set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=None))
         self.data_path = TRAIN_DATA_PATH
         self.model_path = MODEL_PATH
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -97,7 +97,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         )
         judger_config = GSM8KJudgerConfig(
             judger_name="openai/gsm8k",
-            external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+            cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
         )
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
@@ -142,12 +142,12 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         )
         judger_config = GSM8KJudgerConfig(
             judger_name="openai/gsm8k",
-            external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+            cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
         )
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0),
-            external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+            cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
         )
 
         pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
@@ -188,7 +188,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         )
         judger_config = GSM8KJudgerConfig(
             judger_name="openai/gsm8k",
-            external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+            cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
         )
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,

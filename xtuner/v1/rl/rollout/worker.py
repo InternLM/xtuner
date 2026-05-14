@@ -23,9 +23,11 @@ from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, update_status_from_finish_reason
 from xtuner.v1.rl.utils import (
     AutoAcceleratorWorkers,
+    CPUResourcesConfig,
     SingleAcceleratorWorker,
     find_master_addr_and_port,
     get_eos_token,
+    register_cpu_resources,
 )
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
@@ -406,9 +408,14 @@ class RolloutConfig(BaseModel):
 
         from xtuner.v1.rl.rollout.controller import RolloutController
 
+        num_workers = 1
+        register_cpu_resources(
+            name="rollout_controller",
+            cpu_resources=CPUResourcesConfig(num_workers=num_workers),
+        )
         return (
             ray.remote(RolloutController)
-            .options(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
+            .options(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)), num_cpus=num_workers)
             .remote(self, placement_group)
         )
 
