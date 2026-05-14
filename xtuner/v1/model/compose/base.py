@@ -1,11 +1,11 @@
 import json
-import os
 from pathlib import Path
 from shutil import rmtree
 from typing import Callable, Self
 
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 from pydantic import ConfigDict
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import (
@@ -173,13 +173,13 @@ class BaseComposeModel(BaseModel):
             raise NotImplementedError(
                 "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
             )
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
         finalized_hf_dir = self.wait_async_hf()
 
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
         tmp_hf_dir = hf_dir.with_name(f"{hf_dir.name}.incomplete")
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
         if rank == 0 and tmp_hf_dir.exists():
             rmtree(tmp_hf_dir)
         if dist.is_initialized():
@@ -212,40 +212,61 @@ class BaseComposeModel(BaseModel):
         if hasattr(DEVICE_MODULE, "synchronize"):
             DEVICE_MODULE.synchronize()
 
-        pid = os.fork()
-        if pid == 0:
-            try:
-                _set_process_qos(
-                    cpu_priority=self.config.hf_save_cfg.cpu_priority,
-                    io_priority=self.config.hf_save_cfg.io_priority,
-                )
-                self._cleanup_async_hf_dirs_before_write(
-                    cleanup_hf_dirs=cleanup_hf_dirs,
-                    cleanup_done_path=cleanup_done_path,
-                    rank=rank,
-                )
-                for module, file_to_names in module_file_to_names:
-                    self._write_async_hf_module_snapshot(hf_dir=tmp_hf_dir, module=module, file_to_names=file_to_names)
-                status = {"rank": rank, "ok": True, "error": "", "weight_map": merged_weight_map}
-                with status_path.open("w") as f:
-                    f.write(json.dumps(status, indent=2))
-                os._exit(0)
-            except Exception as exc:
-                status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
-                try:
-                    with status_path.open("w") as f:
-                        f.write(json.dumps(status, indent=2))
-                finally:
-                    os._exit(1)
+        mp_ctx = mp.get_context("fork")
+        process = mp_ctx.Process(
+            target=self._run_async_hf_compose_writer,
+            args=(
+                tmp_hf_dir,
+                module_file_to_names,
+                merged_weight_map,
+                status_path,
+                cleanup_hf_dirs,
+                cleanup_done_path,
+                rank,
+            ),
+            daemon=False,
+        )
+        process.start()
 
         self._pending_async_hf = {
-            "pid": pid,
+            "process": process,
             "hf_dir": hf_dir,
             "tmp_hf_dir": tmp_hf_dir,
             "status_path": status_path,
             "cleanup_done_path": cleanup_done_path,
         }
         return finalized_hf_dir
+
+    def _run_async_hf_compose_writer(
+        self,
+        tmp_hf_dir: Path,
+        module_file_to_names: list[tuple[BaseModel, list[tuple[str, list[str]]]]],
+        merged_weight_map: dict[str, str],
+        status_path: Path,
+        cleanup_hf_dirs: list[Path],
+        cleanup_done_path: Path,
+        rank: int,
+    ) -> None:
+        try:
+            _set_process_qos(
+                cpu_priority=self.config.hf_save_cfg.cpu_priority,
+                io_priority=self.config.hf_save_cfg.io_priority,
+            )
+            self._cleanup_async_hf_dirs_before_write(
+                cleanup_hf_dirs=cleanup_hf_dirs,
+                cleanup_done_path=cleanup_done_path,
+                rank=rank,
+            )
+            for module, file_to_names in module_file_to_names:
+                self._write_async_hf_module_snapshot(hf_dir=tmp_hf_dir, module=module, file_to_names=file_to_names)
+            status = {"rank": rank, "ok": True, "error": "", "weight_map": merged_weight_map}
+            with status_path.open("w") as f:
+                f.write(json.dumps(status, indent=2))
+        except Exception as exc:
+            status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
+            with status_path.open("w") as f:
+                f.write(json.dumps(status, indent=2))
+            raise
 
     def _write_async_hf_module_snapshot(
         self,

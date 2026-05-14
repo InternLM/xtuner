@@ -16,6 +16,7 @@ from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, Option
 
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.nn.functional as F
 from cyclopts import Parameter
@@ -73,8 +74,8 @@ def _set_process_qos(cpu_priority: int, io_priority: Optional[int]) -> None:
 
     Args:
         cpu_priority: Nice value for CPU scheduling (0-19, higher = lower priority).
-                     Default 10 is moderately deprioritized.
-        io_priority: I/O scheduling class and priority. If None, uses best-effort class.
+                     Default 19 is the lowest normal CPU scheduling priority.
+        io_priority: Linux ionice scheduling class. If None, do not change I/O priority.
                     Format: class_id (0-3) where 3 = idle (lowest priority).
 
     Note: Requires appropriate permissions. Failures are logged but not fatal.
@@ -156,7 +157,7 @@ class HFSaveCfg(PydanticBaseModel):
     # Lower async HF writer I/O priority. Linux ionice class 3 means idle I/O priority.
     io_priority: Annotated[Optional[int], Parameter(group="model")] = 3
     # Limit concurrent safetensors writes per node. 0 disables locking; 1 serializes writes; 2/4 allow limited concurrency.
-    writer_save_file_lock_slots: Annotated[int, Parameter(group="model")] = 1
+    writer_save_file_lock_slots: Annotated[int, Parameter(group="model")] = 0
     # TODO: `XTunerBaseModel` should also be able to specify which parameters to be trained in fp32,
     # currently it could only be specified in HFSaveCfg
     # Each entry is a **regex** pattern (passed to `re.search`) matched against the HF parameter name.
@@ -749,13 +750,13 @@ class BaseModel(nn.Module):
             raise NotImplementedError(
                 "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
             )
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
         finalized_hf_dir = self.wait_async_hf()
 
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
         tmp_hf_dir = hf_dir.with_name(f"{hf_dir.name}.incomplete")
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
         if rank == 0:
             if tmp_hf_dir.exists():
                 rmtree(tmp_hf_dir)
@@ -780,41 +781,62 @@ class BaseModel(nn.Module):
         if hasattr(DEVICE_MODULE, "synchronize"):
             DEVICE_MODULE.synchronize()
 
-        pid = os.fork()
-        if pid == 0:
-            try:
-                _set_process_qos(
-                    cpu_priority=self.config.hf_save_cfg.cpu_priority,
-                    io_priority=self.config.hf_save_cfg.io_priority,
-                )
-                self._cleanup_async_hf_dirs_before_write(
-                    cleanup_hf_dirs=cleanup_hf_dirs,
-                    cleanup_done_path=cleanup_done_path,
-                    rank=rank,
-                )
-                self._write_async_hf_snapshot(
-                    hf_dir=tmp_hf_dir,
-                    file_to_names=file_to_names,
-                    weight_map=weight_map,
-                    status_path=status_path,
-                )
-                os._exit(0)
-            except Exception as exc:
-                status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
-                try:
-                    with status_path.open("w") as f:
-                        f.write(json.dumps(status, indent=2))
-                finally:
-                    os._exit(1)
+        mp_ctx = mp.get_context("fork")
+        process = mp_ctx.Process(
+            target=self._run_async_hf_writer,
+            args=(
+                tmp_hf_dir,
+                file_to_names,
+                weight_map,
+                status_path,
+                cleanup_hf_dirs,
+                cleanup_done_path,
+                rank,
+            ),
+            daemon=False,
+        )
+        process.start()
 
         self._pending_async_hf = {
-            "pid": pid,
+            "process": process,
             "hf_dir": hf_dir,
             "tmp_hf_dir": tmp_hf_dir,
             "status_path": status_path,
             "cleanup_done_path": cleanup_done_path,
         }
         return finalized_hf_dir
+
+    def _run_async_hf_writer(
+        self,
+        tmp_hf_dir: Path,
+        file_to_names: list[tuple[str, list[str]]],
+        weight_map: dict[str, str],
+        status_path: Path,
+        cleanup_hf_dirs: Sequence[str | Path],
+        cleanup_done_path: Path,
+        rank: int,
+    ) -> None:
+        try:
+            _set_process_qos(
+                cpu_priority=self.config.hf_save_cfg.cpu_priority,
+                io_priority=self.config.hf_save_cfg.io_priority,
+            )
+            self._cleanup_async_hf_dirs_before_write(
+                cleanup_hf_dirs=cleanup_hf_dirs,
+                cleanup_done_path=cleanup_done_path,
+                rank=rank,
+            )
+            self._write_async_hf_snapshot(
+                hf_dir=tmp_hf_dir,
+                file_to_names=file_to_names,
+                weight_map=weight_map,
+                status_path=status_path,
+            )
+        except Exception as exc:
+            status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
+            with status_path.open("w") as f:
+                f.write(json.dumps(status, indent=2))
+            raise
 
     def _prepare_async_hf_snapshot(
         self,
@@ -857,7 +879,7 @@ class BaseModel(nn.Module):
             return None
 
         payload = self._pending_async_hf
-        pid = cast(int, payload["pid"])
+        process = cast(Any, payload["process"])
         hf_dir = cast(Path, payload["hf_dir"])
         tmp_hf_dir = cast(Path, payload["tmp_hf_dir"])
         status_path = cast(Path, payload["status_path"])
@@ -867,9 +889,14 @@ class BaseModel(nn.Module):
         local_error = ""
         local_weight_map: dict[str, str] = {}
 
-        _, status = os.waitpid(pid, 0)
-        exit_code = os.waitstatus_to_exitcode(status)
-        if exit_code != 0:
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        process.join()
+        exit_code = process.exitcode
+        if exit_code is None:
+            local_ok = False
+            local_error = "async_hf_writer_exitcode_missing"
+        elif exit_code != 0:
             local_ok = False
             local_error = f"child_exit_code={exit_code}"
         elif not status_path.exists():
@@ -889,8 +916,6 @@ class BaseModel(nn.Module):
                 if isinstance(weight_map_obj, dict):
                     local_weight_map = {str(k): str(v) for k, v in weight_map_obj.items()}
 
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
         local_status = {"rank": rank, "ok": local_ok, "error": local_error, "weight_map": local_weight_map}
         if dist.is_initialized():
             all_status: list[dict[str, Any]] = [None for _ in range(world_size)]  # type: ignore[list-item]
