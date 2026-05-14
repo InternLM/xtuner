@@ -6,7 +6,14 @@ import tempfile
 import torch
 from transformers import AutoTokenizer
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.rl.utils import (
+    AcceleratorResourcesConfig,
+    AutoAcceleratorWorkers,
+    CPUResourcesConfig,
+    CPUResourceManager,
+    clear_cpu_resource_manager,
+    set_cpu_resource_manager,
+)
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
@@ -64,12 +71,14 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
  
     def setUp(self):
         ray.init(num_cpus=80, ignore_reinit_error=True)
+        set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=None))
         self.data_path = TRAIN_DATA_PATH
         self.model_path = MODEL_PATH
         self.temp_dir = tempfile.TemporaryDirectory()
         self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
 
     def tearDown(self):
+        clear_cpu_resource_manager()
         ray.shutdown()
         self.temp_dir.cleanup()
 
@@ -86,7 +95,10 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             tensor_parallel_size=TEST_NUM_WORKERS,
             worker_log_dir=self.worker_log_dir,
         )
-        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
+        judger_config = GSM8KJudgerConfig(
+            judger_name="openai/gsm8k",
+            cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+        )
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0),
@@ -130,14 +142,12 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         )
         judger_config = GSM8KJudgerConfig(
             judger_name="openai/gsm8k",
-            num_ray_actors=1,
-            num_cpus_per_actor=1,
+            cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
         )
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0),
-            num_ray_actors=1,
-            num_cpus=1,
+            cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
         )
 
         pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
@@ -176,7 +186,10 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             tensor_parallel_size=TEST_NUM_WORKERS,
             worker_log_dir=self.worker_log_dir,
         )
-        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
+        judger_config = GSM8KJudgerConfig(
+            judger_name="openai/gsm8k",
+            cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+        )
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0),

@@ -13,7 +13,7 @@ from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import GSM8KJudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
@@ -67,7 +67,20 @@ rollout_config = RolloutConfig(
 )
 
 # 3. judger
-judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
+train_judger_config = GSM8KJudgerConfig(
+    judger_name="openai/gsm8k",
+    cpu_resources=CPUResourcesConfig(
+        num_workers=1,
+        num_cpus_per_worker=1,
+    ),
+)
+eval_judger_config = GSM8KJudgerConfig(
+    judger_name="openai/gsm8k",
+    cpu_resources=CPUResourcesConfig(
+        num_workers=1,
+        num_cpus_per_worker=1,
+    ),
+)
 
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
@@ -130,6 +143,10 @@ training_sample_params = SampleParams(
 agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=training_sample_params,
+    # cpu_resources=CPUResourcesConfig(
+    #     num_workers=4,
+    #     num_cpus_per_worker=1,
+    # ),
 )
 produce_strategy_config = AsyncProduceStrategyConfig(
     over_sample_threshold = 0.8,
@@ -141,7 +158,7 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="train_task",
         agent_loop_config=agent_loop_config,
-        judger_config=judger_config,
+        judger_config=train_judger_config,
         produce_strategy_config=produce_strategy_config,
         sampler_config=sampler_config,
     ),
@@ -172,12 +189,16 @@ evaluation_sample_params = SampleParams(
 eval_agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=evaluation_sample_params,
+    # cpu_resources=CPUResourcesConfig(
+    #     num_workers=4,
+    #     num_cpus_per_worker=1,
+    # ),
 )
 eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="eval_task",
         agent_loop_config=eval_agent_loop_config,
-        judger_config=judger_config,
+        judger_config=eval_judger_config,
         sampler_config=eval_sampler_config,
     ),
 )

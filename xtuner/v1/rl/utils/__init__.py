@@ -20,6 +20,22 @@ from .misc import (
     parse_query,
     sort_rollout_state_for_deterministic,
 )
+from .ray_accelerator_worker import (
+    AcceleratorResourcesConfig,
+    AutoAcceleratorWorkers,
+    SingleAcceleratorWorker,
+)
+from .ray_cpu_worker import (
+    AutoCPUWorkers,
+    CPUActorLauncher,
+    CPUResourceManager,
+    CPUResourcesConfig,
+    clear_cpu_resource_manager,
+    format_cpu_resource_manager_uninitialized_error,
+    get_cpu_resource_manager,
+    register_cpu_resources,
+    set_cpu_resource_manager,
+)
 from .ray_utils import (
     bind_train_rollout,
     clear_rollout_response_for_rerun,
@@ -30,15 +46,6 @@ from .ray_utils import (
     get_ray_accelerator,
     register_cleanup,
 )
-from .ray_worker import (
-    AcceleratorResourcesConfig,
-    AutoAcceleratorWorkers,
-    AutoCPUWorkers,
-    BaseCPUWorker,
-    CPUActorLauncher,
-    CPUResourcesConfig,
-    SingleAcceleratorWorker,
-)
 
 
 __all__ = [
@@ -47,8 +54,13 @@ __all__ = [
     "AutoAcceleratorWorkers",
     "CPUResourcesConfig",
     "CPUActorLauncher",
-    "BaseCPUWorker",
     "AutoCPUWorkers",
+    "CPUResourceManager",
+    "clear_cpu_resource_manager",
+    "format_cpu_resource_manager_uninitialized_error",
+    "get_cpu_resource_manager",
+    "register_cpu_resources",
+    "set_cpu_resource_manager",
     "get_ray_accelerator",
     "load_function",
     "find_master_addr_and_port",

@@ -109,19 +109,22 @@ XTuner provides ready-made judges for GSM8K. You can use the example code direct
 
 ```{code-block} python
 :caption: Configure Reward Model
-from xtuner.v1.ray.judger.controller import JudgerConfig
-from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
+from xtuner.v1.rl.judger import GSM8KJudgerConfig
+from xtuner.v1.rl.utils import CPUResourcesConfig
 
-judger_cfg = JudgerConfig(
-    reward_judger_configs={
-        "openai/gsm8k": GSM8KJudgerConfig()  # GSM8K math problem judge
-    }
+judger_config = GSM8KJudgerConfig(
+    judger_name="openai/gsm8k",
+    cpu_resources=CPUResourcesConfig(
+        num_workers=1,
+        num_cpus_per_worker=1,
+    ),
 )
 ```
 
 **Usage Instructions**:
 - `"openai/gsm8k"`: Dataset identifier, needs to match the `data_source` field in your dataset
 - `GSM8KJudgerConfig()`: Judge specifically for GSM8K math problems, will check if the numerical answer is correct
+- `cpu_resources`: Runs the judge in PG-external Ray CPU actor(s). If omitted, the judge runs locally.
 
 💡 **Extended Functionality**: XTuner also supports multiple judgment methods (functional, API service) and custom Judgers, related tutorials coming soon.
 

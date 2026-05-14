@@ -5,7 +5,7 @@ import tempfile
 import ray
 from pathlib import Path
 
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
@@ -74,7 +74,10 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
         )
 
         # Judger
-        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
+        judger_config = GSM8KJudgerConfig(
+            judger_name="openai/gsm8k",
+            cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+        )
 
         # Train worker
         lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
