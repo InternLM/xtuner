@@ -8,7 +8,7 @@ from xtuner.v1.model.base import (
 )
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig
-from xtuner.v1.module.rope import RopeScalingConfig
+from xtuner.v1.module.rope import RopeParametersConfig, RopeScalingConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
 from .moe import MoE
@@ -226,8 +226,8 @@ class Qwen3_5_VLTextMoE397BA17BSplitConfig(Qwen3_5_VLTextMoESplitConfig):
         norm_topk_prob=True,
         router_scaling_factor=1.0,
     )
-    rope_scaling_cfg: RopeScalingConfig = RopeScalingConfig(
-        type="qwen3_vl", mrope_section=[11, 11, 10], partial_rotary_factor=0.25
+    rope_parameters_cfg: RopeParametersConfig = RopeParametersConfig(
+        rope_type="qwen3_vl", mrope_section=[11, 11, 10], partial_rotary_factor=0.25
     )
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: ZLossConfig | None = None
