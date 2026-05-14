@@ -99,15 +99,15 @@ class Qwen3VLProjector(BaseModel):
             for param in self.parameters():
                 param.requires_grad = False
 
-        mp_policy = MixedPrecisionPolicy(
-            param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
-        )
-        self._fully_shard(
-            mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
-            reshard_after_forward=self.config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
-        )
+        # mp_policy = MixedPrecisionPolicy(
+        #     param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
+        # )
+        # self._fully_shard(
+        #     mesh=self.fsdp_mesh,
+        #     mp_policy=mp_policy,
+        #     reshard_after_forward=self.config.reshard_after_forward,
+        #     offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+        # )
         return self
 
     @torch.no_grad()
