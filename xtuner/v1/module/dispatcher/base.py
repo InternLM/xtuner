@@ -11,6 +11,8 @@ from typing_extensions import TypedDict, override
 
 from xtuner.v1.ops import permute, unpermute
 
+from .expert_tp import ExpertTP
+
 
 HiddenStates: TypeAlias = torch.Tensor
 
@@ -174,7 +176,9 @@ class DispacherInterface(
 class NaivePreDispatchResult(PreDispatchResult): ...
 
 
-class NaiveDispatchResult(DispatchResult): ...
+class NaiveDispatchResult(DispatchResult, total=False):
+    topk_ids: torch.Tensor
+    tp_size_meta: list[int]
 
 
 class NaivePostDispatchResult(PostDispatchResult):
@@ -205,6 +209,7 @@ class NaiveDispatcher(
         *,
         n_routed_experts: int,
         process_group: torch.distributed.ProcessGroup | None = None,
+        tp_group: torch.distributed.ProcessGroup | None = None,
         training_dtype: Literal["fp8", "bf16"] = "bf16",
         generate_dtype: Literal["fp8", "bf16"] = "bf16",
     ):
@@ -216,6 +221,7 @@ class NaiveDispatcher(
         )
         if self._process_group is not None:
             assert self._process_group.size() == 1, "Naive dispatcher is only for ep=1."
+        self._expert_tp = ExpertTP(tp_group) if tp_group is not None and tp_group.size() > 1 else None
 
     @override
     def dispatch_preprocess(
@@ -245,6 +251,17 @@ class NaiveDispatcher(
         if async_op:
             raise NotImplementedError("Naive dispatcher is only for ep=1.")
 
+        if self._expert_tp is not None:
+            hidden_states, tp_size_meta = self._expert_tp.all_gather(pre_dispatched["hidden_states"])
+            topk_ids = self._expert_tp.all_gather_metadata(pre_dispatched["topk_ids"], tp_size_meta)
+            topk_weights = self._expert_tp.all_gather_metadata(topk_weights, tp_size_meta)
+            return NaiveDispatchResult(
+                hidden_states=hidden_states,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
+                tp_size_meta=tp_size_meta,
+            )
+
         return NaiveDispatchResult(
             hidden_states=pre_dispatched["hidden_states"],
             topk_weights=topk_weights,
@@ -262,11 +279,11 @@ class NaiveDispatcher(
         if async_op:
             raise NotImplementedError("Naive dispatcher is only for ep=1.")
 
+        topk_ids = dispatched["topk_ids"] if self._expert_tp is not None else pre_dispatched["topk_ids"]
         hidden_states, row_id_maps = permute(
             dispatched["hidden_states"],
-            pre_dispatched["topk_ids"].to(torch.int32),
+            topk_ids.to(torch.int32),
         )
-        topk_ids = pre_dispatched["topk_ids"]
         tokens_per_expert = torch.histc(topk_ids, bins=self._n_routed_experts, min=0, max=self._n_routed_experts)
         if decoding:
             raise NotImplementedError
@@ -318,6 +335,13 @@ class NaiveDispatcher(
         if decoding:
             raise NotImplementedError
         else:
+            if self._expert_tp is not None:
+                hidden_states = self._expert_tp.reduce_scatter_sum(
+                    pre_combined["hidden_states"],
+                    dispatched["tp_size_meta"],
+                )
+                return NaiveCombineResult(hidden_states=hidden_states)
+
             return NaiveCombineResult(hidden_states=pre_combined["hidden_states"])
 
     @override

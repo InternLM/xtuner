@@ -176,14 +176,17 @@ class MoE(BaseModel):
 
     def __init__(self, config: MoEConfig):
         super().__init__(config)
-        if config.ep_size is not None and config.ep_size > 1:
+        ep_size = config.ep_size if config.ep_size is not None else 1
+        expert_tp_size = config.expert_tp_size if config.expert_tp_size > 1 else 1
+        if ep_size > 1 or expert_tp_size > 1:
             world_size = dist.get_world_size()
-            expert_tp_size = config.expert_tp_size if config.expert_tp_size > 1 else 1
-            fsdp_size = world_size // (config.ep_size * expert_tp_size)
+            fsdp_size = world_size // (ep_size * expert_tp_size)
             if expert_tp_size > 1:
+                # 中文注释：即使不开 EP，也保留 size=1 的 expert ownership 维度，
+                # 这样 routed experts 和 expert TP 仍然使用同一套 mesh 语义。
                 _init_mesh = init_device_mesh(
                     DEVICE,
-                    (fsdp_size, config.ep_size, expert_tp_size),
+                    (fsdp_size, ep_size, expert_tp_size),
                     mesh_dim_names=(
                         f"{self.config.mesh_prefix}.dp",
                         f"{self.config.mesh_prefix}.ep",
@@ -195,7 +198,7 @@ class MoE(BaseModel):
             else:
                 _init_mesh = init_device_mesh(
                     DEVICE,
-                    (fsdp_size, config.ep_size),
+                    (fsdp_size, ep_size),
                     mesh_dim_names=(f"{self.config.mesh_prefix}.dp", f"{self.config.mesh_prefix}.ep"),
                 )
                 self.ep_mesh = _init_mesh[f"{self.config.mesh_prefix}.ep"]
