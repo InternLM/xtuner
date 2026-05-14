@@ -1162,6 +1162,7 @@ class RLColocateTrainer(BaseRLTrainer):
         if checkpoint_path is not None:
             self._resume_agent_loop_manager(checkpoint_path)
 
+        self.train_controller.set_train_rollout_mode("colocate")
         self._cpu_resource_manager.log_registered_summary()
 
         if self._rollout_config.skip_load_weights:
@@ -1283,7 +1284,7 @@ class RLColocateTrainer(BaseRLTrainer):
                 bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
                 ray.get(self.rollout_controller.onload_weights.remote())
                 self.train_controller.update_weights()
-                self.logger.info("Model weights synchronized successfully.")
+                self.logger.info("Rollout workers update weights successfully in colocate mode")
                 self.train_controller.offload(target="model")
             else:
                 self.train_controller.offload(target="model")
@@ -1321,6 +1322,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                     "because it does not allow early stopping in production."
                 )
         bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+        self.train_controller.set_train_rollout_mode("disaggregated")
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
@@ -1357,7 +1359,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         saved_model_step = self._resume_agent_loop_manager(checkpoint_path)
         assert self._cur_step == saved_model_step
 
-        self.fake_update_weights()
+        self.update_weights()
         self.agent_loop_manager.continue_produce(model_step=saved_model_step)
 
     def fit(self):
@@ -1446,8 +1448,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         ray.get(self.rollout_controller.recover_failed_workers.remote())
         with timer("sync_weight", step_timer_dict):
             bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
-            self.fake_update_weights()
+            self.update_weights()
 
-    def fake_update_weights(self):
+    def update_weights(self):
+        ray.get(self.rollout_controller.pause_generation.remote())
         self.train_controller.update_weights()
-        self.logger.info("Rollout workers updated weights through fake disaggregated sync.")
+        ray.get(self.rollout_controller.continue_generation.remote())
+        self.logger.info("Rollout workers update weights successfully in disaggregated mode")

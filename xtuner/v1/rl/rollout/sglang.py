@@ -3,6 +3,7 @@ import os
 from typing import Any, Dict, List, Union
 
 import numpy as np
+import ray
 import requests
 import torch
 from urllib3.exceptions import NewConnectionError
@@ -181,7 +182,11 @@ class SGLangWorker(RolloutWorker):
         return self._make_request("resume_memory_occupation", {"tags": ["kv_cache"]})
 
     def pause_generation(self):
-        return self._make_request("pause_generation")
+        # SGLang PauseGeneration支持三种模式（https://github.com/sgl-project/sglang/blob/8d27ce7371da617a671f62e78dde66d64b7ad6cb/python/sglang/srt/managers/io_struct.py#L1353）：
+        # abort    = 丢弃 waiting 和 running 请求，
+        # retract  = 保留waiting请求和running请求（保留已生成 token），释放 KV，恢复时重算 KV 后继续
+        # in_place = 保留waiting请求和running请求（保留已生成 token）、已生成 token、KV，恢复时直接继续
+        return self._make_request("pause_generation", {"mode": "abort"})
 
     def continue_generation(self):
         # 恢复生成时必须清掉上一轮 abort 标志，否则新请求会在发送前被本地直接标成 ABORTED。
@@ -223,6 +228,9 @@ class SGLangWorker(RolloutWorker):
         ep_size = num_gpus_per_engine if self.config.expert_parallel_size > 1 else self.config.expert_parallel_size
         nnodes = max(1, num_gpus_per_engine // self.config.gpus_per_node)
         node_rank = self.rank // self.config.gpus_per_node if nnodes > 1 else 0
+        assigned_gpu_id = int(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
+
+        # SGLang 0.5.10 默认启用的 Piecewise CUDA Graph 在启动 warmup compile 阶段会报错。sglang的文档提到这个功能还是实验功能，可能还不太稳定(https://sgl-project-sglang-93.mintlify.app/optimization/cuda-graph#bug-report)。暂时先通过disable_piecewise_cuda_graph=True关掉改功能
         init_kwargs = dict(
             model_path=self.config.model_path,
             trust_remote_code=True,
@@ -230,7 +238,7 @@ class SGLangWorker(RolloutWorker):
             port=self.server_port,
             nccl_port=self.nccl_port,
             dist_init_addr=self.dist_init_addr,
-            base_gpu_id=self.rank % self.config.gpus_per_node,
+            base_gpu_id=assigned_gpu_id,
             gpu_id_step=1,
             nnodes=nnodes,
             node_rank=node_rank,
@@ -242,6 +250,7 @@ class SGLangWorker(RolloutWorker):
             log_level_http=log_level_http,
             tp_size=tp_size,
             ep_size=ep_size,
+            disable_piecewise_cuda_graph=True,
         )
         if self.enable_return_routed_experts:
             init_kwargs["enable_return_routed_experts"] = True
