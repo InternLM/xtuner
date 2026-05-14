@@ -340,9 +340,11 @@ def compute_is_metrics(
     """
     metrics = {}
     device = rollout_is_weights.device
+    seq_valid = response_mask.sum(dim=-1, keepdim=True) > 0
+    metrics["valid"] = response_mask.any().item()
 
     # Track veto statistics
-    metrics["rollout_is_veto_fraction"] = has_catastrophic.float().mean()
+    metrics["rollout_is_veto_fraction"] = masked_mean(has_catastrophic.float(), seq_valid)
     metrics["rollout_is_catastrophic_token_fraction"] = masked_mean(catastrophic_tokens.float(), response_mask)
 
     # Compute metrics based on IS level
@@ -413,22 +415,33 @@ def compute_is_metrics(
     if rollout_is_weights.dim() > 1:
         # Compute mean IS weight per sequence
         seq_mean_weights = masked_mean(rollout_is_weights, response_mask, axis=-1)
+        seq_mean_weights = seq_mean_weights[seq_valid.squeeze(-1)]
 
         # Per-sequence statistics
-        metrics["rollout_is_seq_mean"] = seq_mean_weights.mean()
-        metrics["rollout_is_seq_std"] = (
-            seq_mean_weights.std() if seq_mean_weights.numel() > 1 else torch.tensor(0.0, device=device)
-        )
-        metrics["rollout_is_seq_max"] = seq_mean_weights.max()
-        metrics["rollout_is_seq_min"] = seq_mean_weights.min()
+        if seq_mean_weights.numel() > 0:
+            metrics["rollout_is_seq_mean"] = seq_mean_weights.mean()
+            metrics["rollout_is_seq_std"] = (
+                seq_mean_weights.std() if seq_mean_weights.numel() > 1 else torch.tensor(0.0, device=device)
+            )
+            metrics["rollout_is_seq_max"] = seq_mean_weights.max()
+            metrics["rollout_is_seq_min"] = seq_mean_weights.min()
 
-        # Identify most problematic sequences
-        seq_deviation = (seq_mean_weights - 1.0).abs()
-        metrics["rollout_is_seq_max_deviation"] = seq_deviation.max()
+            # Identify most problematic sequences
+            seq_deviation = (seq_mean_weights - 1.0).abs()
+            metrics["rollout_is_seq_max_deviation"] = seq_deviation.max()
 
-        # Fraction of sequences with high IS weights
-        metrics["rollout_is_seq_fraction_high"] = (seq_mean_weights > rollout_is_threshold_upper).float().mean()
-        metrics["rollout_is_seq_fraction_low"] = (seq_mean_weights < rollout_is_threshold_lower).float().mean()
+            # Fraction of sequences with high IS weights
+            metrics["rollout_is_seq_fraction_high"] = (seq_mean_weights > rollout_is_threshold_upper).float().mean()
+            metrics["rollout_is_seq_fraction_low"] = (seq_mean_weights < rollout_is_threshold_lower).float().mean()
+        else:
+            zero = torch.tensor(0.0, device=device)
+            metrics["rollout_is_seq_mean"] = zero
+            metrics["rollout_is_seq_std"] = zero
+            metrics["rollout_is_seq_max"] = zero
+            metrics["rollout_is_seq_min"] = zero
+            metrics["rollout_is_seq_max_deviation"] = zero
+            metrics["rollout_is_seq_fraction_high"] = zero
+            metrics["rollout_is_seq_fraction_low"] = zero
 
     return metrics
 
@@ -537,12 +550,23 @@ def merge_rollout_is_metrics(rollout_is_metrics: list[dict[str, float]], device=
         for m in rollout_is_metrics:
             is_valid = m.get("mismatch/valid", True)
             valids.append(float(is_valid))
-            values.append(m[key] if is_valid else 0.0)  # set to 0.0 if invalid
+            if is_valid:
+                values.append(m[key])
+            elif "max" in key:
+                values.append(float("-inf"))
+            elif "min" in key:
+                values.append(float("inf"))
+            else:
+                values.append(0.0)
         value_tensor = torch.tensor(values, dtype=torch.float32, device=device)
         valid_tensor = torch.tensor(valids, dtype=torch.float32, device=device)
+        count_value = valid_tensor.sum()
+        dist.all_reduce(count_value, op=dist.ReduceOp.SUM)
 
         # Aggregate across all processes
-        if "max" in key:
+        if count_value.item() == 0:
+            metrics[key] = 0.0
+        elif "max" in key:
             max_value = value_tensor.max()
             dist.all_reduce(max_value, op=dist.ReduceOp.MAX)
             metrics[key] = max_value.item()
@@ -552,9 +576,7 @@ def merge_rollout_is_metrics(rollout_is_metrics: list[dict[str, float]], device=
             metrics[key] = min_value.item()
         else:
             sum_value = value_tensor.sum()
-            count_value = valid_tensor.sum()
             dist.all_reduce(sum_value, op=dist.ReduceOp.SUM)
-            dist.all_reduce(count_value, op=dist.ReduceOp.SUM)
-            metrics[key] = sum_value.item() / count_value.item() if count_value.item() > 0 else 0.0
+            metrics[key] = sum_value.item() / count_value.item()
 
     return metrics
