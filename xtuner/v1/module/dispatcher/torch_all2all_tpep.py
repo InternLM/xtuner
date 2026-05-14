@@ -70,10 +70,6 @@ def _record_stream(value: Any, stream: torch.cuda.Stream) -> None:
             _record_stream(item, stream)
 
 
-def _local_tp_offset(all_sizes: list[int], tp_rank: int) -> int:
-    return sum(all_sizes[:tp_rank])
-
-
 def _tp_all_gather_forward_impl(
     hidden: torch.Tensor,
     all_sizes: list[int],
@@ -92,12 +88,33 @@ def _tp_all_gather_backward_impl(
     all_sizes: list[int],
     tp_rank: int,
     tp_group: dist.ProcessGroup,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # TODO: use reduce_scatter instead of all_reduce
-    grad = grad.contiguous()
-    dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=tp_group)
-    offset = _local_tp_offset(all_sizes, tp_rank)
-    return grad[offset : offset + all_sizes[tp_rank]].clone(), grad
+) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+    return _tp_reduce_scatter_sum_impl(grad, all_sizes, tp_rank, tp_group)
+
+
+def _tp_reduce_scatter_sum_impl(
+    hidden: torch.Tensor,
+    all_sizes: list[int],
+    tp_rank: int,
+    tp_group: dist.ProcessGroup,
+) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+    """Run TP ReduceScatterSum and return tensors whose lifetime may need
+    recording."""
+    hidden = hidden.contiguous()
+    assert hidden.shape[0] == sum(all_sizes), "TP ReduceScatterSum input rows must match TP size meta."
+
+    out = hidden.new_empty((all_sizes[tp_rank], *hidden.shape[1:]))
+    if hidden.shape[0] == 0:
+        # 中文注释：所有 TP rank 都没有 token 时没有实际通信量，直接返回合法的 0 行 slice。
+        return out, hidden, []
+
+    if all(size == all_sizes[0] for size in all_sizes):
+        dist.reduce_scatter_tensor(out, hidden, op=dist.ReduceOp.SUM, group=tp_group)
+        return out, hidden, []
+
+    input_chunks = list(torch.split(hidden, all_sizes, dim=0))
+    dist.reduce_scatter(out, input_chunks, op=dist.ReduceOp.SUM, group=tp_group)
+    return out, hidden, input_chunks
 
 
 def _tp_reduce_scatter_sum_forward_impl(
@@ -105,12 +122,8 @@ def _tp_reduce_scatter_sum_forward_impl(
     all_sizes: list[int],
     tp_rank: int,
     tp_group: dist.ProcessGroup,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # TODO: use reduce_scatter instead of all_reduce
-    reduced = hidden.contiguous().clone()
-    dist.all_reduce(reduced, op=dist.ReduceOp.SUM, group=tp_group)
-    offset = _local_tp_offset(all_sizes, tp_rank)
-    return reduced[offset : offset + all_sizes[tp_rank]].contiguous(), reduced
+) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+    return _tp_reduce_scatter_sum_impl(hidden, all_sizes, tp_rank, tp_group)
 
 
 def _tp_reduce_scatter_sum_backward_impl(
@@ -128,8 +141,7 @@ class _TPAllGather(torch.autograd.Function):
     """TP AllGather with autograd support.
 
     Forward : ``all_gather`` across the TP group, concatenating along the token dim.
-    Backward: ``all_reduce`` (SUM) the gradient then slice, accumulating gradients from
-              each TP weight shard into the original local token slice.
+    Backward: ``reduce_scatter`` (SUM) the gradient into the original local token slice.
     """
 
     @staticmethod
@@ -153,7 +165,7 @@ class _TPAllGather(torch.autograd.Function):
         ctx: Any,
         grad: torch.Tensor,
     ) -> tuple[torch.Tensor, None, None, None, None]:
-        grad_input, _ = _tp_all_gather_backward_impl(grad, ctx.all_sizes, ctx.tp_rank, ctx.tp_group)
+        grad_input, _, _ = _tp_all_gather_backward_impl(grad, ctx.all_sizes, ctx.tp_rank, ctx.tp_group)
         return grad_input, None, None, None, None
 
 
@@ -161,8 +173,8 @@ class _AsyncTPAllGather(torch.autograd.Function):
     """TP AllGather on dispatcher comm stream.
 
     Forward : wait for the previous event, then all-gather token slices.
-    Backward: wait until post-dispatch grad is ready, all-reduce grad, then
-              slice this TP rank's input grad.
+    Backward: wait until post-dispatch grad is ready, then reduce-scatter grad
+              into this TP rank's input slice.
     """
 
     @staticmethod
@@ -203,14 +215,14 @@ class _AsyncTPAllGather(torch.autograd.Function):
     ) -> tuple[torch.Tensor, None, None, None, None, None, None, None, None, None]:
         with torch.cuda.stream(ctx.comm_stream):
             ctx.comm_stream.wait_event(ctx.backward_previous_event)
-            grad_input, grad_for_comm = _tp_all_gather_backward_impl(
+            grad_input, grad_for_comm, chunks = _tp_all_gather_backward_impl(
                 grad,
                 ctx.all_sizes,
                 ctx.tp_rank,
                 ctx.tp_group,
             )
 
-            _record_stream((grad_for_comm, grad_input), ctx.comm_stream)
+            _record_stream((grad_for_comm, chunks, grad_input), ctx.comm_stream)
             ctx.backward_finished_event.record(ctx.comm_stream)
 
         return grad_input, None, None, None, None, None, None, None, None, None
@@ -219,8 +231,7 @@ class _AsyncTPAllGather(torch.autograd.Function):
 class _TPReduceScatterSum(torch.autograd.Function):
     """TP ReduceScatterSum with autograd support.
 
-    Forward : ``all_reduce`` (SUM) then slice — equivalent to a sum reduce-scatter
-              for the unequal-size token case used here.
+    Forward : ``reduce_scatter`` (SUM) to this TP rank's local token slice.
     Backward: ``all_gather`` the gradient slices to reconstruct the full gradient tensor,
               matching the sum reduction in the forward pass.
     """
@@ -234,7 +245,7 @@ class _TPReduceScatterSum(torch.autograd.Function):
         tp_size: int,
         tp_rank: int,
     ) -> torch.Tensor:
-        out, _ = _tp_reduce_scatter_sum_forward_impl(hidden, all_sizes, tp_rank, tp_group)
+        out, _, _ = _tp_reduce_scatter_sum_forward_impl(hidden, all_sizes, tp_rank, tp_group)
         ctx.tp_group = tp_group
         ctx.tp_size = tp_size
         ctx.tp_rank = tp_rank
@@ -269,10 +280,10 @@ class _AsyncTPReduceScatterSum(torch.autograd.Function):
     ) -> torch.Tensor:
         with torch.cuda.stream(comm_stream):
             comm_stream.wait_event(forward_previous_event)
-            out, reduced = _tp_reduce_scatter_sum_forward_impl(hidden, all_sizes, tp_rank, tp_group)
+            out, hidden_for_comm, chunks = _tp_reduce_scatter_sum_forward_impl(hidden, all_sizes, tp_rank, tp_group)
 
             # 中文注释：同步/异步共用 TP ReduceScatter 核心逻辑；异步只额外管理 stream/event。
-            _record_stream((hidden, reduced, out), comm_stream)
+            _record_stream((hidden_for_comm, chunks, out), comm_stream)
             forward_finished_event.record(comm_stream)
 
         ctx.tp_group = tp_group

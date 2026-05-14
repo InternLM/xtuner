@@ -12,12 +12,11 @@ Device mesh 排列（mesh_shape=(dp, ep, tp)）:
 每个 TP rank 持有 N_local=2 个 token，EP+TP 后的流程：
 
     dispatch_preprocess : 按 expert 排序（每 TP rank 独立）
-    dispatch            : EP AlltoAll（每 TP rank 独立，仅路由本 TP 的 token 副本）
-    dispatch_postprocess: TP AllGather → 将 TP slices 合并成 M_total token
-                          + 按 local expert 再排序（供 grouped GEMM）
+    dispatch            : EP AlltoAll → TP AllGather，将 TP slices 合并成 M_total token
+    dispatch_postprocess: 按 local expert 再排序（供 grouped GEMM）
     [Expert GEMM]       : 冗余计算（同一 EP rank 内各 TP rank 计算结果相同）
-    combine_preprocess  : unpermute → TP ReduceScatterSum → 恢复每 TP rank M_ep_recv
-    combine             : EP AlltoAll 逆向
+    combine_preprocess  : unpermute，恢复到 TP AllGather 顺序
+    combine             : TP ReduceScatterSum → EP AlltoAll 逆向
     combine_postprocess : unpermute + topk 加权求和 → [N_local, H]
 
 运行方式：
@@ -126,11 +125,12 @@ EXPECTED: dict[tuple[int, int], RankExpected] = {
         # sorted (topk-slot-first then by expert): A0(e0), A1(e1), A1(e3), A0(e4)
         pre_hidden=(10.0, 11.0, 11.0, 10.0),
         pre_row_id_map=(0, 2, 3, 1),
-        # after EP A2A: from self=[A0(e0),A1(e1)], from ep1_tp0=[B0(e1),B1(e2)]
-        dispatch_hidden=(10.0, 11.0, 20.0, 21.0),
+        # after EP A2A + TP AllGather:
+        # tp0=[A0(e0),A1(e1),B0(e1),B1(e2)], tp1=[A3(e0),A2(e2),B2(e0),B3(e1)]
+        dispatch_hidden=(10.0, 11.0, 20.0, 21.0, 13.0, 12.0, 22.0, 23.0),
         input_splits=(2, 2),
         output_splits=(2, 2),
-        tokens_per_expert_group=(1.0, 1.0, 0.0, 0.0, 1.0, 1.0),
+        tokens_per_expert_group=(1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0),
         output_splits_tp=(4, 4),
         # after TP AllGather (tp0||tp1) + sort by local expert:
         # e0: A0,A3,B2  e1: A1,B0,B3  e2: B1,A2
@@ -139,8 +139,8 @@ EXPECTED: dict[tuple[int, int], RankExpected] = {
         tokens_per_expert=(3.0, 3.0, 2.0),
         # expert adds global_expert_id * 100
         experts_out=(10.0, 13.0, 22.0, 111.0, 120.0, 123.0, 221.0, 212.0),
-        # after ReduceScatterSum — tp0 slice [0:4]
-        pre_combine_hidden=(20.0, 222.0, 240.0, 442.0),
+        # after local unpermute back to TP AllGather order
+        pre_combine_hidden=(10.0, 111.0, 120.0, 221.0, 13.0, 212.0, 22.0, 123.0),
         # after EP A2A reverse: from self=[20,222], from ep1_tp0=[622,820]
         combine_hidden=(20.0, 222.0, 622.0, 820.0),
         post_combine_hidden=(620.0, 382.0),
@@ -152,19 +152,19 @@ EXPECTED: dict[tuple[int, int], RankExpected] = {
         # sorted: A3(e0), A2(e2), A3(e4), A2(e5)
         pre_hidden=(13.0, 12.0, 13.0, 12.0),
         pre_row_id_map=(1, 2, 3, 0),
-        # after EP A2A: from self=[A3(e0),A2(e2)], from ep1_tp1=[B2(e0),B3(e1)]
-        dispatch_hidden=(13.0, 12.0, 22.0, 23.0),
+        # after EP A2A + TP AllGather, same gathered tensor as ep0_tp0
+        dispatch_hidden=(10.0, 11.0, 20.0, 21.0, 13.0, 12.0, 22.0, 23.0),
         input_splits=(2, 2),
         output_splits=(2, 2),
-        tokens_per_expert_group=(1.0, 0.0, 1.0, 1.0, 1.0, 0.0),
+        tokens_per_expert_group=(1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0),
         output_splits_tp=(4, 4),
         # both tp ranks see the same gathered tensor after AllGather
         post_hidden=(10.0, 13.0, 22.0, 11.0, 20.0, 23.0, 21.0, 12.0),
         post_row_ids_map=(0, 3, 4, 6, 1, 7, 2, 5),
         tokens_per_expert=(3.0, 3.0, 2.0),
         experts_out=(10.0, 13.0, 22.0, 111.0, 120.0, 123.0, 221.0, 212.0),
-        # after ReduceScatterSum — tp1 slice [4:8]
-        pre_combine_hidden=(26.0, 424.0, 44.0, 246.0),
+        # after local unpermute back to TP AllGather order
+        pre_combine_hidden=(10.0, 111.0, 120.0, 221.0, 13.0, 212.0, 22.0, 123.0),
         # after EP A2A reverse: from self=[26,424], from ep1_tp1=[826,1024]
         combine_hidden=(26.0, 424.0, 826.0, 1024.0),
         post_combine_hidden=(604.0, 666.0),
@@ -176,19 +176,20 @@ EXPECTED: dict[tuple[int, int], RankExpected] = {
         # sorted: B0(e1), B1(e2), B0(e3), B1(e4)
         pre_hidden=(20.0, 21.0, 20.0, 21.0),
         pre_row_id_map=(0, 3, 2, 1),
-        # after EP A2A: from ep0_tp0=[A1(e3),A0(e4)], from self=[B0(e3),B1(e4)]
-        dispatch_hidden=(11.0, 10.0, 20.0, 21.0),
+        # after EP A2A + TP AllGather:
+        # tp0=[A1(e3),A0(e4),B0(e3),B1(e4)], tp1=[A3(e4),A2(e5),B3(e3),B2(e5)]
+        dispatch_hidden=(11.0, 10.0, 20.0, 21.0, 13.0, 12.0, 23.0, 22.0),
         input_splits=(2, 2),
         output_splits=(2, 2),
-        tokens_per_expert_group=(1.0, 1.0, 0.0, 1.0, 1.0, 0.0),
+        tokens_per_expert_group=(1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0),
         output_splits_tp=(4, 4),
         # after TP AllGather (tp0||tp1) + sort: e3: A1,B0,B3  e4: A0,B1,A3  e5: A2,B2
         post_hidden=(11.0, 20.0, 23.0, 10.0, 21.0, 13.0, 12.0, 22.0),
         post_row_ids_map=(0, 3, 1, 4, 5, 6, 2, 7),
         tokens_per_expert=(3.0, 3.0, 2.0),
         experts_out=(311.0, 320.0, 323.0, 410.0, 421.0, 413.0, 512.0, 522.0),
-        # after ReduceScatterSum — tp0 slice [0:4]
-        pre_combine_hidden=(622.0, 820.0, 640.0, 842.0),
+        # after local unpermute back to TP AllGather order
+        pre_combine_hidden=(311.0, 410.0, 320.0, 421.0, 413.0, 512.0, 323.0, 522.0),
         # after EP A2A reverse: from ep0_tp0=[240,442], from self=[640,842]
         combine_hidden=(240.0, 442.0, 640.0, 842.0),
         post_combine_hidden=(560.0, 642.0),
@@ -200,18 +201,18 @@ EXPECTED: dict[tuple[int, int], RankExpected] = {
         # sorted: B2(e0), B3(e1), B3(e3), B2(e5)
         pre_hidden=(22.0, 23.0, 23.0, 22.0),
         pre_row_id_map=(3, 2, 0, 1),
-        # after EP A2A: from ep0_tp1=[A3(e4),A2(e5)], from self=[B3(e3),B2(e5)]
-        dispatch_hidden=(13.0, 12.0, 23.0, 22.0),
+        # after EP A2A + TP AllGather, same gathered tensor as ep1_tp0
+        dispatch_hidden=(11.0, 10.0, 20.0, 21.0, 13.0, 12.0, 23.0, 22.0),
         input_splits=(2, 2),
         output_splits=(2, 2),
-        tokens_per_expert_group=(0.0, 1.0, 1.0, 1.0, 0.0, 1.0),
+        tokens_per_expert_group=(1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0),
         output_splits_tp=(4, 4),
         post_hidden=(11.0, 20.0, 23.0, 10.0, 21.0, 13.0, 12.0, 22.0),
         post_row_ids_map=(0, 3, 1, 4, 5, 6, 2, 7),
         tokens_per_expert=(3.0, 3.0, 2.0),
         experts_out=(311.0, 320.0, 323.0, 410.0, 421.0, 413.0, 512.0, 522.0),
-        # after ReduceScatterSum — tp1 slice [4:8]
-        pre_combine_hidden=(826.0, 1024.0, 646.0, 1044.0),
+        # after local unpermute back to TP AllGather order
+        pre_combine_hidden=(311.0, 410.0, 320.0, 421.0, 413.0, 512.0, 323.0, 522.0),
         # after EP A2A reverse: from ep0_tp1=[44,246], from self=[646,1044]
         combine_hidden=(44.0, 246.0, 646.0, 1044.0),
         post_combine_hidden=(944.0, 386.0),
@@ -342,7 +343,7 @@ def _run_tpep_case(parallel_info: ParallelInfo) -> dict[str, Any]:
         "input_splits": dispatched["input_splits"],
         "output_splits": dispatched["output_splits"],
         "tokens_per_expert_group": dispatched["tokens_per_expert_group"],
-        "output_splits_tp": post_dispatched["output_splits_tp"],
+        "output_splits_tp": dispatched["output_splits_tp"],
         "post_hidden": post_dispatched["hidden_states"],
         "post_row_ids_map": post_dispatched["row_ids_map"],
         "tokens_per_expert": post_dispatched["tokens_per_expert"],

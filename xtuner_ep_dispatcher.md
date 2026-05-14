@@ -465,3 +465,96 @@ num_recv_tokens_per_expert_list, handle, event
 - host 等 metadata 时无法继续 enqueue 后续本地算子和通信。
 - 如果 metadata 等待短于可覆盖的另一个 micro batch 计算，重叠效果基本保留。
 - 如果 metadata 等待更长，`xtuner_ep_domino.md` 7.3 中的理想时间线会被压缩，真实重叠比例下降。
+
+## TP+EP 中 ReduceScatterSum 与 padding/capacity 取舍
+
+`TorchAll2AllTPEPDispatcher` 在 EP dispatch 之后会额外做 TP AllGather，在 combine 阶段会做 TP
+ReduceScatterSum。这里的 **TP ReduceScatterSum** 是语义名：对同一 TP group 中完整 token 批的 hidden 做
+SUM 归约，并只保留当前 TP rank 负责的 token slice。它同时出现在两个方向：
+
+- combine forward：row-parallel expert output 先做 TP ReduceScatterSum，再进入 EP combine all2all。
+- TP AllGather backward：AllGather 的反向也是 TP ReduceScatterSum。
+
+TP+EP MoE routing 后，同一个 EP rank 上的不同 TP rank 不一定收到相同数量的 token。以 `tp_size=2` 为例：
+
+```text
+EP dispatch 后：
+  TP rank0 hidden: [3, H]
+  TP rank1 hidden: [5, H]
+
+TP size meta:
+  output_splits_tp = [3, 5]
+
+TP AllGather 后每个 TP rank 都看到：
+  gathered hidden: [8, H] = rank0 rows [0:3] | rank1 rows [3:8]
+```
+
+expert 的 row-parallel down projection 后，两个 TP rank 都有 `[8, H]` 的 partial hidden。TP ReduceScatterSum 需要
+对这两个 `[8, H]` 做 SUM，并按同一个 TP size meta 切回：
+
+```text
+TP rank0 output: rows [0:3] -> [3, H]
+TP rank1 output: rows [3:8] -> [5, H]
+```
+
+因此当前设计选择是：**优先实现真正的变长 `reduce_scatter`，不引入 padding/capacity**。dispatcher 已经有
+`output_splits_tp` 作为 TP size meta，正好可以作为变长 reduce scatter 的 split 边界：
+
+```python
+input_tensor_list = list(torch.split(hidden.contiguous(), output_splits_tp, dim=0))
+output = torch.empty_like(input_tensor_list[tp_rank])
+dist.reduce_scatter(output, input_tensor_list, op=dist.ReduceOp.SUM, group=tp_group)
+```
+
+当 `output_splits_tp` 全部相等时，可以在共享核心函数内部走等长 fast path：
+
+```python
+dist.reduce_scatter_tensor(output, hidden.contiguous(), op=dist.ReduceOp.SUM, group=tp_group)
+```
+
+但这只是实现优化，不改变 dispatcher 对外的 TP size meta 语义。真正的 ReduceScatterSum 实现应集中在一个共享核心
+函数中，避免 combine forward 和 TP AllGather backward 分叉。
+
+### 为什么不先做 padding/capacity
+
+padding 和 capacity 带来的收益不同，需要分开看：
+
+- **padding 的收益** 是把一次变长 collective 包装成等长 collective。通信前把每个 TP rank 的真实 slice pad 到同一
+  长度，通信时就可以使用 `reduce_scatter_tensor` / `all_gather_into_tensor` 这类 tensor fast path。若 capacity
+  仍由本 step 的 `max(output_splits_tp)` 动态决定，padding 只减少大块 hidden collective 的 variable-list
+  split 开销，不能消除 TP size meta 的 CPU 同步。
+- **固定 capacity 的收益** 是让这个等长长度跨 step 稳定下来。只有 capacity 是配置值或静态上界时，shape 才稳定，
+  大块通信 shape 才能从本 step 的 Python split list 中解耦，后续也才更容易做 CUDA graph、buffer 复用或通信
+  buffer 预分配。
+- **对 Domino 的影响** 主要来自 host CPU split metadata 同步。只做动态 padding 时，host 仍要拿到
+  `output_splits_tp` 来决定 pad/unpad 边界和本步 capacity，因此这个同步点仍然存在；固定 capacity 才可能减少
+  运行时 shape 决策，并把大块通信从 split-list 发起路径中移出。这和前面 EP All2All 的 host metadata 同步问题
+  类似：host 等 split list 时，已经 enqueue 到 GPU 的另一个 micro batch 计算仍可继续，但 host 不能继续
+  enqueue 后续本地算子和通信；如果等待时间超过可覆盖窗口，会压缩 Domino 的真实 overlap。
+
+因此，如果只是每步动态取 `capacity = max(output_splits_tp)`，它仍然需要 TP size meta 的 CPU 同步，只能减少
+variable collective 的 split-list 开销，不能获得固定 shape / CUDA graph，也不能消除 TP size meta 对 Domino
+host enqueue 的影响。
+
+但它会把问题从通信层扩散到 layout 层。至少有两种做法：
+
+1. **通信内部 padding，通信后立刻 unpad。**
+
+   例如 TP size meta 是 `[3, 5]`，capacity 取 `5`。AllGather 前把 rank0 的 `[3, H]` pad 到 `[5, H]`，
+   rank1 保持 `[5, H]`；等长 AllGather 得到 `[10, H]` 后再按真实 sizes compact 回 `[8, H]`。ReduceScatter
+   则需要先按 `[3, 5]` 切分、分别 pad 到 `[5, H]`，concat 成 `[10, H]` 后走 `reduce_scatter_tensor`，
+   最后再 unpad 成当前 rank 的真实 `[3, H]` 或 `[5, H]`。
+
+   这个方案不改变 expert 看到的 token 数，但增加 pad/unpad copy，并且仍然需要 TP size meta。收益要靠 benchmark
+   证明。
+
+2. **端到端 capacity，让 padding token 进入 expert layout。**
+
+   这种方案会让 `[tp_size * capacity, H]` 直接进入 `dispatch_postprocess` 和 grouped GEMM。它需要定义 padding
+   token 的 expert 归属、`tokens_per_expert` 是否包含 padding、grouped GEMM 是否计算 padding、combine 如何剔除
+   padding，以及 `row_ids_map` / `topk_weights` 如何保证 padding 不影响真实 token。
+
+   这会把改动扩散到 routing、expert layout、postprocess/combine，不适合作为替换 `all_reduce + slice` 的第一步。
+
+因此当前阶段的目标是局部替换：用真正的 TP ReduceScatterSum 取代 `all_reduce + slice`，输出 shape 严格按照
+`output_splits_tp[tp_rank]` 分配，允许 0 行，不做 padding/capacity。

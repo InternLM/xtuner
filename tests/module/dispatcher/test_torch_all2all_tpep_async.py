@@ -105,18 +105,26 @@ def test_async_tpep_combine_owns_tp_reduce_scatter(monkeypatch) -> None:
             output[0].copy_(input)
             output[1].copy_(input)
 
+    def fake_reduce_scatter_tensor(output, input, op=None, group=None) -> None:
+        output.copy_(input[: output.shape[0]])
+
+    def fake_reduce_scatter(output, input_list, op=None, group=None) -> None:
+        output.copy_(input_list[getattr(group, "rank", 0)])
+
+    def fake_all_reduce(tensor, op=None, group=None) -> None:
+        raise AssertionError("TP ReduceScatterSum should not use all_reduce + slice")
+
     def fake_all_gather(chunks, tensor, group=None) -> None:
         chunks[0].copy_(tensor)
         chunks[1].copy_(tensor + 10)
-
-    def fake_all_reduce(tensor, op=None, group=None) -> None:
-        return None
 
     monkeypatch.setattr(dist, "get_rank", fake_get_rank)
     monkeypatch.setattr(dist, "all_to_all_single", fake_all_to_all_single)
     monkeypatch.setattr(torch_all2all, "all_to_all_single_autograd", fake_ep_all_to_all_single_autograd)
     monkeypatch.setattr(dist, "all_gather_into_tensor", fake_all_gather_into_tensor)
     monkeypatch.setattr(dist, "all_gather", fake_all_gather)
+    monkeypatch.setattr(dist, "reduce_scatter_tensor", fake_reduce_scatter_tensor)
+    monkeypatch.setattr(dist, "reduce_scatter", fake_reduce_scatter)
     monkeypatch.setattr(dist, "all_reduce", fake_all_reduce)
 
     hidden = torch.randn(32, 128, device="cuda", dtype=torch.float32, requires_grad=True)
@@ -174,11 +182,16 @@ def test_async_tp_all_gather_uses_comm_stream(monkeypatch) -> None:
         for chunk in chunks:
             chunk.copy_(tensor[: chunk.shape[0]])
 
+    def fake_reduce_scatter_tensor(output, input, op=None, group=None) -> None:
+        calls.append(("reduce_scatter_tensor", _stream_id()))
+        output.copy_(input[: output.shape[0]])
+
     def fake_all_reduce(tensor, op=None, group=None) -> None:
-        calls.append(("all_reduce", _stream_id()))
+        raise AssertionError("TP AllGather backward should use reduce_scatter")
 
     monkeypatch.setattr(dist, "get_rank", fake_get_rank)
     monkeypatch.setattr(dist, "all_gather", fake_all_gather)
+    monkeypatch.setattr(dist, "reduce_scatter_tensor", fake_reduce_scatter_tensor)
     monkeypatch.setattr(dist, "all_reduce", fake_all_reduce)
 
     hidden = torch.randn(2, 3, device="cuda", requires_grad=True)
@@ -210,7 +223,7 @@ def test_async_tp_all_gather_uses_comm_stream(monkeypatch) -> None:
     assert hidden.grad is not None
     assert calls == [
         ("all_gather", comm_stream.cuda_stream),
-        ("all_reduce", comm_stream.cuda_stream),
+        ("reduce_scatter_tensor", comm_stream.cuda_stream),
     ]
 
 
@@ -222,15 +235,20 @@ def test_async_tp_reduce_scatter_uses_comm_stream(monkeypatch) -> None:
     def fake_get_rank(group=None) -> int:
         return getattr(group, "rank", 0)
 
+    def fake_reduce_scatter(output, input_list, op=None, group=None) -> None:
+        calls.append(("reduce_scatter", _stream_id()))
+        output.copy_(input_list[getattr(group, "rank", 0)])
+
     def fake_all_reduce(tensor, op=None, group=None) -> None:
-        calls.append(("all_reduce", _stream_id()))
+        raise AssertionError("TP ReduceScatterSum should use reduce_scatter")
 
     def fake_all_gather(chunks, tensor, group=None) -> None:
         calls.append(("all_gather", _stream_id()))
         for chunk in chunks:
-            chunk.copy_(tensor[: chunk.shape[0]])
+            chunk.copy_(tensor[:1].expand_as(chunk))
 
     monkeypatch.setattr(dist, "get_rank", fake_get_rank)
+    monkeypatch.setattr(dist, "reduce_scatter", fake_reduce_scatter)
     monkeypatch.setattr(dist, "all_reduce", fake_all_reduce)
     monkeypatch.setattr(dist, "all_gather", fake_all_gather)
 
@@ -243,7 +261,7 @@ def test_async_tp_reduce_scatter_uses_comm_stream(monkeypatch) -> None:
 
     out = _async_tp_reduce_scatter_sum(
         hidden,
-        all_sizes=[2, 2],
+        all_sizes=[1, 3],
         tp_group=group,  # type: ignore[arg-type]
         forward_previous_event=forward_previous_event,
         forward_finished_event=forward_finished_event,
@@ -261,6 +279,6 @@ def test_async_tp_reduce_scatter_uses_comm_stream(monkeypatch) -> None:
 
     assert hidden.grad is not None
     assert calls == [
-        ("all_reduce", comm_stream.cuda_stream),
+        ("reduce_scatter", comm_stream.cuda_stream),
         ("all_gather", comm_stream.cuda_stream),
     ]
