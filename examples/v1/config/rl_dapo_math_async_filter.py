@@ -7,7 +7,7 @@ from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import DapoMathJudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
@@ -68,15 +68,15 @@ from transformers import AutoTokenizer
 eos_token_id = get_eos_token(model_path)
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
-dapomath_judger_config = DapoMathJudgerConfig(
+judger_config = DapoMathJudgerConfig(
     judger_name="dapo_math", 
     eos_token=eos_token_str,
     enable_overlong_buffer = True, 
     max_response_len =max_response_length, 
     overlong_buffer_len=4096, 
     overlong_penalty_factor=1.0, 
+    cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
     tokenizer=tokenizer)
-judger_config = DapoMathJudgerConfig(judger_name="dapo_math", num_ray_actors=1)
 
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)

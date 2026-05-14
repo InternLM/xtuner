@@ -229,7 +229,7 @@ class SGLangWorker(RolloutWorker):
         nnodes = max(1, num_gpus_per_engine // self.config.gpus_per_node)
         node_rank = self.rank // self.config.gpus_per_node if nnodes > 1 else 0
         assigned_gpu_id = int(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
-        
+
         # SGLang 0.5.10 默认启用的 Piecewise CUDA Graph 在启动 warmup compile 阶段会报错。sglang的文档提到这个功能还是实验功能，可能还不太稳定(https://sgl-project-sglang-93.mintlify.app/optimization/cuda-graph#bug-report)。暂时先通过disable_piecewise_cuda_graph=True关掉改功能
         init_kwargs = dict(
             model_path=self.config.model_path,

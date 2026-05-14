@@ -92,12 +92,6 @@ class GSM8KJudgerConfig(JudgerConfig):
             score. Defaults to ``compute_reward``.
         request_timeout (float): Timeout in seconds for HTTP reward handlers.
             Defaults to 30.0.
-        num_ray_actors (int): Number of remote Ray actor judger replicas.
-            ``0`` runs the judger locally. Defaults to 0.
-        num_cpus_per_actor (int): CPU cores requested by each remote judger
-            actor. Defaults to 1.
-        cpu_memory_per_actor (int): CPU memory in bytes requested by each
-            remote judger actor. Defaults to 1 GiB.
 
     **Examples:**
 

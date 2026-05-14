@@ -5,7 +5,12 @@ import unittest
 import tempfile
 import numpy as np
 import asyncio
-from xtuner.v1.rl.utils import AutoCPUWorkers, CPUResourcesConfig
+from xtuner.v1.rl.utils import (
+    CPUResourcesConfig,
+    CPUResourceManager,
+    clear_cpu_resource_manager,
+    set_cpu_resource_manager,
+)
 from xtuner.v1.data_proto.rl_data import RolloutState
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
@@ -68,10 +73,12 @@ class TestJudgerController(unittest.TestCase):
 
     def setUp(self):
         ray.init(num_cpus=80, ignore_reinit_error=True)
+        set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=None))
         self.temp_dir = tempfile.TemporaryDirectory()
         self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
 
     def tearDown(self): 
+        clear_cpu_resource_manager()
         ray.shutdown()
         self.temp_dir.cleanup()
 
@@ -81,23 +88,23 @@ class TestJudgerController(unittest.TestCase):
     def test_gsm8k_judger(self):
         from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 
-        gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
+        gsm8k_judger_config = GSM8KJudgerConfig(
+            judger_name="openai/gsm8k",
+            cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+        )
         # Test Case 1: NativeJudger
         native_judger = GSM8KJudgerConfig(judger_name="openai/gsm8k").build()
         res1 = asyncio.run(native_judger.judge(FAKE_JUDGER_INPUT_ITEM))
         self.assertEqual(res1.reward["score"], 1.0)
 
-        # Test Case 2: remote judger with given pg
-        cpu_cfg = CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1)
-        pg = AutoCPUWorkers.build_placement_group(cpu_cfg)
-        ray.get(pg.ready())
-        native_judger_actors = gsm8k_judger_config.build(pg, 0)
+        # Test Case 2: remote judger
+        native_judger_actors = gsm8k_judger_config.build()
         res2 = asyncio.run(native_judger_actors.judge(FAKE_JUDGER_INPUT_ITEM))
         self.assertEqual(res2.reward["score"], 1.0)
         del native_judger_actors
 
         # Test Case 3: JudgerPool + 一批数据的分数是否正确
-        judger_router = gsm8k_judger_config.build(pg)
+        judger_router = gsm8k_judger_config.build()
         states, history_reward = construct_gsm8k_judger_data(VERL_ROLLOUT_DATA_PATH)
         rollout_states = asyncio.run(self._judger_batch(judger_router, states))
         rewards = [s.reward["score"] for s in rollout_states]
@@ -117,7 +124,7 @@ class TestJudgerController(unittest.TestCase):
         # 定义 Judger Config
         config = DapoMathJudgerConfig(
             judger_name="dapo_math",
-            num_ray_actors=1,
+            cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
             eos_token=eos_token_str,
             enable_overlong_buffer=True,
             max_response_len=32768,
@@ -134,7 +141,10 @@ class TestJudgerController(unittest.TestCase):
     def test_geo_batch_judge_score(self):
         # 测试 geo judger + 4 个实例池的评判分数是否正确
         from xtuner.v1.rl.judger.geo3k import GEO3KJudgerConfig
-        config = GEO3KJudgerConfig(judger_name="geo3k", num_ray_actors=4)
+        config = GEO3KJudgerConfig(
+            judger_name="geo3k",
+            cpu_resources=CPUResourcesConfig(num_workers=4, num_cpus_per_worker=1),
+        )
         states, history_reward = construct_geo3k_dapo_judger_data(GEO_ROLLOUT_DATA_PATH)
         router = config.build()
         rollout_states = asyncio.run(self._judger_batch(router, states))
@@ -150,13 +160,11 @@ class TestJudgerController(unittest.TestCase):
 
         gsm8k_config_1 = GSM8KJudgerConfig(
             judger_name="openai/gsm8k_1",
-            num_ray_actors=2,
-            num_cpus_per_actor=1,
+            cpu_resources=CPUResourcesConfig(num_workers=2, num_cpus_per_worker=1),
         )
         gsm8k_config_2 = GSM8KJudgerConfig(
             judger_name="openai/gsm8k_2",
-            num_ray_actors=8,
-            num_cpus_per_actor=2,
+            cpu_resources=CPUResourcesConfig(num_workers=8, num_cpus_per_worker=2),
         )
 
         gsm8k_router_1 = gsm8k_config_1.build()

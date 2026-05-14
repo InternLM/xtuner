@@ -25,7 +25,7 @@ from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
 
 
@@ -72,7 +72,10 @@ rollout_config = RolloutConfig(
 )
 
 # 3. judger
-judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
+judger_config = GSM8KJudgerConfig(
+    judger_name="openai/gsm8k",
+    cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+)
 
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)

@@ -14,7 +14,7 @@ from .misc import find_free_ports
 if TYPE_CHECKING:
     from xtuner.v1.data_proto.rl_data import RolloutState
 
-    from .ray_worker import AcceleratorType
+    from .ray_accelerator_worker import AcceleratorType
 
 
 logger = get_logger()

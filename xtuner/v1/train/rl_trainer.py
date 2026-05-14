@@ -40,8 +40,10 @@ from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
 from xtuner.v1.rl.utils import (
     AcceleratorResourcesConfig,
     AutoAcceleratorWorkers,
+    CPUResourceManager,
     asyncio_run,
     create_task,
+    set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
@@ -459,6 +461,7 @@ class BaseRLTrainer:
         self._init_rollout_config(cfg, log_dir)
         self._init_runtime_flags(cfg)
         self._advantage_estimator = cfg.advantage_estimator_config.build()
+        self._cpu_resource_manager: CPUResourceManager | None = None
 
         self._exp_tracker = get_writer(writer_type=cfg.exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = False
@@ -1110,6 +1113,9 @@ class RLColocateTrainer(BaseRLTrainer):
         self._init_common(cfg, meta_path=self._META_PATH, logger_tag="RLTrainer")
 
         self._pg = AutoAcceleratorWorkers.build_placement_group(cfg.resources)
+        self._cpu_resource_manager = CPUResourceManager(self._pg)
+        self._cpu_resource_manager.log_initial_snapshot()
+        set_cpu_resource_manager(self._cpu_resource_manager)
 
         if self._debug_rollout:
             if self._rollout_config.skip_load_weights:
@@ -1121,6 +1127,7 @@ class RLColocateTrainer(BaseRLTrainer):
             self._maybe_start_gateway(cfg)
             replay_buffer = cfg.replay_buffer_config.build()
             self._build_agent_loop_components(cfg, replay_buffer)
+            self._cpu_resource_manager.log_registered_summary()
             self.logger.warning("Debug rollout mode is enabled. Only rollout workers will be started.")
             return
 
@@ -1156,6 +1163,7 @@ class RLColocateTrainer(BaseRLTrainer):
             self._resume_agent_loop_manager(checkpoint_path)
 
         self.train_controller.set_train_rollout_mode("colocate")
+        self._cpu_resource_manager.log_registered_summary()
 
         if self._rollout_config.skip_load_weights:
             self._sync_weights_from_train_workers()
@@ -1295,6 +1303,9 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             train_resources=cfg.train_resources,
             rollout_resources=cfg.rollout_resources,
         )
+        self._cpu_resource_manager = CPUResourceManager([self._train_pg, self._rollout_pg])
+        self._cpu_resource_manager.log_initial_snapshot()
+        set_cpu_resource_manager(self._cpu_resource_manager)
         self.train_controller = self._train_worker_cfg.build(self._train_pg)
         self.rollout_controller = self._rollout_config.build(self._rollout_pg)
         self._maybe_start_gateway(cfg)
@@ -1315,6 +1326,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
+
+        self._cpu_resource_manager.log_registered_summary()
 
     def _build_disaggregated_placement_groups(
         self,
