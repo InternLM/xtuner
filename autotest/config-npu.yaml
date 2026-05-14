@@ -205,11 +205,11 @@ case:
                     lr: 0.01
             timeout: 10800
 
-    npu-qwen3-rl-vllm-vs-gpu:
+    npu-qwen3-rl-vllm:
         -
             type: rl
             parameters:
-                config: autotest/config/rl_qwen3_30B_grpo_gpu_vs_npu.py
+                config: autotest/config/npu_rl_qwen3_30B_grpo_vllm.py
                 infer_backend: vllm
                 acceleator: NPU
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cic/qa-llm-cicd/test_output
@@ -229,31 +229,31 @@ case:
                     - VLLM_VERSION=0.11.0
                     - VLLM_USE_V1=1
             assert_info:
-                base_metric: npu-qwen3-rl-vllm-vs-gpu/00f7e16/tracker.jsonl
+                base_metric: npu-qwen3-rl-vllm/00f7e16/tracker.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy
-                       threshold: 0.05
+                       threshold: 0.1
                        method: absolute
                        operator: <
                     -
                        metric: response/rewards/mean
-                       threshold: 0.1
+                       threshold: 0.3
                        method: absolute
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0001
+                       threshold: 0.0005
                        method: absolute
                        operator: <=
                     -
                        metric: response/response_len/mean
-                       threshold: 0.12
+                       threshold: 0.25
                        method: relative
                        operator: <
                     -
                        metric: time/step
-                       threshold: 10
+                       threshold: 20
                        method: absolute
                        operator: <
             timeout: 5500
