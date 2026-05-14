@@ -1142,10 +1142,10 @@ class RLColocateTrainer(BaseRLTrainer):
         if checkpoint_path is not None:
             self._resume_agent_loop_manager(checkpoint_path)
 
+        self.train_controller.set_train_rollout_mode("colocate")
+
         if self._rollout_config.skip_load_weights:
             self._sync_weights_from_train_workers()
-
-        self.train_controller.set_train_rollout_mode("colocate")
 
     def _sync_weights_from_train_workers(self) -> None:
         self.logger.info("Rollout workers skip load weights, update weights from train workers.")
@@ -1263,7 +1263,7 @@ class RLColocateTrainer(BaseRLTrainer):
                 bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
                 ray.get(self.rollout_controller.onload_weights.remote())
                 self.train_controller.update_weights()
-                self.logger.info("Model weights synchronized successfully.")
+                self.logger.info("Rollout workers update weights successfully in colocate mode")
                 self.train_controller.offload(target="model")
             else:
                 self.train_controller.offload(target="model")
@@ -1298,11 +1298,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                     "because it does not allow early stopping in production."
                 )
         bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+        self.train_controller.set_train_rollout_mode("disaggregated")
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
-
-        self.train_controller.set_train_rollout_mode("disaggregated")
 
     def _build_disaggregated_placement_groups(
         self,
