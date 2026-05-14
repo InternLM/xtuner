@@ -6,4 +6,5 @@ Reinforcement Learning
 
    model.md
    dataset.md
+   rl_trainer.md
    loss.md
