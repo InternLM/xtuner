@@ -1114,6 +1114,7 @@ class RLColocateTrainer(BaseRLTrainer):
             self._maybe_start_gateway(cfg)
             replay_buffer = cfg.replay_buffer_config.build()
             self._build_agent_loop_components(cfg, replay_buffer)
+            self._cpu_resource_manager.log_registered_summary()
             self.logger.warning("Debug rollout mode is enabled. Only rollout workers will be started.")
             return
 
@@ -1147,6 +1148,8 @@ class RLColocateTrainer(BaseRLTrainer):
         self._build_agent_loop_components(cfg, replay_buffer)
         if checkpoint_path is not None:
             self._resume_agent_loop_manager(checkpoint_path)
+
+        self._cpu_resource_manager.log_registered_summary()
 
         if self._rollout_config.skip_load_weights:
             self._sync_weights_from_train_workers()
@@ -1308,6 +1311,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
+
+        self._cpu_resource_manager.log_registered_summary()
 
     def _build_disaggregated_placement_groups(
         self,

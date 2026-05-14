@@ -381,11 +381,25 @@ class CPUResourceManager:
 
     def log_initial_snapshot(self) -> None:
         resource_summary = self._build_resource_summary()
-        self._log_resource_summary(resource_summary, include_registered=False)
+        self._log_resource_summary(
+            resource_summary,
+            include_registered=False,
+            title=(
+                "External CPU initial cluster snapshot. "
+                "Registered external CPU pools are not shown yet and may change as components are built"
+            ),
+        )
+
+    def log_registered_summary(self) -> None:
+        resource_summary = self._build_resource_summary()
+        self._log_resource_summary(
+            resource_summary,
+            include_registered=True,
+            title="External CPU resource summary before rollout/training",
+        )
 
     def validate_or_raise(self) -> None:
         resource_summary = self._build_resource_summary()
-        self._log_resource_summary(resource_summary, include_registered=True)
 
         cluster_cpus = resource_summary["cluster_cpus"]
         cluster_memory = int(resource_summary["cluster_memory"])
@@ -416,6 +430,11 @@ class CPUResourceManager:
                     f"but the largest node has only {max_node_external_cpus:g} CPU outside accelerator PGs"
                 )
         if errors:
+            self._log_resource_summary(
+                resource_summary,
+                include_registered=True,
+                title="External CPU resource summary at validation failure",
+            )
             pool_lines = [
                 f"  - {name}: {pool.num_workers} workers * {pool.num_cpus_per_worker:g} CPU"
                 f", {pool.cpu_memory_per_worker} memory each"
@@ -481,7 +500,7 @@ class CPUResourceManager:
             "max_node_external_cpus": self._max_node_external_resource("CPU"),
         }
 
-    def _log_resource_summary(self, summary: dict[str, float], *, include_registered: bool) -> None:
+    def _log_resource_summary(self, summary: dict[str, float], *, include_registered: bool, title: str) -> None:
         rows = [
             (
                 "cluster_total",
@@ -529,12 +548,6 @@ class CPUResourceManager:
                     )
                     for name, pool in self.pools.items()
                 ]
-            )
-            title = "External CPU resource summary"
-        else:
-            title = (
-                "External CPU initial cluster snapshot. "
-                "Registered external CPU pools are not shown yet and may change as components are built"
             )
         logger.info(f"{title}:\n{self._format_resource_table(rows)}")
 
