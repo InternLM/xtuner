@@ -47,6 +47,7 @@ from xtuner.v1.rl.utils import (
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
+from xtuner.v1.utils.env_check import get_rollout_engine_version
 
 
 # TODO: Move DEVICE to `xtuner.utils.device`
@@ -452,6 +453,7 @@ class BaseRLTrainer:
         self._init_load_source(cfg)
         self._init_save_config(cfg)
         log_dir = self._init_logger(cfg, logger_tag)
+        self._save_runtime_environment(log_dir)
         self._init_train_state(cfg)
         self._init_train_worker_config(cfg, log_dir)
         self._init_rollout_config(cfg, log_dir)
@@ -491,6 +493,17 @@ class BaseRLTrainer:
         if cfg.skip_checkpoint_validation:
             patch_default_save_plan()
         return log_dir
+
+    def _save_runtime_environment(self, log_dir: Path) -> None:
+        if get_rank() != 0:
+            return
+
+        env_path = log_dir / "env.json"
+        environment_variables = dict(os.environ)
+        infer_engine_version = get_rollout_engine_version()
+        environment_variables.update(infer_engine_version)
+        with env_path.open("w") as f:
+            json.dump(environment_variables, f, indent=2)
 
     def _init_train_state(self, cfg: BaseRLTrainerConfig) -> None:
         self._total_train_steps = cfg.total_train_steps or 0
