@@ -12,7 +12,7 @@ metrics for every step, and surfaces three kinds of problems:
    ranks together with their data_time.
 
 Example:
-    python xtuner/tools/analyze_train_logs.py /path/to/torchrun_logs/xxx \\
+    python .dev_scripts/analyze_train_logs.py /path/to/torchrun_logs/xxx \\
         --tgs-drop-ratio 0.7
 
 Default heuristics (overridable via CLI):
