@@ -120,7 +120,6 @@ dataloader.load_state_dict(state)
 | `sampler.py` | `LengthGroupedSampler`, `ParallelSampler` |
 | `preset_pack.py` | `PresetPackDataset` |
 | `preset_sampler.py` | `PresetSampler` |
-| `resume.py` | `get_dataloader_state / load_dataloader_state` |
 | `dataloader.py` | `Dataloader` wrapper |
 | `data_item.py` | `DataItem` schema |
 
