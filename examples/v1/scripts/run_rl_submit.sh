@@ -23,40 +23,35 @@ fi
 
 ulimit -n 65536  # OSError: [Errno 24] Too many open files
 
-export PYTHONPATH=$(pwd):$PYTHONPATH
-# NOTE: if you add new env vars, please also add them to RUNTIME_ENV_JSON in step 4.
-# master 节点的 IP 地址
-export MASTER_PORT=6000
-export WORLD_SIZE=$NODE_COUNT
-export RANK=$NODE_RANK
-export RAY_MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-# 0 代表主节点, >0 代表工作节点
-export RAY_RANK=${RANK:-0}
-export RAY_HEAD_PORT=${RAY_HEAD_PORT:-"6379"}
-export RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-"8265"}
-# TODO: 提供非环境变量方式配置 ray_max_concurrency
-export RAY_MAX_CONCURRENCY=${RAY_MAX_CONCURRENCY:-1024} # dataflow_max_concurrency * prompt_repeat_k
+# Ray cluster bootstrap variables. Business/runtime variables are passed through
+# ray job runtime_env below instead of relying on raylet shell inheritance.
+MASTER_PORT=${MASTER_PORT:-6000}
+WORLD_SIZE=${NODE_COUNT:-1}
+RANK=${NODE_RANK:-0}
+RAY_MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
+RAY_RANK=${RANK:-0} # 0 代表主节点, >0 代表工作节点
+RAY_HEAD_PORT=${RAY_HEAD_PORT:-"6379"}
+RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-"8265"}
+RAY_MAX_CONCURRENCY=${RAY_MAX_CONCURRENCY:-1024} # dataflow_max_concurrency * prompt_repeat_k
 
-export MODEL_PATH=$MODEL_PATH
-export DATA_PATH=$DATA_PATH
-export EVAL_DATA_PATH=$EVAL_DATA_PATH
-export XTUNER_USE_FA3=${XTUNER_USE_FA3:-1}
-export XTUNER_LOG_LEVEL=${XTUNER_LOG_LEVEL:-"INFO"}
-export PYTHONUNBUFFERED=1
+XTUNER_USE_FA3=${XTUNER_USE_FA3:-1}
+XTUNER_LOG_LEVEL=${XTUNER_LOG_LEVEL:-"INFO"}
+PYTHONPATH_VALUE="$(pwd):${PYTHONPATH:-}"
+PYTORCH_CUDA_ALLOC_CONF_VALUE=""
+XTUNER_USE_SGLANG=0
+XTUNER_USE_LMDEPLOY=0
+XTUNER_USE_VLLM=0
  
 infer_backend_lower=$(echo "$INFER_BACKEND" | tr '[:upper:]' '[:lower:]')
 if [ "$infer_backend_lower" = "sglang" ]; then
-  export XTUNER_USE_SGLANG=1
-  unset PYTORCH_CUDA_ALLOC_CONF
-  export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
-  export SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION=False
+  XTUNER_USE_SGLANG=1
 elif [ "$infer_backend_lower" = "lmdeploy" ]; then
-  export XTUNER_USE_LMDEPLOY=1
-  export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'
-  export PYTHONPATH=$LMDEPLOY_PATH:$PYTHONPATH
+  XTUNER_USE_LMDEPLOY=1
+  PYTORCH_CUDA_ALLOC_CONF_VALUE='expandable_segments:True'
+  PYTHONPATH_VALUE="${LMDEPLOY_PATH}:${PYTHONPATH_VALUE}"
 elif [ "$infer_backend_lower" = "vllm" ]; then
-  export XTUNER_USE_VLLM=1
-  export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'
+  XTUNER_USE_VLLM=1
+  PYTORCH_CUDA_ALLOC_CONF_VALUE='expandable_segments:True'
 else
   echo "Error: INFER_BACKEND '$INFER_BACKEND' is not supported or not specified!"
   exit 1
@@ -67,14 +62,16 @@ current_time=$(date "+%m%d%H")
 model_dir_name=$(basename "$MODEL_PATH")
 data_dir_name=$(basename "$(dirname "$DATA_PATH")")
 DIR=$(pwd)
-export WORK_DIR="${DIR}/work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}"
+WORK_DIR="${WORK_DIR:-${DIR}/work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}}"
 if [ ! -d "$WORK_DIR" ]; then
   mkdir -p "$WORK_DIR"
 fi
-export LMDEPLOY_LOG_FILE="${WORK_DIR}/lmdeploy_log_${current_time}.txt"
+WORK_DIR=$(realpath "$WORK_DIR")
+LMDEPLOY_LOG_FILE="${WORK_DIR}/lmdeploy_log_${current_time}.txt"
+XTUNER_RL_MEM_DIR=""
 if [ "$ACCELERATOR" = "GPU" ]; then
     # TODO: support NPU RL Memory Monitor
-    export XTUNER_RL_MEM_DIR="${WORK_DIR}/mem_${current_time}"
+    XTUNER_RL_MEM_DIR="${WORK_DIR}/mem_${current_time}"
 fi
 
 # 2. Launch Ray cluster
@@ -83,9 +80,9 @@ node_count=${NODE_COUNT:-1}
 
 if [ "$RAY_RANK" -eq 0 ]; then
   rm -rf /tmp/ray_log
-  export RAY_LOG_DIR="${WORK_DIR}/ray_${current_time}/"
-  mkdir -p ${RAY_LOG_DIR}
-  ln -sfn "${RAY_LOG_DIR}" /tmp/ray_log 
+  RAY_LOG_DIR="${WORK_DIR}/ray_${current_time}"
+  mkdir -p "$RAY_LOG_DIR"
+  ln -sfn "$RAY_LOG_DIR" /tmp/ray_log
   ray start --head \
     --node-ip-address="$RAY_MASTER_ADDR" \
     --port="$RAY_HEAD_PORT" \
@@ -93,7 +90,7 @@ if [ "$RAY_RANK" -eq 0 ]; then
     --dashboard-port=$RAY_DASHBOARD_PORT \
     --include-dashboard=true \
     --disable-usage-stats \
-    --temp-dir="/tmp/ray_log/"
+    --temp-dir="/tmp/ray_log"
 else
   while true; do
     if curl --connect-timeout 2 "http://${RAY_MASTER_ADDR}:${RAY_DASHBOARD_PORT}" >/dev/null 2>&1; then
@@ -125,26 +122,41 @@ LOG_FILE="${WORK_DIR}/training_log_${current_time}.txt"
 
 # 3. Submit training job on Head node
 if [ "$RAY_RANK" -eq 0 ]; then
-  RUNTIME_ENV_JSON="{
-      \"env_vars\": {
-        \"WORK_DIR\": \"${WORK_DIR}\",
-        \"MODEL_PATH\": \"${MODEL_PATH}\",
-        \"DATA_PATH\": \"${DATA_PATH}\",
-        \"EVAL_DATA_PATH\": \"${EVAL_DATA_PATH}\",
-        \"XTUNER_USE_FA3\": \"${XTUNER_USE_FA3}\",
-        \"XTUNER_MAX_CONCURRENCY\": \"${XTUNER_MAX_CONCURRENCY}\",
-        \"XTUNER_LOG_LEVEL\": \"${XTUNER_LOG_LEVEL}\",
-        \"PYTHONPATH\": \"${PYTHONPATH}\",
-        \"MASTER_ADDR\": \"${RAY_MASTER_ADDR}\",
-        \"XTUNER_USE_SGLANG\": \"${XTUNER_USE_SGLANG:-}\",
-        \"XTUNER_USE_LMDEPLOY\": \"${XTUNER_USE_LMDEPLOY:-}\",
-        \"XTUNER_USE_VLLM\": \"${XTUNER_USE_VLLM:-}\",
-        \"PYTORCH_CUDA_ALLOC_CONF\": \"${PYTORCH_CUDA_ALLOC_CONF:-}\",
-        \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
-        \"PYTHONUNBUFFERED\": \"1\",
-        \"SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN\": \"1\"
-      }
-    }"
+  # Keep the runtime env explicit and easy to review. This heredoc intentionally
+  # mirrors the common Ray examples; values are expected to be simple paths,
+  # flags, or numbers. If a value contains JSON-special characters such as
+  # quotes, backslashes, or newlines, ray job submit should fail while parsing
+  # --runtime-env-json instead of silently dropping the variable.
+  RUNTIME_ENV_JSON=$(cat <<EOF_JSON
+{
+  "env_vars": {
+    "WORK_DIR": "${WORK_DIR}",
+    "MODEL_PATH": "${MODEL_PATH}",
+    "DATA_PATH": "${DATA_PATH}",
+    "EVAL_DATA_PATH": "${EVAL_DATA_PATH}",
+    "WORLD_SIZE": "${WORLD_SIZE}",
+    "MASTER_ADDR": "${RAY_MASTER_ADDR}",
+    "MASTER_PORT": "${MASTER_PORT}",
+    "RAY_MASTER_ADDR": "${RAY_MASTER_ADDR}",
+    "RAY_MAX_CONCURRENCY": "${RAY_MAX_CONCURRENCY}",
+    "ACCELERATOR": "${ACCELERATOR}",
+    "XTUNER_USE_FA3": "${XTUNER_USE_FA3}",
+    "XTUNER_LOG_LEVEL": "${XTUNER_LOG_LEVEL}",
+    "PYTHONPATH": "${PYTHONPATH_VALUE}",
+    "PYTHONUNBUFFERED": "1",
+    "XTUNER_USE_SGLANG": "${XTUNER_USE_SGLANG}",
+    "XTUNER_USE_LMDEPLOY": "${XTUNER_USE_LMDEPLOY}",
+    "XTUNER_USE_VLLM": "${XTUNER_USE_VLLM}",
+    "PYTORCH_CUDA_ALLOC_CONF": "${PYTORCH_CUDA_ALLOC_CONF_VALUE}",
+    "LMDEPLOY_LOG_FILE": "${LMDEPLOY_LOG_FILE}",
+    "XTUNER_RL_MEM_DIR": "${XTUNER_RL_MEM_DIR}",
+    "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+    "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN": "1",
+    "SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION": "False"
+  }
+}
+EOF_JSON
+)
 
   ray job submit --address="http://127.0.0.1:$RAY_DASHBOARD_PORT" \
        --runtime-env-json="$RUNTIME_ENV_JSON" \
