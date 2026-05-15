@@ -433,31 +433,143 @@ router_weights: [N, E]
 第二次 `post_dispatched["row_ids_map"] [M_recv]` 是 destination EP rank 上第二次 `permute` 产生的还原 map，
 语义相同（scatter，1D indices 无 topk 展开），只负责 expert 计算后恢复 source-block 顺序，方便反向 all2all。
 
-## DeepEP dispatcher 的对应差异
+## DeepEPDispatcher: DeepEP Buffer dispatch/combine 原理
 
-`DeepEPDispatcher` 使用 DeepEP 的 `Buffer.get_dispatch_layout()` / `Buffer.dispatch()` / `Buffer.combine()` 来管理
-layout、通信 handle 和事件。它不像 `TorchAll2AllDispatcher` 那样显式执行：
+`DeepEPDispatcher` 仍然暴露和其他 dispatcher 一样的六阶段接口，但它把 EP all2all 的 routing layout、通信 handle
+和 event 管理交给 DeepSeek 开源 DeepEP 库的 `Buffer` API。DeepEP 的核心接口是：
+
+- `Buffer.get_dispatch_layout(topk_idx, num_experts, ...)`：根据 topK expert 选择计算 dispatch layout。
+- `Buffer.dispatch(...)`：把 token、`topk_idx`、`topk_weights` 发到拥有选中 expert 的 EP rank。
+- `Buffer.combine(...)`：使用 dispatch 返回的 handle，把 expert 输出或 dispatch backward 的梯度送回 source rank。
+- `EventOverlap`：DeepEP 对 CUDA event 的包装，支持 `current_stream_wait()` 让当前 compute stream 等通信完成。
+
+XTuner 的包装在 `xtuner/v1/ops/comm/deepep_op.py` 中：
+
+```python
+num_tokens_per_rank, num_tokens_per_rdma_rank, num_tokens_per_expert, is_token_in_rank, previous_event = \
+    buffer.get_dispatch_layout(topk_idx, num_experts, previous_event=previous_event, async_finish=True)
+
+recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, event = \
+    buffer.dispatch(
+        x,
+        topk_idx=topk_idx,
+        topk_weights=topk_weights,
+        num_tokens_per_rank=num_tokens_per_rank,
+        num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+        is_token_in_rank=is_token_in_rank,
+        num_tokens_per_expert=num_tokens_per_expert,
+        previous_event=previous_event,
+        async_finish=True,
+        allocate_on_comm_stream=True,
+    )
+```
+
+### DeepEP dispatch
+
+`DeepEPDispatcher.dispatch_preprocess` 不像 `TorchAll2AllDispatcher` 那样先本地 `permute`。它只保留原始 source token
+hidden，并把 `topk_ids` 转成 DeepEP 需要的 `int64`：
+
+```text
+hidden_states: [N, H]
+topk_ids:      [N, K]
+topk_weights:  [N, K]
+```
+
+跨 EP rank 搬运由 DeepEP dispatch kernel 完成；真正的 route-copy 展开仍在本 rank 的
+`dispatch_postprocess -> permute(recv_topk_idx)` 中完成。`Buffer.dispatch` 返回：
+
+```text
+recv_x                         # 本 EP rank 收到的 source token hidden
+recv_topk_idx                  # 与 recv_x 对齐的 [M_recv, K] expert ids；非本 rank expert 位置为 -1
+recv_topk_weights              # 与 recv_topk_idx 对齐的 topK weights
+num_recv_tokens_per_expert_list # 本 rank 每个 local expert 收到的 token 数
+handle                         # combine/backward 复用的通信 handle
+event                          # dispatch 完成事件
+```
+
+`handle` 是 DeepEP 的关键抽象。XTuner 注释里列出的 intranode handle 包括：
+
+```text
+rank_prefix_matrix
+channel_prefix_matrix
+recv_channel_prefix_matrix
+recv_src_idx
+is_token_in_rank
+send_head
+```
+
+这些张量记录了 dispatch 的源/目的映射、channel 前缀和接收源索引。后续 combine 不再重新根据 routing 计算布局，而是
+复用这个 handle 把 token 送回原 source rank；dispatch backward 和 combine backward 也复用同一个 handle。
+
+### DeepEP dispatch_postprocess
+
+DeepEP dispatch 已经把 token 发到拥有相关 local expert 的 EP rank，但输出还不是 grouped GEMM 需要的 local expert 连续分组。
+`dispatch_postprocess` 会先等待 dispatch event，然后用 `recv_topk_idx` 再做一次本地 `permute`：
+
+```text
+recv_x
+  --permute(recv_topk_idx, num_out_tokens=sum(num_recv_tokens_per_expert_list))-->
+local expert grouped hidden
+```
+
+`num_recv_tokens_per_expert_list` 被转换成 `tokens_per_expert`，供 grouped GEMM 使用。
+
+### DeepEP combine_preprocess / combine
+
+DeepEP 当前方案和 `TorchAll2AllDispatcher` 的一个重要差异是 `topk_weights` 的位置：
+
+- `TorchAll2AllDispatcher` 把 `topk_weights` 留在 source rank，最后 `combine_postprocess` 本地加权合并。
+- `DeepEPDispatcher` 在 dispatch 时把 `topk_weights` 一起发到拥有选中 expert 的 EP rank，并在
+  `combine_preprocess` 先加权合并：
+
+```python
+hidden_states = unpermute(
+    hidden_states,
+    post_dispatched["row_ids_map"],
+    probs=dispatched["topk_weights"],
+)
+```
+
+因此 DeepEP 的 forward combine 调用不再传 `topk_weights`：
+
+```python
+combined_x, _, event = buffer.combine(x, handle, async_finish=True, previous_event=previous_event)
+```
+
+进入 combine 的 hidden 已经是按 `recv_topk_weights` fold 过的 source-token partial output。DeepEP combine 只负责使用
+dispatch handle 把这些 hidden 送回 source rank 并做 SUM reduce。
+
+### DeepEP backward
+
+DeepEP 的反向复用相反方向的通信原语：
+
+- `DeepEPCombine.backward` 调用 `Buffer.dispatch(..., handle=handle)`：combine forward 的反向是 dispatch。
+- `DeepEPDispatch.backward` 调用 `Buffer.combine(grad_recv_x, handle, topk_weights=grad_recv_topk_weights)`：
+  dispatch forward 的反向是 combine，并且同时把 `grad_recv_topk_weights` 送回 source 侧，得到
+  `combined_grad_recv_topk_weights`。
+
+这解释了为什么 DeepEP dispatch 是一个 composite autograd op：它的 forward 同时产生 `recv_x` 和
+`recv_topk_weights`，backward 也同时返回 `x` 和 `topk_weights` 的梯度。
+
+### Host metadata 同步
+
+DeepEP 不像 `TorchAll2AllDispatcher` 那样在 XTuner 代码里显式执行：
 
 ```python
 to(device=torch.device("cpu")).tolist()
 ```
 
-但它仍然存在 host 可见的 metadata 准备点。`xtuner/v1/ops/comm/deepep_op.py::dispatch_forward()` 中已经注明：
-
-```python
-# NOTES: the CPU will wait for GPU's signal to arrive,
-# so this is not compatible with CUDA graph
-```
-
-DeepEP dispatch 会返回：
+但它仍然存在 host 可见的 metadata 准备点。DeepEP 的 legacy Buffer API 文档和 XTuner 包装都注明：dispatch 内部不知道
+当前 rank 会收到多少 token，因此 CPU 会等待 GPU signal，拿到 receive count 后才能继续。XTuner 代码中的表现是
+`Buffer.dispatch` 返回 Python list：
 
 ```python
 num_recv_tokens_per_expert_list, handle, event
 ```
 
-其中 `num_recv_tokens_per_expert_list` 是 Python list，`dispatch_postprocess` 需要用它计算 `num_out_tokens` 和
-`tokens_per_expert`。因此 DeepEP 也不是完全没有 host 同步；只是同步被 DeepEP 的 layout/dispatch handle 机制封装
-在库内部，不是 PyTorch split-size list 的 `.tolist()` 同步。
+`dispatch_postprocess` 必须用这个 list 计算 `num_out_tokens` 和 `tokens_per_expert`。因此 DeepEP 也不是完全无 host
+同步；只是同步被 DeepEP 的 layout/dispatch handle 机制封装在库内部，不是 PyTorch split-size list 的
+`.tolist()` 同步。
 
 对 Domino EP 来说，两者的影响边界一致：
 
@@ -465,6 +577,14 @@ num_recv_tokens_per_expert_list, handle, event
 - host 等 metadata 时无法继续 enqueue 后续本地算子和通信。
 - 如果 metadata 等待短于可覆盖的另一个 micro batch 计算，重叠效果基本保留。
 - 如果 metadata 等待更长，`xtuner_ep_domino.md` 7.3 中的理想时间线会被压缩，真实重叠比例下降。
+
+### 当前支持边界
+
+当前 `build_dispatcher(dispatcher="deepep", tp_group=...)` 会直接构造 `DeepEPDispatcher`，`tp_group` 没有接入
+DeepEP dispatcher。也就是说，XTuner 当前的 DeepEP 路径是 EP dispatcher，不包含 `TorchAll2AllTPEPDispatcher`
+那套 TP AllGather / TP ReduceScatterSum 通信段。DeepEP + ExpertTP 如果要成为 Domino-compatible ExpertTP，需要
+额外设计 DeepEP dispatch 后的 TP AllGather、combine 前的 TP ReduceScatterSum，以及相应的 `topk_weights`
+event 语义；这部分见 `xtuner_etp.md`。
 
 ## TP+EP 中 ReduceScatterSum 与 padding/capacity 取舍
 

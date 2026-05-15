@@ -6,6 +6,14 @@ import torch
 import torch.distributed as dist
 
 
+def _record_stream(value: Any, stream: torch.cuda.Stream) -> None:
+    if isinstance(value, torch.Tensor):
+        value.record_stream(stream)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _record_stream(item, stream)
+
+
 def _tp_all_gather_forward_impl(
     tensor: torch.Tensor,
     all_sizes: list[int],
@@ -85,6 +93,60 @@ class _TPAllGather(torch.autograd.Function):
         return grad_input, None, None, None, None
 
 
+class _AsyncTPAllGather(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx: Any,
+        tensor: torch.Tensor,
+        all_sizes: list[int],
+        tp_group: dist.ProcessGroup,
+        tp_size: int,
+        tp_rank: int,
+        forward_previous_event: torch.cuda.Event | None,
+        forward_finished_event: torch.cuda.Event | None,
+        backward_previous_event: torch.cuda.Event,
+        backward_finished_event: torch.cuda.Event,
+        comm_stream: torch.cuda.Stream,
+    ) -> torch.Tensor:
+        with torch.cuda.stream(comm_stream):
+            if forward_previous_event is not None:
+                comm_stream.wait_event(forward_previous_event)
+            gathered, tensor_for_comm, chunks = _tp_all_gather_forward_impl(tensor, all_sizes, tp_group)
+            # 中文注释：异步路径只增加 stream/event 管理，collective 核心逻辑和同步路径一致。
+            _record_stream((tensor_for_comm, chunks, gathered), comm_stream)
+            if forward_finished_event is not None:
+                forward_finished_event.record(comm_stream)
+
+        ctx.all_sizes = all_sizes
+        ctx.tp_group = tp_group
+        ctx.tp_rank = tp_rank
+        ctx.backward_previous_event = backward_previous_event
+        ctx.backward_finished_event = backward_finished_event
+        ctx.comm_stream = comm_stream
+        return gathered
+
+    @staticmethod
+    def backward(
+        ctx: Any,
+        grad: torch.Tensor,
+    ) -> tuple[torch.Tensor, None, None, None, None, None, None, None, None, None]:
+        grad_ready_event = torch.cuda.Event()
+        grad_ready_event.record()
+        with torch.cuda.stream(ctx.comm_stream):
+            ctx.comm_stream.wait_event(ctx.backward_previous_event)
+            ctx.comm_stream.wait_event(grad_ready_event)
+            grad_input, grad_for_comm, chunks = _tp_all_gather_backward_impl(
+                grad,
+                ctx.all_sizes,
+                ctx.tp_rank,
+                ctx.tp_group,
+            )
+            _record_stream((grad_for_comm, chunks, grad_input), ctx.comm_stream)
+            ctx.backward_finished_event.record(ctx.comm_stream)
+
+        return grad_input, None, None, None, None, None, None, None, None, None
+
+
 class _TPReduceScatterSum(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -104,6 +166,56 @@ class _TPReduceScatterSum(torch.autograd.Function):
     def backward(ctx: Any, grad_slice: torch.Tensor) -> tuple[torch.Tensor, None, None, None, None]:
         full_grad, _, _ = _tp_reduce_scatter_sum_backward_impl(grad_slice, ctx.all_sizes, ctx.tp_group)
         return full_grad, None, None, None, None
+
+
+class _AsyncTPReduceScatterSum(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx: Any,
+        tensor: torch.Tensor,
+        all_sizes: list[int],
+        tp_group: dist.ProcessGroup,
+        tp_size: int,
+        tp_rank: int,
+        forward_previous_event: torch.cuda.Event,
+        forward_finished_event: torch.cuda.Event,
+        backward_previous_event: torch.cuda.Event,
+        backward_finished_event: torch.cuda.Event,
+        comm_stream: torch.cuda.Stream,
+    ) -> torch.Tensor:
+        with torch.cuda.stream(comm_stream):
+            comm_stream.wait_event(forward_previous_event)
+            out, tensor_for_comm, chunks = _tp_reduce_scatter_sum_impl(tensor, all_sizes, tp_rank, tp_group)
+            # 中文注释：TP ReduceScatterSum 属于 combine 通信段，输出事件交给 combine_postprocess 等待。
+            _record_stream((tensor_for_comm, chunks, out), comm_stream)
+            forward_finished_event.record(comm_stream)
+
+        ctx.all_sizes = all_sizes
+        ctx.tp_group = tp_group
+        ctx.backward_previous_event = backward_previous_event
+        ctx.backward_finished_event = backward_finished_event
+        ctx.comm_stream = comm_stream
+        return out
+
+    @staticmethod
+    def backward(
+        ctx: Any,
+        grad_slice: torch.Tensor,
+    ) -> tuple[torch.Tensor, None, None, None, None, None, None, None, None, None]:
+        grad_ready_event = torch.cuda.Event()
+        grad_ready_event.record()
+        with torch.cuda.stream(ctx.comm_stream):
+            ctx.comm_stream.wait_event(ctx.backward_previous_event)
+            ctx.comm_stream.wait_event(grad_ready_event)
+            full_grad, grad_slice_for_comm, chunks = _tp_reduce_scatter_sum_backward_impl(
+                grad_slice,
+                ctx.all_sizes,
+                ctx.tp_group,
+            )
+            _record_stream((grad_slice_for_comm, chunks, full_grad), ctx.comm_stream)
+            ctx.backward_finished_event.record(ctx.comm_stream)
+
+        return full_grad, None, None, None, None, None, None, None, None, None
 
 
 class ExpertTP:
@@ -139,9 +251,88 @@ class ExpertTP:
         gathered, _ = self.all_gather(tensor, all_sizes)
         return gathered
 
+    def async_all_gather(
+        self,
+        tensor: torch.Tensor,
+        all_sizes: list[int],
+        forward_previous_event: torch.cuda.Event | None,
+        forward_finished_event: torch.cuda.Event | None,
+        backward_previous_event: torch.cuda.Event,
+        backward_finished_event: torch.cuda.Event,
+        comm_stream: torch.cuda.Stream,
+    ) -> torch.Tensor:
+        if self._tp_size == 1:
+            if forward_finished_event is not None:
+                forward_finished_event.record()
+            return tensor
+
+        tp_rank = dist.get_rank(group=self._tp_group)
+        return _AsyncTPAllGather.apply(
+            tensor,
+            all_sizes,
+            self._tp_group,
+            self._tp_size,
+            tp_rank,
+            forward_previous_event,
+            forward_finished_event,
+            backward_previous_event,
+            backward_finished_event,
+            comm_stream,
+        )
+
+    def async_all_gather_metadata(
+        self,
+        tensor: torch.Tensor,
+        all_sizes: list[int],
+        forward_previous_event: torch.cuda.Event | None,
+        forward_finished_event: torch.cuda.Event | None,
+        comm_stream: torch.cuda.Stream,
+    ) -> torch.Tensor:
+        if self._tp_size == 1:
+            if forward_finished_event is not None:
+                forward_finished_event.record()
+            return tensor
+
+        with torch.cuda.stream(comm_stream):
+            if forward_previous_event is not None:
+                comm_stream.wait_event(forward_previous_event)
+            gathered, tensor_for_comm, chunks = _tp_all_gather_forward_impl(tensor, all_sizes, self._tp_group)
+            _record_stream((tensor_for_comm, chunks, gathered), comm_stream)
+            if forward_finished_event is not None:
+                forward_finished_event.record(comm_stream)
+        return gathered
+
     def reduce_scatter_sum(self, tensor: torch.Tensor, all_sizes: list[int]) -> torch.Tensor:
         if self._tp_size == 1:
             return tensor
 
         tp_rank = dist.get_rank(group=self._tp_group)
         return _TPReduceScatterSum.apply(tensor, all_sizes, self._tp_group, self._tp_size, tp_rank)
+
+    def async_reduce_scatter_sum(
+        self,
+        tensor: torch.Tensor,
+        all_sizes: list[int],
+        forward_previous_event: torch.cuda.Event,
+        forward_finished_event: torch.cuda.Event,
+        backward_previous_event: torch.cuda.Event,
+        backward_finished_event: torch.cuda.Event,
+        comm_stream: torch.cuda.Stream,
+    ) -> torch.Tensor:
+        if self._tp_size == 1:
+            forward_finished_event.record()
+            return tensor
+
+        tp_rank = dist.get_rank(group=self._tp_group)
+        return _AsyncTPReduceScatterSum.apply(
+            tensor,
+            all_sizes,
+            self._tp_group,
+            self._tp_size,
+            tp_rank,
+            forward_previous_event,
+            forward_finished_event,
+            backward_previous_event,
+            backward_finished_event,
+            comm_stream,
+        )
