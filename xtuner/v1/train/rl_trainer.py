@@ -491,6 +491,7 @@ class BaseRLTrainer:
 
     def _init_logger(self, cfg: BaseRLTrainerConfig, logger_tag: str) -> Path:
         log_dir = self.exp_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
         self.logger = get_logger(log_dir=log_dir, tag=logger_tag)
 
         if cfg.skip_checkpoint_validation:

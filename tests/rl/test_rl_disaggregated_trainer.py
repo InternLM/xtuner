@@ -78,7 +78,6 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._log_step = MagicMock()
         trainer._maybe_save_checkpoint = MagicMock()
         trainer._maybe_save_hf = MagicMock()
-        trainer.fake_update_weights = MagicMock()
         trainer.train_controller = SimpleNamespace(
             fit=MagicMock(return_value=[{"train_metrics": [], "sft_train_metrics": {}}]),
             onload=MagicMock(return_value="onload"),
@@ -89,16 +88,18 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             recover_failed_workers=SimpleNamespace(remote=MagicMock(return_value="recover")),
             onload_weights=SimpleNamespace(remote=MagicMock(return_value="onload_weights")),
             onload_kvcache=SimpleNamespace(remote=MagicMock(return_value="onload_kvcache")),
+            pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause_generation")),
+            continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue_generation")),
         )
         return trainer
 
-    def test_sync_weights_and_save_saves_before_fake_update(self):
+    def test_sync_weights_and_save_saves_before_update_weights(self):
         manager = _FakeManager([])
         trainer = self._make_trainer(manager)
         events: list[str] = []
         trainer._maybe_save_checkpoint = MagicMock(side_effect=lambda step: events.append(f"save:{step}"))
         trainer._maybe_save_hf = MagicMock(side_effect=lambda step: events.append(f"hf:{step}"))
-        trainer.fake_update_weights = MagicMock(side_effect=lambda: events.append("fake_update"))
+        trainer.update_weights = MagicMock(side_effect=lambda: events.append("update_weights"))
 
         with (
             patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
@@ -109,7 +110,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         ):
             asyncio.run(trainer._sync_weights_and_save(train_step=3, step_timer_dict={}))
 
-        self.assertEqual(events, ["save:3", "hf:3", "bind", "fake_update"])
+        self.assertEqual(events, ["save:3", "hf:3", "bind", "update_weights"])
         trainer.train_controller.offload.assert_not_called()
 
     def test_fit_skips_train_when_batch_is_expired(self):
@@ -164,17 +165,17 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertTrue(manager._finish_event.is_set())
         self.assertIn("produce_loop_exit", manager.calls)
 
-    def test_fake_update_weights_does_not_onload_rollout(self):
+    def test_update_weights_pauses_generation_without_onloading_rollout(self):
         manager = _FakeManager([])
         trainer = self._make_trainer(manager)
 
         with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
-            trainer.fake_update_weights = RLDisaggregatedTrainer.fake_update_weights.__get__(
-                trainer, RLDisaggregatedTrainer
-            )
-            trainer.fake_update_weights()
+            trainer.update_weights = RLDisaggregatedTrainer.update_weights.__get__(trainer, RLDisaggregatedTrainer)
+            trainer.update_weights()
 
+        trainer.rollout_controller.pause_generation.remote.assert_called_once_with()
         trainer.train_controller.update_weights.assert_called_once_with()
+        trainer.rollout_controller.continue_generation.remote.assert_called_once_with()
         trainer.rollout_controller.onload_weights.remote.assert_not_called()
         trainer.rollout_controller.onload_kvcache.remote.assert_not_called()
 
@@ -183,7 +184,10 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer.logger = MagicMock()
         trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=Path(self.temp_dir.name))
         trainer.train_controller = SimpleNamespace(resume=MagicMock(return_value="resume"))
-        trainer.rollout_controller = SimpleNamespace()
+        trainer.rollout_controller = SimpleNamespace(
+            pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause_generation")),
+            continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue_generation")),
+        )
         events: list[str] = []
 
         def manager_resume(checkpoint_path):
@@ -197,7 +201,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             resume=MagicMock(side_effect=manager_resume),
             continue_produce=MagicMock(side_effect=manager_continue_produce),
         )
-        trainer.fake_update_weights = MagicMock(side_effect=lambda: events.append("fake_update"))
+        trainer.update_weights = MagicMock(side_effect=lambda: events.append("update_weights"))
 
         train_state_path = Path(self.temp_dir.name) / trainer._SAVE_TRAIN_STATE_PATH
         train_state_path.write_text('{"cur_step": 3}')
@@ -209,7 +213,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertEqual(trainer._cur_step, 3)
         trainer.agent_loop_manager.resume.assert_called_once_with(Path(self.temp_dir.name))
         self.assertTrue(events[0].startswith("manager_resume:"))
-        self.assertEqual(events[1:], ["fake_update", "continue_produce:3"])
+        self.assertEqual(events[1:], ["update_weights", "continue_produce:3"])
 
     def test_validate_sync_schedule_accepts_multiples(self):
         _validate_sync_intervals(sync_weights_interval=2, checkpoint_interval=4, hf_interval=6)

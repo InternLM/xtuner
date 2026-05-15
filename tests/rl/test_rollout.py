@@ -69,8 +69,9 @@ class TestRollout(unittest.IsolatedAsyncioTestCase):
             num_cpus_per_worker=4,
             cpu_memory_per_worker=8 * 1024**3,  # 8 GB
         )
-        pg1 = AutoAcceleratorWorkers.build_placement_group(resource_config, name="tp_pg")
-        pg2 = AutoAcceleratorWorkers.build_placement_group(resource_config, name="ep_pg")
+        pg_name_suffix = os.path.basename(self.temp_dir.name)
+        pg1 = AutoAcceleratorWorkers.build_placement_group(resource_config, name=f"tp_pg_{pg_name_suffix}")
+        pg2 = AutoAcceleratorWorkers.build_placement_group(resource_config, name=f"ep_pg_{pg_name_suffix}")
         dense_model_path = MODEL_PATH
         moe_model_path = MOE_MODEL_PATH
         dist_port_base = 38000
