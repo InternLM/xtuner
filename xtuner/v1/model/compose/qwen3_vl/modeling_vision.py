@@ -517,7 +517,7 @@ class Qwen3VLVisionModel(BaseModel):
 
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
-            if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
+            if int(os.getenv("VL_XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
                 with async_save_on_cpu(
                     h2d_stream=self.offload_stream,
                     d2h_stream=self.offload_stream,

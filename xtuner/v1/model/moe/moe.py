@@ -509,6 +509,7 @@ class MoE(BaseModel):
                         custom_check_fn=lambda x: x.data_ptr()
                         in [hidden_states.data_ptr() for hidden_states in hidden_states_list],
                         prefetch=True,
+                        reserve_pin_memory=True,
                     ):
                         layer_results = decoder_layer(
                             *hidden_states_list,
@@ -1137,42 +1138,59 @@ class MoE(BaseModel):
 
     @torch.no_grad  # type: ignore
     def scale_and_reduce_grad(self):
+        ep_enabled = self.ep_mesh is not None and self.ep_mesh.size() > 1
+
+        # Bucket gradients that need a cross-rank reduction by their target process
+        # group. Each bucket is reduced with a single coalesced NCCL all_reduce
+        # instead of one launch per parameter, which used to dominate latency for
+        # models with many small replicated tensors.
+        grads_by_group: dict[dist.ProcessGroup, list[torch.Tensor]] = {}
+
         for name, param in self.trainable_parameters():
             if param.grad is None:
                 continue
 
-            ep_enabled = self.ep_mesh is not None and self.ep_mesh.size() > 1
-            # Scale moe parameters
+            # Expert parameters live on a unique EP rank, so no cross-rank reduction
+            # is needed — just rescale by `ep_size` to keep the effective average.
             if ep_enabled and ".experts" in name:
                 param.grad.div_(self.ep_mesh.size())  # type: ignore
                 continue
 
-            if isinstance(param, DTensor):
-                replicate_dim_names = tuple(
-                    param.device_mesh.mesh_dim_names[i]
-                    for i, p in enumerate(param.placements)
-                    if isinstance(p, Replicate)
-                )
-                if replicate_dim_names:
-                    # `DeviceMesh.get_group()` only supports a single mesh dimension,
-                    # so calling it directly on a multi-dim sub-mesh raises RuntimeError.
-                    # `_flatten()` collapses all Replicate dims into a 1D mesh whose
-                    # process group covers every rank across those dimensions, allowing
-                    # a single all_reduce regardless of how many Replicate dims exist.
-                    if len(replicate_dim_names) > 1:
-                        flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
-                    else:
-                        # In the case that only one replicate dim, in pt2.8 _flatten is worked due to a bug.
-                        # in pt2.9.1 this bug is fixed and _flatten will raise error when the mesh is already 1D,
-                        # which means replicate_dim_names represents an existing single mesh dimension
-                        # so we directly get the submesh without flatten in this case.
-                        flat_mesh = param.device_mesh[replicate_dim_names[0]]
-                    grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
-                    dist.all_reduce(
-                        grad.div_(flat_mesh.size()),  # type: ignore
-                        ReduceOp.SUM,
-                        group=flat_mesh.get_group(),  # type: ignore
-                    )
+            if not isinstance(param, DTensor):
+                continue
+
+            replicate_dim_names = tuple(
+                param.device_mesh.mesh_dim_names[i]
+                for i, p in enumerate(param.placements)
+                if isinstance(p, Replicate)
+            )
+            if not replicate_dim_names:
+                continue
+
+            # `DeviceMesh.get_group()` only supports a single mesh dimension,
+            # so calling it directly on a multi-dim sub-mesh raises RuntimeError.
+            # `_flatten()` collapses all Replicate dims into a 1D mesh whose
+            # process group covers every rank across those dimensions, allowing
+            # a single all_reduce regardless of how many Replicate dims exist.
+            if len(replicate_dim_names) > 1:
+                flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
+            else:
+                # In the case that only one replicate dim, in pt2.8 _flatten is worked due to a bug.
+                # in pt2.9.1 this bug is fixed and _flatten will raise error when the mesh is already 1D,
+                # which means replicate_dim_names represents an existing single mesh dimension
+                # so we directly get the submesh without flatten in this case.
+                flat_mesh = param.device_mesh[replicate_dim_names[0]]
+
+            grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+            # Pre-scale locally so the SUM all_reduce below yields the mean across replicas.
+            grad.div_(flat_mesh.size())  # type: ignore
+            grads_by_group.setdefault(flat_mesh.get_group(), []).append(grad)  # type: ignore
+
+        # One coalesced all_reduce per process group covers all replicated grads.
+        for group, grads in grads_by_group.items():
+            with dist._coalescing_manager(group=group):
+                for grad in grads:
+                    dist.all_reduce(grad, ReduceOp.SUM, group=group)
 
     def _init_device_mesh(self, fsdp_config: FSDPConfig):
         self.fsdp_config = fsdp_config
