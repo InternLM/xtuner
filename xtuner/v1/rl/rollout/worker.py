@@ -20,7 +20,13 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from typing_extensions import Annotated
 
 from transformers import AutoTokenizer
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, update_status_from_finish_reason
+from xtuner.v1.data_proto.rl_data import (
+    RolloutState,
+    SampleParams,
+    Status,
+    reset_rollout_response,
+    update_status_from_finish_reason,
+)
 from xtuner.v1.rl.utils import (
     AutoAcceleratorWorkers,
     CPUResourcesConfig,
@@ -609,7 +615,13 @@ class RolloutWorker(SingleAcceleratorWorker):
             "Authorization": f"Bearer {self.config.api_key}",
         }
 
-        rollout_state = self.partial_rollout_handler.preprocess(rollout_state, max_tokens, enable_partial_rollout)
+        if enable_partial_rollout:
+            rollout_state = self.partial_rollout_handler.preprocess(rollout_state, max_tokens)
+        elif rollout_state.status == Status.ABORTED:
+            # ABORTED samples can be replayed; without partial rollout, rerun from the original prompt.
+            rollout_state = reset_rollout_response(rollout_state)
+            rollout_state.sample_params = rollout_state.sample_params.model_copy(update={"max_tokens": max_tokens})
+            rollout_state.status = Status.INIT
         payload = self._get_request_payload(rollout_state)
         max_retries = self.config.max_retry_per_sample
 
@@ -631,19 +643,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                 f"No generation needed for request {uid}: max_tokens={max_tokens} or last input_id={last_id} is in eos_token."
             )
             finish_reason = "stop" if is_eos_reached else "length"
-            rollout_state = await self.partial_rollout_handler.postprocess(
-                rollout_state,
-                response="",
-                response_ids=[],
-                logprobs=[],
-                routed_experts=None,
-                finish_reason=finish_reason,
-                status=Status.COMPLETED,
-                enable_partial_rollout=enable_partial_rollout,
-            )
-            if not enable_partial_rollout:
-                rollout_state.response_mask = []
-                rollout_state.response_model_steps = []
+            # 对于是否开 partial rollout 的情况都直接标记为完成并返回，因为本轮 rollout 未开始，也不需要拼接
+            rollout_state.finish_reason = finish_reason
+            rollout_state.status = Status.COMPLETED
             return rollout_state
 
         for attempt in range(max_retries + 1):
@@ -938,16 +940,23 @@ class RolloutWorker(SingleAcceleratorWorker):
                     rollout_state.error_msg = error_msg
                     return rollout_state
 
-                rollout_state = await self.partial_rollout_handler.postprocess(
-                    rollout_state,
-                    response=returned_response,
-                    response_ids=response_ids,
-                    logprobs=logprobs,
-                    routed_experts=routed_experts,
-                    finish_reason=finish_reason,
-                    status=rollout_status,
-                    enable_partial_rollout=self.enable_partial_rollout,
-                )
+                if self.enable_partial_rollout:
+                    rollout_state = await self.partial_rollout_handler.postprocess(
+                        rollout_state,
+                        response=returned_response,
+                        response_ids=response_ids,
+                        logprobs=logprobs,
+                        routed_experts=routed_experts,
+                        finish_reason=finish_reason,
+                        status=rollout_status,
+                    )
+                else:
+                    rollout_state.response = returned_response
+                    rollout_state.response_ids = response_ids
+                    rollout_state.logprobs = logprobs
+                    rollout_state.routed_experts = routed_experts
+                    rollout_state.finish_reason = finish_reason
+                    rollout_state.status = rollout_status
                 return rollout_state
             except KeyError as e:
                 response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}

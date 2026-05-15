@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Union
 import numpy as np
 import ray
 import requests
-import torch
 from urllib3.exceptions import NewConnectionError
 
 from transformers import AutoConfig, AutoTokenizer
@@ -205,8 +204,8 @@ class SGLangWorker(RolloutWorker):
                 self.routed_experts_num_hidden_layers,
                 self.routed_experts_num_experts_per_tok,
             )
-            return torch.from_numpy(routed_experts_array.copy())
-        return routed_experts
+            return routed_experts_array.copy()
+        return np.asarray(routed_experts)
 
     def _transform_rollout_config_to_server_configs(self):
         # remove the CUDA_VISIBLE_DEVICES set by ray and use base_gpu_id
