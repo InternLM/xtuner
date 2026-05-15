@@ -111,12 +111,12 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
             "dataset": DatasetConfig(name='alpaca', anno_path=data_path),
             "tokenize_fn": OpenaiTokenizeFunctionConfig(
                 chat_template='qwen3',
-                max_length=32768
+                max_length=2048
             )
         }]
         sft_dataloader_cfg = DataloaderConfig(
             dataset_config_list=sft_dataset_config,
-            pack_max_length=32768,
+            pack_max_length=2048,
             pack_to_max_length=True,
             num_workers=0,
         )
