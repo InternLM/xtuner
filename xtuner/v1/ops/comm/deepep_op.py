@@ -231,7 +231,7 @@ def dispatch_backward(
     group: dist.ProcessGroup,
     previous_event: Optional[EventOverlap] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
-    hidden_size = grad_recv_topk_weights[0].shape[-1]
+    hidden_size = grad_recv_x.shape[-1]
     _buffer = get_low_latency_buffer(group, hidden=hidden_size, num_experts=num_experts)
 
     # The backward process of MoE dispatch is actually a combine
