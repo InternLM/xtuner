@@ -5,7 +5,7 @@ from typing import cast
 
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 from xtuner.v1.rl.agent_loop import AgentLoop, AgentLoopConfig
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
@@ -101,8 +101,6 @@ class GSM8KToolAgentLoop(AgentLoop):
 
             rollout_state = await self.rollout_ctl.generate.remote(rollout_state)  # type: ignore[attr-defined]
             cur_turn += 1
-            if rollout_state.status != Status.COMPLETED:
-                return rollout_state
             response_ids = cast(list[int], rollout_state.response_ids)
             cur_turn_tokens.extend(response_ids)
 

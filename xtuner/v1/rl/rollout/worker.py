@@ -353,18 +353,29 @@ class RolloutConfig(BaseModel):
         else:
             return 1
 
-    def get_controller_concurrency(self, placement_group: "PlacementGroup") -> tuple[int, int]:
-        num_rollout_workers = len(placement_group.bundle_specs)
-        num_gpus_per_engine = self.expert_parallel_size if self.expert_parallel_size > 1 else self.tensor_parallel_size
+    @property
+    def num_gpus_per_engine(self) -> int:
+        return self.expert_parallel_size if self.expert_parallel_size > 1 else self.tensor_parallel_size
+
+    def get_active_servers_count(self, num_rollout_workers: int) -> tuple[int, int]:
+        """Calculate the number of active servers and nodes per engine."""
+        # NOTE: Since different inference engines have different launch methods,
+        # the number of nodes contained in each engine is not consistent.
+        # For example, sglang requires starting an inference engine for each node,
+        # while lmdeploy and vllm do not. Therefore, calculate active servers from the rollout config.
         nodes_per_engine = (
             1
-            if self.rollout_cross_node_comm or num_gpus_per_engine < self.gpus_per_node
-            else num_gpus_per_engine // self.gpus_per_node
+            if self.rollout_cross_node_comm or self.num_gpus_per_engine < self.gpus_per_node
+            else self.num_gpus_per_engine // self.gpus_per_node
         )
-        active_worker_count = max(
+        active_servers_count = max(
             1,
-            int((num_rollout_workers // num_gpus_per_engine) * nodes_per_engine * self.server_urls_per_engine),
+            int((num_rollout_workers // self.num_gpus_per_engine) * nodes_per_engine * self.server_urls_per_engine),
         )
+        return active_servers_count, nodes_per_engine
+
+    def get_controller_concurrency(self, placement_group: "PlacementGroup") -> tuple[int, int]:
+        active_worker_count, _ = self.get_active_servers_count(len(placement_group.bundle_specs))
         control_max_concurrency = active_worker_count
         assert self.rollout_max_batch_size_per_instance is not None, (
             "rollout_max_batch_size_per_instance must be set before building RolloutController."
@@ -447,6 +458,10 @@ class RolloutConfig(BaseModel):
             cpu_resources=CPUResourcesConfig(num_workers=num_workers),
         )
         generate_max_concurrency, control_max_concurrency = self.get_controller_concurrency(placement_group)
+        get_logger().info(
+            f"Calculated RolloutController concurrency - generate: {generate_max_concurrency}, "
+            f"control: {control_max_concurrency}"
+        )
         return ray.remote(
             max_concurrency=generate_max_concurrency,
             concurrency_groups={
@@ -513,8 +528,8 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.logger.info(f"Using eos_token: {eos_token} for model at {self.config.model_path}")
         self.eos_token: List[int] = [eos_token] if isinstance(eos_token, int) else eos_token
         self.receive_abort_request = threading.Event()
-        # Keep abort handling aligned with httpx's default timeout instead of the long rollout request timeout.
-        # This is also the grace window for an in-flight rollout request to return after an abort signal.
+        # After an abort signal, wait this long for an in-flight rollout request to return before cancelling the
+        # client-side request task.
         self.abort_timeout = 10.0
         self.dist_init_addr: str = ""
         self.serverl_url: str = ""
@@ -617,7 +632,7 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     async def _wait_abort_request(self) -> None:
         while not self.receive_abort_request.is_set():
-            await asyncio.sleep(0.001)
+            await asyncio.sleep(1)
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def continue_generation(self):
@@ -921,16 +936,6 @@ class RolloutWorker(SingleAcceleratorWorker):
             r.raise_for_status()
             return HttpRequestResult(response=r)
 
-        except asyncio.CancelledError:
-            self.logger.debug(f"Request to {url} was cancelled while waiting for the response.")
-            if send_task is not None and not send_task.done():
-                send_task.cancel()
-                await asyncio.gather(send_task, return_exceptions=True)
-            if abort_task is not None and not abort_task.done():
-                abort_task.cancel()
-                await asyncio.gather(abort_task, return_exceptions=True)
-            self.receive_abort_request.set()
-            return HttpRequestResult(error_type=HttpRequestErrorType.REQUEST_ABORTED, url=url, payload=payload)
         except Exception as e:
             error_type = HttpRequestErrorType.from_exception(e)
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
