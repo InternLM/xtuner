@@ -760,6 +760,7 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
             log_str = ", ".join(
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
                 for key, value in train_log_item.items()
+                if not key.startswith("reduced_train_policy_") and key != "max_ratio"
             )
             log_str = f"Rank{self.rank} Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)
