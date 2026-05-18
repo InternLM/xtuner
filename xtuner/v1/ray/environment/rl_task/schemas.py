@@ -16,7 +16,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 # ─────────────────────────────────────────────────────────────────
 # Task Data
 # ─────────────────────────────────────────────────────────────────
@@ -60,6 +59,7 @@ class SandboxSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     image: str
+    key: str
     ttl_seconds: int = 11700
     workspace_path: str = "/workspace"  # becomes $TASK_WORKSPACE
     env_vars: dict[str, str] = {}
