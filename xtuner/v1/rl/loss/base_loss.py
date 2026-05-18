@@ -298,7 +298,7 @@ def finalize_train_policy_metrics(extra_info_dict: dict[str, Any], device: str |
     for output_key, sum_key in output_keys.items():
         extra_info_dict[output_key] = train_policy_values[sum_key] / valid_count if valid_count > 0 else 0.0
 
-    ratio_max = train_policy_values["reduced_train_policy_ratio_max"]
+    ratio_max = train_policy_values["reduced_train_policy_ratio_max"] if valid_count > 0 else 0.0
     ratio_min = train_policy_values["reduced_train_policy_ratio_min"] if valid_count > 0 else 0.0
     extra_info_dict["reduced_train_policy_ratio_max"] = ratio_max
     extra_info_dict["reduced_train_policy_ratio_min"] = ratio_min
