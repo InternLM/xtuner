@@ -33,6 +33,7 @@ from xtuner.v1.rl.utils import (
     AutoAcceleratorWorkers,
     CPUResourcesConfig,
     SingleAcceleratorWorker,
+    cancel_and_drain,
     find_master_addr_and_port,
     get_eos_token,
     register_cpu_resources,
@@ -901,6 +902,7 @@ class RolloutWorker(SingleAcceleratorWorker):
     async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
         send_task = None
         abort_task = None
+
         try:
             if self.receive_abort_request.is_set():
                 self.logger.debug(f"Request to {url} was cancelled before sending due to an abort signal.")
@@ -926,8 +928,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     self.logger.debug(
                         f"Request to {url} did not return within {self.abort_timeout:.2f}s after abort signal."
                     )
-                    send_task.cancel()
-                    await asyncio.gather(send_task, return_exceptions=True)
+                    await cancel_and_drain(send_task)
                     return HttpRequestResult(
                         error_type=HttpRequestErrorType.REQUEST_ABORTED,
                         url=url,
@@ -936,14 +937,19 @@ class RolloutWorker(SingleAcceleratorWorker):
             r.raise_for_status()
             return HttpRequestResult(response=r)
 
+        except asyncio.CancelledError:
+            self.logger.debug(f"Request to {url} was cancelled while waiting for the response.")
+            await cancel_and_drain(send_task)
+            await cancel_and_drain(abort_task)
+            self.receive_abort_request.set()
+            return HttpRequestResult(error_type=HttpRequestErrorType.REQUEST_ABORTED, url=url, payload=payload)
         except Exception as e:
             error_type = HttpRequestErrorType.from_exception(e)
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
             return result
         finally:
             if abort_task is not None and not abort_task.done():
-                abort_task.cancel()
-                await asyncio.gather(abort_task, return_exceptions=True)
+                await cancel_and_drain(abort_task)
 
     async def _safe_handle_response(self, rollout_state: RolloutState, http_response: httpx.Response) -> RolloutState:
         uid = rollout_state.message_uid
