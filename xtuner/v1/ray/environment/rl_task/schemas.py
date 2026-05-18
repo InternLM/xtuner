@@ -60,7 +60,7 @@ class SandboxSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     image: str
-    ttl_seconds: int = 1800
+    ttl_seconds: int = 11700
     workspace_path: str = "/workspace"  # becomes $TASK_WORKSPACE
     env_vars: dict[str, str] = {}
     resources: dict[str, Any] = {}

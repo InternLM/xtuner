@@ -189,6 +189,22 @@ class BaseEnvironment(ABC):
         return self._call_rollout_func("get_rollout_info", block)
 
     @ray_method
+    def get_rollout_controller(self):
+        """Returns the ``RolloutController`` actor handle.
+
+        Used by the trainer to reach ``RolloutController.tokenize`` —
+        running tokenization on the rollout side (256 TokenizeWorker
+        actors, parallel) instead of in the driver (SentencePiece slow
+        tokenizer + GIL-bound ThreadPoolExecutor).
+
+        Returns:
+            The ``RolloutController`` actor handle, or ``None`` if
+                this environment has no rollout controller (e.g. a
+                pure-eval setup).
+        """
+        return self.rollout_controller
+
+    @ray_method
     def onload_weights(self, block=True) -> None:
         """Loads weights onto the rollout workers.
 

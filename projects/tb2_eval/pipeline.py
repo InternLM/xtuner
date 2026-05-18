@@ -222,6 +222,7 @@ def tb2_eval_pipeline(
             ReadFileHook("/tmp/message.json", "message"),
             DumpDaemonLogOnFailure(),
         ],
+        detach={"daemon_pattern": "lagent.serving.sandbox.daemon"},
     )
 
     return Runner(

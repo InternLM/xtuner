@@ -402,52 +402,111 @@ class TrainingWorker(SingleAcceleratorWorker):
         return ref_logprobs_list
 
     def _add_rollout_routed_experts(
-        self, seq_ctx: SequenceContext, rollout_routed_experts: torch.Tensor | list[torch.Tensor | ray.ObjectRef]
-    ):
+        self,
+        seq_ctx: SequenceContext,
+        rollout_routed_experts,
+    ) -> list[str]:
+        """Resolve the rollout routed_experts payload into an
+        ``(input_ids.size(1), num_layers, top_k)`` tensor on ``seq_ctx``.
+
+        ``rollout_routed_experts`` can be:
+
+        * ``dict`` — per-sample delta-store reference. Either the
+          per-message form ``{"key": str, "length": int}`` (single-turn)
+          or the accumulator form ``{"keys": list[str], "length": int}``
+          (multi-turn, aggregated by ``tokenize()``). Each key names a
+          delta chunk in the :class:`RoutedExpertStore`; concatenated in
+          turn order they make up the sample's full routing tensor.
+        * ``torch.Tensor`` — either a real routing tensor (legacy path)
+          or a ``(pack_max_length, 1, 1)`` pad_rand_index placeholder
+          from ``RLController._packing``. The legacy full-tensor path
+          still exists for the all-padding fallback where the controller
+          never produced any real rollout data for this pack.
+        * ``list[dict | torch.Tensor]`` — the packed form: each real
+          sample contributes one dict, padding slots contribute a
+          ``(pad_len, 1, 1)`` pad_rand_index tensor.
+
+        Fetching happens here (on the training worker) so the driver
+        never holds the full routing tensors in memory. The returned
+        list of store keys lets the caller release them after an SP
+        barrier so all ranks that had to ray.get the same chunk have
+        completed before the store drops the entry.
+
+        Args:
+            seq_ctx (SequenceContext): Destination sequence context.
+            rollout_routed_experts: See above.
+
+        Returns:
+            list[str]: Store keys consumed for this sample. Empty when
+                the input was a legacy/placeholder tensor only.
+        """
+        import numpy as np
+
+        from xtuner.v1.ray.rollout.routed_expert_store import get_store
+
         language_cfg = (
             self.config.model_cfg.text_config
             if isinstance(self.config.model_cfg, BaseComposeConfig)
             else self.config.model_cfg
         )
 
-        to_free_routed_expert_refs: list[ray.ObjectRef] = []
-        if isinstance(rollout_routed_experts, list):
-            # list[n,l,e]
-            out_rollout_routed_expert = []
-            for rollout_routed_expert in rollout_routed_experts:
-                if isinstance(rollout_routed_expert, torch.Tensor):
-                    rollout_routed_experts_tensor = torch.randint(
-                        low=0,
-                        high=language_cfg.n_routed_experts,
-                        size=(
-                            rollout_routed_expert.size(0),
-                            language_cfg.num_hidden_layers,
-                            language_cfg.num_experts_per_tok,
-                        ),
-                    )
-                    out_rollout_routed_expert.append(rollout_routed_experts_tensor)
-                else:
-                    rollout_routed_expert_refs = rollout_routed_expert
-                    rollout_routed_expert = ray.get(rollout_routed_expert_refs)
-                    # free obj store explicitly
-                    if self.sp_mesh is None or self.sp_mesh.size() == 1:
-                        ray.internal.free(rollout_routed_expert_refs, local_only=False)
-                    else:
-                        if self.sp_mesh.get_local_rank() == 0:
-                            # only free once of sp mesh
-                            to_free_routed_expert_refs.append(rollout_routed_expert_refs)
-                    rollout_routed_expert = torch.as_tensor(rollout_routed_expert, dtype=torch.long)
-                    rollout_routed_expert = rollout_routed_expert.reshape(
-                        -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
-                    )
-                    out_rollout_routed_expert.append(rollout_routed_expert)
+        resolved_keys: list[str] = []
+        store_handle = None
 
-            seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
-        else:
-            assert isinstance(rollout_routed_experts, torch.Tensor), (
-                f"padding experts should be a dummy tensor, bug got {type(rollout_routed_experts)}"
+        def _fetch_dict(entry: dict) -> torch.Tensor:
+            nonlocal store_handle
+            keys = entry["keys"] if "keys" in entry else [entry["key"]]
+            length = int(entry["length"])
+            if not keys:
+                raise AssertionError(f"routed_experts entry has empty keys list but length={length}")
+            if store_handle is None:
+                store_handle = get_store()
+            chunks: list[np.ndarray] = []
+            for k in keys:
+                ref = ray.get(store_handle.get_ref.remote(k))
+                chunks.append(np.asarray(ray.get(ref)))
+            arr = np.concatenate(chunks, axis=0) if len(chunks) > 1 else chunks[0]
+            assert arr.shape[0] == length, (
+                f"routed_experts delta concat length {arr.shape[0]} != cumulative length {length} for keys={keys}"
             )
-            rollout_routed_experts_tensor = torch.randint(
+            resolved_keys.extend(keys)
+            return torch.as_tensor(arr, dtype=torch.long).reshape(
+                -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
+            )
+
+        def _resolve_tensor(t: torch.Tensor) -> torch.Tensor:
+            is_padding_placeholder = t.dim() == 3 and t.size(1) == 1 and t.size(2) == 1
+            if is_padding_placeholder:
+                return torch.randint(
+                    low=0,
+                    high=language_cfg.n_routed_experts,
+                    size=(
+                        t.size(0),
+                        language_cfg.num_hidden_layers,
+                        language_cfg.num_experts_per_tok,
+                    ),
+                )
+            return t.to(torch.long).reshape(-1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok)
+
+        if isinstance(rollout_routed_experts, list):
+            parts: list[torch.Tensor] = []
+            for entry in rollout_routed_experts:
+                if isinstance(entry, dict):
+                    parts.append(_fetch_dict(entry))
+                elif isinstance(entry, torch.Tensor):
+                    parts.append(_resolve_tensor(entry))
+                else:
+                    raise TypeError(
+                        f"Unexpected routed_experts entry type {type(entry)}; "
+                        "expected dict (delta-store ref) or torch.Tensor."
+                    )
+            seq_ctx.rollout_routed_experts = torch.cat(parts, dim=0)
+        elif isinstance(rollout_routed_experts, dict):
+            seq_ctx.rollout_routed_experts = _fetch_dict(rollout_routed_experts)
+        elif isinstance(rollout_routed_experts, torch.Tensor):
+            # All-padding pack: controller emits a dummy (1,1,1) tensor and
+            # expects us to fill the full pack_max_length with random values.
+            seq_ctx.rollout_routed_experts = torch.randint(
                 low=0,
                 high=language_cfg.n_routed_experts,
                 size=(
@@ -456,16 +515,15 @@ class TrainingWorker(SingleAcceleratorWorker):
                     language_cfg.num_experts_per_tok,
                 ),
             )
-            seq_ctx.rollout_routed_experts = rollout_routed_experts_tensor
+        else:
+            raise TypeError(f"Unexpected rollout_routed_experts payload type {type(rollout_routed_experts)}")
 
         assert seq_ctx.input_ids is not None, "input_ids is None"
-        assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1)
-
-        if self.sp_mesh is not None and self.sp_mesh.size() > 1:
-            dist.barrier()
-            for free_routed_expert_refs in to_free_routed_expert_refs:
-                ray.internal.free(free_routed_expert_refs, local_only=False)
-            del to_free_routed_expert_refs
+        assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1), (
+            f"routed_experts length {seq_ctx.rollout_routed_experts.size(0)} "
+            f"!= input_ids length {seq_ctx.input_ids.size(1)}"
+        )
+        return resolved_keys
 
     @ray_method
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:
@@ -484,6 +542,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_list: list[BaseRLLossContext] = []
         mtp_loss_ctx_list: list[list[MTPLossContext]] = []
+        store_keys_to_release: list[str] = []
         for data in data_batches:
             # update seq_ctx
             seq_ctx = data["seq_ctx"]
@@ -499,7 +558,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
             rollout_routed_experts = seq_ctx.rollout_routed_experts
             if rollout_routed_experts is not None:
-                self._add_rollout_routed_experts(seq_ctx, rollout_routed_experts)
+                store_keys_to_release.extend(self._add_rollout_routed_experts(seq_ctx, rollout_routed_experts))
 
             seq_ctx = data["seq_ctx"].to(DEVICE)
             if self.sp_mesh.size() > 1:
@@ -543,6 +602,17 @@ class TrainingWorker(SingleAcceleratorWorker):
                 mtp_loss_ctx_list.append(mtp_loss_ctxs_per_batch)
 
         del data_batches
+
+        # Each rank releases its own keys. Duplicate releases on the store are
+        # idempotent (pop then ray.internal.free is a no-op on missing keys),
+        # so this wastes a couple of no-op RPCs instead of deadlocking.
+        if store_keys_to_release:
+            from xtuner.v1.ray.rollout.routed_expert_store import get_store
+
+            try:
+                get_store().release_many.remote(list(set(store_keys_to_release)))
+            except Exception as exc:
+                self.logger.warning(f"[routed_experts] release failed, TTL will catch: {exc}")
 
         # When sp_mesh.size() > 1, get the sp_split shifted_labels and rollout_logprobs
         shifted_labels_list = [loss_ctx.loss_kwargs.shifted_labels for loss_ctx in loss_ctx_list]

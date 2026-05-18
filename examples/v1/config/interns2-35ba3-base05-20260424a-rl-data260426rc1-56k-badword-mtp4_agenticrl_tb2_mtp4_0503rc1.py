@@ -59,7 +59,7 @@ from xtuner.v1.ray.evaluator import EvaluatorConfig
 from xtuner.v1.ray.judger.compass_verifier_v2 import CompassVerifierV2Config
 from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.ray.judger.frontierscience_judger import FrontierScienceJudgerConfig
-from xtuner.v1.ray.judger.review import ReviewJudgerConfig
+# from xtuner.v1.ray.judger.review import ReviewJudgerConfig
 from xtuner.v1.ray.judger.sgi_judger import SGIJudgerConfig
 from xtuner.v1.ray.rollout import RolloutController
 from xtuner.v1.rl.base import WorkerConfig
@@ -68,6 +68,7 @@ from xtuner.v1.rl.grpo import GRPOLossConfig
 from xtuner.v1.train.agent_rl_trainer import AgentRLTrainerConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils.compute_metric import compute_metric
+from xtuner.v1.utils import get_logger
 
 if not ray.is_initialized():
     ray.init(ignore_reinit_error=True, runtime_env={"env_vars": {"RAY_DEBUG_POST_MORTEM": "0"}})
@@ -80,17 +81,18 @@ model_path = '/mnt/shared-storage-user/llmit1/user/wangziyi/exp/mindcopilot_rl/w
 stop_word = "<|im_end|>"
 
 # basic settings
-global_batch_size = 44
-prompt_repeat_k = 4
+global_batch_size = 128
+prompt_repeat_k = 8
 max_concurrent_groups = 512
+install_agent_env_replicas = 64
 
-max_prompt_length = 16 * 1024
-pack_max_length = 130 * 1024
-max_response_length = 128 * 1024
+max_prompt_length = 32 * 1024
+pack_max_length = 68 * 1024
+max_response_length = 64 * 1024
 
 train_ep_size = 1
-train_sp_size = 2
-rollout_tp_size = 4
+train_sp_size = 1
+rollout_tp_size = 1
 rollout_ep_size = 1
 fp32_lm_head = True
 enable_float8_rollout = False
@@ -98,7 +100,7 @@ rollout_max_batch_size = 128
 max_prefill_token_num = 1024
 enable_return_routed_experts = True
 enable_partial_rollout = False
-staleness_threshold = 0.5
+staleness_threshold = 0.3
 tail_batch_candidate_steps = 0
 auto_resume = True
 skip_load_weights = True
@@ -138,7 +140,7 @@ rollout_config = RolloutConfig(
     dtype="bfloat16",
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
-    gpu_memory_utilization=0.7,
+    gpu_memory_utilization=0.6,
     enable_float8=enable_float8_rollout,
     skip_load_weights=skip_load_weights,
     context_length=max_response_length,
@@ -147,18 +149,17 @@ rollout_config = RolloutConfig(
     allow_over_concurrency_ratio=1.2,
     rollout_timeout=1800,
     enable_return_routed_experts=enable_return_routed_experts,
-    return_routed_experts_key=enable_return_routed_experts,
     # max_prefill_token_num=max_prefill_token_num,
     extra_rollout_config=dict(
         lmdeploy_log_level="ERROR",
         lmdeploy_uvicorn_log_level="ERROR",
-        lmdeploy_speculative_algorithm='qwen3_5_mtp',
-        lmdeploy_speculative_num_draft_tokens=4,
+        # lmdeploy_speculative_algorithm='qwen3_5_mtp',
+        # lmdeploy_speculative_num_draft_tokens=4,
     ),
     fp32_lm_head=fp32_lm_head,
     tokenize_controller_config=TokenizeControllerConfig(
-        num_ray_actors=64,
-        num_cpus_per_actor=1,
+        num_ray_actors=256,
+        num_cpus_per_actor=0.5,
         num_processes_per_actor=1,
     ),
 )
@@ -306,14 +307,15 @@ train_dataset_cfg_tb2rl = parse_xpuyu_json_cfg(
     '/mnt/shared-storage-user/llmit/user/wangziyi/projs/xtuner_agent_dev/examples/demo_data/agent_dev/tb2_rl/meta.json',
     max_prompt_length,
 )
-train_dataset_cfg = (
-    train_dataset_cfg_science_search
-    + train_dataset_cfg_internlm_science
-    + train_dataset_cfg_search
-    + train_dataset_cfg_math
-    + train_dataset_cfg_review
-    + train_dataset_cfg_tb2rl
-)
+# train_dataset_cfg = (
+#     train_dataset_cfg_science_search
+#     + train_dataset_cfg_internlm_science
+#     + train_dataset_cfg_search
+#     + train_dataset_cfg_math
+#     + train_dataset_cfg_review
+#     + train_dataset_cfg_tb2rl
+# )
+train_dataset_cfg = train_dataset_cfg_tb2rl
 eval_dataset_cfg_search = [
     {
         "dataset": DatasetConfig(
@@ -448,12 +450,12 @@ eval_data_cfg_tb2eval = [
         ),
     },
 ]
-eval_dataset_cfg = (
-    (eval_dataset_cfg_search + eval_dataset_cfg_math + eval_dataset_cfg_review + eval_data_cfg_tb2eval)
-    if enable_evaluate
-    else []
-)
-# eval_dataset_cfg = eval_data_cfg_tb2eval
+# eval_dataset_cfg = (
+#     (eval_dataset_cfg_search + eval_dataset_cfg_math + eval_dataset_cfg_review + eval_data_cfg_tb2eval)
+#     if enable_evaluate
+#     else []
+# )
+eval_dataset_cfg = eval_data_cfg_tb2eval
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length, collator="fake_collator", pack_level="none")
 
 
@@ -529,7 +531,7 @@ compass_judger_cfg = JudgerConfig(
         ),
     ],
 )
-review_judger_cfg = JudgerConfig(reward_judger_configs=[ReviewJudgerConfig(judger_name="openreview")])
+# review_judger_cfg = JudgerConfig(reward_judger_configs=[ReviewJudgerConfig(judger_name="openreview")])
 
 from xtuner.v1.ray.judger.controller import JudgerController
 
@@ -543,17 +545,17 @@ compass_judger_controller = JudgerController.remote(
         timeout=30,
     ),
 )
-review_judger_controller = JudgerController.remote(
-    review_judger_cfg,
-    ray.get(
-        placement_group(
-            bundles=[{"CPU": 1, "memory": 1024**3}] * len(review_judger_cfg.reward_judger_configs),
-            strategy="PACK",
-        ).ready(),
-        timeout=30,
-    ),
-)
-
+# review_judger_controller = JudgerController.remote(
+#     review_judger_cfg,
+#     ray.get(
+#         placement_group(
+#             bundles=[{"CPU": 1, "memory": 1024**3}] * len(review_judger_cfg.reward_judger_configs),
+#             strategy="PACK",
+#         ).ready(),
+#         timeout=30,
+#     ),
+# )
+review_judger_controller = None
 from lagent.llms.model import AsyncAPIClient, ModelConfig
 
 from xtuner.v1.ray.environment.lagent.parsers import Qwen3_5FunctionCallParser
@@ -579,6 +581,28 @@ def convert_rollout_tractory_to_train(env, group_data_items):
         env_history = group_data_items[i].env.rollout.extra_info['agent_state_dict']['env_agent.memory']
         messages = group_data_items[i].env.rollout.extra_info['agent_message_dict']['policy_agent.messages']
         agent_data_items.append(RLAgentDataItem(extra_info=dict(messages=messages, state={"history": history})))
+        # Defense: lagent can return a "completed" sample where policy memory
+        # is empty (0 msgs), or has only the input env message with no assistant
+        # reply (last msg's raw_content_ids is None). Both cases corrupt
+        # downstream train data. Mark SKIPPED and log for later diagnostics.
+        last_policy = history[-1] if history else None
+        has_assistant_response = (
+            last_policy is not None
+            and last_policy.get('raw_content_ids') is not None
+            and last_policy.get('raw_content_logprobs') is not None
+        )
+        if not history or not env_history or not has_assistant_response:
+            get_logger().warning(
+                f"[convert_rollout_tractory_to_train] skipped guard: "
+                f"policy_len={len(history)} env_len={len(env_history)} "
+                f"first_turn={len(history) <= 1} "
+                f"last_policy_has_response={has_assistant_response} "
+                f"last_sender={last_policy.get('sender') if last_policy else None} "
+                f"source={group_data_items[i].data.extra_info.get('origin_data_source')}"
+            )
+            rollout_response_items.append(RLRolloutResponseItem(state=RolloutState.SKIPPED))
+            judger_response_items.append(RLJudgerResponseItem(reward=dict(score=0.0)))
+            continue
         rollout_response_items.append(
             RLRolloutResponseItem(
                 response=history[-1]['raw_content'],
@@ -612,7 +636,26 @@ def convert_rollout_tractory_to_train_for_tb2rl(env, group_data_items):
         messages = group_data_items[i].env.agent.extra_info['message_dict']['policy_agent.messages']
         tools = group_data_items[i].env.agent.extra_info['message_dict'].get('policy_agent.tools')
         agent_data_items.append(RLAgentDataItem(extra_info=dict(messages=messages, tools=tools)))
-        # breakpoint()
+        # Same stronger guard as convert_rollout_tractory_to_train: reject
+        # empty OR missing assistant-response fields on the last message.
+        last_msg = messages[-1] if messages else None
+        has_assistant_response = (
+            isinstance(last_msg, dict)
+            and last_msg.get('raw_content_ids') is not None
+            and last_msg.get('raw_content_logprobs') is not None
+        )
+        if not messages or not has_assistant_response:
+            get_logger().warning(
+                f"[convert_rollout_tractory_to_train_for_tb2rl] skipped guard: "
+                f"n_messages={len(messages)} "
+                f"first_turn={len(messages) <= 1} "
+                f"last_has_response={has_assistant_response} "
+                f"last_sender={last_msg.get('sender') if isinstance(last_msg, dict) else None} "
+                f"last_finish_reason={last_msg.get('finish_reason') if isinstance(last_msg, dict) else None}"
+            )
+            rollout_response_items.append(RLRolloutResponseItem(state=RolloutState.SKIPPED))
+            judger_response_items.append(RLJudgerResponseItem(reward=dict(score=0.0)))
+            continue
         rollout_response_items.append(
             RLRolloutResponseItem(
                 response=messages[-1]['raw_content'],
@@ -626,7 +669,6 @@ def convert_rollout_tractory_to_train_for_tb2rl(env, group_data_items):
     group_data_items = update_dataflow_item(group_data_items, "env.agent", agent_data_items)
     group_data_items = update_dataflow_item(group_data_items, "env.rollout", rollout_response_items)
     group_data_items = update_dataflow_item(group_data_items, "env.judger", judger_response_items)
-    # breakpoint()
     return group_data_items
 
 
@@ -936,29 +978,29 @@ eval_math_agent = dict(
     initialize_input=False,
 )
 
-train_review_agent = dict(
-    type=FunctionCallAgent,
-    policy_agent=dict(type=AsyncAgent, llm=llm, template=review_tool_prompt + "\n\n" + review_sys_prompt),
-    env_agent=dict(
-        type=EnvAgent,
-        actions=[arxiv_tool],
-        judger=JudgerWrapper(judger_controller=review_judger_controller, reward_key=None),
-        max_turn=25,
-        lower_tool_turn_bound=None,
-        enable_repeated_tool_call_penalty=False,
-        enable_no_thinking_penalty=False,
-        max_tool_response_length=max_tool_response_length,
-    ),
-    finish_condition=finish_condition_func,
-    initialize_input=False,
-)
+# train_review_agent = dict(
+#     type=FunctionCallAgent,
+#     policy_agent=dict(type=AsyncAgent, llm=llm, template=review_tool_prompt + "\n\n" + review_sys_prompt),
+#     env_agent=dict(
+#         type=EnvAgent,
+#         actions=[arxiv_tool],
+#         judger=JudgerWrapper(judger_controller=review_judger_controller, reward_key=None),
+#         max_turn=25,
+#         lower_tool_turn_bound=None,
+#         enable_repeated_tool_call_penalty=False,
+#         enable_no_thinking_penalty=False,
+#         max_tool_response_length=max_tool_response_length,
+#     ),
+#     finish_condition=finish_condition_func,
+#     initialize_input=False,
+# )
 eval_review_agent = dict(
     type=FunctionCallAgent,
     policy_agent=dict(type=AsyncAgent, llm=llm, template=review_tool_prompt + "\n\n" + review_sys_prompt),
     env_agent=dict(
         type=EnvAgent,
         actions=[arxiv_tool],
-        judger=JudgerWrapper(judger_controller=review_judger_controller, reward_key=None),
+        judger=dict(type=JudgerWrapper, judger_controller=review_judger_controller, reward_key=None),
         max_turn=25,
         lower_tool_turn_bound=None,
         enable_repeated_tool_call_penalty=False,
@@ -1081,14 +1123,14 @@ environment_config = dict(
             preprocess_func=prepare_agent_inputs,
             postprocess_func=convert_rollout_tractory_to_train,
         ),
-        'train_review_agent': dict(
-            type=AgentEnvironment,
-            environment='train_review_agent',
-            agent_cfg=train_review_agent,
-            rollout_controller=rollout_controller,
-            preprocess_func=prepare_agent_inputs,
-            postprocess_func=convert_rollout_tractory_to_train,
-        ),
+        # 'train_review_agent': dict(
+        #     type=AgentEnvironment,
+        #     environment='train_review_agent',
+        #     agent_cfg=train_review_agent,
+        #     rollout_controller=rollout_controller,
+        #     preprocess_func=prepare_agent_inputs,
+        #     postprocess_func=convert_rollout_tractory_to_train,
+        # ),
         'eval_review_agent': dict(
             type=AgentEnvironment,
             environment='eval_review_agent',
@@ -1097,20 +1139,26 @@ environment_config = dict(
             preprocess_func=prepare_agent_inputs,
             postprocess_func=convert_rollout_tractory_to_train,
         ),
-        'train_tb2rl': dict(
-            type=InstallAgentEnvironment,
-            environment='train_tb2rl',
-            rollout_controller=rollout_controller,
-            preprocess_func=prepare_agent_inputs_for_tb2rl,
-            postprocess_func=convert_rollout_tractory_to_train_for_tb2rl,
-        ),
-        'eval_tb2eval': dict(
-            type=InstallAgentEnvironment,
-            environment='eval_tb2eval',
-            rollout_controller=rollout_controller,
-            preprocess_func=prepare_agent_inputs_for_tb2rl,
-            postprocess_func=convert_rollout_tractory_to_train_for_tb2rl,
-        ),
+        'train_tb2rl': [
+            dict(
+                type=InstallAgentEnvironment,
+                environment='train_tb2rl',
+                rollout_controller=rollout_controller,
+                preprocess_func=prepare_agent_inputs_for_tb2rl,
+                postprocess_func=convert_rollout_tractory_to_train_for_tb2rl,
+            )
+            for _ in range(install_agent_env_replicas)
+        ],
+        'eval_tb2eval': [
+            dict(
+                type=InstallAgentEnvironment,
+                environment='eval_tb2eval',
+                rollout_controller=rollout_controller,
+                preprocess_func=prepare_agent_inputs_for_tb2rl,
+                postprocess_func=convert_rollout_tractory_to_train_for_tb2rl,
+            )
+            for _ in range(install_agent_env_replicas)
+        ],
     },
     router=rollout_env_router_fn,
 )

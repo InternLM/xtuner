@@ -6,8 +6,8 @@ import ray
 
 from transformers import AutoTokenizer
 from xtuner.v1.ray.environment.lagent.tokenize import tokenize as lagent_tokenize
-from xtuner.v1.utils.executor import SharedPoolExecutor
 from xtuner.v1.utils import get_logger
+from xtuner.v1.utils.executor import SharedPoolExecutor
 
 
 _PROCESS_TOKENIZER = None
@@ -92,11 +92,9 @@ class TokenizeController:
         num_ray_actors: int = 0,
         num_cpus_per_actor: int = 1,
         num_processes_per_actor: int = 1,
-        request_timeout: float = 300.0,
         enable_spread_scheduling: bool = True,
     ):
         self.logger = get_logger(tag="TokenizeController")
-        self.request_timeout = request_timeout
         self._lock = asyncio.Lock()
         self._next_actor_idx = 0
         self._actors: List[ray.actor.ActorHandle] = []
@@ -118,9 +116,7 @@ class TokenizeController:
             )
             self._actors.append(actor)
         self.logger.info(
-            "TokenizeController starts %d ray actors, %d processes per actor.",
-            len(self._actors),
-            max(1, num_processes_per_actor),
+            f"TokenizeController starts {len(self._actors)} ray actors, {max(1, num_processes_per_actor)} processes per actor.",
         )
 
     async def tokenize(self, messages: List[Dict[str, Any]], tools: Optional[List[Any]] = None) -> Dict[str, Any]:
@@ -131,8 +127,7 @@ class TokenizeController:
             actor = self._actors[self._next_actor_idx]
             self._next_actor_idx = (self._next_actor_idx + 1) % len(self._actors)
 
-        response_ref = actor.tokenize.remote(messages, tools)
-        return await asyncio.wait_for(asyncio.shield(response_ref), timeout=self.request_timeout)
+        return await actor.tokenize.remote(messages, tools)
 
     def shutdown(self):
         tasks = [actor.shutdown.remote() for actor in self._actors]

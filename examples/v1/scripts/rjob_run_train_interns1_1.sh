@@ -1,8 +1,8 @@
 JOB_NAME=xtuner_router_reply_insterns2_preview_ßtrain
 NUM_NODES=8
 WORKER_GPU=8
-CPU_NUMS=12
-NODE_MEMS=960
+CPU_NUMS=16
+NODE_MEMS=1800
 IMAGE=registry.h.pjlab.org.cn/ailab-puyu/xpuyu:torch-2.7.0-076676dd-0708
 # rjob delete ${JOB_NAME}
 clusterx run \

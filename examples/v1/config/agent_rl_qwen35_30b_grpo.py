@@ -97,7 +97,6 @@ rollout_config = RolloutConfig(
     allow_over_concurrency_ratio=2,
     rollout_timeout=36000,
     enable_return_routed_experts=enable_return_routed_experts,
-    return_routed_experts_key=True,
     max_prefill_token_num=max_prefill_token_num,
     extra_rollout_config=dict(lmdeploy_log_level="INFO", lmdeploy_uvicorn_log_level="INFO"),
 )

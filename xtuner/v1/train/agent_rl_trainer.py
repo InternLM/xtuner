@@ -1,8 +1,8 @@
+import asyncio
 import json
 import os
 import random
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Literal, cast
 
@@ -15,15 +15,14 @@ from mmengine.dist import get_rank
 from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
 from ray.actor import ActorClass
 from ray.util.placement_group import PlacementGroup
+from transformers import AutoTokenizer
 from typing_extensions import Self
 
-from transformers import AutoTokenizer
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment.lagent.tokenize import tokenize
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
-from xtuner.v1.ray.rollout.lmdeploy import get_lmdeploy_routed_experts_ref
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.rl.config.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
@@ -37,7 +36,6 @@ from .rl_trainer import (
     RLTrainerConfig,
     bind_train_rollout,
 )
-
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 DEVICE = get_device()
@@ -187,8 +185,6 @@ class AgentRLTrainer(RLTrainer):
         self._checkpoint_maxkeep = checkpoint_maxkeep
         self._checkpoint_no_save_optimizer = checkpoint_no_save_optimizer
 
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-
         self._debug = debug
         self._debug_rollout = debug_rollout
         self._seed = seed
@@ -253,11 +249,19 @@ class AgentRLTrainer(RLTrainer):
             dataflow_cfg=dataflow_config,
             replay_buffer_config=replay_buffer_config,
         )
+        self.tokenizer = None
+        if not hasattr(self._rollout_env_controller, 'rollout_controller'):
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
         rollout_info = ray.get(self._rollout_env_controller.get_rollout_info.remote())
         print(f"rollout_info {rollout_info}")
         self.model_name = rollout_info["rollout_config"].model_name
         api_server_url = rollout_info["api_server_url"]
+
+        # Cache the RolloutController handle so _prepare_train_data can route
+        # tokenize() through the 256 TokenizeWorker actors instead of the
+        # driver-side SentencePiece slow tokenizer.
+        self._rollout_controller = ray.get(self._rollout_env_controller.get_rollout_controller.remote())
 
         # 写死 0.0.0.0:8000
         url = "http://s-20260104203038-22bhb-decode.ailab-evalservice.svc:4000/v1/models/new"
@@ -481,7 +485,7 @@ class AgentRLTrainer(RLTrainer):
                         "response": _compact_message(messages[-1]) if messages else None,
                         "response_len": len(data.env.rollout.response_ids or []),
                         "reward": data.env.judger.reward["score"],
-                        "data_source": data.data.extra_info.get('origin_data_source'),
+                        "data_source": data.data.extra_info.get("origin_data_source"),
                     }
                     if is_eval:
                         entry["daemon_log"] = data.env.agent.extra_info.get("daemon_log", "")
@@ -555,22 +559,26 @@ class AgentRLTrainer(RLTrainer):
         if not agent_data_groups:
             return data_batches, info_dict
 
-        def _tokenize_agent_messages(data_item):
+        async def _tokenize_agent_messages(data_item):
             if "inputs" in data_item.env.agent.extra_info:
                 return data_item.env.agent.extra_info["inputs"]
+            if self.tokenizer is None:
+                return await self._rollout_env_controller.rollout_controller.tokenize.remote(
+                    data_item.env.agent.extra_info["messages"], data_item.env.agent.extra_info.get("tools")
+                )
             return tokenize(
-                self.tokenizer,
-                data_item.env.agent.extra_info["messages"],
-                tools=data_item.env.agent.extra_info.get("tools"),
+                self.tokenizer, data_item.env.agent.extra_info["messages"], data_item.env.agent.extra_info.get("tools")
             )
 
-        with ThreadPoolExecutor(max_workers=64) as executor:
-            inputs_list = list(
-                executor.map(
-                    _tokenize_agent_messages,
-                    [group[i] for group in agent_data_groups for i in range(len(group))],
-                )
+        import nest_asyncio
+
+        nest_asyncio.apply()
+        _loop = asyncio.get_event_loop()
+        inputs_list = _loop.run_until_complete(
+            asyncio.gather(
+                *[_tokenize_agent_messages(group[i]) for group in agent_data_groups for i in range(len(group))],
             )
+        )
 
         rewards_list = []
         advantages_list = []
@@ -619,21 +627,22 @@ class AgentRLTrainer(RLTrainer):
                 response_len_list.append(len(rollout.response_ids))
                 prompt_len_list.append(len(input_ids) - len(rollout.response_ids))
                 advantages_list.extend([advantages[i]] * len(rollout.response_ids))
-                assert len(input_ids) <= pack_max_length, (
-                    f"Input ids length {len(input_ids)} exceed pack max length {pack_max_length}."
-                )
+                assert (
+                    len(input_ids) <= pack_max_length
+                ), f"Input ids length {len(input_ids)} exceed pack max length {pack_max_length}."
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
                 rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)
-                assert rollout_logprobs.size() == shifted_labels.size(), (
-                    f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
-                )
+                assert (
+                    rollout_logprobs.size() == shifted_labels.size()
+                ), f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
 
                 seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
-                routed_experts = inputs["routed_experts"]
-                if isinstance(routed_experts, str):
-                    routed_experts = get_lmdeploy_routed_experts_ref(routed_experts)
-                seq_ctx.rollout_routed_experts = routed_experts
+                # Pass the accumulator dict {"keys": [...], "length": N} straight
+                # through — fetch + concat happens in the training worker so the
+                # trainer driver does not hold all rollout routing tensors at
+                # once (that path OOM'd on a 128k-context batch).
+                seq_ctx.rollout_routed_experts = inputs.get("routed_experts")
                 data_batches.append(
                     dict(
                         seq_ctx=seq_ctx,
@@ -643,6 +652,17 @@ class AgentRLTrainer(RLTrainer):
                     )
                 )
         random.shuffle(data_batches)
+        # End-to-end sample funnel — tells us how many rollouts actually entered
+        # training this step. Diverges from DataFlow's finished_samples_count
+        # when the postprocess guard marks some as SKIPPED.
+        n_with_routed = sum(1 for db in data_batches if db["seq_ctx"].rollout_routed_experts is not None)
+        n_prompt_tokens_total = sum(len for len in prompt_len_list)
+        n_resp_tokens_total = sum(len for len in response_len_list)
+        self.logger.info(
+            f"[AgentRLTrainer] prepare: entered_train={len(data_batches)} "
+            f"groups={len(agent_data_groups)} with_routed_experts={n_with_routed} "
+            f"prompt_tokens_total={n_prompt_tokens_total} resp_tokens_total={n_resp_tokens_total}"
+        )
         info_dict.update(
             {
                 "agent/batch_size": len(rewards_list),
