@@ -9,7 +9,7 @@ import ray
 import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, ProduceBatchResult
+from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, ProduceBatchResult, ProduceBatchStatus
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import AgentLoopManager, _TaskRunner
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SerializedRayObjectRef
 from xtuner.v1.train.rl_trainer import RLColocateTrainer
@@ -22,6 +22,7 @@ class _FakeRolloutState:
         self.message_uid = uid
         self.status = Status.INIT
         self.seq_staleness = 0
+        self.prompt_ids = [10, 11]
         self.response_ids = []
         self.response = None
         self.reward = None
@@ -102,6 +103,11 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer.tokenizer = MagicMock()
         trainer._exp_tracker = MagicMock()
         trainer._display_all_workers_log = False
+        trainer._num_workers = 1.0
+        trainer._rollout_num_workers = 1.0
+        trainer._benchmark_start_time_s = 100.0
+        trainer._benchmark_training_samples = 0
+        trainer._benchmark_training_tokens = 0
         trainer._save_trajectories = MagicMock()
         trainer._sync_weights_and_save = MagicMock(
             side_effect=lambda train_step, step_timer_dict: train_step % trainer._sync_weights_interval == 0
@@ -130,6 +136,32 @@ class TestRLColocateTrainer(unittest.TestCase):
             ),
         )
         return trainer
+
+    def _minimal_train_info(
+        self,
+        *,
+        training_samples: int,
+        training_tokens: int,
+    ):
+        return {
+            "data_info": {
+                "batch_size": training_samples,
+                "rewards/mean": 1.0,
+                "training_samples": training_samples,
+                "training_tokens": training_tokens,
+                "benchmark_end_time_s": 108.0,
+            },
+            "workers_log_item": [
+                {
+                    "rollout_is_metrics": {},
+                    "mismatch_metrics": {},
+                    "rollout_entropy": 0.0,
+                    "train_entropy": 0.0,
+                    "train_metrics": [],
+                    "sft_train_metrics": {},
+                }
+            ],
+        }
 
     def test_fit_accepts_async_strategy_manager_on_colocate_path(self):
         replay_buffer = AsyncReplayBufferConfig().build()
@@ -161,6 +193,9 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer._save_trajectories.assert_called_once()
         trainer._sync_weights_and_save.assert_called_once()
         trainer._log_step.assert_called_once()
+        produce_result = trainer._log_step.call_args.args[2]
+        self.assertEqual(produce_result.produced_samples, 1)
+        self.assertEqual(produce_result.produced_tokens, 3)
         self.assertEqual(trainer._cur_step, 1)
 
     def test_fit_requires_non_empty_batch_from_manager(self):
@@ -241,6 +276,88 @@ class TestRLColocateTrainer(unittest.TestCase):
         self.assertEqual(saved_batch[0][0].response, "ok")
         trainer.train_controller.fit.assert_not_called()
         trainer._sync_weights_and_save.assert_not_called()
+
+    def test_prepare_train_data_records_training_tokens(self):
+        trainer = RLColocateTrainer.__new__(RLColocateTrainer)
+        trainer.logger = MagicMock()
+        trainer._advantage_estimator = MagicMock()
+        trainer._advantage_estimator.compute.return_value = torch.tensor([0.5, -0.5])
+
+        group = [
+            RolloutState(
+                message=[{"role": "user", "content": "hello"}],
+                prompt_ids=[10, 11, 12],
+                response="ok",
+                response_ids=[1, 2, 3, 4],
+                reward={"score": 1.0},
+                status=Status.COMPLETED,
+            ),
+            RolloutState(
+                message=[{"role": "user", "content": "hello"}],
+                prompt_ids=[10, 11, 12],
+                response="fine",
+                response_ids=[5, 6],
+                reward={"score": 0.0},
+                status=Status.COMPLETED,
+            ),
+        ]
+
+        data_batches, data_info = trainer._prepare_train_data([group], pack_max_length=16)
+
+        self.assertEqual(len(data_batches), 2)
+        self.assertEqual(data_info["batch_size"], 2)
+        self.assertEqual(data_info["training_samples"], 2)
+        self.assertEqual(data_info["training_tokens"], 10)
+
+    def test_log_step_records_colocate_throughput_metrics(self):
+        trainer = self._make_trainer(MagicMock())
+        trainer._log_step = RLColocateTrainer._log_step.__get__(trainer, RLColocateTrainer)
+        trainer._num_workers = 2.0
+        trainer._rollout_num_workers = 2.0
+
+        trainer._log_step(
+            train_step=1,
+            step_timer_dict={
+                "step": 10.0,
+                "produce_batch": 3.0,
+                "prepare_data": 1.0,
+                "training": 4.0,
+            },
+            produce_result=ProduceBatchResult(
+                rollout_states=[],
+                produced_samples=5,
+                produced_tokens=80,
+                produce_time_s=2.0,
+            ),
+            train_info=self._minimal_train_info(
+                training_samples=3,
+                training_tokens=120,
+            ),
+            eval_info={},
+        )
+
+        scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
+        self.assertEqual(scalars["throughput/e2e_effective_samples_per_s"], 0.375)
+        self.assertEqual(scalars["throughput/e2e_effective_tgs"], 7.5)
+        self.assertEqual(scalars["throughput/effective_samples_per_s"], 0.3)
+        self.assertEqual(scalars["throughput/effective_tgs"], 6.0)
+        self.assertEqual(scalars["throughput/training_tgs"], 15.0)
+        self.assertEqual(scalars["throughput/rollout_samples_per_s"], 2.5)
+        self.assertEqual(scalars["throughput/rollout_tgs"], 20.0)
+
+    def test_log_step_skips_throughput_without_train_info(self):
+        trainer = self._make_trainer(MagicMock())
+        trainer._log_step = RLColocateTrainer._log_step.__get__(trainer, RLColocateTrainer)
+
+        trainer._log_step(
+            train_step=1,
+            step_timer_dict={"step": 10.0, "produce_batch": 3.0, "prepare_data": 1.0},
+            produce_result=ProduceBatchResult(rollout_states=[], status=ProduceBatchStatus.EXPIRED_BATCH),
+            train_info={},
+            eval_info={},
+        )
+
+        trainer._exp_tracker.add_scalars.assert_called_once()
 
     def test_debug_train_loads_batches_and_skips_weight_sync(self):
         trainer = self._make_trainer(MagicMock(), total_train_steps=2)

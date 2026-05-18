@@ -97,6 +97,9 @@ class ProduceProgress:
     - target_upto_future_step：target_samples 已覆盖到的最大 future step。
     - raw_rewards_sum / raw_rewards_count：各 task 自上次 consumer 取 batch 后，producer 实际生成出的
       completed group reward 统计。filtered group 在过滤前仍按 completed 生成结果计入。
+    - produced_samples / produced_tokens：各 task 自上次 consumer 取 batch 后，producer 实际返回的样本数和
+      response token 数，包含 filtered / aborted / 未被训练消费的 completed 样本。
+    - produce_time_s：自上次 consumer 取 batch 后，producer 实际执行 produce_batch 的累计 wall time。
     """
 
     next_consumer_step: int = 1
@@ -106,6 +109,9 @@ class ProduceProgress:
     target_upto_future_step: int = 0
     raw_rewards_sum: dict[str, float] = field(default_factory=dict)
     raw_rewards_count: dict[str, int] = field(default_factory=dict)
+    produced_samples: dict[str, int] = field(default_factory=dict)
+    produced_tokens: dict[str, int] = field(default_factory=dict)
+    produce_time_s: float = 0.0
 
     @classmethod
     def build(cls, task_names: list[str]) -> "ProduceProgress":
@@ -114,6 +120,8 @@ class ProduceProgress:
             target_samples={task_name: 0 for task_name in task_names},
             raw_rewards_sum={task_name: 0.0 for task_name in task_names},
             raw_rewards_count={task_name: 0 for task_name in task_names},
+            produced_samples={task_name: 0 for task_name in task_names},
+            produced_tokens={task_name: 0 for task_name in task_names},
         )
 
     @classmethod
@@ -132,6 +140,8 @@ class ProduceProgress:
             target_upto_future_step=train_step,
             raw_rewards_sum={task_name: 0.0 for task_name in task_names},
             raw_rewards_count={task_name: 0 for task_name in task_names},
+            produced_samples={task_name: 0 for task_name in task_names},
+            produced_tokens={task_name: 0 for task_name in task_names},
         )
 
     def ensure_target_upto(
@@ -164,6 +174,25 @@ class ProduceProgress:
         self.raw_rewards_sum[task_name] += rewards_sum
         self.raw_rewards_count[task_name] += rewards_count
 
+    def add_produced(self, task_name: str, samples: int, tokens: int) -> None:
+        self.produced_samples[task_name] += samples
+        self.produced_tokens[task_name] += tokens
+
+    def add_produce_time(self, elapsed_s: float) -> None:
+        self.produce_time_s += elapsed_s
+
+    def consume_produced(self, task_name: str) -> tuple[int, int]:
+        samples = self.produced_samples[task_name]
+        tokens = self.produced_tokens[task_name]
+        self.produced_samples[task_name] = 0
+        self.produced_tokens[task_name] = 0
+        return samples, tokens
+
+    def consume_produce_time(self) -> float:
+        produce_time_s = self.produce_time_s
+        self.produce_time_s = 0.0
+        return produce_time_s
+
     def consume_raw_rewards(self, task_name: str) -> tuple[float, int]:
         rewards_sum = self.raw_rewards_sum[task_name]
         rewards_count = self.raw_rewards_count[task_name]
@@ -186,6 +215,9 @@ class ProduceProgress:
             "target_upto_future_step": self.target_upto_future_step,
             "raw_rewards_sum": dict(self.raw_rewards_sum),
             "raw_rewards_count": dict(self.raw_rewards_count),
+            "produced_samples": dict(self.produced_samples),
+            "produced_tokens": dict(self.produced_tokens),
+            "produce_time_s": self.produce_time_s,
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -206,6 +238,17 @@ class ProduceProgress:
         self.raw_rewards_count.update(
             {task_name: int(state.get("raw_rewards_count", {}).get(task_name, 0)) for task_name in task_names}
         )
+        produced_samples_state = state.get("produced_samples", {})
+        produced_tokens_state = state.get("produced_tokens", {})
+        self.produced_samples.clear()
+        self.produced_samples.update(
+            {task_name: int(produced_samples_state.get(task_name, 0)) for task_name in task_names}
+        )
+        self.produced_tokens.clear()
+        self.produced_tokens.update(
+            {task_name: int(produced_tokens_state.get(task_name, 0)) for task_name in task_names}
+        )
+        self.produce_time_s = float(state.get("produce_time_s", 0.0))
 
 
 class ProduceBatchStatus(Enum):
@@ -341,6 +384,13 @@ class ProduceContext:
             current_train_step=self.consumer_step,
             stale_threshold=self.stale_threshold,
         )
+        produced_tokens = 0
+        for item in group:
+            response_ids = getattr(item, "response_ids", None)
+            if response_ids is None:
+                continue
+            produced_tokens += int(response_ids.numel()) if hasattr(response_ids, "numel") else len(response_ids)
+        self.progress.add_produced(self.task_name, samples=len(group), tokens=produced_tokens)
         # replay_buffer.put 可能把 stale group 转为 EXPIRED，返回前重新判断是否仍可训练。
         is_completed = get_group_status(group) == Status.COMPLETED
         return is_completed
