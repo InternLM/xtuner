@@ -35,7 +35,6 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
@@ -47,7 +46,6 @@ from xtuner.v1.ray.environment.rl_task.schemas import TaskData  # noqa: E402
 from xtuner.v1.ray.environment.rl_task.validator import JudgerValidator  # noqa: E402
 from xtuner.v1.ray.environment.trace import emit_diagnostic, span  # noqa: E402
 from xtuner.v1.utils import get_logger  # noqa: E402
-
 
 # ─────────────────────────────────────────────────────────────────
 # Failure-path diagnostics
@@ -359,10 +357,7 @@ async def _acquire_ready_sandbox(provider: Any, spec: Any) -> tuple[Any, str]:
     last_err: Exception | None = None
     for attempt in range(1, _ACQUIRE_MAX_ATTEMPTS + 1):
         try:
-            client, env_id = await provider.create(
-                image_tag=spec.image,
-                ttl_seconds=spec.ttl_seconds,
-            )
+            client, env_id = await provider.create(image_tag=spec.image, ttl_seconds=spec.ttl_seconds, key=spec.key)
         except Exception as exc:
             last_err = exc
             get_logger().warning(f"provider.create attempt {attempt} failed: {exc}")
