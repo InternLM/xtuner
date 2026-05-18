@@ -150,7 +150,7 @@ class HFSaveCfg(PydanticBaseModel):
     model_config = ConfigDict(extra="forbid")
     worker_per_rank: Annotated[int, Parameter(group="model")] = 16
     max_save_rank: Annotated[int, Parameter(group="model")] = 16
-    # Max bytes per generated safetensors shard. Can also be set via XTUNER_HF_SAVE_BUCKET_SIZE.
+    # Max bytes per generated safetensors shard.
     bucket_size: Annotated[int, Parameter(group="model")] = 1024**3 * 4
     # Lower async HF writer CPU scheduling priority. 19 is the lowest nice priority for normal users.
     cpu_priority: Annotated[int, Parameter(group="model")] = 19
@@ -164,13 +164,6 @@ class HFSaveCfg(PydanticBaseModel):
     # Remember to escape literal dots, e.g. use r"model\.layers\.\d+\.weight" instead of
     # r"model.layers.\d+.weight" to avoid unintended wildcard matches.
     fp32_keys_pattern: Annotated[list[str] | None, Parameter(group="model")] = None
-
-    @model_validator(mode="after")
-    def _apply_env_overrides(self) -> Self:
-        bucket_size = os.environ.get("XTUNER_HF_SAVE_BUCKET_SIZE")
-        if bucket_size:
-            self.bucket_size = int(bucket_size)
-        return self
 
 
 class XTunerBaseModelConfig(PydanticBaseModel):
