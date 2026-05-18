@@ -1,6 +1,7 @@
 from typing import Any, Literal
 
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
@@ -249,3 +250,58 @@ class BaseRLLossContext(CELossContext):
 
         self.loss_kwargs.is_weights = rollout_is_weights
         return mismatch_metrics, rollout_is_metrics
+
+
+def finalize_train_policy_metrics(extra_info_dict: dict[str, Any], device: str | torch.device) -> dict[str, Any]:
+    if "reduced_train_policy_valid_count" not in extra_info_dict:
+        return extra_info_dict
+
+    has_clip_count = (
+        "reduced_train_policy_clip_low_count" in extra_info_dict
+        and "reduced_train_policy_clip_high_count" in extra_info_dict
+    )
+    sum_keys = [
+        "reduced_train_policy_ratio_abs_dev_sum",
+        "reduced_train_policy_kl1_sum",
+        "reduced_train_policy_kl3_sum",
+        "reduced_train_policy_valid_count",
+    ]
+    if has_clip_count:
+        sum_keys.extend(["reduced_train_policy_clip_low_count", "reduced_train_policy_clip_high_count"])
+    max_keys = ("reduced_train_policy_ratio_max",)
+    min_keys = ("reduced_train_policy_ratio_min",)
+
+    def reduce_values(keys, op):
+        values = torch.tensor([extra_info_dict.pop(key, 0.0) for key in keys], dtype=torch.float32, device=device)
+        if dist.is_initialized():
+            dist.all_reduce(values, op=op)
+        return dict(zip(keys, values.tolist()))
+
+    train_policy_values = {}
+    train_policy_values.update(reduce_values(sum_keys, dist.ReduceOp.SUM))
+    train_policy_values.update(reduce_values(max_keys, dist.ReduceOp.MAX))
+    train_policy_values.update(reduce_values(min_keys, dist.ReduceOp.MIN))
+
+    valid_count = train_policy_values["reduced_train_policy_valid_count"]
+    output_keys = {
+        "reduced_train_policy_ratio_abs_dev_mean": "reduced_train_policy_ratio_abs_dev_sum",
+        "reduced_train_policy_kl1": "reduced_train_policy_kl1_sum",
+        "reduced_train_policy_kl3": "reduced_train_policy_kl3_sum",
+    }
+    if has_clip_count:
+        output_keys.update(
+            {
+                "reduced_train_policy_clip_frac_low": "reduced_train_policy_clip_low_count",
+                "reduced_train_policy_clip_frac_high": "reduced_train_policy_clip_high_count",
+            }
+        )
+    for output_key, sum_key in output_keys.items():
+        extra_info_dict[output_key] = train_policy_values[sum_key] / valid_count if valid_count > 0 else 0.0
+
+    ratio_max = train_policy_values["reduced_train_policy_ratio_max"]
+    ratio_min = train_policy_values["reduced_train_policy_ratio_min"] if valid_count > 0 else 0.0
+    extra_info_dict["reduced_train_policy_ratio_max"] = ratio_max
+    extra_info_dict["reduced_train_policy_ratio_min"] = ratio_min
+    # legacy metric，keep here
+    extra_info_dict["max_ratio"] = ratio_max
+    return extra_info_dict
