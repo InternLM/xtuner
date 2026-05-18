@@ -16,7 +16,7 @@ from vllm.utils import FlexibleArgumentParser
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_status_from_finish_reason
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
-from .worker import RolloutConfig, RolloutWorker
+from .worker import ROLLOUT_CONCURRENCY_GROUP_CONTROL, RolloutConfig, RolloutWorker
 
 
 DEVICE = get_device()
@@ -255,21 +255,26 @@ class vLLMWorker(RolloutWorker):
         assert response.status_code == 200, response.status_code
         return response.text
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def pause_generation(self):
-        pass
+        self.receive_abort_request.set()
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def continue_generation(self):
         # 恢复生成时必须清掉上一轮 abort 标志，否则新请求会在发送前被本地直接标成 ABORTED。
         self.receive_abort_request.clear()
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def onload_weights(self):
         """Onloads the model weights by waking up the model."""
         return self.wake_up(tags=["weights"])
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def onload_kvcache(self):
         """Onloads the KV cache by waking up the model."""
         return self.wake_up(tags=["kv_cache"])
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def offload(self):
         """Offloads the model weights and KV cache."""
         return self.sleep(level=2)

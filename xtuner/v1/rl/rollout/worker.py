@@ -1,9 +1,11 @@
 import asyncio
 import copy
 import json
+import math
 import multiprocessing
 import os
 import socket
+import threading
 import time
 import traceback
 from abc import abstractmethod
@@ -46,6 +48,8 @@ if TYPE_CHECKING:
 
 
 infer_group = Group("inference", help="Inference worker configuration.")
+ROLLOUT_CONCURRENCY_GROUP_GENERATE = "generate"
+ROLLOUT_CONCURRENCY_GROUP_CONTROL = "control"
 
 
 class RolloutConfig(BaseModel):
@@ -349,6 +353,29 @@ class RolloutConfig(BaseModel):
         else:
             return 1
 
+    def get_controller_concurrency(self, placement_group: "PlacementGroup") -> tuple[int, int]:
+        num_rollout_workers = len(placement_group.bundle_specs)
+        num_gpus_per_engine = self.expert_parallel_size if self.expert_parallel_size > 1 else self.tensor_parallel_size
+        nodes_per_engine = (
+            1
+            if self.rollout_cross_node_comm or num_gpus_per_engine < self.gpus_per_node
+            else num_gpus_per_engine // self.gpus_per_node
+        )
+        active_worker_count = max(
+            1,
+            int((num_rollout_workers // num_gpus_per_engine) * nodes_per_engine * self.server_urls_per_engine),
+        )
+        control_max_concurrency = active_worker_count
+        assert self.rollout_max_batch_size_per_instance is not None, (
+            "rollout_max_batch_size_per_instance must be set before building RolloutController."
+        )
+        concurrency_per_worker = max(
+            1,
+            math.ceil(self.rollout_max_batch_size_per_instance * self.allow_over_concurrency_ratio),
+        )
+        generate_max_concurrency = active_worker_count * concurrency_per_worker
+        return generate_max_concurrency, control_max_concurrency
+
     def model_post_init(self, __context: Any) -> None:
         if self.model_name is None:
             model_name_from_config = None
@@ -419,11 +446,14 @@ class RolloutConfig(BaseModel):
             name="rollout_controller",
             cpu_resources=CPUResourcesConfig(num_workers=num_workers),
         )
-        return (
-            ray.remote(RolloutController)
-            .options(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)), num_cpus=num_workers)
-            .remote(self, placement_group)
-        )
+        generate_max_concurrency, control_max_concurrency = self.get_controller_concurrency(placement_group)
+        return ray.remote(
+            max_concurrency=generate_max_concurrency,
+            concurrency_groups={
+                ROLLOUT_CONCURRENCY_GROUP_GENERATE: generate_max_concurrency,
+                ROLLOUT_CONCURRENCY_GROUP_CONTROL: control_max_concurrency,
+            },
+        )(RolloutController).remote(self, placement_group)
 
 
 class RolloutWorker(SingleAcceleratorWorker):
@@ -470,7 +500,6 @@ class RolloutWorker(SingleAcceleratorWorker):
         http_concurrency = config.rollout_max_batch_size_per_instance * config.allow_over_concurrency_ratio
         limits = httpx.Limits(max_connections=http_concurrency, max_keepalive_connections=100)
         self.client = httpx.AsyncClient(limits=limits, timeout=self.config.rollout_timeout)
-        self.paused = False
         self.server_task = None
         self.engine_bundle_idxs: list[int] = []
         self.server_process: Optional[multiprocessing.Process] = None
@@ -483,13 +512,16 @@ class RolloutWorker(SingleAcceleratorWorker):
         eos_token = get_eos_token(self.config.model_path)
         self.logger.info(f"Using eos_token: {eos_token} for model at {self.config.model_path}")
         self.eos_token: List[int] = [eos_token] if isinstance(eos_token, int) else eos_token
-        self.receive_abort_request = asyncio.Event()
-        self.abort_timeout = 5.0
+        self.receive_abort_request = threading.Event()
+        # Keep abort handling aligned with httpx's default timeout instead of the long rollout request timeout.
+        # This is also the grace window for an in-flight rollout request to return after an abort signal.
+        self.abort_timeout = 10.0
         self.dist_init_addr: str = ""
         self.serverl_url: str = ""
         self.partial_rollout_handler = PartialRolloutHandler()
         self.enable_partial_rollout: bool = False
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def set_enable_partial_rollout(self, enable: bool) -> None:
         self.enable_partial_rollout = enable
 
@@ -565,14 +597,34 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.logger.debug(f"Worker {self.rank} server process and its children terminated.")
             return
 
-    def pause_generation(self):
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
+    async def pause_generation(self):
         """Pause the worker's generation process."""
-        self.paused = True
+        self.receive_abort_request.set()
+        return await self._send_abort_request()
 
+    async def _send_abort_request(self) -> bool:
+        url = f"{self.server_url}/abort_request"
+        try:
+            async with httpx.AsyncClient(timeout=self.abort_timeout) as client:
+                response = await client.post(url, json={"abort_all": True})
+            response.raise_for_status()
+            self.logger.debug(f"Successfully sent abort request to {self.server_url}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to send abort request to {self.server_url}: {e}")
+            return False
+
+    async def _wait_abort_request(self) -> None:
+        while not self.receive_abort_request.is_set():
+            await asyncio.sleep(0.001)
+
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def continue_generation(self):
         """Resume the worker's generation process."""
         self.receive_abort_request.clear()
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def check_health(self) -> bool:
         """Check the health of the worker's server.
 
@@ -595,6 +647,7 @@ class RolloutWorker(SingleAcceleratorWorker):
     async def _decode_routed_experts(self, routed_experts: Any) -> Any:
         return routed_experts
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         # TODO(@duanyanhui):
         # 1. support claude format input
@@ -831,6 +884,8 @@ class RolloutWorker(SingleAcceleratorWorker):
             raise TimeoutError("Server failed to start within the timeout period.")
 
     async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
+        send_task = None
+        abort_task = None
         try:
             if self.receive_abort_request.is_set():
                 self.logger.debug(f"Request to {url} was cancelled before sending due to an abort signal.")
@@ -841,14 +896,49 @@ class RolloutWorker(SingleAcceleratorWorker):
                 headers=headers,
                 json=payload,
             )
-            r = await self.client.send(req)
+            send_task = asyncio.create_task(self.client.send(req))
+            abort_task = asyncio.create_task(self._wait_abort_request())
+            done, _ = await asyncio.wait(
+                {send_task, abort_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if send_task in done:
+                r = await send_task
+            else:
+                try:
+                    r = await asyncio.wait_for(asyncio.shield(send_task), timeout=self.abort_timeout)
+                except asyncio.TimeoutError:
+                    self.logger.debug(
+                        f"Request to {url} did not return within {self.abort_timeout:.2f}s after abort signal."
+                    )
+                    send_task.cancel()
+                    await asyncio.gather(send_task, return_exceptions=True)
+                    return HttpRequestResult(
+                        error_type=HttpRequestErrorType.REQUEST_ABORTED,
+                        url=url,
+                        payload=payload,
+                    )
             r.raise_for_status()
             return HttpRequestResult(response=r)
 
+        except asyncio.CancelledError:
+            self.logger.debug(f"Request to {url} was cancelled while waiting for the response.")
+            if send_task is not None and not send_task.done():
+                send_task.cancel()
+                await asyncio.gather(send_task, return_exceptions=True)
+            if abort_task is not None and not abort_task.done():
+                abort_task.cancel()
+                await asyncio.gather(abort_task, return_exceptions=True)
+            self.receive_abort_request.set()
+            return HttpRequestResult(error_type=HttpRequestErrorType.REQUEST_ABORTED, url=url, payload=payload)
         except Exception as e:
             error_type = HttpRequestErrorType.from_exception(e)
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
             return result
+        finally:
+            if abort_task is not None and not abort_task.done():
+                abort_task.cancel()
+                await asyncio.gather(abort_task, return_exceptions=True)
 
     async def _safe_handle_response(self, rollout_state: RolloutState, http_response: httpx.Response) -> RolloutState:
         uid = rollout_state.message_uid
@@ -880,11 +970,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                         )
                     rollout_state.error_msg = "Missing finish_reason in response meta_info"
                     return rollout_state
-
-                if finish_reason == "abort" and self.receive_abort_request.is_set() is False:
-                    self.receive_abort_request.set()
-                    self.logger.info(f"Setting receive_abort_request to True for rank {self.rank}")
-
                 returned_response = response.get("text", "")
                 # 获取response_ids && respoonse_ids
                 if (

@@ -19,7 +19,15 @@ from .parser.factory import build_reasoning_parser, build_tool_call_parser
 from .parser.reasoning_parser import ReasoningParser
 from .parser.tool_parser import ToolCallParser
 from .utils import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthChecker, SessionRouter
-from .worker import RolloutConfig, RolloutWorker
+from .worker import (
+    ROLLOUT_CONCURRENCY_GROUP_CONTROL,
+    ROLLOUT_CONCURRENCY_GROUP_GENERATE,
+    RolloutConfig,
+    RolloutWorker,
+)
+
+
+ROLLOUT_WORKER_MAX_CONCURRENCY = 2000
 
 
 if TYPE_CHECKING:
@@ -145,6 +153,7 @@ class RolloutController:
         self.logger.info(f"Gateway server started at {url}, capture_folder: {config.capture_folder}")
         return url
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def get_rollout_metadata(self) -> RolloutWorkerMetadata:
         """Get information about the current rollout setup.
 
@@ -177,6 +186,7 @@ class RolloutController:
 
         return tool_call_parser, reasoning_parser
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def get_ready_status(self) -> tuple[bool, dict[str, Any]]:
         with self.worker_info_lock:
             active_workers = sum(1 for info in self.rank2info.values() if info.is_active)
@@ -186,6 +196,7 @@ class RolloutController:
             "total_workers": total_workers,
         }
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         if XTUNER_DETERMINISTIC:
             sample_params = rollout_state.sample_params.model_copy(deep=True)
@@ -204,7 +215,8 @@ class RolloutController:
         response_ref = worker.generate.remote(rollout_state=rollout_state)  # type: ignore[attr-defined]
         try:
             response_rollout_state = await asyncio.wait_for(
-                response_ref, timeout=self.config.rollout_timeout * self.timeout_multiplier
+                response_ref,
+                timeout=self.config.rollout_timeout * self.timeout_multiplier,
             )
             self._apply_output_parsers(response_rollout_state)
             return response_rollout_state
@@ -231,30 +243,37 @@ class RolloutController:
             else:
                 rollout_state.extra_fields.pop("reasoning_text", None)
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def set_enable_partial_rollout(self, enable: bool) -> None:
         """Propagate enable_partial_rollout flag to all active workers."""
         with self.worker_info_lock:
             active_actors = [info.actor for info in self.rank2info.values() if info.is_active]
             ray.get([actor.set_enable_partial_rollout.remote(enable) for actor in active_actors])  # type: ignore[attr-defined]
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def pause_generation(self):
         self.health_checker.pause()
         self._broadcast_to_active_workers("pause_generation")
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def continue_generation(self):
         self.health_checker.resume()
         self._broadcast_to_active_workers("continue_generation")
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def offload(self):
         self._broadcast_to_active_workers("offload")
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def onload(self):
         self._broadcast_to_active_workers("onload_weights")
         self._broadcast_to_active_workers("onload_kvcache")
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def onload_weights(self):
         self._broadcast_to_active_workers("onload_weights")
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def onload_kvcache(self):
         self._broadcast_to_active_workers("onload_kvcache")
 
@@ -380,21 +399,28 @@ class RolloutController:
         if os.environ.get("XTUNER_USE_LMDEPLOY") == "1":
             from .lmdeploy import LMDeployWorker
 
-            return ray.remote(LMDeployWorker)
+            worker_cls = LMDeployWorker
         elif os.environ.get("XTUNER_USE_VLLM") == "1":
             from .vllm import vLLMWorker
 
-            return ray.remote(vLLMWorker)
+            worker_cls = vLLMWorker
         elif os.environ.get("XTUNER_USE_SGLANG") == "1":
             from .sglang import SGLangWorker
 
-            return ray.remote(SGLangWorker)
+            worker_cls = SGLangWorker
         else:
             raise NotImplementedError(
                 "Rollout backend is not supported."
                 "Please set XTUNER_USE_LMDEPLOY or XTUNER_USE_VLLM"
                 " or XTUNER_USE_SGLANG environment variable."
             )
+        return ray.remote(
+            max_concurrency=ROLLOUT_WORKER_MAX_CONCURRENCY,
+            concurrency_groups={
+                ROLLOUT_CONCURRENCY_GROUP_GENERATE: ROLLOUT_WORKER_MAX_CONCURRENCY,
+                ROLLOUT_CONCURRENCY_GROUP_CONTROL: ROLLOUT_WORKER_MAX_CONCURRENCY,
+            },
+        )(worker_cls)
 
     def _get_rank_by_actor(self, actor: RolloutWorker) -> Optional[int]:
         """Get rank by actor object.
