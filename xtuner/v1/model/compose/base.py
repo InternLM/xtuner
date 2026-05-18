@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Callable, Self
+from typing import Callable, Self, Sequence
 
 import torch
 import torch.distributed as dist
@@ -16,7 +16,7 @@ from typing_extensions import override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model import BaseModel
-from xtuner.v1.model.base import XTunerBaseModelConfig
+from xtuner.v1.model.base import BatchForwardInfo, ModelOutputs, XTunerBaseModelConfig
 from xtuner.v1.utils import get_device, get_logger
 
 from ..utils.misc import update_weight_map_from_safetensors_index
@@ -160,6 +160,9 @@ class BaseComposeModel(BaseModel):
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
                 json.dump({"weight_map": weight_map_dict, "metadata": {}}, f, indent=4)
         dist.barrier()
+
+    def post_micro_batch_forward(self, batch_outputs: Sequence[ModelOutputs]) -> BatchForwardInfo:
+        return self.language_model.post_micro_batch_forward(batch_outputs)
 
     def scale_and_reduce_grad(self):
         self.language_model.scale_and_reduce_grad()
