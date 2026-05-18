@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
+import importlib
 from typing import Annotated, cast
 
 import torch
@@ -13,7 +14,7 @@ from typing_extensions import overload
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
 from ...ops.gated_deltanet.causal_conv1d import causal_conv1d_fn
 from ...ops.gated_deltanet.chunk_gated_delta_rule import chunk_gated_delta_rule
@@ -40,8 +41,61 @@ def _all_to_all_out(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
 
 
+def _pin_fla_autotune_configs() -> None:
+    # 确定性模式下，不让 FLA 依据本地 benchmark/cache 选择不同 Triton 配置。
+    kernel_groups = {
+        "fla.modules.fused_norm_gate": (
+            "layer_norm_gated_fwd_kernel",
+            "layer_norm_gated_fwd_kernel1",
+            "layer_norm_gated_bwd_kernel",
+            "layer_norm_gated_bwd_kernel1",
+        ),
+        "fla.modules.l2norm": (
+            "l2norm_fwd_kernel",
+            "l2norm_fwd_kernel1",
+            "l2norm_bwd_kernel",
+            "l2norm_bwd_kernel1",
+        ),
+        "fla.ops.common.chunk_delta_h": (
+            "chunk_gated_delta_rule_fwd_kernel_h_blockdim64",
+            "chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64",
+        ),
+        "fla.ops.common.chunk_o": (
+            "chunk_fwd_kernel_o",
+            "chunk_bwd_kernel_dqkwg",
+            "chunk_bwd_kernel_dv",
+            "chunk_bwd_kernel_dv_local",
+        ),
+        "fla.ops.common.chunk_scaled_dot_kkt": ("chunk_scaled_dot_kkt_fwd_kernel",),
+        "fla.ops.gated_delta_rule.wy_fast": ("recompute_w_u_fwd_kernel", "prepare_wy_repr_bwd_kernel"),
+        "fla.ops.utils.cumsum": ("chunk_local_cumsum_scalar_kernel", "chunk_local_cumsum_vector_kernel"),
+        "fla.ops.utils.solve_tril": (
+            "solve_tril_16x16_kernel",
+            "merge_16x16_to_32x32_inverse_kernel",
+            "merge_16x16_to_64x64_inverse_kernel",
+        ),
+    }
+
+    for module_name, kernel_names in kernel_groups.items():
+        module = importlib.import_module(module_name)
+        for kernel_name in kernel_names:
+            kernel = getattr(module, kernel_name, None)
+            autotuner = getattr(kernel, "fn", kernel)
+            configs = getattr(autotuner, "configs", None)
+            if not configs:
+                continue
+            assert autotuner is not None
+            autotuner.configs = configs[:1]
+            autotuner.cache_results = False
+            if hasattr(autotuner, "cache"):
+                autotuner.cache.clear()
+
+
 try:
     from fla.modules import FusedRMSNormGated as FLA_FusedRMSNormGated
+
+    if XTUNER_DETERMINISTIC:
+        _pin_fla_autotune_configs()
 
     class FusedRMSNormGated(FLA_FusedRMSNormGated):
         def forward(
