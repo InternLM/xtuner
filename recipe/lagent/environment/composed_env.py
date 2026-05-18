@@ -11,7 +11,7 @@ from xtuner.v1.data_proto.rl_data import RLDataFlowItem
 from .base_env import BaseEnvironment
 
 
-@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))  # type: ignore[call-overload]
+@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 2000)))  # type: ignore[call-overload]
 class ComposedEnvironment(BaseEnvironment):
     def __init__(
         self,

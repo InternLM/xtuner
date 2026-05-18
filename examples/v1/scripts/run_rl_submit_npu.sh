@@ -50,7 +50,6 @@ export TRANSFORMERS_OFFLINE=1
 export HF_EVALUATE_OFFLINE=1
 export HF_HUB_OFFLINE=1
 
-export XTUNER_MAX_CONCURRENCY=8192
 export XTUNER_LOG_LEVEL="INFO"
 export UVICORN_LOG_LEVEL="CRITICAL"
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
@@ -116,7 +115,7 @@ echo OUPUT_DIR is ${WORK_DIR}
 if [ "$RAY_RANK" -eq 0 ]; then
   RUNTIME_ENV_JSON="{
       \"env_vars\": {
-        \"XTUNER_MAX_CONCURRENCY\": \"${XTUNER_MAX_CONCURRENCY}\",
+        \"RAY_MAX_CONCURRENCY\": \"${RAY_MAX_CONCURRENCY}\",
         \"XTUNER_LOG_LEVEL\": \"${XTUNER_LOG_LEVEL}\",
         \"PYTHONPATH\": \"${PYTHONPATH}\",
         \"MASTER_ADDR\": \"${RAY_MASTER_ADDR}\",

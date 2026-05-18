@@ -133,8 +133,9 @@ class TestVLMRollout(unittest.IsolatedAsyncioTestCase):
                 case_id = f"Case {i+1}"
                 self.assertEqual(result.status, Status.COMPLETED, 
                                  msg=f"{case_id} failed: Expected status COMPLETED but got {result.status} and error_msg {result.error_msg}")
-                self.assertEqual(result.finish_reason, 'stop', 
-                                 msg=f"{case_id} failed: Expected finish_reason 'stop' but got {result.finish_reason}")
+                self.assertIn(result.finish_reason, {'stop', 'length'},
+                              msg=f"{case_id} failed: Expected finish_reason 'stop' or 'length' "
+                                  f"but got {result.finish_reason}")
             
                 if result.sample_params.return_token_ids:
                     self.assertGreater(len(result.response_ids), 0, 

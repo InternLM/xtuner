@@ -35,7 +35,7 @@ def check_dead_actors():
     return dead_actors
 
 
-@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))  # type: ignore[call-overload]
+@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 2000)))  # type: ignore[call-overload]
 class AgentEnvironment(BaseEnvironment):
     def __init__(
         self,
