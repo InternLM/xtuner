@@ -2,82 +2,14 @@ import json
 import multiprocessing
 import os
 import time
-from typing import Any, Callable, Dict, List
+from typing import Any, Dict, List
 
-import httpx
 import requests
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 
-from xtuner.v1.ray.judger.native import NativeJudgerConfig
-
-# try:
-from xtuner.v1.ray.rollout.lmdeploy import LMDeployWorker
-from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
-
-
-# except ImportError:
-#     LMDeployWorker = object
-class MockTimeoutRolloutWorker(LMDeployWorker):
-    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
-        try:
-            raise httpx.TimeoutException("Mocked timeout error")
-        except Exception as e:
-            error_type = HttpRequestErrorType.from_exception(e)
-            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
-            self.logger.info(f"Caught mocked timeout exception: {e.__class__.__name__}")
-            return result
-
-    def launch_server(self):
-        pass  # Override
-
-
-class MockRequestErrorRolloutWorker(LMDeployWorker):
-    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
-        try:
-            req = httpx.Request("POST", url)
-            raise httpx.RequestError("Mocked httpx request error", request=req)
-        except Exception as e:
-            error_type = HttpRequestErrorType.from_exception(e)
-            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
-            self.logger.info(f"Caught mocked request error exception: {e.__class__.__name__}")
-            return result
-
-    def launch_server(self):
-        pass  # Override
-
-
-class MockClientErrorRolloutWorker(LMDeployWorker):
-    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
-        try:
-            req = httpx.Request("POST", url)
-            res = httpx.Response(400, request=req)
-            raise httpx.HTTPStatusError("Mocked client error", request=req, response=res)
-        except Exception as e:
-            error_type = HttpRequestErrorType.from_exception(e)
-            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
-            self.logger.info(f"Caught mocked client exception: {e.__class__.__name__}")
-            return result
-
-    def launch_server(self):
-        pass  # Override
-
-
-class MockServerErrorRolloutWorker(LMDeployWorker):
-    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
-        try:
-            req = httpx.Request("POST", url)
-            res = httpx.Response(500, request=req)
-            raise httpx.HTTPStatusError("Mocked server error", request=req, response=res)
-        except Exception as e:
-            error_type = HttpRequestErrorType.from_exception(e)
-            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
-            self.logger.info(f"Caught mocked server exception: {e.__class__.__name__}")
-            return result
-
-    def launch_server(self):
-        pass  # Override
+from xtuner.v1.rl.judger.native import JudgerConfig
 
 
 app = FastAPI()
@@ -113,7 +45,7 @@ class JudgeResponse(BaseModel):
 
 @app.post("/judge", response_model=JudgeResponse)
 async def judge(request: JudgeRequest):
-    from xtuner.v1.ray.judger.gsm8k import compute_reward
+    from xtuner.v1.rl.judger.gsm8k import compute_reward
 
     """Endpoint to compute reward for a given response and label."""
     # The compute_reward function returns a float, we wrap it in a dict
@@ -158,17 +90,7 @@ class JudgerServer:
             print("Server stopped.")
 
 
-def custom_postprocessor_for_gsm8k(result):
-    from xtuner.v1.data_proto.rl_data import RLJudgerResponseItem
-
-    if not isinstance(result, list):
-        result = [result]
-    judger_response_item = [RLJudgerResponseItem(uid=result[i]["uid"], reward=result[i]) for i in range(len(result))]
-    return judger_response_item
-
-
-class GSM8KRemoteJudgerConfig(NativeJudgerConfig):
+class GSM8KRemoteJudgerConfig(JudgerConfig):
     judger_name: str
-    remote_url: str
-    extra_info: dict = {"score": 1, "format_score": 0}
-    postprocess_func: Callable = custom_postprocessor_for_gsm8k
+    reward_handler: str
+    extra_info: dict = Field(default_factory=lambda: {"score": 1, "format_score": 0})

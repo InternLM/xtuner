@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch.distributed.device_mesh import DeviceMesh
 
-from xtuner.v1.rl.utils import gather_logprobs
+from xtuner.v1.rl.utils.misc import gather_logprobs
 from xtuner.v1.utils.device import get_device
 
 from .base_loss_ctx import BaseLossConfig, BaseLossContext, BaseLossKwargs

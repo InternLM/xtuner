@@ -17,18 +17,18 @@ from io import BytesIO
 from multiprocessing import Process, Queue
 from pathlib import Path
 from threading import Lock
-from typing import Callable, Dict, TypeVar, cast
+from typing import Any, Callable, Dict, TypeVar, cast
 
 import numpy as np
 import torch
 from mmengine import mkdir_or_exist
 from mmengine.dist import barrier, get_rank
+from pydantic import BaseModel
 from torch import distributed as dist
 from tqdm import tqdm
 
 from xtuner.v1.datasets.data_item import CacheItem
 from xtuner.v1.datasets.pt_tokenize_fn.long_text import LongTextPretrainTokenizeFunction
-from xtuner.v1.datasets.rl_tokenize_fn.rl_tokenize_fn import RLTokenizeFn
 from xtuner.v1.utils import SharedMemory, get_logger
 from xtuner.v1.utils.dist_utils import get_local_process_group, get_local_world_size, is_local_rank0
 
@@ -439,11 +439,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         ################################## Post-processing of offsets, num_tokens and _meta #######################################
 
         tok_hash_str = ""
-        if isinstance(
-            tokenize_fn, RLTokenizeFn
-        ):  # RLTokenizeFn is CachableTokenizeFunction, but it does not have a hash method
-            tok_hash_str = "RLTokenizeFn"
-        elif isinstance(tokenize_fn, CachableTokenizeFunction):
+        if isinstance(tokenize_fn, CachableTokenizeFunction):
             tok_hash_str = tokenize_fn.hash()
 
         job_discriminator = os.environ.get("MASTER_PORT", "")
@@ -624,14 +620,32 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
     @staticmethod
     def _tokenize_by_offset(
         data: bytes,
-        tokenize_fn: Callable[[dict], CacheItem],
+        tokenize_fn: Callable[[dict], CacheItem | BaseModel],
     ) -> dict:
         line = data.decode()
-        tokenized: dict = tokenize_fn(json.loads(line))  # type: ignore[assignment]
-        res = {"num_tokens": tokenized["num_tokens"], "proxy_attn_flops": tokenized["proxy_attn_flops"]}
-        if "chunks" in tokenized:
-            res["chunks"] = tokenized["chunks"]
-        return res
+        tokenized = tokenize_fn(json.loads(line))
+        if isinstance(tokenized, dict):
+            res = {"num_tokens": tokenized["num_tokens"], "proxy_attn_flops": tokenized["proxy_attn_flops"]}
+            if "chunks" in tokenized:
+                tokenized = cast(dict[str, Any], tokenized)
+                res["chunks"] = tokenized["chunks"]
+            return res
+        if isinstance(tokenized, BaseModel):
+            # RL tokenize functions return RolloutState, a Pydantic model,
+            # during cache building. Extract cache metadata here so those
+            # tokenizers do not need to return a separate CacheItem dict.
+            num_tokens = getattr(tokenized, "num_tokens", None)
+            if num_tokens is None:
+                raise TypeError(f"{type(tokenized).__name__} must provide `num_tokens` for dataset cache.")
+            proxy_attn_flops = getattr(tokenized, "proxy_attn_flops", None)
+            if proxy_attn_flops is None:
+                proxy_attn_flops = float(num_tokens)
+            res = {"num_tokens": num_tokens, "proxy_attn_flops": proxy_attn_flops}
+            chunks = getattr(tokenized, "chunks", None)
+            if chunks is not None:
+                res["chunks"] = chunks
+            return res
+        raise TypeError(f"{type(tokenized).__name__} must be a CacheItem-like dict or a Pydantic model.")
 
     def count_tokens(self, offsets, cache_dir=None):
         self.tokenize_fn.set_state("cache")

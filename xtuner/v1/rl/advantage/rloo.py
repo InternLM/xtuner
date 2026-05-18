@@ -1,12 +1,8 @@
-from typing import TYPE_CHECKING
+from typing import Any
 
 import torch
 
 from xtuner.v1.rl.advantage.base import AdvantageEstimator
-
-
-if TYPE_CHECKING:
-    from xtuner.v1.data_proto.rl_data import RLDataFlowItem
 
 
 class RLOOEstimator(AdvantageEstimator):
@@ -23,7 +19,7 @@ class RLOOEstimator(AdvantageEstimator):
     When K=1, returns the raw reward as the advantage.
     """
 
-    def compute(self, rewards: torch.Tensor, group: list["RLDataFlowItem"]) -> torch.Tensor:
+    def compute(self, rewards: torch.Tensor, group: list[Any]) -> torch.Tensor:
         k = len(rewards)
         if k == 1:
             return rewards

@@ -25,7 +25,7 @@ from .pt_tokenize_fn import (
     PretrainTokenizeFunction,
     PretrainTokenizeFunctionConfig,
 )
-from .rl_tokenize_fn import RLTokenizeFnConfig
+from .rl_tokenize_fn import RLTextTokenizeFnConfig
 from .sampler import LengthGroupedSampler, ParallelSampler
 from .sft_tokenize_fn import OpenaiTokenizeFunction, OpenaiTokenizeFunctionConfig
 from .utils import CachableTokenizeFunction, calculate_file_sha256, calculate_xxhash, tokenizer_hash
@@ -56,6 +56,7 @@ __all__ = [
     "build_datasets",
     "build_dataloader",
     "sft_llm_collator",
+    "fake_collator",
     "intern_s1_vl_sft_collator",
     "qwen3_vl_sft_collator",
     "FtdpTokenizeFunction",
@@ -65,7 +66,6 @@ __all__ = [
     "VLMJsonlDataset",
     "FTDPTokenizeFnConfig",
     "InternS1VLTokenizeFnConfig",
-    "fake_collator",
     "RLTokenizeFnConfig",
     "DatasetConfigList",
     "DataloaderConfig",

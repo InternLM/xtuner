@@ -1,6 +1,5 @@
 import os
 import threading
-import time
 from pathlib import Path
 from typing import Annotated
 
@@ -10,7 +9,6 @@ from cyclopts import App, Parameter
 from cyclopts.group import Group
 
 from xtuner.v1.rl.utils import register_cleanup
-from xtuner.v1.train.rl_trainer import RLTrainer
 from xtuner.v1.utils import Config
 from xtuner.v1.utils.track_rl_mem import monitor_actor_memory
 
@@ -21,42 +19,36 @@ app = App(
 
 
 def rl_monitor_actor_memory(work_dir, interval: int = 60):
-    while True:
-        try:
-            ray.init(address="auto")
-            time.sleep(interval)
-            break
-        except KeyboardInterrupt:
-            print("\n监控已停止")
-            break
-        except Exception:
-            print("连接 Ray 集群失败, 等等")
-
-    monitor_actor_memory(work_dir=work_dir, interval=interval)
+    try:
+        monitor_actor_memory(work_dir=work_dir, interval=interval)
+    except Exception as exc:
+        print(f"Actor memory monitor stopped due to error: {exc}")
 
 
 @app.default()
 def main(
     *,
     config: Annotated[Path, Parameter(group=Group("config-path", sort_key=0))],
+    work_dir: str | None = None,
+    num_workers: int | None = None,
 ):
     if not ray.is_initialized():
-        if os.getenv("RAY_MASTER_ADDR"):
-            master_addr = os.getenv("RAY_MASTER_ADDR", "127.0.0.1")
-            client_port = os.getenv("RAY_CLIENT_PORT", "10001")
-            ray_head_address = f"ray://{master_addr}:{client_port}"
-            ray.init(address=ray_head_address)
-        else:
-            ray.init(num_cpus=128)
+        ray.init(address="auto")
 
     if os.getenv("XTUNER_RL_MEM_DIR"):
-        print("Start to monitor actor memory")
-        track_thread = threading.Thread(target=rl_monitor_actor_memory, args=(os.getenv("XTUNER_RL_MEM_DIR"),))
+        interval = int(os.getenv("XTUNER_RL_MEM_INTERVAL", "60"))
+        track_thread = threading.Thread(
+            target=rl_monitor_actor_memory, args=(os.getenv("XTUNER_RL_MEM_DIR"), interval)
+        )
         track_thread.daemon = True
         track_thread.start()
 
-    trainer_cfg = Config.fromfile(config)["trainer"]
-    trainer = RLTrainer.from_config(trainer_cfg)
+    cfg = Config.fromfile(config)
+    if work_dir is not None:
+        cfg.trainer.work_dir = work_dir
+    if num_workers is not None:
+        cfg.trainer.resources.num_workers = num_workers
+    trainer = cfg.trainer.build()
     trainer.fit()
 
     if dist.is_initialized():

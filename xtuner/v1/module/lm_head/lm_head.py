@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from typing_extensions import overload
 
-from xtuner.v1.loss import LMHeadLossContext
+from xtuner.v1.loss.ce_loss import LMHeadLossContext
 
 
 Loss: TypeAlias = torch.Tensor
