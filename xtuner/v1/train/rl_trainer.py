@@ -758,8 +758,7 @@ class BaseRLTrainer:
         overlap_start = time.perf_counter()
 
         async def pause_produce_once() -> float:
-            with timer("pause_produce", step_timer_dict):
-                return await self.agent_loop_manager.pause_produce(use_global_progress=use_global_progress)
+            return await self.agent_loop_manager.pause_produce(use_global_progress=use_global_progress)
 
         pause_task = asyncio.create_task(pause_produce_once())
         await asyncio.sleep(0)

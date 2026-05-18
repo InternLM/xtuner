@@ -481,7 +481,7 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
 
 
 class ProduceStrategy(ABC):
-    PENDING_TASK_COLLECT_TIMEOUT_S = 10.0
+    PENDING_TASK_COLLECT_TIMEOUT_S = 15.0
 
     def __init__(
         self,
@@ -537,7 +537,8 @@ class ProduceStrategy(ABC):
         # more aborted requests to return, and finally stop waiting after the
         # timeout so training can move on without producer-side cancellation.
         claimed_done = await self._pending_tasks.claim_ready()
-        collected_count = await self._put_claimed(claimed_done, ctx)
+        collected_task_count = len(claimed_done)
+        completed_group_count = await self._put_claimed(claimed_done, ctx)
 
         pending_after_abort = self._pending_tasks.count()
         if pending_after_abort:
@@ -554,10 +555,14 @@ class ProduceStrategy(ABC):
             claimed_done = await self._pending_tasks.wait_and_claim(timeout_s=min(1.0, remaining_time))
             if not claimed_done:
                 continue
-            collected_count += await self._put_claimed(claimed_done, ctx)
+            collected_task_count += len(claimed_done)
+            completed_group_count += await self._put_claimed(claimed_done, ctx)
 
-        if collected_count:
-            logger.info(f"Collected {collected_count} rollout tasks for task {ctx.task_name} after abort.")
+        if collected_task_count:
+            logger.info(
+                f"Collected {collected_task_count} rollout tasks "
+                f"({completed_group_count} completed groups) for task {ctx.task_name} after abort."
+            )
         pending_count = self._pending_tasks.count()
         if pending_count:
             logger.warning(
@@ -565,7 +570,7 @@ class ProduceStrategy(ABC):
                 f"task {ctx.task_name} still has {pending_count} pending rollout tasks. "
                 "The rollout worker request timeout is expected to finish them without producer-side cancellation."
             )
-        return collected_count
+        return collected_task_count
 
 
 class _PendingTasks:
