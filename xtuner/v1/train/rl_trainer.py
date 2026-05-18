@@ -761,6 +761,9 @@ class BaseRLTrainer:
             return await self.agent_loop_manager.pause_produce(use_global_progress=use_global_progress)
 
         pause_task = asyncio.create_task(pause_produce_once())
+        # Let pause_produce submit the Ray abort request before the local event loop is blocked by synchronous
+        # batch preparation. The Ray actor handles abort in another process; local pending-task collection resumes
+        # only after _prepare_train_batch returns.
         await asyncio.sleep(0)
         try:
             prepared_train_info = self._prepare_train_batch(

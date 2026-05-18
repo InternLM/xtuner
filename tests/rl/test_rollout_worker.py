@@ -74,6 +74,7 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
         worker.receive_abort_request = threading.Event()
         worker.logger = MagicMock()
         send_started = asyncio.Event()
+        send_cancelled = asyncio.Event()
 
         class _Client:
             def build_request(self, *args, **kwargs):
@@ -81,7 +82,11 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
 
             async def send(self, req):
                 send_started.set()
-                await asyncio.Event().wait()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    send_cancelled.set()
+                    raise
 
         worker.client = _Client()
 
@@ -93,6 +98,7 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.error_type, HttpRequestErrorType.REQUEST_ABORTED)
         self.assertTrue(worker.receive_abort_request.is_set())
+        self.assertTrue(send_cancelled.is_set())
 
     async def test_safe_post_request_cancels_inflight_request_after_abort_timeout(self):
         worker = RolloutWorker.__new__(RolloutWorker)
