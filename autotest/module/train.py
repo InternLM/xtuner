@@ -77,7 +77,7 @@ class Train:
             check_metrics = config.get("assert_info", {}).get("check_metrics", {})
             return check_result(config["case_name"], base_path, cur_path, check_metrics)
         elif train_type == "rl":
-            cur_path = os.path.join(get_latest_subdir(work_dir), "exp_tracking/tracker.jsonl")
+            cur_path = os.path.join(get_latest_subdir(work_dir), "logs/exp_tracking/tracker.jsonl")
             check_metrics = config.get("assert_info", {})
             return check_rl_result(config["case_name"], base_path, cur_path, check_metrics)
         else:
