@@ -22,6 +22,7 @@ per-task image always overrides it via ``sandbox_spec`` in ``extra_info``.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -92,7 +93,9 @@ DEFAULT_AGENTS: list[AgentSpec] = [
 ]
 
 # Placeholder image — each task overrides this via sandbox_spec in extra_info.
-DEFAULT_SANDBOX = SandboxSpec(image="tb2-eval-placeholder", ttl_seconds=11700, workspace_path="/app")
+DEFAULT_SANDBOX = SandboxSpec(
+    image="tb2-eval-placeholder", ttl_seconds=11700, key=os.getenv('SANDBOX_PROVIDER_KEY'), workspace_path="/app"
+)
 
 
 # ─────────────────────────────────────────────────────────────────

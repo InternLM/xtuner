@@ -19,6 +19,7 @@ At runtime we do NOT rebuild the image; we use the pre-built
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -88,7 +89,9 @@ DEFAULT_AGENTS: list[AgentSpec] = [
     ),
 ]
 
-DEFAULT_SANDBOX = SandboxSpec(image="t-data-processing-v1", ttl_seconds=11700, workspace_path="/app")
+DEFAULT_SANDBOX = SandboxSpec(
+    image="t-data-processing-v1", ttl_seconds=11700, key=os.getenv('SANDBOX_PROVIDER_KEY'), workspace_path="/app"
+)
 
 
 # ─────────────────────────────────────────────────────────────────

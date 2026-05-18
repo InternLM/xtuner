@@ -8,6 +8,7 @@ looks like; core stays bench-agnostic.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -105,7 +106,9 @@ DEFAULT_AGENTS: list[AgentSpec] = [
     ),
 ]
 
-DEFAULT_SANDBOX = SandboxSpec(image="ubuntu2404-v2", ttl_seconds=1800, workspace_path="/workspace")
+DEFAULT_SANDBOX = SandboxSpec(
+    image="ubuntu2404-v2", ttl_seconds=1800, key=os.getenv('SANDBOX_PROVIDER_KEY'), workspace_path="/workspace"
+)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -217,7 +220,11 @@ def claw_pipeline(
             extras={"WORKSPACE": ws, "CLAW_WORKSPACE": ws},
         ),
         timeout=1800,
-        post=[DownloadHook(["/workspace", "/tmp/agent_response.txt"]), ReadFileHook("/tmp/message.json", "message"), DumpDaemonLogOnFailure()],
+        post=[
+            DownloadHook(["/workspace", "/tmp/agent_response.txt"]),
+            ReadFileHook("/tmp/message.json", "message"),
+            DumpDaemonLogOnFailure(),
+        ],
     )
 
     return Runner(
