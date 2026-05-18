@@ -6,17 +6,16 @@ from collections import OrderedDict
 from itertools import cycle
 from typing import TYPE_CHECKING, Any, Optional
 
-import httpx
 import ray
 from ray import ObjectRef as RayObjectRef
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.utils import asyncio_run, clear_rollout_response_for_rerun
+from xtuner.v1.rl.utils import asyncio_run, clear_rollout_response_for_rerun, free_object_refs
 from xtuner.v1.utils import get_logger
 
 
 if TYPE_CHECKING:
-    from .controller import RolloutControllerProxy, WorkerInfo
+    from .controller import WorkerInfo
     from .worker import RolloutConfig, RolloutWorker
 
 ROLLOUT_RAY_GET_TIMEOUT = int(os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", str(5 * 3600)))  # default 5 hours
@@ -165,15 +164,15 @@ class RolloutHealthChecker:
                     rank: (info.actor, info.url, info.is_active) for rank, info in self._workers_info.items()
                 }
 
+        workers_to_check = [
+            (rank, actor, url, is_active) for rank, (actor, url, is_active) in workers_snapshot.items() if is_active
+        ]
+        if not workers_to_check:
+            return
+
         tasks = [
-            check_worker_health(
-                actor,
-                rank,
-                url,
-                is_active,
-                self._check_failure_threshold,
-            )
-            for rank, (actor, url, is_active) in workers_snapshot.items()
+            check_worker_health(actor, rank, url, is_active, self._check_failure_threshold)
+            for rank, actor, url, is_active in workers_to_check
         ]
 
         async def _run_checks() -> list[bool]:
@@ -181,7 +180,7 @@ class RolloutHealthChecker:
 
         check_results = asyncio_run(_run_checks())
         inactive_workers = []
-        for rank, is_healthy in zip(workers_snapshot.keys(), check_results):
+        for (rank, _, _, _), is_healthy in zip(workers_to_check, check_results):
             if not is_healthy:
                 logger.warning(f"Worker {rank} failed health check. Marking as inactive.")
                 if self._worker_infos_lock is None:
@@ -201,6 +200,10 @@ class RolloutHealthChecker:
         for rank, inactive_worker in inactive_workers:
             try:
                 ray.get(inactive_worker.offload.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+            except Exception as e:
+                logger.error(f"Exception while offloading worker {rank}: {e}")
+
+            try:
                 ray.get(inactive_worker.shutdown.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
             except Exception as e:
                 logger.error(f"Exception while shutting down worker {rank}: {e}")
@@ -221,42 +224,6 @@ class RolloutHealthChecker:
 
             if self._stop_event.wait(self._check_interval):
                 break
-
-
-async def send_abort_request(client: httpx.AsyncClient, url: str, timeout: float = 60.0) -> tuple[str, bool]:
-    worker_url = f"{url}/abort_request"
-    try:
-        response = await client.post(worker_url, json={"abort_all": True}, timeout=timeout)
-        response.raise_for_status()
-        logger.debug(f"Successfully sent abort request to {url}")
-        return url, True
-    except Exception as e:
-        logger.error(f"Failed to send abort request to {url}: {e}")
-        return url, False
-
-
-async def pause_generation(rollout_ctl: "RolloutControllerProxy", pause_time_out: float = 60.0) -> None:
-    await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
-    rollout_ctl_metadata = await rollout_ctl.get_rollout_metadata.remote()  # type: ignore[attr-defined]
-    infer_server_url = list(rollout_ctl_metadata["server_url_dict"].values())
-    async with httpx.AsyncClient() as client:
-        tasks = [send_abort_request(client, url, timeout=pause_time_out) for url in infer_server_url]
-        results = await asyncio.gather(*tasks)
-
-    failed_workers = [url for url, success in results if not success]
-    succeeded_count = len(infer_server_url) - len(failed_workers)
-
-    if failed_workers:
-        logger.warning(
-            f"Abort requests completed. Succeeded: {succeeded_count}, "
-            f"Failed: {len(failed_workers)}. Failed workers: {failed_workers}"
-        )
-    else:
-        logger.info(f"All {succeeded_count} abort requests sent successfully.")
-
-
-async def continue_generation(rollout_ctl: "RolloutControllerProxy") -> None:
-    return await rollout_ctl.continue_generation.remote()  # type: ignore[attr-defined]
 
 
 async def check_worker_health(
@@ -360,6 +327,8 @@ class PartialRolloutHandler:
             # 处理routed experts
             history_routed_experts = rollout_state.routed_experts or None
             if history_routed_experts is not None and routed_experts is not None:
+                history_routed_experts_ref = history_routed_experts
+                cur_routed_experts_ref = routed_experts
                 start_time = time.time()
                 history_routed_experts, cur_routed_experts = await asyncio.gather(
                     _resolve_routed_experts(history_routed_experts),
@@ -375,9 +344,13 @@ class PartialRolloutHandler:
                 cur_routed_experts = cur_routed_experts[history_routed_experts_len:]
                 concat_routed_experts = history_routed_experts + cur_routed_experts
                 rollout_state.routed_experts = ray.put(concat_routed_experts)
-                # free_object_refs(
-                #     [ref for ref in (history_routed_experts_ref, cur_routed_experts_ref) if isinstance(ref, ray.ObjectRef)]
-                # )
+                free_object_refs(
+                    [
+                        ref
+                        for ref in (history_routed_experts_ref, cur_routed_experts_ref)
+                        if isinstance(ref, RayObjectRef)
+                    ]
+                )
                 end_time = time.time()
                 self.logger.debug(
                     f"[PartialRolloutHandler] Postprocess routed_experts concatenation time: {end_time - start_time:.4f} seconds"

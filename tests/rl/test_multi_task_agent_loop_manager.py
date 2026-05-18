@@ -360,7 +360,6 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         )
         manager._status = AgentLoopManagerStatus.EXPIRED_BATCH
         manager._model_step = 2
-        manager._pause_time_s = 1.5
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             checkpoint_path = Path(tmp_dir)
@@ -385,7 +384,6 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT)
         self.assertTrue(manager._update_event.is_set())
         self.assertFalse(manager._finish_event.is_set())
-        self.assertEqual(manager._pause_time_s, 0.0)
         self.assertEqual(manager._model_step, 7)
         self.assertEqual(sampler.saved_paths, [Path(tmp_dir) / manager._TASK_CHECKPOINT_DIR / "task_a"])
         self.assertEqual(sampler.resumed_paths, [Path(tmp_dir) / manager._TASK_CHECKPOINT_DIR / "task_a"])
@@ -523,7 +521,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(AssertionError, "must return non-empty rollout_states"):
             await manager.produce_batch(batch_size=1, train_step=3, model_step=2)
 
-    async def test_pause_produce_from_async_produce_loop_sets_status_and_pause_time(self):
+    async def test_pause_produce_from_async_produce_loop_sets_status_and_returns_pause_time(self):
         strategy = _FakeProduceStrategy(cleanup_pause_time_s=2.5)
         manager = AgentLoopManager(
             task_runners=[
@@ -548,7 +546,6 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertIs(strategy.cleanup_progresses[0], manager._produce_progress)
         self.assertTrue(manager._update_event.is_set())
         self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT)
-        self.assertEqual(manager._pause_time_s, 2.5)
 
     async def test_pause_produce_validates_progress_selection_before_state_change(self):
         strategy = _FakeProduceStrategy(cleanup_pause_time_s=2.5)
@@ -571,8 +568,8 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(manager._update_event.is_set())
         self.assertEqual(manager._status, AgentLoopManagerStatus.NORMAL)
 
-        with self.assertRaisesRegex(ValueError, "progress must be provided"):
-            await manager.pause_produce(use_global_progress=False)
+        with self.assertRaisesRegex(ValueError, "progress must not be provided"):
+            await manager.pause_produce(use_global_progress=False, progress=object())
         self.assertFalse(manager._update_event.is_set())
         self.assertEqual(manager._status, AgentLoopManagerStatus.NORMAL)
         self.assertEqual(strategy.cleanup_call_count, 0)
