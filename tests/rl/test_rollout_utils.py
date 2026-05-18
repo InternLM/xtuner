@@ -11,12 +11,132 @@ from unittest.mock import patch
 from xtuner.v1.data_proto.rl_data import Status, RolloutState, SampleParams
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.rollout.controller import RolloutController, WorkerInfo
-from xtuner.v1.rl.rollout.utils import RolloutHealthChecker, SessionRouter
+from xtuner.v1.rl.rollout.utils import (
+    PartialRolloutHandler,
+    RolloutHealthChecker,
+    SessionRouter,
+)
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers, asyncio_run
 
 MODEL_PATH = os.environ.get("ROLLOUT_MODEL_PATH", "")
 RESOURCE_MAP = {"npu": "NPU", "cuda": "GPU"}
 TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
+
+
+class _FakeRemoteMethod:
+    def __init__(self, name, call_log):
+        self.name = name
+        self.call_log = call_log
+
+    def remote(self):
+        self.call_log.append((self.name, "remote"))
+        return self.name
+
+
+class _FakeWorker:
+    def __init__(self):
+        self.call_log = []
+        self.offload = _FakeRemoteMethod("offload", self.call_log)
+        self.shutdown = _FakeRemoteMethod("shutdown", self.call_log)
+
+
+class TestRolloutHealthChecker(unittest.TestCase):
+    def _build_checker(self, workers_info):
+        config = SimpleNamespace(health_check_interval_seconds=10, health_check_failure_threshold=1)
+        return RolloutHealthChecker(config, workers_info)
+
+    def test_shutdown_runs_when_offload_fails(self):
+        worker = _FakeWorker()
+        workers_info = {0: SimpleNamespace(actor=worker, url="http://worker-0", is_active=True)}
+        checker = self._build_checker(workers_info)
+
+        async def unhealthy_worker(*args, **kwargs):
+            return False
+
+        def ray_get(ref, timeout=None):
+            worker.call_log.append((ref, "get"))
+            if ref == "offload":
+                raise RuntimeError("offload failed")
+            return None
+
+        with (
+            patch("xtuner.v1.rl.rollout.utils.check_worker_health", side_effect=unhealthy_worker),
+            patch("xtuner.v1.rl.rollout.utils.ray.get", side_effect=ray_get),
+        ):
+            checker.run_once()
+
+        self.assertFalse(workers_info[0].is_active)
+        self.assertEqual(
+            worker.call_log,
+            [
+                ("offload", "remote"),
+                ("offload", "get"),
+                ("shutdown", "remote"),
+                ("shutdown", "get"),
+            ],
+        )
+
+    def test_inactive_worker_is_not_cleaned_up_again(self):
+        worker = _FakeWorker()
+        workers_info = {0: SimpleNamespace(actor=worker, url="http://worker-0", is_active=False)}
+        checker = self._build_checker(workers_info)
+
+        with (
+            patch("xtuner.v1.rl.rollout.utils.check_worker_health") as check_worker_health_mock,
+            patch("xtuner.v1.rl.rollout.utils.ray.get") as ray_get_mock,
+        ):
+            checker.run_once()
+
+        check_worker_health_mock.assert_not_called()
+        ray_get_mock.assert_not_called()
+        self.assertEqual(worker.call_log, [])
+
+
+class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
+    async def test_postprocess_frees_old_routed_expert_refs_after_concat(self):
+        class FakeObjectRef:
+            pass
+
+        history_ref = FakeObjectRef()
+        cur_ref = FakeObjectRef()
+        concat_ref = FakeObjectRef()
+        rollout_state = RolloutState(
+            message=[],
+            response="old",
+            response_ids=[1, 2],
+            logprobs=[0.1, 0.2],
+            routed_experts=history_ref,
+            status=Status.ABORTED,
+        )
+
+        async def resolve_routed_experts(value):
+            if value is history_ref:
+                return [[1], [2]]
+            if value is cur_ref:
+                return [[1], [2], [3]]
+            raise AssertionError(f"unexpected routed_experts value: {value}")
+
+        with (
+            patch("xtuner.v1.rl.rollout.utils.RayObjectRef", FakeObjectRef),
+            patch("xtuner.v1.rl.rollout.utils._resolve_routed_experts", side_effect=resolve_routed_experts),
+            patch("xtuner.v1.rl.rollout.utils.ray.put", return_value=concat_ref) as ray_put,
+            patch("xtuner.v1.rl.rollout.utils.free_object_refs") as free_object_refs,
+        ):
+            out = await PartialRolloutHandler().postprocess(
+                rollout_state,
+                response="new",
+                response_ids=[3],
+                logprobs=[0.3],
+                routed_experts=cur_ref,
+                finish_reason="abort",
+                status=Status.ABORTED,
+                enable_partial_rollout=True,
+            )
+
+        self.assertIs(out.routed_experts, concat_ref)
+        ray_put.assert_called_once_with([[1], [2], [3]])
+        free_object_refs.assert_called_once_with([history_ref, cur_ref])
+
 
 class TestRolloutControllerRecover(unittest.TestCase):
     @classmethod

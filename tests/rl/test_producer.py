@@ -190,10 +190,10 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             nonlocal spawn_count
             spawn_count += 1
 
-            async def wait_forever():
-                await asyncio.Event().wait()
+            async def done():
+                return "done"
 
-            return asyncio.create_task(wait_forever())
+            return asyncio.create_task(done())
 
         self.assertFalse(
             await pending_tasks.schedule_one(max_pending=0, should_abort=lambda: False, spawn_one=spawn_one)
@@ -209,23 +209,9 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(spawn_count, 1)
 
-        self.assertEqual(await pending_tasks.cancel_all(), 1)
-        self.assertEqual(pending_tasks.count(), 0)
-
-    async def test_pending_tasks_cancel_all_clears_before_wait_claims(self):
-        pending_tasks = _PendingTasks()
-
-        async def spawn_one():
-            async def wait_forever():
-                await asyncio.Event().wait()
-
-            return asyncio.create_task(wait_forever())
-
-        self.assertTrue(
-            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
-        )
-        self.assertEqual(await pending_tasks.cancel_all(), 1)
-        self.assertEqual(await pending_tasks.wait_and_claim(timeout_s=0), set())
+        await asyncio.sleep(0)
+        claimed = await pending_tasks.claim_ready()
+        self.assertEqual(len(claimed), 1)
         self.assertEqual(pending_tasks.count(), 0)
 
     async def test_sampler_with_replay_buffer(self):
@@ -335,6 +321,40 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(final_data), 2)
         self.assertEqual(final_data[0][0].id, 0)
         self.assertEqual(final_data[1][0].id, 1)
+
+    async def test_sync_produce_strategy_aborts_and_collects_early_stop_pending_tasks(self):
+        task_name = "test_sync_early_stop"
+        mock_agent_loop = self._build_agent_loop({0: 0.0, 1: 0.05})
+        produce_strategy_cfg = SyncProduceStrategyConfig(
+            should_continue_fn=lambda completed_sample_count, task_batch_size: completed_sample_count < 1
+        )
+        sampler = self._build_sampler()
+        strategy = produce_strategy_cfg.build()
+
+        ctx = self._build_context(
+            strategy,
+            task_name,
+            mock_agent_loop,
+            sampler,
+            batch_size=2,
+            train_step=4,
+            model_step=3,
+            progress=self._build_progress(task_name, target=2, train_step=4),
+        )
+        status = await strategy.produce_batch(ctx)
+
+        self.assertEqual(status, ProduceBatchStatus.NORMAL)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)
+        self.assertGreater(strategy.pending_task_count(), 0)
+        mock_agent_loop.rollout_ctl.pause_generation.remote.assert_not_awaited()
+
+        pause_time_s = await strategy.pause_produce(ctx)
+
+        self.assertGreaterEqual(pause_time_s, 0.0)
+        self.assertEqual(strategy.pending_task_count(), 0)
+        self.assertEqual(mock_agent_loop.rollout_ctl.pause_generation.remote.await_count, 1)
+        final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
+        self.assertEqual(len(final_data), 2)
 
     async def test_async_produce_strategy(self):
         # 这个async_produce_strategy的测试主要验证超发逻辑 + staleness 优先get的逻辑
@@ -705,14 +725,14 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         aborted = await self.replay_buffer.count(task_name, Status.ABORTED)
         expired = await self.replay_buffer.count(task_name, Status.EXPIRED)
         self.assertEqual(completed + aborted + expired, 3)
+        self.assertEqual(mock_agent_loop.rollout_ctl.pause_generation.remote.await_count, 1)
 
-    async def test_async_produce_strategy_pause_produce_cancels_all_on_timeout(self):
-        task_name = "test_cleanup_timeout"
-        mock_agent_loop = self._build_agent_loop({0: 0.01, 1: 60.0, 2: 60.0})
+    async def test_async_produce_strategy_pause_produce_collects_without_cancelling(self):
+        task_name = "test_cleanup_without_cancel"
+        mock_agent_loop = self._build_agent_loop({0: 0.01, 1: 0.03, 2: 0.03})
         produce_strategy_cfg = AsyncProduceStrategyConfig(over_sample_threshold=2.0, enable_partial_rollout=True)
         sampler = self._build_sampler()
         strategy = produce_strategy_cfg.build()
-        strategy.cleanup_task_time = 0
         progress = self._build_progress(task_name, target=1)
 
         ctx = self._build_context(
@@ -733,7 +753,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         completed = await self.replay_buffer.count(task_name, Status.COMPLETED)
         aborted = await self.replay_buffer.count(task_name, Status.ABORTED)
         expired = await self.replay_buffer.count(task_name, Status.EXPIRED)
-        self.assertEqual(completed + aborted + expired, 1)
+        self.assertEqual(completed + aborted + expired, 3)
+        self.assertEqual(mock_agent_loop.rollout_ctl.pause_generation.remote.await_count, 1)
 
     async def test_async_produce_strategy_returns_update_abort_without_sampling(self):
         task_name = "test_update_abort"
