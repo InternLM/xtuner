@@ -756,6 +756,8 @@ class BaseRLTrainer:
                 pack_max_length=self._train_worker_cfg.pack_max_length,
                 rollout_idx=train_step,
             )
+        if self._cpu_resource_manager is not None:
+            self._cpu_resource_manager.log_registered_summary()
         return {
             "data_info": data_info,
             "workers_log_item": workers_log_item,
