@@ -1,7 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-import importlib
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 import torch
 import torch.nn.functional as F
@@ -41,61 +40,32 @@ def _all_to_all_out(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
 
 
-def _pin_fla_autotune_configs() -> None:
-    # 确定性模式下，不让 FLA 依据本地 benchmark/cache 选择不同 Triton 配置。
-    kernel_groups = {
-        "fla.modules.fused_norm_gate": (
-            "layer_norm_gated_fwd_kernel",
-            "layer_norm_gated_fwd_kernel1",
-            "layer_norm_gated_bwd_kernel",
-            "layer_norm_gated_bwd_kernel1",
-        ),
-        "fla.modules.l2norm": (
-            "l2norm_fwd_kernel",
-            "l2norm_fwd_kernel1",
-            "l2norm_bwd_kernel",
-            "l2norm_bwd_kernel1",
-        ),
-        "fla.ops.common.chunk_delta_h": (
-            "chunk_gated_delta_rule_fwd_kernel_h_blockdim64",
-            "chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64",
-        ),
-        "fla.ops.common.chunk_o": (
-            "chunk_fwd_kernel_o",
-            "chunk_bwd_kernel_dqkwg",
-            "chunk_bwd_kernel_dv",
-            "chunk_bwd_kernel_dv_local",
-        ),
-        "fla.ops.common.chunk_scaled_dot_kkt": ("chunk_scaled_dot_kkt_fwd_kernel",),
-        "fla.ops.gated_delta_rule.wy_fast": ("recompute_w_u_fwd_kernel", "prepare_wy_repr_bwd_kernel"),
-        "fla.ops.utils.cumsum": ("chunk_local_cumsum_scalar_kernel", "chunk_local_cumsum_vector_kernel"),
-        "fla.ops.utils.solve_tril": (
-            "solve_tril_16x16_kernel",
-            "merge_16x16_to_32x32_inverse_kernel",
-            "merge_16x16_to_64x64_inverse_kernel",
-        ),
-    }
+def _patch_triton_autotune_for_determinism() -> None:
+    # 在导入 FLA 前改 Triton 装饰器，避免依赖 FLA 内部 kernel 名。
+    import triton
 
-    for module_name, kernel_names in kernel_groups.items():
-        module = importlib.import_module(module_name)
-        for kernel_name in kernel_names:
-            kernel = getattr(module, kernel_name, None)
-            autotuner = getattr(kernel, "fn", kernel)
-            configs = getattr(autotuner, "configs", None)
-            if not configs:
-                continue
-            assert autotuner is not None
-            autotuner.configs = configs[:1]
-            autotuner.cache_results = False
-            if hasattr(autotuner, "cache"):
-                autotuner.cache.clear()
+    original_autotune = triton.autotune
+    if getattr(original_autotune, "_xtuner_deterministic_patched", False):
+        return
+
+    def deterministic_autotune(configs, *args, **kwargs):
+        if configs:
+            configs = configs[:1]
+        kwargs["cache_results"] = False
+        return original_autotune(configs, *args, **kwargs)
+
+    patched = cast(Any, deterministic_autotune)
+    patched._xtuner_deterministic_patched = True
+    patched._xtuner_original_autotune = original_autotune
+    triton.autotune = deterministic_autotune
+
+
+if XTUNER_DETERMINISTIC:
+    _patch_triton_autotune_for_determinism()
 
 
 try:
     from fla.modules import FusedRMSNormGated as FLA_FusedRMSNormGated
-
-    if XTUNER_DETERMINISTIC:
-        _pin_fla_autotune_configs()
 
     class FusedRMSNormGated(FLA_FusedRMSNormGated):
         def forward(
