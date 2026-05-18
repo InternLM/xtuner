@@ -1,7 +1,9 @@
+import asyncio
 import json
 import os
 import random
 import re
+import time
 from pathlib import Path
 from shutil import rmtree
 from typing import Any, List, cast
@@ -35,7 +37,7 @@ from xtuner.v1.rl.replay_buffer import (
 )
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.trainer.controller import TrainingController
+from xtuner.v1.rl.trainer.controller import ColateItem, TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
 from xtuner.v1.rl.utils import (
     AcceleratorResourcesConfig,
@@ -88,6 +90,7 @@ def _parse_debug_rollout_step(path: Path) -> int:
 
 
 class TrainInfo(TypedDict, total=False):
+    data_batches: list[ColateItem]
     data_info: dict[str, float]
     workers_log_item: list[WorkerLogItem]
 
@@ -704,6 +707,7 @@ class BaseRLTrainer:
             train_step=1,
             model_step=0,
         )
+        await self.eval_agent_loop_manager.pause_produce(use_global_progress=False)
         if XTUNER_DETERMINISTIC:
             eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
                 eval_produce_result.rollout_states
@@ -713,14 +717,12 @@ class BaseRLTrainer:
         tb_scores = {f"eval/{k}": v for k, v in eval_metrics.items()}
         self._exp_tracker.add_scalars(tag_scalar_dict=tb_scores, global_step=0)
 
-    def _train_one_batch(
+    def _prepare_train_batch(
         self,
         train_batch: list[list[RolloutState]],
         train_step: int,
         step_timer_dict: dict,
         *,
-        offload_rollout_before_train: bool = False,
-        onload_train_before_train: bool = False,
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ) -> TrainInfo:
@@ -733,14 +735,6 @@ class BaseRLTrainer:
         self._save_trajectories(train_batch, train_trajectory_path)
         self.logger.info(f"Train step {train_step} train trajectories saved to {train_trajectory_path}")
 
-        # 共卡需要先释放 rollout，再把训练 worker onload；非共卡不走这两个动作。
-        if offload_rollout_before_train:
-            ray.get(self.rollout_controller.offload.remote())
-        if onload_train_before_train:
-            with timer("onload", step_timer_dict):
-                self.train_controller.onload(target="all")
-                self.logger.info("Training controller loaded")
-
         with timer("prepare_data", step_timer_dict):
             data_batches, data_info = self._prepare_train_data(
                 train_batch,
@@ -749,17 +743,43 @@ class BaseRLTrainer:
                 raw_rewards_count=raw_rewards_count,
             )
         self.logger.info(f"Prepared {len(data_batches)} training data batches")
+        return {"data_batches": data_batches, "data_info": data_info}
 
-        with timer("training", step_timer_dict):
-            workers_log_item: list[WorkerLogItem] = self.train_controller.fit(
-                data_batches,
-                pack_max_length=self._train_worker_cfg.pack_max_length,
-                rollout_idx=train_step,
+    async def _prepare_train_batch_and_await_pause(
+        self,
+        train_batch: list[list[RolloutState]],
+        train_step: int,
+        step_timer_dict: dict,
+        *,
+        use_global_progress: bool,
+        raw_rewards_sum: float = 0.0,
+        raw_rewards_count: int = 0,
+    ) -> tuple[TrainInfo, float]:
+        overlap_start = time.perf_counter()
+
+        async def pause_produce_once() -> float:
+            with timer("pause_produce", step_timer_dict):
+                return await self.agent_loop_manager.pause_produce(use_global_progress=use_global_progress)
+
+        pause_task = asyncio.create_task(pause_produce_once())
+        await asyncio.sleep(0)
+        try:
+            prepared_train_info = self._prepare_train_batch(
+                train_batch,
+                train_step,
+                step_timer_dict,
+                raw_rewards_sum=raw_rewards_sum,
+                raw_rewards_count=raw_rewards_count,
             )
-        return {
-            "data_info": data_info,
-            "workers_log_item": workers_log_item,
-        }
+        except BaseException:
+            pause_task.cancel()
+            await asyncio.gather(pause_task, return_exceptions=True)
+            raise
+        pause_time_s = await pause_task
+        overlap_time_s = time.perf_counter() - overlap_start
+        step_timer_dict["prepare_and_pause"] = overlap_time_s
+        self.logger.info(f"Prepared train batch and paused production in {overlap_time_s:.2f}s.")
+        return prepared_train_info, pause_time_s
 
     async def _run_evaluation(self, train_step: int) -> dict[str, float]:
         eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
@@ -767,6 +787,7 @@ class BaseRLTrainer:
             train_step=1,
             model_step=0,
         )
+        await self.eval_agent_loop_manager.pause_produce(use_global_progress=False)
         if XTUNER_DETERMINISTIC:
             eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
                 eval_produce_result.rollout_states
@@ -1218,15 +1239,31 @@ class RLColocateTrainer(BaseRLTrainer):
                 )
 
                 if not self._debug_rollout:
-                    train_log_info = self._train_one_batch(
-                        train_batch,
-                        train_step,
-                        step_timer_dict,
-                        offload_rollout_before_train=True,
-                        onload_train_before_train=True,
-                        raw_rewards_sum=produce_result.raw_rewards_sum,
-                        raw_rewards_count=produce_result.raw_rewards_count,
+                    prepared_train_info, pause_time_s = asyncio_run(
+                        self._prepare_train_batch_and_await_pause(
+                            train_batch,
+                            train_step,
+                            step_timer_dict,
+                            use_global_progress=False,
+                            raw_rewards_sum=produce_result.raw_rewards_sum,
+                            raw_rewards_count=produce_result.raw_rewards_count,
+                        )
                     )
+                    produce_result.group_gen_pause_time_s = pause_time_s
+                    ray.get(self.rollout_controller.offload.remote())
+                    with timer("onload", step_timer_dict):
+                        self.train_controller.onload(target="all")
+                        self.logger.info("Training controller loaded")
+                    with timer("training", step_timer_dict):
+                        workers_log_item: list[WorkerLogItem] = self.train_controller.fit(
+                            prepared_train_info["data_batches"],
+                            pack_max_length=self._train_worker_cfg.pack_max_length,
+                            rollout_idx=train_step,
+                        )
+                    train_log_info: TrainInfo = {
+                        "data_info": prepared_train_info["data_info"],
+                        "workers_log_item": workers_log_item,
+                    }
 
                     weights_synced = self._sync_weights_and_save(train_step, step_timer_dict)
                     if weights_synced:
@@ -1237,6 +1274,13 @@ class RLColocateTrainer(BaseRLTrainer):
                         with timer("evaluation", step_timer_dict):
                             eval_log_info.update(asyncio_run(self._run_evaluation(train_step)))
                 else:
+                    with timer("pause", step_timer_dict):
+                        pause_time_s = asyncio_run(
+                            self.agent_loop_manager.pause_produce(
+                                use_global_progress=False,
+                            )
+                        )
+                        produce_result.group_gen_pause_time_s = pause_time_s
                     self._save_debug_rollout_batch(train_batch, train_step)
                     train_log_info = {}
                     eval_log_info = {}
@@ -1252,13 +1296,21 @@ class RLColocateTrainer(BaseRLTrainer):
             with timer("step", step_timer_dict):
                 with timer("load_debug_rollout", step_timer_dict):
                     train_batch = self._load_debug_rollout_batch(train_step)
-                train_log_info = self._train_one_batch(
+                prepared_train_info = self._prepare_train_batch(
                     train_batch,
                     train_step,
                     step_timer_dict,
-                    offload_rollout_before_train=False,
-                    onload_train_before_train=False,
                 )
+                with timer("training", step_timer_dict):
+                    workers_log_item: list[WorkerLogItem] = self.train_controller.fit(
+                        prepared_train_info["data_batches"],
+                        pack_max_length=self._train_worker_cfg.pack_max_length,
+                        rollout_idx=train_step,
+                    )
+                train_log_info: TrainInfo = {
+                    "data_info": prepared_train_info["data_info"],
+                    "workers_log_item": workers_log_item,
+                }
                 eval_log_info: dict[str, float] = {}
                 produce_result = ProduceBatchResult(rollout_states=train_batch)
 
@@ -1408,22 +1460,56 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             "RLDisaggregatedTrainer expects get_batch() to return non-empty rollout_states "
                             "unless status is EXPIRED_BATCH."
                         )
-                        train_log_info = self._train_one_batch(
-                            train_batch,
-                            train_step,
-                            step_timer_dict,
-                            raw_rewards_sum=produce_result.raw_rewards_sum,
-                            raw_rewards_count=produce_result.raw_rewards_count,
-                        )
+                        if need_sync:
+                            prepared_train_info, pause_time_s = await self._prepare_train_batch_and_await_pause(
+                                train_batch,
+                                train_step,
+                                step_timer_dict,
+                                use_global_progress=True,
+                                raw_rewards_sum=produce_result.raw_rewards_sum,
+                                raw_rewards_count=produce_result.raw_rewards_count,
+                            )
+                            produce_result.group_gen_pause_time_s = pause_time_s
+                            with timer("training", step_timer_dict):
+                                workers_log_item: list[WorkerLogItem] = self.train_controller.fit(
+                                    prepared_train_info["data_batches"],
+                                    pack_max_length=self._train_worker_cfg.pack_max_length,
+                                    rollout_idx=train_step,
+                                )
+                            train_log_info = {
+                                "data_info": prepared_train_info["data_info"],
+                                "workers_log_item": workers_log_item,
+                            }
+                        else:
+                            prepared_train_info = self._prepare_train_batch(
+                                train_batch,
+                                train_step,
+                                step_timer_dict,
+                                raw_rewards_sum=produce_result.raw_rewards_sum,
+                                raw_rewards_count=produce_result.raw_rewards_count,
+                            )
+                            with timer("training", step_timer_dict):
+                                workers_log_item = self.train_controller.fit(
+                                    prepared_train_info["data_batches"],
+                                    pack_max_length=self._train_worker_cfg.pack_max_length,
+                                    rollout_idx=train_step,
+                                )
+                            train_log_info = {
+                                "data_info": prepared_train_info["data_info"],
+                                "workers_log_item": workers_log_item,
+                            }
                     else:
                         self.logger.info(
                             "Skip train step because rollout model is expired; prioritize weight sync first."
                         )
 
                     if need_sync:
-                        # 同步前先暂停后台 producer，避免 save/sync 时还有 pending rollout 继续写 buffer。
-                        with timer("pause_produce", step_timer_dict):
-                            await self.agent_loop_manager.pause_produce(use_global_progress=True)
+                        if produce_result.status == ProduceBatchStatus.EXPIRED_BATCH:
+                            # expired batch 没有训练侧 CPU 准备可以并行，仍需先收口后台 producer。
+                            with timer("pause_produce", step_timer_dict):
+                                await self.agent_loop_manager.pause_produce(
+                                    use_global_progress=True,
+                                )
 
                         await self._sync_weights_and_save(train_step, step_timer_dict)
 

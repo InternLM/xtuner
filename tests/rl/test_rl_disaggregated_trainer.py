@@ -68,7 +68,10 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         )
         Path(trainer.exp_dir).mkdir(parents=True, exist_ok=True)
         trainer.agent_loop_manager = agent_loop_manager
-        trainer.eval_agent_loop_manager = SimpleNamespace(produce_batch=AsyncMock())
+        trainer.eval_agent_loop_manager = SimpleNamespace(
+            produce_batch=AsyncMock(),
+            pause_produce=AsyncMock(return_value=0.25),
+        )
         trainer.evaluator = MagicMock(eval_batch_size=1, run=MagicMock(return_value={"acc": 1.0}))
         trainer._exp_tracker = MagicMock()
         trainer._prepare_train_data = MagicMock(
@@ -90,6 +93,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             onload_kvcache=SimpleNamespace(remote=MagicMock(return_value="onload_kvcache")),
             pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause_generation")),
             continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue_generation")),
+            get_rollout_metadata=SimpleNamespace(remote=MagicMock(return_value={"server_url_dict": {}})),
         )
         return trainer
 
