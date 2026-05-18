@@ -10,7 +10,7 @@ import ray
 from ray import ObjectRef as RayObjectRef
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.utils import asyncio_run, clear_rollout_response_for_rerun, free_object_refs
+from xtuner.v1.rl.utils import asyncio_run, clear_rollout_response_for_rerun
 from xtuner.v1.utils import get_logger
 
 
@@ -327,8 +327,6 @@ class PartialRolloutHandler:
             # 处理routed experts
             history_routed_experts = rollout_state.routed_experts or None
             if history_routed_experts is not None and routed_experts is not None:
-                history_routed_experts_ref = history_routed_experts
-                cur_routed_experts_ref = routed_experts
                 start_time = time.time()
                 history_routed_experts, cur_routed_experts = await asyncio.gather(
                     _resolve_routed_experts(history_routed_experts),
@@ -344,13 +342,13 @@ class PartialRolloutHandler:
                 cur_routed_experts = cur_routed_experts[history_routed_experts_len:]
                 concat_routed_experts = history_routed_experts + cur_routed_experts
                 rollout_state.routed_experts = ray.put(concat_routed_experts)
-                free_object_refs(
-                    [
-                        ref
-                        for ref in (history_routed_experts_ref, cur_routed_experts_ref)
-                        if isinstance(ref, RayObjectRef)
-                    ]
-                )
+                # free_object_refs(
+                #     [
+                #         ref
+                #         for ref in (history_routed_experts_ref, cur_routed_experts_ref)
+                #         if isinstance(ref, RayObjectRef)
+                #     ]
+                # )
                 end_time = time.time()
                 self.logger.debug(
                     f"[PartialRolloutHandler] Postprocess routed_experts concatenation time: {end_time - start_time:.4f} seconds"

@@ -499,7 +499,9 @@ class ProduceStrategy(ABC):
         pause_start = time.perf_counter()
         if self.pending_task_count() == 0:
             return 0.0
-
+        logger.info(
+            f"Start pauseing production for task {ctx.task_name} with {self.pending_task_count()} pending rollout tasks..."
+        )
         await ctx.abort_generation()
         await self._collect_pending_tasks_after_abort(ctx)
         pause_duration = time.perf_counter() - pause_start
