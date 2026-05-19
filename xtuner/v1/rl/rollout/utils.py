@@ -269,15 +269,8 @@ class PartialRolloutHandler:
         self.logger = get_logger(self.__class__.__name__)
 
     def preprocess(self, rollout_state: RolloutState, max_tokens: int) -> RolloutState:
-        if not rollout_state.response_ids:
-            assert not rollout_state.response and not rollout_state.logprobs, (
-                "If response_ids is empty, response and logprobs should also be empty"
-            )
-            # 如果上一轮没有回复，则不需要进行预处理，直接返回原始rollout_state
-            return rollout_state
-
         # Set up token and length variable
-        response_ids = rollout_state.response_ids
+        response_ids = list(rollout_state.response_ids or [])
         prompt_ids = list(rollout_state.prompt_ids or [])
         response_len = len(response_ids)
         prompt_len = len(prompt_ids)
@@ -301,6 +294,7 @@ class PartialRolloutHandler:
         routed_experts: np.ndarray | RayObjectRef | None,
         finish_reason: str,
         status: Status,
+        routed_experts_expect_len: int,
     ) -> RolloutState:
         rollout_state.finish_reason = finish_reason
         rollout_state.status = status
@@ -328,9 +322,12 @@ class PartialRolloutHandler:
             cur_routed_experts = cur_routed_experts[history_routed_experts_len:]
             concat_routed_experts = np.concatenate([history_routed_experts, cur_routed_experts], axis=0)
             rollout_state.routed_experts = ray.put(concat_routed_experts)
-            expected_len = len(cast(list[int], rollout_state.prompt_ids)) + len(current_response_ids) - 1
-            assert len(concat_routed_experts) == expected_len, (
-                f"After concatenation, routed_experts len: {len(concat_routed_experts)}, expected len: {expected_len}, history_routed_experts_len: {history_routed_experts_len}, current_routed_experts_len: {len(cur_routed_experts)}, prompt_ids_len: {len(cast(list[int], rollout_state.prompt_ids))}, response_ids_len: {len(current_response_ids)}"
+            expected_len = len(cast(list[int], rollout_state.prompt_ids)) + len(rollout_state.response_ids) - 1
+            assert expected_len == routed_experts_expect_len, (
+                f"Expected routed_experts len: {expected_len}, routed_experts_expect_len: {routed_experts_expect_len}, prompt_ids_len: {len(cast(list[int], rollout_state.prompt_ids))}, response_ids_len: {len(rollout_state.response_ids)}"
+            )
+            assert len(concat_routed_experts) == routed_experts_expect_len, (
+                f"After concatenation, routed_experts len: {len(concat_routed_experts)}, expected len: {expected_len}, history_routed_experts_len: {history_routed_experts_len}, current_routed_experts_len: {len(cur_routed_experts)}, prompt_ids_len: {len(cast(list[int], rollout_state.prompt_ids))}, response_ids_len: {len(rollout_state.response_ids)}"
             )
             # free_object_refs(
             #     [ref for ref in (history_routed_experts_ref, cur_routed_experts_ref) if isinstance(ref, ray.ObjectRef)]
