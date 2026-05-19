@@ -29,7 +29,6 @@ import ray
 
 
 GENERATE_GROUP = "generate"
-CONTROL_GROUP = "control"
 
 
 @dataclass(frozen=True)
@@ -98,14 +97,12 @@ class SimulatedRolloutWorker:
             "delay_s": self.abort_timeout_s,
         }
 
-    @ray.method(concurrency_group=CONTROL_GROUP)
     async def pause_generation(self) -> dict:
         self.abort_event.set()
         if self.abort_ack_delay_s > 0:
             await asyncio.sleep(self.abort_ack_delay_s)
         return {"started_count": self.started_count}
 
-    @ray.method(concurrency_group=CONTROL_GROUP)
     def get_started_count(self) -> int:
         return self.started_count
 
@@ -114,7 +111,6 @@ class SimulatedRolloutController:
     def __init__(self, workers: list) -> None:
         self.workers = workers
 
-    @ray.method(concurrency_group=CONTROL_GROUP)
     def pause_generation(self) -> dict:
         start = time.perf_counter()
         results = ray.get([worker.pause_generation.remote() for worker in self.workers])
@@ -190,10 +186,8 @@ class TestRolloutPauseSimulation(unittest.TestCase):
         try:
             worker_cls = ray.remote(
                 num_cpus=0,
-                max_concurrency=config.pending_per_worker + 4,
                 concurrency_groups={
                     GENERATE_GROUP: config.pending_per_worker,
-                    CONTROL_GROUP: 4,
                 },
             )(SimulatedRolloutWorker)
             workers = [
@@ -202,10 +196,8 @@ class TestRolloutPauseSimulation(unittest.TestCase):
             ]
             controller_cls = ray.remote(
                 num_cpus=0,
-                max_concurrency=max(4, config.worker_count),
                 concurrency_groups={
                     GENERATE_GROUP: max(1, config.total_pending),
-                    CONTROL_GROUP: max(1, config.worker_count),
                 },
             )(SimulatedRolloutController)
             controller = controller_cls.remote(workers)

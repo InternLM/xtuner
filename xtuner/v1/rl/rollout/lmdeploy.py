@@ -11,7 +11,7 @@ from ray.util.placement_group import placement_group_table
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 
-from .worker import ROLLOUT_CONCURRENCY_GROUP_CONTROL, RolloutConfig, RolloutWorker
+from .worker import RolloutConfig, RolloutWorker
 
 
 SHARED_STORE = "shared_store"
@@ -80,17 +80,14 @@ class LMDeployWorker(RolloutWorker):
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
         self.lmdeploy_actor = None
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def offload(self):
         """Offloads the model weights and KV cache."""
         return self._sleep(level=2)
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def onload_weights(self):
         """Onloads the model weights by waking up the model."""
         return self._wake_up(tags=["weights"])
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def onload_kvcache(self):
         """Onloads the KV cache by waking up the model."""
         return self._wake_up(tags=["kv_cache"])

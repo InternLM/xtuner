@@ -316,9 +316,9 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         result = await multi_task_manager.produce_batch(batch_size=7, train_step=3, model_step=2)
 
         self.assertEqual(result.task_batch_sizes, {"task_a": 5, "task_b": 2, "task_c": 0})
-        # sync produce_batch 在本轮入口恢复 NORMAL，收尾 pause 后保留 UPDATE_WEIGHT_AND_ABORT 到下一轮入口再清理。
-        self.assertEqual(multi_task_manager._status, AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT)
-        self.assertTrue(multi_task_manager._update_event.is_set())
+        # sync produce_batch owns the full colocated lifecycle and returns with the manager ready for the next step.
+        self.assertEqual(multi_task_manager._status, AgentLoopManagerStatus.NORMAL)
+        self.assertFalse(multi_task_manager._update_event.is_set())
         self.assertEqual(multi_task_manager._model_step, 2)
         self.assertEqual(strategy_a.called_batch_sizes, [5])
         self.assertEqual(strategy_b.called_batch_sizes, [2])
@@ -457,7 +457,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy_b.called_batch_sizes, [2])
         self.assertEqual(result.rollout_states, [["b-0"], ["b-1"]])
 
-    async def test_status_returning_strategy_uses_cleanup_and_reconstructs_group_timing_stats(self):
+    async def test_status_returning_strategy_reconstructs_group_timing_stats_without_cleanup(self):
         strategy = _FakeStatusProduceStrategy(status=ProduceBatchStatus.NORMAL, pause_time_s=1.25)
         replay_buffer = _FakeReplayBuffer(
             rollout_states_by_task={
@@ -485,23 +485,21 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         result = await manager.produce_batch(batch_size=2, train_step=7, model_step=6)
 
-        self.assertEqual(strategy.cleanup_call_count, 1)
-        self.assertEqual(len(strategy.cleanup_progresses), 1)
-        self.assertIsNotNone(strategy.cleanup_progresses[0])
-        self.assertEqual(strategy.cleanup_model_steps, [6])
-        self.assertEqual(strategy.cleanup_progresses[0].consumed_samples["task_a"], 2)
+        self.assertEqual(strategy.cleanup_call_count, 0)
+        self.assertEqual(strategy.cleanup_progresses, [])
+        self.assertEqual(strategy.cleanup_model_steps, [])
         self.assertEqual(manager._model_step, 6)
         self.assertEqual(strategy.called_train_steps, [7])
         self.assertEqual(strategy.called_model_steps, [6])
         self.assertEqual(len(strategy.called_update_events), 1)
         self.assertFalse(strategy.called_update_event_states[0])
-        self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT)
-        self.assertTrue(manager._update_event.is_set())
+        self.assertEqual(manager._status, AgentLoopManagerStatus.NORMAL)
+        self.assertFalse(manager._update_event.is_set())
         self.assertEqual(result.group_gen_count, 2)
         self.assertAlmostEqual(result.group_gen_mean_s, 0.75)
         self.assertAlmostEqual(result.group_gen_p50_s, 1.0)
         self.assertAlmostEqual(result.group_gen_p99_s, 1.0)
-        self.assertAlmostEqual(result.group_gen_pause_time_s, 1.25)
+        self.assertAlmostEqual(result.group_gen_pause_time_s, 0.0)
 
     async def test_produce_batch_requires_non_empty_rollout_states(self):
         manager = AgentLoopManager(
@@ -547,7 +545,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(manager._update_event.is_set())
         self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT)
 
-    async def test_pause_produce_validates_progress_selection_before_state_change(self):
+    async def test_pause_produce_rejects_colocated_progress_path_before_state_change(self):
         strategy = _FakeProduceStrategy(cleanup_pause_time_s=2.5)
         manager = AgentLoopManager(
             task_runners=[
@@ -563,13 +561,8 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=_FakeReplayBuffer({}, {}),
         )
 
-        with self.assertRaisesRegex(ValueError, "progress must not be provided"):
-            await manager.pause_produce(use_global_progress=True, progress=object())
-        self.assertFalse(manager._update_event.is_set())
-        self.assertEqual(manager._status, AgentLoopManagerStatus.NORMAL)
-
-        with self.assertRaisesRegex(ValueError, "progress must not be provided"):
-            await manager.pause_produce(use_global_progress=False, progress=object())
+        with self.assertRaisesRegex(ValueError, "disaggregated global progress"):
+            await manager.pause_produce(use_global_progress=False)
         self.assertFalse(manager._update_event.is_set())
         self.assertEqual(manager._status, AgentLoopManagerStatus.NORMAL)
         self.assertEqual(strategy.cleanup_call_count, 0)

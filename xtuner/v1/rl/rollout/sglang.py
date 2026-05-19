@@ -11,7 +11,7 @@ from transformers import AutoConfig, AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.utils import XTUNER_DETERMINISTIC
 
-from .worker import ROLLOUT_CONCURRENCY_GROUP_CONTROL, RolloutConfig, RolloutWorker
+from .worker import RolloutConfig, RolloutWorker
 
 
 class SGLangWorker(RolloutWorker):
@@ -168,22 +168,18 @@ class SGLangWorker(RolloutWorker):
             {"input_ids": input_ids, "sampling_params": sampling_params, "stream": False, "return_logprob": True},
         )
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def offload(self):
         """Offloads the model weights and KV cache."""
         self.flush_cache()
         return self._make_request("release_memory_occupation")
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def onload_weights(self):
         """Onloads the model weights by waking up the model."""
         return self._make_request("resume_memory_occupation", {"tags": ["weights"]})
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def onload_kvcache(self):
         return self._make_request("resume_memory_occupation", {"tags": ["kv_cache"]})
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def pause_generation(self):
         # SGLang PauseGeneration支持三种模式（https://github.com/sgl-project/sglang/blob/8d27ce7371da617a671f62e78dde66d64b7ad6cb/python/sglang/srt/managers/io_struct.py#L1353）：
         # abort    = 丢弃 waiting 和 running 请求，
@@ -192,7 +188,6 @@ class SGLangWorker(RolloutWorker):
         self.receive_abort_request.set()
         return self._make_request("pause_generation", {"mode": "abort"})
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def continue_generation(self):
         # 恢复生成时必须清掉上一轮 abort 标志，否则新请求会在发送前被本地直接标成 ABORTED。
         self.receive_abort_request.clear()

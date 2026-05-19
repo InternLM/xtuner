@@ -385,7 +385,11 @@ class AgentLoopManager:
         # self._status，不要跨 await 缓存局部快照，避免错过同步、过期或结束状态变化。
         self._status = AgentLoopManagerStatus.NORMAL
 
-        # producer / consumer 共享的当前进度。对象引用必须保持稳定；
+        # pause_produce 写入、下一次 get batch 读取并清零的耗时指标。
+        # 只用于消费侧日志/metrics；读写不构成生产正确性依赖。
+        self._pause_time_s = 0.0
+
+        # 非共卡 producer / consumer 共享的绝对累计进度。对象引用必须保持稳定；
         # consumer 原地更新字段，producer / strategy 需要字段值时直接读取 progress.xxx，
         # 不要把字段值复制成跨 await 使用的局部快照。
         self._produce_progress = ProduceProgress.build(self.task_names)
@@ -602,13 +606,19 @@ class AgentLoopManager:
         #
         # 因此调用方必须显式说明是否使用全局 progress：
         # - use_global_progress=True：非共卡后台生产循环在权重同步点前暂停；
-        # - use_global_progress=False：共卡同步 produce_batch 的本次调用收尾，使用已 reset 到本次 batch 的 progress。
-        # 返回值 `pause_time_s` 不是业务语义，而是日志/诊断信息，由 trainer 直接写入当前 batch。
+        # - use_global_progress=False：共卡同步 produce_batch 的本次调用收尾，使用本地 progress。
+        # 返回值 `pause_time_s` 不是业务语义，而是日志/诊断信息，
+        # 供训练侧在下一次消费 batch 时上报。
         # use_global_progress=False 模式会在下一次 produce_batch 入口通过 continue_produce 恢复；
         # use_global_progress=True 模式则由 trainer 在权重同步和评测完成后显式恢复。
-        if progress is not None:
-            raise ValueError("progress must not be provided.")
-        pause_progress = self._produce_progress
+        if use_global_progress:
+            if progress is not None:
+                raise ValueError("progress must not be provided when use_global_progress=True.")
+            pause_progress = self._produce_progress
+        else:
+            if progress is None:
+                raise ValueError("progress must be provided when use_global_progress=False.")
+            pause_progress = progress
 
         # 合法参数确认后，统一拉起 manager 级暂停信号，阻止仍在运行的 produce_batch 继续调度新 rollout。
         self._update_event.set()
@@ -705,6 +715,9 @@ class AgentLoopManager:
         task_batch_sizes: dict[str, int],
         consume_progress: ProduceProgress,
     ) -> ProduceBatchResult:
+        pause_time_s = self._pause_time_s
+        self._pause_time_s = 0.0
+
         self._validate_task_batch_sizes(task_batch_sizes, batch_size)
         batch_by_task, consumed_counts = await self.replay_buffer.take_batch(task_batch_sizes)
         consume_progress.mark_consumed(consumed_counts)
@@ -715,7 +728,7 @@ class AgentLoopManager:
             batch_by_task,
             leftover_counts,
             progress=consume_progress,
-            pause_time_s=0.0,
+            pause_time_s=pause_time_s,
         )
 
     def continue_produce(self, model_step: int) -> None:
@@ -749,10 +762,10 @@ class AgentLoopManager:
     ) -> ProduceBatchResult:
         # `produce_batch()` 是保留给 colocate 路径的同步入口。
         #
-        # 它虽然名字没变，但内部已经改成拆分式：
+        # 它虽然名字没变，但内部已经改成三段式：
         # 1. `_produce_batch_to_buffer()` 只负责生产，把结果写入 replay buffer
-        # 2. `_get_batch_from_buffer()` 把训练 batch 取出来
-        # 3. trainer 显式调用 `pause_produce(use_global_progress=False)` 收尾 pending rollout
+        # 2. `pause_produce()` 显式收尾 pending rollout
+        # 3. `_get_batch_from_buffer()` 再把训练 batch 取出来
         #
         # 这也是为什么这里要求返回非空 batch：
         # - colocate 语义下，调用它就是为了拿一批可训练 completed groups
@@ -770,29 +783,37 @@ class AgentLoopManager:
         rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
         # TODO: put in self.continue_produce()
         await rollout_ctl.continue_generation.remote()  # type: ignore[attr-defined]
-        # 共卡路径不复用非共卡的 paused producer 状态机。
-        # 即使 manager 是从 resume() 恢复出来、当前仍处在 UPDATE_WEIGHT_AND_ABORT，
-        # produce_batch() 也应视作一次独立的同步生产过程，从干净状态开始。
-        #
-        # 共卡路径下，produce_batch() 对应 rollout worker 当前持有的权重版本。
-        self.continue_produce(model_step=model_step)
-        # 共卡 produce_batch 也是消费入口；生产前先刷新 buffer 中已有 completed / aborted。
-        await self._refresh_for_all_tasks(train_step, [Status.COMPLETED, Status.ABORTED])
-        self._produce_progress.reset(self.task_names, current_sizes, train_step)
-        status = await self._produce_batch_to_buffer(
-            task_batch_sizes=current_sizes,
-            progress=self._produce_progress,
-        )
-        result = await self._get_batch_from_buffer(
-            batch_size=batch_size,
-            task_batch_sizes=current_sizes,
-            consume_progress=self._produce_progress,
-        )
-        result.status = status
-        assert result.rollout_states, (
-            "AgentLoopManager.produce_batch() must return non-empty rollout_states for colocated training. "
-            "Use get_batch() for disaggregated empty/expired reads."
-        )
+        try:
+            # 共卡路径不复用非共卡的 paused producer 状态机。
+            # 即使 manager 是从 resume() 恢复出来、当前仍处在 UPDATE_WEIGHT_AND_ABORT，
+            # produce_batch() 也应视作一次独立的同步生产过程，从干净状态开始。
+            #
+            # 共卡路径下，produce_batch() 对应 rollout worker 当前持有的权重版本。
+            self.continue_produce(model_step=model_step)
+            # 共卡 produce_batch 也是消费入口；生产前先刷新 buffer 中已有 completed / aborted。
+            await self._refresh_for_all_tasks(train_step, [Status.COMPLETED, Status.ABORTED])
+            local_progress = ProduceProgress.build_local(self.task_names, current_sizes, train_step)
+            status = await self._produce_batch_to_buffer(
+                task_batch_sizes=current_sizes,
+                progress=local_progress,
+            )
+            await self.pause_produce(
+                use_global_progress=False,
+                progress=local_progress,
+            )
+            result = await self._get_batch_from_buffer(
+                batch_size=batch_size,
+                task_batch_sizes=current_sizes,
+                consume_progress=local_progress,
+            )
+            result.status = status
+            assert result.rollout_states, (
+                "AgentLoopManager.produce_batch() must return non-empty rollout_states for colocated training. "
+                "Use get_batch() for disaggregated empty/expired reads."
+            )
+        finally:
+            # TODO: put in self.pause_produce()
+            await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
 
         self.logger.info(
             f"[AgentLoopManager][{self.name}] produce_batch done "
@@ -848,7 +869,7 @@ class AgentLoopManager:
         # `get_batch()` 是非共卡路径给 trainer 的消费接口。
         #
         # 设计上它和 `produce_batch()` 明确分工：
-        # - `produce_batch()`：colocate，一次调用内完成“生产+取数”，收尾由 trainer 显式调用
+        # - `produce_batch()`：colocate，一次调用内完成“生产+收尾+取数”
         # - `get_batch()`：disagg，等待 replay buffer 准备好当前训练步所需 batch 后再取数
         #
         # 因而这里允许返回空 batch 的唯一合法场景仍然只有：
@@ -941,5 +962,6 @@ class AgentLoopManager:
         self._finish_event = asyncio.Event()
         self._update_event.set()
         self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
+        self._pause_time_s = 0.0
         self._model_step = saved_model_step
         return saved_model_step

@@ -19,12 +19,7 @@ from .parser.factory import build_reasoning_parser, build_tool_call_parser
 from .parser.reasoning_parser import ReasoningParser
 from .parser.tool_parser import ToolCallParser
 from .utils import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthChecker, SessionRouter
-from .worker import (
-    ROLLOUT_CONCURRENCY_GROUP_CONTROL,
-    ROLLOUT_CONCURRENCY_GROUP_GENERATE,
-    RolloutConfig,
-    RolloutWorker,
-)
+from .worker import ROLLOUT_CONCURRENCY_GROUP_GENERATE, RolloutConfig, RolloutWorker
 
 
 ROLLOUT_WORKER_MAX_CONCURRENCY = 2000
@@ -149,7 +144,6 @@ class RolloutController:
         self.logger.info(f"Gateway server started at {url}, capture_folder: {config.capture_folder}")
         return url
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def get_rollout_metadata(self) -> RolloutWorkerMetadata:
         """Get information about the current rollout setup.
 
@@ -182,7 +176,6 @@ class RolloutController:
 
         return tool_call_parser, reasoning_parser
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def get_ready_status(self) -> tuple[bool, dict[str, Any]]:
         with self.worker_info_lock:
             active_workers = sum(1 for info in self.rank2info.values() if info.is_active)
@@ -239,37 +232,30 @@ class RolloutController:
             else:
                 rollout_state.extra_fields.pop("reasoning_text", None)
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def set_enable_partial_rollout(self, enable: bool) -> None:
         """Propagate enable_partial_rollout flag to all active workers."""
         with self.worker_info_lock:
             active_actors = [info.actor for info in self.rank2info.values() if info.is_active]
             ray.get([actor.set_enable_partial_rollout.remote(enable) for actor in active_actors])  # type: ignore[attr-defined]
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def pause_generation(self):
         self.health_checker.pause()
         self._broadcast_to_active_workers("pause_generation")
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def continue_generation(self):
         self.health_checker.resume()
         self._broadcast_to_active_workers("continue_generation")
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def offload(self):
         self._broadcast_to_active_workers("offload")
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def onload(self):
         self._broadcast_to_active_workers("onload_weights")
         self._broadcast_to_active_workers("onload_kvcache")
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def onload_weights(self):
         self._broadcast_to_active_workers("onload_weights")
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def onload_kvcache(self):
         self._broadcast_to_active_workers("onload_kvcache")
 
@@ -380,10 +366,8 @@ class RolloutController:
                 " or XTUNER_USE_SGLANG environment variable."
             )
         return ray.remote(
-            max_concurrency=ROLLOUT_WORKER_MAX_CONCURRENCY,
             concurrency_groups={
                 ROLLOUT_CONCURRENCY_GROUP_GENERATE: ROLLOUT_WORKER_MAX_CONCURRENCY,
-                ROLLOUT_CONCURRENCY_GROUP_CONTROL: ROLLOUT_WORKER_MAX_CONCURRENCY,
             },
         )(worker_cls)
 

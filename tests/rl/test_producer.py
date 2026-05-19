@@ -322,7 +322,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_data[0][0].id, 0)
         self.assertEqual(final_data[1][0].id, 1)
 
-    async def test_sync_produce_strategy_aborts_and_collects_early_stop_pending_tasks(self):
+    async def test_sync_produce_strategy_cleans_early_stop_pending_tasks_before_return(self):
         task_name = "test_sync_early_stop"
         mock_agent_loop = self._build_agent_loop({0: 0.0, 1: 0.05})
         produce_strategy_cfg = SyncProduceStrategyConfig(
@@ -344,13 +344,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         status = await strategy.produce_batch(ctx)
 
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
-        self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)
-        self.assertGreater(strategy.pending_task_count(), 0)
-        mock_agent_loop.rollout_ctl.pause_generation.remote.assert_not_awaited()
-
-        pause_time_s = await strategy.pause_produce(ctx)
-
-        self.assertGreaterEqual(pause_time_s, 0.0)
         self.assertEqual(strategy.pending_task_count(), 0)
         self.assertEqual(mock_agent_loop.rollout_ctl.pause_generation.remote.await_count, 1)
         final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)

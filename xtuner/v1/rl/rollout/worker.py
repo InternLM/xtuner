@@ -50,7 +50,6 @@ if TYPE_CHECKING:
 
 infer_group = Group("inference", help="Inference worker configuration.")
 ROLLOUT_CONCURRENCY_GROUP_GENERATE = "generate"
-ROLLOUT_CONCURRENCY_GROUP_CONTROL = "control"
 
 
 class RolloutConfig(BaseModel):
@@ -375,9 +374,8 @@ class RolloutConfig(BaseModel):
         )
         return active_servers_count, nodes_per_engine
 
-    def get_controller_concurrency(self, placement_group: "PlacementGroup") -> tuple[int, int]:
+    def get_controller_generate_concurrency(self, placement_group: "PlacementGroup") -> int:
         active_worker_count, _ = self.get_active_servers_count(len(placement_group.bundle_specs))
-        control_max_concurrency = active_worker_count
         assert self.rollout_max_batch_size_per_instance is not None, (
             "rollout_max_batch_size_per_instance must be set before building RolloutController."
         )
@@ -386,7 +384,7 @@ class RolloutConfig(BaseModel):
             math.ceil(self.rollout_max_batch_size_per_instance * self.allow_over_concurrency_ratio),
         )
         generate_max_concurrency = active_worker_count * concurrency_per_worker
-        return generate_max_concurrency, control_max_concurrency
+        return generate_max_concurrency
 
     def model_post_init(self, __context: Any) -> None:
         if self.model_name is None:
@@ -458,16 +456,11 @@ class RolloutConfig(BaseModel):
             name="rollout_controller",
             cpu_resources=CPUResourcesConfig(num_workers=num_workers),
         )
-        generate_max_concurrency, control_max_concurrency = self.get_controller_concurrency(placement_group)
-        get_logger().info(
-            f"Calculated RolloutController concurrency - generate: {generate_max_concurrency}, "
-            f"control: {control_max_concurrency}"
-        )
+        generate_max_concurrency = self.get_controller_generate_concurrency(placement_group)
+        get_logger().info(f"Calculated RolloutController generate concurrency: {generate_max_concurrency}")
         return ray.remote(
-            max_concurrency=generate_max_concurrency,
             concurrency_groups={
                 ROLLOUT_CONCURRENCY_GROUP_GENERATE: generate_max_concurrency,
-                ROLLOUT_CONCURRENCY_GROUP_CONTROL: control_max_concurrency,
             },
         )(RolloutController).remote(self, placement_group)
 
@@ -537,7 +530,6 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.partial_rollout_handler = PartialRolloutHandler()
         self.enable_partial_rollout: bool = False
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def set_enable_partial_rollout(self, enable: bool) -> None:
         self.enable_partial_rollout = enable
 
@@ -613,7 +605,6 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.logger.debug(f"Worker {self.rank} server process and its children terminated.")
             return
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     async def pause_generation(self):
         """Pause the worker's generation process."""
         self.receive_abort_request.set()
@@ -635,12 +626,10 @@ class RolloutWorker(SingleAcceleratorWorker):
         while not self.receive_abort_request.is_set():
             await asyncio.sleep(1)
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def continue_generation(self):
         """Resume the worker's generation process."""
         self.receive_abort_request.clear()
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def check_health(self) -> bool:
         """Check the health of the worker's server.
 
