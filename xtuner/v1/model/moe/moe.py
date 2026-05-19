@@ -509,6 +509,7 @@ class MoE(BaseModel):
                         custom_check_fn=lambda x: x.data_ptr()
                         in [hidden_states.data_ptr() for hidden_states in hidden_states_list],
                         prefetch=True,
+                        reserve_pin_memory=True,
                     ):
                         layer_results = decoder_layer(
                             *hidden_states_list,
