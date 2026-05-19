@@ -1,5 +1,5 @@
 import torch
-import types
+import copy
 from .qwen3_vl_config import Qwen3VLBaseConfig
 from xtuner.v1.loss import CELossContext
 import torch.distributed as dist
@@ -12,15 +12,20 @@ from xtuner.v1.model.moe.qwen3 import Qwen3MoE
 from torch.distributed.device_mesh import DeviceMesh
 from xtuner.v1.data_proto.utils import split_for_sequence_parallel
 from xtuner.v1.model import TorchCompileOption, DEFAULT_FLOAT8_CFG
+import torch
+from packaging.version import Version
 from ..base import BaseComposeModel, to_hf_key_list_wrapper
 
 logger = get_logger()
 
-QWEN3VL_COMPILE_CFG: dict[str, TorchCompileOption] = {
-    # "xtuner.v1.model.compose.qwen3_vl.modeling_projector.Qwen3VLProjector.forward": TorchCompileOption(fullgraph=True),
-    "xtuner.v1.model.compose.qwen3_vl.modeling_vision.Qwen3VLVisionLayer.forward": TorchCompileOption(fullgraph=True),
-    **DEFAULT_FLOAT8_CFG,
-}
+if Version(torch.__version__) >= Version("2.9.1"):
+    QWEN3VL_COMPILE_CFG: dict[str, TorchCompileOption] = {
+        "xtuner.v1.model.compose.qwen3_vl.modeling_projector.Qwen3VLProjector.forward": TorchCompileOption(fullgraph=True),
+        "xtuner.v1.model.compose.qwen3_vl.modeling_vision.Qwen3VLVisionLayer.forward": TorchCompileOption(fullgraph=True),
+        **DEFAULT_FLOAT8_CFG,
+    }
+else:
+    QWEN3VL_COMPILE_CFG = copy.deepcopy(DEFAULT_FLOAT8_CFG)
 
 
 class Qwen3VLForConditionalGeneration(BaseComposeModel):
