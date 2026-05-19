@@ -62,11 +62,17 @@ class GetCnt:
 
 
 class SwapTensor:
-    def __init__(self, tensor, key):
+    def __init__(self, tensor, key, tensor_cpu=None):
         self.tensor = tensor
         self.size = tensor.size()
         self.storage_size = tensor.storage().size()
-        self.tensor_cpu = torch.empty(tensor.shape, dtype=tensor.dtype, pin_memory=True, device="cpu")
+        # Reuse a caller-provided pinned CPU buffer when available; otherwise allocate a fresh one.
+        # Reuse is keyed externally (see OffloadManager.get_or_create_pin_memory) so the buffer
+        # survives across iterations and avoids repeated pin_memory allocations.
+        if tensor_cpu is not None:
+            self.tensor_cpu = tensor_cpu
+        else:
+            self.tensor_cpu = torch.empty(tensor.shape, dtype=tensor.dtype, pin_memory=True, device="cpu")
 
         self.is_slice_tensor = tensor.storage().size() != tensor.numel()
         self.stat = "device"
@@ -197,11 +203,24 @@ class OffloadManager(metaclass=SingletonMeta):
         self.device_item = []
         self.getcnt = {}
         self.may_npu_tensors = {}
+        # Cache of reusable pinned CPU buffers keyed by full_key ("{group}_{block}_{tensor_idx}").
+        # Populated only when async_save_on_cpu is constructed with reserve_pin_memory=True;
+        # buffer is reused across iterations as long as shape and dtype still match.
+        self.pin_memory_cache: dict = {}
 
     def get_cnt(self, block_idx, group="default"):
         if group not in self.getcnt:
             self.getcnt[group] = GetCnt()
         return self.getcnt[group].get_cnt(block_idx)
+
+    def get_or_create_pin_memory(self, key, shape, dtype):
+        cached = self.pin_memory_cache.get(key)
+        # Shape or dtype drift (e.g. variable seqlen) invalidates the cached buffer; reallocate.
+        if cached is not None and cached.shape == shape and cached.dtype == dtype:
+            return cached
+        new_tensor = torch.empty(shape, dtype=dtype, pin_memory=True, device="cpu")
+        self.pin_memory_cache[key] = new_tensor
+        return new_tensor
 
     def assert_exist(self, key):
         if key not in self.items:
@@ -300,6 +319,7 @@ class async_save_on_cpu(saved_tensors_hooks):
         group: str = "default",
         custom_check_fn=None,
         prefetch=True,
+        reserve_pin_memory: bool = False,
     ) -> None:
         def _pack_to_cpu(tensor):
             if not base_check_fn(tensor):
@@ -313,8 +333,15 @@ class async_save_on_cpu(saved_tensors_hooks):
             if after_block and (prev_block_idx is not None):
                 OffloadManager().del_npu_tensor(f"{group}_{prev_block_idx}_", d2h_stream)
 
-            swap_tensor = SwapTensor(tensor, key)
             full_key = f"{group}_{key}"
+            # When reserve_pin_memory is enabled, reuse the pinned CPU buffer that was
+            # allocated for the same (group, block, tensor_idx) in a previous iteration.
+            cached_cpu = (
+                OffloadManager().get_or_create_pin_memory(full_key, tensor.shape, tensor.dtype)
+                if reserve_pin_memory
+                else None
+            )
+            swap_tensor = SwapTensor(tensor, key, tensor_cpu=cached_cpu)
 
             should_offload = depth is None or block_idx <= depth - 1
             if should_offload:
