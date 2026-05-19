@@ -718,7 +718,10 @@ class AsyncProduceStrategy(ProduceStrategy):
             return 0.0
 
         rollout_ctl = await get_agent_loop_rollout_ctl(ctx.agent_loop)
-        await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
+        pause_result = await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
+        failed_worker_urls: list[str] = []
+        if isinstance(pause_result, dict):
+            failed_worker_urls = pause_result.get("failed_worker_urls") or []
 
         logger.info(
             f"Pause signal sent for task {ctx.task_name}. Waiting for {self._pending_tasks.count()} pending tasks to complete..."
@@ -728,6 +731,13 @@ class AsyncProduceStrategy(ProduceStrategy):
         aborted_tokens_sum = 0
         aborted_zero_token_count = 0
         while True:
+            if failed_worker_urls:
+                logger.warning(f"Retrying abort request for failed workers: {failed_worker_urls}")
+                retry_result = await rollout_ctl.pause_generation.remote(worker_urls=failed_worker_urls)  # type: ignore[attr-defined]
+                failed_worker_urls = []
+                if isinstance(retry_result, dict):
+                    failed_worker_urls = retry_result.get("failed_worker_urls") or []
+
             elapsed_time = time.perf_counter() - cleanup_start_time
             if elapsed_time > self.PENDING_TASK_COLLECT_TIMEOUT_S:
                 cancelled_count = await self._pending_tasks.cancel_all()

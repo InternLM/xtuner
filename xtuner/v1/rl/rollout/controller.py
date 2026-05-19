@@ -236,9 +236,28 @@ class RolloutController:
             active_actors = [info.actor for info in self.rank2info.values() if info.is_active]
             ray.get([actor.set_enable_partial_rollout.remote(enable) for actor in active_actors])  # type: ignore[attr-defined]
 
-    def pause_generation(self):
-        self.health_checker.pause()
-        self._broadcast_to_active_workers("pause_generation")
+    def pause_generation(self, worker_urls: Optional[List[str]] = None):
+        if worker_urls is None:
+            self.health_checker.pause()
+        target_worker_urls = set(worker_urls) if worker_urls is not None else None
+        with self.worker_info_lock:
+            active_workers = [
+                info
+                for info in self.rank2info.values()
+                if info.is_active and (target_worker_urls is None or info.url in target_worker_urls)
+            ]
+        futures = [info.actor.pause_generation.remote() for info in active_workers]  # type: ignore[attr-defined]
+        results = ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
+        failed_worker_urls = [info.url for info, result in zip(active_workers, results) if result is False]
+        if failed_worker_urls:
+            self.logger.warning(
+                "Abort requests completed. "
+                f"Succeeded: {len(results) - len(failed_worker_urls)}, Failed: {len(failed_worker_urls)}. "
+                f"Failed workers: {failed_worker_urls}"
+            )
+        else:
+            self.logger.info(f"All {len(results)} abort requests sent successfully.")
+        return {"failed_worker_urls": failed_worker_urls}
 
     def cleanup_after_pause(self):
         self._broadcast_to_active_workers("cleanup_after_pause")
