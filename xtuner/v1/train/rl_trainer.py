@@ -2,6 +2,8 @@ import json
 import os
 import random
 import re
+import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from shutil import rmtree
 from typing import Any, List, cast
@@ -90,6 +92,58 @@ def _parse_debug_rollout_step(path: Path) -> int:
 class TrainInfo(TypedDict, total=False):
     data_info: dict[str, float]
     workers_log_item: list[WorkerLogItem]
+
+
+@dataclass(frozen=True)
+class RLThroughputBenchmark:
+    """Throughput metrics exported by RL trainer.
+
+    Keep this dataclass focused on concise, user-facing throughput signals.
+    Large counters and intermediate rates used only for computation should stay
+    as local variables in `_compute_benchmark_metrics`.
+
+    Metrics:
+        sgs means samples per GPU per second, and tgs means tokens per GPU per second.
+
+        e2e_effective_sgs: Run-level E2E effective sample throughput per train
+            worker/GPU.
+            It uses cumulative training-consumed samples since RL training start
+            divided by elapsed wall time from RL training start to current step
+            log time and train worker count.
+        e2e_effective_tgs: Per-train-worker run-level E2E effective token
+            throughput. It uses cumulative training-consumed tokens since RL
+            training start divided by run-level E2E elapsed time and train
+            worker count.
+        effective_sgs: Current step effective sample throughput per train
+            worker/GPU. It
+            uses samples consumed by the current training step divided by the
+            full current step wall time, including rollout/get, prepare,
+            training, sync/save/eval phases that run inside the step timer,
+            and train worker count.
+        effective_tgs: Per-train-worker current step effective token throughput.
+            It uses tokens consumed by the current training step divided by the
+            full current step wall time and train worker count.
+        training_tgs: Per-train-worker training-only token throughput. It uses
+            current step training-consumed tokens divided by `train_controller.fit`
+            time and train worker count.
+        rollout_sgs: Rollout sample throughput per rollout worker/GPU. It uses samples
+            produced by the current rollout window divided by producer
+            `produce_batch` wall time and rollout worker count.
+        rollout_tgs: Per-rollout-worker rollout token throughput. It uses
+            response tokens produced by the current rollout window divided by
+            producer `produce_batch` wall time and rollout worker count.
+    """
+
+    e2e_effective_sgs: float
+    e2e_effective_tgs: float
+    effective_sgs: float
+    effective_tgs: float
+    training_tgs: float
+    rollout_sgs: float
+    rollout_tgs: float
+
+    def to_scalars(self) -> dict[str, float]:
+        return {f"throughput/{key}": value for key, value in asdict(self).items()}
 
 
 def get_train_seq_ctx(
@@ -462,6 +516,11 @@ class BaseRLTrainer:
         self._init_runtime_flags(cfg)
         self._advantage_estimator = cfg.advantage_estimator_config.build()
         self._cpu_resource_manager: CPUResourceManager | None = None
+        self._num_workers = 1.0
+        self._rollout_num_workers = 1.0
+        self._benchmark_start_time_s: float | None = None
+        self._benchmark_training_samples: int = 0
+        self._benchmark_training_tokens: int = 0
 
         self._exp_tracker = get_writer(writer_type=cfg.exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = False
@@ -824,6 +883,7 @@ class BaseRLTrainer:
         advantages_list = []
         prompt_len_list = []
         response_len_list = []
+        training_tokens = 0
 
         data_batches = []
 
@@ -907,6 +967,7 @@ class BaseRLTrainer:
                 advantages_list.extend(actual_advantages[:-1])
 
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
+                training_tokens += len(input_ids)
                 input_ids_t = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
 
                 if logprobs is not None:
@@ -943,6 +1004,8 @@ class BaseRLTrainer:
         raw_rewards_mean = raw_rewards_sum / raw_rewards_count if raw_rewards_count > 0 else rewards_t.mean().item()
         info_dict = {
             "batch_size": len(rewards_list),
+            "training_samples": len(rewards_list),
+            "training_tokens": training_tokens,
             "rewards/mean": rewards_t.mean().item(),
             "rewards/min": rewards_t.min().item(),
             "rewards/max": rewards_t.max().item(),
@@ -960,6 +1023,51 @@ class BaseRLTrainer:
         }
         return data_batches, info_dict
 
+    def _compute_benchmark_metrics(
+        self,
+        data_info: dict[str, float],
+        produce_result: ProduceBatchResult,
+        step_timer_dict: dict,
+        benchmark_end_time_s: float,
+    ) -> RLThroughputBenchmark | None:
+        benchmark_start_time_s = self._benchmark_start_time_s
+        if benchmark_start_time_s is None:
+            return None
+        e2e_s = benchmark_end_time_s - benchmark_start_time_s
+        step_s = step_timer_dict.get("step")
+        training_s = step_timer_dict.get("training")
+        rollout_s = produce_result.produce_time_s or step_timer_dict.get("produce_batch")
+        if e2e_s <= 0 or step_s is None or step_s <= 0 or training_s is None or training_s <= 0:
+            return None
+
+        training_samples = float(data_info.get("training_samples", data_info.get("batch_size", 0.0)))
+        training_tokens = float(data_info.get("training_tokens", 0.0))
+        effective_samples = float(self._benchmark_training_samples)
+        effective_tokens = float(self._benchmark_training_tokens)
+        rollout_samples = float(produce_result.produced_samples)
+        rollout_tokens = float(produce_result.produced_tokens)
+        train_gpu_count = float(getattr(self, "_num_workers", 1.0))
+        if train_gpu_count <= 0:
+            train_gpu_count = 1.0
+        rollout_gpu_count = float(getattr(self, "_rollout_num_workers", train_gpu_count))
+        if rollout_gpu_count <= 0:
+            rollout_gpu_count = 1.0
+
+        e2e_effective_tokens_per_s = effective_tokens / e2e_s
+        effective_tokens_per_s = training_tokens / step_s
+        training_tokens_per_s = training_tokens / training_s
+        rollout_samples_per_s = rollout_samples / rollout_s if rollout_s is not None and rollout_s > 0 else 0.0
+        rollout_tokens_per_s = rollout_tokens / rollout_s if rollout_s is not None and rollout_s > 0 else 0.0
+        return RLThroughputBenchmark(
+            e2e_effective_sgs=effective_samples / e2e_s / train_gpu_count,
+            e2e_effective_tgs=e2e_effective_tokens_per_s / train_gpu_count,
+            effective_sgs=training_samples / step_s / train_gpu_count,
+            effective_tgs=effective_tokens_per_s / train_gpu_count,
+            training_tgs=training_tokens_per_s / train_gpu_count,
+            rollout_sgs=rollout_samples_per_s / rollout_gpu_count,
+            rollout_tgs=rollout_tokens_per_s / rollout_gpu_count,
+        )
+
     def _log_step(
         self,
         train_step: int,
@@ -971,6 +1079,7 @@ class BaseRLTrainer:
         all_scalars = {}
         log_time_str = ""
         trajectory_str = ""
+        throughput_str = ""
         eval_str = ""
         if step_timer_dict:
             all_scalars.update({f"time/{k}": v for k, v in step_timer_dict.items()})
@@ -992,9 +1101,34 @@ class BaseRLTrainer:
         all_scalars["async/filtered_samples"] = produce_result.leftover_filtered
 
         if train_info:
-            all_scalars.update({f"response/{k}": v for k, v in train_info.get("data_info", {}).items()})
+            data_info = train_info.get("data_info", {})
+            training_samples = int(data_info.get("training_samples", data_info.get("batch_size", 0)))
+            training_tokens = int(data_info.get("training_tokens", 0))
+            self._benchmark_training_samples += training_samples
+            self._benchmark_training_tokens += training_tokens
+            benchmark_end_time_s = float(data_info.get("benchmark_end_time_s", time.perf_counter()))
+            benchmark_data_info_keys = {
+                "training_samples",
+                "training_tokens",
+                "benchmark_end_time_s",
+            }
+            response_data_info = {k: v for k, v in data_info.items() if k not in benchmark_data_info_keys}
+            all_scalars.update({f"response/{k}": v for k, v in response_data_info.items()})
+            throughput_benchmark = self._compute_benchmark_metrics(
+                data_info,
+                produce_result,
+                step_timer_dict,
+                benchmark_end_time_s,
+            )
+            if throughput_benchmark is not None:
+                throughput_metrics = throughput_benchmark.to_scalars()
+                all_scalars.update(throughput_metrics)
+                throughput_str = f"\nTrain step {train_step} throughput statistics:\n"
+                throughput_str += "\n".join(
+                    [f"- {k.removeprefix('throughput/'):<25}: {v:.4f}" for k, v in throughput_metrics.items()]
+                )
             trajectory_str = f"\nTrain step {train_step} data statistics:\n"
-            trajectory_str += "\n".join([f"- {k:<25}: {v:.4f}" for k, v in train_info.get("data_info", {}).items()])
+            trajectory_str += "\n".join([f"- {k:<25}: {v:.4f}" for k, v in response_data_info.items()])
             rank0_log_item = train_info["workers_log_item"][0]
             rank0_rollout_is_metrics = rank0_log_item.get("rollout_is_metrics", {})
             rank0_mismatch_metrics = rank0_log_item.get("mismatch_metrics", {})
@@ -1025,7 +1159,9 @@ class BaseRLTrainer:
             all_scalars.update({f"eval/{k}": v for k, v in eval_info.items()})
             eval_str = " ".join([f"{k}: {v:.4f}" for k, v in eval_info.items()])
 
-        self.logger.info(f"Train step {train_step}/{self._total_train_steps}{log_time_str} {trajectory_str} ")
+        self.logger.info(
+            f"Train step {train_step}/{self._total_train_steps}{log_time_str} {trajectory_str} {throughput_str}"
+        )
         if eval_str:
             self.logger.info(f"Eval: {eval_str}")
         self._exp_tracker.add_scalars(tag_scalar_dict=all_scalars, global_step=train_step)
@@ -1112,6 +1248,8 @@ class RLColocateTrainer(BaseRLTrainer):
     # 共卡 trainer 保留自己的资源编排、resume、主循环和权重同步；通用保存、日志仍在 BaseRLTrainer。
     def __init__(self, cfg: RLColocateTrainerConfig):
         self._init_common(cfg, meta_path=self._META_PATH, logger_tag="RLTrainer")
+        self._num_workers = float(cfg.resources.num_workers)
+        self._rollout_num_workers = float(cfg.resources.num_workers)
 
         self._pg = AutoAcceleratorWorkers.build_placement_group(cfg.resources)
         self._cpu_resource_manager = CPUResourceManager(self._pg)
@@ -1192,6 +1330,10 @@ class RLColocateTrainer(BaseRLTrainer):
         if self._enable_initial_evaluate and not self._debug_rollout:
             asyncio_run(self._run_initial_evaluate())
 
+        self._benchmark_start_time_s = time.perf_counter()
+        self._benchmark_training_samples = 0
+        self._benchmark_training_tokens = 0
+
         init_train_step = self._cur_step + 1
         model_step = self._get_colocate_rollout_model_step(init_train_step)
         for train_step in range(init_train_step, self._total_train_steps + 1):
@@ -1227,7 +1369,11 @@ class RLColocateTrainer(BaseRLTrainer):
                         raw_rewards_sum=produce_result.raw_rewards_sum,
                         raw_rewards_count=produce_result.raw_rewards_count,
                     )
+                else:
+                    self._save_debug_rollout_batch(train_batch, train_step)
+                    train_log_info = {}
 
+                if not self._debug_rollout:
                     weights_synced = self._sync_weights_and_save(train_step, step_timer_dict)
                     if weights_synced:
                         model_step = train_step
@@ -1237,14 +1383,16 @@ class RLColocateTrainer(BaseRLTrainer):
                         with timer("evaluation", step_timer_dict):
                             eval_log_info.update(asyncio_run(self._run_evaluation(train_step)))
                 else:
-                    self._save_debug_rollout_batch(train_batch, train_step)
-                    train_log_info = {}
                     eval_log_info = {}
 
             self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
             self._cur_step = train_step
 
     def _fit_debug_train(self) -> None:
+        self._benchmark_start_time_s = time.perf_counter()
+        self._benchmark_training_samples = 0
+        self._benchmark_training_tokens = 0
+
         init_train_step = self._cur_step + 1
         for train_step in range(init_train_step, self._total_train_steps + 1):
             self.logger.info(f"Debug train step {train_step}/{self._total_train_steps} start")
@@ -1299,6 +1447,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
     def __init__(self, cfg: RLDisaggregatedTrainerConfig):
         self._init_common(cfg, meta_path=self._META_PATH, logger_tag="RLDisaggTrainer")
+        self._num_workers = float(cfg.train_resources.num_workers)
+        self._rollout_num_workers = float(cfg.rollout_resources.num_workers)
 
         self._train_pg, self._rollout_pg = self._build_disaggregated_placement_groups(
             train_resources=cfg.train_resources,
@@ -1375,6 +1525,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         if self._enable_initial_evaluate:
             await self._run_initial_evaluate()
+
+        self._benchmark_start_time_s = time.perf_counter()
+        self._benchmark_training_samples = 0
+        self._benchmark_training_tokens = 0
 
         # 后台 producer 只负责持续往 replay buffer 写数据，前台 trainer 通过 get_batch 消费。
         producer_task = create_task(
