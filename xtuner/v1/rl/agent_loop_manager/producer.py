@@ -747,7 +747,9 @@ class AsyncProduceStrategy(ProduceStrategy):
                         f"length: {len(item.response_ids or [])}) after pausing generation."
                     )
                 await ctx.put_generated_group(paused_items)
-        return time.perf_counter() - pause_start
+        pause_time = time.perf_counter() - pause_start
+        logger.info(f"pause_produce completed for task {ctx.task_name} within {pause_time}s.")
+        return pause_time
 
     async def produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:
         if ctx.task_name not in ctx.progress.consumed_samples:

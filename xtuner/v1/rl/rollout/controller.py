@@ -1,4 +1,5 @@
 import asyncio
+import math
 import os
 import threading
 from dataclasses import dataclass
@@ -20,9 +21,6 @@ from .parser.reasoning_parser import ReasoningParser
 from .parser.tool_parser import ToolCallParser
 from .utils import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthChecker, SessionRouter
 from .worker import ROLLOUT_CONCURRENCY_GROUP_GENERATE, RolloutConfig, RolloutWorker
-
-
-ROLLOUT_WORKER_MAX_CONCURRENCY = 2000
 
 
 if TYPE_CHECKING:
@@ -365,9 +363,16 @@ class RolloutController:
                 "Please set XTUNER_USE_LMDEPLOY or XTUNER_USE_VLLM"
                 " or XTUNER_USE_SGLANG environment variable."
             )
+        assert self.config.rollout_max_batch_size_per_instance is not None, (
+            "rollout_max_batch_size_per_instance must be set before building RolloutWorker."
+        )
+        worker_generate_max_concurrency = max(
+            1000,  # Ray async actor default max_concurrency.
+            math.ceil(self.config.rollout_max_batch_size_per_instance * self.config.allow_over_concurrency_ratio),
+        )
         return ray.remote(
             concurrency_groups={
-                ROLLOUT_CONCURRENCY_GROUP_GENERATE: ROLLOUT_WORKER_MAX_CONCURRENCY,
+                ROLLOUT_CONCURRENCY_GROUP_GENERATE: worker_generate_max_concurrency,
             },
         )(worker_cls)
 

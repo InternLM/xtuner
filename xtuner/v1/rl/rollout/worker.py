@@ -379,9 +379,8 @@ class RolloutConfig(BaseModel):
         assert self.rollout_max_batch_size_per_instance is not None, (
             "rollout_max_batch_size_per_instance must be set before building RolloutController."
         )
-        concurrency_per_worker = max(
-            1,
-            math.ceil(self.rollout_max_batch_size_per_instance * self.allow_over_concurrency_ratio),
+        concurrency_per_worker = math.ceil(
+            self.rollout_max_batch_size_per_instance * self.allow_over_concurrency_ratio
         )
         generate_max_concurrency = active_worker_count * concurrency_per_worker
         return generate_max_concurrency
@@ -917,7 +916,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     self.logger.debug(
                         f"Request to {url} did not return within {self.abort_timeout:.2f}s after abort signal."
                     )
-                    await cancel_and_drain(send_task)
+                    await cancel_and_drain([send_task])
                     return HttpRequestResult(
                         error_type=HttpRequestErrorType.REQUEST_ABORTED,
                         url=url,
@@ -928,8 +927,7 @@ class RolloutWorker(SingleAcceleratorWorker):
 
         except asyncio.CancelledError:
             self.logger.debug(f"Request to {url} was cancelled while waiting for the response.")
-            await cancel_and_drain(send_task)
-            await cancel_and_drain(abort_task)
+            await cancel_and_drain([send_task, abort_task])
             self.receive_abort_request.set()
             return HttpRequestResult(error_type=HttpRequestErrorType.REQUEST_ABORTED, url=url, payload=payload)
         except Exception as e:
@@ -937,8 +935,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
             return result
         finally:
-            if abort_task is not None and not abort_task.done():
-                await cancel_and_drain(abort_task)
+            await cancel_and_drain([abort_task])
 
     async def _safe_handle_response(self, rollout_state: RolloutState, http_response: httpx.Response) -> RolloutState:
         uid = rollout_state.message_uid
