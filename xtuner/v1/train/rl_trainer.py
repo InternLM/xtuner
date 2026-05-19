@@ -48,6 +48,7 @@ from xtuner.v1.rl.utils import (
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
+from xtuner.v1.rl.utils.misc import register_to_routedapiproxy
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -1264,7 +1265,7 @@ class RLColocateTrainer(BaseRLTrainer):
                 )
                 self._rollout_config.skip_load_weights = False
             self.rollout_controller = self._rollout_config.build(self._pg)
-            self._maybe_start_gateway(cfg)
+            # self._maybe_start_gateway(cfg)
             replay_buffer = cfg.replay_buffer_config.build()
             self._build_agent_loop_components(cfg, replay_buffer)
             self._cpu_resource_manager.log_registered_summary()
@@ -1294,8 +1295,16 @@ class RLColocateTrainer(BaseRLTrainer):
         self.train_controller.offload(target="all")
 
         self.rollout_controller = self._rollout_config.build(self._pg)
-        self._maybe_start_gateway(cfg)
+        # self._maybe_start_gateway(cfg)
         bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+
+        self.logger.info("registering to routedapiproxy")
+        info_dict = ray.get(self.rollout_controller.get_rollout_metadata.remote())
+        model_name = info_dict["rollout_config"].model_name
+        worker_session_urls = info_dict["worker_session_urls"]
+        for worker_session_url in worker_session_urls:
+            register_to_routedapiproxy(model_name, worker_session_url)
+        self.logger.info("registered to routedapiproxy")
 
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)

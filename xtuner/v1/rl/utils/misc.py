@@ -9,6 +9,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, List, Literal, Union
 
+import requests
 import torch.nn.functional as F
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
@@ -336,3 +337,19 @@ def chat_trace_records_to_rollout_states(
         }
         states.append(normalized)
     return states
+
+
+def register_to_routedapiproxy(model_name: str, api_server_url: str) -> dict:
+    url = "http://s-20260104203038-22bhb-decode.ailab-evalservice.svc:4000/v1/models/new"
+    payload = {
+        "model_name": model_name,
+        "api_key": "sk-admin",
+        "api_base": api_server_url,
+    }
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
