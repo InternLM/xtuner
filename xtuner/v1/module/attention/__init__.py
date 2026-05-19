@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from .attn_outputs import AttnOutputs
+from .dsa import DeepSeekSparseAttention, DSAConfig
 from .gated_deltanet import GatedDeltaNet, GatedDeltaNetConfig
 from .indexer import Indexer, IndexerConfig
 from .mha import MHAConfig, MultiHeadAttention
@@ -13,6 +14,8 @@ __all__ = [
     "MHAConfig",
     "MLAConfig",
     "AttnOutputs",
+    "DSAConfig",
+    "DeepSeekSparseAttention",
     "GatedDeltaNet",
     "GatedDeltaNetConfig",
     "Indexer",
