@@ -12,7 +12,15 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from shutil import rmtree
 from typing import (
-    Annotated, Callable, Literal, Protocol, Sequence, Sized, cast, overload, runtime_checkable,
+    Annotated,
+    Callable,
+    Literal,
+    Protocol,
+    Sequence,
+    Sized,
+    cast,
+    overload,
+    runtime_checkable,
 )
 
 import torch
@@ -400,7 +408,6 @@ class TrainerConfig(BaseModel):
     strict_load: bool = True
     checkpoint_interval: int | None = -1
     checkpoint_maxkeep: int | None = -1
-    checkpoint_save_optimizer: bool = True
     skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
     patch_for_dcp_finish: bool = False
     async_checkpoint: bool = False
@@ -525,7 +532,6 @@ class Trainer:
         strict_load: bool = True,
         checkpoint_interval: int | None = -1,
         checkpoint_maxkeep: int | None = -1,
-        checkpoint_save_optimizer: bool = True,
         skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
         patch_for_dcp_finish: bool = False,
         async_checkpoint: bool = False,
@@ -591,7 +597,6 @@ class Trainer:
 
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
-        self._checkpoint_save_optimizer = checkpoint_save_optimizer
         self._async_checkpoint = async_checkpoint
         self._pending_checkpoint: Future | None = None
         self._snapshot_interval = snapshot_interval
@@ -706,7 +711,6 @@ class Trainer:
             load_checkpoint_path=self._load_checkpoint_cfg.checkpoint_path,
             strict=strict_load,
             intra_layer_micro_batch=intra_layer_micro_batch,
-            async_checkpoint=self._async_checkpoint,
         )
         self._lr_cfg = lr_cfg
         self._lr_scheduler = self.build_lr_scheduler(lr_cfg, self.total_step)
@@ -765,7 +769,6 @@ class Trainer:
             strict_load=config.strict_load,
             checkpoint_interval=config.checkpoint_interval,
             checkpoint_maxkeep=config.checkpoint_maxkeep,
-            checkpoint_save_optimizer=config.checkpoint_save_optimizer,
             skip_checkpoint_validation=config.skip_checkpoint_validation,
             patch_for_dcp_finish=config.patch_for_dcp_finish,
             async_checkpoint=config.async_checkpoint,
@@ -1083,7 +1086,6 @@ class Trainer:
         load_checkpoint_path: str | Path | None,
         intra_layer_micro_batch: int = 1,
         strict: bool = True,
-        async_checkpoint: bool = False,
     ):
         """Build the training engine for the transformer model.
 
@@ -1095,7 +1097,6 @@ class Trainer:
             resume_cfg (ResumeConfig | None): Resume configuration for continuing training.
             intra_layer_micro_batch (int): Intra-layer micro batch size for gradient accumulation.
             strict (bool): Whether to strictly load model weights.
-            async_checkpoint (bool): Whether to create a dedicated gloo process group for async checkpoint.
 
         Returns:
             TrainEngine: Initialized training engine.
@@ -1105,7 +1106,6 @@ class Trainer:
             fsdp_cfg=fsdp_config,
             model_cfg=model_config,
             intra_layer_micro_batch=intra_layer_micro_batch,
-            async_checkpoint=async_checkpoint,
         )
         if model_path is not None and (model_config.dcp_ignore_frozen_params or load_checkpoint_path is None):
             engine.from_hf(hf_path=model_path, strict=strict)
@@ -1173,7 +1173,7 @@ class Trainer:
                 raise RuntimeError("Health check failed, exit training")
             logger.info(f"Health check passed at step {self.cur_step}")
 
-    def _wait_for_pending_checkpoint(self, timeout: int = 300) -> None:
+    def _wait_for_pending_checkpoint(self, timeout: int = 3000) -> None:
         if self._pending_checkpoint is None:
             return
 
@@ -1185,70 +1185,6 @@ class Trainer:
         except TimeoutError:
             future.cancel()
             raise TimeoutError(f"Async checkpoint timed out after {timeout}s")
-
-    def _finalize_checkpoint_metadata(
-        self,
-        checkpoint_path: Path,
-        meta_path: Path,
-        train_state_path: Path,
-        is_snapshot: bool,
-        cur_step: int,
-        cur_epoch: int,
-        total_consumed_tokens: int,
-        train_time_offset: float,
-    ) -> None:
-        # Save train state
-        if self.rank == 0:
-            with train_state_path.open("w") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "cur_step": cur_step,
-                            "cur_epoch": cur_epoch,
-                            "total_consumed_tokens": total_consumed_tokens,
-                            "train_time_offset": train_time_offset,
-                        }
-                    )
-                )
-
-        # Update meta
-        current_exp = self.meta.latest_exp
-        ckp_list = current_exp.checkpoint_list if not is_snapshot else current_exp.snap_checkpoint_list
-        ckp_list.append(str(checkpoint_path))
-        current_exp.cur_step = cur_step
-        current_exp.cur_epoch = cur_epoch
-        current_exp.consumed_tokens = int(total_consumed_tokens)
-        current_exp.history[-1]["end"] = cur_step
-
-        # Delete checkpoints and update meta's checkpoint_list
-        ckp_maxkeep = self._checkpoint_maxkeep if not is_snapshot else 1
-        if ckp_maxkeep is not None and ckp_maxkeep > 0 and len(ckp_list) > ckp_maxkeep:
-            ckp_pop_num = len(ckp_list) - ckp_maxkeep
-            for _ in range(ckp_pop_num):
-                deleted_ckp = ckp_list.pop(0)
-                if self.rank == 0 and Path(deleted_ckp).exists():
-                    rmtree(deleted_ckp)
-
-        # Save meta, must after deleting checkpoints to ensure the checkpoint_list is updated in the meta file
-        if self.rank == 0:
-            with meta_path.open("w") as f:
-                f.write(self.meta.model_dump_json(indent=2))
-
-        dist.barrier()
-
-        if is_snapshot:
-            hooks = self.hooks_config.get_hooks(HookStage.AFTER_SAVE_SNAPSHOT)
-        else:
-            hooks = self.hooks_config.get_hooks(HookStage.AFTER_SAVE_DCP)
-
-        for hook in hooks:
-            hook(
-                checkpoint=checkpoint_path,
-                step=cur_step,
-                epoch=cur_epoch,
-                total_step=self.total_step,
-                total_epoch=self.total_epoch,
-            )
 
     def _maybe_save(self, is_snapshot: bool = False) -> bool:
         ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
@@ -1267,6 +1203,7 @@ class Trainer:
         checkpoint_path = self._get_checkpoint_path(epoch=self._cur_epoch, step=self.cur_step, is_snapshot=is_snapshot)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
+        # Ensure at most one async checkpoint is in flight.
         self._wait_for_pending_checkpoint()
 
         meta_path = self.work_dir / self._META_PATH
@@ -1284,12 +1221,11 @@ class Trainer:
             DEVICE_MODULE.empty_cache()
 
         # Save model and optimizer
-        save_optimizer = self._checkpoint_save_optimizer
         future: Future | None = None
         if self._async_checkpoint and not is_snapshot:
-            future = self._engine.async_save_dcp(weights_dir=weights_path, save_optimizer=save_optimizer)
+            future = self._engine.async_save_dcp(weights_dir=weights_path)
         else:
-            self._engine.save_dcp(weights_dir=weights_path, save_optimizer=save_optimizer)
+            self._engine.save_dcp(weights_dir=weights_path)
 
         # Save dataloader
         self._save_dataloader(dataloader_path)
@@ -1317,16 +1253,58 @@ class Trainer:
 
         dist.barrier()
 
-        self._finalize_checkpoint_metadata(
-            checkpoint_path=checkpoint_path,
-            meta_path=meta_path,
-            train_state_path=train_state_path,
-            is_snapshot=is_snapshot,
-            cur_step=self.cur_step,
-            cur_epoch=self._cur_epoch,
-            total_consumed_tokens=total_consumed_tokens,
-            train_time_offset=self._train_time + self._train_time_offset,
-        )
+        # Save train state
+        if self.rank == 0:
+            with train_state_path.open("w") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "cur_step": self.cur_step,
+                            "cur_epoch": self._cur_epoch,
+                            "total_consumed_tokens": total_consumed_tokens,
+                            "train_time_offset": self._train_time + self._train_time_offset,
+                        }
+                    )
+                )
+
+        # Update meta
+        current_exp = self.meta.latest_exp
+        ckp_list = current_exp.checkpoint_list if not is_snapshot else current_exp.snap_checkpoint_list
+        ckp_list.append(str(checkpoint_path))
+        current_exp.cur_step = self.cur_step
+        current_exp.cur_epoch = self._cur_epoch
+        current_exp.consumed_tokens = int(total_consumed_tokens)
+        current_exp.history[-1]["end"] = self.cur_step
+
+        # Delete checkpoints and update meta's checkpoint_list
+        ckp_maxkeep = self._checkpoint_maxkeep if not is_snapshot else 1
+        if ckp_maxkeep is not None and ckp_maxkeep > 0 and len(ckp_list) > ckp_maxkeep:
+            ckp_pop_num = len(ckp_list) - ckp_maxkeep
+            for _ in range(ckp_pop_num):
+                deleted_ckp = ckp_list.pop(0)
+                if self.rank == 0 and Path(deleted_ckp).exists():
+                    rmtree(deleted_ckp)
+
+        # Save meta, must after deleting checkpoints to ensure the checkpoint_list is updated in the meta file
+        if self.rank == 0:
+            with meta_path.open("w") as f:
+                f.write(self.meta.model_dump_json(indent=2))
+
+        dist.barrier()
+
+        if is_snapshot:
+            hooks = self.hooks_config.get_hooks(HookStage.AFTER_SAVE_SNAPSHOT)
+        else:
+            hooks = self.hooks_config.get_hooks(HookStage.AFTER_SAVE_DCP)
+
+        for hook in hooks:
+            hook(
+                checkpoint=checkpoint_path,
+                step=self.cur_step,
+                epoch=self._cur_epoch,
+                total_step=self.total_step,
+                total_epoch=self.total_epoch,
+            )
 
         return True
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shutil
 import threading
 import time
-from concurrent.futures import Future, wait
+import traceback
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, List, cast
 
@@ -13,7 +15,6 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from safetensors import safe_open
-from torch.distributed.checkpoint.filesystem import FileSystemWriter
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
@@ -37,8 +38,14 @@ from xtuner.v1.model.base import (
     ModelOutputs,
     XTunerBaseModelConfig,
 )
+from xtuner.v1.patch.xtuner_storage import XtunerCacheWriter
 from xtuner.v1.profiler.prober import ProberList
-from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
+from xtuner.v1.utils import (
+    get_device,
+    get_logger,
+    get_torch_device_module,
+    profile_time_and_memory,
+)
 from xtuner.v1.utils.grad_norm import cal_grad_norm
 
 
@@ -139,7 +146,6 @@ class TrainEngine:
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig,
         intra_layer_micro_batch: int = 1,
-        async_checkpoint: bool = False,
     ) -> None:
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
@@ -151,11 +157,6 @@ class TrainEngine:
         self.has_freeze_params = self.__has_freeze_params()
         self._async_checkpoint_pg: dist.ProcessGroup | None = None
         self._async_state_dict_cache: dict[str, Any] | None = None
-        if async_checkpoint:
-            # dcp.async_save() performs collectives from a background thread.
-            # Keep those gloo collectives off the training NCCL process group
-            # to avoid cross-thread communication conflicts.
-            self._async_checkpoint_pg = dist.new_group(backend="gloo")
 
     def __has_freeze_params(self) -> bool:
         has_freeze_params = False
@@ -344,81 +345,137 @@ class TrainEngine:
                 checkpoint_id=weights_dir,
             )
 
+    def _get_async_checkpoint_pg(self) -> dist.ProcessGroup:
+        if self._async_checkpoint_pg is None:
+            # dcp.async_save() performs collectives from a background thread.
+            # Keep those gloo collectives off the training NCCL process group
+            # to avoid cross-thread communication conflicts.
+            self._async_checkpoint_pg = dist.new_group(backend="gloo")
+        return self._async_checkpoint_pg
+
+    @staticmethod
+    def _is_async_checkpoint_daemon_init_error(exc: BaseException) -> bool:
+        message = str(exc)
+        return (
+            "EADDRINUSE" in message
+            or "address already in use" in message
+            or "Checkpoint background process is dead" in message
+        )
+
     def async_save_dcp(
         self,
         weights_dir: Path,
         save_optimizer: bool = True,
     ) -> Future:
+        async_checkpoint_pg = self._get_async_checkpoint_pg()
 
         # Match async HF export semantics: write the DCP payload into a
         # temporary .incomplete directory and commit it only after every rank's
         # async_save future has completed.
         incomplete_dir = weights_dir.with_name(f"{weights_dir.name}.incomplete")
+        if weights_dir.exists():
+            raise FileExistsError(f"Checkpoint directory already exists: {weights_dir}")
         if dist.get_rank() == 0:
             if incomplete_dir.exists():
                 shutil.rmtree(incomplete_dir)
             incomplete_dir.mkdir(parents=True, exist_ok=True)
 
+        # XtunerCacheWriter.stage() creates its staging cache directly in POSIX
+        # shared memory (/dev/shm). PyTorch's ForkingPickler detects
+        # shared-memory tensors and sends fd handles (no data copy) to the
+        # checkpoint process, avoiding PSS amplification.
+        # The shm cache is reused across checkpoints via self._async_state_dict_cache.
         state_dict = self._get_dcp_state_dict(cpu_offload=False, save_optimizer=save_optimizer)
         storage_writer = self._build_async_storage_writer(incomplete_dir, save_optimizer=save_optimizer)
 
+        if dist.get_rank() == 0:
+            logger.info(f"[DCP async_save for {weights_dir}] async_checkpointer_type=process")
+
         t0 = time.time()
-        with profile_time_and_memory(f"[DCP async_save for {weights_dir}]"):
-            dcp_future = dcp.async_save(
-                state_dict,
-                checkpoint_id=incomplete_dir,
-                storage_writer=storage_writer,
-                process_group=self._async_checkpoint_pg,
-            )
 
-        committed_future: Future = Future()
+        def start_async_save() -> Future:
+            async_save_kwargs: dict[str, Any] = {}
+            state_dict_saver = importlib.import_module("torch.distributed.checkpoint.state_dict_saver")
+            async_checkpointer_type = getattr(state_dict_saver, "AsyncCheckpointerType", None)
+            if async_checkpointer_type is not None:
+                async_save_kwargs["async_checkpointer_type"] = async_checkpointer_type.PROCESS
 
-        def commit_async_save(done_future: Future) -> None:
-            def commit() -> None:
+            with profile_time_and_memory(f"[DCP async_save for {weights_dir}]"):
+                return cast(Any, dcp.async_save)(
+                    state_dict,
+                    checkpoint_id=incomplete_dir,
+                    storage_writer=storage_writer,
+                    process_group=async_checkpoint_pg,
+                    **async_save_kwargs,
+                )
+
+        dcp_future = start_async_save()
+
+        def commit_async_save() -> None:
+            nonlocal dcp_future
+            # Retry only PyTorch DCP daemon init port races, such as
+            # EADDRINUSE from TCPStore. Other checkpoint failures still raise.
+            max_daemon_init_attempts = 3
+            for attempt in range(1, max_daemon_init_attempts + 1):
                 try:
-                    done_future.result()
-                    if self._async_checkpoint_pg is not None:
-                        dist.barrier(group=self._async_checkpoint_pg)
-                    if dist.get_rank() == 0:
-                        if weights_dir.exists():
-                            shutil.rmtree(weights_dir)
-                        incomplete_dir.rename(weights_dir)
-                    if self._async_checkpoint_pg is not None:
-                        dist.barrier(group=self._async_checkpoint_pg)
+                    dcp_future.result()
+                    break
                 except BaseException as exc:
-                    elapsed = time.time() - t0
-                    logger.error(f"[DCP async_save for {weights_dir}] failed after {elapsed:.2f}s: {exc}")
-                    if not committed_future.done():
-                        committed_future.set_exception(exc)
-                    return
+                    if attempt == max_daemon_init_attempts or not self._is_async_checkpoint_daemon_init_error(exc):
+                        elapsed = time.time() - t0
+                        logger.error(f"[DCP async_save for {weights_dir}] failed after {elapsed:.2f}s: {exc}")
+                        logger.error(traceback.format_exc())
+                        raise
 
-                elapsed = time.time() - t0
-                logger.info(f"[DCP async_save for {weights_dir}] finished in {elapsed:.2f}s")
-                if not committed_future.done():
-                    committed_future.set_result(None)
+                    if dist.get_rank() == 0:
+                        logger.warning(
+                            "[DCP async_save for %s] checkpoint daemon init failed on attempt %s/%s, retrying: %s",
+                            weights_dir,
+                            attempt,
+                            max_daemon_init_attempts,
+                            exc,
+                        )
+                        if incomplete_dir.exists():
+                            shutil.rmtree(incomplete_dir)
+                        incomplete_dir.mkdir(parents=True, exist_ok=True)
+                    dist.barrier(group=async_checkpoint_pg)
+                    dcp_future = start_async_save()
 
-            threading.Thread(target=commit, daemon=True).start()
+            dist.barrier(group=async_checkpoint_pg)
+            if dist.get_rank() == 0:
+                incomplete_dir.rename(weights_dir)
+            dist.barrier(group=async_checkpoint_pg)
 
-        self._async_state_dict_cache = storage_writer.state_dict_cache
-        dcp_future.add_done_callback(commit_async_save)
-        return committed_future
+            # Propagate the staging cache created by XtunerCacheWriter.stage()
+            # so the next checkpoint reuses the same buffers.
+            self._async_state_dict_cache = storage_writer.state_dict_cache
 
-    def _build_async_storage_writer(self, weights_dir: Path, *, save_optimizer: bool) -> FileSystemWriter:
-        # cache_staged_state_dict keeps pinned staging buffers on the
-        # FileSystemWriter instance. XTuner creates one writer per checkpoint
-        # path, so carry the cache across writers to preserve steady-state
-        # async_save launch performance.
-        if self._async_state_dict_cache is not None:
-            cached_has_optim = "optimizer" in self._async_state_dict_cache
-            if cached_has_optim != save_optimizer:
-                self._async_state_dict_cache = None
+            elapsed = time.time() - t0
+            logger.info(f"[DCP async_save for {weights_dir}] finished in {elapsed:.2f}s")
 
-        storage_writer = FileSystemWriter(weights_dir, cache_staged_state_dict=True)
+        commit_executor = ThreadPoolExecutor(max_workers=1)
+        commit_future = commit_executor.submit(commit_async_save)
+        commit_future.add_done_callback(lambda _: commit_executor.shutdown(wait=False))
+        return commit_future
+
+    def _build_async_storage_writer(self, weights_dir: Path, *, save_optimizer: bool) -> XtunerCacheWriter:
+        # XtunerCacheWriter.stage() builds the staging cache in POSIX shared
+        # memory so ForkingPickler can transfer tensors to the daemon via fd
+        # handles (no copy).
+        # XTuner creates one writer per checkpoint path; carry the cache across
+        # writers via self._async_state_dict_cache to avoid re-allocation.
+        # Keep cache_staged_state_dict=True to preserve steady-state performance.
+
+        if dist.get_rank() == 0:
+            logger.info("[DCP async_save] XtunerCacheWriter cache_staged_state_dict=True")
+
+        storage_writer = XtunerCacheWriter(weights_dir, cache_staged_state_dict=True)
         storage_writer.state_dict_cache = self._async_state_dict_cache
         return storage_writer
 
     def destroy_async_checkpoint_pg(self) -> None:
-        """Destroy the dedicated gloo process group used for async checkpoint."""
+        """Destroy the dedicated gloo process group used for async
+        checkpoint."""
         self._async_state_dict_cache = None
         if self._async_checkpoint_pg is not None:
             if dist.is_available() and dist.is_initialized():
@@ -439,8 +496,8 @@ class TrainEngine:
     ) -> None:
         """Load a DCP checkpoint saved in the merged weights format.
 
-        If the checkpoint was saved without optimizer (checkpoint_save_optimizer=False),
-        only model weights will be loaded regardless of load_states/load_args settings.
+        If the checkpoint does not contain optimizer states, only model weights will be loaded regardless of
+        load_states/load_args settings.
         """
         load_optimizer = load_states or load_args
         state_dict = self._get_dcp_state_dict(cpu_offload=True, save_optimizer=load_optimizer)
@@ -465,6 +522,8 @@ class TrainEngine:
             if not load_args:
                 logger.info("Not loading arg defaults")
                 param_groups = self.optimizer.state_dict()["param_groups"]
+                # Now we only support one param_group. If we want to support different lr for different parameters,
+                # we may use multiple param_groups like:
                 assert len(param_groups) == 1, "Only one param_group is supported now"
                 init_defaults = param_groups[0]
                 init_defaults.pop("params")

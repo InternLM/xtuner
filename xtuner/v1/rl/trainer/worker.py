@@ -5,7 +5,16 @@ import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Iterable, List, Sequence, TypeAlias, TypedDict, cast
+from typing import (
+    TYPE_CHECKING,
+    Dict,
+    Iterable,
+    List,
+    Sequence,
+    TypeAlias,
+    TypedDict,
+    cast,
+)
 
 
 if TYPE_CHECKING:
@@ -192,8 +201,7 @@ class WorkerLogItem(TypedDict):
 
 
 class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
-    _SAVE_OPTIMIZER_DIR = "optimizer"
-    _SAVE_MODEL_DIR = "model"
+    _SAVE_WEIGHTS_DIR = "weights"
     _SAVE_SFT_DATALOADER_DIR = "sft_dataloader"
     _SAVE_SFT_TRAIN_STATE_PATH = "sft_train_state.json"
 
@@ -928,13 +936,12 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
         """Save the DCP checkpoint of the training worker."""
         if not isinstance(checkpoint_path, Path):
             checkpoint_path = Path(checkpoint_path)
-        optimizer_path = checkpoint_path / self._SAVE_OPTIMIZER_DIR
-        model_path = checkpoint_path / self._SAVE_MODEL_DIR
+        weights_path = checkpoint_path / self._SAVE_WEIGHTS_DIR
 
         # Save model and optimizer
         self._engine.save_dcp(
-            model_dir=model_path,
-            optimizer_dir=None if no_save_optimizer else optimizer_path,
+            weights_dir=weights_path,
+            save_optimizer=not no_save_optimizer,
         )
 
         # Save sft dataloader
@@ -973,16 +980,12 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
         if not resume_from.exists():
             raise FileNotFoundError(f"Checkpoint path {resume_from} does not exist.")
 
-        model_path = resume_from / self._SAVE_MODEL_DIR
-        optimizer_path = (
-            resume_from / self._SAVE_OPTIMIZER_DIR
-            if load_checkpoint_cfg.load_optimizer_states or load_checkpoint_cfg.load_optimizer_args
-            else None
-        )
+        weights_path = resume_from / self._SAVE_WEIGHTS_DIR
+        if not weights_path.exists():
+            raise FileNotFoundError(f"Checkpoint at {resume_from} has no '{self._SAVE_WEIGHTS_DIR}/' directory.")
 
         self._engine.load_dcp(
-            model_dir=model_path,
-            optimizer_dir=optimizer_path,
+            weights_dir=weights_path,
             load_states=load_checkpoint_cfg.load_optimizer_states,
             load_args=load_checkpoint_cfg.load_optimizer_args,
         )

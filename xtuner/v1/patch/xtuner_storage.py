@@ -1,17 +1,28 @@
+import fcntl
+import logging
 import os
+import time
 from collections.abc import Sequence
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Optional, Union
 
 import torch
+import torch.distributed as dist
 from packaging import version
 from torch.distributed.checkpoint import FileSystemWriter, Metadata, SavePlan, SavePlanner
 from torch.distributed.checkpoint._extension import (
     StreamTransformExtension,
 )
+from torch.distributed.checkpoint.filesystem import FileSystem
+from torch.distributed.checkpoint.staging import _copy_state_dict, _create_cpu_state_dict
 from torch.distributed.checkpoint.storage import (
     WriteResult,
 )
 from torch.futures import Future
+
+
+logger = logging.getLogger(__name__)
 
 
 # PyTorch 2.7+ introduced _extensions parameter for FileSystemWriter
@@ -45,6 +56,80 @@ def _compare_write_results(write_results: list[WriteResult], other_write_results
 
 def _contains_new_write_results(results: list[list[WriteResult]]) -> bool:
     return any(delta_result for delta_result in results)
+
+
+def _is_rank0() -> bool:
+    return not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
+
+
+def _release_write_lock(fd: int) -> None:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _get_file_write_lock_slots() -> int:
+    return max(0, int(os.environ.get("ASYNC_DCP_FILE_WRITE_LOCK_SLOTS", "0")))
+
+
+def _get_file_write_lock_key(path: Union[str, os.PathLike]) -> str:
+    path = Path(path)
+    parts = path.parts
+    if "checkpoints" in parts:
+        run_root = Path(*parts[: parts.index("checkpoints")])
+    else:
+        run_root = path.parent
+    return str(run_root).replace(os.sep, "_")
+
+
+def _get_file_write_lock_dir() -> str:
+    return "/dev/shm/xtuner_dcp_write_locks"
+
+
+def _acquire_file_write_lock(slots: int, lock_key: str) -> tuple[int, int, float]:
+    os.makedirs(_get_file_write_lock_dir(), exist_ok=True)
+
+    rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+    start_slot = rank % slots
+    start = time.time()
+    while True:
+        for offset in range(slots):
+            slot = (start_slot + offset) % slots
+            lock_path = os.path.join(_get_file_write_lock_dir(), f"{lock_key}.file-slot{slot}.lock")
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd, slot, time.time() - start
+            except BlockingIOError:
+                os.close(fd)
+        time.sleep(0.05)
+
+
+class _FileLockingFileSystem(FileSystem):
+    def __init__(self, slots: int, lock_key: str) -> None:
+        self._slots = slots
+        self._lock_key = lock_key
+
+    @contextmanager
+    def create_stream(self, path: Union[str, os.PathLike], mode: str):
+        if self._slots <= 0 or "w" not in mode:
+            with super().create_stream(path, mode) as stream:
+                yield stream
+            return
+
+        lock_fd, lock_slot, waited = _acquire_file_write_lock(self._slots, self._lock_key)
+        if waited >= 1.0:
+            rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else -1
+            logger.info(
+                "[DCP async_save] acquired file write slot "
+                f"{lock_slot}/{self._slots} after {waited:.2f}s rank={rank} file={path}"
+            )
+        try:
+            with super().create_stream(path, mode) as stream:
+                yield stream
+        finally:
+            _release_write_lock(lock_fd)
 
 
 class XtunerCacheWriter(FileSystemWriter):
@@ -84,8 +169,43 @@ class XtunerCacheWriter(FileSystemWriter):
             overwrite=overwrite,
             **kwargs,
         )
+        file_write_lock_slots = _get_file_write_lock_slots()
+        if file_write_lock_slots > 0:
+            self.fs = _FileLockingFileSystem(file_write_lock_slots, _get_file_write_lock_key(path))
+            if _is_rank0():
+                logger.info(f"[DCP async_save] file-level write lock enabled slots={file_write_lock_slots}")
+
         self._enable_write_result_caching = enable_write_result_caching
         self._cached_write_results_key = cache_key_prefix + self.__class__.__name__
+
+    def stage(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        """Stage tensors into a reusable shared-memory cache for async process
+        saves.
+
+        PyTorch's default BlockingAsyncStager creates a pinned CPU cache when cache_staged_state_dict=True. For async
+        process checkpointing that cache is later handed to a subprocess; if it is not backed by shared memory,
+        multiprocessing has to create/copy shared files during handoff. Creating the long-lived cache directly in shm
+        lets later checkpoints reuse the same storage and update it in place.
+        """
+
+        # The staged state_dict is already CPU-resident. Disable DCP's
+        # overlapping CPU loader so the checkpoint process does not create CUDA
+        # streams or touch GPU memory while writing files.
+        self.per_thread_copy_ahead = 0
+
+        if not self.cache_staged_state_dict:
+            staged_state_dict = _create_cpu_state_dict(state_dict, share_memory=True)
+            return _copy_state_dict(state_dict, staged_state_dict, type_check=self.type_check)
+
+        if self.state_dict_cache is None:
+            if not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0:
+                logger.info("[DCP async_save] creating shared-memory staged cache")
+            self.state_dict_cache = _create_cpu_state_dict(
+                state_dict,
+                share_memory=True,
+            )
+
+        return _copy_state_dict(state_dict, self.state_dict_cache, type_check=self.type_check)
 
     def write_data(
         self,
