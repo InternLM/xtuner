@@ -89,3 +89,34 @@ def _make_subclass(name: str, module: str, superclass: Any = _MockObject,
 
 
 mock._make_subclass = _make_subclass  # type: ignore[attr-defined])
+
+
+# `packaging` is imported by sphinx itself before `autodoc_mock_imports` is
+# applied, so it cannot actually be mocked — `packaging.version.Version` always
+# resolves to the real class. Module-level gates such as
+# `Version(torch.__version__) >= Version("2.9.1")` therefore hand the real
+# `Version()` a mock instance and raise `TypeError`. Patch both `_MockModule`
+# (used for top-level mocked packages like `torch`) and `_MockObject` (used for
+# attribute chains) so that `__version__` resolves to a parseable placeholder;
+# the branch chosen does not affect documentation generation because everything
+# downstream is mocked anyway.
+_MOCK_VERSION = "0.0.0"
+
+_orig_mockmod_getattr = mock._MockModule.__getattr__
+_orig_mockobj_getattr = mock._MockObject.__getattr__
+
+
+def _patched_mockmod_getattr(self, name: str) -> Any:
+    if name == "__version__":
+        return _MOCK_VERSION
+    return _orig_mockmod_getattr(self, name)
+
+
+def _patched_mockobj_getattr(self, key: str) -> Any:
+    if key == "__version__":
+        return _MOCK_VERSION
+    return _orig_mockobj_getattr(self, key)
+
+
+mock._MockModule.__getattr__ = _patched_mockmod_getattr  # type: ignore[method-assign]
+mock._MockObject.__getattr__ = _patched_mockobj_getattr  # type: ignore[method-assign]

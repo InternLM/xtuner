@@ -124,6 +124,7 @@ autodoc_mock_imports = [
     "more_itertools",
     "pyarrow",
     "fla",
+    "causal_conv1d_cuda",
 ]
 
 
