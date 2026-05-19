@@ -76,7 +76,16 @@ class NoAuxRouter(nn.Module, RouterProtocol):
             "e_score_correction_bias", torch.empty((self.n_routed_experts), device=get_device(), dtype=torch.float32)
         )
 
-    def forward(self, logits, rollout_routed_experts: torch.Tensor | None = None) -> RouterResults:
+    def forward(
+        self,
+        logits,
+        rollout_routed_experts: torch.Tensor | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> RouterResults:
+        # `input_ids` is accepted for protocol compatibility with HashRouter but is
+        # not consumed by score-based routing.
+        del input_ids
         match self.scoring_func:
             case "sigmoid":
                 scores = logits.sigmoid()
@@ -183,7 +192,16 @@ class NoAuxGroupedRouter(NoAuxRouter):
         )
         self.router_n_groups = router_n_groups
 
-    def forward(self, logits, rollout_routed_experts: torch.Tensor | None = None) -> RouterResults:
+    def forward(
+        self,
+        logits,
+        rollout_routed_experts: torch.Tensor | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> RouterResults:
+        # `input_ids` is accepted for protocol compatibility with HashRouter but is
+        # not consumed by score-based routing.
+        del input_ids
         seq, ne = logits.shape
         match self.scoring_func:
             case "sigmoid":
