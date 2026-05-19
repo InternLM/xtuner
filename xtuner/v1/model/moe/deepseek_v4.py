@@ -1,0 +1,876 @@
+# Copyright (c) OpenMMLab. All rights reserved.
+# ============================================================================
+# Portions of this file (class structure, parameter shapes, HF key mapping) are
+# adapted from DeepSeek-V4-Flash `inference/model.py` (`Transformer`, `Block`,
+# `MTPBlock`, `ParallelHead`), Copyright (c) DeepSeek-AI, released under the
+# MIT License.
+# Upstream reference: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/resolve/main/inference/model.py
+# Local cache: .dev_scripts/deepseek_v4_reference/model.py
+#
+# The training path retained here strips inference-time machinery (kv_cache,
+# block_table, FP4/FP8 quant, TileLang kernels, tensor-parallel collectives)
+# and substitutes XTuner's varlen-packed primitives for the V4 reference's
+# fixed-batch tensors.
+# ============================================================================
+"""DeepSeekV4 model glue: ties DSA attention, hash routing, NoAux sqrt-softplus
+routing, dual rope and Hyper-Connections together into a working
+:class:`MoEConfig` / :class:`MoE` pair for DeepSeek-V4-Flash."""
+
+import json
+import re
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+
+import torch
+import torch.nn as nn
+from pydantic import Field
+from typing_extensions import Self, override
+
+from transformers import AutoConfig
+from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.module import HashRouterConfig, NoAuxRouterConfig, RouterResults
+from xtuner.v1.module.attention.dsa import DeepSeekSparseAttention, DSAConfig
+from xtuner.v1.module.decoder_layer.hc_block import HCDecoderLayer, HCWrapperConfig
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEDecoderLayer
+from xtuner.v1.module.mtp import MTPConfig
+from xtuner.v1.module.rope import RopeParametersConfig
+from xtuner.v1.utils import get_logger
+
+from .moe import BalancingLossConfig, MoE, MoEConfig, ZLossConfig
+
+
+logger = get_logger()
+
+
+# V4-Flash ships its `compress_ratios` as a vector of length `num_hidden_layers + 1`
+# (43 + 1 = 44): indices 0..42 cover the main transformer stack, index 43 is the
+# trailing MTP layer. We keep the default factory consistent with the released
+# config.json so meta-device construction works without an HF round-trip.
+_DEFAULT_COMPRESS_RATIOS: list[int] = [0, 0] + [4, 128] * 20 + [4, 0]
+
+
+def _build_compressed_position_embeddings(
+    rotary_emb,
+    hidden_states: torch.Tensor,
+    position_ids: torch.LongTensor,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    # DualRotaryEmbedding emits two rope bases (`rope_theta` and
+    # `compress_rope_theta`) via the `use_compressed` keyword; the regular base
+    # is consumed by sliding-window heads and the compressed base by the
+    # Indexer / compressor heads. We materialise both up-front in DeepSeekV4
+    # forward so each layer can pick the one matching its `compress_ratio`
+    # without re-running the rope kernel.
+    if hasattr(rotary_emb, "inv_freq_compressed"):
+        return rotary_emb(hidden_states, position_ids, use_compressed=True)
+    return None
+
+
+class _V4InnerBlock(MoEDecoderLayer):
+    """Adapter exposing :class:`MoEDecoderLayer` as an :class:`HCInnerBlock`.
+
+    Hyper-Connections (PR7) defines a narrow contract on its inner block:
+
+    * ``attn_block(x: Tensor) -> Tensor`` runs pre-norm + attention and returns
+      ``[B, S, hidden_size]`` (no residual; HC owns the residual mix).
+    * ``ffn_block(x: Tensor) -> Tensor`` runs pre-norm + MoE dispatch and
+      returns ``[B, S, hidden_size]`` (no residual either).
+
+    :class:`MoEDecoderLayer` does both as a single ``_pre_moe_forward`` →
+    dispatcher → ``_post_moe_forward`` chain that *adds* its own residual and
+    returns ``(hidden, logits, weights)``. This adapter decomposes the chain
+    so HC can call attn and ffn separately and apply its own residual mix
+    between them.
+
+    ``attn_block`` and ``ffn_block`` only receive ``x`` per HC's protocol, but
+    DSA needs ``position_embeddings``, ``position_embeddings_compressed`` and
+    ``seq_ctx``; the MoE gate's hash branch additionally needs ``input_ids``.
+    :meth:`set_context` stashes those tensors on ``self`` once per forward;
+    :class:`DeepSeekV4._forward` calls it before invoking the HC wrapper.
+
+    Args:
+        compress_ratio (int): Per-layer DSA mode (0 / 4 / 128). Passed to
+            DSA at build time; informational on the adapter for parity with
+            ``DeepSeekSparseAttention.compress_ratio``.
+    """
+
+    def __init__(
+        self,
+        *,
+        compress_ratio: int,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.compress_ratio = compress_ratio
+        # Initialise context slots to None so a missing `set_context` call surfaces
+        # as a clean AttributeError-from-None instead of a silent stale reuse.
+        self._ctx_position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._ctx_position_embeddings_compressed: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._ctx_seq_ctx: SequenceContext | None = None
+        self._ctx_input_ids: torch.Tensor | None = None
+        # Stash the most recent router results so the outer V4DecoderLayer can return
+        # them to MoE._forward after the HC wrapper has run (HC's contract is single-Tensor).
+        self._last_router_results: RouterResults | None = None
+
+    def set_context(
+        self,
+        *,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        position_embeddings_compressed: tuple[torch.Tensor, torch.Tensor] | None,
+        seq_ctx: SequenceContext,
+        input_ids: torch.Tensor | None,
+    ) -> None:
+        """Stash per-forward context for ``attn_block`` and ``ffn_block``.
+
+        Args:
+            position_embeddings (tuple[Tensor, Tensor]): Dense ``(cos, sin)``
+                consumed by DSA sliding-window heads.
+            position_embeddings_compressed (tuple[Tensor, Tensor] | None):
+                Compressed ``(cos, sin)`` consumed by DSA Indexer; ``None`` for
+                ``compress_ratio == 0`` layers (DSA will assert if it actually
+                needs them).
+            seq_ctx (SequenceContext): Carries ``cu_seq_lens`` for varlen
+                attention and packing-aware MoE dispatch.
+            input_ids (Tensor | None): Per-token ids consumed by HashRouter;
+                None for score-routed layers.
+        """
+        self._ctx_position_embeddings = position_embeddings
+        self._ctx_position_embeddings_compressed = position_embeddings_compressed
+        self._ctx_seq_ctx = seq_ctx
+        self._ctx_input_ids = input_ids
+
+    def attn_block(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        # The signature carries `*args`/`**kwargs` purely to satisfy the structural
+        # HCInnerBlock protocol; HCDecoderLayer.forward forwards its extra args here.
+        # We deliberately ignore them: all DSA inputs are pinned via `set_context`.
+        del args, kwargs
+        assert self._ctx_position_embeddings is not None, "attn_block called without set_context"
+        assert self._ctx_seq_ctx is not None
+        h = self.input_layernorm(x)
+        # `self_attn` is statically typed as a union over MLA/MHA/Gated/DSA on the
+        # parent class for shared backward compat; V4 always wires DSA here.
+        dsa = cast(DeepSeekSparseAttention, self.self_attn)
+        attn = dsa(
+            hidden_states=h,
+            position_embeddings=self._ctx_position_embeddings,
+            position_embeddings_compressed=self._ctx_position_embeddings_compressed,
+            seq_ctx=self._ctx_seq_ctx,
+        )
+        return attn["projected_output"]
+
+    def ffn_block(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        del args, kwargs
+        assert self._ctx_seq_ctx is not None
+        seq_ctx = self._ctx_seq_ctx
+        h = self.post_attention_layernorm(x)
+
+        if seq_ctx.rollout_routed_experts is not None and self.layer_idx < seq_ctx.rollout_routed_experts.shape[1]:
+            rollout_routed_experts = seq_ctx.rollout_routed_experts[:, self.layer_idx, :]
+        else:
+            rollout_routed_experts = None
+        router_results: RouterResults = self.gate(h, rollout_routed_experts, input_ids=self._ctx_input_ids)
+        # Stash so the outer V4DecoderLayer can forward router results to MoE._forward
+        # after HC wrapping is done; HC's forward returns a single tensor only.
+        self._last_router_results = router_results
+
+        origin_shape = h.shape
+        pre_dispatched = self.dispatcher.dispatch_preprocess(
+            hidden_states=h.view(-1, h.shape[-1]),
+            topk_ids=router_results["topk_ids"],
+        )
+        dispatched = self.dispatcher.dispatch(
+            pre_dispatched=pre_dispatched,
+            topk_weights=router_results["topk_weights"],
+            decoding=False,
+        )
+        post_dispatched = self.dispatcher.dispatch_postprocess(
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+        )
+        experts_out = self.experts(
+            post_dispatched["hidden_states"],
+            post_dispatched["tokens_per_expert"],
+            decoding=False,
+        )
+        pre_combined = self.dispatcher.combine_preprocess(
+            hidden_states=experts_out,
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            decoding=False,
+        )
+        combined = self.dispatcher.combine(
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            pre_combined=pre_combined,
+            decoding=False,
+        )
+        post_combined = self.dispatcher.combine_postprocess(
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            pre_combined=pre_combined,
+            combined=combined,
+        )
+        combined_hidden_states = post_combined["hidden_states"].view(*origin_shape)
+
+        if self.n_shared_experts > 0:
+            shared_out = self._shared_experts_forward(hidden_states=h)
+            combined_hidden_states = combined_hidden_states + shared_out
+        return combined_hidden_states * self.hidden_factor
+
+
+class _V4DecoderLayer(nn.Module):
+    """Composition wrapper: HC + ``_V4InnerBlock``.
+
+    Stored in :class:`DeepSeekV4.layers`. Bridges between :class:`MoE._forward`
+    (which expects ``layer(hidden, position_embeddings=, seq_ctx=) -> (hidden,
+    logits, weights)``) and :class:`HCDecoderLayer` (which expects
+    ``forward(x) -> x`` and exposes only a single-tensor output).
+    """
+
+    def __init__(
+        self,
+        *,
+        inner: _V4InnerBlock,
+        hc_layer: HCDecoderLayer,
+    ) -> None:
+        super().__init__()
+        self.inner = inner
+        self.hc_layer = hc_layer
+        self.layer_idx = inner.layer_idx
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        position_embeddings_compressed: tuple[torch.Tensor, torch.Tensor] | None,
+        seq_ctx: SequenceContext,
+        input_ids: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # HC requires the inner block to access rope / seq_ctx / input_ids without
+        # widening its `attn_block(x)` / `ffn_block(x)` signatures; set_context is
+        # the pre-call stashing point that fulfills that contract.
+        self.inner.set_context(
+            position_embeddings=position_embeddings,
+            position_embeddings_compressed=position_embeddings_compressed,
+            seq_ctx=seq_ctx,
+            input_ids=input_ids,
+        )
+        out = self.hc_layer(hidden_states)
+        router_results = self.inner._last_router_results
+        assert router_results is not None, "ffn_block did not stash router_results"
+        return out, router_results["logits"], router_results["router_weights"]
+
+
+class DeepSeekV4Config(MoEConfig):
+    """Configuration for DeepSeek-V4-Flash.
+
+    Mirrors :class:`DeepSeekV3Config` but uses :class:`DSAConfig` (sparse
+    attention with grouped O-LoRA + attention sink), ``"sqrtsoftplus"`` NoAux
+    scoring, hash routing for the first ``num_hash_layers`` layers, dual rope
+    (``rope_theta`` + ``compress_rope_theta``), and Hyper-Connections
+    wrappers around every decoder layer.
+    """
+
+    vocab_size: int = 129280
+    max_position_embeddings: int = 1048576
+    pad_token_id: int | None = None
+    eos_token_id: int = 1
+    bos_token_id: int = 0
+    num_hidden_layers: int = 43
+    # V4 has no dense-replace prefix: every layer in the main stack is MoE; the
+    # `first_k_dense_replace` mechanism inherited from V3 stays at 0.
+    first_k_dense_replace: int = 0
+    num_hash_layers: int = 3
+    hidden_size: int = 4096
+    # Unused by V4 (MoE expert dim is `moe_intermediate_size`); kept for
+    # parent-config compatibility — MoEConfig.intermediate_size is non-Optional.
+    intermediate_size: int = 0
+    moe_intermediate_size: int = 2048
+    rms_norm_eps: float = 1e-6
+    # SwiGLU clamp limit applied to expert intermediate activations
+    # (DeepSeekV4 inference `Expert.forward` clamps with min=-limit, max=limit).
+    swiglu_limit: float = 10.0
+    rope_parameters_cfg: RopeParametersConfig = Field(
+        default_factory=lambda: RopeParametersConfig(
+            rope_theta=10000.0,
+            rope_type="yarn",
+            beta_fast=32,
+            beta_slow=1,
+            factor=16,
+            original_max_position_embeddings=65536,
+            compress_rope_theta=160000.0,
+            compress_ratios=list(_DEFAULT_COMPRESS_RATIOS),
+        )
+    )
+    hidden_act: str = "silu"
+    attention: DSAConfig = Field(
+        default_factory=lambda: DSAConfig(
+            num_attention_heads=64,
+            num_key_value_heads=1,
+            head_dim=512,
+            qk_rope_head_dim=64,
+            q_lora_rank=1024,
+            o_lora_rank=1024,
+            o_groups=8,
+            sliding_window=128,
+            use_attn_sink=True,
+            index_head_dim=128,
+            index_n_heads=64,
+            index_topk=512,
+            rms_norm_eps=1e-6,
+        )
+    )
+    tie_word_embeddings: bool = False
+    n_routed_experts: int = 256
+    n_shared_experts: int = 1
+    num_experts_per_tok: int = 6
+    hidden_factor: float = 1.0
+    router: NoAuxRouterConfig = Field(
+        default_factory=lambda: NoAuxRouterConfig(
+            n_group=8,
+            topk_group=4,
+            scoring_func="sqrtsoftplus",
+            norm_topk_prob=True,
+            router_scaling_factor=1.5,
+        )
+    )
+    hc_cfg: HCWrapperConfig = Field(
+        default_factory=lambda: HCWrapperConfig(
+            hc_mult=4,
+            hc_eps=1e-6,
+            hc_sinkhorn_iters=20,
+        )
+    )
+    # V4-Flash does not train an aux balancing loss (the HF config exposes
+    # `routed_scaling_factor` but no balancing field, and inference/model.py
+    # has no aux-loss path). HashRouter's dummy logits would also be invalid
+    # input to BalancingLoss anyway — we keep both nullable losses off by default.
+    balancing_loss_cfg: BalancingLossConfig | None = None
+    z_loss_cfg: ZLossConfig | None = None
+    mtp_config: MTPConfig | None = Field(default_factory=lambda: MTPConfig(num_layers=1, loss_scaling_factor=0.1))
+    moe_act_fn_cfg: MoEActFnConfig = Field(
+        default_factory=lambda: MoEActFnConfig(
+            act_type="clipped_swiglu",
+            # V4's `swiglu_limit=10` is symmetric, matching XTuner's
+            # `native_clipped_swiglu(limit=...)` clamp range.
+            clip_alpha=1.0,
+            clip_limit=10.0,
+        )
+    )
+
+    def build(self) -> "DeepSeekV4":
+        return DeepSeekV4(self)
+
+    @classmethod
+    def from_hf(cls, hf_path: str | Path) -> Self:
+        """Construct a :class:`DeepSeekV4Config` from the HF release directory.
+
+        Args:
+            hf_path (str | Path): Path containing ``config.json``.
+
+        Returns:
+            DeepSeekV4Config: XTuner-side config mirroring the HF fields.
+        """
+        # transformers<5.10 does not ship a `DeepseekV4Config`. We try AutoConfig
+        # first (with trust_remote_code) so a HF release shipping `*.py` modeling
+        # files just works; if that fails we fall back to reading `config.json`
+        # directly into a SimpleNamespace, since every field DeepSeekV4Config
+        # consumes from `cfg` is a plain attribute lookup with no Python-side
+        # validation.
+        try:
+            cfg = AutoConfig.from_pretrained(hf_path, trust_remote_code=True)
+        except (KeyError, ValueError):
+            config_json_path = Path(hf_path) / "config.json"
+            with open(config_json_path, encoding="utf-8") as f:
+                cfg = SimpleNamespace(**json.load(f))
+        assert getattr(cfg, "model_type", None) == "deepseek_v4", (
+            f"Expected `model_type == 'deepseek_v4'`, got {getattr(cfg, 'model_type', None)!r}"
+        )
+
+        default_rope_params = (
+            cls.model_fields["rope_parameters_cfg"].get_default(call_default_factory=True).model_dump()
+        )
+        rope_parameters_cfg = RopeParametersConfig.from_hf_config(cfg, default_rope_params)
+        assert rope_parameters_cfg is not None, "DeepSeek-V4 HF config must define rope parameters"
+
+        attention = DSAConfig(
+            num_attention_heads=cfg.num_attention_heads,
+            num_key_value_heads=cfg.num_key_value_heads,
+            head_dim=cfg.head_dim,
+            qk_rope_head_dim=cfg.qk_rope_head_dim,
+            q_lora_rank=cfg.q_lora_rank,
+            o_lora_rank=cfg.o_lora_rank,
+            o_groups=cfg.o_groups,
+            sliding_window=cfg.sliding_window,
+            use_attn_sink=True,
+            index_head_dim=cfg.index_head_dim,
+            index_n_heads=cfg.index_n_heads,
+            index_topk=cfg.index_topk,
+            rms_norm_eps=cfg.rms_norm_eps,
+        )
+
+        router = NoAuxRouterConfig(
+            # V4 inference uses 8 groups / top-4 (model.py:Gate.__init__);
+            # HF config doesn't expose them, so we hard-pin the documented values.
+            n_group=8,
+            topk_group=4,
+            scoring_func=cfg.scoring_func,
+            norm_topk_prob=cfg.norm_topk_prob,
+            router_scaling_factor=cfg.routed_scaling_factor,
+        )
+
+        hc_cfg = HCWrapperConfig(
+            hc_mult=cfg.hc_mult,
+            hc_eps=cfg.hc_eps,
+            hc_sinkhorn_iters=cfg.hc_sinkhorn_iters,
+        )
+
+        num_nextn = getattr(cfg, "num_nextn_predict_layers", 0) or 0
+        mtp_config: MTPConfig | None = (
+            MTPConfig(num_layers=num_nextn, loss_scaling_factor=0.1) if num_nextn > 0 else None
+        )
+
+        moe_act_fn_cfg = MoEActFnConfig(
+            act_type="clipped_swiglu",
+            clip_alpha=1.0,
+            clip_limit=float(getattr(cfg, "swiglu_limit", 10.0)),
+        )
+
+        return cls(
+            vocab_size=cfg.vocab_size,
+            max_position_embeddings=cfg.max_position_embeddings,
+            pad_token_id=getattr(cfg, "pad_token_id", None),
+            eos_token_id=cfg.eos_token_id,
+            bos_token_id=getattr(cfg, "bos_token_id", 0),
+            num_hidden_layers=cfg.num_hidden_layers,
+            num_hash_layers=cfg.num_hash_layers,
+            hidden_size=cfg.hidden_size,
+            moe_intermediate_size=cfg.moe_intermediate_size,
+            rms_norm_eps=cfg.rms_norm_eps,
+            swiglu_limit=float(getattr(cfg, "swiglu_limit", 10.0)),
+            rope_parameters_cfg=rope_parameters_cfg,
+            hidden_act=cfg.hidden_act,
+            attention=attention,
+            tie_word_embeddings=cfg.tie_word_embeddings,
+            n_routed_experts=cfg.n_routed_experts,
+            n_shared_experts=cfg.n_shared_experts,
+            num_experts_per_tok=cfg.num_experts_per_tok,
+            router=router,
+            hc_cfg=hc_cfg,
+            mtp_config=mtp_config,
+            moe_act_fn_cfg=moe_act_fn_cfg,
+        )
+
+    @property
+    def hf_config(self):
+        # V4 has no transformers-built-in config class in older releases; let `save_hf`
+        # fall back to copying the original `*.py` files from `self._hf_path`.
+        return None
+
+
+class DeepSeekV4(MoE):
+    """DeepSeek-V4-Flash transformer for training.
+
+    Departures from the base :class:`MoE` worth flagging:
+
+    * **Per-layer router/attention dispatch** — the first ``num_hash_layers``
+      MoE gates use :class:`HashRouter`, the rest use sqrt-softplus
+      :class:`NoAuxRouter`; every layer's attention is
+      :class:`DeepSeekSparseAttention` with a per-layer
+      ``compress_ratio in {0, 4, 128}`` pulled from
+      ``rope_parameters_cfg.compress_ratios``.
+    * **Hyper-Connections** — every decoder layer is wrapped in
+      :class:`HCDecoderLayer` so the model carries ``hc_mult`` residual streams.
+      The embedding is expanded to ``[B, S, hc_mult, D]`` and reduced back to
+      ``[B, S, D]`` via a learned ``hc_head_*`` triple before the final norm.
+    * **Forward override** — the standard :class:`MoE._forward` assumes
+      ``decoder_layer(...)`` returns ``(hidden, logits, weights)`` and treats
+      ``hidden`` as ``[B, S, D]``. V4 layers operate on ``[B, S, hc_mult, D]``
+      and need an extra ``position_embeddings_compressed`` rope tuple, so
+      ``_forward`` is replaced here.
+
+    Args:
+        config (DeepSeekV4Config): Model configuration.
+    """
+
+    config: DeepSeekV4Config
+
+    def __init__(self, config: DeepSeekV4Config) -> None:
+        # Model-level HC head parameters (separate from each layer's HC params).
+        # Allocate before super().__init__ so they exist when `_init_load_spec` walks
+        # named_parameters during the parent init.
+        self._hc_mult = config.hc_cfg.hc_mult
+        super().__init__(config)
+        # `hc_head_fn` reduces `[B, S, hc_mult, D]` back to `[B, S, D]` before the
+        # final RMSNorm + lm_head. Shape matches V4 reference ParallelHead/Transformer
+        # (model.py L797): `[hc_mult, hc_mult * D]`. Stored fp32 for sinkhorn stability.
+        hc_mult = config.hc_cfg.hc_mult
+        hc_dim = hc_mult * config.hidden_size
+        fp32 = torch.float32
+        self.hc_head_fn = nn.Parameter(torch.zeros(hc_mult, hc_dim, dtype=fp32))
+        self.hc_head_base = nn.Parameter(torch.zeros(hc_mult, dtype=fp32))
+        # V4 reference uses a scalar scale for hc_head (model.py L799); we keep
+        # the same shape for HF key parity.
+        self.hc_head_scale = nn.Parameter(torch.zeros(1, dtype=fp32))
+
+    @override
+    def build_layers(self, config: MoEConfig) -> nn.ModuleDict:
+        # The parent MoE.build_layers does its own per-layer wiring for
+        # MLA/MHA/GatedDeltaNet attention plus score-only routing. V4 needs per-layer
+        # `compress_ratio`, per-layer router type, and an HC wrapper — wholly
+        # different control flow. We re-implement here rather than threading the
+        # decisions into the parent loop because every per-layer branch in the parent
+        # would otherwise need to know about DSA / hash / HC.
+        v4_cfg = cast(DeepSeekV4Config, config)
+        compress_ratios = v4_cfg.rope_parameters_cfg.compress_ratios
+        assert compress_ratios is not None and len(compress_ratios) >= v4_cfg.num_hidden_layers, (
+            f"compress_ratios (len={len(compress_ratios) if compress_ratios else 0}) must cover "
+            f"all {v4_cfg.num_hidden_layers} hidden layers"
+        )
+
+        layers = nn.ModuleDict()
+        for layer_idx in range(v4_cfg.num_hidden_layers):
+            layers[str(layer_idx)] = self._build_one_layer(v4_cfg, layer_idx, compress_ratios[layer_idx])
+        return layers
+
+    @override
+    def build_mtp_block(self, config: MoEConfig):
+        # The V4 MTP block has its own HC head + e_proj/h_proj/enorm/hnorm chain
+        # (model.py:MTPBlock L738-766) and uses the same per-layer DSA + hash/score
+        # routing dispatch as the main stack. Reusing the parent's MTPBlock builder
+        # would route through MoEDecoderLayer with the default attention_config.build
+        # path, which crashes for DSAConfig (no compress_ratio). PR9 leaves MTP as a
+        # TODO follow-up: the structural pieces (HCDecoderLayer + _V4InnerBlock) are
+        # in place, but the MTP-specific e_proj/h_proj/enorm/hnorm/hc_head_* glue and
+        # its `compress_ratios[-1]`-driven attention mode need their own wiring pass.
+        if config.mtp_config is not None:
+            logger.warning(
+                "DeepSeekV4: mtp_config is set but MTP forward + parameter wiring is not "
+                "implemented in PR9. The model will build without MTP and skip MTP loss; "
+                "follow-up PR will add the V4 MTPBlock with HC + e_proj/h_proj. "
+                f"(num_layers={config.mtp_config.num_layers})"
+            )
+        return None
+
+    @override
+    def build_embeddings(self, config: MoEConfig):
+        # We rely on the parent's plain `nn.Embedding` and broadcast to `hc_mult`
+        # streams in `_forward`. Keeping the embedding module untouched means HF
+        # weight loading for `embed.weight` works without any layout massage.
+        return nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
+
+    def to_hf_key_list(self, key: str) -> list[str]:
+        """Translate an XTuner-side parameter name to its HF counterpart(s).
+
+        DeepSeek-V4 HF keys carry no ``model.`` prefix and no ``mlp.`` infix; experts
+        are named ``w1/w2/w3``; HC parameters sit at ``layers.N.hc_*`` (top-level on
+        the wrapper); MTP layers live at ``mtp.M.*``. Fused expert weights expand
+        to one HF key per expert.
+
+        Args:
+            key (str): XTuner-side parameter name.
+
+        Returns:
+            list[str]: One or more HF parameter names; lists with multiple entries
+            arise when an XTuner-side fused tensor maps to per-expert HF tensors.
+        """
+        # Top-level HC head parameters and final norm stay as-is.
+        if key in {"hc_head_fn", "hc_head_base", "hc_head_scale"}:
+            return [key]
+        if key == "norm.weight":
+            return ["norm.weight"]
+        if key == "embed_tokens.weight":
+            return ["embed.weight"]
+        if key == "lm_head.weight":
+            return ["head.weight"]
+
+        n_routed_experts = self.config.n_routed_experts
+
+        # Layers prefix — strip XTuner's wrapper layout (`.inner.<...>`) to match HF's
+        # flat layout, then translate XTuner module names to HF names.
+        m = re.match(r"^layers\.(\d+)\.(.+)$", key)
+        if m:
+            layer_idx, tail = m.group(1), m.group(2)
+            return [
+                f"layers.{layer_idx}.{hf_tail}"
+                for hf_tail in self._translate_layer_tail(tail, layer_idx, n_routed_experts)
+            ]
+
+        # MTP block — XTuner stores it under `mtp_block.layers.M.<...>`. HF flat
+        # layout is `mtp.M.<...>`. The MTP layer body has the same structure as
+        # a main-stack layer plus the extra e_proj/h_proj/enorm/hnorm/norm fields
+        # and its own hc_head_*.
+        m = re.match(r"^mtp_block\.layers\.(\d+)\.(.+)$", key)
+        if m:
+            mtp_idx, tail = m.group(1), m.group(2)
+            return [f"mtp.{mtp_idx}.{hf_tail}" for hf_tail in self._translate_mtp_tail(tail, n_routed_experts)]
+
+        return [key]
+
+    @override
+    def _should_compute_aux_loss(self, layer_idx: int) -> bool:
+        # Hash-routed layers emit a `[1]` dummy logits placeholder; feeding that
+        # to AuxLossContext.accumulate's `index_select(0, nonpad_indices)` would
+        # raise an out-of-range error. Skip the aux-loss accumulation for those
+        # layers entirely. Score-routed layers (idx >= num_hash_layers) keep the
+        # default behaviour.
+        return layer_idx >= self.config.num_hash_layers
+
+    @override
+    def _forward(self, seq_ctx, loss_ctx, return_router_logits: bool = False):  # type: ignore[override]
+        # We replace MoE._forward outright because the V4 forward graph has three
+        # invariants that don't fit the parent:
+        #   1) Decoder layers operate on `[B, S, hc_mult, D]`, not `[B, S, D]`.
+        #   2) Each layer needs `position_embeddings_compressed` in addition to the
+        #      dense rope.
+        #   3) The final norm runs *after* an hc_head reduction back to `[B, S, D]`.
+        # Note: MTP forward is omitted in this PR; the V4 MTP block has its own
+        # HC head + e/h proj + enorm/hnorm chain that must be wired separately
+        # (tracked as PR9 follow-up).
+        from xtuner.v1.loss import LMHeadLossContext
+        from xtuner.v1.model.utils import ModelForwardExtraLogInfo
+
+        from .moe import MoEModelOutputs
+
+        assert seq_ctx.position_ids is not None
+        assert seq_ctx.input_ids is not None, "DeepSeekV4 requires input_ids (HashRouter consumes them)"
+        hidden_states = self.embed_tokens(seq_ctx.input_ids)
+        # Dense rope (sliding-window heads) and compressed rope (Indexer) are both
+        # produced from the same DualRotaryEmbedding instance; we pre-compute both
+        # so each layer can pick the matching pair without branching on layer type.
+        position_embeddings = self.rotary_emb(hidden_states, seq_ctx.position_ids, use_compressed=False)
+        position_embeddings_compressed = _build_compressed_position_embeddings(
+            self.rotary_emb, hidden_states, seq_ctx.position_ids
+        )
+
+        # Expand `[B, S, D]` → `[B, S, hc_mult, D]`. `.contiguous()` is essential
+        # because downstream HC ops (`flatten(2)`, `.view(shape)`) assume a dense
+        # layout; the expand-without-copy would alias.
+        hidden_states = hidden_states.unsqueeze(-2).expand(-1, -1, self._hc_mult, -1).contiguous()
+
+        output: dict = {}
+        if self.config.return_hidden_states:
+            output["hidden_states"] = []
+
+        keep_router = self.config.return_router_results or return_router_logits
+        if keep_router:
+            output["router_logits"] = {}
+            output["router_weights"] = {}
+        else:
+            output["router_logits"] = None
+            output["router_weights"] = None
+
+        balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
+        nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
+        non_pad_token = nonpad_indices.numel()
+        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
+
+        for idx, decoder_layer in self.layers.items():
+            v4_layer = cast(_V4DecoderLayer, decoder_layer)
+            hidden_states, router_logits, router_weights = v4_layer(
+                hidden_states,
+                position_embeddings=position_embeddings,
+                position_embeddings_compressed=position_embeddings_compressed,
+                seq_ctx=seq_ctx,
+                input_ids=seq_ctx.input_ids,
+            )
+            if keep_router:
+                output["router_logits"][f"layer{idx}"] = self._maybe_offload_router(router_logits)
+                output["router_weights"][f"layer{idx}"] = self._maybe_offload_router(router_weights)
+            if self._should_compute_aux_loss(int(idx)):
+                hidden_states = self.aux_loss.accumulate(
+                    selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
+                    selected_router_logits=router_logits.index_select(0, nonpad_indices).contiguous().float(),
+                    hidden_states=hidden_states,
+                    balancing_ctx=balancing_ctx,
+                    z_ctx=z_ctx,
+                    num_tokens_local=non_pad_token,
+                    num_tokens_global=num_tokens_global,
+                    world_size=z_world_size,
+                )
+            if self.config.return_hidden_states:
+                output["hidden_states"].append(hidden_states)
+
+        # Reduce `[B, S, hc_mult, D]` → `[B, S, D]` via the model-level hc_head
+        # triple, then apply the standard final RMSNorm + lm_head.
+        hidden_states = self._hc_head_reduce(hidden_states)
+        hidden_states = self.norm(hidden_states)
+
+        lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
+        loss, (logits, extra_info) = self.lm_head(hidden_states, cast(LMHeadLossContext, lm_loss_ctx))  # type: ignore[arg-type]
+        output["loss"] = loss
+        output["logits"] = logits
+        output["extra_info"] = extra_info if extra_info is not None else ModelForwardExtraLogInfo()
+
+        split_aux_output = self.aux_loss.finalize(
+            balancing_ctx=balancing_ctx,
+            z_ctx=z_ctx,
+            non_pad_token=non_pad_token,
+        )
+        balancing_loss, z_loss, tokens_per_expert_global = split_aux_output
+        if balancing_loss is not None:
+            output["balancing_loss"] = balancing_loss
+        if z_loss is not None:
+            output["z_loss"] = z_loss
+        output["tokens_per_expert_global"] = tokens_per_expert_global
+
+        if keep_router:
+            for layer_name, router_logits_t in output["router_logits"].items():
+                output["router_logits"][layer_name] = router_logits_t.detach().unsqueeze(0)
+
+        return MoEModelOutputs(**output)
+
+    def _hc_head_reduce(self, x: torch.Tensor) -> torch.Tensor:
+        # Port of `ParallelHead.hc_head` (model.py L728-735). Mirrors `hc_pre`'s
+        # RMS-rescaled mixing but skips Sinkhorn — head reduce uses a per-stream
+        # sigmoid weight, not a doubly-stochastic mix.
+        shape, dtype = x.size(), x.dtype
+        x_flat = x.flatten(2).float()
+        rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.config.rms_norm_eps)
+        mixes = torch.nn.functional.linear(x_flat, self.hc_head_fn.float()) * rsqrt
+        pre = torch.sigmoid(mixes * self.hc_head_scale.float() + self.hc_head_base.float()) + self.config.hc_cfg.hc_eps
+        y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=-2)
+        return y.to(dtype)
+
+    def _build_one_layer(
+        self,
+        config: DeepSeekV4Config,
+        layer_idx: int,
+        compress_ratio: int,
+    ) -> _V4DecoderLayer:
+        # Pick the router topology per-layer; hash layers do not need group/topk_group
+        # because they bypass scoring entirely.
+        router_config: NoAuxRouterConfig | HashRouterConfig
+        if layer_idx < config.num_hash_layers:
+            router_config = HashRouterConfig(
+                vocab_size=config.vocab_size,
+                n_routed_experts=config.n_routed_experts,
+                num_experts_per_tok=config.num_experts_per_tok,
+            )
+        else:
+            router_config = config.router
+
+        # DSA is constructed externally because DSAConfig.build requires per-layer
+        # `compress_ratio`; we hand the pre-built module to MoEDecoderLayer via its
+        # `attention_module` override (see MoEDecoderLayer.__init__ note).
+        attention_module = config.attention.build(
+            hidden_size=config.hidden_size,
+            layer_idx=layer_idx,
+            compress_ratio=compress_ratio,
+        )
+
+        inner = _V4InnerBlock(
+            compress_ratio=compress_ratio,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            moe_intermediate_size=config.moe_intermediate_size,
+            mlp_bias=config.mlp_bias,
+            gate_bias=False,
+            moe_bias=config.moe_bias,
+            hidden_act=config.hidden_act,
+            rms_norm_eps=config.rms_norm_eps,
+            rms_norm_type=config.rms_norm_type,
+            num_experts_per_tok=config.num_experts_per_tok,
+            n_routed_experts=config.n_routed_experts,
+            n_shared_experts=config.n_shared_experts,
+            with_shared_expert_gate=config.with_shared_expert_gate,
+            hidden_factor=config.hidden_factor,
+            attention_config=config.attention,
+            rope_scaling_cfg=None,
+            layer_type=None,
+            generate_config=config.generate_config,
+            router_config=router_config,
+            router_compute_dtype=config.router_compute_dtype,
+            moe_act_fn_cfg=config.moe_act_fn_cfg,
+            float8_cfg=config.float8_cfg,
+            layer_idx=layer_idx,
+            dispatcher=config.dispatcher,
+            ep_mesh=self.ep_mesh,
+            attention_module=attention_module,
+        )
+
+        hc_layer = HCDecoderLayer(inner=inner, hc_cfg=config.hc_cfg, hidden_size=config.hidden_size)
+        return _V4DecoderLayer(inner=inner, hc_layer=hc_layer)
+
+    def _translate_layer_tail(self, tail: str, layer_idx: str, n_routed_experts: int) -> list[str]:
+        # XTuner module names → HF key fragments (per BF16 safetensors index).
+        # Wrapping layout: `_V4DecoderLayer.hc_layer.{hc_attn_*|hc_ffn_*}` and
+        # `_V4DecoderLayer.hc_layer.inner.{input_layernorm|self_attn|...}`. HF
+        # keeps everything flat under `layers.L.`. The mapping below is the
+        # authoritative bridge; if you change the wrapper layout, update it here.
+        del layer_idx  # only used for the outer prefix already prepended
+
+        # HC parameters live on the wrapper; PyTorch's named_parameters surfaces them
+        # under the `hc_layer.*` path while the inner module is surfaced as
+        # `inner.*` (the same module object is registered twice on _V4DecoderLayer
+        # but parameter walking dedupes by id and reports the first attribute path
+        # — see _V4DecoderLayer.__init__).
+        if tail.startswith("hc_layer.hc_attn_") or tail.startswith("hc_layer.hc_ffn_"):
+            return [tail[len("hc_layer.") :]]
+
+        # Everything else lives inside the inner MoEDecoderLayer.
+        inner_prefix = "inner."
+        if not tail.startswith(inner_prefix):
+            # Composition wrapper itself has no other parameters; treat as identity
+            # to avoid silently dropping anything new.
+            return [tail]
+        inner_tail = tail[len(inner_prefix) :]
+
+        # Pre-attention / post-attention layernorms map to `attn_norm` / `ffn_norm`.
+        if inner_tail == "input_layernorm.weight":
+            return ["attn_norm.weight"]
+        if inner_tail == "post_attention_layernorm.weight":
+            return ["ffn_norm.weight"]
+
+        # Attention: XTuner `self_attn.*` → HF `attn.*`.
+        if inner_tail.startswith("self_attn."):
+            return ["attn." + inner_tail[len("self_attn.") :]]
+
+        # MoE gate: XTuner `gate.weight` is the linear projection; `gate.router.*` are
+        # the router-specific buffers (tid2eid for hash, e_score_correction_bias for noaux).
+        if inner_tail == "gate.weight":
+            return ["ffn.gate.weight"]
+        if inner_tail == "gate.bias":
+            return ["ffn.gate.bias"]
+        if inner_tail == "gate.router.tid2eid":
+            return ["ffn.gate.tid2eid"]
+        if inner_tail == "gate.router.e_score_correction_bias":
+            return ["ffn.gate.bias"]
+
+        # Experts: fused tensors expand to per-expert HF keys.
+        if inner_tail == "experts.fused_w1w3.weight":
+            keys: list[str] = []
+            for i in range(n_routed_experts):
+                keys.append(f"ffn.experts.{i}.w1.weight")
+                keys.append(f"ffn.experts.{i}.w3.weight")
+            return keys
+        if inner_tail == "experts.fused_w2.weight":
+            return [f"ffn.experts.{i}.w2.weight" for i in range(n_routed_experts)]
+
+        # Shared experts: XTuner uses gate_proj/up_proj/down_proj names; HF uses w1/w3/w2.
+        if inner_tail == "shared_experts.gate_proj.weight":
+            return ["ffn.shared_experts.w1.weight"]
+        if inner_tail == "shared_experts.up_proj.weight":
+            return ["ffn.shared_experts.w3.weight"]
+        if inner_tail == "shared_experts.down_proj.weight":
+            return ["ffn.shared_experts.w2.weight"]
+
+        # Fallback: pass through (catches anything PR9 forgot — surfaces as a missing
+        # key in `from_hf` rather than silent skipping).
+        return [inner_tail]
+
+    def _translate_mtp_tail(self, tail: str, n_routed_experts: int) -> list[str]:
+        # XTuner MTP layer wraps a decoder_layer + extra fields (e_proj/h_proj/enorm/
+        # hnorm/norm/hc_head_*). HF mirrors the body of a main layer under `mtp.M.*`
+        # plus the extras at the same level. The exact MTPLayer attribute names
+        # depend on the cherry-picked PR; this translator is best-effort for
+        # `to_hf_key_list_coverage` and may need a follow-up once V4 MTP is wired
+        # to the new HC head pattern.
+        if tail.startswith("decoder_layer."):
+            inner_tail = tail[len("decoder_layer.") :]
+            return self._translate_layer_tail("hc_layer.inner." + inner_tail, "0", n_routed_experts)
+        return [tail]

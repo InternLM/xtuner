@@ -45,7 +45,7 @@ from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTilewiseFloat8CastTensor,
 )
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, CELossConfig
-from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig, MLAConfig
+from xtuner.v1.module.attention import DSAConfig, GatedDeltaNetConfig, MHAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeParametersConfig, RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
@@ -190,7 +190,11 @@ class TransformerConfig(XTunerBaseModelConfig):
     rms_norm_eps: Annotated[float, Parameter(group="model")]
     rms_norm_type: Annotated[Literal["default", "zero_centered"], Parameter(group="model")] = "default"
     hidden_act: Annotated[str, Parameter(group="model")]  # key defined in `transformers.activations.ACT2CLS`
-    attention: MLAConfig | MHAConfig
+    # DSAConfig is admitted at the base because DeepSeekV4Config consumes it; the V3
+    # `attention.build` path is unaffected (DSAConfig is only used by DeepSeekV4,
+    # which routes the build through a pre-constructed `attention_module` injection in
+    # MoEDecoderLayer — see DeepSeekV4.build_layers and MoEDecoderLayer.__init__).
+    attention: MLAConfig | MHAConfig | DSAConfig
     linear_attention: Annotated[GatedDeltaNetConfig | None, Parameter(group="model")] = None
     mlp_bias: Annotated[bool, Parameter(group="model")] = False
     tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False

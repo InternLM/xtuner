@@ -26,6 +26,7 @@ from xtuner.v1.module import (
     RMSNorm,
     RouterResults,
 )
+from xtuner.v1.module.attention.dsa import DeepSeekSparseAttention, DSAConfig
 from xtuner.v1.module.dispatcher import (
     CombineResult,
     DispatchResult,
@@ -219,7 +220,7 @@ class MoEDecoderLayer(nn.Module):
         n_shared_experts: int,
         with_shared_expert_gate: bool = False,
         hidden_factor: float = 1.0,
-        attention_config: MHAConfig | MLAConfig | GatedDeltaNetConfig,
+        attention_config: MHAConfig | MLAConfig | GatedDeltaNetConfig | DSAConfig,
         rope_scaling_cfg: RopeScalingConfig | None = None,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         generate_config: GenerateConfig | None = None,
@@ -230,6 +231,7 @@ class MoEDecoderLayer(nn.Module):
         layer_idx: int = 0,
         dispatcher: Literal["deepep", "all2all", "agrs"] | None,
         ep_mesh: DeviceMesh | None = None,
+        attention_module: nn.Module | None = None,
     ):
         super().__init__()
         self.ep_mesh = ep_mesh
@@ -238,14 +240,32 @@ class MoEDecoderLayer(nn.Module):
         self.n_shared_experts = n_shared_experts
         self.hidden_factor = hidden_factor
 
-        self.self_attn: MultiHeadAttention | MultiLatentAttention | GatedDeltaNet = attention_config.build(
-            hidden_size=hidden_size,
-            layer_idx=layer_idx,
-            generate_config=generate_config,
-            rope_scaling_cfg=rope_scaling_cfg,
-            layer_type=layer_type,
-            float8_cfg=float8_cfg,
-        )
+        # `attention_module` overrides the build path when set. Why: DSAConfig.build
+        # requires a `compress_ratio` argument that varies per-layer and is owned by
+        # the model class (DeepSeekV4) — threading it through every `attention_config.build`
+        # call would either widen the build signatures of MLA/MHA/GatedDeltaNet (none of
+        # which use it) or force a layer-type-aware branch here. Letting the caller
+        # pre-build the DSA module keeps the spaghetti in DeepSeekV4.build_layers,
+        # which already has all the per-layer context. The existing MLA/MHA/Gated paths
+        # still go through `attention_config.build` unchanged.
+        self.self_attn: MultiHeadAttention | MultiLatentAttention | GatedDeltaNet | DeepSeekSparseAttention
+        if attention_module is not None:
+            self.self_attn = attention_module  # type: ignore[assignment]
+        else:
+            if isinstance(attention_config, DSAConfig):
+                raise ValueError(
+                    "DSAConfig requires a pre-built `attention_module` because DSAConfig.build needs "
+                    "a per-layer `compress_ratio`. Construct DeepSeekSparseAttention in your model's "
+                    "`build_layers` and pass it via the `attention_module` kwarg."
+                )
+            self.self_attn = attention_config.build(
+                hidden_size=hidden_size,
+                layer_idx=layer_idx,
+                generate_config=generate_config,
+                rope_scaling_cfg=rope_scaling_cfg,
+                layer_type=layer_type,
+                float8_cfg=float8_cfg,
+            )
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, type=rms_norm_type)
         self.layer_idx = layer_idx
 

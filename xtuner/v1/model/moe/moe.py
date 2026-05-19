@@ -272,6 +272,13 @@ class MoE(BaseModel):
 
         return loss_ctx.get("balancing"), loss_ctx.get("z_loss")
 
+    def _should_compute_aux_loss(self, layer_idx: int) -> bool:
+        # Extension hook for routers whose `router_results` is not shape-compatible with
+        # `aux_loss.accumulate` (e.g. HashRouter emits a `[1]` dummy logits tensor since
+        # it never scores). DeepSeekV4 overrides this for layers wired to HashRouter.
+        # Default keeps the existing score-routed behaviour unchanged.
+        return True
+
     @torch.no_grad()
     def update_bias(self, total_expert_counts_pre_iter, expected_loads):
         """Implementation for the following paper:
@@ -534,21 +541,24 @@ class MoE(BaseModel):
                     if keep_router:
                         router_logits_list[i][f"layer{idx}"] = self._maybe_offload_router(router_logits[i])
 
-                cat_router_weights = torch.cat(router_weights, dim=0)
-                cat_router_logits = torch.cat(router_logits, dim=0)
-                # Pin the per-layer z-loss to MB0's hidden_states stream. With multiple MBs, only
-                # one carrier may be chosen — all MBs converge into the same total_loss backward,
-                # so MB0's path traverses every aux-loss node exactly once.
-                hidden_states_list[0] = self.aux_loss.accumulate(
-                    selected_router_weights=cat_router_weights.index_select(0, nonpad_indices).contiguous().float(),
-                    selected_router_logits=cat_router_logits.index_select(0, nonpad_indices).contiguous().float(),
-                    hidden_states=hidden_states_list[0],
-                    balancing_ctx=balancing_ctx,
-                    z_ctx=z_ctx,
-                    num_tokens_local=non_pad_token,
-                    num_tokens_global=num_tokens_global,
-                    world_size=z_world_size,
-                )
+                if self._should_compute_aux_loss(int(idx)):
+                    cat_router_weights = torch.cat(router_weights, dim=0)
+                    cat_router_logits = torch.cat(router_logits, dim=0)
+                    # Pin the per-layer z-loss to MB0's hidden_states stream. With multiple MBs, only
+                    # one carrier may be chosen — all MBs converge into the same total_loss backward,
+                    # so MB0's path traverses every aux-loss node exactly once.
+                    hidden_states_list[0] = self.aux_loss.accumulate(
+                        selected_router_weights=cat_router_weights.index_select(0, nonpad_indices)
+                        .contiguous()
+                        .float(),
+                        selected_router_logits=cat_router_logits.index_select(0, nonpad_indices).contiguous().float(),
+                        hidden_states=hidden_states_list[0],
+                        balancing_ctx=balancing_ctx,
+                        z_ctx=z_ctx,
+                        num_tokens_local=non_pad_token,
+                        num_tokens_global=num_tokens_global,
+                        world_size=z_world_size,
+                    )
 
         assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
 
@@ -722,16 +732,17 @@ class MoE(BaseModel):
                 if keep_router:
                     output["router_logits"][f"layer{idx}"] = self._maybe_offload_router(router_results)
                     output["router_weights"][f"layer{idx}"] = self._maybe_offload_router(router_weights)
-                hidden_states = self.aux_loss.accumulate(
-                    selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
-                    selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
-                    hidden_states=hidden_states,
-                    balancing_ctx=balancing_ctx,
-                    z_ctx=z_ctx,
-                    num_tokens_local=non_pad_token,
-                    num_tokens_global=num_tokens_global,
-                    world_size=z_world_size,
-                )
+                if self._should_compute_aux_loss(int(idx)):
+                    hidden_states = self.aux_loss.accumulate(
+                        selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
+                        selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
+                        hidden_states=hidden_states,
+                        balancing_ctx=balancing_ctx,
+                        z_ctx=z_ctx,
+                        num_tokens_local=non_pad_token,
+                        num_tokens_global=num_tokens_global,
+                        world_size=z_world_size,
+                    )
 
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)

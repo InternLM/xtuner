@@ -138,9 +138,14 @@ class RopeParametersConfig(BaseModel):
 
         Result is cached since model_fields is static after class definition.
         """
+        # `compress_rope_theta`/`compress_ratios` were added by PR2 (dual rope) but do not have a
+        # `RopeScalingConfig` counterpart (RopeScalingConfig uses `extra="forbid"`); excluding them
+        # here keeps the backward-compat `rope_scaling_cfg` property valid for V4 configs. Any new
+        # `RopeParametersConfig` field that is V4-specific (no rope_scaling analog) should be added.
+        _no_scaling_analog = {"rope_theta", "compress_rope_theta", "compress_ratios"}
         mapping: dict[str, str] = {}
         for field_name in cls.model_fields.keys():
-            if field_name == "rope_theta":
+            if field_name in _no_scaling_analog:
                 continue
             elif field_name == "rope_type":
                 mapping["type"] = "rope_type"
