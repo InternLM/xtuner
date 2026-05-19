@@ -656,6 +656,9 @@ class Trainer:
         if self._can_save_hf and self._hf_interval is None:
             self._hf_interval = self.total_step
 
+        # if os.environ.get("XTUNER_DISABLE_HF_SAVE", "0") == "1":
+        #     self._hf_interval = None
+
         if debug_skip_save:
             self._hf_interval = None
             self._checkpoint_interval = None
@@ -1110,7 +1113,7 @@ class Trainer:
                 raise RuntimeError("Health check failed, exit training")
             logger.info(f"Health check passed at step {self.cur_step}")
 
-    def _wait_for_pending_checkpoint(self, timeout: int = 300) -> None:
+    def _wait_for_pending_checkpoint(self, timeout: int = 3000) -> None:
         if self._pending_checkpoint is None:
             return
 

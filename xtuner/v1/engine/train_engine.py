@@ -21,6 +21,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
+from torch.distributed.checkpoint.state_dict_saver import AsyncCheckpointerType
 from torch.nn.utils.clip_grad import _no_grad
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
@@ -37,6 +38,7 @@ from xtuner.v1.model.base import (
     ModelOutputs,
     XTunerBaseModelConfig,
 )
+from xtuner.v1.patch.xtuner_storage import XtunerCacheWriter
 from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
 from xtuner.v1.utils.grad_norm import cal_grad_norm
@@ -359,8 +361,19 @@ class TrainEngine:
                 shutil.rmtree(incomplete_dir)
             incomplete_dir.mkdir(parents=True, exist_ok=True)
 
+        # ASYNC_DCP_SHARE_MEMORY=1 eliminates PSS amplification in process mode.
+        #
+        # XtunerCacheWriter.stage() creates its staging cache directly in POSIX
+        # shared memory (/dev/shm) when ASYNC_DCP_SHARE_MEMORY=1.  PyTorch's
+        # ForkingPickler detects shared-memory tensors and sends fd handles (no
+        # data copy) to the daemon → PSS is split 1/2 each, no amplification.
+        # The shm cache is reused across checkpoints via self._async_state_dict_cache.
         state_dict = self._get_dcp_state_dict(cpu_offload=False, save_optimizer=save_optimizer)
         storage_writer = self._build_async_storage_writer(incomplete_dir, save_optimizer=save_optimizer)
+
+        async_checkpointer_type = AsyncCheckpointerType(os.environ.get("ASYNC_CHECKPOINT_TYPE", "process"))
+        if dist.get_rank() == 0:
+            logger.info(f"[DCP async_save for {weights_dir}] async_checkpointer_type={async_checkpointer_type.value}")
 
         t0 = time.time()
         with profile_time_and_memory(f"[DCP async_save for {weights_dir}]"):
@@ -369,6 +382,7 @@ class TrainEngine:
                 checkpoint_id=incomplete_dir,
                 storage_writer=storage_writer,
                 process_group=self._async_checkpoint_pg,
+                async_checkpointer_type=async_checkpointer_type,
             )
 
         committed_future: Future = Future()
@@ -392,6 +406,11 @@ class TrainEngine:
                         committed_future.set_exception(exc)
                     return
 
+                # Propagate the staging cache (already in shm when
+                # ASYNC_DCP_SHARE_MEMORY=1, via XtunerCacheWriter.stage()) so
+                # the next checkpoint reuses the same buffers.
+                self._async_state_dict_cache = storage_writer.state_dict_cache
+
                 elapsed = time.time() - t0
                 logger.info(f"[DCP async_save for {weights_dir}] finished in {elapsed:.2f}s")
                 if not committed_future.done():
@@ -399,21 +418,49 @@ class TrainEngine:
 
             threading.Thread(target=commit, daemon=True).start()
 
-        self._async_state_dict_cache = storage_writer.state_dict_cache
         dcp_future.add_done_callback(commit_async_save)
         return committed_future
 
-    def _build_async_storage_writer(self, weights_dir: Path, *, save_optimizer: bool) -> FileSystemWriter:
-        # cache_staged_state_dict keeps pinned staging buffers on the
-        # FileSystemWriter instance. XTuner creates one writer per checkpoint
-        # path, so carry the cache across writers to preserve steady-state
-        # async_save launch performance.
+    def _build_async_storage_writer(self, weights_dir: Path, *, save_optimizer: bool) -> XtunerCacheWriter:
+        # XtunerCacheWriter.stage() builds the staging cache directly in POSIX
+        # shared memory when ASYNC_DCP_SHARE_MEMORY=1, so ForkingPickler can
+        # transfer tensors to the daemon via fd handles (no copy).
+        # XTuner creates one writer per checkpoint path; carry the cache across
+        # writers via self._async_state_dict_cache to avoid re-allocation.
+        # Keep cache_staged_state_dict=True: disabling it caused repeated staging
+        # and SIGBUS in experiments.
+        share_memory_cache = os.environ.get("ASYNC_DCP_SHARE_MEMORY", "0") not in {"0", "false", "False"}
+        async_checkpointer_type = AsyncCheckpointerType(os.environ.get("ASYNC_CHECKPOINT_TYPE", "process"))
+        if share_memory_cache and async_checkpointer_type == AsyncCheckpointerType.PROCESS:
+            # In async-process + shared-memory mode the staged tensors are already
+            # CPU-resident. Disable DCP's overlapping CPU loader because it creates
+            # CUDA streams in the checkpoint daemon and can OOM the training GPUs.
+            per_thread_copy_ahead = 0
+        else:
+            per_thread_copy_ahead = int(os.environ.get("ASYNC_DCP_PER_THREAD_COPY_AHEAD", "10000000"))
+        thread_count = int(os.environ.get("ASYNC_DCP_THREAD_COUNT", "1"))
+        sync_files = os.environ.get("ASYNC_DCP_SYNC_FILES", "1") not in {"0", "false", "False"}
+
         if self._async_state_dict_cache is not None:
             cached_has_optim = "optimizer" in self._async_state_dict_cache
             if cached_has_optim != save_optimizer:
                 self._async_state_dict_cache = None
 
-        storage_writer = FileSystemWriter(weights_dir, cache_staged_state_dict=True)
+        if dist.get_rank() == 0:
+            logger.info(
+                "[DCP async_save] XtunerCacheWriter "
+                "cache_staged_state_dict=True, "
+                f"per_thread_copy_ahead={per_thread_copy_ahead}, "
+                f"thread_count={thread_count}, sync_files={sync_files}"
+            )
+
+        storage_writer = XtunerCacheWriter(
+            weights_dir,
+            cache_staged_state_dict=True,
+            per_thread_copy_ahead=per_thread_copy_ahead,
+            thread_count=thread_count,
+            sync_files=sync_files,
+        )
         storage_writer.state_dict_cache = self._async_state_dict_cache
         return storage_writer
 
