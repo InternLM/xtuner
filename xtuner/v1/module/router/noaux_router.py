@@ -3,6 +3,7 @@ from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 
@@ -13,7 +14,7 @@ from .protocol import RouterProtocol, RouterResults
 
 class NoAuxRouterConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    scoring_func: Annotated[Literal["sigmoid", "softmax"], Parameter(group="router")]
+    scoring_func: Annotated[Literal["sigmoid", "softmax", "sqrtsoftplus"], Parameter(group="router")]
     router_scaling_factor: Annotated[float, Parameter(group="router")]
     norm_topk_prob: Annotated[bool, Parameter(group="router")]
     n_group: int
@@ -56,7 +57,7 @@ class NoAuxRouter(nn.Module, RouterProtocol):
         n_routed_experts: int,
         num_experts_per_tok: int,
         router_scaling_factor: float,
-        scoring_func: Literal["sigmoid", "softmax"],
+        scoring_func: Literal["sigmoid", "softmax", "sqrtsoftplus"],
         n_group: int,
         topk_group: int,
         norm_topk_prob: bool = True,
@@ -76,11 +77,15 @@ class NoAuxRouter(nn.Module, RouterProtocol):
         )
 
     def forward(self, logits, rollout_routed_experts: torch.Tensor | None = None) -> RouterResults:
-        if self.scoring_func == "sigmoid":
-            scores = logits.sigmoid()
-        else:
-            # TODO: (yehaochen)support softmax
-            raise NotImplementedError(f"insupportable scoring function for MoE gating: {self.scoring_func}")
+        match self.scoring_func:
+            case "sigmoid":
+                scores = logits.sigmoid()
+            case "softmax":
+                scores = logits.softmax(dim=-1)
+            case "sqrtsoftplus":
+                scores = F.softplus(logits).sqrt()
+            case _:
+                raise NotImplementedError(f"insupportable scoring function for MoE gating: {self.scoring_func}")
 
         scores_for_choice = scores + self.e_score_correction_bias.unsqueeze(0)
 
@@ -160,7 +165,7 @@ class NoAuxGroupedRouter(NoAuxRouter):
         num_experts_per_tok: int,
         router_scaling_factor: float,
         router_n_groups: int,
-        scoring_func: Literal["sigmoid", "softmax"],
+        scoring_func: Literal["sigmoid", "softmax", "sqrtsoftplus"],
         n_group: int,
         topk_group: int,
         norm_topk_prob: bool = True,
@@ -180,11 +185,15 @@ class NoAuxGroupedRouter(NoAuxRouter):
 
     def forward(self, logits, rollout_routed_experts: torch.Tensor | None = None) -> RouterResults:
         seq, ne = logits.shape
-        if self.scoring_func == "sigmoid":
-            scores = logits.sigmoid()
-        else:
-            # TODO: (yehaochen)support softmax
-            raise NotImplementedError(f"insupportable scoring function for MoE gating: {self.scoring_func}")
+        match self.scoring_func:
+            case "sigmoid":
+                scores = logits.sigmoid()
+            case "softmax":
+                scores = logits.softmax(dim=-1)
+            case "sqrtsoftplus":
+                scores = F.softplus(logits).sqrt()
+            case _:
+                raise NotImplementedError(f"insupportable scoring function for MoE gating: {self.scoring_func}")
 
         scores_for_choice = scores + self.e_score_correction_bias.unsqueeze(0)
 
