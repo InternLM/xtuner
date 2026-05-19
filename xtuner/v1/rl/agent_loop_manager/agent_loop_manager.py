@@ -13,7 +13,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop import AgentLoopConfig, AgentLoopSpec, get_agent_loop_rollout_ctl
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
-from xtuner.v1.rl.rollout import RolloutController, continue_generation, pause_generation
+from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import asyncio_run
 from xtuner.v1.utils import get_logger
 
@@ -782,7 +782,7 @@ class AgentLoopManager:
 
         rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
         # TODO: put in self.continue_produce()
-        await continue_generation(rollout_ctl)
+        await rollout_ctl.continue_generation.remote()  # type: ignore[attr-defined]
         try:
             # 共卡路径不复用非共卡的 paused producer 状态机。
             # 即使 manager 是从 resume() 恢复出来、当前仍处在 UPDATE_WEIGHT_AND_ABORT，
@@ -813,7 +813,7 @@ class AgentLoopManager:
             )
         finally:
             # TODO: put in self.pause_produce()
-            await pause_generation(rollout_ctl)
+            await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
 
         self.logger.info(
             f"[AgentLoopManager][{self.name}] produce_batch done "
@@ -842,7 +842,7 @@ class AgentLoopManager:
                 continue
 
             rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
-            await continue_generation(rollout_ctl)
+            await rollout_ctl.continue_generation.remote()  # type: ignore[attr-defined]
             task_batch_sizes = self._produce_progress.ensure_target_upto(
                 batch_size=batch_size,
                 future_step=self._produce_progress.producer_future_step,
@@ -882,10 +882,15 @@ class AgentLoopManager:
 
         while not self._finish_event.is_set():
             if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
-                return ProduceBatchResult(
+                pause_time_s = self._pause_time_s
+                self._pause_time_s = 0.0
+                result = ProduceBatchResult(
                     rollout_states=[],
                     status=ProduceBatchStatus.EXPIRED_BATCH,
                 )
+                if pause_time_s > 0:
+                    result.group_gen_pause_time_s = pause_time_s
+                return result
             if await self.replay_buffer.is_ready(task_batch_sizes):
                 result = await self._get_batch_from_buffer(
                     batch_size=batch_size,

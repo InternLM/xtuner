@@ -1,4 +1,5 @@
 import asyncio
+import math
 import os
 import threading
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ from .parser.factory import build_reasoning_parser, build_tool_call_parser
 from .parser.reasoning_parser import ReasoningParser
 from .parser.tool_parser import ToolCallParser
 from .utils import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthChecker, SessionRouter
-from .worker import RolloutConfig, RolloutWorker
+from .worker import ROLLOUT_CONCURRENCY_GROUP_GENERATE, RolloutConfig, RolloutWorker
 
 
 if TYPE_CHECKING:
@@ -86,11 +87,7 @@ class RolloutController:
                 RolloutWorker actors.
         """
         self.config = infer_config
-        self.num_gpus_per_engine = (
-            self.config.expert_parallel_size
-            if self.config.expert_parallel_size > 1
-            else self.config.tensor_parallel_size
-        )
+        self.num_gpus_per_engine = self.config.num_gpus_per_engine
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
         self.engine_rank_mesh_array: List[List[int]] = []
         self.worker_server_urls_map: dict[str, List[str]] = {}
@@ -186,6 +183,7 @@ class RolloutController:
             "total_workers": total_workers,
         }
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         if XTUNER_DETERMINISTIC:
             sample_params = rollout_state.sample_params.model_copy(deep=True)
@@ -204,7 +202,8 @@ class RolloutController:
         response_ref = worker.generate.remote(rollout_state=rollout_state)  # type: ignore[attr-defined]
         try:
             response_rollout_state = await asyncio.wait_for(
-                response_ref, timeout=self.config.rollout_timeout * self.timeout_multiplier
+                response_ref,
+                timeout=self.config.rollout_timeout * self.timeout_multiplier,
             )
             self._apply_output_parsers(response_rollout_state)
             return response_rollout_state
@@ -240,6 +239,9 @@ class RolloutController:
     def pause_generation(self):
         self.health_checker.pause()
         self._broadcast_to_active_workers("pause_generation")
+
+    def cleanup_after_pause(self):
+        self._broadcast_to_active_workers("cleanup_after_pause")
 
     def continue_generation(self):
         self.health_checker.resume()
@@ -328,37 +330,6 @@ class RolloutController:
                 dist_init_addrs[i : i + server_urls_per_engine] = [dist_init_addrs[i]] * server_urls_per_engine
         return dist_init_addrs
 
-    def _get_active_servers_count(self, infer_config: RolloutConfig, gpu_nums: int):
-        """Calculate the number of active servers and nodes per engine.
-
-        This calculation depends on the inference backend and parallelism settings.
-
-        Args:
-            infer_config (RolloutConfig): The rollout configuration.
-            gpu_nums (int): The total number of GPUs available.
-
-        Returns:
-            Tuple[int, int]: A tuple containing the number of active servers
-                and the number of nodes per engine.
-        """
-        # NOTE：Since different inference engines have different launch methods,
-        # the number of nodes contained in each engine is not consistent.
-        # For example: sglang requires starting an inference engine for each node,
-        # while lmdeploy and vllm does not. Therefore, we calculate the number
-        # of active servers based on the configuration.
-        support_cross_node_comm = infer_config.rollout_cross_node_comm
-        gpus_per_node = infer_config.gpus_per_node
-        nodes_per_engine = (
-            1
-            if support_cross_node_comm or self.num_gpus_per_engine < gpus_per_node
-            else self.num_gpus_per_engine // gpus_per_node
-        )
-
-        active_servers_count = int(
-            (gpu_nums // self.num_gpus_per_engine) * nodes_per_engine * infer_config.server_urls_per_engine
-        )
-        return active_servers_count, nodes_per_engine
-
     def _broadcast_to_active_workers(self, method_name: str):
         """Helper function to call a method on all active workers.
 
@@ -380,21 +351,33 @@ class RolloutController:
         if os.environ.get("XTUNER_USE_LMDEPLOY") == "1":
             from .lmdeploy import LMDeployWorker
 
-            return ray.remote(LMDeployWorker)
+            worker_cls = LMDeployWorker
         elif os.environ.get("XTUNER_USE_VLLM") == "1":
             from .vllm import vLLMWorker
 
-            return ray.remote(vLLMWorker)
+            worker_cls = vLLMWorker
         elif os.environ.get("XTUNER_USE_SGLANG") == "1":
             from .sglang import SGLangWorker
 
-            return ray.remote(SGLangWorker)
+            worker_cls = SGLangWorker
         else:
             raise NotImplementedError(
                 "Rollout backend is not supported."
                 "Please set XTUNER_USE_LMDEPLOY or XTUNER_USE_VLLM"
                 " or XTUNER_USE_SGLANG environment variable."
             )
+        assert self.config.rollout_max_batch_size_per_instance is not None, (
+            "rollout_max_batch_size_per_instance must be set before building RolloutWorker."
+        )
+        worker_generate_max_concurrency = max(
+            1000,  # Ray async actor default max_concurrency.
+            math.ceil(self.config.rollout_max_batch_size_per_instance * self.config.allow_over_concurrency_ratio),
+        )
+        return ray.remote(
+            concurrency_groups={
+                ROLLOUT_CONCURRENCY_GROUP_GENERATE: worker_generate_max_concurrency,
+            },
+        )(worker_cls)
 
     def _get_rank_by_actor(self, actor: RolloutWorker) -> Optional[int]:
         """Get rank by actor object.
@@ -447,7 +430,7 @@ class RolloutController:
         workers, rank_bundle_idx_list = AutoAcceleratorWorkers.from_placement_group(
             self._get_worker_cls(), self.config, placement_group
         )
-        active_servers_count, nodes_per_engine = self._get_active_servers_count(self.config, len(workers))
+        active_servers_count, nodes_per_engine = self.config.get_active_servers_count(len(workers))
         interval = len(workers) // active_servers_count
         active_rollout_workers = workers[::interval]
         server_urls_per_engine = self.config.server_urls_per_engine

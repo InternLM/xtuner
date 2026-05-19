@@ -160,6 +160,26 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertIn(("continue_produce", 1), manager.calls)
         self.assertIn("produce_loop_exit", manager.calls)
 
+    def test_log_step_records_pause_time_without_group_timing(self):
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer._log_step = RLDisaggregatedTrainer._log_step.__get__(trainer, RLDisaggregatedTrainer)
+
+        trainer._log_step(
+            train_step=1,
+            step_timer_dict={},
+            produce_result=ProduceBatchResult(
+                rollout_states=[],
+                status=ProduceBatchStatus.EXPIRED_BATCH,
+                group_gen_pause_time_s=1.5,
+            ),
+            train_info={},
+            eval_info={},
+        )
+
+        logged_scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
+        self.assertEqual(logged_scalars["timing/pause_s"], 1.5)
+        self.assertNotIn("timing/task_n", logged_scalars)
+
     def test_fit_runs_eval_before_reset_and_stops_producer(self):
         # 确定性排序依赖 RolloutState 的 message_uid 和 uid，测试用轻量对象模拟即可。
         train_sample = SimpleNamespace(message_uid=1, uid=1)

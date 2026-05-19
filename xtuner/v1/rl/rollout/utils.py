@@ -6,7 +6,6 @@ from collections import OrderedDict
 from itertools import cycle
 from typing import TYPE_CHECKING, Any, Optional, cast
 
-import httpx
 import numpy as np
 import ray
 from ray import ObjectRef as RayObjectRef
@@ -17,7 +16,7 @@ from xtuner.v1.utils import get_logger
 
 
 if TYPE_CHECKING:
-    from .controller import RolloutControllerProxy, WorkerInfo
+    from .controller import WorkerInfo
     from .worker import RolloutConfig, RolloutWorker
 
 ROLLOUT_RAY_GET_TIMEOUT = int(os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", str(5 * 3600)))  # default 5 hours
@@ -166,15 +165,15 @@ class RolloutHealthChecker:
                     rank: (info.actor, info.url, info.is_active) for rank, info in self._workers_info.items()
                 }
 
+        workers_to_check = [
+            (rank, actor, url, is_active) for rank, (actor, url, is_active) in workers_snapshot.items() if is_active
+        ]
+        if not workers_to_check:
+            return
+
         tasks = [
-            check_worker_health(
-                actor,
-                rank,
-                url,
-                is_active,
-                self._check_failure_threshold,
-            )
-            for rank, (actor, url, is_active) in workers_snapshot.items()
+            check_worker_health(actor, rank, url, is_active, self._check_failure_threshold)
+            for rank, actor, url, is_active in workers_to_check
         ]
 
         async def _run_checks() -> list[bool]:
@@ -182,7 +181,7 @@ class RolloutHealthChecker:
 
         check_results = asyncio_run(_run_checks())
         inactive_workers = []
-        for rank, is_healthy in zip(workers_snapshot.keys(), check_results):
+        for (rank, _, _, _), is_healthy in zip(workers_to_check, check_results):
             if not is_healthy:
                 logger.warning(f"Worker {rank} failed health check. Marking as inactive.")
                 if self._worker_infos_lock is None:
@@ -202,6 +201,10 @@ class RolloutHealthChecker:
         for rank, inactive_worker in inactive_workers:
             try:
                 ray.get(inactive_worker.offload.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+            except Exception as e:
+                logger.error(f"Exception while offloading worker {rank}: {e}")
+
+            try:
                 ray.get(inactive_worker.shutdown.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
             except Exception as e:
                 logger.error(f"Exception while shutting down worker {rank}: {e}")
@@ -222,42 +225,6 @@ class RolloutHealthChecker:
 
             if self._stop_event.wait(self._check_interval):
                 break
-
-
-async def send_abort_request(client: httpx.AsyncClient, url: str, timeout: float = 60.0) -> tuple[str, bool]:
-    worker_url = f"{url}/abort_request"
-    try:
-        response = await client.post(worker_url, json={"abort_all": True}, timeout=timeout)
-        response.raise_for_status()
-        logger.debug(f"Successfully sent abort request to {url}")
-        return url, True
-    except Exception as e:
-        logger.error(f"Failed to send abort request to {url}: {e}")
-        return url, False
-
-
-async def pause_generation(rollout_ctl: "RolloutControllerProxy", pause_time_out: float = 60.0) -> None:
-    await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
-    rollout_ctl_metadata = await rollout_ctl.get_rollout_metadata.remote()  # type: ignore[attr-defined]
-    infer_server_url = list(rollout_ctl_metadata["server_url_dict"].values())
-    async with httpx.AsyncClient() as client:
-        tasks = [send_abort_request(client, url, timeout=pause_time_out) for url in infer_server_url]
-        results = await asyncio.gather(*tasks)
-
-    failed_workers = [url for url, success in results if not success]
-    succeeded_count = len(infer_server_url) - len(failed_workers)
-
-    if failed_workers:
-        logger.warning(
-            f"Abort requests completed. Succeeded: {succeeded_count}, "
-            f"Failed: {len(failed_workers)}. Failed workers: {failed_workers}"
-        )
-    else:
-        logger.info(f"All {succeeded_count} abort requests sent successfully.")
-
-
-async def continue_generation(rollout_ctl: "RolloutControllerProxy") -> None:
-    return await rollout_ctl.continue_generation.remote()  # type: ignore[attr-defined]
 
 
 async def check_worker_health(
@@ -302,15 +269,8 @@ class PartialRolloutHandler:
         self.logger = get_logger(self.__class__.__name__)
 
     def preprocess(self, rollout_state: RolloutState, max_tokens: int) -> RolloutState:
-        if not rollout_state.response_ids:
-            assert not rollout_state.response and not rollout_state.logprobs, (
-                "If response_ids is empty, response and logprobs should also be empty"
-            )
-            # 如果上一轮没有回复，则不需要进行预处理，直接返回原始rollout_state
-            return rollout_state
-
         # Set up token and length variable
-        response_ids = rollout_state.response_ids
+        response_ids = list(rollout_state.response_ids or [])
         prompt_ids = list(rollout_state.prompt_ids or [])
         response_len = len(response_ids)
         prompt_len = len(prompt_ids)
@@ -334,6 +294,7 @@ class PartialRolloutHandler:
         routed_experts: np.ndarray | RayObjectRef | None,
         finish_reason: str,
         status: Status,
+        routed_experts_expect_len: int,
     ) -> RolloutState:
         rollout_state.finish_reason = finish_reason
         rollout_state.status = status
@@ -361,9 +322,12 @@ class PartialRolloutHandler:
             cur_routed_experts = cur_routed_experts[history_routed_experts_len:]
             concat_routed_experts = np.concatenate([history_routed_experts, cur_routed_experts], axis=0)
             rollout_state.routed_experts = ray.put(concat_routed_experts)
-            expected_len = len(cast(list[int], rollout_state.prompt_ids)) + len(current_response_ids) - 1
-            assert len(concat_routed_experts) == expected_len, (
-                f"After concatenation, routed_experts len: {len(concat_routed_experts)}, expected len: {expected_len}, history_routed_experts_len: {history_routed_experts_len}, current_routed_experts_len: {len(cur_routed_experts)}, prompt_ids_len: {len(cast(list[int], rollout_state.prompt_ids))}, response_ids_len: {len(current_response_ids)}"
+            expected_len = len(cast(list[int], rollout_state.prompt_ids)) + len(rollout_state.response_ids) - 1
+            assert expected_len == routed_experts_expect_len, (
+                f"Expected routed_experts len: {expected_len}, routed_experts_expect_len: {routed_experts_expect_len}, prompt_ids_len: {len(cast(list[int], rollout_state.prompt_ids))}, response_ids_len: {len(rollout_state.response_ids)}"
+            )
+            assert len(concat_routed_experts) == routed_experts_expect_len, (
+                f"After concatenation, routed_experts len: {len(concat_routed_experts)}, expected len: {expected_len}, history_routed_experts_len: {history_routed_experts_len}, current_routed_experts_len: {len(cur_routed_experts)}, prompt_ids_len: {len(cast(list[int], rollout_state.prompt_ids))}, response_ids_len: {len(rollout_state.response_ids)}"
             )
             # free_object_refs(
             #     [ref for ref in (history_routed_experts_ref, cur_routed_experts_ref) if isinstance(ref, ray.ObjectRef)]
