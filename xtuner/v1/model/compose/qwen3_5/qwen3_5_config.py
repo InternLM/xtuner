@@ -49,8 +49,8 @@ class Qwen3_5TimeSeriesMoE35BA3Config(Qwen3_5_VLMoE35BA3Config):
 
 
 class Qwen3_5_VLMoE397BA17SplitConfig(Qwen3_5_BaseConfig):
-    vision_config: Qwen3_5_VisionConfig = Qwen3_5_VisionConfig()
-    projector_config: Qwen3_5_ProjectorConfig = Qwen3_5_ProjectorConfig(text_hidden_size=4096)
+    vision_config: Qwen3_5_VisionConfig = Qwen3_5_VisionConfig(fully_shard=False)
+    projector_config: Qwen3_5_ProjectorConfig = Qwen3_5_ProjectorConfig(text_hidden_size=4096, fully_shard=False)
     text_config: MoEConfig = Qwen3_5_VLTextMoE397BA17BSplitConfig(
         hf_key_mapping={r"^model\.": "model.language_model."}
     )
