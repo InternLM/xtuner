@@ -283,11 +283,20 @@ class DeepSeekSparseAttention(nn.Module):
                 "position_embeddings must carry one (cos, sin) row per token; "
                 f"got cos {tuple(cos.shape)}, sin {tuple(sin.shape)}, expected token dim {total_tokens}"
             )
-        if cos.size(-1) != self.qk_rope_head_dim:
+        # XTuner's RotaryEmbedding emits cos/sin at the full head_dim (rotate-half
+        # convention), but DSA only applies rope to the qk_rope_head_dim suffix of
+        # each head. Accept either shape: caller-sliced qk_rope_head_dim, or
+        # full-head-dim cos/sin which we slice to the first qk_rope_head_dim entries.
+        # The first half of XTuner's `cat((freqs, freqs), dim=-1)` layout matches
+        # the V4 reference's qk_rope_head_dim-sized cos/sin bit-identically.
+        if cos.size(-1) < self.qk_rope_head_dim:
             raise ValueError(
-                "position_embeddings last dim must equal qk_rope_head_dim "
+                "position_embeddings last dim must be at least qk_rope_head_dim "
                 f"({self.qk_rope_head_dim}); got {cos.size(-1)}"
             )
+        if cos.size(-1) > self.qk_rope_head_dim:
+            cos = cos[..., : self.qk_rope_head_dim]
+            sin = sin[..., : self.qk_rope_head_dim]
 
         # 1. Q-LoRA path. `q_lowrank` is reused by the Indexer (V4 reuses
         # the same low-rank Q stream for the score path).
