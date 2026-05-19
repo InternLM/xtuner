@@ -656,7 +656,7 @@ class SyncProduceStrategy(ProduceStrategy):
 
 
 class AsyncProduceStrategy(ProduceStrategy):
-    PENDING_TASK_COLLECT_TIMEOUT_S = 15.0
+    PENDING_TASK_COLLECT_TIMEOUT_S = 300.0
 
     def __init__(
         self,
@@ -724,6 +724,9 @@ class AsyncProduceStrategy(ProduceStrategy):
             f"Pause signal sent for task {ctx.task_name}. Waiting for {self._pending_tasks.count()} pending tasks to complete..."
         )
         cleanup_start_time = time.perf_counter()
+        aborted_count = 0
+        aborted_tokens_sum = 0
+        aborted_zero_token_count = 0
         while True:
             elapsed_time = time.perf_counter() - cleanup_start_time
             if elapsed_time > self.PENDING_TASK_COLLECT_TIMEOUT_S:
@@ -741,6 +744,12 @@ class AsyncProduceStrategy(ProduceStrategy):
             for task in claimed_done:
                 paused_items = task.result()
                 for item in paused_items:
+                    if item.status == Status.ABORTED:
+                        token_count = len(item.response_ids or [])
+                        aborted_count += 1
+                        aborted_tokens_sum += token_count
+                        if token_count == 0:
+                            aborted_zero_token_count += 1
                     logger.debug(
                         f"[{self.__class__.__name__}] Task {ctx.task_name} | "
                         f"Collecting paused sample (uid: {item.uid}, status: {item.status}, "
@@ -748,7 +757,12 @@ class AsyncProduceStrategy(ProduceStrategy):
                     )
                 await ctx.put_generated_group(paused_items)
         pause_time = time.perf_counter() - pause_start
-        logger.info(f"pause_produce completed for task {ctx.task_name} within {pause_time}s.")
+        aborted_tokens_mean = aborted_tokens_sum / aborted_count if aborted_count > 0 else 0.0
+        logger.info(
+            f"pause_produce completed for task {ctx.task_name} within {pause_time}s. "
+            f"aborted_count={aborted_count}, aborted_tokens_mean={aborted_tokens_mean:.1f}, "
+            f"aborted_zero_token_count={aborted_zero_token_count}."
+        )
         return pause_time
 
     async def produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:

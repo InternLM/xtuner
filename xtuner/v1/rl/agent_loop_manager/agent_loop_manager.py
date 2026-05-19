@@ -882,10 +882,15 @@ class AgentLoopManager:
 
         while not self._finish_event.is_set():
             if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
-                return ProduceBatchResult(
+                pause_time_s = self._pause_time_s
+                self._pause_time_s = 0.0
+                result = ProduceBatchResult(
                     rollout_states=[],
                     status=ProduceBatchStatus.EXPIRED_BATCH,
                 )
+                if pause_time_s > 0:
+                    result.group_gen_pause_time_s = pause_time_s
+                return result
             if await self.replay_buffer.is_ready(task_batch_sizes):
                 result = await self._get_batch_from_buffer(
                     batch_size=batch_size,

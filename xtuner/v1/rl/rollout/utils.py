@@ -6,7 +6,6 @@ from collections import OrderedDict
 from itertools import cycle
 from typing import TYPE_CHECKING, Any, Optional, cast
 
-import httpx
 import numpy as np
 import ray
 from ray import ObjectRef as RayObjectRef

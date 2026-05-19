@@ -457,11 +457,15 @@ class RolloutConfig(BaseModel):
         )
         generate_max_concurrency = self.get_controller_generate_concurrency(placement_group)
         get_logger().info(f"Calculated RolloutController generate concurrency: {generate_max_concurrency}")
-        return ray.remote(
-            concurrency_groups={
-                ROLLOUT_CONCURRENCY_GROUP_GENERATE: generate_max_concurrency,
-            },
-        )(RolloutController).remote(self, placement_group)
+        return (
+            ray.remote(
+                concurrency_groups={
+                    ROLLOUT_CONCURRENCY_GROUP_GENERATE: generate_max_concurrency,
+                },
+            )(RolloutController)
+            .options(num_cpus=num_workers)
+            .remote(self, placement_group)
+        )
 
 
 class RolloutWorker(SingleAcceleratorWorker):
@@ -657,6 +661,11 @@ class RolloutWorker(SingleAcceleratorWorker):
         # 1. support claude format input
         # 2. 需要看下新的输入输出(RolloutState)怎么适配PartialRollout的逻辑，先跑起来
         # 3. 对于流式返回的response先删掉，目前还用不上，等需要的时候再加上
+
+        if self.receive_abort_request.is_set():
+            rollout_state.finish_reason = "abort"
+            rollout_state.status = Status.ABORTED
+            return rollout_state
 
         uid = rollout_state.uid
         sample_params: SampleParams = rollout_state.sample_params

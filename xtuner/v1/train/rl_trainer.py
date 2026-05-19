@@ -1092,6 +1092,7 @@ class BaseRLTrainer:
             all_scalars["timing/task_p50_s"] = produce_result.group_gen_p50_s
             all_scalars["timing/task_p99_s"] = produce_result.group_gen_p99_s
             all_scalars["timing/task_p99_p50_ratio"] = produce_result.group_gen_p99_p50_ratio
+        if produce_result.group_gen_pause_time_s is not None:
             all_scalars["timing/pause_s"] = produce_result.group_gen_pause_time_s
         all_scalars["async/init_samples"] = produce_result.leftover_init
         all_scalars["async/completed_samples"] = produce_result.leftover_completed

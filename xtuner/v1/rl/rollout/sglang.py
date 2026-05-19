@@ -180,12 +180,13 @@ class SGLangWorker(RolloutWorker):
     def onload_kvcache(self):
         return self._make_request("resume_memory_occupation", {"tags": ["kv_cache"]})
 
-    def pause_generation(self):
+    async def pause_generation(self):
         # SGLang PauseGeneration支持三种模式（https://github.com/sgl-project/sglang/blob/8d27ce7371da617a671f62e78dde66d64b7ad6cb/python/sglang/srt/managers/io_struct.py#L1353）：
         # abort    = 丢弃 waiting 和 running 请求，
         # retract  = 保留waiting请求和running请求（保留已生成 token），释放 KV，恢复时重算 KV 后继续
         # in_place = 保留waiting请求和running请求（保留已生成 token）、已生成 token、KV，恢复时直接继续
         self.receive_abort_request.set()
+        await self._send_abort_request()
         return self._make_request("pause_generation", {"mode": "abort"})
 
     def continue_generation(self):
