@@ -240,6 +240,9 @@ class RolloutController:
         self.health_checker.pause()
         self._broadcast_to_active_workers("pause_generation")
 
+    def cleanup_after_pause(self):
+        self._broadcast_to_active_workers("cleanup_after_pause")
+
     def continue_generation(self):
         self.health_checker.resume()
         self._broadcast_to_active_workers("continue_generation")

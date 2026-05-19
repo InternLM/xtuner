@@ -613,6 +613,10 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.receive_abort_request.set()
         return await self._send_abort_request()
 
+    async def cleanup_after_pause(self) -> None:
+        """Run backend-specific cleanup after paused requests are drained."""
+        return None
+
     async def _send_abort_request(self) -> bool:
         url = f"{self.server_url}/abort_request"
         try:

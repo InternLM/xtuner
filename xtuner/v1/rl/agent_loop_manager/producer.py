@@ -756,6 +756,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                         f"length: {len(item.response_ids or [])}) after pausing generation."
                     )
                 await ctx.put_generated_group(paused_items)
+        await rollout_ctl.cleanup_after_pause.remote()  # type: ignore[attr-defined]
         pause_time = time.perf_counter() - pause_start
         aborted_tokens_mean = aborted_tokens_sum / aborted_count if aborted_count > 0 else 0.0
         logger.info(
