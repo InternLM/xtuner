@@ -67,6 +67,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._benchmark_start_time_s = 100.0
         trainer._benchmark_training_samples = 0
         trainer._benchmark_training_tokens = 0
+        trainer._cpu_resource_manager = None
         trainer._train_worker_cfg = SimpleNamespace(pack_max_length=16)
         trainer._meta = SimpleNamespace(
             latest_exp=SimpleNamespace(exp_dir=str(Path(self.temp_dir.name) / "exp")),

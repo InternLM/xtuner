@@ -38,7 +38,6 @@ from .ray_cpu_worker import (
 )
 from .ray_utils import (
     bind_train_rollout,
-    clear_rollout_response_for_rerun,
     close_ray,
     find_master_addr_and_port,
     free_object_refs,
@@ -66,7 +65,6 @@ __all__ = [
     "find_master_addr_and_port",
     "get_accelerator_ids",
     "free_object_refs",
-    "clear_rollout_response_for_rerun",
     "bind_train_rollout",
     "handle_task_exception",
     "create_task",

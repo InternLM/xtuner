@@ -1,6 +1,11 @@
 import torch
+from typing_extensions import NotRequired, TypedDict
 
-from xtuner.v1.data_proto.cache_item import CacheItem
+
+class CacheItem(TypedDict):
+    num_tokens: int
+    num_img_tokens: NotRequired[list[int]]
+    proxy_attn_flops: NotRequired[float]
 
 
 class DataItem(CacheItem):

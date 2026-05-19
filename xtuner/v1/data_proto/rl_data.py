@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import base64
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 import numpy as np
 import torch
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import NotRequired, TypedDict
 
 # ====================================
@@ -108,7 +107,7 @@ class RolloutState(BaseModel):
     tool_calls: list[RolloutToolCall] | None = None
     response_ids: list[int] | None = None
     logprobs: list[float] | None = None
-    routed_experts: list[int] | RayObjectRef | None = None
+    routed_experts: np.ndarray | RayObjectRef | None = None
     finish_reason: str | None = None
     # response_mask: 记录response_ids中哪个token算loss, 与response_ids长度相同，每轮rollout在 agent_loop.generate 中覆盖写
     response_mask: list[int] | None = None
@@ -127,51 +126,6 @@ class RolloutState(BaseModel):
     error_msg: str | None = None
     position_ids: torch.Tensor | None = None
     extra_fields: dict[str, Any] = {}
-
-    @field_serializer("routed_experts")
-    def _serialize_routed_experts(self, value: list[int] | RayObjectRef | None) -> list[int] | str | None:
-        """序列化 routed_experts 字段：
-
-        - None -> None
-        - list[int] -> list[int]（原样保留）
-        - RayObjectRef -> base64 编码的字符串（通过 ray.cloudpickle 序列化）
-        """
-        import ray
-
-        if value is None:
-            return None
-        if isinstance(value, ray.ObjectRef):
-            data = ray.cloudpickle.dumps(value)
-            return base64.b64encode(data).decode("utf-8")
-        return value
-
-    @field_validator("routed_experts", mode="before")
-    @classmethod
-    def _deserialize_routed_experts(cls, value: Any) -> list[int] | RayObjectRef | None:
-        """反序列化 routed_experts 字段：
-
-        - None -> None
-        - list[int] -> list[int]（原样保留）
-        - str（base64 编码）-> RayObjectRef（通过 ray.cloudpickle 反序列化）
-        - RayObjectRef -> RayObjectRef（原样保留）
-        """
-        import ray
-
-        if value is None:
-            return None
-        if isinstance(value, ray.ObjectRef):
-            return value
-        if isinstance(value, str):
-            data = base64.b64decode(value)
-            return ray.cloudpickle.loads(data)
-        if isinstance(value, list):
-            return value
-        return value
-
-    @field_serializer("mm_info")
-    def _serialize_mm_info(self, value: MultimodalInfo | None) -> MultimodalInfo | None:
-        # TODO: Not currently needed
-        return None
 
 
 def update_status_from_finish_reason(finish_reason: str | None) -> Status:
@@ -210,6 +164,29 @@ def update_status_from_finish_reason(finish_reason: str | None) -> Status:
     else:
         logger.error(f"finish_reason '{finish_reason}' is unknown, setting status to FAILED.")
         return Status.FAILED
+
+
+def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
+    routed_experts = getattr(rollout_state, "routed_experts", None)
+    if routed_experts is not None:
+        import ray
+        from ray import ObjectRef as RayObjectRef
+
+        if isinstance(routed_experts, RayObjectRef):
+            ray.internal.free([routed_experts])
+        rollout_state.routed_experts = None
+    prompt_ids = getattr(rollout_state, "prompt_ids", None)
+    rollout_state.tokens = list(prompt_ids) if prompt_ids is not None else None
+    rollout_state.response = ""
+    rollout_state.response_ids = []
+    rollout_state.logprobs = []
+    rollout_state.routed_experts = None
+    rollout_state.finish_reason = None
+    rollout_state.response_mask = []
+    rollout_state.response_model_steps = []
+    rollout_state.reward = None
+    rollout_state.error_msg = None
+    return rollout_state
 
 
 def get_group_status(rollout_states: list[RolloutState]) -> Status:
