@@ -1924,7 +1924,13 @@ class Trainer:
 
     def _print_training_config(self):
         if self._config is not None and self.rank == 0:
-            config_str = self._config.model_dump_json(indent=2)
+            config_str = self._config.model_dump_json(
+                indent=2,
+                # Printing `dataset_cfg` and `dataloader_cfg` would take up a huge amount of space and make
+                # the logs unreadable, so the trainer only prints the model-related configuration.
+                exclude=set(["dataset_cfg", "dataloader_cfg"]),
+                serialize_as_any=True,
+            )
             logger.info(f"Training config: {config_str}")
 
     def _resolve_deprecate_compile_cfg(self, model_cfg: XTunerBaseModelConfig, fsdp_cfg: FSDPConfig):
