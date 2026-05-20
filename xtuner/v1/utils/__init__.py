@@ -7,7 +7,7 @@ from .enum_helper import StrEnum
 from .exception_helper import ParallelConfigException
 from .init_weight import default_init_weights, init_params
 from .loader import HFCheckpointLoader
-from .logger import get_logger, log_format
+from .logger import get_logger, log_format, log_rank0
 from .misc import (
     XTUNER_DETERMINISTIC,
     FunctionEnum,
@@ -31,6 +31,7 @@ IGNORE_INDEX = -100
 
 __all__ = [
     "get_logger",
+    "log_rank0",
     "SharedMemory",
     "StrEnum",
     "ForwardState",

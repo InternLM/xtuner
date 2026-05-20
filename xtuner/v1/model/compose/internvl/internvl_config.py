@@ -7,7 +7,7 @@ from xtuner.v1.model.base import XTunerBaseModelConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense0P6BConfig, Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
-from xtuner.v1.utils import get_device, get_logger
+from xtuner.v1.utils import get_device, get_logger, log_rank0
 
 from ..base import BaseComposeConfig
 
@@ -51,7 +51,7 @@ class InternVLVisionConfig(XTunerBaseModelConfig):
     def model_post_init(self, _):
         if self.attn_impl == "flash_attention" and get_device() == "cuda":
             if not (is_installed("flash-attn") or is_installed("flash-attn-3")):
-                logger.warning("flash-attn is not installed, using `flex_attention` instead.")
+                log_rank0.warning("flash-attn is not installed, using `flex_attention` instead.")
                 self.attn_impl = "flex_attention"
         return self
 
@@ -110,7 +110,7 @@ class InternVLBaseConfig(BaseComposeConfig):
     @property
     def hf_config(self):
         # TODO(pppppM) Support saving HuggingFace format config
-        logger.warning(
+        log_rank0.warning(
             f"{type(self)} does not support conversion to HuggingFace config format. "
             "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
             f"If you have changed the default values in {type(self)}, it may cause the config in the saved "

@@ -12,7 +12,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import DTensor
 
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, log_rank0
 
 
 if TYPE_CHECKING:
@@ -202,7 +202,7 @@ class ProberList:
         for prober_cls in cls.prober_list:
             prober_cls.setup(dump_home, profile_step)
 
-        logger.info(
+        log_rank0.info(
             f"ProberList initialized with {len(cls.prober_list)} probers: {[p.__name__ for p in cls.prober_list]}"
         )
 
@@ -510,7 +510,7 @@ class AccProber(BaseProber):
     def setup(cls, dump_home: Path, profile_step: list[int]):
         super().setup(dump_home / "acc_prober", profile_step)
         cls.forward_records = []
-        logger.info(f"AccProber initialized at {cls.dump_dir}")
+        log_rank0.info(f"AccProber initialized at {cls.dump_dir}")
 
     @classmethod
     def record_tensor(cls, tensor: torch.Tensor | None, name: str):
@@ -734,7 +734,7 @@ class TimeProber(BaseProber):
         cls.timings = {}
         cls.start_times = {}
         cls.max_step = max(profile_step)
-        logger.info(f"TimeProber initialized at {cls.dump_dir}")
+        log_rank0.info(f"TimeProber initialized at {cls.dump_dir}")
 
     @classmethod
     def _start_timer(cls, name: str):

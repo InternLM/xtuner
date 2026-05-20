@@ -32,6 +32,44 @@ def log_format(debug: bool = False, module: str | None = None, rank: int | None 
     return formatter
 
 
+class _Rank0Logger:
+    """Logger proxy that emits records only when the current process is rank 0.
+
+    Use this for messages that are identical across distributed ranks — configuration
+    warnings, env detection, deprecation notices, one-shot startup info. Non-rank-0
+    processes skip the call entirely (so the message is absent from both stderr and the
+    per-rank log file). For per-sample, per-rank, or per-process messages that
+    genuinely differ across ranks, call ``get_logger()`` directly so every rank keeps
+    its own record.
+    """
+
+    # `opt(depth=1)` skips this wrapper frame so loguru's `{name}:{function}:{line}`
+    # in the debug log format still points to the real caller.
+
+    def debug(self, *args, **kwargs):
+        if get_rank() == 0:
+            get_logger().opt(depth=1).debug(*args, **kwargs)
+
+    def info(self, *args, **kwargs):
+        if get_rank() == 0:
+            get_logger().opt(depth=1).info(*args, **kwargs)
+
+    def warning(self, *args, **kwargs):
+        if get_rank() == 0:
+            get_logger().opt(depth=1).warning(*args, **kwargs)
+
+    def error(self, *args, **kwargs):
+        if get_rank() == 0:
+            get_logger().opt(depth=1).error(*args, **kwargs)
+
+    def critical(self, *args, **kwargs):
+        if get_rank() == 0:
+            get_logger().opt(depth=1).critical(*args, **kwargs)
+
+
+log_rank0 = _Rank0Logger()
+
+
 def get_logger(level="INFO", log_dir=None, tag=None):
     global _LOGGER
     if _LOGGER is None:

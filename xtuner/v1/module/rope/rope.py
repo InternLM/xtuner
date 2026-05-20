@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict
 from typing_extensions import Self, deprecated, overload
 
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, log_rank0
 from xtuner.v1.utils.device import get_device
 
 
@@ -599,7 +599,7 @@ def get_rope_embedding(config, device=None) -> RotaryEmbeddingProtocol:
     if rope_parameters_cfg is not None and rope_parameters_cfg.rope_type == "qwen3_vl":
         return Qwen3VLTextRotaryEmbedding(config, device=device)
     elif rope_parameters_cfg is not None and rope_parameters_cfg.use_fope:
-        logger.info("Using FoPE rotary embedding.")
+        log_rank0.info("Using FoPE rotary embedding.")
         return FourierEmbedding(config, device=device)
     else:
         return RotaryEmbedding(config, device=device)

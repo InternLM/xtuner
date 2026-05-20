@@ -17,7 +17,7 @@ from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops import AttnOpOutputs, attn_impl_mapping, flash_attn_varlen_func, get_apply_rotary_emb
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
-from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_logger
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_logger, log_rank0
 
 from ..linear import build_linear
 from ..rms_norm import RMSNorm
@@ -48,7 +48,7 @@ class MHAConfig(BaseModel):
     def model_post_init(self, _):
         if self.attn_impl == "flash_attention" and get_device() == "cuda":
             if not (is_installed("flash-attn") or is_installed("flash-attn-3")):
-                logger.warning("flash-attn is not installed, using `flex_attention` instead.")
+                log_rank0.warning("flash-attn is not installed, using `flex_attention` instead.")
                 self.attn_impl = "flex_attention"
         return self
 

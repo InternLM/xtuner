@@ -20,7 +20,7 @@ import numpy as np
 from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.data import Sampler
 
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, log_rank0
 
 from .preset_pack import PresetPackDataset
 
@@ -61,7 +61,7 @@ def _log_coverage_summary(order: np.ndarray, num_packs: int) -> None:
     used_packs = int(uniq.size)
     repeated = int(np.sum(counts > 1))
     pct = 100.0 * used_packs / num_packs if num_packs > 0 else 0.0
-    logger.info(
+    log_rank0.info(
         f"PresetSampler: sampler order covers {used_packs}/{num_packs} packs ({pct:.1f}%). "
         f"({repeated} packs referenced more than once)"
     )
@@ -106,7 +106,7 @@ class PresetSampler(Sampler):
 
         if round_up:
             round_up = False
-            logger.warning(
+            log_rank0.warning(
                 "PresetSampler: round_up is not supported and ignored for preset sampler, due to mmap array limitation."
             )
 
@@ -120,7 +120,7 @@ class PresetSampler(Sampler):
         self.dataset = dataset
         self.global_batch_size = global_batch_size
 
-        logger.info(f"PresetSampler: loading sampler order (mmap) from {sampler_config_path}.")
+        log_rank0.info(f"PresetSampler: loading sampler order (mmap) from {sampler_config_path}.")
         order = _load_sampler_config(sampler_config_path)
 
         if order.ndim != 1:
@@ -146,7 +146,7 @@ class PresetSampler(Sampler):
                 "cannot round down to a positive multiple. "
             )
         if self.total_size < raw_len:
-            logger.info(
+            log_rank0.info(
                 f"PresetSampler: truncating sampler order from {raw_len} to {self.total_size} "
                 f"(multiple of {self.global_batch_size}, round-down)."
             )
@@ -184,7 +184,7 @@ class PresetSampler(Sampler):
 
     def load_state_dict(self, state_dict: dict) -> None:
         if self.world_size != state_dict.get("world_size"):
-            logger.warning(
+            log_rank0.warning(
                 f"PresetSampler: world_size mismatch: checkpoint has "
                 f"{state_dict.get('world_size')}, current is {self.world_size}. "
                 "Resumption may be inaccurate."

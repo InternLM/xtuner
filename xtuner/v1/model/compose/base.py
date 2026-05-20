@@ -25,7 +25,7 @@ from xtuner.v1.model.base import (
     ModelOutputs,
     XTunerBaseModelConfig,
 )
-from xtuner.v1.utils import get_device, get_logger
+from xtuner.v1.utils import get_device, get_logger, log_rank0
 from xtuner.v1.utils.process import set_async_save_process_qos
 
 from ..utils.misc import update_weight_map_from_safetensors_index
@@ -82,17 +82,17 @@ class BaseComposeModel(BaseModel):
         if freeze_vision:
             self.vision_tower.requires_grad_(False)
             self.vision_tower.eval()
-            logger.info("Freeze vision tower")
+            log_rank0.info("Freeze vision tower")
         freeze_projector = self.config.freeze_projector
         if freeze_projector:
             self.multi_modal_projector.requires_grad_(False)
             self.multi_modal_projector.eval()
-            logger.info("Freeze multi modal projector")
+            log_rank0.info("Freeze multi modal projector")
         freeze_language = self.config.freeze_language
         if freeze_language:
             self.language_model.requires_grad_(False)
             self.language_model.eval()
-            logger.info("Freeze language model")
+            log_rank0.info("Freeze language model")
 
     @override
     def init_weights(self) -> None:

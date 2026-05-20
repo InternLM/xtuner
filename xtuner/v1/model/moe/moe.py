@@ -62,6 +62,7 @@ from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
 from xtuner.v1.utils import (
     get_device,
     get_logger,
+    log_rank0,
 )
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 from xtuner.v1.utils.router_offload import async_offload_to_cpu
@@ -890,7 +891,7 @@ class MoE(BaseModel):
                 if self.config.freeze_routers:
                     layers[str(layer_idx)].gate.requires_grad_(False)
                     layers[str(layer_idx)].gate.eval()
-                    logger.info(f"Freeze MoE Router in layer {layer_idx}")
+                    log_rank0.info(f"Freeze MoE Router in layer {layer_idx}")
 
         layers.__class__.__repr__ = module_dict_repr  # type: ignore[method-assign]
         return layers

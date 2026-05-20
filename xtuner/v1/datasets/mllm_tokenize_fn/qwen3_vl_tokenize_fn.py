@@ -20,7 +20,7 @@ from transformers import AutoProcessor, PreTrainedTokenizer
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from xtuner.v1.data_proto.messages import ChatMessages, Qwen35ChatMessages
 from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP, HybridChatTemplate
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, log_rank0
 
 from ..data_item import CacheItem, QwenVL3DataItem
 from ..utils import apply_exif_orientation, generate_random_int_from_dict
@@ -400,7 +400,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.add_bos_token = add_bos_token
         self.bos_token_id = None
         if self.add_bos_token and tokenizer.bos_token is None:
-            logger.warning("tokenizer has no bos_token, set add_bos_token=False")
+            log_rank0.warning("tokenizer has no bos_token, set add_bos_token=False")
             self.add_bos_token = False
         if self.add_bos_token:
             self.bos_token_id = tokenizer.convert_tokens_to_ids(tokenizer.bos_token)

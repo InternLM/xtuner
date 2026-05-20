@@ -6,7 +6,7 @@ XTUNER_DISPATCHER_DEBUG = os.getenv("XTUNER_DISPATCHER_DEBUG", "0") == "1"
 
 import torch.distributed as dist
 
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, log_rank0
 
 from .agrs import MoEAGRSDispatcher
 from .base import (
@@ -36,7 +36,7 @@ def build_dispatcher(
 ) -> DispacherInterface:
     if ep_group is None or ep_group.size() == 1:
         if dispatcher is not None:
-            logger.warning(f"{dispatcher} will not be used because the ep group is None.")
+            log_rank0.warning(f"{dispatcher} will not be used because the ep group is None.")
         return NaiveDispatcher(
             n_routed_experts=n_routed_experts,
             process_group=ep_group,
