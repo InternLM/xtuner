@@ -2,6 +2,7 @@ import re
 from typing import Literal
 
 from pydantic import computed_field
+from pydantic import Field, computed_field
 
 from xtuner.v1.model.base import (
     HFSaveCfg,
@@ -140,7 +141,6 @@ class Qwen3_5_VLTextMoE35BA3BSplitConfig(Qwen3_5_VLTextMoESplitConfig):
     hidden_size: int = 2048
     intermediate_size: int = 0  # not used
     rms_norm_eps: float = 1e-6
-    rope_theta: float = 10000000.0
     hidden_act: str = "silu"
     attention: MHAConfig = MHAConfig(
         with_gate=True,
@@ -173,8 +173,13 @@ class Qwen3_5_VLTextMoE35BA3BSplitConfig(Qwen3_5_VLTextMoESplitConfig):
         norm_topk_prob=True,
         router_scaling_factor=1.0,
     )
-    rope_scaling_cfg: RopeScalingConfig = RopeScalingConfig(
-        type="qwen3_vl", mrope_section=[11, 11, 10], partial_rotary_factor=0.25
+    rope_parameters_cfg: RopeParametersConfig = Field(
+        default_factory=lambda: RopeParametersConfig(
+            rope_theta=10000000.0,
+            rope_type="qwen3_vl",
+            mrope_section=[11, 11, 10],
+            partial_rotary_factor=0.25,
+        )
     )
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: ZLossConfig | None = None
@@ -193,7 +198,6 @@ class Qwen3_5_VLTextMoE397BA17BSplitConfig(Qwen3_5_VLTextMoESplitConfig):
     hidden_size: int = 4096
     intermediate_size: int = 0  # not used
     rms_norm_eps: float = 1e-6
-    rope_theta: float = 10000000.0
     hidden_act: str = "silu"
     attention: MHAConfig = MHAConfig(
         with_gate=True,
@@ -227,7 +231,7 @@ class Qwen3_5_VLTextMoE397BA17BSplitConfig(Qwen3_5_VLTextMoESplitConfig):
         router_scaling_factor=1.0,
     )
     rope_parameters_cfg: RopeParametersConfig = RopeParametersConfig(
-        rope_type="qwen3_vl", mrope_section=[11, 11, 10], partial_rotary_factor=0.25
+        rope_type="qwen3_vl", mrope_section=[11, 11, 10], partial_rotary_factor=0.25, rope_theta=10000000,
     )
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: ZLossConfig | None = None
