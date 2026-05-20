@@ -347,7 +347,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertIn("task_b", result.task_results)
         self.assertIn("task_c", result.task_results)
 
-    def test_save_and_resume_roundtrip_restores_paused_manager_state(self):
+    async def test_save_and_resume_roundtrip_restores_paused_manager_state(self):
         # 验证 checkpoint/resume 会保留模型版本和 producer 暂停态，并恢复 sampler / replay buffer。
         sampler = _FakeSampler()
         replay_buffer = _FakeReplayBuffer({}, {})
@@ -370,7 +370,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             checkpoint_path = Path(tmp_dir)
-            manager.save(checkpoint_path, model_step=7)
+            await manager.save(checkpoint_path, model_step=7)
 
             state_path = checkpoint_path / manager._MANAGER_STATE_PATH
             with state_path.open("r") as f:
@@ -385,7 +385,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state["target_samples"], {"task_a": 0})
             self.assertEqual(state["target_upto_future_step"], 0)
 
-            restored_step = manager.resume(checkpoint_path)
+            restored_step = await manager.resume(checkpoint_path)
 
         self.assertEqual(restored_step, 7)
         self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT)
@@ -398,7 +398,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay_buffer.saved_paths, [Path(tmp_dir)])
         self.assertEqual(replay_buffer.resumed_paths, [Path(tmp_dir)])
 
-    def test_save_rejects_pending_async_tasks(self):
+    async def test_save_rejects_pending_async_tasks(self):
         # 验证保存前必须先清空 pending rollout task，避免 checkpoint 缺失后台生产结果。
         strategy = _FakeProduceStrategy()
         strategy.pending_task_count_value = 1
@@ -418,7 +418,34 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             with self.assertRaisesRegex(RuntimeError, "pending rollout tasks"):
-                manager.save(tmp_dir, model_step=0)
+                await manager.save(tmp_dir, model_step=0)
+
+    async def test_save_and_resume_can_run_inside_existing_event_loop(self):
+        # 验证 manager save/resume 自身是 async 入口，不会在已有 event loop 中嵌套 asyncio_run。
+        sampler = _FakeSampler()
+        replay_buffer = _FakeReplayBuffer({}, {})
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=_FakeProduceStrategy(),
+                    sampler=sampler,
+                    weight=1.0,
+                    order=0,
+                )
+            ],
+            replay_buffer=replay_buffer,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            checkpoint_path = Path(tmp_dir)
+            await manager.save(checkpoint_path, model_step=3)
+            restored_step = await manager.resume(checkpoint_path)
+
+        self.assertEqual(restored_step, 3)
+        self.assertEqual(replay_buffer.saved_paths, [Path(tmp_dir)])
+        self.assertEqual(replay_buffer.resumed_paths, [Path(tmp_dir)])
 
     async def test_custom_get_task_batch_sizes_can_disable_tasks(self):
         # 验证自定义 task batch size 可以禁用某个 task，训练 batch 只从启用 task 取数。

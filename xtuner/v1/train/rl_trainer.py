@@ -675,13 +675,14 @@ class BaseRLTrainer:
         self._cur_step = train_state["cur_step"]
         return checkpoint_path
 
-    def _resume_agent_loop_manager(self, checkpoint_path: Path | str) -> int:
+    async def _resume_agent_loop_manager(self, checkpoint_path: Path | str) -> int:
         self.logger.info(f"Resume agent_loop_manager from {checkpoint_path}")
         checkpoint_path = Path(checkpoint_path)
-        saved_model_step = self.agent_loop_manager.resume(checkpoint_path)
+        # agent_loop_manager.resume 是 async；同步 trainer 入口必须在调用方显式 asyncio_run。
+        saved_model_step = await self.agent_loop_manager.resume(checkpoint_path)
         return saved_model_step
 
-    def _maybe_save_checkpoint(self, cur_step: int) -> None:
+    async def _maybe_save_checkpoint(self, cur_step: int) -> None:
         """Save checkpoint if interval condition is met."""
         ckp_interval = self._checkpoint_interval
         if ckp_interval is None or ckp_interval == -1:
@@ -694,7 +695,8 @@ class BaseRLTrainer:
 
         # 1. Save sampler (dataloader) state
         self.logger.info(f"Saving sampler state to {checkpoint_path}")
-        self.agent_loop_manager.save(checkpoint_path, model_step=cur_step)
+        # agent loop manager / replay buffer 保存走 async，避免在 async fit 内嵌套 asyncio_run。
+        await self.agent_loop_manager.save(checkpoint_path, model_step=cur_step)
 
         # 2. Save DCP checkpoint (model + optimizer)
         self.logger.info(f"Saving DCP checkpoint to {checkpoint_path}")
@@ -1300,7 +1302,7 @@ class RLColocateTrainer(BaseRLTrainer):
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)
         if checkpoint_path is not None:
-            self._resume_agent_loop_manager(checkpoint_path)
+            asyncio_run(self._resume_agent_loop_manager(checkpoint_path))
 
         self.train_controller.set_train_rollout_mode("colocate")
         self._cpu_resource_manager.log_registered_summary()
@@ -1424,7 +1426,7 @@ class RLColocateTrainer(BaseRLTrainer):
         should_sync_weights = train_step % self._sync_weights_interval == 0
         with timer("save_ckpt", step_timer_dict):
             self.train_controller.offload(target="optimizer")
-            self._maybe_save_checkpoint(train_step)
+            asyncio_run(self._maybe_save_checkpoint(train_step))
             self._maybe_save_hf(train_step)
 
         ray.get(self.rollout_controller.recover_failed_workers.remote())
@@ -1508,7 +1510,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
     def _resume_from_checkpoint(self, checkpoint_path: Path | str) -> None:
         checkpoint_path = self._resume_train_controller_and_state(checkpoint_path)
-        saved_model_step = self._resume_agent_loop_manager(checkpoint_path)
+        saved_model_step = asyncio_run(self._resume_agent_loop_manager(checkpoint_path))
         assert self._cur_step == saved_model_step
 
         self.update_weights()
@@ -1619,7 +1621,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
     async def _sync_weights_and_save(self, model_step: int, step_timer_dict: dict):
         # 非共卡已经在 _fit 里暂停 producer；这里保持静止态下的 save -> bind -> update 顺序。
         with timer("save_ckpt", step_timer_dict):
-            self._maybe_save_checkpoint(model_step)
+            await self._maybe_save_checkpoint(model_step)
             self._maybe_save_hf(model_step)
 
         ray.get(self.rollout_controller.recover_failed_workers.remote())

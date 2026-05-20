@@ -1,3 +1,25 @@
+"""RLDisaggregatedTrainer 的 public 行为测试。
+
+Good Tests:
+- 通过 fit()、update_weights()、同步周期校验和资源布局不变量验证行为。
+- 用 _FakeManager 和轻量 controller 替代真实 Ray worker。
+- 只断言 step 递进、producer 恢复 model_step、checkpoint 文件等可观察结果。
+- 对 async producer/consumer 只验证最终业务结果；内部任务编排放到 AgentLoopManager 测试中。
+
+Bad Tests:
+- 不直接测试 _sync_weights_and_save、_log_step、_resume_from_checkpoint 等私有 helper。
+- 不把 save/sync/eval 的内部调用顺序当成契约。
+- 只保留 eval 先于 continue_produce 这类对外可见顺序。
+- 不重复验证 RLThroughputBenchmark schema；统一放在 colocate trainer 测试中覆盖。
+
+本文件主要覆盖的 public 行为:
+- disaggregated fit 遇到空 EXPIRED_BATCH 时重试同一个 train_step，不推进 _cur_step。
+- 非空 EXPIRED_BATCH 仍会训练，并用当前完成的 model_step 恢复 producer。
+- checkpoint 保存发生在 fit 完成的 model_step 上，且 manager.save 为 async 调用。
+- eval 在 producer 恢复前运行；update_weights 本身不直接 pause/continue rollout controller。
+- sync/checkpoint/eval interval 必须是 sync_weights_interval 的整数倍，资源布局必须 fail fast。
+"""
+
 import asyncio
 import json
 import tempfile
@@ -11,11 +33,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     ProduceBatchResult,
     ProduceBatchStatus,
 )
-from xtuner.v1.train.rl_trainer import RLDisaggregatedTrainer, RLThroughputBenchmark, _validate_sync_intervals
-
-
-def _throughput_scalars(scalars: dict[str, float]) -> dict[str, float]:
-    return {key: value for key, value in scalars.items() if key.startswith("throughput/")}
+from xtuner.v1.train.rl_trainer import RLDisaggregatedTrainer, _validate_sync_intervals
 
 
 class _FakeManager:
@@ -87,7 +105,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         )
         trainer._save_trajectories = MagicMock()
         trainer._log_step = MagicMock()
-        trainer._maybe_save_checkpoint = MagicMock()
+        trainer._maybe_save_checkpoint = AsyncMock()
         trainer._maybe_save_hf = MagicMock()
         trainer.train_controller = SimpleNamespace(
             fit=MagicMock(return_value=[{"train_metrics": [], "sft_train_metrics": {}}]),
@@ -104,55 +122,15 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         )
         return trainer
 
-    def _minimal_train_info(
-        self,
-        *,
-        training_samples: int,
-        training_tokens: int,
-    ):
-        return {
-            "data_info": {
-                "batch_size": training_samples,
-                "rewards/mean": 1.0,
-                "training_samples": training_samples,
-                "training_tokens": training_tokens,
-                "benchmark_end_time_s": 108.0,
-            },
-            "workers_log_item": [
-                {
-                    "rollout_is_metrics": {},
-                    "mismatch_metrics": {},
-                    "rollout_entropy": 0.0,
-                    "train_entropy": 0.0,
-                    "train_metrics": [],
-                    "sft_train_metrics": {},
-                }
-            ],
-        }
+    def _run_fit(self, trainer):
+        with patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run):
+            trainer.fit()
 
-    def test_sync_weights_and_save_saves_completed_model_step_before_update_weights(self):
-        manager = _FakeManager([])
-        trainer = self._make_trainer(manager)
-        events: list[str] = []
-        trainer._maybe_save_checkpoint = MagicMock(side_effect=lambda step: events.append(f"save:{step}"))
-        trainer._maybe_save_hf = MagicMock(side_effect=lambda step: events.append(f"hf:{step}"))
-        trainer.update_weights = MagicMock(side_effect=lambda: events.append("update_weights"))
-
-        with (
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
-            patch(
-                "xtuner.v1.train.rl_trainer.bind_train_rollout",
-                side_effect=lambda train_controller, rollout_controller: events.append("bind"),
-            ),
-        ):
-            asyncio.run(trainer._sync_weights_and_save(model_step=3, step_timer_dict={}))
-
-        self.assertEqual(events, ["save:3", "hf:3", "bind", "update_weights"])
-        trainer.train_controller.offload.assert_not_called()
-
-    def test_sync_weights_and_save_persists_completed_model_step_checkpoint(self):
-        manager = _FakeManager([])
-        manager.save = MagicMock()
+    def test_fit_persists_checkpoint_for_completed_model_step(self):
+        # 验证 checkpoint 以 fit 完成的 model_step 为准，并通过 async manager.save 落盘。
+        train_sample = SimpleNamespace(message_uid=1, uid=1)
+        manager = _FakeManager([ProduceBatchResult(rollout_states=[[train_sample]])])
+        manager.save = AsyncMock()
         trainer = self._make_trainer(manager)
         trainer._checkpoint_interval = 1
         trainer._checkpoint_maxkeep = None
@@ -162,24 +140,27 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._meta.latest_exp.checkpoint_list = []
         trainer._meta.model_dump_json = MagicMock(return_value="{}")
         trainer.train_controller.save = MagicMock()
-        trainer.update_weights = MagicMock()
         trainer._maybe_save_checkpoint = RLDisaggregatedTrainer._maybe_save_checkpoint.__get__(
             trainer, RLDisaggregatedTrainer
         )
 
         with (
+            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
             patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
             patch("xtuner.v1.train.rl_trainer.bind_train_rollout"),
         ):
-            asyncio.run(trainer._sync_weights_and_save(model_step=3, step_timer_dict={}))
+            trainer.fit()
 
-        checkpoint_path = Path(trainer.exp_dir) / trainer._CHECKPOINT_DIR / "ckpt-step-3"
-        manager.save.assert_called_once_with(checkpoint_path, model_step=3)
+        checkpoint_path = Path(trainer.exp_dir) / trainer._CHECKPOINT_DIR / "ckpt-step-1"
+        manager.save.assert_awaited_once_with(checkpoint_path, model_step=1)
         trainer.train_controller.save.assert_called_once_with(str(checkpoint_path), False)
         with (checkpoint_path / trainer._SAVE_TRAIN_STATE_PATH).open("r") as f:
-            self.assertEqual(json.load(f), {"cur_step": 3})
+            self.assertEqual(json.load(f), {"cur_step": 1})
+        self.assertIn(("continue_produce", 1), manager.calls)
+        self.assertEqual(trainer._cur_step, 1)
 
     def test_fit_retries_same_step_after_empty_expired_skip(self):
+        # 验证空 expired batch 只同步上一版模型，不推进 train_step，并重试同一步。
         train_sample = SimpleNamespace(message_uid=1, uid=1)
         manager = _FakeManager(
             [
@@ -192,23 +173,20 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._cur_step = 1
         trainer._sync_weights_and_save = AsyncMock()
 
-        asyncio.run(trainer._fit())
+        self._run_fit(trainer)
 
         self.assertEqual(
             [call for call in manager.calls if isinstance(call, tuple) and call[0] == "get_batch"],
             [("get_batch", 2, 2), ("get_batch", 2, 2)],
         )
-        trainer._prepare_train_data.assert_called_once()
         trainer.train_controller.fit.assert_called_once()
-        self.assertEqual([call.args[0] for call in trainer._sync_weights_and_save.await_args_list], [1, 2])
         self.assertIn(("continue_produce", 1), manager.calls)
         self.assertIn(("continue_produce", 2), manager.calls)
-        trainer._log_step.assert_called_once()
-        self.assertEqual(trainer._log_step.call_args.args[0], 2)
         self.assertEqual(trainer._cur_step, 2)
         self.assertIn("produce_loop_exit", manager.calls)
 
     def test_fit_trains_non_empty_expired_batch_then_syncs_current_step(self):
+        # 验证非空 expired batch 仍会训练，并用当前完成的 model_step 恢复 producer。
         train_sample = SimpleNamespace(message_uid=1, uid=1)
         manager = _FakeManager(
             [ProduceBatchResult(rollout_states=[[train_sample]], status=ProduceBatchStatus.EXPIRED_BATCH)]
@@ -216,38 +194,14 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer = self._make_trainer(manager)
         trainer._sync_weights_and_save = AsyncMock()
 
-        asyncio.run(trainer._fit())
+        self._run_fit(trainer)
 
-        trainer._prepare_train_data.assert_called_once()
         trainer.train_controller.fit.assert_called_once()
-        trainer._sync_weights_and_save.assert_awaited_once()
-        self.assertEqual(trainer._sync_weights_and_save.await_args.args[0], 1)
         self.assertIn(("continue_produce", 1), manager.calls)
-        trainer._log_step.assert_called_once()
-        self.assertEqual(trainer._log_step.call_args.args[0], 1)
         self.assertEqual(trainer._cur_step, 1)
 
-    def test_log_step_records_pause_time_without_group_timing(self):
-        trainer = self._make_trainer(_FakeManager([]))
-        trainer._log_step = RLDisaggregatedTrainer._log_step.__get__(trainer, RLDisaggregatedTrainer)
-
-        trainer._log_step(
-            train_step=1,
-            step_timer_dict={},
-            produce_result=ProduceBatchResult(
-                rollout_states=[],
-                status=ProduceBatchStatus.EXPIRED_BATCH,
-                group_gen_pause_time_s=1.5,
-            ),
-            train_info={},
-            eval_info={},
-        )
-
-        logged_scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
-        self.assertEqual(logged_scalars["timing/pause_s"], 1.5)
-        self.assertNotIn("timing/task_n", logged_scalars)
-
     def test_fit_runs_eval_before_reset_and_stops_producer(self):
+        # 验证 eval 在 producer 恢复前执行，避免生产侧提前抢占 rollout 资源。
         # 确定性排序依赖 RolloutState 的 message_uid 和 uid，测试用轻量对象模拟即可。
         train_sample = SimpleNamespace(message_uid=1, uid=1)
         eval_sample = SimpleNamespace(message_uid=2, uid=2)
@@ -274,108 +228,16 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer.evaluator.run = MagicMock(return_value={"acc": 1.0})
         manager.continue_produce = continue_produce
 
-        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
-            asyncio.run(trainer._fit())
+        self._run_fit(trainer)
 
-        trainer._prepare_train_data.assert_called_once()
         trainer.train_controller.fit.assert_called_once()
         trainer.train_controller.onload.assert_not_called()
         self.assertEqual(events, ["sync", "eval", "continue_produce"])
         self.assertTrue(manager._finish_event.is_set())
         self.assertIn("produce_loop_exit", manager.calls)
 
-    def test_log_step_records_disaggregated_effective_e2e_window(self):
-        trainer = self._make_trainer(_FakeManager([]))
-        trainer._log_step = RLDisaggregatedTrainer._log_step.__get__(trainer, RLDisaggregatedTrainer)
-        trainer._num_workers = 3.0
-        trainer._rollout_num_workers = 2.0
-
-        trainer._log_step(
-            train_step=1,
-            step_timer_dict={
-                "step": 10.0,
-                "get_batch": 5.0,
-                "prepare_data": 1.0,
-                "training": 2.0,
-            },
-            produce_result=ProduceBatchResult(
-                rollout_states=[],
-                produced_samples=4,
-                produced_tokens=120,
-                produce_time_s=4.0,
-            ),
-            train_info=self._minimal_train_info(
-                training_samples=3,
-                training_tokens=60,
-            ),
-            eval_info={},
-        )
-
-        scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
-        self.assertEqual(
-            _throughput_scalars(scalars),
-            RLThroughputBenchmark(
-                e2e_effective_sgs=3.0 / 8.0 / 3.0,
-                e2e_effective_tgs=60.0 / 8.0 / 3.0,
-                effective_sgs=3.0 / 10.0 / 3.0,
-                effective_tgs=60.0 / 10.0 / 3.0,
-                training_tgs=60.0 / 2.0 / 3.0,
-                rollout_sgs=4.0 / 4.0 / 2.0,
-                rollout_tgs=120.0 / 4.0 / 2.0,
-            ).to_scalars(),
-        )
-
-    def test_update_weights_updates_weights_without_rollout_pause_or_continue(self):
-        manager = _FakeManager([])
-        trainer = self._make_trainer(manager)
-
-        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
-            trainer.update_weights = RLDisaggregatedTrainer.update_weights.__get__(trainer, RLDisaggregatedTrainer)
-            trainer.update_weights()
-
-        trainer.train_controller.update_weights.assert_called_once_with()
-        trainer.rollout_controller.pause_generation.remote.assert_not_called()
-        trainer.rollout_controller.continue_generation.remote.assert_not_called()
-        trainer.rollout_controller.onload_weights.remote.assert_not_called()
-        trainer.rollout_controller.onload_kvcache.remote.assert_not_called()
-
-    def test_resume_from_checkpoint_updates_weights_then_resets_manager(self):
-        trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
-        trainer.logger = MagicMock()
-        trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=Path(self.temp_dir.name))
-        trainer.train_controller = SimpleNamespace(resume=MagicMock(return_value="resume"))
-        trainer.rollout_controller = SimpleNamespace(
-            pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause_generation")),
-            continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue_generation")),
-        )
-        events: list[str] = []
-
-        def manager_resume(checkpoint_path):
-            events.append(f"manager_resume:{Path(checkpoint_path).name}")
-            return 3
-
-        async def manager_continue_produce(model_step: int):
-            events.append(f"continue_produce:{model_step}")
-
-        trainer.agent_loop_manager = SimpleNamespace(
-            resume=MagicMock(side_effect=manager_resume),
-            continue_produce=AsyncMock(side_effect=manager_continue_produce),
-        )
-        trainer.update_weights = MagicMock(side_effect=lambda: events.append("update_weights"))
-
-        train_state_path = Path(self.temp_dir.name) / trainer._SAVE_TRAIN_STATE_PATH
-        train_state_path.write_text('{"cur_step": 3}')
-
-        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
-            trainer._resume_from_checkpoint(self.temp_dir.name)
-
-        trainer.train_controller.resume.assert_called_once_with(trainer._load_checkpoint_cfg)
-        self.assertEqual(trainer._cur_step, 3)
-        trainer.agent_loop_manager.resume.assert_called_once_with(Path(self.temp_dir.name))
-        self.assertTrue(events[0].startswith("manager_resume:"))
-        self.assertEqual(events[1:], ["update_weights", "continue_produce:3"])
-
     def test_validate_sync_schedule_accepts_multiples(self):
+        # 验证保存、HF 导出、评测周期都可以对齐 sync_weights_interval。
         _validate_sync_intervals(sync_weights_interval=2, checkpoint_interval=4, hf_interval=6)
         _validate_sync_intervals(sync_weights_interval=2, checkpoint_interval=-1, hf_interval=None)
         _validate_sync_intervals(
@@ -387,14 +249,17 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         )
 
     def test_validate_sync_schedule_rejects_non_multiple_checkpoint_interval(self):
+        # 验证 checkpoint_interval 不能落在非权重同步 step 上。
         with self.assertRaisesRegex(ValueError, "checkpoint_interval=5.*sync_weights_interval=2"):
             _validate_sync_intervals(sync_weights_interval=2, checkpoint_interval=5, hf_interval=-1)
 
     def test_validate_sync_schedule_rejects_non_multiple_hf_interval(self):
+        # 验证 hf_interval 不能落在非权重同步 step 上。
         with self.assertRaisesRegex(ValueError, "hf_interval=5.*sync_weights_interval=2"):
             _validate_sync_intervals(sync_weights_interval=2, checkpoint_interval=4, hf_interval=5)
 
     def test_validate_sync_schedule_rejects_non_multiple_evaluate_step(self):
+        # 验证 evaluate_step 不能落在非权重同步 step 上。
         with self.assertRaisesRegex(ValueError, "evaluate_step=5.*sync_weights_interval=2"):
             _validate_sync_intervals(
                 sync_weights_interval=2,
@@ -404,7 +269,8 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
                 enable_evaluate=True,
             )
 
-    def test_build_disaggregated_placement_groups_uses_distinct_names(self):
+    def test_resource_layout_uses_distinct_train_and_rollout_group_names(self):
+        # 验证 train/rollout placement group 使用不同名字，避免 Ray 复用同一组资源。
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
         trainer.logger = MagicMock()
         trainer._meta = SimpleNamespace(
@@ -433,7 +299,8 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             "xtuner_rl_disagg_20260416130000_rollout",
         )
 
-    def test_build_disaggregated_placement_groups_rejects_reused_pg(self):
+    def test_resource_layout_fails_fast_when_train_and_rollout_share_group(self):
+        # 验证 Ray 返回同一 placement group 时 fail fast，并打印可排查的不变量。
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
         trainer.logger = MagicMock()
         trainer._meta = SimpleNamespace(

@@ -14,7 +14,6 @@ from xtuner.v1.rl.agent_loop import AgentLoopConfig, AgentLoopSpec, get_agent_lo
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
-from xtuner.v1.rl.utils import asyncio_run
 from xtuner.v1.utils import get_logger
 
 from .producer import (
@@ -945,7 +944,7 @@ class AgentLoopManager:
                 pending_task_counts[task.task_name] = pending_count
         return pending_task_counts
 
-    def save(self, checkpoint_path: Path | str, model_step: int) -> None:
+    async def save(self, checkpoint_path: Path | str, model_step: int) -> None:
         """Save all task sampler states and the shared replay buffer."""
         checkpoint_path = Path(checkpoint_path)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
@@ -961,7 +960,8 @@ class AgentLoopManager:
             task_checkpoint_path = self._task_checkpoint_path(checkpoint_path, task.task_name)
             task_checkpoint_path.mkdir(parents=True, exist_ok=True)
             task.sampler.save(task_checkpoint_path)
-        asyncio_run(self.replay_buffer.save(checkpoint_path))
+        # manager 层保持 async 语义；同步入口只允许在 trainer 边界用 asyncio_run 包起来。
+        await self.replay_buffer.save(checkpoint_path)
         manager_state_path = self._manager_state_path(checkpoint_path)
         progress_state = self._produce_progress.state_dict()
         with manager_state_path.open("w") as f:
@@ -974,12 +974,13 @@ class AgentLoopManager:
                 f,
             )
 
-    def resume(self, checkpoint_path: Path | str) -> int:
+    async def resume(self, checkpoint_path: Path | str) -> int:
         """Resume all task sampler states and the shared replay buffer."""
         checkpoint_path = Path(checkpoint_path)
         for task in self.task_runners:
             task.sampler.resume(self._task_checkpoint_path(checkpoint_path, task.task_name))
-        asyncio_run(self.replay_buffer.resume(checkpoint_path))
+        # replay buffer 恢复是 async I/O，不能在已有 event loop 中再次嵌套 asyncio_run。
+        await self.replay_buffer.resume(checkpoint_path)
 
         manager_state_path = self._manager_state_path(checkpoint_path)
         with manager_state_path.open("r") as f:
