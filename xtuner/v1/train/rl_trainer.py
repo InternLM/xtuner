@@ -678,7 +678,11 @@ class BaseRLTrainer:
     async def _resume_agent_loop_manager(self, checkpoint_path: Path | str) -> int:
         self.logger.info(f"Resume agent_loop_manager from {checkpoint_path}")
         checkpoint_path = Path(checkpoint_path)
-        # agent_loop_manager.resume 是 async；同步 trainer 入口必须在调用方显式 asyncio_run。
+        # asyncio_run 只能出现在 trainer 的同步边界：
+        # - colocate 的 __init__/fit/_sync_weights_and_save 仍是同步入口，可以显式包一层；
+        # - disaggregated 的 _fit 已经在 asyncio_run 启动的事件循环里，内部必须全程 await。
+        # 因此 agent_loop_manager / replay_buffer 的 save/resume 必须保持 async；如果它们内部再调用
+        # asyncio_run，save/resume 会在 disaggregated 训练循环里触发 nested asyncio_run 失败。
         saved_model_step = await self.agent_loop_manager.resume(checkpoint_path)
         return saved_model_step
 
@@ -695,7 +699,8 @@ class BaseRLTrainer:
 
         # 1. Save sampler (dataloader) state
         self.logger.info(f"Saving sampler state to {checkpoint_path}")
-        # agent loop manager / replay buffer 保存走 async，避免在 async fit 内嵌套 asyncio_run。
+        # 保持 manager checkpoint 的 async 调用链。
+        # 是否 asyncio_run 只由 trainer 最外层同步入口统一决定。
         await self.agent_loop_manager.save(checkpoint_path, model_step=cur_step)
 
         # 2. Save DCP checkpoint (model + optimizer)
