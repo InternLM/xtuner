@@ -10,7 +10,7 @@ from xtuner.v1.model.base import (
     HFSaveCfg,
     TorchCompileOption,
 )
-from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
+from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig, use_moe_ep_compile_cfg
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
@@ -191,7 +191,7 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
     @property
     @override
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
-        if self.config.ep_size > 1:
+        if use_moe_ep_compile_cfg(self.config):
             return MOE_EP_COMPILE_CFG
         else:
             return MOE_NON_EP_COMPILE_CFG

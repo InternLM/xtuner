@@ -162,6 +162,11 @@ class MoEConfig(TransformerConfig):
         return MoE(self)
 
 
+def use_moe_ep_compile_cfg(config: MoEConfig) -> bool:
+    # 中文注释：ExpertTP 也会跨 rank 进入 dispatcher 通信段，compile 边界应和 EP 路径一致。
+    return config.ep_size > 1 or config.expert_tp_size > 1
+
+
 class MoE(BaseModel):
     """Transformer decoder consisting of *config.num_hidden_layers* layers.
     Each layer is a [`InternLM3DecoderLayer`]
@@ -1083,7 +1088,7 @@ class MoE(BaseModel):
     @property
     @override
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
-        if self.config.ep_size > 1:
+        if use_moe_ep_compile_cfg(self.config):
             return MOE_EP_COMPILE_CFG
         else:
             return MOE_NON_EP_COMPILE_CFG

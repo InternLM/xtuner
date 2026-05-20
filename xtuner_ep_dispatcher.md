@@ -433,6 +433,44 @@ router_weights: [N, E]
 第二次 `post_dispatched["row_ids_map"] [M_recv]` 是 destination EP rank 上第二次 `permute` 产生的还原 map，
 语义相同（scatter，1D indices 无 topk 展开），只负责 expert 计算后恢复 source-block 顺序，方便反向 all2all。
 
+## torch.compile 与 dispatcher 边界
+
+`FSDPConfig.torch_compile=True` 目前只是一个兼容入口，真正决定 compile 行为的是
+`XTunerBaseModelConfig.compile_cfg`：
+
+- `compile_cfg=None` 或 `True`：使用模型自己的 `default_compile_cfg`。
+- `compile_cfg=False`：关闭 compile。
+- `compile_cfg=dict[...]`：用户显式指定 compile target。
+- `FSDPConfig.torch_compile=False` 会在 trainer 配置解析阶段把 `model_cfg.compile_cfg` 强制设成 `False`；反过来
+  `FSDPConfig.torch_compile=True` 不会强制覆盖用户自定义的 `compile_cfg`。
+
+对 MoE 来说，默认 compile target 会根据 dispatcher 是否包含跨 rank 通信编排分两类：
+
+- `ep_size == 1` 且 `expert_tp_size == 1`：使用 `MOE_NON_EP_COMPILE_CFG`。普通 MoE 会把
+  `MoEDecoderLayer.forward` 作为 compile target，同时也 compile `MoEBlock.forward`、
+  `_pre_moe_forward`、`_shared_experts_forward`、`_post_moe_forward`、dense layer 和 float8 相关函数。
+- `ep_size > 1` 或 `expert_tp_size > 1`：使用 `MOE_EP_COMPILE_CFG`。它从 non-EP 配置复制而来，但显式删除
+  `MoEDecoderLayer.forward`，保留局部计算函数的 compile。
+
+`qwen3_5_text` 的 non-EP 配置也包含 `MoEDecoderLayer.forward`，但该 target 使用 `fullgraph=False`；EP 开启后同样会从
+默认配置中删除顶层 `MoEDecoderLayer.forward`。
+
+这个差异是 dispatcher 边界的核心：EP 或 ExpertTP 开启后，`MoEDecoderLayer.forward` 顶层会承载
+`dispatch_preprocess -> dispatch -> dispatch_postprocess -> expert -> combine_preprocess -> combine -> combine_postprocess`
+的变长通信编排，以及 Domino micro batch 的多输入分支、CUDA event、autograd hook、DeepEP handle 等动态对象。
+这些部分不适合作为稳定的 fullgraph compile 边界，因此当前设计让 dispatcher 编排保持 eager Python，只把相对稳定的本地计算块交给
+`torch.compile`。
+
+这也意味着 compile 不会消除前面描述的 dispatcher host metadata 同步：
+
+- `TorchAll2AllDispatcher` 仍需要在 dispatch 阶段拿到 Python `input_splits` / `output_splits`。
+- `DeepEPDispatcher` 仍可能在库内部等待 receive count，并把 `num_recv_tokens_per_expert_list` 暴露给 Python。
+- TP+EP 路径仍需要 TP size meta 来发起变长 TP AllGather / ReduceScatterSum。
+
+因此，对 Domino EP 来说，compile 的收益主要是缩短 `_pre_moe_forward`、expert block、`_post_moe_forward` 等本地计算段；
+它不能把 dispatcher 的 host 等待变成 GPU-only 异步，也不能改变 2.1 和 DeepEP “Host metadata 同步”小节里的重叠约束。
+如果 host metadata 等待超过另一个 micro batch 能覆盖的计算窗口，真实 overlap 仍会下降。
+
 ## DeepEPDispatcher: DeepEP Buffer dispatch/combine 原理
 
 `DeepEPDispatcher` 仍然暴露和其他 dispatcher 一样的六阶段接口，但它把 EP all2all 的 routing layout、通信 handle

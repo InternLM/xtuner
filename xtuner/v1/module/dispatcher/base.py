@@ -187,12 +187,13 @@ class DispacherInterface(
 ): ...
 
 
-class NaivePreDispatchResult(PreDispatchResult, total=False):
+class NaivePreDispatchResult(PreDispatchResult):
+    # 中文注释：这些 key 必须始终存在；torch.compile 不支持 optional-key TypedDict。
     forward_finished_event: torch.cuda.Event | None
     backward_previous_event: torch.cuda.Event | None
 
 
-class NaiveDispatchResult(DispatchResult, total=False):
+class NaiveDispatchResult(DispatchResult):
     topk_ids: torch.Tensor
     tp_size_meta: list[int]
     forward_finished_event: torch.cuda.Event | None
@@ -204,12 +205,12 @@ class NaivePostDispatchResult(PostDispatchResult):
     row_ids_map: torch.Tensor
 
 
-class NaivePreCombineResult(PreCombineResult, total=False):
+class NaivePreCombineResult(PreCombineResult):
     forward_finished_event: torch.cuda.Event | None
     backward_previous_event: torch.cuda.Event | None
 
 
-class NaiveCombineResult(CombineResult, total=False):
+class NaiveCombineResult(CombineResult):
     forward_finished_event: torch.cuda.Event | None
     backward_previous_event: torch.cuda.Event | None
 
@@ -278,6 +279,8 @@ class NaiveDispatcher(
         return NaivePreDispatchResult(
             hidden_states=hidden_states,
             topk_ids=topk_ids,
+            forward_finished_event=None,
+            backward_previous_event=None,
         )
 
     @override
@@ -354,11 +357,19 @@ class NaiveDispatcher(
                 topk_ids=topk_ids,
                 topk_weights=topk_weights,
                 tp_size_meta=tp_size_meta,
+                forward_finished_event=None,
+                backward_previous_event=None,
+                topk_weights_backward_previous_event=None,
             )
 
         return NaiveDispatchResult(
             hidden_states=pre_dispatched["hidden_states"],
+            topk_ids=pre_dispatched["topk_ids"],
             topk_weights=topk_weights,
+            tp_size_meta=[],
+            forward_finished_event=None,
+            backward_previous_event=None,
+            topk_weights_backward_previous_event=None,
         )
 
     @override
@@ -487,9 +498,17 @@ class NaiveDispatcher(
                     pre_combined["hidden_states"],
                     dispatched["tp_size_meta"],
                 )
-                return NaiveCombineResult(hidden_states=hidden_states)
+                return NaiveCombineResult(
+                    hidden_states=hidden_states,
+                    forward_finished_event=None,
+                    backward_previous_event=None,
+                )
 
-            return NaiveCombineResult(hidden_states=pre_combined["hidden_states"])
+            return NaiveCombineResult(
+                hidden_states=pre_combined["hidden_states"],
+                forward_finished_event=None,
+                backward_previous_event=None,
+            )
 
     @override
     def combine_postprocess(
