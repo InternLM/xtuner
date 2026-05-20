@@ -15,6 +15,7 @@ from xtuner.v1.data_proto.rl_data import (
     Status,
     get_group_status,
     refresh_seq_staleness,
+    reset_rollout_response,
     update_sample_version,
 )
 from xtuner.v1.rl.utils import (
@@ -26,7 +27,6 @@ from xtuner.v1.rl.utils import (
     QueryNode,
     ScalarNode,
     SetNode,
-    clear_rollout_response_for_rerun,
     parse_query,
 )
 from xtuner.v1.utils import get_logger
@@ -472,7 +472,7 @@ class ReplayBuffer:
         status = get_group_status(items)
         if status == Status.EXPIRED:
             for item in items:
-                clear_rollout_response_for_rerun(item)
+                reset_rollout_response(item)
         storage_item = StorageItem(
             item=items,
             uid=0,
@@ -528,7 +528,7 @@ class ReplayBuffer:
                     if should_expire:
                         # completed / aborted 样本超过 step 级阈值时整组翻转，后续 sampler 可按 EXPIRED 重新取样。
                         for item in record.item:
-                            clear_rollout_response_for_rerun(item)
+                            reset_rollout_response(item)
                             item.status = Status.EXPIRED
                         status = Status.EXPIRED
                         expired_count += 1

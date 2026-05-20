@@ -34,8 +34,6 @@ export RAY_MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 export RAY_RANK=${RANK:-0}
 export RAY_HEAD_PORT=${RAY_HEAD_PORT:-"6379"}
 export RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-"8265"}
-# TODO: 提供非环境变量方式配置 ray_max_concurrency
-export RAY_MAX_CONCURRENCY=${RAY_MAX_CONCURRENCY:-1024} # dataflow_max_concurrency * prompt_repeat_k
 
 export MODEL_PATH=$MODEL_PATH
 export DATA_PATH=$DATA_PATH
@@ -60,7 +58,6 @@ export XTUNER_USE_VLLM=1
 export UVICORN_LOG_LEVEL="CRITICAL"
 export VLLM_VERSION=0.11.0
 export VLLM_USE_V1=1
-export RAY_MAX_CONCURRENCY=2048
 export RAY_CGRAPH_get_timeout=3600
  
 infer_backend_lower="vllm"
@@ -115,7 +112,6 @@ echo OUPUT_DIR is ${WORK_DIR}
 if [ "$RAY_RANK" -eq 0 ]; then
   RUNTIME_ENV_JSON="{
       \"env_vars\": {
-        \"RAY_MAX_CONCURRENCY\": \"${RAY_MAX_CONCURRENCY}\",
         \"XTUNER_LOG_LEVEL\": \"${XTUNER_LOG_LEVEL}\",
         \"PYTHONPATH\": \"${PYTHONPATH}\",
         \"MASTER_ADDR\": \"${RAY_MASTER_ADDR}\",

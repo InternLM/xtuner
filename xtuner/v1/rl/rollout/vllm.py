@@ -4,6 +4,7 @@ import traceback
 from argparse import Namespace
 from typing import Any, Dict, List, Union
 
+import numpy as np
 import ray
 import requests
 import torch
@@ -255,7 +256,7 @@ class vLLMWorker(RolloutWorker):
         return response.text
 
     def pause_generation(self):
-        pass
+        self.receive_abort_request.set()
 
     def continue_generation(self):
         # 恢复生成时必须清掉上一轮 abort 标志，否则新请求会在发送前被本地直接标成 ABORTED。
@@ -402,8 +403,8 @@ class vLLMWorker(RolloutWorker):
 
                     data = base64.b64decode(routed_experts)
                     routed_experts = ray.cloudpickle.loads(data)
-                else:
-                    routed_experts = torch.tensor(routed_experts)
+                if not isinstance(routed_experts, ray.ObjectRef):
+                    routed_experts = np.asarray(routed_experts)
                     routed_experts = ray.put(routed_experts)
 
         rollout_status = update_status_from_finish_reason(finish_reason)

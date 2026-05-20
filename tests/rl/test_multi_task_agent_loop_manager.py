@@ -237,6 +237,7 @@ def _fake_agent_loop():
     rollout_ctl = MagicMock()
     rollout_ctl.continue_generation.remote = AsyncMock()
     rollout_ctl.pause_generation.remote = AsyncMock()
+    rollout_ctl.cleanup_after_pause.remote = AsyncMock()
     rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
     agent_loop = MagicMock()
     agent_loop.rollout_ctl = rollout_ctl
@@ -525,11 +526,12 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
     async def test_pause_produce_from_async_produce_loop_sets_status_and_pause_time(self):
         strategy = _FakeProduceStrategy(cleanup_pause_time_s=2.5)
+        agent_loop = _fake_agent_loop()
         manager = AgentLoopManager(
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
-                    agent_loop=_fake_agent_loop(),
+                    agent_loop=agent_loop,
                     produce_strategy=strategy,
                     sampler=_FakeSampler(),
                     weight=1.0,
@@ -592,11 +594,14 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=_FakeReplayBuffer({}, {}),
         )
         manager._status = AgentLoopManagerStatus.EXPIRED_BATCH
+        manager._pause_time_s = 1.5
 
         result = await manager.get_batch(batch_size=2, train_step=11)
 
         self.assertEqual(result.status, ProduceBatchStatus.EXPIRED_BATCH)
         self.assertEqual(result.rollout_states, [])
+        self.assertEqual(result.group_gen_pause_time_s, 1.5)
+        self.assertEqual(manager._pause_time_s, 0.0)
 
     async def test_get_batch_refreshes_staleness_at_entry(self):
         replay_buffer = _FakeReplayBuffer(

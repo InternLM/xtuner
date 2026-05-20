@@ -1,4 +1,9 @@
-from .async_utils import asyncio_run, create_task, handle_task_exception
+from .async_utils import (
+    asyncio_run,
+    cancel_and_drain,
+    create_task,
+    handle_task_exception,
+)
 from .misc import (
     BetweenNode,
     BetweenOperator,
@@ -38,7 +43,6 @@ from .ray_cpu_worker import (
 )
 from .ray_utils import (
     bind_train_rollout,
-    clear_rollout_response_for_rerun,
     close_ray,
     find_master_addr_and_port,
     free_object_refs,
@@ -66,10 +70,10 @@ __all__ = [
     "find_master_addr_and_port",
     "get_accelerator_ids",
     "free_object_refs",
-    "clear_rollout_response_for_rerun",
     "bind_train_rollout",
     "handle_task_exception",
     "create_task",
+    "cancel_and_drain",
     "QueryNode",
     "ConditionNode",
     "ScalarNode",

@@ -3,9 +3,9 @@ from argparse import Namespace
 from itertools import chain
 from typing import Any, Dict, List
 
+import numpy as np
 import ray
 import requests
-import torch
 from ray.util.placement_group import placement_group_table
 
 from transformers import AutoTokenizer
@@ -183,8 +183,19 @@ class LMDeployWorker(RolloutWorker):
                 self.lmdeploy_actor = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
             assert self.lmdeploy_actor is not None, "LMDeploy actor should be available in the shared store."
             routed_experts_data = await self.lmdeploy_actor.get.remote(routed_experts)
-            return ray.put(routed_experts_data)
-        return torch.tensor(routed_experts)
+            return ray.put(np.asarray(routed_experts_data))
+        return np.asarray(routed_experts)
+
+    async def cleanup_after_pause(self) -> None:
+        if not self.enable_return_routed_experts:
+            return
+        try:
+            lmdeploy_actor = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
+            await lmdeploy_actor.clear.remote()
+        except ValueError:
+            self.logger.debug("LMDeploy shared_store actor is not available, skip cleanup after pause.")
+        except Exception as e:
+            self.logger.warning(f"Failed to clear LMDeploy shared_store after pause: {e}")
 
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
         """Transform the RolloutConfig into a Namespace suitable for the
@@ -349,6 +360,9 @@ class LMDeployWorker(RolloutWorker):
                 )
             if "uvicorn_log_level" in lmdeploy_config_kwargs:
                 env.update({"UVICORN_LOG_LEVEL": lmdeploy_config_kwargs["uvicorn_log_level"]})
+            skip_warmup = os.environ.get("LMDEPLOY_SKIP_WARMUP", os.environ.get("LMD_SKIP_WARMUP"))
+            if skip_warmup is not None:
+                env["LMDEPLOY_SKIP_WARMUP"] = skip_warmup
         else:
             env.update({"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"})
             if "tm_log_level" in lmdeploy_config_kwargs:

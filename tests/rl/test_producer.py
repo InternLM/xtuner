@@ -69,6 +69,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         mock_agent_loop = MagicMock()
         mock_agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
         mock_agent_loop.rollout_ctl.pause_generation.remote = AsyncMock(return_value=None)
+        mock_agent_loop.rollout_ctl.cleanup_after_pause.remote = AsyncMock(return_value=None)
         mock_agent_loop.rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
 
         sleep_by_id = sleep_by_id or {}
@@ -705,14 +706,15 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         aborted = await self.replay_buffer.count(task_name, Status.ABORTED)
         expired = await self.replay_buffer.count(task_name, Status.EXPIRED)
         self.assertEqual(completed + aborted + expired, 3)
+        self.assertEqual(mock_agent_loop.rollout_ctl.pause_generation.remote.await_count, 1)
+        self.assertEqual(mock_agent_loop.rollout_ctl.cleanup_after_pause.remote.await_count, 1)
 
-    async def test_async_produce_strategy_pause_produce_cancels_all_on_timeout(self):
-        task_name = "test_cleanup_timeout"
-        mock_agent_loop = self._build_agent_loop({0: 0.01, 1: 60.0, 2: 60.0})
+    async def test_async_produce_strategy_pause_produce_collects_without_cancelling(self):
+        task_name = "test_cleanup_without_cancel"
+        mock_agent_loop = self._build_agent_loop({0: 0.01, 1: 0.03, 2: 0.03})
         produce_strategy_cfg = AsyncProduceStrategyConfig(over_sample_threshold=2.0, enable_partial_rollout=True)
         sampler = self._build_sampler()
         strategy = produce_strategy_cfg.build()
-        strategy.cleanup_task_time = 0
         progress = self._build_progress(task_name, target=1)
 
         ctx = self._build_context(
@@ -733,7 +735,9 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         completed = await self.replay_buffer.count(task_name, Status.COMPLETED)
         aborted = await self.replay_buffer.count(task_name, Status.ABORTED)
         expired = await self.replay_buffer.count(task_name, Status.EXPIRED)
-        self.assertEqual(completed + aborted + expired, 1)
+        self.assertEqual(completed + aborted + expired, 3)
+        self.assertEqual(mock_agent_loop.rollout_ctl.pause_generation.remote.await_count, 1)
+        self.assertEqual(mock_agent_loop.rollout_ctl.cleanup_after_pause.remote.await_count, 1)
 
     async def test_async_produce_strategy_returns_update_abort_without_sampling(self):
         task_name = "test_update_abort"

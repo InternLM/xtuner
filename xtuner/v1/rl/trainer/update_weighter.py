@@ -73,6 +73,9 @@ class UpdateWeighter:
         self._sglang_disagg_executor: ThreadPoolExecutor | None = None
         self._train_update_sync_group: dist.ProcessGroup | None = None
         self._sglang_disagg_update_lock = Lock()
+        self.use_fake_weight_update = (
+            False  # 仅在 lmdeploy 后端的 disaggregated 模式下使用，表示是否使用 fake 接口进行权重更新
+        )
 
     def _hook_compare_test_sent_and_received_weight_hash(
         self,
@@ -137,6 +140,26 @@ class UpdateWeighter:
             self.is_train_rollout_colocated = True
         elif mode == "disaggregated":
             self.is_train_rollout_colocated = False
+
+            backend = self.rollout_cfg_info.get("backend", "").lower()
+            if backend == "vllm":
+                raise NotImplementedError("Disaggregated train-rollout mode is not supported for vLLM backend.")
+
+            elif backend == "pytorch" or backend == "turbomind":
+                self.logger.warning(
+                    "Disaggregated train-rollout mode for lmdeploy backend is not fully supported yet. "
+                    "A fake no-op interface will be used temporarily.",
+                )
+                self.use_fake_weight_update = True  # 后续 fake 接口可根据这个标志跳过实际同步
+
+            elif backend == "sglang":
+                self.use_fake_weight_update = False
+            else:
+                raise ValueError(
+                    f"Unsupported rollout backend for disaggregated mode: {backend!r}. "
+                    "Expected 'vllm', 'pytorch', 'turbomind' or 'sglang'."
+                )
+
         else:
             raise ValueError(
                 f"Unsupported train_rollout_mode: {train_rollout_mode!r}. Expected 'colocate' or 'disaggregated'."
@@ -196,9 +219,12 @@ class UpdateWeighter:
         DEVICE_MODULE.empty_cache()
 
     def _update_weights_disaggregated(self):
-        assert self.rollout_cfg_info.get("backend") == "sglang", (
-            "Only SGLang disaggregated weight update is implemented now."
-        )
+        if self.use_fake_weight_update:
+            self.logger.warning(
+                "Using fake weight update interface, no actual weight synchronization will happen. This is only for testing purposes and should not be used in production."
+            )
+            return
+
         DEVICE_MODULE.empty_cache()
         try:
             if isinstance(self.config.model_cfg, BaseComposeConfig):

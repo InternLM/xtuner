@@ -18,10 +18,7 @@
    - Dataflow 每次发送一组数据，实际同一时间内发送的数据条数为 `max_concurrent * prompt_repeat_k`。
    - 建议设置为略高于推理引擎实际处理能力，以保证推理队列始终有任务。
 
-4. **RAY_MAX_CONCURRENCY**
-   - Ray 后端的最大并发任务数，通过环境变量配置，默认为 1024。
-
-5. **httpx 最大连接数**
+4. **httpx 最大连接数**
    - 控制 HTTP 客户端（如 RolloutWorker）发起到推理服务的最大并发连接数。
    - 建议与 `rollout_max_batch_size_per_instance` 保持一致或略高。
 
@@ -30,8 +27,7 @@
 - **推荐配置流程**：
   1. 根据模型和硬件资源，确定合理的 `rollout_max_batch_size_per_instance`（如 128、256、512、 1024）。该参数为可选，若用户不提供，Xtuner 会根据 `context_length` 提供预设值：`context_length` ≤ 4K 时并发度为 1024，≤ 16K 时并发度为 512，≤ 32K 时并发度为 128。
   2. 设定 `DataflowConfig.max_concurrent`，建议为 `rollout_max_batch_size_per_instance * num_of_infer_instance / prompt_repeat_k * allow_over_concurrency_ratio`。其中 `num_of_infer_instance` 为启动的推理引擎实例数量，一般为节点数 / `tensor_parallel_size`。
-  3. 设置 `RAY_MAX_CONCURRENCY` 环境变量，建议与 `rollout_max_batch_size_per_instance * num_of_infer_instance` 保持一致或略高。
-  4. httpx 最大连接数默认配置为 `rollout_max_batch_size_per_instance * allow_over_concurrency_ratio`。
+  3. httpx 最大连接数默认配置为 `rollout_max_batch_size_per_instance * allow_over_concurrency_ratio`。
 
 - **动态调整**：可通过监控推理队列长度、GPU 利用率和响应延迟，动态调整上述参数，找到最优并发配置。
 
@@ -53,6 +49,5 @@ dataflow = DataflowConfig(
     ...
 )
 
-# 环境变量设置
-export RAY_MAX_CONCURRENCY=1024
+# RolloutController 和 RolloutWorker 的 Ray actor 并发由 Xtuner 根据 rollout 配置自动计算。
 ```
