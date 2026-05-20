@@ -56,17 +56,10 @@ class TreeNode:
 
 
 class Trie:
-    def __init__(self, split_fn: Optional[Callable[[str], Iterable[str]]] = None):
-        """Initialize the prefix tree (Trie).
-
-        Args:
-            split_fn (Optional[Callable[[str], Iterable[str]]]): Custom string split function.
-                Takes a string and returns an iterable of string tokens/chunks.
-                If None, defaults to `list` (character-level split).
-        """
+    def __init__(self):
+        """Initialize the prefix tree (Trie)."""
         # 根节点默认没有任何 value
         self.root = TreeNode(value=None, parent=None)
-        self.split_fn = split_fn or list
 
     def keys(self) -> List[str]:
         """Get all keys (i.e., strings) stored in the Trie."""
@@ -88,14 +81,21 @@ class Trie:
             key (str): The key string to insert.
             value (Any): The value to store at the destination node.
         """
-        tokens = list(self.split_fn(key))
         node = self.root
+        while key:
+            best_prefix = ""
+            for token in node.children:
+                if key.startswith(token) and len(token) > len(best_prefix):
+                    best_prefix = token
 
-        for token in tokens:
-            if token not in node.children:
+            if best_prefix:
+                node = node.children[best_prefix]
+                key = key[len(best_prefix) :]
+            else:
                 # 若节点不存在则创建
-                node.children[token] = TreeNode(value=None, parent=node)
-            node = node.children[token]
+                node.children[key] = TreeNode(value=None, parent=node)
+                node = node.children[key]
+                break
 
         # 在最终的节点上设置 value
         node.value = value
@@ -112,15 +112,20 @@ class Trie:
             Tuple[str, List["TreeNode"]]: A tuple containing the matched longest prefix string
             and a list of nodes along the matched path (excluding the root).
         """
-        tokens = self.split_fn(text)
         node = self.root
         key_path, matched_nodes = [], []
 
-        for token in tokens:
-            if token in node.children:
-                node = node.children[token]
+        while text:
+            best_prefix = ""
+            for token in node.children:
+                if text.startswith(token) and len(token) > len(best_prefix):
+                    best_prefix = token
+
+            if best_prefix:
+                node = node.children[best_prefix]
                 matched_nodes.append(node)
-                key_path.append(token)
+                key_path.append(best_prefix)
+                text = text[len(best_prefix) :]
             else:
                 break
 
@@ -151,13 +156,18 @@ class Trie:
             _free_subtree(self.root)
             return
 
-        tokens = list(self.split_fn(key))
         node = self.root
         path = []
-        for token in tokens:
-            if token in node.children:
-                path.append((node, token))
-                node = node.children[token]
+        while key:
+            best_prefix = ""
+            for token in node.children:
+                if key.startswith(token) and len(token) > len(best_prefix):
+                    best_prefix = token
+
+            if best_prefix:
+                path.append((node, best_prefix))
+                node = node.children[best_prefix]
+                key = key[len(best_prefix) :]
             else:
                 return
 
@@ -193,7 +203,7 @@ class RolloutTraceStore:
             Trie: The Trie instance associated with the session.
         """
         if session_id not in self.sessions:
-            self.sessions[session_id] = Trie(lambda x: [x])
+            self.sessions[session_id] = Trie()
         return self.sessions[session_id]
 
     def keys(self, session_id: str) -> List[str]:
