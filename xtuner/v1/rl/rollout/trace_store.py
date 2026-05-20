@@ -1,0 +1,406 @@
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+
+import ray
+
+from xtuner.v1.utils import get_logger
+
+_STORE_NAME = "rollout_trace_store"
+_handle_cache: Any = None
+
+
+def _free_ray_refs(obj: Any):
+    """Recursively free ray.ObjectRef instances trapped inside an object.
+
+    Args:
+        obj (Any): The object that may contain ray.ObjectRef references (e.g., dict, list, tuple).
+    """
+    if isinstance(obj, ray.ObjectRef):
+        try:
+            ray.internal.free([obj], local_only=False)
+        except Exception as e:
+            get_logger().error(f"Failed to free Ray ObjectRef {obj}: {e}")
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _free_ray_refs(v)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            _free_ray_refs(v)
+    elif hasattr(obj, 'model_dump'):  # Pydantic v2
+        for v in obj.model_dump().values() if hasattr(obj.model_dump, '__call__') else {}.values():
+            _free_ray_refs(v)
+    elif hasattr(obj, 'dict') and callable(getattr(obj, 'dict')):  # Pydantic v1
+        for v in obj.dict().values():
+            _free_ray_refs(v)
+    elif hasattr(obj, '__dict__'):
+        for v in vars(obj).values():
+            _free_ray_refs(v)
+
+
+@dataclass
+class TreeNode:
+    """A node in the prefix tree (Trie).
+
+    Attributes:
+        value (Optional[Any]): The value stored in the node.
+        parent (Optional["TreeNode"]): The parent node.
+        children (dict[str, "TreeNode"]): The child nodes, mapping string tokens to TreeNodes.
+        created_at (float): The timestamp when the node was created.
+    """
+
+    value: Optional[Any]
+    parent: Optional["TreeNode"]
+    children: dict[str, "TreeNode"] = field(default_factory=dict)
+    created_at: float = field(default_factory=time.time)
+
+
+class Trie:
+    def __init__(self, split_fn: Optional[Callable[[str], Iterable[str]]] = None):
+        """Initialize the prefix tree (Trie).
+
+        Args:
+            split_fn (Optional[Callable[[str], Iterable[str]]]): Custom string split function.
+                Takes a string and returns an iterable of string tokens/chunks.
+                If None, defaults to `list` (character-level split).
+        """
+        # 根节点默认没有任何 value
+        self.root = TreeNode(value=None, parent=None)
+        self.split_fn = split_fn or list
+
+    def keys(self) -> List[str]:
+        """Get all keys (i.e., strings) stored in the Trie."""
+        result = []
+
+        def _collect(node: TreeNode, path: List[str]):
+            if node.value is not None:
+                result.append(''.join(path))
+            for token, child in node.children.items():
+                _collect(child, path + [token])
+
+        _collect(self.root, [])
+        return result
+
+    def insert(self, key: str, value: Any) -> None:
+        """Insert a (key, value) pair into the Trie.
+
+        Args:
+            key (str): The key string to insert.
+            value (Any): The value to store at the destination node.
+        """
+        tokens = list(self.split_fn(key))
+        node = self.root
+
+        for token in tokens:
+            if token not in node.children:
+                # 若节点不存在则创建
+                node.children[token] = TreeNode(value=None, parent=node)
+            node = node.children[token]
+
+        # 在最终的节点上设置 value
+        node.value = value
+
+    def search(self, text: str, filter_none: bool = False) -> Tuple[str, List["TreeNode"]]:
+        """Search for the longest prefix matching the input text.
+
+        Args:
+            text (str): The input string to search for.
+            filter_none (bool): If True, only returns nodes whose value is not None
+                (i.e., nodes where a value was explicitly inserted).
+
+        Returns:
+            Tuple[str, List["TreeNode"]]: A tuple containing the matched longest prefix string
+            and a list of nodes along the matched path (excluding the root).
+        """
+        tokens = self.split_fn(text)
+        node = self.root
+        key_path, matched_nodes = [], []
+
+        for token in tokens:
+            if token in node.children:
+                node = node.children[token]
+                matched_nodes.append(node)
+                key_path.append(token)
+            else:
+                break
+
+        if filter_none:
+            matched_nodes = [n for n in matched_nodes if n.value is not None]
+
+        return ''.join(key_path), matched_nodes
+
+    def release(self, key: str | None = None):
+        """Release nodes and free associated resources (e.g. Ray objects) for a given key.
+
+        If the key is None, the entire Trie is released. Prunes empty branches bottom-up.
+
+        Args:
+            key (Optional[str]): The key string whose associated nodes should be released.
+                If None, releases the entire tree.
+        """
+
+        def _free_subtree(node: TreeNode):
+            for child in node.children.values():
+                _free_subtree(child)
+            if node.value is not None:
+                _free_ray_refs(node.value)
+                node.value = None
+            node.children.clear()
+
+        if key is None:
+            _free_subtree(self.root)
+            return
+
+        tokens = list(self.split_fn(key))
+        node = self.root
+        path = []
+        for token in tokens:
+            if token in node.children:
+                path.append((node, token))
+                node = node.children[token]
+            else:
+                return
+
+        if node.value is not None:
+            _free_ray_refs(node.value)
+            node.value = None
+
+        for parent, token in reversed(path):
+            child_node = parent.children[token]
+            if child_node.value is None and not child_node.children:
+                del parent.children[token]
+            else:
+                break
+
+
+@ray.remote(num_cpus=0)
+class RolloutTraceStore:
+    """Actor for managing trace stores (Tries) across different rollout sessions."""
+
+    def __init__(self):
+        """Initialize the rollout trace store actor."""
+        self.sessions: Dict[str, Trie] = {}
+        self.objects: Dict[str, ray.ObjectRef] = {}
+        self.updated_at: Dict[str, float] = {}
+
+    def get_or_create(self, session_id: str) -> Trie:
+        """Get the Trie for a session, or create one if it doesn't exist.
+
+        Args:
+            session_id (str): The session identifier.
+
+        Returns:
+            Trie: The Trie instance associated with the session.
+        """
+        if session_id not in self.sessions:
+            self.sessions[session_id] = Trie(lambda x: [x])
+        return self.sessions[session_id]
+
+    def keys(self, session_id: str) -> List[str]:
+        """Get all keys (i.e., strings) stored in a session's Trie.
+
+        Args:
+            session_id (str): The session identifier.
+
+        Returns:
+            List[str]: A list of all keys in the session's Trie.
+        """
+        trie = self.get_or_create(session_id)
+        return trie.keys()
+
+    def insert(self, session_id: str, key: str, value: Any):
+        """Insert a (key, value) pair into a session's Trie.
+
+        Args:
+            session_id (str): The session identifier.
+            key (str): The key string.
+            value (Any): The trace segment/value to store.
+        """
+        trie = self.get_or_create(session_id)
+        return trie.insert(key, value)
+
+    def search(self, session_id: str, text: str, filter_none: bool = False):
+        """Search the longest prefix in a session's Trie.
+
+        Args:
+            session_id (str): The session identifier.
+            text (str): The input text to search.
+            filter_none (bool): Whether to filter out nodes with no value.
+
+        Returns:
+            Tuple[str, List["TreeNode"]]: The matched prefix and matched nodes.
+        """
+        trie = self.get_or_create(session_id)
+        return trie.search(text, filter_none)
+
+    def release(self, session_id: str):
+        """Release the Trie and free associated resources for a specific session.
+
+        Args:
+            session_id (str): The session identifier.
+        """
+        assert session_id in self.sessions, f"Session ID '{session_id}' not found for release."
+        trie = self.sessions.pop(session_id)
+        trie.release()
+
+    def export_training_trace(self, session_id: str, prompt_text: str) -> dict:
+        """Export the stored training trace given a complete prompt text.
+
+        Args:
+            session_id (str): The session identifier.
+            prompt_text (str): The complete assembled prompt string to look up.
+
+        Returns:
+            dict: The trace dictionary containing `input_ids`, `labels`, `logprobs`,
+                and `routed_experts`.
+
+        Raises:
+            ValueError: If the prompt_text does not completely match the trace keys in the session.
+        """
+        trie = self.get_or_create(session_id)
+        key, nodes = trie.search(prompt_text, filter_none=True)
+        if prompt_text != key:
+            raise ValueError(
+                f"Prompt text '{prompt_text}' does not match any trace key '{key}' in session '{session_id}'."
+            )
+        trace = {'input_ids': [], 'labels': [], 'logprobs': [], 'routed_experts': []}
+        for node in nodes:
+            trace['input_ids'].extend(node.value['token_ids'])
+            trace['labels'].extend(node.value['labels'])
+            trace['logprobs'].extend(node.value['logprobs'])
+            trace['routed_experts'].append(node.value['expert_key'])
+        return trace
+
+    def get_objects(self, keys: list[str]) -> list[ray.ObjectRef]:
+        """Fetch ray.ObjectRef elements by their keys.
+
+        Args:
+            keys (list[str]): The list of object keys to retrieve.
+
+        Returns:
+            list[ray.ObjectRef]: The mapped ray.ObjectRefs.
+        """
+        return [self.objects[key] for key in keys if key in self.objects]
+
+
+def get_store():
+    """Process-local cached handle to the singleton store actor.
+
+    Fast path: ``ray.get_actor`` if another caller has already created it.
+    Slow path: create the actor under the reserved name; race with concurrent
+    creators is handled by catching the "name already taken" ValueError and
+    re-looking-up.
+
+    Returns:
+        ActorHandle: Handle to the ``RolloutTraceStore`` actor.
+    """
+    global _handle_cache
+    if _handle_cache is not None:
+        return _handle_cache
+
+    try:
+        _handle_cache = ray.get_actor(_STORE_NAME)
+        return _handle_cache
+    except ValueError:
+        pass
+
+    import time as _time
+
+    for attempt in range(10):
+        try:
+            _handle_cache = RolloutTraceStore.options(name=_STORE_NAME).remote()
+            return _handle_cache
+        except ValueError as exc:
+            try:
+                _handle_cache = ray.get_actor(_STORE_NAME)
+                return _handle_cache
+            except ValueError:
+                get_logger().debug(f"RolloutTraceStore bootstrap retry {attempt}: {exc}")
+                _time.sleep(0.2 * (attempt + 1))
+                continue
+
+    raise RuntimeError(f"RolloutTraceStore: failed to acquire named actor {_STORE_NAME!r} after retries")
+
+
+if __name__ == "__main__":
+    print("=== 评估使用 Trie 加速 tokenize.py 避免多轮对话重复 tokenization ===")
+
+    # 1. 初始化
+    trie = Trie()
+
+    # 2. 模拟增量 Tokenize 输出
+    def mock_segment_tokenize(segment_text: str, is_assistant_response: bool):
+        tok_len = max(1, len(segment_text) // 4)
+        if is_assistant_response:
+            return {
+                "segment_text": segment_text,
+                "token_ids": [1000] * tok_len,
+                "labels": [1000] * tok_len,  # 模型真实生成内容，参与 Loss 计算
+                "logprobs": [-0.1] * tok_len,  # 拥有真实的概率分布
+            }
+        else:
+            return {
+                "segment_text": segment_text,
+                "token_ids": [1000] * tok_len,
+                "labels": [-100] * tok_len,  # 模板/用户文本被掩蔽 (Mask)
+                "logprobs": [0.0] * tok_len,
+            }
+
+    # 3. 定义两轮对话的四个增量片段，明确分离“非模型生成段”与“模型生成段”
+    non_asst_str1 = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello!<|im_end|>\n<|im_start|>assistant\n"
+    asst_str1 = "Hi there!<|im_end|>"
+    non_asst_str2 = "\n<|im_start|>user\nIntroduce yourself.<|im_end|>\n<|im_start|>assistant\n"
+    asst_str2 = "I am an AI assistant created to help you.<|im_end|>"
+
+    # 4. 模拟运行流：我们在每收到一个新的增量片段时，将“至今为止的整个 Prefix String”作为 key，
+    #    且把“最新计算好的增量 Token 状态”作为 value 存入 Trie。
+
+    print("\n[Step 1] 处理第一轮 non_assistant 提示...")
+    current_prefix = non_asst_str1
+    val1 = mock_segment_tokenize(non_asst_str1, is_assistant_response=False)
+    trie.insert(current_prefix, val1)
+
+    print("[Step 2] 模型生成了第一轮回复，将其追加...")
+    current_prefix += asst_str1
+    val2 = mock_segment_tokenize(asst_str1, is_assistant_response=True)
+    trie.insert(current_prefix, val2)
+
+    print("[Step 3] 追加第二轮 non_assistant 提示...")
+    current_prefix += non_asst_str2
+    val3 = mock_segment_tokenize(non_asst_str2, is_assistant_response=False)
+    trie.insert(current_prefix, val3)
+
+    # 5. 模拟一次线上推理 / 强化学习推演的过程
+    # 假设我们现在需要对一段更长的请求（第二轮模型开始生成前）的完整 prompt 进行处理：
+    turn2_prompt = non_asst_str1 + asst_str1 + non_asst_str2
+
+    print(f"\n[Search] 收到需要 tokenizer 计算的长 Prompt (总长 {len(turn2_prompt)} 字符)")
+    prefix, nodes = trie.search(turn2_prompt)
+
+    # 6. 从前缀树中收集沿路径出现的所有 value
+    cached_length = 0
+    reconstructed_labels = []
+    reconstructed_string_parts = []
+
+    for node in nodes:
+        if node.value is not None:
+            val = node.value
+            cached_length += len(val["segment_text"])
+            reconstructed_labels.extend(val["labels"])
+            reconstructed_string_parts.append(val["segment_text"])
+            print(
+                f"   -> 命中缓存片段: {repr(val['segment_text'][:30])}..., 长度: {len(val['segment_text'])}, 掩蔽标记({val['labels'][0]}): {len(val['labels'])} tokens"
+            )
+
+    reconstructed_string = "".join(reconstructed_string_parts)
+    print(f"\n   -> 测试字符串重建: {reconstructed_string == turn2_prompt[:cached_length]}")
+
+    print(f"\n[Result] 统计验证：")
+    print(f"  -> Cache 命中的总字符长度: {cached_length} / {len(turn2_prompt)}")
+
+    if cached_length == len(turn2_prompt):
+        print("  -> 🥳 完美！整个 Prompt 都命中了 Trie 缓存内容，完全不需要调用 tokenizer.encode 进行重复处理！")
+    else:
+        unmatched_text = turn2_prompt[cached_length:]
+        print(f"  -> 剩下实际需要交给 tokenizer 的未命中部分: {unmatched_text!r}")
+    trie.release()
