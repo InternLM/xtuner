@@ -2,7 +2,7 @@
 
 Good Tests:
 - 通过 AgentLoopManager 的公开入口验证 manager 对 rollout 生产和 replay buffer 消费的编排行为。
-- 断言 ProduceBatchResult、checkpoint/resume 结果、pause/continue 对外可见顺序、get_batch expired 语义。
+- 断言 ProduceBatchResult、pause/continue 对外可见顺序、get_batch expired 语义。
 - 仅在验证 pause/continue 顺序等外部协议时，少量使用 fake rollout controller 观察调用边界。
 
 Bad Tests:
@@ -14,14 +14,11 @@ Bad Tests:
 - 共卡 produce_batch 按 task 权重分配并返回非空训练 batch。
 - 非共卡 get_batch 等待 ready batch，并处理 Expired Produce Batch 的空/非空/fail-fast 语义。
 - pause_produce / continue_produce 控制 rollout controller 和后台 produce_loop 恢复。
-- save/resume/shutdown 对 producer 生命周期和 checkpoint 的外部行为。
+- shutdown 对后台 produce_loop 的外部退出行为。
 """
 
 import asyncio
-import json
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 from xtuner.v1.data_proto.rl_data import Status
@@ -39,19 +36,9 @@ from xtuner.v1.rl.utils import calculate_seq_staleness
 class _FakeSampler:
     def __init__(self, size: int = 1):
         self._size = size
-        self.saved_paths: list[Path] = []
-        self.resumed_paths: list[Path] = []
 
     def __len__(self) -> int:
         return self._size
-
-    def save(self, checkpoint_path):
-        self.saved_paths.append(Path(checkpoint_path))
-        return None
-
-    def resume(self, checkpoint_path):
-        self.resumed_paths.append(Path(checkpoint_path))
-        return None
 
 
 class _FakeProduceStrategy:
@@ -73,7 +60,6 @@ class _FakeProduceStrategy:
         self.cleanup_model_steps: list[int] = []
         self.cleanup_progresses: list[object | None] = []
         self.cleanup_call_count = 0
-        self.pending_task_count_value = 0
 
     async def produce_batch(self, ctx) -> ProduceBatchStatus:
         self.called_batch_sizes.append(ctx.task_batch_size)
@@ -94,9 +80,6 @@ class _FakeProduceStrategy:
         # fake strategy 的过期状态由用例显式返回 status 控制。
         return False
 
-    def pending_task_count(self) -> int:
-        return self.pending_task_count_value
-
 
 class _FakeStatusProduceStrategy:
     def __init__(self, status: ProduceBatchStatus, pause_time_s: float):
@@ -110,7 +93,6 @@ class _FakeStatusProduceStrategy:
         self.called_progresses: list[object] = []
         self.cleanup_model_steps: list[int] = []
         self.cleanup_progresses: list[object | None] = []
-        self.pending_task_count_value = 0
 
     async def produce_batch(self, ctx) -> ProduceBatchStatus:
         self.called_train_steps.append(ctx.train_step)
@@ -129,9 +111,6 @@ class _FakeStatusProduceStrategy:
     def is_model_expired(self, train_step: int, model_step: int) -> bool:
         # fake strategy 的过期状态由用例显式返回 status 控制。
         return False
-
-    def pending_task_count(self) -> int:
-        return self.pending_task_count_value
 
 
 class _FakeRolloutState:
@@ -166,8 +145,6 @@ class _FakeReplayBuffer:
     def __init__(self, rollout_states_by_task: dict[str, list[list[str]]], leftover_counts: dict[tuple[str, Status], int]):
         self._rollout_states_by_task = rollout_states_by_task
         self._leftover_counts = leftover_counts
-        self.saved_paths: list[Path] = []
-        self.resumed_paths: list[Path] = []
         self.refresh_staleness_calls: list[tuple[str, int, int, tuple[Status, ...]]] = []
 
     async def get(self, batch_size: int, task_name: str, group_status: Status):
@@ -225,12 +202,6 @@ class _FakeReplayBuffer:
             }
             for task_name in task_names
         }
-
-    async def save(self, checkpoint_path: Path | str):
-        self.saved_paths.append(Path(checkpoint_path))
-
-    async def resume(self, checkpoint_path: Path | str):
-        self.resumed_paths.append(Path(checkpoint_path))
 
 
 class _SequencedCompletedReplayBuffer(_FakeReplayBuffer):
@@ -346,106 +317,6 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertIn("task_a", result.task_results)
         self.assertIn("task_b", result.task_results)
         self.assertIn("task_c", result.task_results)
-
-    async def test_save_and_resume_roundtrip_restores_paused_manager_state(self):
-        # 验证 checkpoint/resume 会保留模型版本和 producer 暂停态，并恢复 sampler / replay buffer。
-        sampler = _FakeSampler()
-        replay_buffer = _FakeReplayBuffer({}, {})
-        manager = AgentLoopManager(
-            task_runners=[
-                _TaskRunner(
-                    task_name="task_a",
-                    agent_loop=_fake_agent_loop(),
-                    produce_strategy=_FakeProduceStrategy(stale_threshold=5),
-                    sampler=sampler,
-                    weight=1.0,
-                    order=0,
-                )
-            ],
-            replay_buffer=replay_buffer,
-        )
-        manager._status = AgentLoopManagerStatus.EXPIRED_BATCH
-        manager._model_step = 2
-        manager._pause_time_s = 1.5
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            checkpoint_path = Path(tmp_dir)
-            await manager.save(checkpoint_path, model_step=7)
-
-            state_path = checkpoint_path / manager._MANAGER_STATE_PATH
-            with state_path.open("r") as f:
-                state = json.load(f)
-
-            self.assertEqual(state["status"], "EXPIRED_BATCH")
-            self.assertEqual(state["model_step"], 7)
-            self.assertNotIn("model_step_override", state)
-            self.assertEqual(state["next_consumer_step"], 1)
-            self.assertEqual(state["producer_future_step"], 1)
-            self.assertEqual(state["consumed_samples"], {"task_a": 0})
-            self.assertEqual(state["target_samples"], {"task_a": 0})
-            self.assertEqual(state["target_upto_future_step"], 0)
-
-            restored_step = await manager.resume(checkpoint_path)
-
-        self.assertEqual(restored_step, 7)
-        self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT)
-        self.assertTrue(manager._update_event.is_set())
-        self.assertFalse(manager._finish_event.is_set())
-        self.assertEqual(manager._pause_time_s, 0.0)
-        self.assertEqual(manager._model_step, 7)
-        self.assertEqual(sampler.saved_paths, [Path(tmp_dir) / manager._TASK_CHECKPOINT_DIR / "task_a"])
-        self.assertEqual(sampler.resumed_paths, [Path(tmp_dir) / manager._TASK_CHECKPOINT_DIR / "task_a"])
-        self.assertEqual(replay_buffer.saved_paths, [Path(tmp_dir)])
-        self.assertEqual(replay_buffer.resumed_paths, [Path(tmp_dir)])
-
-    async def test_save_rejects_pending_async_tasks(self):
-        # 验证保存前必须先清空 pending rollout task，避免 checkpoint 缺失后台生产结果。
-        strategy = _FakeProduceStrategy()
-        strategy.pending_task_count_value = 1
-        manager = AgentLoopManager(
-            task_runners=[
-                _TaskRunner(
-                    task_name="task_a",
-                    agent_loop=_fake_agent_loop(),
-                    produce_strategy=strategy,
-                    sampler=_FakeSampler(),
-                    weight=1.0,
-                    order=0,
-                )
-            ],
-            replay_buffer=_FakeReplayBuffer({}, {}),
-        )
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            with self.assertRaisesRegex(RuntimeError, "pending rollout tasks"):
-                await manager.save(tmp_dir, model_step=0)
-
-    async def test_save_and_resume_can_run_inside_existing_event_loop(self):
-        # 验证 manager save/resume 自身是 async 入口，不会在已有 event loop 中嵌套 asyncio_run。
-        sampler = _FakeSampler()
-        replay_buffer = _FakeReplayBuffer({}, {})
-        manager = AgentLoopManager(
-            task_runners=[
-                _TaskRunner(
-                    task_name="task_a",
-                    agent_loop=_fake_agent_loop(),
-                    produce_strategy=_FakeProduceStrategy(),
-                    sampler=sampler,
-                    weight=1.0,
-                    order=0,
-                )
-            ],
-            replay_buffer=replay_buffer,
-        )
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            checkpoint_path = Path(tmp_dir)
-            await manager.save(checkpoint_path, model_step=3)
-            restored_step = await manager.resume(checkpoint_path)
-
-        self.assertEqual(restored_step, 3)
-        self.assertEqual(replay_buffer.saved_paths, [Path(tmp_dir)])
-        self.assertEqual(replay_buffer.resumed_paths, [Path(tmp_dir)])
 
     async def test_custom_get_task_batch_sizes_can_disable_tasks(self):
         # 验证自定义 task batch size 可以禁用某个 task，训练 batch 只从启用 task 取数。
