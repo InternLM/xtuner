@@ -341,6 +341,9 @@ class SessionServer:
                 for c in response_data.get("choices", []):
                     if c.get("message") and isinstance(c["message"].get("content"), str):
                         c["message"]["content"] = c["message"]["content"].replace(self.stop_word, "")
+                        for tc in c['message'].get('tool_calls') or []:
+                            if isinstance(tc.get('function', {}).get('arguments'), str):
+                                tc['function']['arguments'] = json.loads(tc['function']['arguments'])
 
                 response_data['session_id'] = session_id
                 response_data['messages'] = messages
