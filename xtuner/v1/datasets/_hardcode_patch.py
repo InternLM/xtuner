@@ -23,7 +23,7 @@ import os
 from abc import ABC
 
 from transformers import PreTrainedTokenizer
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, log_rank0
 
 from .ftdp import FtdpTokenizeFunction
 from .mllm_tokenize_fn import InternS1VLTokenizeFunction, Qwen3VLTokenizeFunction
@@ -58,9 +58,11 @@ class _SkipEmptyThink(ABC):
             self._think_token = None
 
         if not self._skip_seq:
-            logger.warning("`SkipEmptyThink` is disabled because <think> or </think> token is not found in tokenizer.")
+            log_rank0.warning(
+                "`SkipEmptyThink` is disabled because <think> or </think> token is not found in tokenizer."
+            )
         else:
-            logger.info("`SkipEmptyThink` is enabled to skip empty <think></think> sequences in labels.")
+            log_rank0.info("`SkipEmptyThink` is enabled to skip empty <think></think> sequences in labels.")
 
     def process_labels(self, input_ids: list[int], labels: list[int]):
         """Remove all complete occurrences of skip_seq from labels.

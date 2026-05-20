@@ -13,7 +13,7 @@ from xtuner.v1.float8.fsdp_utils import (
     precompute_tensorwise_float8_scale_for_fsdp,
     precompute_tilewise_float8_scale_for_fsdp,
 )
-from xtuner.v1.utils import get_logger, is_evenly_distributed
+from xtuner.v1.utils import get_logger, is_evenly_distributed, log_rank0
 
 from .fsdp_utils import WeightWithDynamicTensorWiseFloat8CastTensor, WeightWithDynamicTilewiseFloat8CastTensor
 
@@ -55,7 +55,7 @@ class Float8Handler:
         )
 
         if not _is_sm89_or_later():
-            logger.warning(
+            log_rank0.warning(
                 "Failed to enable float8 training because float8 is only supported on SM89 or later",
             )
             return
@@ -143,7 +143,7 @@ class Float8Handler:
         # fsdp rank 0 的后 64 个 dim 要跟 fsdp rank 1 的前 64 个 dim 共同组成一个 block
         # 计算 absmax 的时候要 reduce max
         if not self.is_tilewise_fp8:
-            logger.warning("Scaling granularity is not TILEWISE, no need to build reduce group.")
+            log_rank0.warning("Scaling granularity is not TILEWISE, no need to build reduce group.")
             return
 
         world_size = dist.get_world_size()
@@ -163,7 +163,7 @@ class Float8Handler:
 
     def _build_reduce_mesh_mapping(self, model: nn.Module, fsdp_mesh: DeviceMesh):
         if not self.is_tilewise_fp8:
-            logger.warning("Scaling granularity is not TILEWISE, no need to build reduce group.")
+            log_rank0.warning("Scaling granularity is not TILEWISE, no need to build reduce group.")
             return
 
         from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear

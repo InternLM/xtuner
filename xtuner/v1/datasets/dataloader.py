@@ -11,7 +11,7 @@ from xtuner.v1.datasets.collator import ColateItem
 from xtuner.v1.datasets.packing import ExpandSoftPackDataset, _LegacySoftPackDataset
 from xtuner.v1.datasets.preset_sampler import PresetSampler
 from xtuner.v1.datasets.sampler import LengthGroupedSampler, ParallelSampler
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, log_rank0
 
 
 logger = get_logger()
@@ -76,7 +76,7 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
         sampler_state = state_dict["sampler"]
 
         if not hasattr(sampler, "load_state_dict"):
-            logger.warning(f"Resuming from {type(sampler)} is risky.")
+            log_rank0.warning(f"Resuming from {type(sampler)} is risky.")
         else:
             sampler.load_state_dict(sampler_state)
 
@@ -97,12 +97,12 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
         }
 
         if not hasattr(sampler, "load_state_dict") or not hasattr(sampler, "get_state_dict"):
-            logger.warning(f"Resuming from {type(sampler)} is risky.")
+            log_rank0.warning(f"Resuming from {type(sampler)} is risky.")
         else:
             dataloader_state["sampler"].update(sampler.get_state_dict(total_steps))
 
         if not hasattr(dataset, "load_state_dict") or not hasattr(dataset, "get_state_dict"):
-            logger.warning(f"Resuming from {type(dataset)} is risky.")
+            log_rank0.warning(f"Resuming from {type(dataset)} is risky.")
         else:
             dataloader_state["dataset"].update(dataset.get_state_dict())
 

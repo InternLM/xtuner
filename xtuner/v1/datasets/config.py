@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader as TorchDataLoader
 from typing_extensions import TypedDict
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.utils import get_logger, profile_time
+from xtuner.v1.utils import get_logger, log_rank0, profile_time
 
 from ..datasets.collator import ColateItem
 from .collator import (
@@ -166,7 +166,7 @@ def build_dataloader(
         | MLLMPretrainHybridPackDataset
     )
     if dataloader_config.pack_level == "soft":
-        logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
+        log_rank0.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
         dataset = ExpandSoftPackDataset(
             datasets,
             pack_max_length=dataloader_config.pack_max_length,
@@ -177,7 +177,7 @@ def build_dataloader(
             seed=seed,
         )
     elif dataloader_config.pack_level == "mllm_hybrid":
-        logger.info("[Dataset] Start packing data of MLLMPretrainHybridPackDataset.")
+        log_rank0.info("[Dataset] Start packing data of MLLMPretrainHybridPackDataset.")
         dataset = MLLMPretrainHybridPackDataset(
             datasets,
             pack_max_length=dataloader_config.pack_max_length,
@@ -188,7 +188,7 @@ def build_dataloader(
             seed=seed,
         )
     elif dataloader_config.pack_level == "hard":
-        logger.info("[Dataset] Start packing data of HardPackDataset.")
+        log_rank0.info("[Dataset] Start packing data of HardPackDataset.")
         dataset = HardPackDataset(
             datasets,
             pack_max_length=dataloader_config.pack_max_length,
@@ -198,7 +198,7 @@ def build_dataloader(
     elif dataloader_config.pack_level == "none":
         dataset = ConcatDataset(datasets)  # type: ignore
     elif dataloader_config.pack_level == "__legacy":
-        logger.info("[Dataset] Start packing data of _LegacySoftPackDataset.")
+        log_rank0.info("[Dataset] Start packing data of _LegacySoftPackDataset.")
         dataset = _LegacySoftPackDataset(
             datasets,
             pack_max_length=dataloader_config.pack_max_length,
@@ -331,18 +331,18 @@ class DataloaderConfig(BaseDataloaderConfig):
         for config in dataset_config_list:
             dc = copy.deepcopy(config["dataset"])
             if dc.sample_ratio != 1.0:
-                logger.warning(
+                log_rank0.warning(
                     f"pack_level='preset': overriding sample_ratio {dc.sample_ratio} -> 1.0 "
                     f"for dataset '{dc.anno_path}'."
                 )
                 dc.sample_ratio = 1.0
             if not dc.enable_sequential_sampler:
-                logger.warning(
+                log_rank0.warning(
                     f"pack_level='preset': forcing enable_sequential_sampler=True for dataset '{dc.anno_path}'."
                 )
                 dc.enable_sequential_sampler = True
             if not dc.disable_filter:
-                logger.warning(f"pack_level='preset': forcing disable_filter=True for dataset '{dc.anno_path}'.")
+                log_rank0.warning(f"pack_level='preset': forcing disable_filter=True for dataset '{dc.anno_path}'.")
                 dc.disable_filter = True
             result.append({"dataset": dc, "tokenize_fn": config["tokenize_fn"]})
         return result
@@ -413,7 +413,7 @@ class DataloaderConfig(BaseDataloaderConfig):
                 | PresetPackDataset
             )
             if self.pack_level == "soft":
-                logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
+                log_rank0.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
                 dataset = ExpandSoftPackDataset(
                     datasets,
                     pack_max_length=self.pack_max_length,
@@ -424,7 +424,7 @@ class DataloaderConfig(BaseDataloaderConfig):
                     seed=seed,
                 )
             elif self.pack_level == "mllm_hybrid":
-                logger.info("[Dataset] Start packing data of MLLMPretrainHybridPackDataset.")
+                log_rank0.info("[Dataset] Start packing data of MLLMPretrainHybridPackDataset.")
                 dataset = MLLMPretrainHybridPackDataset(
                     datasets,
                     pack_max_length=self.pack_max_length,
@@ -435,7 +435,7 @@ class DataloaderConfig(BaseDataloaderConfig):
                     seed=seed,
                 )
             elif self.pack_level == "hard":
-                logger.info("[Dataset] Start packing data of HardPackDataset.")
+                log_rank0.info("[Dataset] Start packing data of HardPackDataset.")
                 dataset = HardPackDataset(
                     datasets,
                     pack_max_length=self.pack_max_length,
@@ -447,7 +447,7 @@ class DataloaderConfig(BaseDataloaderConfig):
             elif self.pack_level == "none":
                 dataset = ConcatDataset(datasets)  # type: ignore
             elif self.pack_level == "__legacy":
-                logger.info("[Dataset] Start packing data of _LegacySoftPackDataset.")
+                log_rank0.info("[Dataset] Start packing data of _LegacySoftPackDataset.")
                 dataset = _LegacySoftPackDataset(
                     datasets,
                     pack_max_length=self.pack_max_length,
@@ -459,7 +459,7 @@ class DataloaderConfig(BaseDataloaderConfig):
                     raise ValueError(
                         "pack_level='preset' requires both 'pack_config_path' and 'sampler_config_path' to be set."
                     )
-                logger.info("[Dataset] Start loading PresetPackDataset.")
+                log_rank0.info("[Dataset] Start loading PresetPackDataset.")
                 dataset = PresetPackDataset(
                     datasets,
                     pack_config_path=self.pack_config_path,

@@ -20,7 +20,7 @@ from torch.utils.data import ConcatDataset
 from torch.utils.data import Dataset as TorchDataset
 from tqdm import tqdm
 
-from xtuner.v1.utils import get_logger, is_local_rank0
+from xtuner.v1.utils import get_logger, is_local_rank0, log_rank0
 from xtuner.v1.utils.executor import SharedPoolExecutor
 
 from .jsonl import JsonlDataset
@@ -328,7 +328,7 @@ class ExpandSoftPackDataset(_LegacySoftPackDataset):
         self.pack_chunk_size = pack_chunk_size
         if seed is not None:
             self.torch_random_generator.manual_seed(seed)
-        logger.info(f"Using {self.pack_workers} pack workers for packing datasets.")
+        log_rank0.info(f"Using {self.pack_workers} pack workers for packing datasets.")
 
         super().__init__(
             datasets=datasets,

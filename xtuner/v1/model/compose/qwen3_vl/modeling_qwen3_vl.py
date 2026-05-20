@@ -5,7 +5,7 @@ from xtuner.v1.loss import CELossContext
 import torch.distributed as dist
 import torch.distributed.nn.functional as distF
 from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, log_rank0
 from typing_extensions import override
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE
@@ -36,8 +36,8 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
         if self.only_llm_forward:
             config.freeze_vision = True
             config.freeze_projector = True
-            logger.warning("only_llm_forward is True, vision and projector will be frozen " \
-                            "regardless of their individual freeze settings.")
+            log_rank0.warning("only_llm_forward is True, vision and projector will be frozen " \
+                              "regardless of their individual freeze settings.")
         super().__init__(config)  # type: ignore[arg-type]
 
         # if type(self.language_model) is Qwen3MoE:
