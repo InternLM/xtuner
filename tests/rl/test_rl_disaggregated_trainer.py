@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -129,7 +130,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             ],
         }
 
-    def test_sync_weights_and_save_saves_before_update_weights(self):
+    def test_sync_weights_and_save_saves_completed_model_step_before_update_weights(self):
         manager = _FakeManager([])
         trainer = self._make_trainer(manager)
         events: list[str] = []
@@ -144,25 +145,87 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
                 side_effect=lambda train_controller, rollout_controller: events.append("bind"),
             ),
         ):
-            asyncio.run(trainer._sync_weights_and_save(train_step=3, step_timer_dict={}))
+            asyncio.run(trainer._sync_weights_and_save(model_step=3, step_timer_dict={}))
 
         self.assertEqual(events, ["save:3", "hf:3", "bind", "update_weights"])
         trainer.train_controller.offload.assert_not_called()
 
-    def test_fit_skips_train_when_batch_is_expired(self):
+    def test_sync_weights_and_save_persists_completed_model_step_checkpoint(self):
+        manager = _FakeManager([])
+        manager.save = MagicMock()
+        trainer = self._make_trainer(manager)
+        trainer._checkpoint_interval = 1
+        trainer._checkpoint_maxkeep = None
+        trainer._checkpoint_no_save_optimizer = False
+        trainer._hf_interval = -1
+        trainer._meta_path = ".xtuner_rl_disaggregated_trainer"
+        trainer._meta.latest_exp.checkpoint_list = []
+        trainer._meta.model_dump_json = MagicMock(return_value="{}")
+        trainer.train_controller.save = MagicMock()
+        trainer.update_weights = MagicMock()
+        trainer._maybe_save_checkpoint = RLDisaggregatedTrainer._maybe_save_checkpoint.__get__(
+            trainer, RLDisaggregatedTrainer
+        )
+
+        with (
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+            patch("xtuner.v1.train.rl_trainer.bind_train_rollout"),
+        ):
+            asyncio.run(trainer._sync_weights_and_save(model_step=3, step_timer_dict={}))
+
+        checkpoint_path = Path(trainer.exp_dir) / trainer._CHECKPOINT_DIR / "ckpt-step-3"
+        manager.save.assert_called_once_with(checkpoint_path, model_step=3)
+        trainer.train_controller.save.assert_called_once_with(str(checkpoint_path), False)
+        with (checkpoint_path / trainer._SAVE_TRAIN_STATE_PATH).open("r") as f:
+            self.assertEqual(json.load(f), {"cur_step": 3})
+
+    def test_fit_retries_same_step_after_empty_expired_skip(self):
+        train_sample = SimpleNamespace(message_uid=1, uid=1)
         manager = _FakeManager(
-            [ProduceBatchResult(rollout_states=[], status=ProduceBatchStatus.EXPIRED_BATCH)]
+            [
+                ProduceBatchResult(rollout_states=[], status=ProduceBatchStatus.EXPIRED_BATCH),
+                ProduceBatchResult(rollout_states=[[train_sample]], status=ProduceBatchStatus.NORMAL),
+            ]
+        )
+        trainer = self._make_trainer(manager)
+        trainer._total_train_steps = 2
+        trainer._cur_step = 1
+        trainer._sync_weights_and_save = AsyncMock()
+
+        asyncio.run(trainer._fit())
+
+        self.assertEqual(
+            [call for call in manager.calls if isinstance(call, tuple) and call[0] == "get_batch"],
+            [("get_batch", 2, 2), ("get_batch", 2, 2)],
+        )
+        trainer._prepare_train_data.assert_called_once()
+        trainer.train_controller.fit.assert_called_once()
+        self.assertEqual([call.args[0] for call in trainer._sync_weights_and_save.await_args_list], [1, 2])
+        self.assertIn(("continue_produce", 1), manager.calls)
+        self.assertIn(("continue_produce", 2), manager.calls)
+        trainer._log_step.assert_called_once()
+        self.assertEqual(trainer._log_step.call_args.args[0], 2)
+        self.assertEqual(trainer._cur_step, 2)
+        self.assertIn("produce_loop_exit", manager.calls)
+
+    def test_fit_trains_non_empty_expired_batch_then_syncs_current_step(self):
+        train_sample = SimpleNamespace(message_uid=1, uid=1)
+        manager = _FakeManager(
+            [ProduceBatchResult(rollout_states=[[train_sample]], status=ProduceBatchStatus.EXPIRED_BATCH)]
         )
         trainer = self._make_trainer(manager)
         trainer._sync_weights_and_save = AsyncMock()
 
         asyncio.run(trainer._fit())
 
-        trainer._prepare_train_data.assert_not_called()
-        trainer.train_controller.fit.assert_not_called()
+        trainer._prepare_train_data.assert_called_once()
+        trainer.train_controller.fit.assert_called_once()
         trainer._sync_weights_and_save.assert_awaited_once()
+        self.assertEqual(trainer._sync_weights_and_save.await_args.args[0], 1)
         self.assertIn(("continue_produce", 1), manager.calls)
-        self.assertIn("produce_loop_exit", manager.calls)
+        trainer._log_step.assert_called_once()
+        self.assertEqual(trainer._log_step.call_args.args[0], 1)
+        self.assertEqual(trainer._cur_step, 1)
 
     def test_log_step_records_pause_time_without_group_timing(self):
         trainer = self._make_trainer(_FakeManager([]))
@@ -262,7 +325,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             ).to_scalars(),
         )
 
-    def test_update_weights_pauses_generation_without_onloading_rollout(self):
+    def test_update_weights_updates_weights_without_rollout_pause_or_continue(self):
         manager = _FakeManager([])
         trainer = self._make_trainer(manager)
 
@@ -270,9 +333,9 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             trainer.update_weights = RLDisaggregatedTrainer.update_weights.__get__(trainer, RLDisaggregatedTrainer)
             trainer.update_weights()
 
-        trainer.rollout_controller.pause_generation.remote.assert_called_once_with()
         trainer.train_controller.update_weights.assert_called_once_with()
-        trainer.rollout_controller.continue_generation.remote.assert_called_once_with()
+        trainer.rollout_controller.pause_generation.remote.assert_not_called()
+        trainer.rollout_controller.continue_generation.remote.assert_not_called()
         trainer.rollout_controller.onload_weights.remote.assert_not_called()
         trainer.rollout_controller.onload_kvcache.remote.assert_not_called()
 

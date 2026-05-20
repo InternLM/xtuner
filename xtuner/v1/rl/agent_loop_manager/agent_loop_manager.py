@@ -624,6 +624,7 @@ class AgentLoopManager:
         self._update_event.set()
         self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
 
+        # 必须先让 producer / strategy 看到暂停状态，再暂停 rollout controller，避免暂停过程中继续调度新请求。
         rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
         await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
 
@@ -746,6 +747,7 @@ class AgentLoopManager:
         self._model_step = model_step
         rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
         await rollout_ctl.continue_generation.remote()  # type: ignore[attr-defined]
+        # rollout controller 真正恢复后，再把 manager 暴露成 NORMAL，produce_loop 才能继续生产。
         self._status = AgentLoopManagerStatus.NORMAL
         self._update_event.clear()
 
@@ -884,6 +886,7 @@ class AgentLoopManager:
 
         while not self._finish_event.is_set():
             if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
+                # 只有训练侧已经有更新的 Model Step，空 expired 才能跳过训练并直接同步。
                 if current_model_step > self._model_step:
                     pause_time_s = self._pause_time_s
                     self._pause_time_s = 0.0
@@ -894,6 +897,7 @@ class AgentLoopManager:
                     if pause_time_s > 0:
                         result.group_gen_pause_time_s = pause_time_s
                     return result
+                # 没有更新模型且当前 batch 不 ready 时，producer 已停且无法靠同步恢复，必须立即暴露不变量。
                 if not await self.replay_buffer.is_ready(task_batch_sizes):
                     leftover_counts = await self.replay_buffer.count_statuses(self.task_names, _LEFTOVER_STATUSES)
                     raise RuntimeError(
@@ -915,6 +919,7 @@ class AgentLoopManager:
                     consume_progress=progress,
                 )
                 if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
+                    # expired 但带数据表示 trainer 仍需完成本 step，再用新 Model Step 恢复 producer。
                     result.status = ProduceBatchStatus.EXPIRED_BATCH
                 if result.rollout_states:
                     progress.finish_consume(train_step)

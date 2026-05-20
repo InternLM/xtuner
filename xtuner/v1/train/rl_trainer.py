@@ -1538,7 +1538,9 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             )
         )
         try:
-            for train_step in range(self._cur_step + 1, self._total_train_steps + 1):
+            # train_step 表示“下一步待完成训练”；空 expired 不算完成，所以必须用 while 支持重试同一步。
+            train_step = self._cur_step + 1
+            while train_step <= self._total_train_steps:
                 self.logger.info(f"Train step {train_step}/{self._total_train_steps} start")
                 step_timer_dict: dict[str, float] = {}
                 train_log_info = {}
@@ -1552,16 +1554,22 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                         produce_result.rollout_states = sort_rollout_state_for_deterministic(
                             produce_result.rollout_states
                         )
-                    need_sync = (
-                        produce_result.status == ProduceBatchStatus.EXPIRED_BATCH
-                        or train_step % self._sync_weights_interval == 0
-                        or train_step == self._total_train_steps
-                    )
-                    if produce_result.status != ProduceBatchStatus.EXPIRED_BATCH:
-                        train_batch = produce_result.rollout_states
+
+                    train_batch = produce_result.rollout_states
+                    # EXPIRED_BATCH 分两类：空 batch 是控制面同步；非空 batch 仍然是可训练数据。
+                    empty_expired_batch = produce_result.status == ProduceBatchStatus.EXPIRED_BATCH and not train_batch
+                    if empty_expired_batch:
+                        # 没有完成训练，能同步的只能是上一轮已经完成的 Model Step。
+                        sync_model_step = train_step - 1
+                        self.logger.info(
+                            "Skip train step because rollout model is expired and a newer model already exists; "
+                            f"sync completed model_step={sync_model_step} first."
+                        )
+                    else:
+                        # 非空 expired 必须训练出当前 step 的新模型版本，否则 producer 没有更新权重可恢复。
                         assert train_batch, (
                             "RLDisaggregatedTrainer expects get_batch() to return non-empty rollout_states "
-                            "unless status is EXPIRED_BATCH."
+                            "unless status is empty EXPIRED_BATCH."
                         )
                         train_log_info = self._train_one_batch(
                             train_batch,
@@ -1570,36 +1578,49 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             raw_rewards_sum=produce_result.raw_rewards_sum,
                             raw_rewards_count=produce_result.raw_rewards_count,
                         )
-                    else:
-                        self.logger.info(
-                            "Skip train step because rollout model is expired; prioritize weight sync first."
-                        )
+                        sync_model_step = train_step
+
+                    # 后续保存、同步、评测、恢复 producer 都以“已完成的 Model Step”为唯一口径。
+                    need_sync = (
+                        empty_expired_batch
+                        or produce_result.status == ProduceBatchStatus.EXPIRED_BATCH
+                        or sync_model_step % self._sync_weights_interval == 0
+                        or sync_model_step == self._total_train_steps
+                    )
 
                     if need_sync:
                         # 同步前先暂停后台 producer，避免 save/sync 时还有 pending rollout 继续写 buffer。
                         with timer("pause_produce", step_timer_dict):
                             await self.agent_loop_manager.pause_produce(use_global_progress=True)
 
-                        await self._sync_weights_and_save(train_step, step_timer_dict)
+                        await self._sync_weights_and_save(sync_model_step, step_timer_dict)
 
-                        if self._enable_evaluate and train_step % self._evaluate_step == 0:
+                        if (
+                            self._enable_evaluate
+                            and sync_model_step > 0
+                            and sync_model_step % self._evaluate_step == 0
+                        ):
                             # eval 放在恢复 producer 前，避免后台生产抢占 rollout 资源。
                             with timer("evaluation", step_timer_dict):
-                                eval_log_info.update(await self._run_evaluation(train_step))
+                                eval_log_info.update(await self._run_evaluation(sync_model_step))
 
-                        await self.agent_loop_manager.continue_produce(model_step=train_step)
+                        await self.agent_loop_manager.continue_produce(model_step=sync_model_step)
 
+                if empty_expired_batch:
+                    # 空 expired 没有完成训练，不能 log 成已完成 step，也不能推进 _cur_step。
+                    continue
                 self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
                 self._cur_step = train_step
+                train_step = self._cur_step + 1
         finally:
             self.agent_loop_manager.shutdown()
             await producer_task
 
-    async def _sync_weights_and_save(self, train_step: int, step_timer_dict: dict):
+    async def _sync_weights_and_save(self, model_step: int, step_timer_dict: dict):
         # 非共卡已经在 _fit 里暂停 producer；这里保持静止态下的 save -> bind -> update 顺序。
         with timer("save_ckpt", step_timer_dict):
-            self._maybe_save_checkpoint(train_step)
-            self._maybe_save_hf(train_step)
+            self._maybe_save_checkpoint(model_step)
+            self._maybe_save_hf(model_step)
 
         ray.get(self.rollout_controller.recover_failed_workers.remote())
         with timer("sync_weight", step_timer_dict):
@@ -1607,7 +1628,6 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             self.update_weights()
 
     def update_weights(self):
-        ray.get(self.rollout_controller.pause_generation.remote())
+        # producer 的 pause/continue 由 AgentLoopManager 控制，避免这里提前恢复 rollout 影响 eval 顺序。
         self.train_controller.update_weights()
-        ray.get(self.rollout_controller.continue_generation.remote())
         self.logger.info("Rollout workers update weights successfully in disaggregated mode")
