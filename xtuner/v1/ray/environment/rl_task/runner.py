@@ -168,12 +168,9 @@ class Runner:
                         if not infer_result.ok:
                             infer_span.mark_error(f"rc={infer_result.return_code}: {infer_result.error}")
                 except Exception as exc:
-                    # SandboxStage.run itself raised.  Distinguish pre-hook
-                    # failure (no entry output yet) from post-hook failure
-                    # (entry rc available via item.infer.entry_result).
                     prev = item.infer.entry_result
-                    if prev is not None and prev.return_code != 0:
-                        category = _classify_entry_rc(prev.return_code)
+                    if item.infer.error is not None:
+                        category = item.infer.error.category
                     elif prev is not None:
                         category = "infer_posthook"
                     else:
@@ -187,10 +184,13 @@ class Runner:
                     raise
                 get_logger().info(f"[{tid}] infer: done rc={infer_result.return_code} ({time.monotonic() - t1:.1f}s)")
                 if not infer_result.ok:
-                    category = _classify_entry_rc(infer_result.return_code)
+                    if item.infer.error is not None:
+                        category = item.infer.error.category
+                    else:
+                        category = "infer"
                     total_span.mark_error(f"infer failed: {infer_result.error}")
                     item.status = RolloutStatus.FAILED
-                    item.error = RolloutError(
+                    item.error = item.infer.error or RolloutError(
                         stage="infer",
                         category=category,
                         type="StageResult",
@@ -231,20 +231,16 @@ class Runner:
             # has the exception recorded, so this label is just a structured
             # error-category fallback.
             if item.error is None:
-                stage = "validate" if item.validation.status == StageStatus.FAILED else "infer"
-                category = (
-                    item.validation.error.category
-                    if item.validation.error is not None
-                    else item.infer.error.category
-                    if item.infer.error is not None
-                    else "runner_exc"
-                )
-                item.error = RolloutError(
-                    stage=stage,
-                    category=category,
-                    type=type(exc).__name__,
-                    message=str(exc),
-                )
+                stage_error = item.validation.error if item.validation.error is not None else item.infer.error
+                if stage_error is not None:
+                    item.error = stage_error
+                else:
+                    item.error = RolloutError(
+                        stage="runner",
+                        category="runner_exc",
+                        type=type(exc).__name__,
+                        message=str(exc),
+                    )
             get_logger().error(f"[{tid}] runner failed: {exc}\n{traceback.format_exc()}")
             item.status = RolloutStatus.FAILED
             return item
@@ -266,37 +262,6 @@ class Runner:
         if name not in self.sandboxes:
             raise KeyError(f"unknown sandbox {name!r}; known sandboxes: {sorted(self.sandboxes)}")
         return name
-
-
-def _classify_entry_rc(rc: int) -> str:
-    """Map an entry return code to a Runner error category.
-
-    Mirrors the rc encodings produced by ``ShellEntry`` and entry scripts:
-
-      * ``-4`` — sandbox env unreachable (gateway evicted, TTL expired,
-        container killed).  Separates "sandbox died under us" from
-        "entry script misbehaved" so observability can attribute the loss
-        correctly.
-      * ``-3`` — host-side entry monitor exceeded ``ShellEntry.timeout``
-        (agent hung through the window).
-      * ``-2`` — reserved for future service-health failure.
-      * ``-1`` — wrapper shell died without writing the rc file
-        (SIGKILL / container eviction / fatal shell error).
-      * positive — entry script or lagent client CLI exit code.
-    """
-    if rc == -4:
-        return "sandbox_unreachable"
-    if rc == -3:
-        return "infer_timeout"
-    if rc == -2:
-        return "infer_daemon_gone"
-    if rc == -1:
-        return "infer_pid_lost"
-    if rc == -9 or rc == 137:
-        return "infer_oom"
-    if rc > 0:
-        return f"infer_rc_{rc}"
-    return "infer_rc_unknown"
 
 
 def _sandbox_url_of(client: Any) -> str | None:
@@ -563,7 +528,7 @@ _CATEGORIES: list[tuple[str, str]] = [
     ("script_bash_unbound", r"unbound variable"),
     ("script_type_error", r"TypeError:"),
     ("script_file_not_found", r"FileNotFoundError:"),
-    ("timeout", r"return_code=124|Command timed out"),
+    ("timeout", r"Command timed out"),
 ]
 
 

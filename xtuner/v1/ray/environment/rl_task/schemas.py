@@ -15,7 +15,7 @@ imported class/function object or a string path understood by
 
 from __future__ import annotations
 
-from enum import Enum, IntEnum
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -41,24 +41,6 @@ class StageStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
-
-
-class EntryReturnCode(IntEnum):
-    PID_LOST = -1
-    DAEMON_GONE = -2
-    TIMEOUT = -3
-    SANDBOX_UNREACHABLE = -4
-
-
-class ReturnCodeKind(str, Enum):
-    OK = "ok"
-    SCRIPT_ERROR = "script_error"
-    TIMEOUT = "timeout"
-    DAEMON_GONE = "daemon_gone"
-    PID_LOST = "pid_lost"
-    SANDBOX_UNREACHABLE = "sandbox_unreachable"
-    OOM = "oom"
-    UNKNOWN = "unknown"
 
 
 class RolloutError(BaseModel):
@@ -93,7 +75,7 @@ class StageResult(BaseModel):
 
     stdout: str = ""
     stderr: str = ""
-    return_code: int = 0
+    return_code: int | None = 0
     error: str | None = None
 
     @property
@@ -141,7 +123,6 @@ class EntryRecord(BaseModel):
     started_at: float | None = None
     finished_at: float | None = None
     return_code: int | None = None
-    return_code_kind: ReturnCodeKind | None = None
     result: StageResult | None = None
     outcome: EntryOutcome | None = None
     error: RolloutError | None = None
@@ -169,7 +150,6 @@ class StageRecord(BaseModel):
 
     entry_cmd: str | None = None
     return_code: int | None = None
-    return_code_kind: ReturnCodeKind | None = None
 
     entries: list[EntryRecord] = Field(default_factory=list)
     entry_result: StageResult | None = None
@@ -309,8 +289,6 @@ __all__ = [
     "AgentRolloutItem",
     "EntryOutcome",
     "EntryRecord",
-    "EntryReturnCode",
-    "ReturnCodeKind",
     "RolloutError",
     "RolloutStatus",
     "SandboxSpec",

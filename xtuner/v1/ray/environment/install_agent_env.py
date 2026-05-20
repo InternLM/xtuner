@@ -152,19 +152,7 @@ def _classify_mark_failed_reason(reason: str | None) -> str:
         return "prehook_failed"
     m = _RE_RETURN_CODE.search(r)
     if m:
-        rc = int(m.group(1))
-        if rc == -1:
-            return "entry_pid_lost"
-        if rc == -2:
-            return "entry_daemon_gone"
-        if rc == -3:
-            return "entry_timeout"
-        if rc == -4:
-            return "sandbox_unreachable"
-        if rc == -9 or rc == 137:
-            return "oom_killed"
-        if rc > 0:
-            return f"entry_rc_{rc}"
+        return "entry_failed"
     if "TimeoutError" in r:
         return "timeout"
     if "OutOfMemoryError" in r or "OutOfMemory" in r:
@@ -237,15 +225,18 @@ class InstallAgentEnvironment(BaseEnvironment):
         metadata: dict[str, Any] = dict(item.metadata)
         self._merge_stage_metadata(metadata, item.infer)
         if item.error is not None:
-            metadata.setdefault("failed_stage", item.error.category)
+            metadata.setdefault("failed_stage", item.error.stage or item.error.category)
+            metadata.setdefault("error_category", item.error.category)
             if item.error.type:
                 metadata.setdefault("exception_type", item.error.type)
         elif item.infer.error is not None:
-            metadata.setdefault("failed_stage", item.infer.error.category)
+            metadata.setdefault("failed_stage", item.infer.error.stage or item.infer.error.category)
+            metadata.setdefault("error_category", item.infer.error.category)
             if item.infer.error.type:
                 metadata.setdefault("exception_type", item.infer.error.type)
         elif item.validation.error is not None:
-            metadata.setdefault("failed_stage", item.validation.error.category)
+            metadata.setdefault("failed_stage", item.validation.error.stage or item.validation.error.category)
+            metadata.setdefault("error_category", item.validation.error.category)
             if item.validation.error.type:
                 metadata.setdefault("exception_type", item.validation.error.type)
 

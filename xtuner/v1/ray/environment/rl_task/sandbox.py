@@ -37,8 +37,6 @@ from xtuner.v1.ray.environment.rl_task.schemas import (
     AgentRolloutItem,
     EntryOutcome,
     EntryRecord,
-    EntryReturnCode,
-    ReturnCodeKind,
     RolloutError,
     StageRecord,
     StageResult,
@@ -261,7 +259,7 @@ class ReturnCodeFileCompletion(EntryMonitorProbe):
         get_logger().info("[%s] entry %s finished rc=%s", item.id, entry.name, rc)
         return EntryOutcome(
             source=type(self).__name__,
-            reason="rc_file_written",
+            reason="entry_completed" if rc == 0 else "entry_failed",
             result=StageResult(return_code=rc, error=None if rc == 0 else f"return_code={rc}"),
         )
 
@@ -301,7 +299,7 @@ class SandboxHealthCheck(EntryMonitorProbe):
             retryable=True,
             details={"failures": failures, "fail_after": self.fail_after},
             result=StageResult(
-                return_code=EntryReturnCode.SANDBOX_UNREACHABLE,
+                return_code=None,
                 stderr=f"[{item.id}] sandbox unreachable while waiting for entry {entry.name}",
                 error="sandbox unreachable",
             ),
@@ -333,7 +331,7 @@ class EntryProcessHealthCheck(EntryMonitorProbe):
             if rc is not None:
                 return EntryOutcome(
                     source=type(self).__name__,
-                    reason="rc_after_missing_pid_file",
+                    reason="entry_completed" if rc == 0 else "entry_failed",
                     result=StageResult(return_code=rc, error=None if rc == 0 else f"return_code={rc}"),
                 )
             return EntryOutcome(
@@ -342,7 +340,7 @@ class EntryProcessHealthCheck(EntryMonitorProbe):
                 retryable=True,
                 details={"missing_pid_file": missing_pid_file, "fail_after": self.fail_after},
                 result=StageResult(
-                    return_code=EntryReturnCode.PID_LOST,
+                    return_code=None,
                     stderr=f"[{item.id}] entry {entry.name} pid file was not written",
                     error="entry pid file missing",
                 ),
@@ -362,7 +360,7 @@ class EntryProcessHealthCheck(EntryMonitorProbe):
         if rc is not None:
             return EntryOutcome(
                 source=type(self).__name__,
-                reason="rc_after_pid_exit",
+                reason="entry_completed" if rc == 0 else "entry_failed",
                 result=StageResult(return_code=rc, error=None if rc == 0 else f"return_code={rc}"),
             )
         return EntryOutcome(
@@ -371,7 +369,7 @@ class EntryProcessHealthCheck(EntryMonitorProbe):
             retryable=True,
             details={"pid": pid, "missing": missing, "fail_after": self.fail_after},
             result=StageResult(
-                return_code=EntryReturnCode.PID_LOST,
+                return_code=None,
                 stderr=f"[{item.id}] entry {entry.name} pid {pid} gone without rc file",
                 error="entry pid lost",
             ),
@@ -408,7 +406,7 @@ class EntryMonitor:
                     retryable=True,
                     details={"timeout": self.timeout},
                     result=StageResult(
-                        return_code=EntryReturnCode.TIMEOUT,
+                        return_code=None,
                         stderr=f"[{item.id}] entry {entry.name} exceeded max runtime {self.timeout}s",
                         error=f"entry {entry.name} timed out",
                     ),
@@ -485,7 +483,7 @@ class ShellEntry:
             outcome = EntryOutcome(
                 source=type(self).__name__,
                 reason="exception",
-                result=StageResult(return_code=1, stderr=str(exc), error=str(exc)),
+                result=StageResult(return_code=None, stderr=str(exc), error=str(exc)),
             )
             if self.failure is not None:
                 outcome = await self.failure.handle(client, item, record, entry, outcome)
@@ -504,7 +502,7 @@ class ShellEntry:
         stderr = exec_res.get("stderr") or ""
         return EntryOutcome(
             source="sync_exec",
-            reason="command_returned",
+            reason="entry_completed" if rc == 0 else "entry_failed",
             result=StageResult(
                 stdout=exec_res.get("stdout") or "",
                 stderr=stderr,
@@ -528,18 +526,24 @@ class ShellEntry:
     def _finish_record(self, entry: EntryRecord, outcome: EntryOutcome, *, exc: Exception | None = None) -> None:
         entry.finished_at = time.monotonic()
         entry.return_code = outcome.result.return_code
-        entry.return_code_kind = _return_code_kind(outcome.result.return_code)
         entry.result = outcome.result
         entry.outcome = outcome
         entry.status = StageStatus.COMPLETED if outcome.ok else StageStatus.FAILED
         if not outcome.ok:
             entry.error = RolloutError(
                 stage=entry.name,
-                category=entry.return_code_kind.value if entry.return_code_kind else "entry",
+                category=_outcome_error_category(outcome),
                 type=type(exc).__name__
                 if exc is not None
-                else ("EntryReturnCode" if outcome.result.return_code < 0 else "ScriptReturnCode"),
-                message=outcome.result.error or outcome.result.stderr or f"return_code={outcome.result.return_code}",
+                else ("ScriptReturnCode" if outcome.result.return_code is not None else "EntryRuntimeError"),
+                message=outcome.result.error
+                or outcome.result.stderr
+                or (
+                    f"return_code={outcome.result.return_code}"
+                    if outcome.result.return_code is not None
+                    else outcome.reason
+                    or "entry failed"
+                ),
                 retryable=outcome.retryable,
             )
 
@@ -591,7 +595,7 @@ class DetachedShellEntry:
             outcome = EntryOutcome(
                 source=type(self).__name__,
                 reason="exception",
-                result=StageResult(return_code=1, stderr=str(exc), error=str(exc)),
+                result=StageResult(return_code=None, stderr=str(exc), error=str(exc)),
             )
             if self.failure is not None:
                 outcome = await self.failure.handle(client, item, record, entry, outcome)
@@ -646,7 +650,7 @@ class DetachedShellEntry:
             stderr = await self._read_capture_file(client, entry.stderr_file)
             if stderr is not None:
                 result.stderr = stderr
-                if result.return_code > 0:
+                if result.return_code is not None and result.return_code > 0:
                     result.error = f"return_code={result.return_code}: {stderr[:400]}"
 
     async def _read_capture_file(self, client: Any, path: str, timeout_sec: float = 5.0) -> str | None:
@@ -659,18 +663,24 @@ class DetachedShellEntry:
     def _finish_record(self, entry: EntryRecord, outcome: EntryOutcome, *, exc: Exception | None = None) -> None:
         entry.finished_at = time.monotonic()
         entry.return_code = outcome.result.return_code
-        entry.return_code_kind = _return_code_kind(outcome.result.return_code)
         entry.result = outcome.result
         entry.outcome = outcome
         entry.status = StageStatus.COMPLETED if outcome.ok else StageStatus.FAILED
         if not outcome.ok:
             entry.error = RolloutError(
                 stage=entry.name,
-                category=entry.return_code_kind.value if entry.return_code_kind else "entry",
+                category=_outcome_error_category(outcome),
                 type=type(exc).__name__
                 if exc is not None
-                else ("EntryReturnCode" if outcome.result.return_code < 0 else "ScriptReturnCode"),
-                message=outcome.result.error or outcome.result.stderr or f"return_code={outcome.result.return_code}",
+                else ("ScriptReturnCode" if outcome.result.return_code is not None else "EntryRuntimeError"),
+                message=outcome.result.error
+                or outcome.result.stderr
+                or (
+                    f"return_code={outcome.result.return_code}"
+                    if outcome.result.return_code is not None
+                    else outcome.reason
+                    or "entry failed"
+                ),
                 retryable=outcome.retryable,
             )
 
@@ -788,7 +798,6 @@ class SandboxStage:
         record.entry_result = result
         record.result = result
         record.return_code = result.return_code
-        record.return_code_kind = _return_code_kind(result.return_code)
         if result.ok:
             record.status = StageStatus.COMPLETED
             record.error = None
@@ -800,9 +809,11 @@ class SandboxStage:
         else:
             record.error = RolloutError(
                 stage=latest_entry.name if latest_entry is not None else record.judger_name,
-                category=record.return_code_kind.value if record.return_code_kind else "entry",
-                type="EntryReturnCode" if result.return_code < 0 else "ScriptReturnCode",
-                message=result.error or result.stderr or f"return_code={result.return_code}",
+                category="entry_failed" if result.return_code is not None else "entry",
+                type="ScriptReturnCode" if result.return_code is not None else "EntryRuntimeError",
+                message=result.error
+                or result.stderr
+                or (f"return_code={result.return_code}" if result.return_code is not None else "entry failed"),
             )
 
     async def _run_hook(
@@ -947,19 +958,7 @@ def _result_code(exec_res: dict[str, Any]) -> int:
     return int(rc)
 
 
-def _return_code_kind(rc: int) -> ReturnCodeKind:
-    if rc == 0:
-        return ReturnCodeKind.OK
-    if rc == EntryReturnCode.SANDBOX_UNREACHABLE:
-        return ReturnCodeKind.SANDBOX_UNREACHABLE
-    if rc == EntryReturnCode.TIMEOUT:
-        return ReturnCodeKind.TIMEOUT
-    if rc == EntryReturnCode.DAEMON_GONE:
-        return ReturnCodeKind.DAEMON_GONE
-    if rc == EntryReturnCode.PID_LOST:
-        return ReturnCodeKind.PID_LOST
-    if rc in (-9, 137):
-        return ReturnCodeKind.OOM
-    if rc > 0:
-        return ReturnCodeKind.SCRIPT_ERROR
-    return ReturnCodeKind.UNKNOWN
+def _outcome_error_category(outcome: EntryOutcome) -> str:
+    if outcome.reason in {"timeout", "sandbox_unreachable", "pid_lost", "pid_file_missing"}:
+        return "pid_lost" if outcome.reason == "pid_file_missing" else outcome.reason
+    return outcome.reason or "entry"
