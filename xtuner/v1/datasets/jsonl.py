@@ -81,6 +81,7 @@ def _filter_sampled_indices(
     sampled: np.ndarray,
     num_tokens: np.ndarray | None,
     max_length: int | None,
+    path: Path | str,
 ) -> np.ndarray:
     # Filter out samples with num_tokens=0, 0 means the sample is damaged
     if num_tokens is not None:
@@ -89,14 +90,14 @@ def _filter_sampled_indices(
         sampled = sampled[num_tokens[sampled] != 0]
         if len(sampled) < orig_sample_num:
             missed = orig_sample_num - len(sampled)
-            logger.warning(f"filtered {missed} damaged samples (num_tokens==0).")
+            logger.warning(f"filtered {missed} damaged samples (num_tokens==0) in {path}.")
 
     if num_tokens is not None and max_length is not None:
         assert isinstance(max_length, int)
         before = len(sampled)
         sampled = sampled[num_tokens[sampled] <= max_length]
         if len(sampled) < before:
-            logger.warning(f"filtered {before - len(sampled)} samples with length>{max_length}.")
+            logger.warning(f"filtered {before - len(sampled)} samples with length>{max_length} in {path}.")
 
     return sampled
 
@@ -283,13 +284,13 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         self.tokenizer_workers = int(os.environ.get("XTUNER_TOKENIZE_WORKERS", 8))
         self.meta_path = os.path.join(cache_dir, CACHE_META) if cache_dir else None
 
-        logger.info(f"[Dataset] Start loading [{self.name}]{self.path} with sample_ratio={sample_ratio}.")
+        logger.debug(f"[Dataset] Start loading [{self.name}]{self.path} with sample_ratio={sample_ratio}.")
 
         self._has_chunk = isinstance(tokenize_fn, LongTextPretrainTokenizeFunction)
 
         tok_cache_dir: str | None = None  # set inside cache_dir branch when tokenize_fn is CachableTokenizeFunction
         if cache_tag is not None and (cached := self._get_cached_tag(cache_tag, tokenize_fn)) is not None:
-            logger.info(f"[Dataset] Load cached [{self.name}]{self.path} of cache tags {cache_tag}.")
+            logger.debug(f"[Dataset] Load cached [{self.name}]{self.path} of cache tags {cache_tag}.")
             offset_path = cached["offsets"]
             meta_path = cached.get("jsonl_meta")
             offsets = np.load(offset_path, mmap_mode="r" if enable_mmap_shared else None)
@@ -375,7 +376,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
                 _meta_file = os.path.join(tok_cache_dir, "jsonl_meta")
                 if os.path.exists(_meta_file):
-                    logger.info(f"Loading tokenize meta from cache: {_meta_file}")
+                    logger.debug(f"Loading tokenize meta from cache: {_meta_file}")
                     _meta = load_dict_from_npy_dir(_meta_file, mmap=enable_mmap_shared)
                 else:
                     _meta = self.count_tokens(offsets, tok_cache_dir)
@@ -533,7 +534,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         _sampled = np.arange(base_len, dtype=dtype)
 
         if not self.disable_filter:
-            _sampled = _filter_sampled_indices(_sampled, _meta.get("num_tokens"), max_length)
+            _sampled = _filter_sampled_indices(_sampled, _meta.get("num_tokens"), max_length, self.path)
 
         if sample_ratio != 1.0:
             _sampled = _apply_sample_ratio(

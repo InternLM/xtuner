@@ -132,7 +132,7 @@ def build_datasets(
             _tokenize_fn = _tokenize_fn_name.build(tokenizer, tokenizer_hash=tokenizer_hash, anno_name=anno_name)
             _dataset = _dataset_config.build(_tokenize_fn)
             if get_rank() == 0:
-                logger.info(
+                logger.debug(
                     f"[Dataset] (Original) {_dataset_config.name}/{os.path.basename(anno_path)}: {len(_dataset)} samples."
                 )
             datasets.append(_dataset)
@@ -211,8 +211,8 @@ def build_dataloader(
     if dataloader_config.pack_level in ("mllm_hybrid", "soft", "__legacy") and get_rank() == 0:
         ori_samples = sum([len(dset) for dset in datasets])
         packed_samples = len(dataset)
-        logger.info(f"[Dataset] (Original) {ori_samples} samples.")
-        logger.info(f"[Dataset] (Packed) {packed_samples} samples.")
+        logger.debug(f"[Dataset] (Original) {ori_samples} samples.")
+        logger.debug(f"[Dataset] (Packed) {packed_samples} samples.")
 
     sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler
     if dataloader_config.group_by_length:
