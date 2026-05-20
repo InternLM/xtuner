@@ -15,7 +15,7 @@ from typing import Literal, TypedDict, cast
 import numpy as np
 import torch.utils.data as tud
 
-from xtuner.v1.utils import get_logger, profile_time
+from xtuner.v1.utils import get_logger, log_rank0, profile_time
 
 from .data_item import DataItem, LongTextDataItem
 from .jsonl import JsonlDataset
@@ -96,14 +96,14 @@ class PresetPackDataset(tud.Dataset):
         self._path_to_ds_idx: dict[str, int] = {ds.path: idx for idx, ds in enumerate(datasets)}
 
         self._validate_arrays()
-        logger.info(f"PresetPackDataset: {len(self)} valid packs loaded.")
+        log_rank0.info(f"PresetPackDataset: {len(self)} valid packs loaded.")
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _validate_arrays(self) -> None:
-        logger.info("PresetPackDataset._validate_arrays: start")
+        log_rank0.info("PresetPackDataset._validate_arrays: start")
         boundaries = self._boundaries
         samples = self._samples
         paths = self._paths

@@ -33,7 +33,7 @@ from xtuner.v1.model.base import (
     XTunerBaseModelConfig,
 )
 from xtuner.v1.profiler.prober import ProberList
-from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
+from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, log_rank0, profile_time_and_memory
 from xtuner.v1.utils.grad_norm import cal_grad_norm
 
 
@@ -95,7 +95,7 @@ class HFCheckpointLoader:
 
     def load(self, key):
         if key not in self.weight_map:
-            logger.warning(f"{key} not in checkpoint.")
+            log_rank0.warning(f"{key} not in checkpoint.")
             return
 
         _file = self.weight_map[key]
@@ -159,7 +159,7 @@ class TrainEngine:
         model = model.fully_shard(self.fsdp_cfg)
 
         if dist.get_rank() == 0:
-            logger.info(model)
+            log_rank0.info(model)
         return model
 
     def build_optimizer(self, optim_cfg: OptimConfig) -> torch.optim.Optimizer:
@@ -194,7 +194,7 @@ class TrainEngine:
         iters_per_step = self.grad_accumulation_steps(len(data_batches))
 
         if self._count == 0:
-            logger.info(f"grad_accumulation_steps: {iters_per_step}")
+            log_rank0.info(f"grad_accumulation_steps: {iters_per_step}")
             self._count += 1
 
         micro_batch_iter = 0
@@ -262,12 +262,12 @@ class TrainEngine:
     def step_optimizer(self, grad_norm):
         """Step the optimizer to update the model parameters."""
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-            logger.warning(f"Gradient norm {grad_norm} is invalid, skipping optimizer step.")
+            log_rank0.warning(f"Gradient norm {grad_norm} is invalid, skipping optimizer step.")
             self.optimizer.zero_grad()
         elif (
             self.optim_cfg.skip_grad_norm_threshold is not None and grad_norm > self.optim_cfg.skip_grad_norm_threshold
         ):
-            logger.warning(
+            log_rank0.warning(
                 f"Gradient norm {grad_norm} exceeds the threshold {self.optim_cfg.skip_grad_norm_threshold}, skipping optimizer step."
             )
             self.optimizer.zero_grad()
@@ -361,10 +361,10 @@ class TrainEngine:
                     checkpoint_id=optimizer_dir,
                 )
                 if not load_states:
-                    logger.info("Not loading optimizer states")
+                    log_rank0.info("Not loading optimizer states")
                     shard_optimizer_state_dict["state"] = {}
                 if not load_args:
-                    logger.info("Not loading arg defaults")
+                    log_rank0.info("Not loading arg defaults")
                     param_groups = self.optimizer.state_dict()["param_groups"]
                     # Now we only support one param_group. If we want to support different lr for different parameters,
                     # we may use multiple param_groups like:

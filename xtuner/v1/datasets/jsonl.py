@@ -29,7 +29,7 @@ from tqdm import tqdm
 
 from xtuner.v1.datasets.data_item import CacheItem
 from xtuner.v1.datasets.pt_tokenize_fn.long_text import LongTextPretrainTokenizeFunction
-from xtuner.v1.utils import SharedMemory, get_logger
+from xtuner.v1.utils import SharedMemory, get_logger, log_rank0
 from xtuner.v1.utils.dist_utils import get_local_process_group, get_local_world_size, is_local_rank0
 
 from .utils import CachableTokenizeFunction, calculate_xxhash
@@ -90,14 +90,14 @@ def _filter_sampled_indices(
         sampled = sampled[num_tokens[sampled] != 0]
         if len(sampled) < orig_sample_num:
             missed = orig_sample_num - len(sampled)
-            logger.warning(f"filtered {missed} damaged samples (num_tokens==0) in {path}.")
+            log_rank0.warning(f"filtered {missed} damaged samples (num_tokens==0) in {path}.")
 
     if num_tokens is not None and max_length is not None:
         assert isinstance(max_length, int)
         before = len(sampled)
         sampled = sampled[num_tokens[sampled] <= max_length]
         if len(sampled) < before:
-            logger.warning(f"filtered {before - len(sampled)} samples with length>{max_length} in {path}.")
+            log_rank0.warning(f"filtered {before - len(sampled)} samples with length>{max_length} in {path}.")
 
     return sampled
 
@@ -417,7 +417,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 barrier()
 
             elif tokenize_fn:
-                logger.warning(
+                log_rank0.warning(
                     f"{tokenize_fn.__class__.__name__} is not an instance of "
                     "`CachableTokenizeFunction`, data will always "
                     "be re-tokenized during training!"

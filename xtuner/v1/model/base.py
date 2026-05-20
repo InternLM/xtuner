@@ -48,7 +48,7 @@ from xtuner.v1.loss import BaseLossConfig, BaseLossContext, CELossConfig
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeParametersConfig, RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
-from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
+from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, log_rank0, profile_time_and_memory
 from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_compile
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
@@ -908,8 +908,8 @@ class BaseModel(nn.Module):
             load_spec_mapping[name] = load_spec
 
         if hf_key_mapping_missing:
-            logger.info("These hf keys will not be influenced by `hf_key_mapping`:")
-            logger.info(json.dumps(list(hf_key_mapping_missing), indent=2))
+            log_rank0.info("These hf keys will not be influenced by `hf_key_mapping`:")
+            log_rank0.info(json.dumps(list(hf_key_mapping_missing), indent=2))
 
         self.load_spec_mapping = load_spec_mapping
 
@@ -1359,7 +1359,7 @@ class BaseModel(nn.Module):
                 and self.fsdp_config.fp32_lm_head
                 and load_spec.hf_keys[0] == "lm_head.weight"
             ):
-                logger.info(f"handling same hf param: {load_spec.hf_keys} separately")
+                log_rank0.info(f"handling same hf param: {load_spec.hf_keys} separately")
                 lm_head_tensor_list = self._fsdp_foreach_allgather([local_tensor], [load_spec])
                 lm_head_tensor_list = [
                     self.param_to_safetensor(safetensor, name)
@@ -2117,7 +2117,7 @@ class BaseModel(nn.Module):
                     setattr(cls, method_name, torch.compile(compiled_function, **compile_options))
 
         full_name = get_function_full_qualname(compiled_function)  # type: ignore[arg-type]
-        logger.info(f"Enabling torch.compile for function {full_name} with options: {compile_options}")
+        logger.debug(f"Enabling torch.compile for function {full_name} with options: {compile_options}")
 
     def _resolve_compile_cfg(
         self,
@@ -2134,7 +2134,7 @@ class BaseModel(nn.Module):
         # torch.compile is not supported on NPU
         if DEVICE == "npu":
             if custom_cfg is not False:
-                logger.warning("torch.compile is not supported on NPU, disabling torch.compile.")
+                log_rank0.warning("torch.compile is not supported on NPU, disabling torch.compile.")
             self._disable_compile_cfg(self.config)
             return {}
 

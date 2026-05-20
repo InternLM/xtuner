@@ -46,6 +46,7 @@ from xtuner.v1.utils import (
     get_logger,
     is_hf_model_path,
     log_format,
+    log_rank0,
     profile_time_and_memory,
     record_git_info,
 )
@@ -572,16 +573,6 @@ class Trainer:
 
         is_hf_path, error_info = is_hf_model_path(load_from) if load_from is not None else False, None
         self._load_from_hf = is_hf_path
-        self._can_save_hf = model_cfg.hf_config is not None or self._load_from_hf
-
-        if not self._can_save_hf:
-            assert_info = (
-                f"`hf_interval`: {hf_interval} and `hf_max_keep`: {hf_max_keep} "
-                f"should be None when `load_from` is not a Huggingface model path, "
-            )
-            if is_hf_path is False and error_info is not None:
-                assert_info += f", HF path load error Info: {error_info}"
-            assert hf_interval is None and hf_max_keep is None, assert_info
 
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
@@ -622,7 +613,7 @@ class Trainer:
         self.logger, log_dir = self._init_logger(self._log_dir)  # depends on log_dir and init_dist(get_rank)
 
         # After init logger
-        logger.warning("`resume_cfg` is deprecated, please use `auto_resume` and `load_checkpoint_cfg` instead")
+        log_rank0.warning("`resume_cfg` is deprecated, please use `auto_resume` and `load_checkpoint_cfg` instead")
 
         self._try_bind_numa()
         self._set_deterministic()
@@ -633,7 +624,7 @@ class Trainer:
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
         else:
             self.tokenizer = UTF8ByteTokenizer()
-            logger.info(f"Using toy tokenizer: {self.tokenizer}!")
+            log_rank0.info(f"Using toy tokenizer: {self.tokenizer}!")
 
         self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(self._auto_resume, load_checkpoint_cfg)
 
@@ -659,10 +650,10 @@ class Trainer:
         self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg, fsdp_cfg)
 
         if dataset_cfg is not None:  # TODO: Removed in version 1.1.0
-            logger.warning("`dataset_cfg` is deprecated, please use `dataloader_cfg.dataset_config_list` instead")
+            log_rank0.warning("`dataset_cfg` is deprecated, please use `dataloader_cfg.dataset_config_list` instead")
             # For backward compatibility, reserve the dataset_cfg interface, remove it later
             if dataloader_cfg.dataset_config_list is not None:
-                logger.warning("Outside dataset_cfg will override inner dataset_config_list")
+                log_rank0.warning("Outside dataset_cfg will override inner dataset_config_list")
             dataloader_cfg.dataset_config_list = dataset_cfg
 
         self._dataloader = dataloader_cfg.build(
@@ -682,6 +673,16 @@ class Trainer:
 
         if isinstance(load_from, str):
             load_from = Path(load_from)
+
+        self._can_save_hf = model_cfg.hf_config is not None or self._load_from_hf
+        if not self._can_save_hf:
+            assert_info = (
+                f"`hf_interval`: {hf_interval} and `hf_max_keep`: {hf_max_keep} "
+                f"should be None when `load_from` is not a Huggingface model path, "
+            )
+            if is_hf_path is False and error_info is not None:
+                assert_info += f", HF path load error Info: {error_info}"
+            assert hf_interval is None and hf_max_keep is None, assert_info
 
         self._engine = self.build_engine(
             model_path=load_from,
@@ -851,7 +852,7 @@ class Trainer:
         self._exp_tracker.close()
         if self._metrics_recorder:
             self._metrics_recorder.close()
-        self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
+        log_rank0.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
 
     def _prepare_model_input(self, data_batch) -> list[ModelItem]:
         seq_ctx_list: list[SequenceContext] = []
@@ -1089,8 +1090,8 @@ class Trainer:
         if model_path is not None:
             engine.model.set_hf(model_path)
 
-        if engine.model.compile_cfg is not None and self.rank == 0:
-            logger.info(f"The `compile_cfg` of model is {json.dumps(engine.model.compile_cfg, indent=4)}")
+        if engine.model.compile_cfg is not None:
+            log_rank0.info(f"The `compile_cfg` of model is {json.dumps(engine.model.compile_cfg, indent=4)}")
         return engine
 
     def build_lr_scheduler(self, lr_cfg: LRConfig, scheduler_step: int) -> torch.optim.lr_scheduler.LRScheduler:
@@ -1145,7 +1146,7 @@ class Trainer:
         ):
             if not check_health():
                 raise RuntimeError("Health check failed, exit training")
-            logger.info(f"Health check passed at step {self.cur_step}")
+            log_rank0.info(f"Health check passed at step {self.cur_step}")
 
     def _maybe_save(self, is_snapshot: bool = False) -> bool:
         ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
@@ -1330,7 +1331,7 @@ class Trainer:
 
     def _set_deterministic(self):
         if XTUNER_DETERMINISTIC:
-            logger.info("Setting deterministic algorithms")
+            log_rank0.info("Setting deterministic algorithms")
             os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
             torch.use_deterministic_algorithms(True, warn_only=True)
 
@@ -1339,7 +1340,7 @@ class Trainer:
 
     def _try_bind_numa(self):
         if str(DEVICE) != "cuda":
-            logger.info("Current device is not cuda, skip numa binding.")
+            log_rank0.info("Current device is not cuda, skip numa binding.")
             return
 
         try:
@@ -1721,7 +1722,7 @@ class Trainer:
             pad_token_id = tokenizer.eos_token_id
 
         if not isinstance(pad_token_id, int):
-            logger.warning(
+            log_rank0.warning(
                 f"Tokenizer pad_token_id is {pad_token_id}, which is not an integer. Setting pad_token_id to 0."
             )
 
@@ -1751,7 +1752,7 @@ class Trainer:
         if dataloader_cfg.pad_token_id is None:
             dataloader_cfg.pad_token_id = pad_token_id
         elif dataloader_cfg.pad_token_id != pad_token_id:
-            logger.warning(
+            log_rank0.warning(
                 f"Dataloader pad_token_id {dataloader_cfg.pad_token_id} is different from tokenizer "
                 f"pad_token_id {pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
             )
@@ -1759,7 +1760,7 @@ class Trainer:
 
         if self._sp_size > 1:
             if dataloader_cfg.pack_to_max_length is False:
-                logger.warning(
+                log_rank0.warning(
                     "pack_to_max_length must be True when using sequence parallel. Setting pack_to_max_length to True."
                 )
                 dataloader_cfg.pack_to_max_length = True
@@ -1772,10 +1773,10 @@ class Trainer:
                 ...
             case (MoEConfig(ep_size=1), _):
                 model_cfg.ep_size = fsdp_cfg.ep_size
-                logger.warning(f"Found model ep_size 1, using fsdp ep_size {fsdp_cfg.ep_size}.")
+                log_rank0.warning(f"Found model ep_size 1, using fsdp ep_size {fsdp_cfg.ep_size}.")
             case (MoEConfig(), FSDPConfig(ep_size=1)):
                 fsdp_cfg.ep_size = model_cfg.ep_size
-                logger.warning(f"Found fsdp ep_size 1, using fsdp ep_size {fsdp_cfg.ep_size}.")
+                log_rank0.warning(f"Found fsdp ep_size 1, using fsdp ep_size {fsdp_cfg.ep_size}.")
 
         match dataloader_cfg, model_cfg:
             case DataloaderConfig(pack_to_max_length=False), XTunerBaseModelConfig(compile_cfg=value) if (
@@ -1806,11 +1807,10 @@ class Trainer:
                 model_cfg.text_config.lm_loss_cfg = loss_cfg
             else:
                 model_cfg.lm_loss_cfg = loss_cfg
-            if self.rank == 0:
-                logger.warning(
-                    "Setting model_cfg.lm_loss_cfg from Trainer's loss_cfg for backward compatibility. "
-                    "In the future, please set lm_loss_cfg directly in model_cfg instead of Trainer."
-                )
+            log_rank0.warning(
+                "Setting model_cfg.lm_loss_cfg from Trainer's loss_cfg for backward compatibility. "
+                "In the future, please set lm_loss_cfg directly in model_cfg instead of Trainer."
+            )
 
     def _resolve_load_checkpoint_cfg(
         self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
@@ -1830,12 +1830,12 @@ class Trainer:
         load_checkpoint_cfg: LoadCheckpointConfig = self._load_checkpoint_cfg
 
         if (resume_from := load_checkpoint_cfg.checkpoint_path) is None:
-            logger.info("No checkpoint to resume from.")
+            log_rank0.info("No checkpoint to resume from.")
             return
 
         if isinstance(resume_from, str):
             resume_from = Path(resume_from)
-        logger.info(f"Resume from checkpoint: {resume_from}")
+        log_rank0.info(f"Resume from checkpoint: {resume_from}")
 
         if not resume_from.exists():
             raise FileNotFoundError(f"Checkpoint path {resume_from} does not exist.")
@@ -1920,7 +1920,7 @@ class Trainer:
         for k, v in env.items():
             log_str += f"{k}: {v}\n"
         log_str += "=================================================="
-        logger.info(log_str)
+        log_rank0.info(log_str)
 
     def _print_training_config(self):
         if self._config is not None and self.rank == 0:
@@ -1934,12 +1934,10 @@ class Trainer:
             logger.info(f"Training config: {config_str}")
 
     def _resolve_deprecate_compile_cfg(self, model_cfg: XTunerBaseModelConfig, fsdp_cfg: FSDPConfig):
-        if self.rank == 0:
-            logger.warning(
-                "FSDPConfig.torch_compile is deprecated, and will be removed in version 1.1.0. "
-                "Please use XTunerBaseModelConfig.compile_cfg to control whether to use torch.compile for the model"
-            )
+        log_rank0.warning(
+            "FSDPConfig.torch_compile is deprecated, and will be removed in version 1.1.0. "
+            "Please use XTunerBaseModelConfig.compile_cfg to control whether to use torch.compile for the model"
+        )
         if not fsdp_cfg.torch_compile:
-            if self.rank == 0:
-                logger.warning("FSDPConfig.torch_compile is set to False, setting model_cfg.compile_cfg to False.")
+            log_rank0.warning("FSDPConfig.torch_compile is set to False, setting model_cfg.compile_cfg to False.")
             model_cfg.compile_cfg = False

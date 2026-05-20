@@ -4,7 +4,7 @@ from typing import Callable, Generic, cast
 import torch
 
 from .device import get_device
-from .logger import get_logger
+from .logger import get_logger, log_rank0
 from .misc import FunctionEnum, get_function_type
 from .type_helper import P, T
 
@@ -51,7 +51,7 @@ class MaybeCompile(Generic[P, T]):
 
     def disable_compile(self) -> None:
         """Disable torch.compile, reverting to the original function."""
-        logger.info(f"Disabling torch.compile for function {self.origin_func.__name__}")
+        log_rank0.info(f"Disabling torch.compile for function {self.origin_func.__name__}")
         self.func = self.origin_func
 
 
