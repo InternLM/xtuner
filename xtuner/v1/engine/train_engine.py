@@ -25,6 +25,7 @@ from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.loss import LogProbContext
 from xtuner.v1.model.base import (
+    AsyncHFSaveHandle,
     BaseModel,
     BatchForwardInfo,
     DataBatchInfo,
@@ -287,23 +288,29 @@ class TrainEngine:
             name = name.replace("_orig_mod.", "")
         return name
 
-    def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16) -> Path | None:
+    def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         """Save the hf model to the given directory.
 
         Args:
             hf_dir (str): The directory to save the model.
             save_dtype (torch.dtype): The dtype to save the model parameters, bfloat16 or float8.
         """
-        if self._async_hf_export:
-            return self.model.async_save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
-        return self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
+        self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
 
-    def add_async_hf_cleanup_dirs(self, cleanup_hf_dirs: Sequence[str | Path]) -> None:
-        if self._async_hf_export:
-            self.model.add_async_hf_cleanup_dirs(cleanup_hf_dirs)
+    def async_save_hf(
+        self,
+        hf_dir: str,
+        save_dtype: torch.dtype = torch.bfloat16,
+        cleanup_hf_dirs: Sequence[str | Path] = (),
+    ) -> AsyncHFSaveHandle:
+        return self.model.async_save_hf(
+            hf_dir=hf_dir,
+            save_dtype=save_dtype,
+            cleanup_hf_dirs=cleanup_hf_dirs,
+        )
 
-    def wait_async_hf(self) -> Path | None:
-        return self.model.wait_async_hf()
+    def wait_async_hf(self, handle: AsyncHFSaveHandle | None = None) -> Path | None:
+        return self.model.wait_async_hf(handle)
 
     # TODO: Support async save
     def save_dcp(

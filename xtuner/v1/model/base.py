@@ -1,12 +1,14 @@
 import importlib
 import json
 import math
+import multiprocessing as py_mp
 import os
 import pydoc
 import re
 import subprocess
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from functools import reduce
 from importlib import import_module
 from itertools import chain
@@ -16,7 +18,6 @@ from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, Option
 
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.nn.functional as F
 from cyclopts import Parameter
@@ -137,6 +138,15 @@ class BatchForwardInfo(TypedDict):
 class _HFSavePlan(TypedDict):
     hf_dir: Path
     save_tasks: list[tuple[str, dict[str, torch.Tensor]]]
+
+
+@dataclass
+class AsyncHFSaveHandle:
+    process: Any
+    hf_dir: Path
+    tmp_hf_dir: Path
+    status_path: Path
+    cleanup_done_path: Path
 
 
 class TorchCompileOption(TypedDict):
@@ -590,8 +600,7 @@ class BaseModel(nn.Module):
 
         self._hf_path: Path | None = None  # type: ignore
         self._async_hf_tensor_cache: dict[tuple[Any, ...], torch.Tensor] = {}
-        self._pending_async_hf: dict[str, Any] | None = None
-        self._async_hf_cleanup_dirs: list[Path] = []
+        self._pending_async_hf: AsyncHFSaveHandle | None = None
 
         self._compile_cfg = self._resolve_compile_cfg(self.config)
         self._float8_handler: Float8Handler | None = None
@@ -726,26 +735,25 @@ class BaseModel(nn.Module):
             ignored_params=ignored_params if ignored_params else None,
         )
 
-    def save_hf(
-        self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, safetensors_prefix: str = "model"
-    ) -> Path:
+    def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, safetensors_prefix: str = "model"):
         with profile_time_and_memory(f"[Saving HF to [{safetensors_prefix}]{hf_dir} cost]"):
             self._save_hf(hf_dir=hf_dir, save_dtype=save_dtype, safetensors_prefix=safetensors_prefix)
-        return Path(hf_dir)
 
     def async_save_hf(
         self,
         hf_dir: Path | str,
         save_dtype: torch.dtype = torch.bfloat16,
         safetensors_prefix: str = "model",
-    ) -> Path | None:
+        cleanup_hf_dirs: Sequence[str | Path] = (),
+    ) -> AsyncHFSaveHandle:
         if self._hf_path is None and self.config.hf_config is None:
             raise NotImplementedError(
                 "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
             )
+        if self._pending_async_hf is not None:
+            raise RuntimeError("Previous async HF save is still pending. Call wait_async_hf before launching a new one.")
         rank = dist.get_rank() if dist.is_initialized() else 0
         world_size = dist.get_world_size() if dist.is_initialized() else 1
-        finalized_hf_dir = self.wait_async_hf()
 
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
@@ -761,7 +769,6 @@ class BaseModel(nn.Module):
 
         status_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{self._async_hf_writer_status_filename(rank, world_size)}"
         cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
-        cleanup_hf_dirs = self._pop_async_hf_cleanup_dirs()
         if rank == 0:
             cleanup_done_path.unlink(missing_ok=True)
 
@@ -774,7 +781,7 @@ class BaseModel(nn.Module):
         if hasattr(DEVICE_MODULE, "synchronize"):
             DEVICE_MODULE.synchronize()
 
-        mp_ctx = mp.get_context("fork")
+        mp_ctx = py_mp.get_context("fork")
         process = mp_ctx.Process(
             target=self._run_async_hf_writer,
             args=(
@@ -790,14 +797,15 @@ class BaseModel(nn.Module):
         )
         process.start()
 
-        self._pending_async_hf = {
-            "process": process,
-            "hf_dir": hf_dir,
-            "tmp_hf_dir": tmp_hf_dir,
-            "status_path": status_path,
-            "cleanup_done_path": cleanup_done_path,
-        }
-        return finalized_hf_dir
+        handle = AsyncHFSaveHandle(
+            process=process,
+            hf_dir=hf_dir,
+            tmp_hf_dir=tmp_hf_dir,
+            status_path=status_path,
+            cleanup_done_path=cleanup_done_path,
+        )
+        self._pending_async_hf = handle
+        return handle
 
     def _run_async_hf_writer(
         self,
@@ -859,24 +867,17 @@ class BaseModel(nn.Module):
             del hf_tensor_list
         return file_to_names, weight_map
 
-    def add_async_hf_cleanup_dirs(self, cleanup_hf_dirs: Sequence[str | Path]) -> None:
-        self._async_hf_cleanup_dirs.extend(Path(hf_dir) for hf_dir in cleanup_hf_dirs)
-
-    def _pop_async_hf_cleanup_dirs(self) -> list[Path]:
-        cleanup_hf_dirs = self._async_hf_cleanup_dirs
-        self._async_hf_cleanup_dirs = []
-        return cleanup_hf_dirs
-
-    def wait_async_hf(self) -> Path | None:
-        if self._pending_async_hf is None:
+    def wait_async_hf(self, handle: AsyncHFSaveHandle | None = None) -> Path | None:
+        if handle is None:
+            handle = self._pending_async_hf
+        if handle is None:
             return None
 
-        payload = self._pending_async_hf
-        process = cast(Any, payload["process"])
-        hf_dir = cast(Path, payload["hf_dir"])
-        tmp_hf_dir = cast(Path, payload["tmp_hf_dir"])
-        status_path = cast(Path, payload["status_path"])
-        cleanup_done_path = cast(Path, payload["cleanup_done_path"])
+        process = handle.process
+        hf_dir = handle.hf_dir
+        tmp_hf_dir = handle.tmp_hf_dir
+        status_path = handle.status_path
+        cleanup_done_path = handle.cleanup_done_path
 
         local_ok = True
         local_error = ""
@@ -920,7 +921,8 @@ class BaseModel(nn.Module):
             failed = ", ".join(
                 f"rank={status['rank']}({status['error']})" for status in all_status if not status["ok"]
             )
-            self._pending_async_hf = None
+            if self._pending_async_hf is handle:
+                self._pending_async_hf = None
             raise RuntimeError(f"Async HF save global consistency check failed: {failed}")
 
         merged_weight_map: dict[str, str] = {}
@@ -939,7 +941,8 @@ class BaseModel(nn.Module):
             tmp_hf_dir.rename(hf_dir)
         if dist.is_initialized():
             dist.barrier()
-        self._pending_async_hf = None
+        if self._pending_async_hf is handle:
+            self._pending_async_hf = None
         return hf_dir
 
     def _cleanup_async_hf_dirs_before_write(

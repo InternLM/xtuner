@@ -1,11 +1,11 @@
 import json
+import multiprocessing as py_mp
 from pathlib import Path
 from shutil import rmtree
-from typing import Callable, Self
+from typing import Callable, Self, Sequence
 
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from pydantic import ConfigDict
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import (
@@ -18,7 +18,7 @@ from typing_extensions import override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model import BaseModel
-from xtuner.v1.model.base import DEVICE_MODULE, XTunerBaseModelConfig, _set_process_qos
+from xtuner.v1.model.base import AsyncHFSaveHandle, DEVICE_MODULE, XTunerBaseModelConfig, _set_process_qos
 from xtuner.v1.utils import get_device, get_logger
 
 from ..utils.misc import update_weight_map_from_safetensors_index
@@ -168,14 +168,16 @@ class BaseComposeModel(BaseModel):
         hf_dir: Path | str,
         save_dtype: torch.dtype = torch.bfloat16,
         safetensors_prefix: str = "model",
-    ) -> Path | None:
+        cleanup_hf_dirs: Sequence[str | Path] = (),
+    ) -> AsyncHFSaveHandle:
         if self._hf_path is None and self.config.hf_config is None:
             raise NotImplementedError(
                 "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
             )
+        if self._pending_async_hf is not None:
+            raise RuntimeError("Previous async HF save is still pending. Call wait_async_hf before launching a new one.")
         rank = dist.get_rank() if dist.is_initialized() else 0
         world_size = dist.get_world_size() if dist.is_initialized() else 1
-        finalized_hf_dir = self.wait_async_hf()
 
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
@@ -190,7 +192,6 @@ class BaseComposeModel(BaseModel):
 
         status_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{self._async_hf_writer_status_filename(rank, world_size)}"
         cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
-        cleanup_hf_dirs = self._pop_async_hf_cleanup_dirs()
         if rank == 0:
             cleanup_done_path.unlink(missing_ok=True)
 
@@ -212,7 +213,7 @@ class BaseComposeModel(BaseModel):
         if hasattr(DEVICE_MODULE, "synchronize"):
             DEVICE_MODULE.synchronize()
 
-        mp_ctx = mp.get_context("fork")
+        mp_ctx = py_mp.get_context("fork")
         process = mp_ctx.Process(
             target=self._run_async_hf_compose_writer,
             args=(
@@ -228,14 +229,15 @@ class BaseComposeModel(BaseModel):
         )
         process.start()
 
-        self._pending_async_hf = {
-            "process": process,
-            "hf_dir": hf_dir,
-            "tmp_hf_dir": tmp_hf_dir,
-            "status_path": status_path,
-            "cleanup_done_path": cleanup_done_path,
-        }
-        return finalized_hf_dir
+        handle = AsyncHFSaveHandle(
+            process=process,
+            hf_dir=hf_dir,
+            tmp_hf_dir=tmp_hf_dir,
+            status_path=status_path,
+            cleanup_done_path=cleanup_done_path,
+        )
+        self._pending_async_hf = handle
+        return handle
 
     def _run_async_hf_compose_writer(
         self,
@@ -243,7 +245,7 @@ class BaseComposeModel(BaseModel):
         module_file_to_names: list[tuple[BaseModel, list[tuple[str, list[str]]]]],
         merged_weight_map: dict[str, str],
         status_path: Path,
-        cleanup_hf_dirs: list[Path],
+        cleanup_hf_dirs: Sequence[str | Path],
         cleanup_done_path: Path,
         rank: int,
     ) -> None:

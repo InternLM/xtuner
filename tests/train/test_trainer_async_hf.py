@@ -79,14 +79,20 @@ class FakeAsyncHFEngine:
         self.grad_norm_calls += 1
         return torch.tensor(1.0)
 
-    def add_async_hf_cleanup_dirs(self, cleanup_hf_dirs):
+    def _cleanup_hf_dirs(self, cleanup_hf_dirs):
         for cleanup_hf_dir in cleanup_hf_dirs:
             cleanup_hf_dir = Path(cleanup_hf_dir)
             if cleanup_hf_dir.exists():
                 shutil.rmtree(cleanup_hf_dir)
 
     def save_hf(self, hf_dir: Path | str):
-        finalized_hf_dir = self.wait_async_hf()
+        hf_dir = Path(hf_dir)
+        hf_dir.mkdir(parents=True, exist_ok=True)
+        self.save_hf_calls.append(hf_dir)
+        return hf_dir
+
+    def async_save_hf(self, hf_dir: Path | str, cleanup_hf_dirs=()):
+        self._cleanup_hf_dirs(cleanup_hf_dirs)
         hf_dir = Path(hf_dir)
         hf_dir.mkdir(parents=True, exist_ok=True)
         self.save_hf_calls.append(hf_dir)
@@ -95,20 +101,23 @@ class FakeAsyncHFEngine:
         shard_name = f"model-rank{rank}-of-{world_size}.safetensors"
         (hf_dir / shard_name).write_text(f"fake async model weights for rank {rank}")
         weight_map = {f"layers.rank{rank}.weight": shard_name} if self.async_hf_status_ok else {}
-        self._pending_async_hf = {
+        handle = {
             "hf_dir": hf_dir,
             "ok": self.async_hf_status_ok,
             "error": self.async_hf_status_error,
             "weight_map": weight_map,
         }
-        return finalized_hf_dir
+        self._pending_async_hf = handle
+        return handle
 
-    def wait_async_hf(self):
-        self.wait_async_hf_calls.append(None)
-        if self._pending_async_hf is None:
+    def wait_async_hf(self, handle=None):
+        self.wait_async_hf_calls.append(handle)
+        if handle is None:
+            handle = self._pending_async_hf
+        if handle is None:
             return None
 
-        pending = self._pending_async_hf
+        pending = handle
         local_status = {
             "rank": dist.get_rank(),
             "ok": bool(pending["ok"]),
@@ -118,7 +127,8 @@ class FakeAsyncHFEngine:
         all_status = [None for _ in range(dist.get_world_size())]
         dist.all_gather_object(all_status, local_status)
         if not all(status["ok"] for status in all_status):
-            self._pending_async_hf = None
+            if self._pending_async_hf is handle:
+                self._pending_async_hf = None
             failed = ", ".join(
                 f"rank={status['rank']}({status['error']})" for status in all_status if not status["ok"]
             )
@@ -133,7 +143,8 @@ class FakeAsyncHFEngine:
                 hf_dir=Path(pending["hf_dir"]),
                 weight_map=merged_weight_map,
             )
-        self._pending_async_hf = None
+        if self._pending_async_hf is handle:
+            self._pending_async_hf = None
         return Path(pending["hf_dir"])
 
 

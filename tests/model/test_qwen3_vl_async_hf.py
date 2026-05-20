@@ -121,9 +121,8 @@ class TestQwen3VLAsyncHF(DeterministicDDPTestCase):
             model = self._build_sharded_model(ep_size)
             _set_hf_for_compose_submodules(model, QWEN3_VL_MOE_PATH)
 
-            finalized = model.async_save_hf(async_hf_dir)
-            self.assertIsNone(finalized)
-            finalized = model.wait_async_hf()
+            handle = model.async_save_hf(async_hf_dir)
+            finalized = model.wait_async_hf(handle)
             self.assertEqual(finalized, async_hf_dir)
 
             dist.barrier()
@@ -155,9 +154,8 @@ class TestQwen3VLAsyncHF(DeterministicDDPTestCase):
             model = self._build_sharded_model(ep_size)
             model.from_hf(QWEN3_VL_MOE_PATH)
 
-            finalized = model.async_save_hf(async_hf_dir)
-            self.assertIsNone(finalized)
-            finalized = model.wait_async_hf()
+            handle = model.async_save_hf(async_hf_dir)
+            finalized = model.wait_async_hf(handle)
             self.assertEqual(finalized, async_hf_dir)
 
             dist.barrier()
