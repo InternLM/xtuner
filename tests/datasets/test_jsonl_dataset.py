@@ -415,7 +415,7 @@ def test_build_sampled_indices_uses_numpy_array_and_matches_sampling_semantics()
     base_len = num_offsets - 1
     dtype = np.int32 if base_len < np.iinfo(np.int32).max else np.int64
     sampled = np.arange(base_len, dtype=dtype)
-    sampled = _filter_sampled_indices(sampled, num_tokens, max_length=2)
+    sampled = _filter_sampled_indices(sampled, num_tokens, max_length=2, path="test_path")
     sampled = _apply_sample_ratio(sampled, sample_ratio=1.5, enable_sequential_sampler=True)
     assert isinstance(sampled, np.ndarray)
     assert sampled.dtype.kind in ("i", "u")
