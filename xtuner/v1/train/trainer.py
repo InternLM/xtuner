@@ -1007,7 +1007,7 @@ class Trainer:
         log_level = os.environ.get("XTUNER_LOG_LEVEL", "INFO").upper()
         logger = get_logger()
         logger.remove()
-        logger.add(log_dir / f"rank{get_rank()}.log", format=log_format(), backtrace=True, catch=True)
+        logger.add(log_dir / f"rank{get_rank()}.log", format=log_format(), backtrace=True, catch=True, level="DEBUG")
         # Set log level to hide debug output
         logger.add(sys.stderr, format=log_format(rank=get_rank()), level=log_level)
         return logger, log_dir

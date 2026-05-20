@@ -360,7 +360,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             f"equal to video_max_frames: {self.video_processor.max_frames}"
         )
         self.data_name = os.path.basename(anno_name)
-        logger.info(
+        logger.debug(
             f"[{self.data_name}] min_pixels: {self.image_processor.size['shortest_edge']}, "
             f"max_pixels: {self.image_processor.size['longest_edge']}, "
             f"video_min_total_pixels: {self.video_processor.size['shortest_edge']}, "
