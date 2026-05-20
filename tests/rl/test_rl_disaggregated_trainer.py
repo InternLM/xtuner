@@ -126,6 +126,26 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         with patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run):
             trainer.fit()
 
+    def _minimal_train_info(self, *, training_samples: int, training_tokens: int, benchmark_end_time_s: float = 108.0):
+        return {
+            "data_info": {
+                "batch_size": training_samples,
+                "training_samples": training_samples,
+                "training_tokens": training_tokens,
+                "benchmark_end_time_s": benchmark_end_time_s,
+            },
+            "workers_log_item": [
+                {
+                    "rollout_is_metrics": {},
+                    "mismatch_metrics": {},
+                    "rollout_entropy": 0.0,
+                    "train_entropy": 0.0,
+                    "train_metrics": [],
+                    "sft_train_metrics": {},
+                }
+            ],
+        }
+
     def test_fit_persists_checkpoint_for_completed_model_step(self):
         # 验证 checkpoint 以 fit 完成的 model_step 为准，并通过 async manager.save 落盘。
         train_sample = SimpleNamespace(message_uid=1, uid=1)
@@ -153,7 +173,6 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
         checkpoint_path = Path(trainer.exp_dir) / trainer._CHECKPOINT_DIR / "ckpt-step-1"
         manager.save.assert_awaited_once_with(checkpoint_path, model_step=1)
-        trainer.train_controller.save.assert_called_once_with(str(checkpoint_path), False)
         with (checkpoint_path / trainer._SAVE_TRAIN_STATE_PATH).open("r") as f:
             self.assertEqual(json.load(f), {"cur_step": 1})
         self.assertIn(("continue_produce", 1), manager.calls)
@@ -235,6 +254,91 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertEqual(events, ["sync", "eval", "continue_produce"])
         self.assertTrue(manager._finish_event.is_set())
         self.assertIn("produce_loop_exit", manager.calls)
+
+    def test_log_step_records_disaggregated_effective_e2e_window(self):
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer._log_step = RLDisaggregatedTrainer._log_step.__get__(trainer, RLDisaggregatedTrainer)
+        trainer._num_workers = 3.0
+        trainer._rollout_num_workers = 2.0
+
+        trainer._log_step(
+            train_step=1,
+            step_timer_dict={
+                "step": 10.0,
+                "get_batch": 5.0,
+                "prepare_data": 1.0,
+                "training": 2.0,
+            },
+            produce_result=ProduceBatchResult(
+                rollout_states=[],
+                produced_samples=4,
+                produced_tokens=120,
+                produce_time_s=4.0,
+            ),
+            train_info=self._minimal_train_info(
+                training_samples=3,
+                training_tokens=60,
+            ),
+            eval_info={},
+        )
+
+        scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
+        self.assertAlmostEqual(scalars["throughput/e2e_effective_sgs"], 0.125)
+        self.assertAlmostEqual(scalars["throughput/e2e_effective_tgs"], 2.5)
+        self.assertAlmostEqual(scalars["throughput/effective_sgs"], 0.1)
+        self.assertAlmostEqual(scalars["throughput/effective_tgs"], 2.0)
+        self.assertAlmostEqual(scalars["throughput/training_tgs"], 10.0)
+        self.assertAlmostEqual(scalars["throughput/rollout_sgs"], 0.5)
+        self.assertAlmostEqual(scalars["throughput/rollout_tgs"], 15.0)
+
+    def test_update_weights_pauses_generation_without_onloading_rollout(self):
+        manager = _FakeManager([])
+        trainer = self._make_trainer(manager)
+
+        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
+            trainer.update_weights = RLDisaggregatedTrainer.update_weights.__get__(trainer, RLDisaggregatedTrainer)
+            trainer.update_weights()
+
+        trainer.rollout_controller.pause_generation.remote.assert_not_called()
+        trainer.rollout_controller.continue_generation.remote.assert_not_called()
+        trainer.rollout_controller.onload_weights.remote.assert_not_called()
+        trainer.rollout_controller.onload_kvcache.remote.assert_not_called()
+
+    def test_resume_from_checkpoint_updates_weights_then_resets_manager(self):
+        trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
+        trainer.logger = MagicMock()
+        trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=Path(self.temp_dir.name))
+        trainer.train_controller = SimpleNamespace(resume=MagicMock(return_value="resume"))
+        trainer.rollout_controller = SimpleNamespace(
+            pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause_generation")),
+            continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue_generation")),
+        )
+        events: list[str] = []
+
+        async def manager_resume(checkpoint_path):
+            events.append(f"manager_resume:{Path(checkpoint_path).name}")
+            return 3
+
+        async def manager_continue_produce(model_step: int):
+            events.append(f"continue_produce:{model_step}")
+
+        trainer.agent_loop_manager = SimpleNamespace(
+            resume=AsyncMock(side_effect=manager_resume),
+            continue_produce=AsyncMock(side_effect=manager_continue_produce),
+        )
+        trainer.update_weights = MagicMock(side_effect=lambda: events.append("update_weights"))
+
+        train_state_path = Path(self.temp_dir.name) / trainer._SAVE_TRAIN_STATE_PATH
+        train_state_path.write_text('{"cur_step": 3}')
+
+        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
+            trainer._resume_from_checkpoint(self.temp_dir.name)
+
+        self.assertEqual(trainer._cur_step, 3)
+        trainer.agent_loop_manager.resume.assert_awaited_once_with(Path(self.temp_dir.name))
+        trainer.agent_loop_manager.continue_produce.assert_awaited_once_with(model_step=3)
+        self.assertTrue(events[0].startswith("manager_resume:"))
+        self.assertEqual(events[1:], ["update_weights", "continue_produce:3"])
 
     def test_validate_sync_schedule_accepts_multiples(self):
         # 验证保存、HF 导出、评测周期都可以对齐 sync_weights_interval。

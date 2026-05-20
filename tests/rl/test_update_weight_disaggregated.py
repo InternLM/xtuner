@@ -11,7 +11,6 @@ import ray
 import torch
 import torch.distributed as dist
 
-from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.data_proto.rl_data import SampleParams, RolloutState
 from xtuner.v1.config import (
     AdamWConfig,
@@ -19,7 +18,13 @@ from xtuner.v1.config import (
     LRConfig,
 )
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.rl.utils import (
+    AcceleratorResourcesConfig,
+    AutoAcceleratorWorkers,
+    CPUResourceManager,
+    clear_cpu_resource_manager,
+    set_cpu_resource_manager,
+)
 from xtuner.v1.rl.trainer import WorkerConfig, TrainingController, TrainingWorker as BaseTrainingWorker
 from xtuner.v1.rl.loss import GRPOLossConfig as LossConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
@@ -125,6 +130,7 @@ class TestUpdateWeight(unittest.TestCase):
         )
 
     def tearDown(self):
+        clear_cpu_resource_manager()
         ray.shutdown()
         self.temp_dir.cleanup()
 
@@ -211,11 +217,9 @@ class TestUpdateWeight(unittest.TestCase):
             self.rollout_resources_cfg,
             name=f"test_update_weight_rollout_{id(self)}",
         )
+        set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=[self.pg, rollout_pg]))
         self.rollout_cfg.skip_load_weights = False
-        return ray.remote(RolloutController).remote(
-            self.rollout_cfg,
-            rollout_pg,
-        )
+        return self.rollout_cfg.build(rollout_pg)
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "sglang backend is not enabled")
     def test_sglang_disaggregated_update_weight_and_generate(self):
@@ -241,11 +245,9 @@ class TestUpdateWeight(unittest.TestCase):
             self.rollout_resources_cfg,
             name=f"test_update_weight_rollout_{id(self)}",
         )
+        set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=[self.pg, rollout_pg]))
         self.rollout_cfg.skip_load_weights = False
-        rollout_controller = ray.remote(RolloutController).remote(
-            self.rollout_cfg,
-            rollout_pg,
-        )
+        rollout_controller = self.rollout_cfg.build(rollout_pg)
 
         sample_params = SampleParams(temperature=0.0, max_tokens=128, top_k=1)
         input_state = RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params)

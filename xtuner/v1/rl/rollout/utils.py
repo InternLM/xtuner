@@ -4,14 +4,14 @@ import threading
 import time
 from collections import OrderedDict
 from itertools import cycle
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import ray
 from ray import ObjectRef as RayObjectRef
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.utils import asyncio_run
+from xtuner.v1.rl.utils import asyncio_run, free_object_refs
 from xtuner.v1.utils import get_logger
 
 
@@ -251,9 +251,12 @@ async def check_worker_health(
 
 async def _resolve_routed_experts(routed_experts: np.ndarray | RayObjectRef) -> np.ndarray:
     if isinstance(routed_experts, RayObjectRef):
-        routed_experts = await routed_experts
-    assert routed_experts is not None, "routed_experts should not be empty after resolution"
-    return np.asarray(routed_experts)
+        routed_experts_value = await routed_experts
+        free_object_refs([routed_experts])
+    else:
+        routed_experts_value = routed_experts
+    assert routed_experts_value is not None, "routed_experts should not be empty after resolution"
+    return np.asarray(routed_experts_value)
 
 
 class PartialRolloutHandler:
@@ -294,7 +297,8 @@ class PartialRolloutHandler:
         routed_experts: np.ndarray | RayObjectRef | None,
         finish_reason: str,
         status: Status,
-        routed_experts_expect_len: int,
+        prompt_tokens: int,
+        completion_tokens: int,
     ) -> RolloutState:
         rollout_state.finish_reason = finish_reason
         rollout_state.status = status
@@ -310,28 +314,49 @@ class PartialRolloutHandler:
 
         history_routed_experts = rollout_state.routed_experts
         if history_routed_experts is not None and routed_experts is not None:
+            routed_experts_expect_len = prompt_tokens + completion_tokens - 1
+            history_routed_experts_expect_len = prompt_tokens - 1
+
             # case 1: 上一次 rolloutstate 有 response, 本次推理也有 response，需要对 routed experts 进行拼接
             start_time = time.perf_counter()
             history_routed_experts = await _resolve_routed_experts(history_routed_experts)  # type: ignore[assignment]
             cur_routed_experts = await _resolve_routed_experts(routed_experts)  # type: ignore[assignment]
             history_routed_experts_len = len(history_routed_experts)
             cur_routed_experts_len = len(cur_routed_experts)
+            assert history_routed_experts_len == history_routed_experts_expect_len, (
+                f"History routed_experts len mismatch before partial rollout concatenation: "
+                f"history_routed_experts_len={history_routed_experts_len}, "
+                f"expected_len={history_routed_experts_expect_len}, "
+                f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}, "
+                f"history_response_ids_len={len(history_response_ids)}, "
+                f"current_response_ids_len={len(response_ids)}"
+            )
+            assert cur_routed_experts_len == routed_experts_expect_len, (
+                f"Current routed_experts len mismatch before partial rollout concatenation: "
+                f"cur_routed_experts_len={cur_routed_experts_len}, expected_len={routed_experts_expect_len}, "
+                f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}, "
+                f"history_routed_experts_len={history_routed_experts_len}, "
+                f"current_response_ids_len={len(response_ids)}"
+            )
             assert history_routed_experts_len - 1 <= cur_routed_experts_len, (
-                f"Existing routed_experts len: {history_routed_experts_len}, current routed_experts len: {cur_routed_experts_len}, history_response_ids len: {len(history_response_ids)}, current response_ids len: {len(response_ids)}"
+                f"Current routed_experts len is shorter than history during partial rollout concatenation: "
+                f"history_routed_experts_len={history_routed_experts_len}, "
+                f"cur_routed_experts_len={cur_routed_experts_len}, "
+                f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}, "
+                f"history_response_ids_len={len(history_response_ids)}, "
+                f"current_response_ids_len={len(response_ids)}"
             )
             cur_routed_experts = cur_routed_experts[history_routed_experts_len:]
             concat_routed_experts = np.concatenate([history_routed_experts, cur_routed_experts], axis=0)
-            rollout_state.routed_experts = ray.put(concat_routed_experts)
-            expected_len = len(cast(list[int], rollout_state.prompt_ids)) + len(rollout_state.response_ids) - 1
-            assert expected_len == routed_experts_expect_len, (
-                f"Expected routed_experts len: {expected_len}, routed_experts_expect_len: {routed_experts_expect_len}, prompt_ids_len: {len(cast(list[int], rollout_state.prompt_ids))}, response_ids_len: {len(rollout_state.response_ids)}"
-            )
             assert len(concat_routed_experts) == routed_experts_expect_len, (
-                f"After concatenation, routed_experts len: {len(concat_routed_experts)}, expected len: {expected_len}, history_routed_experts_len: {history_routed_experts_len}, current_routed_experts_len: {len(cur_routed_experts)}, prompt_ids_len: {len(cast(list[int], rollout_state.prompt_ids))}, response_ids_len: {len(rollout_state.response_ids)}"
+                f"Concatenated routed_experts len mismatch after partial rollout concatenation: "
+                f"concat_routed_experts_len={len(concat_routed_experts)}, "
+                f"expected_len={routed_experts_expect_len}, "
+                f"history_routed_experts_len={history_routed_experts_len}, "
+                f"current_routed_experts_len={len(cur_routed_experts)}, "
+                f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}"
             )
-            # free_object_refs(
-            #     [ref for ref in (history_routed_experts_ref, cur_routed_experts_ref) if isinstance(ref, ray.ObjectRef)]
-            # )
+            rollout_state.routed_experts = ray.put(concat_routed_experts)
             end_time = time.perf_counter()
             self.logger.debug(
                 f"[PartialRolloutHandler] Postprocess routed_experts concatenation time: {end_time - start_time:.4f} seconds"

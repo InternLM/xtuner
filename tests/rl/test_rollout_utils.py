@@ -95,11 +95,18 @@ class TestRolloutHealthChecker(unittest.TestCase):
 class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
     async def test_postprocess_frees_old_routed_expert_refs_after_concat(self):
         class FakeObjectRef:
-            pass
+            def __init__(self, value):
+                self.value = value
 
-        history_ref = FakeObjectRef()
-        cur_ref = FakeObjectRef()
-        concat_ref = FakeObjectRef()
+            def __await__(self):
+                async def _resolve():
+                    return self.value
+
+                return _resolve().__await__()
+
+        history_ref = FakeObjectRef([[1], [2]])
+        cur_ref = FakeObjectRef([[1], [2], [3]])
+        concat_ref = FakeObjectRef(None)
         rollout_state = RolloutState(
             message=[],
             response="old",
@@ -109,16 +116,8 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
             status=Status.ABORTED,
         )
 
-        async def resolve_routed_experts(value):
-            if value is history_ref:
-                return [[1], [2]]
-            if value is cur_ref:
-                return [[1], [2], [3]]
-            raise AssertionError(f"unexpected routed_experts value: {value}")
-
         with (
             patch("xtuner.v1.rl.rollout.utils.RayObjectRef", FakeObjectRef),
-            patch("xtuner.v1.rl.rollout.utils._resolve_routed_experts", side_effect=resolve_routed_experts),
             patch("xtuner.v1.rl.rollout.utils.ray.put", return_value=concat_ref) as ray_put,
             patch("xtuner.v1.rl.rollout.utils.free_object_refs") as free_object_refs,
         ):
@@ -130,12 +129,15 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
                 routed_experts=cur_ref,
                 finish_reason="abort",
                 status=Status.ABORTED,
-                enable_partial_rollout=True,
+                prompt_tokens=3,
+                completion_tokens=1,
             )
 
         self.assertIs(out.routed_experts, concat_ref)
-        ray_put.assert_called_once_with([[1], [2], [3]])
-        free_object_refs.assert_called_once_with([history_ref, cur_ref])
+        self.assertEqual(ray_put.call_args.args[0].tolist(), [[1], [2], [3]])
+        free_object_refs.assert_any_call([history_ref])
+        free_object_refs.assert_any_call([cur_ref])
+        self.assertEqual(free_object_refs.call_count, 2)
 
 
 class TestRolloutControllerRecover(unittest.TestCase):

@@ -22,7 +22,6 @@ from xtuner.v1.rl.agent_loop_manager import (
     TaskSpecConfig,
 )
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, SampleParams
-from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
@@ -71,11 +70,16 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
  
     def setUp(self):
         ray.init(num_cpus=80, ignore_reinit_error=True)
-        set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=None))
+        clear_cpu_resource_manager()
         self.data_path = TRAIN_DATA_PATH
         self.model_path = MODEL_PATH
         self.temp_dir = tempfile.TemporaryDirectory()
         self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
+
+    def build_accelerator_placement_group(self):
+        pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
+        set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=pg))
+        return pg
 
     def tearDown(self):
         clear_cpu_resource_manager()
@@ -104,8 +108,8 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0),
         )
         # 2. 创建 rollout_controller
-        pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
-        rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
+        pg = self.build_accelerator_placement_group()
+        rollout_controller = rollout_config.build(pg)
         # 3. 创建 AgentLoop
         agent_loop = agent_loop_cfg.build(
             rollout_controller=rollout_controller,
@@ -150,8 +154,8 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
         )
 
-        pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
-        rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
+        pg = self.build_accelerator_placement_group()
+        rollout_controller = rollout_config.build(pg)
         agent_loop = agent_loop_cfg.build(
             rollout_controller=rollout_controller,
             judger=judger_config.build(),
@@ -222,8 +226,8 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             ],
         )
         # 2. 创建 rollout_controller
-        pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
-        rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
+        pg = self.build_accelerator_placement_group()
+        rollout_controller = rollout_config.build(pg)
         # 3. 创建 AgentLoopManager
         replay_buffer_cfg = SyncReplayBufferConfig()
         replay_buffer = replay_buffer_cfg.build()
