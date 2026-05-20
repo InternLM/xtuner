@@ -623,6 +623,10 @@ class AgentLoopManager:
         # 合法参数确认后，统一拉起 manager 级暂停信号，阻止仍在运行的 produce_batch 继续调度新 rollout。
         self._update_event.set()
         self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
+
+        rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
+        await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
+
         pause_time_s = 0.0
         for task in self.task_runners:
             ctx = _build_produce_context(
@@ -731,7 +735,7 @@ class AgentLoopManager:
             pause_time_s=pause_time_s,
         )
 
-    def continue_produce(self, model_step: int) -> None:
+    async def continue_produce(self, model_step: int) -> None:
         #
         # 它和 pause_produce(use_global_progress=True) 是一对：
         # - pause_produce(...) 负责让 producer 停下来；
@@ -739,8 +743,10 @@ class AgentLoopManager:
         #
         # 这里同步更新 `_model_step`，表示 rollout 侧接下来生成样本时，
         # 应把“当前正在使用的是哪一版权重”记录成这个版本号。
-        self._status = AgentLoopManagerStatus.NORMAL
         self._model_step = model_step
+        rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
+        await rollout_ctl.continue_generation.remote()  # type: ignore[attr-defined]
+        self._status = AgentLoopManagerStatus.NORMAL
         self._update_event.clear()
 
     def shutdown(self) -> None:
@@ -780,40 +786,36 @@ class AgentLoopManager:
         active_tasks = [task for task in self.task_runners if current_sizes[task.task_name] > 0]
         assert active_tasks, "No active tasks found"
 
-        rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
-        # TODO: put in self.continue_produce()
-        await rollout_ctl.continue_generation.remote()  # type: ignore[attr-defined]
+        # 共卡路径不复用非共卡的 paused producer 状态机。
+        # 即使 manager 是从 resume() 恢复出来、当前仍处在 UPDATE_WEIGHT_AND_ABORT，
+        # produce_batch() 也应视作一次独立的同步生产过程，从干净状态开始。
+        #
+        # 共卡路径下，produce_batch() 对应 rollout worker 当前持有的权重版本。
+        await self.continue_produce(model_step=model_step)
+        local_progress = ProduceProgress.build_local(self.task_names, current_sizes, train_step)
+        status = ProduceBatchStatus.NORMAL
         try:
-            # 共卡路径不复用非共卡的 paused producer 状态机。
-            # 即使 manager 是从 resume() 恢复出来、当前仍处在 UPDATE_WEIGHT_AND_ABORT，
-            # produce_batch() 也应视作一次独立的同步生产过程，从干净状态开始。
-            #
-            # 共卡路径下，produce_batch() 对应 rollout worker 当前持有的权重版本。
-            self.continue_produce(model_step=model_step)
             # 共卡 produce_batch 也是消费入口；生产前先刷新 buffer 中已有 completed / aborted。
             await self._refresh_for_all_tasks(train_step, [Status.COMPLETED, Status.ABORTED])
-            local_progress = ProduceProgress.build_local(self.task_names, current_sizes, train_step)
             status = await self._produce_batch_to_buffer(
                 task_batch_sizes=current_sizes,
                 progress=local_progress,
             )
+        finally:
             await self.pause_produce(
                 use_global_progress=False,
                 progress=local_progress,
             )
-            result = await self._get_batch_from_buffer(
-                batch_size=batch_size,
-                task_batch_sizes=current_sizes,
-                consume_progress=local_progress,
-            )
-            result.status = status
-            assert result.rollout_states, (
-                "AgentLoopManager.produce_batch() must return non-empty rollout_states for colocated training. "
-                "Use get_batch() for disaggregated empty/expired reads."
-            )
-        finally:
-            # TODO: put in self.pause_produce()
-            await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
+        result = await self._get_batch_from_buffer(
+            batch_size=batch_size,
+            task_batch_sizes=current_sizes,
+            consume_progress=local_progress,
+        )
+        result.status = status
+        assert result.rollout_states, (
+            "AgentLoopManager.produce_batch() must return non-empty rollout_states for colocated training. "
+            "Use get_batch() for disaggregated empty/expired reads."
+        )
 
         self.logger.info(
             f"[AgentLoopManager][{self.name}] produce_batch done "
@@ -841,8 +843,6 @@ class AgentLoopManager:
                 await self._wait_for_status_exit(self._status)
                 continue
 
-            rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
-            await rollout_ctl.continue_generation.remote()  # type: ignore[attr-defined]
             task_batch_sizes = self._produce_progress.ensure_target_upto(
                 batch_size=batch_size,
                 future_step=self._produce_progress.producer_future_step,
@@ -872,31 +872,50 @@ class AgentLoopManager:
         # - `produce_batch()`：colocate，一次调用内完成“生产+收尾+取数”
         # - `get_batch()`：disagg，等待 replay buffer 准备好当前训练步所需 batch 后再取数
         #
-        # 因而这里允许返回空 batch 的唯一合法场景仍然只有：
-        # - 当 manager 已进入 EXPIRED_BATCH，返回空 batch + 状态信号
-        # - trainer 看到后应跳过训练，优先去做权重同步
+        # 因而这里允许返回空 batch 的唯一合法场景是：
+        # - manager 已进入 EXPIRED_BATCH
+        # - 当前训练侧已有比 rollout 侧更新的 Model Step，可以直接同步过去
+        # 如果没有更新的模型版本，则要么消费当前已准备好的 batch，要么 fail fast 暴露不变量破坏。
         progress = self._produce_progress
         progress.begin_consume(train_step)
         await self._refresh_for_all_tasks(train_step, [Status.COMPLETED, Status.ABORTED])
         task_batch_sizes = self._get_task_batch_sizes_for_step(batch_size, train_step)
+        current_model_step = train_step - 1
 
         while not self._finish_event.is_set():
             if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
-                pause_time_s = self._pause_time_s
-                self._pause_time_s = 0.0
-                result = ProduceBatchResult(
-                    rollout_states=[],
-                    status=ProduceBatchStatus.EXPIRED_BATCH,
-                )
-                if pause_time_s > 0:
-                    result.group_gen_pause_time_s = pause_time_s
-                return result
+                if current_model_step > self._model_step:
+                    pause_time_s = self._pause_time_s
+                    self._pause_time_s = 0.0
+                    result = ProduceBatchResult(
+                        rollout_states=[],
+                        status=ProduceBatchStatus.EXPIRED_BATCH,
+                    )
+                    if pause_time_s > 0:
+                        result.group_gen_pause_time_s = pause_time_s
+                    return result
+                if not await self.replay_buffer.is_ready(task_batch_sizes):
+                    leftover_counts = await self.replay_buffer.count_statuses(self.task_names, _LEFTOVER_STATUSES)
+                    raise RuntimeError(
+                        "AgentLoopManager reached EXPIRED_BATCH without a newer model or a ready batch: "
+                        f"train_step={train_step}, current_model_step={current_model_step}, "
+                        f"rollout_model_step={self._model_step}, manager_status={self._status.name}, "
+                        f"producer_future_step={progress.producer_future_step}, "
+                        f"next_consumer_step={progress.next_consumer_step}, "
+                        f"target_upto_future_step={progress.target_upto_future_step}, "
+                        f"target_samples={progress.target_samples}, "
+                        f"consumed_samples={progress.consumed_samples}, "
+                        f"task_batch_sizes={task_batch_sizes}, "
+                        f"leftover_status_counts={leftover_counts}"
+                    )
             if await self.replay_buffer.is_ready(task_batch_sizes):
                 result = await self._get_batch_from_buffer(
                     batch_size=batch_size,
                     task_batch_sizes=task_batch_sizes,
                     consume_progress=progress,
                 )
+                if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
+                    result.status = ProduceBatchStatus.EXPIRED_BATCH
                 if result.rollout_states:
                     progress.finish_consume(train_step)
                     await self._refresh_for_all_tasks(train_step + 1, [Status.COMPLETED, Status.ABORTED])

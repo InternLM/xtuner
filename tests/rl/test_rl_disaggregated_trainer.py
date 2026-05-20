@@ -10,7 +10,11 @@ from xtuner.v1.rl.agent_loop_manager import (
     ProduceBatchResult,
     ProduceBatchStatus,
 )
-from xtuner.v1.train.rl_trainer import RLDisaggregatedTrainer, _validate_sync_intervals
+from xtuner.v1.train.rl_trainer import RLDisaggregatedTrainer, RLThroughputBenchmark, _validate_sync_intervals
+
+
+def _throughput_scalars(scalars: dict[str, float]) -> dict[str, float]:
+    return {key: value for key, value in scalars.items() if key.startswith("throughput/")}
 
 
 class _FakeManager:
@@ -33,7 +37,7 @@ class _FakeManager:
         self.calls.append(("pause_produce", use_global_progress))
         return 0.25
 
-    def continue_produce(self, model_step: int):
+    async def continue_produce(self, model_step: int):
         self.calls.append(("continue_produce", model_step))
 
     def shutdown(self):
@@ -198,7 +202,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             events.append("eval")
             return ProduceBatchResult(rollout_states=[[eval_sample]])
 
-        def continue_produce(model_step: int):
+        async def continue_produce(model_step: int):
             events.append("continue_produce")
             manager.calls.append(("continue_produce", model_step))
 
@@ -245,13 +249,18 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         )
 
         scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
-        self.assertEqual(scalars["throughput/e2e_effective_samples_per_s"], 0.375)
-        self.assertEqual(scalars["throughput/e2e_effective_tgs"], 2.5)
-        self.assertEqual(scalars["throughput/effective_samples_per_s"], 0.3)
-        self.assertEqual(scalars["throughput/effective_tgs"], 2.0)
-        self.assertEqual(scalars["throughput/training_tgs"], 10.0)
-        self.assertEqual(scalars["throughput/rollout_samples_per_s"], 1.0)
-        self.assertEqual(scalars["throughput/rollout_tgs"], 15.0)
+        self.assertEqual(
+            _throughput_scalars(scalars),
+            RLThroughputBenchmark(
+                e2e_effective_sgs=3.0 / 8.0 / 3.0,
+                e2e_effective_tgs=60.0 / 8.0 / 3.0,
+                effective_sgs=3.0 / 10.0 / 3.0,
+                effective_tgs=60.0 / 10.0 / 3.0,
+                training_tgs=60.0 / 2.0 / 3.0,
+                rollout_sgs=4.0 / 4.0 / 2.0,
+                rollout_tgs=120.0 / 4.0 / 2.0,
+            ).to_scalars(),
+        )
 
     def test_update_weights_pauses_generation_without_onloading_rollout(self):
         manager = _FakeManager([])
@@ -282,12 +291,12 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             events.append(f"manager_resume:{Path(checkpoint_path).name}")
             return 3
 
-        def manager_continue_produce(model_step: int):
+        async def manager_continue_produce(model_step: int):
             events.append(f"continue_produce:{model_step}")
 
         trainer.agent_loop_manager = SimpleNamespace(
             resume=MagicMock(side_effect=manager_resume),
-            continue_produce=MagicMock(side_effect=manager_continue_produce),
+            continue_produce=AsyncMock(side_effect=manager_continue_produce),
         )
         trainer.update_weights = MagicMock(side_effect=lambda: events.append("update_weights"))
 

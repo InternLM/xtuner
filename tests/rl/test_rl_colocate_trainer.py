@@ -12,7 +12,11 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, ProduceBatchResult, ProduceBatchStatus
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import AgentLoopManager, _TaskRunner
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SerializedRayObjectRef
-from xtuner.v1.train.rl_trainer import RLColocateTrainer
+from xtuner.v1.train.rl_trainer import RLColocateTrainer, RLThroughputBenchmark
+
+
+def _throughput_scalars(scalars: dict[str, float]) -> dict[str, float]:
+    return {key: value for key, value in scalars.items() if key.startswith("throughput/")}
 
 
 class _FakeRolloutState:
@@ -310,6 +314,31 @@ class TestRLColocateTrainer(unittest.TestCase):
         self.assertEqual(data_info["training_samples"], 2)
         self.assertEqual(data_info["training_tokens"], 10)
 
+    def test_throughput_benchmark_exports_stable_scalar_schema(self):
+        # throughput key 是日志对外契约；具体 _log_step 流程测试复用这个 schema，避免多处硬编码。
+        scalars = RLThroughputBenchmark(
+            e2e_effective_sgs=1.0,
+            e2e_effective_tgs=2.0,
+            effective_sgs=3.0,
+            effective_tgs=4.0,
+            training_tgs=5.0,
+            rollout_sgs=6.0,
+            rollout_tgs=7.0,
+        ).to_scalars()
+
+        self.assertEqual(
+            scalars,
+            {
+                "throughput/e2e_effective_sgs": 1.0,
+                "throughput/e2e_effective_tgs": 2.0,
+                "throughput/effective_sgs": 3.0,
+                "throughput/effective_tgs": 4.0,
+                "throughput/training_tgs": 5.0,
+                "throughput/rollout_sgs": 6.0,
+                "throughput/rollout_tgs": 7.0,
+            },
+        )
+
     def test_log_step_records_colocate_throughput_metrics(self):
         trainer = self._make_trainer(MagicMock())
         trainer._log_step = RLColocateTrainer._log_step.__get__(trainer, RLColocateTrainer)
@@ -338,13 +367,18 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
 
         scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
-        self.assertEqual(scalars["throughput/e2e_effective_samples_per_s"], 0.375)
-        self.assertEqual(scalars["throughput/e2e_effective_tgs"], 7.5)
-        self.assertEqual(scalars["throughput/effective_samples_per_s"], 0.3)
-        self.assertEqual(scalars["throughput/effective_tgs"], 6.0)
-        self.assertEqual(scalars["throughput/training_tgs"], 15.0)
-        self.assertEqual(scalars["throughput/rollout_samples_per_s"], 2.5)
-        self.assertEqual(scalars["throughput/rollout_tgs"], 20.0)
+        self.assertEqual(
+            _throughput_scalars(scalars),
+            RLThroughputBenchmark(
+                e2e_effective_sgs=3.0 / 8.0 / 2.0,
+                e2e_effective_tgs=120.0 / 8.0 / 2.0,
+                effective_sgs=3.0 / 10.0 / 2.0,
+                effective_tgs=120.0 / 10.0 / 2.0,
+                training_tgs=120.0 / 4.0 / 2.0,
+                rollout_sgs=5.0 / 2.0 / 2.0,
+                rollout_tgs=80.0 / 2.0 / 2.0,
+            ).to_scalars(),
+        )
 
     def test_log_step_skips_throughput_without_train_info(self):
         trainer = self._make_trainer(MagicMock())

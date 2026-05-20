@@ -536,7 +536,7 @@ class AgentLoopManager:
     async def produce_batch(self, batch_size: int, train_step: int, *, model_step: int) -> ProduceBatchResult:
         """共卡同步入口：生产 -> 显式收尾 -> 取数。"""
 
-        self.continue_produce(model_step)
+        await self.continue_produce(model_step)
         task_sizes = self.get_task_batch_sizes(batch_size, train_step)
         local_progress = ProduceProgress.build_local(self.task_names, task_sizes, train_step)
 
@@ -588,15 +588,32 @@ class AgentLoopManager:
 
         task_sizes = self.get_task_batch_sizes(batch_size, train_step)
         while not self._finish_event.is_set():
-            if self._status == ManagerStatus.EXPIRED_BATCH:
+            current_model_step = train_step - 1
+            if self._status == ManagerStatus.EXPIRED_BATCH and current_model_step > self._model_step:
                 return ProduceBatchResult([], status=ProduceBatchStatus.EXPIRED_BATCH)
 
-            if await self.replay_buffer.is_ready(task_sizes):
+            ready = await self.replay_buffer.is_ready(task_sizes)
+            if self._status == ManagerStatus.EXPIRED_BATCH and not ready:
+                leftover_counts = await self.replay_buffer.count_statuses(self.task_names, _LEFTOVER_STATUSES)
+                raise RuntimeError(
+                    "EXPIRED_BATCH cannot be skipped and current batch is not ready. "
+                    f"train_step={train_step}, current_model_step={current_model_step}, "
+                    f"rollout_model_step={self._model_step}, status={self._status}, "
+                    f"producer_future_step={progress.producer_future_step}, "
+                    f"next_consumer_step={progress.next_consumer_step}, "
+                    f"target_upto_future_step={progress.target_upto_future_step}, "
+                    f"target_samples={progress.target_samples}, consumed_samples={progress.consumed_samples}, "
+                    f"task_sizes={task_sizes}, leftover_counts={leftover_counts}"
+                )
+
+            if ready:
                 result = await self._get_batch_from_buffer(
                     batch_size=batch_size,
                     task_batch_sizes=task_sizes,
                     consume_progress=progress,
                 )
+                if self._status == ManagerStatus.EXPIRED_BATCH:
+                    result.status = ProduceBatchStatus.EXPIRED_BATCH
                 progress.finish_consume(train_step)
                 await self._refresh_for_all_tasks(train_step + 1, [Status.COMPLETED, Status.ABORTED])
                 result.task_batch_sizes = task_sizes
@@ -623,11 +640,14 @@ class AgentLoopManager:
 
         self._update_event.set()
         self._status = ManagerStatus.UPDATE_WEIGHT_AND_ABORT
+        # 真实实现这里先调用 rollout_ctl.pause_generation.remote()，再 drain pending。
         task_sizes = {task.task_name: 0 for task in self.task_runners}
         self._pause_time_s = await self._pause_with_progress(task_sizes, pause_progress)
         return self._pause_time_s
 
-    def continue_produce(self, model_step: int) -> None:
+    async def continue_produce(self, model_step: int) -> None:
+        # 真实实现先更新 model_step，再调用 rollout_ctl.continue_generation.remote()。
+        # 状态切回 NORMAL 必须放在 continue_generation 完成之后。
         self._model_step = model_step
         self._status = ManagerStatus.NORMAL
         self._update_event.clear()
@@ -817,27 +837,33 @@ async def disagg_train_loop(
 
     producer_task = asyncio.create_task(manager.produce_loop(train_batch_size))
     try:
-        for train_step in range(start_step, total_train_steps + 1):
+        train_step = start_step
+        while train_step <= total_train_steps:
             produce_result = await manager.get_batch(train_batch_size, train_step=train_step)
             if produce_result.status == ProduceBatchStatus.FINISH:
                 break
 
             expired = produce_result.status == ProduceBatchStatus.EXPIRED_BATCH
-            if not expired:
+            trained = False
+            if produce_result.rollout_states:
                 assert produce_result.rollout_states, "非共卡 get_batch 除 EXPIRED_BATCH 外必须返回非空训练 batch。"
                 await trainer.train_one_batch(produce_result.rollout_states, train_step)
+                trained = True
 
-            should_sync = expired or train_step % sync_weights_interval == 0 or train_step == total_train_steps
+            sync_model_step = train_step if trained else train_step - 1
+            should_sync = expired or sync_model_step % sync_weights_interval == 0 or sync_model_step == total_train_steps
             if should_sync:
                 await manager.pause_produce(use_global_progress=True)
-                await trainer.sync_weights_and_save(train_step)
+                await trainer.sync_weights_and_save(sync_model_step)
 
-                if trainer.should_eval(train_step):
-                    await trainer.run_eval(train_step)
+                if trainer.should_eval(sync_model_step):
+                    await trainer.run_eval(sync_model_step)
 
-                manager.continue_produce(model_step=train_step)
+                await manager.continue_produce(model_step=sync_model_step)
 
-            await trainer.log_step(train_step, produce_result)
+            if trained:
+                await trainer.log_step(train_step, produce_result)
+                train_step += 1
     finally:
         manager.shutdown()
         await producer_task

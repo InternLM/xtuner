@@ -270,6 +270,9 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         strategy_a = _FakeProduceStrategy()
         strategy_b = _FakeProduceStrategy()
         strategy_c = _FakeProduceStrategy()
+        agent_loop_b = _fake_agent_loop()
+        agent_loop_a = _fake_agent_loop()
+        agent_loop_c = _fake_agent_loop()
         replay_buffer = _FakeReplayBuffer(
             rollout_states_by_task={
                 "task_a": [["a-0"], ["a-1"]],
@@ -286,7 +289,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             task_runners=[
                 _TaskRunner(
                     task_name="task_b",
-                    agent_loop=_fake_agent_loop(),
+                    agent_loop=agent_loop_b,
                     produce_strategy=strategy_b,
                     sampler=_FakeSampler(),
                     weight=1.0,
@@ -294,7 +297,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 ),
                 _TaskRunner(
                     task_name="task_a",
-                    agent_loop=_fake_agent_loop(),
+                    agent_loop=agent_loop_a,
                     produce_strategy=strategy_a,
                     sampler=_FakeSampler(),
                     weight=2.0,
@@ -302,7 +305,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 ),
                 _TaskRunner(
                     task_name="task_c",
-                    agent_loop=_fake_agent_loop(),
+                    agent_loop=agent_loop_c,
                     produce_strategy=strategy_c,
                     sampler=_FakeSampler(),
                     weight=0.0,
@@ -332,6 +335,12 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(strategy_a.called_update_event_states[0])
         self.assertEqual(len(strategy_b.called_update_events), 1)
         self.assertFalse(strategy_b.called_update_event_states[0])
+        agent_loop_b.rollout_ctl.continue_generation.remote.assert_awaited_once_with()
+        agent_loop_b.rollout_ctl.pause_generation.remote.assert_awaited_once_with()
+        agent_loop_a.rollout_ctl.continue_generation.remote.assert_not_awaited()
+        agent_loop_a.rollout_ctl.pause_generation.remote.assert_not_awaited()
+        agent_loop_c.rollout_ctl.continue_generation.remote.assert_not_awaited()
+        agent_loop_c.rollout_ctl.pause_generation.remote.assert_not_awaited()
         self.assertEqual(result.rollout_states, [["a-0"], ["a-1"], ["b-0"], ["b-1"]])
         self.assertEqual(result.leftover_init, 0)
         self.assertEqual(result.leftover_completed, 1)
@@ -541,9 +550,16 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=_FakeReplayBuffer({}, {}),
         )
 
+        async def _assert_update_state_before_controller_pause():
+            self.assertTrue(manager._update_event.is_set())
+            self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT)
+
+        agent_loop.rollout_ctl.pause_generation.remote.side_effect = _assert_update_state_before_controller_pause
+
         pause_time_s = await manager.pause_produce(use_global_progress=True)
 
         self.assertEqual(pause_time_s, 2.5)
+        agent_loop.rollout_ctl.pause_generation.remote.assert_awaited_once_with()
         self.assertEqual(strategy.cleanup_call_count, 1)
         self.assertEqual(len(strategy.cleanup_progresses), 1)
         self.assertEqual(strategy.cleanup_model_steps, [0])
@@ -579,7 +595,38 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager._status, AgentLoopManagerStatus.NORMAL)
         self.assertEqual(strategy.cleanup_call_count, 0)
 
-    async def test_get_batch_returns_expired_batch_when_manager_is_expired(self):
+    async def test_continue_produce_resumes_rollout_controller_before_normal_status(self):
+        agent_loop = _fake_agent_loop()
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=agent_loop,
+                    produce_strategy=_FakeProduceStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                ),
+            ],
+            replay_buffer=_FakeReplayBuffer({}, {}),
+        )
+        manager._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
+        manager._update_event.set()
+
+        async def _assert_paused_before_controller_resume():
+            self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT)
+            self.assertTrue(manager._update_event.is_set())
+
+        agent_loop.rollout_ctl.continue_generation.remote.side_effect = _assert_paused_before_controller_resume
+
+        await manager.continue_produce(model_step=6)
+
+        agent_loop.rollout_ctl.continue_generation.remote.assert_awaited_once_with()
+        self.assertEqual(manager._model_step, 6)
+        self.assertEqual(manager._status, AgentLoopManagerStatus.NORMAL)
+        self.assertFalse(manager._update_event.is_set())
+
+    async def test_get_batch_returns_empty_expired_when_model_step_is_newer_than_rollout(self):
         manager = AgentLoopManager(
             task_runners=[
                 _TaskRunner(
@@ -594,6 +641,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=_FakeReplayBuffer({}, {}),
         )
         manager._status = AgentLoopManagerStatus.EXPIRED_BATCH
+        manager._model_step = 9
         manager._pause_time_s = 1.5
 
         result = await manager.get_batch(batch_size=2, train_step=11)
@@ -602,6 +650,83 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.rollout_states, [])
         self.assertEqual(result.group_gen_pause_time_s, 1.5)
         self.assertEqual(manager._pause_time_s, 0.0)
+
+    async def test_get_batch_returns_ready_batch_as_expired_when_no_newer_model_exists(self):
+        replay_buffer = _FakeReplayBuffer(
+            rollout_states_by_task={
+                "task_a": [
+                    [_FakeRolloutState("a-0", 0.2)],
+                    [_FakeRolloutState("a-1", 0.3)],
+                ],
+            },
+            leftover_counts={("task_a", Status.COMPLETED): 2},
+        )
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=_FakeProduceStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                ),
+            ],
+            replay_buffer=replay_buffer,
+        )
+        manager._status = AgentLoopManagerStatus.EXPIRED_BATCH
+        manager._model_step = 8
+
+        result = await manager.get_batch(batch_size=2, train_step=9)
+
+        self.assertEqual(result.status, ProduceBatchStatus.EXPIRED_BATCH)
+        self.assertEqual([group[0].uid for group in result.rollout_states], ["a-0", "a-1"])
+        self.assertEqual(manager._produce_progress.next_consumer_step, 10)
+        self.assertEqual(manager._produce_progress.consumed_samples["task_a"], 2)
+
+    async def test_get_batch_fails_fast_when_expired_without_ready_batch_or_newer_model(self):
+        replay_buffer = _FakeReplayBuffer(
+            rollout_states_by_task={},
+            leftover_counts={
+                ("task_a", Status.INIT): 3,
+                ("task_a", Status.COMPLETED): 1,
+                ("task_a", Status.ABORTED): 2,
+            },
+        )
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=_FakeProduceStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                ),
+            ],
+            replay_buffer=replay_buffer,
+        )
+        manager._status = AgentLoopManagerStatus.EXPIRED_BATCH
+        manager._model_step = 8
+        manager._produce_progress.producer_future_step = 9
+        manager._produce_progress.target_upto_future_step = 8
+        manager._produce_progress.target_samples["task_a"] = 2
+        manager._produce_progress.consumed_samples["task_a"] = 1
+
+        with self.assertRaisesRegex(
+            RuntimeError, "train_step=9.*current_model_step=8.*rollout_model_step=8"
+        ) as caught:
+            await manager.get_batch(batch_size=2, train_step=9)
+        message = str(caught.exception)
+
+        self.assertIn("manager_status=EXPIRED_BATCH", message)
+        self.assertIn("producer_future_step=9", message)
+        self.assertIn("next_consumer_step=9", message)
+        self.assertIn("target_upto_future_step=8", message)
+        self.assertIn("target_samples={'task_a': 2}", message)
+        self.assertIn("consumed_samples={'task_a': 1}", message)
+        self.assertIn("task_batch_sizes={'task_a': 2}", message)
+        self.assertIn("leftover_status_counts=", message)
 
     async def test_get_batch_refreshes_staleness_at_entry(self):
         replay_buffer = _FakeReplayBuffer(
@@ -745,11 +870,12 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         strategy = _SequencedProduceStrategy(
             statuses=[ProduceBatchStatus.NORMAL, ProduceBatchStatus.EXPIRED_BATCH, ProduceBatchStatus.NORMAL],
         )
+        agent_loop = _fake_agent_loop()
         manager = AgentLoopManager(
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
-                    agent_loop=_fake_agent_loop(),
+                    agent_loop=agent_loop,
                     produce_strategy=strategy,
                     sampler=_FakeSampler(),
                     weight=1.0,
@@ -765,12 +891,14 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         await self._wait_until(lambda: manager._status == AgentLoopManagerStatus.EXPIRED_BATCH)
         self.assertEqual(manager._status, AgentLoopManagerStatus.EXPIRED_BATCH)
         self.assertEqual(strategy.called_train_steps[:2], [3, 4])
+        agent_loop.rollout_ctl.continue_generation.remote.assert_not_awaited()
 
-        manager.continue_produce(model_step=9)
+        await manager.continue_produce(model_step=9)
         await self._wait_until(lambda: len(strategy.called_train_steps) >= 3)
         self.assertEqual(manager._status, AgentLoopManagerStatus.NORMAL)
         self.assertEqual(strategy.called_train_steps[:3], [3, 4, 4])
         self.assertEqual(strategy.called_model_steps[2], 9)
+        agent_loop.rollout_ctl.continue_generation.remote.assert_awaited_once_with()
 
         manager.shutdown()
         await asyncio.wait_for(loop_task, timeout=1.0)

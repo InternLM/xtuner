@@ -1512,7 +1512,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         assert self._cur_step == saved_model_step
 
         self.update_weights()
-        self.agent_loop_manager.continue_produce(model_step=saved_model_step)
+        asyncio_run(self.agent_loop_manager.continue_produce(model_step=saved_model_step))
 
     def fit(self):
         # 对外保留同步 fit 接口，内部用 async loop 组织 producer/consumer。
@@ -1587,7 +1587,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             with timer("evaluation", step_timer_dict):
                                 eval_log_info.update(await self._run_evaluation(train_step))
 
-                        self.agent_loop_manager.continue_produce(model_step=train_step)
+                        await self.agent_loop_manager.continue_produce(model_step=train_step)
 
                 self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
                 self._cur_step = train_step
