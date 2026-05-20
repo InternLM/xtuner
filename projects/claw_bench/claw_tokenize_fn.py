@@ -10,7 +10,7 @@ from xtuner.v1.utils import get_logger
 
 from xtuner.v1.datasets.utils import CachableTokenizeFunction
 from xtuner.v1.datasets.rl_tokenize_fn.rl_tokenize_fn import RLTokenizeFn
-from xtuner.v1.ray.environment.rl_task.schemas import TaskData
+from xtuner.v1.ray.environment.rl_task.schemas import AgentRolloutItem
 
 logger = get_logger()
 
@@ -67,12 +67,14 @@ class RLClawTokenizeFn(RLTokenizeFn):
             if self.max_length is not None:
                 assert num_tokens <= self.max_length, f"num_tokens {num_tokens} > max_length {self.max_length}"
         
-        task_data = TaskData(
+        rollout_item = AgentRolloutItem(
             id=toml.get("id") or task_dir.name,
             data_source='claw-bench',
             ability=toml.get("domain"),
             tags=list(toml.get("tags") or []),
             instruction="instruction.md",
+            task_root=task_dir,
+            pipeline="claw_bench.pipeline.runner",
         )
 
         rl_out_data = {
@@ -84,9 +86,7 @@ class RLClawTokenizeFn(RLTokenizeFn):
             "ability": toml.get("domain", None),
             "data_source": {"claw-bench": 1.0},
             "extra_info": {
-                "task_data": task_data,
-                "task_dir": task_dir.as_posix(),
-                "pipeline": "claw_bench.pipeline.claw_pipeline",
+                "rollout_item": rollout_item,
             },
         }
         return rl_out_data  # type: ignore

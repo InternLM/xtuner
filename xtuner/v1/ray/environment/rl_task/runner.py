@@ -1,7 +1,7 @@
 """Runner — top-level orchestrator for one task rollout.
 
-Owns the infer sandbox lifecycle, threads a context dict through the two
-stages (infer → validate), assembles the result envelope.  All real work
+Owns sandbox lifecycle, threads one :class:`AgentRolloutItem` through the
+stages (infer → validate), and fills the result fields in place. All real work
 is hook-driven (:class:`sandbox.SandboxStage` pre/entry/post) +
 :class:`validator.JudgerValidator`.
 
@@ -15,10 +15,9 @@ Invocation:
     python runner.py --config config.py TASK_DIR [TASK_DIR ...]
     python runner.py --config config.py --limit 10     # iterate whole dataset
 
-``dataset`` in the config provides ``pipeline`` (a :class:`Runner` shared
-by all its tasks) and ``load_task(task_dir) → TaskData``.  No
-type-dispatched config — the pipeline is composed in pure Python by the
-project's factory.
+``dataset`` in the config provides either a :class:`Runner` object or a
+lagent-style runner config (``dict(type=Runner, ...)``), plus
+``load_task(task_dir) → AgentRolloutItem``.
 """
 
 from __future__ import annotations
@@ -32,33 +31,28 @@ import re
 import sys
 import time
 import traceback
+from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from lagent.utils import create_object  # noqa: E402
 from lagent.serving.sandbox.providers.gateway import GatewayProvider  # noqa: E402
 
 from xtuner.v1.ray.environment.rl_task.sandbox import SandboxStage  # noqa: E402
-from xtuner.v1.ray.environment.rl_task.schemas import TaskData  # noqa: E402
+from xtuner.v1.ray.environment.rl_task.schemas import (  # noqa: E402
+    AgentRolloutItem,
+    RolloutError,
+    RolloutStatus,
+    SandboxSpec,
+    StageStatus,
+)
 from xtuner.v1.ray.environment.rl_task.validator import JudgerValidator  # noqa: E402
-from xtuner.v1.ray.environment.trace import emit_diagnostic, span  # noqa: E402
+from xtuner.v1.ray.environment.trace import span  # noqa: E402
 from xtuner.v1.utils import get_logger  # noqa: E402
-
-
-# ─────────────────────────────────────────────────────────────────
-# Failure-path diagnostics
-# ─────────────────────────────────────────────────────────────────
-#
-# The in-sandbox lagent daemon writes its log to ``_DAEMON_LOG_PATH``.
-# On failure we pull the whole log to shared storage so post-mortem
-# survives Ray driver-log dedup.  The budget below is generous since
-# daemon logs can grow to several MB on long rollouts.
-_DAEMON_LOG_PATH = "/tmp/agent_daemon.log"
-_DAEMON_LOG_DUMP_TIMEOUT_SEC = 30.0
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -69,239 +63,226 @@ _DAEMON_LOG_DUMP_TIMEOUT_SEC = 30.0
 class Runner:
     """Pairs one infer stage with one validator."""
 
-    def __init__(self, infer: SandboxStage, validate: JudgerValidator):
-        self.infer = infer
-        self.validate = validate
-
-    async def run_single(
+    def __init__(
         self,
-        task_root: Path,
-        data: TaskData,
-        uid: dict[str, int],
         *,
-        provider: Any,
-        lagent_src_dir: str | Path | None = None,
-        llm_model: str | None = None,
-        llm_base_url: str | None = None,
-        llm_api_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Run one rollout end-to-end.
+        provider: Any | None = None,
+        sandboxes: Mapping[str, SandboxSpec | dict[str, Any]],
+        infer: SandboxStage | dict[str, Any],
+        validate: JudgerValidator | dict[str, Any],
+        acquire_max_attempts: int = 3,
+        health_max_wait_sec: float = 600.0,
+        health_poll_interval_sec: float = 2.0,
+    ):
+        self.provider = create_object(provider)
+        self.sandboxes = {name: create_object(spec) for name, spec in sandboxes.items()}
+        self.infer = create_object(infer)
+        self.validate = create_object(validate)
+        self.acquire_max_attempts = acquire_max_attempts
+        self.health_max_wait_sec = health_max_wait_sec
+        self.health_poll_interval_sec = health_poll_interval_sec
 
-        Returns an RLDataFlowItem-shaped dict.
-        """
-        ctx: dict[str, Any] = {
-            "task_root": task_root,
-            "data": data,
-            "uid": uid,
-            "runtime": {
-                "lagent_src_dir": lagent_src_dir,
-                "llm_model": llm_model,
-                "llm_base_url": llm_base_url,
-                "llm_api_key": llm_api_key,
-            },
-            "workspace": self.infer.sandbox.workspace_path,
-            "sandbox_image": self.infer.sandbox.image,
-            # Structured failure metadata populated as run_single proceeds; the
-            # fields below end up in ``_mark_failed``'s ``extra_info`` so the
-            # install_agent_env classifier and fates.jsonl get the exact stage
-            # + rc the runner saw, rather than a best-effort regex guess.
-            "failed_stage": None,
-            "entry_rc": None,
-            "entry_stderr": None,
-            "exception_type": None,
-            "sandbox_env_id": None,
-            "sandbox_url": None,
-        }
+    async def run(self, item: AgentRolloutItem) -> AgentRolloutItem:
+        """Run one rollout sample and return the same item with result fields filled."""
+        provider = self.provider
+        if provider is None:
+            raise RuntimeError("Runner has no sandbox provider; pass provider at build time")
 
-        client = None
-        env_id: str | None = None
-        tid = data.id
+        if item.task_root is None:
+            raise ValueError("AgentRolloutItem.task_root is required by Runner.run")
+        if not item.uid:
+            raise ValueError("AgentRolloutItem.uid is required by Runner.run")
+
+        uid = item.uid
+        infer_sandbox = self._stage_sandbox_name(self.infer)
+        infer_spec = self.sandboxes[infer_sandbox]
+        sandbox_clients: dict[str, Any] = {}
+        sandbox_env_ids: dict[str, str] = {}
+        sandbox_urls: dict[str, str | None] = {}
+
+        async def get_sandbox(name: str) -> Any:
+            if name in sandbox_clients:
+                return sandbox_clients[name]
+            spec = self.sandboxes[name]
+            client, env_id = await _acquire_ready_sandbox(
+                provider,
+                spec,
+                max_attempts=self.acquire_max_attempts,
+                health_max_wait_sec=self.health_max_wait_sec,
+                health_poll_interval_sec=self.health_poll_interval_sec,
+            )
+            sandbox_clients[name] = client
+            sandbox_env_ids[name] = env_id
+            sandbox_urls[name] = _sandbox_url_of(client)
+            return client
+
+        item.status = RolloutStatus.RUNNING
+        item.infer.runtime.update(dict(getattr(self.infer, "runtime", {}) or {}))
+        item.infer.sandbox_name = infer_sandbox
+        item.infer.sandbox_image = infer_spec.image
+        item.infer.workspace = infer_spec.workspace_path
+
+        tid = item.id
         uid_obs = str(uid.get("observation_id") or "")
         try:
-            with span(uid_obs, "run_single_total", task_id=tid) as total_span:
-                get_logger().info(f"[{tid}] acquiring sandbox (image={self.infer.sandbox.image})")
+            with span(uid_obs, "run_total", task_id=tid) as total_span:
+                get_logger().info(f"[{tid}] acquiring sandbox name={infer_sandbox} image={infer_spec.image}")
                 t0 = time.monotonic()
                 try:
                     with span(uid_obs, "acquire", task_id=tid) as acquire_span:
-                        client, env_id = await _acquire_ready_sandbox(
-                            provider,
-                            self.infer.sandbox,
-                        )
+                        infer_client = await get_sandbox(infer_sandbox)
                         # Annotate the span BEFORE it exits so the sandbox_url
                         # lands in the emitted acquire span record.  This is
                         # the primary observability signal for in-flight
                         # debugging (``scripts/trace/inflight.py`` uses it to
                         # surface "which sandbox is this sample stuck in").
-                        ctx["sandbox_env_id"] = env_id
-                        ctx["sandbox_url"] = _sandbox_url_of(client)
+                        item.infer.sandbox_env_id = sandbox_env_ids[infer_sandbox]
+                        sandbox_url = sandbox_urls[infer_sandbox]
+                        if sandbox_url is not None:
+                            item.infer.sandbox_url = sandbox_url
                         acquire_span.annotate(
-                            sandbox_env_id=env_id,
-                            sandbox_url=ctx["sandbox_url"],
-                            sandbox_image=self.infer.sandbox.image,
+                            sandbox_name=infer_sandbox,
+                            sandbox_env_id=item.infer.sandbox_env_id,
+                            sandbox_url=sandbox_url,
+                            sandbox_image=infer_spec.image,
                         )
-                except Exception:
-                    ctx["failed_stage"] = "acquire"
+                except Exception as exc:
+                    item.infer.status = StageStatus.FAILED
+                    item.infer.error = RolloutError(
+                        stage="infer",
+                        category="acquire",
+                        type=type(exc).__name__,
+                        message=str(exc),
+                    )
                     raise
-                get_logger().info(f"[{tid}] sandbox ready env_id={env_id} ({time.monotonic() - t0:.1f}s)")
+                get_logger().info(
+                    f"[{tid}] sandbox ready name={infer_sandbox} env_id={sandbox_env_ids[infer_sandbox]} "
+                    f"({time.monotonic() - t0:.1f}s)"
+                )
 
                 get_logger().info(f"[{tid}] infer: start ({len(self.infer.pre)} pre-hooks)")
                 t1 = time.monotonic()
                 try:
                     with span(uid_obs, "infer", task_id=tid) as infer_span:
-                        # Detached-entry model: SandboxStage.run launches the
-                        # entry with detach=True and polls process liveness +
-                        # rc file to detect completion.  Post-hooks on entry
-                        # failure swallow their own exceptions (see sandbox.py)
-                        # so the real entry rc reaches us here.
-                        infer_result = await self.infer.run(client, ctx)
+                        infer_result = await self.infer.run(infer_client, item, item.infer)
                         if not infer_result.ok:
                             infer_span.mark_error(f"rc={infer_result.return_code}: {infer_result.error}")
                 except Exception as exc:
                     # SandboxStage.run itself raised.  Distinguish pre-hook
                     # failure (no entry output yet) from post-hook failure
-                    # (entry rc available via ctx["result"]).
-                    prev = ctx.get("result")
+                    # (entry rc available via item.infer.entry_result).
+                    prev = item.infer.entry_result
                     if prev is not None and prev.return_code != 0:
-                        ctx["failed_stage"] = _classify_entry_rc(prev.return_code)
-                        ctx["entry_rc"] = prev.return_code
-                        ctx["entry_stderr"] = (prev.stderr or "")[:400]
+                        category = _classify_entry_rc(prev.return_code)
                     elif prev is not None:
-                        ctx["failed_stage"] = "infer_posthook"
-                        ctx["entry_rc"] = 0
+                        category = "infer_posthook"
                     else:
-                        ctx["failed_stage"] = "infer_prehook"
-                    ctx["exception_type"] = type(exc).__name__
+                        category = "infer_prehook"
+                    item.infer.error = item.infer.error or RolloutError(
+                        stage="infer",
+                        category=category,
+                        type=type(exc).__name__,
+                        message=str(exc),
+                    )
                     raise
                 get_logger().info(f"[{tid}] infer: done rc={infer_result.return_code} ({time.monotonic() - t1:.1f}s)")
                 if not infer_result.ok:
-                    ctx["failed_stage"] = _classify_entry_rc(infer_result.return_code)
-                    ctx["entry_rc"] = infer_result.return_code
-                    ctx["entry_stderr"] = (infer_result.stderr or "")[:400]
+                    category = _classify_entry_rc(infer_result.return_code)
                     total_span.mark_error(f"infer failed: {infer_result.error}")
-                    # Also dump diagnostics on non-exception rc!=0 paths (rc=-4
-                    # sandbox_unreachable, rc=-3 timeout, rc=5/6/7 entry-script
-                    # errors, etc.).  The dump records the attempt even when
-                    # the daemon log download itself fails (e.g. sandbox is
-                    # already gone in the rc=-4 case) so post-mortems always
-                    # have *something* beyond the terse fate string.
-                    await _dump_skipped_diagnostic(
-                        client,
-                        tid,
-                        data,
-                        RuntimeError(f"infer failed: return_code={infer_result.return_code}: {infer_result.error}"),
-                        uid=uid_obs,
+                    item.status = RolloutStatus.FAILED
+                    item.error = RolloutError(
+                        stage="infer",
+                        category=category,
+                        type="StageResult",
+                        message=f"infer failed: {infer_result.error}",
                     )
-                    return _mark_failed(
-                        data,
-                        uid,
-                        f"infer failed: {infer_result.error}",
-                        metadata=_infer_metadata(ctx),
-                    )
+                    return item
 
                 get_logger().info(f"[{tid}] validate: start ({len(self.validate.judgers)} judgers)")
                 t2 = time.monotonic()
                 try:
                     with span(uid_obs, "validate", task_id=tid):
                         aggregated = await self.validate.run(
-                            client,
-                            ctx,
-                            provider,
-                            self.infer.sandbox.workspace_path,
+                            item,
+                            get_sandbox,
+                            sandboxes=self.sandboxes,
+                            infer_sandbox=infer_sandbox,
+                            infer_workspace=infer_spec.workspace_path,
                         )
-                except Exception:
-                    ctx["failed_stage"] = "validate"
+                except Exception as exc:
+                    item.validation.status = StageStatus.FAILED
+                    item.validation.error = RolloutError(
+                        stage="validate",
+                        category="validate",
+                        type=type(exc).__name__,
+                        message=str(exc),
+                    )
                     raise
                 get_logger().info(
                     f"[{tid}] validate: done total={aggregated.total:.4f} ({time.monotonic() - t2:.1f}s)"
                 )
 
-                return _mark_completed(data, uid, metadata=_infer_metadata(ctx), judge=aggregated, infer=infer_result)
+                item.status = RolloutStatus.COMPLETED
+                item.score = aggregated.total
+                return item
         except Exception as exc:
             # Any stage still without a tag at this point is an uncategorized
-            # runner-level exception — the span for the throwing stage already
-            # has the exception recorded, so this label is just a fate-bucket
-            # fallback.
-            if ctx.get("failed_stage") is None:
-                ctx["failed_stage"] = "runner_exc"
-            ctx["exception_type"] = ctx.get("exception_type") or type(exc).__name__
-            # Try to capture daemon log tail to a per-task file on shared
-            # storage so the post-mortem survives Ray driver-log dedup.
-            # ``client.download_file`` may well fail when the daemon is dead
-            # (same upstream /download endpoint) — we swallow that and record
-            # the attempt outcome either way.
-            await _dump_skipped_diagnostic(client, tid, data, exc, uid=uid_obs)
+            # runner-level exception. The span for the throwing stage already
+            # has the exception recorded, so this label is just a structured
+            # error-category fallback.
+            if item.error is None:
+                stage = "validate" if item.validation.status == StageStatus.FAILED else "infer"
+                category = (
+                    item.validation.error.category
+                    if item.validation.error is not None
+                    else item.infer.error.category
+                    if item.infer.error is not None
+                    else "runner_exc"
+                )
+                item.error = RolloutError(
+                    stage=stage,
+                    category=category,
+                    type=type(exc).__name__,
+                    message=str(exc),
+                )
             get_logger().error(f"[{tid}] runner failed: {exc}\n{traceback.format_exc()}")
-            return _mark_failed(
-                data,
-                uid,
-                f"{type(exc).__name__}: {exc}",
-                metadata=_infer_metadata(ctx),
-            )
+            item.status = RolloutStatus.FAILED
+            return item
         finally:
-            if env_id is not None:
+            for name, client in reversed(list(sandbox_clients.items())):
                 try:
-                    await provider.delete(env_id)
+                    await provider.delete(sandbox_env_ids[name])
                 except Exception as exc:
-                    get_logger().warning(f"[{tid}] gateway delete failed: {exc}")
-            if client is not None:
+                    get_logger().warning(f"[{tid}] gateway delete failed for sandbox {name}: {exc}")
                 try:
                     await client.aclose()
                 except Exception as exc:
-                    get_logger().warning(f"[{tid}] client aclose failed: {exc}")
+                    get_logger().warning(f"[{tid}] client aclose failed for sandbox {name}: {exc}")
 
-
-# ─────────────────────────────────────────────────────────────────
-# Result envelope
-# ─────────────────────────────────────────────────────────────────
-
-
-def _infer_metadata(ctx: dict[str, Any]) -> dict[str, Any]:
-    """Pack structured runner state into the ``extra_info`` metadata that
-    ``_mark_failed`` / ``_mark_completed`` attach to their result envelope.
-
-    The install_agent_env fate emitter reads these fields directly instead
-    of regex-parsing ``failure_reason``, which is both fragile and opaque
-    (rc22 had 3468 fates misclassified as ``posthook_download_404`` when
-    the real cause was ``infer_timeout`` — the post-hook error string
-    simply overwrote the entry rc in a reason-string-only world).
-    """
-    md: dict[str, Any] = {}
-    chosen = ctx.get("chosen_agent")
-    if chosen is not None:
-        md["agent_name"] = chosen.name
-    for key in (
-        "failed_stage",
-        "entry_rc",
-        "entry_stderr",
-        "exception_type",
-        "sandbox_image",
-        "sandbox_env_id",
-        "sandbox_url",
-    ):
-        val = ctx.get(key)
-        if val is not None:
-            md[key] = val
-    return md
+    def _stage_sandbox_name(self, stage: SandboxStage) -> str:
+        name = stage.sandbox
+        if not isinstance(name, str):
+            raise TypeError(f"SandboxStage.sandbox must be a sandbox name, got {type(name).__name__}")
+        if name not in self.sandboxes:
+            raise KeyError(f"unknown sandbox {name!r}; known sandboxes: {sorted(self.sandboxes)}")
+        return name
 
 
 def _classify_entry_rc(rc: int) -> str:
-    """Map a detached-entry return code to a fate ``failed_stage`` label.
+    """Map an entry return code to a Runner error category.
 
-    Mirrors the rc encodings produced by
-    ``wait_for_detached_entry`` + entry scripts:
+    Mirrors the rc encodings produced by ``ShellEntry`` and entry scripts:
 
       * ``-4`` — sandbox env unreachable (gateway evicted, TTL expired,
         container killed).  Separates "sandbox died under us" from
-        "entry script misbehaved" so fate stats attribute the loss
+        "entry script misbehaved" so observability can attribute the loss
         correctly.
-      * ``-3`` — host-side poll loop exceeded ``SandboxStage.timeout``
+      * ``-3`` — host-side entry monitor exceeded ``ShellEntry.timeout``
         (agent hung through the window).
-      * ``-2`` — daemon process disappeared from pgrep while entry ran.
+      * ``-2`` — reserved for future service-health failure.
       * ``-1`` — wrapper shell died without writing the rc file
         (SIGKILL / container eviction / fatal shell error).
-      * positive — entry script's own exit code (e.g. lagent_entry.sh
-        uses 4 = daemon boot failure, 5 = chat call error, 6 = state_dict
-        error, 7 = get_messages error).
+      * positive — entry script or lagent client CLI exit code.
     """
     if rc == -4:
         return "sandbox_unreachable"
@@ -321,9 +302,8 @@ def _classify_entry_rc(rc: int) -> str:
 def _sandbox_url_of(client: Any) -> str | None:
     """Best-effort extraction of the sandbox base URL from a client.
 
-    Different client libraries expose this under different attributes —
-    try the common ones and fall back to ``str(client)`` so fates always
-    have *something* pointing at the right sandbox.
+    Different client libraries expose this under different attributes;
+    try the common ones so downstream observability has a sandbox pointer.
     """
     for attr in ("base_url", "url", "endpoint", "_base_url"):
         val = getattr(client, attr, None)
@@ -332,20 +312,18 @@ def _sandbox_url_of(client: Any) -> str | None:
     return None
 
 
-_ACQUIRE_MAX_ATTEMPTS = 3
-# Sandbox cold-start can take 30-60s under load; pathological boots run
-# longer.  With async waits this budget is cheap (no thread tied up), so
-# stay generous to avoid spurious "unhealthy" → delete → recreate churn.
-_HEALTH_MAX_WAIT_SEC = 600
-_HEALTH_POLL_INTERVAL_SEC = 2
-
-
-async def _acquire_ready_sandbox(provider: Any, spec: Any) -> tuple[Any, str]:
+async def _acquire_ready_sandbox(
+    provider: Any,
+    spec: Any,
+    *,
+    max_attempts: int,
+    health_max_wait_sec: float,
+    health_poll_interval_sec: float,
+) -> tuple[Any, str]:
     """Create a sandbox + wait for /health to respond before returning.
 
-    Retries on create-fail or /health-never-becomes-ok (up to
-    :data:`_ACQUIRE_MAX_ATTEMPTS` times).  Burst protection is enforced
-    inside ``provider.create`` via a token-bucket rate limiter.
+    Retries on create-fail or /health-never-becomes-ok. Burst protection
+    is enforced inside ``provider.create`` via a token-bucket rate limiter.
 
     Args:
         provider (Any): Async sandbox provider exposing ``create`` /
@@ -357,11 +335,19 @@ async def _acquire_ready_sandbox(provider: Any, spec: Any) -> tuple[Any, str]:
     """
 
     last_err: Exception | None = None
-    for attempt in range(1, _ACQUIRE_MAX_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
+            create_kwargs: dict[str, Any] = {}
+            if getattr(spec, "key", None):
+                create_kwargs["key"] = spec.key
+            if getattr(spec, "env_vars", None):
+                create_kwargs["env_vars"] = spec.env_vars
+            if getattr(spec, "resources", None):
+                create_kwargs["resources"] = spec.resources
             client, env_id = await provider.create(
                 image_tag=spec.image,
                 ttl_seconds=spec.ttl_seconds,
+                **create_kwargs,
             )
         except Exception as exc:
             last_err = exc
@@ -369,7 +355,11 @@ async def _acquire_ready_sandbox(provider: Any, spec: Any) -> tuple[Any, str]:
             await asyncio.sleep(min(2**attempt, 8))
             continue
 
-        if await _wait_healthy(client):
+        if await _wait_healthy(
+            client,
+            max_wait_sec=health_max_wait_sec,
+            poll_interval_sec=health_poll_interval_sec,
+        ):
             return client, env_id
 
         get_logger().warning(f"sandbox {env_id} never became healthy; deleting and retrying")
@@ -383,13 +373,13 @@ async def _acquire_ready_sandbox(provider: Any, spec: Any) -> tuple[Any, str]:
             get_logger().warning(f"aclose of unhealthy {env_id} failed: {exc}")
         last_err = RuntimeError(f"sandbox {env_id} unhealthy")
 
-    raise RuntimeError(f"could not acquire a healthy sandbox after {_ACQUIRE_MAX_ATTEMPTS} attempts: {last_err}")
+    raise RuntimeError(f"could not acquire a healthy sandbox after {max_attempts} attempts: {last_err}")
 
 
-async def _wait_healthy(client: Any) -> bool:
+async def _wait_healthy(client: Any, *, max_wait_sec: float, poll_interval_sec: float) -> bool:
     """Poll /health until it returns ``ok: True`` or the budget is
     exhausted."""
-    deadline = time.monotonic() + _HEALTH_MAX_WAIT_SEC
+    deadline = time.monotonic() + max_wait_sec
     while time.monotonic() < deadline:
         try:
             h = await client.health_check()
@@ -397,136 +387,13 @@ async def _wait_healthy(client: Any) -> bool:
                 return True
         except Exception as exc:
             get_logger().debug(f"health poll error: {exc}")
-        await asyncio.sleep(_HEALTH_POLL_INTERVAL_SEC)
+        await asyncio.sleep(poll_interval_sec)
     return False
-
-
-def _mark_completed(
-    data: TaskData,
-    uid: dict[str, int],
-    *,
-    metadata: dict[str, Any],
-    judge,
-    infer,
-) -> dict[str, Any]:
-    return {
-        "uid": uid,
-        "data": {
-            "extra_info": {
-                "task_id": data.id,
-                "data_source": data.data_source,
-                "ability": data.ability,
-                "tags": data.tags,
-            },
-        },
-        "env": {
-            "rollout": {
-                "state": "completed",
-                "finish_reason": "stop",
-                "extra_info": {**metadata},
-            },
-            "judger": {
-                "total": judge.total,
-                "per_judger": [r.model_dump() for r in judge.per_judger],
-                "step_rewards": [sr.model_dump() for sr in judge.step_rewards],
-                "failed": judge.failed,
-            },
-            "agent": {
-                "message_dict": json.loads(infer.pulled.get("message", "{}")),
-                "daemon_log": infer.pulled.get("daemon_log", ""),
-            },
-        },
-    }
-
-
-def _mark_failed(
-    data: TaskData,
-    uid: dict[str, int],
-    reason: str,
-    *,
-    metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    return {
-        "uid": uid,
-        "data": {
-            "extra_info": {
-                "task_id": data.id,
-                "data_source": data.data_source,
-            },
-        },
-        "env": {
-            "rollout": {
-                "state": "failed",
-                "finish_reason": "failed",
-                "extra_info": {
-                    "failure_reason": reason,
-                    **(metadata or {}),
-                },
-            },
-            "judger": None,
-            "agent": None,
-        },
-    }
-
-
-async def _dump_skipped_diagnostic(
-    client: Any | None,
-    tid: str,
-    data: TaskData,
-    exc: BaseException,
-    uid: str | None = None,
-) -> None:
-    """Download the daemon log and hand it off to ``trace.emit_diagnostic`` so
-    per-failure bundles land under ``$WORK_DIR/trace/diagnostics/``.
-
-    Runner owns the sandbox client (so the daemon log fetch lives here),
-    but the file-writing convention is centralized in
-    :mod:`xtuner.v1.ray.environment.trace` to keep the full observability
-    namespace (``fates.jsonl`` / ``spans.jsonl`` / ``llm_calls.jsonl`` /
-    ``diagnostics/``) under one roof.  Both are best-effort — download
-    timeout or write errors are swallowed.
-
-    Args:
-        client (Any | None): SandboxClient or None if acquire failed.
-        tid (str): Task id for log tags.
-        data (TaskData): Owning task record.
-        exc (BaseException): Exception being handled.
-        uid (str | None): Per-sample observation id; threaded in so
-            diagnostics can be cross-referenced with fates.jsonl /
-            spans.jsonl entries of the same sample.
-    """
-    daemon_log: bytes | None = None
-    download_err: str | None = None
-    if client is not None:
-        try:
-            daemon_log = await asyncio.wait_for(
-                client.download_file(_DAEMON_LOG_PATH),
-                timeout=_DAEMON_LOG_DUMP_TIMEOUT_SEC,
-            )
-        except Exception as dl_exc:
-            download_err = f"{type(dl_exc).__name__}: {dl_exc}"
-    else:
-        download_err = "no sandbox client available"
-
-    emit_diagnostic(
-        task_id=data.id,
-        uid=uid,
-        data_source=getattr(data, "data_source", None),
-        exception_type=type(exc).__name__,
-        exception_msg=str(exc),
-        daemon_log=daemon_log,
-        download_err=download_err,
-    )
 
 
 # ─────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────
-
-
-DEFAULT_GATEWAY = "http://env-gateway.ailab.ailab.ai"
-DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent"
-# DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/wangziyi/projs/lagent"
 
 
 def _load_dataset_from_config(config_path: Path) -> Any:
@@ -540,9 +407,9 @@ def _load_dataset_from_config(config_path: Path) -> Any:
 
         # configs/claw_bench_calendar.py
         from claw_bench.dataset import ClawBench
-        from claw_bench.pipeline import claw_pipeline
+        from claw_bench.pipeline import runner
         dataset = ClawBench(tasks_root="/data/bench/claw-bench/tasks",
-                            pipeline=claw_pipeline())
+                            pipeline=runner)
     """
     ns: dict[str, Any] = {}
     exec(compile(config_path.read_text(encoding="utf-8"), str(config_path), "exec"), ns)
@@ -562,19 +429,32 @@ async def _run_one(
     llm_base_url: str | None,
     llm_api_key: str | None,
 ) -> dict[str, Any]:
-    data = dataset.load_task(task_dir)
-    runner: Runner = dataset.pipeline
-    get_logger().info(f"running task={data.id} (dataset={dataset.name}, uid={uid})")
-    return await runner.run_single(
-        task_dir,
-        data,
-        uid,
-        provider=provider,
-        lagent_src_dir=lagent_src_dir,
-        llm_model=llm_model,
-        llm_base_url=llm_base_url,
-        llm_api_key=llm_api_key,
-    )
+    item = dataset.load_task(task_dir)
+    pipeline_spec = item.pipeline or dataset.pipeline
+    runner_config = deepcopy(pipeline_spec) if isinstance(pipeline_spec, dict) else pipeline_spec
+    if isinstance(runner_config, dict):
+        runner_config["provider"] = provider
+        infer = dict(runner_config.get("infer") or {})
+        runtime = dict(infer.get("runtime") or {})
+        runtime.update(
+            {
+                "lagent_src_dir": lagent_src_dir,
+                "llm_model": llm_model,
+                "llm_base_url": llm_base_url,
+                "llm_api_key": llm_api_key,
+            }
+        )
+        infer["runtime"] = runtime
+        runner_config["infer"] = infer
+    runner: Runner = create_object(runner_config)
+    get_logger().info(f"running task={item.id} (dataset={dataset.name}, uid={uid})")
+    result = await runner.run(item.model_copy(update={"task_root": Path(task_dir), "uid": uid}))
+    dumped = result.model_dump(mode="json", exclude={"artifacts", "pipeline"})
+    dumped["artifacts"] = {
+        key: f"<{len(value)} bytes>" if isinstance(value, (bytes, bytearray)) else value
+        for key, value in result.artifacts.items()
+    }
+    return dumped
 
 
 async def main_async(args: argparse.Namespace) -> int:
@@ -638,8 +518,8 @@ async def main_async(args: argparse.Namespace) -> int:
                 elapsed = time.monotonic() - run_start
                 rate = completed / max(elapsed, 0.001)
                 remaining = (total - completed) / max(rate, 0.001)
-                state = (result.get("env", {}).get("rollout") or {}).get("state", "?")
-                tid = (result.get("data", {}).get("extra_info") or {}).get("task_id", "?")
+                state = result.get("status", "?")
+                tid = result.get("id", "?")
                 took = time.monotonic() - started
                 get_logger().info(
                     f"[{completed}/{total}] {tid} {state} took={took:.1f}s | "
@@ -654,7 +534,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
     report_path = _write_run_report(results, Path(args.report_dir))
     _print_summary(results, report_path)
-    any_failed = any(r["env"]["rollout"]["state"] == "failed" for r in results)
+    any_failed = any(r.get("status") == RolloutStatus.FAILED.value for r in results)
     return 1 if any_failed else 0
 
 
@@ -702,20 +582,21 @@ def _categorize_failure(reason: str) -> tuple[str, str | None]:
 
 
 def _summarize(r: dict) -> dict:
-    rollout = r.get("env", {}).get("rollout", {}) or {}
-    state = rollout.get("state")
-    task_id = r.get("data", {}).get("extra_info", {}).get("task_id")
-    if state == "completed":
-        total = (r.get("env", {}).get("judger") or {}).get("total")
+    state = r.get("status")
+    task_id = r.get("id")
+    if state == RolloutStatus.COMPLETED.value:
+        validation = r.get("validation") or {}
+        judge = validation.get("result") or {}
+        total = r.get("score", judge.get("total"))
         return {"state": "passed", "task_id": task_id, "total": total}
 
-    extra = rollout.get("extra_info", {}) or {}
-    reason = extra.get("failure_reason", "") or ""
+    err = r.get("error") or (r.get("infer") or {}).get("error") or (r.get("validation") or {}).get("error") or {}
+    reason = err.get("message") or state or ""
     category, detail = _categorize_failure(reason)
     return {
         "state": "failed",
         "task_id": task_id,
-        "category": category,
+        "category": err.get("category") or category,
         "detail": detail,
         "reason": reason[:800],
     }
@@ -803,10 +684,10 @@ def main() -> int:
         default=1024,
         help="Max tasks running in parallel (semaphore-gated).",
     )
-    parser.add_argument("--gateway", default=DEFAULT_GATEWAY)
+    parser.add_argument("--gateway", default="http://env-gateway.ailab.ailab.ai")
     parser.add_argument(
         "--lagent-src",
-        default=DEFAULT_LAGENT_SRC,
+        default="/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent",
         help="Local path to lagent source.  Pass '' to skip upload.",
     )
     parser.add_argument("--llm-model", default=None)

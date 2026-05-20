@@ -8,9 +8,9 @@ Invoke via::
 """
 
 from tb2_eval.dataset import TB2EvalBench
-from tb2_eval.pipeline import tb2_eval_pipeline
+from tb2_eval.pipeline import runner
 
 dataset = TB2EvalBench(
     tasks_root="/mnt/shared-storage-user/llmit/user/wangziyi/projs/terminalbench2-harbor-p-cluster/terminal-bench-2",
-    pipeline=tb2_eval_pipeline(),
+    pipeline=runner,
 )

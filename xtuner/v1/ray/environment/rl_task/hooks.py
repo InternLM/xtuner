@@ -1,45 +1,233 @@
-"""Specialized hooks — agent setup, instruction rendering, output/judger
-plumbing.
+"""Hook implementations — primitive sandbox plumbing plus agent setup.
 
 Each class here is a :class:`sandbox.Hook` subclass with a clear purpose
 you can infer from its name.  Primitive hooks (Upload/Exec/Download) cover
 the common case; specialized hooks encapsulate logic that's awkward to
 express as a plain lambda (e.g. running agent config exec on host).
 
-Context dict keys this module reads/writes::
-
-    ctx["task_root"]        : Path  (set by Runner)
-    ctx["data"]             : TaskData  (set by Runner)
-    ctx["workspace"]        : str  (set by Runner from stage.sandbox.workspace_path)
-    ctx["uid"]              : dict  (set by Runner)
-    ctx["runtime"]          : dict  (lagent_src_dir, llm_base_url, llm_api_key)
-    ctx["chosen_agent"]     : AgentSpec  (set by PickAgent)
-    ctx["judger_result"]    : JudgerResult  (set by ParseJudgerStdout)
-    ctx["result"]           : StageResult  (set by SandboxStage after entry)
+Hooks receive the current :class:`AgentRolloutItem` and the current
+:class:`StageRecord`. They read task fields from the item and write stage
+execution fields on the record.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import fnmatch
+import io
 import json
+import re
+import tarfile
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from lagent.utils import create_object
 from pydantic import ValidationError
 
-from xtuner.v1.ray.environment.rl_task import bundle
 from xtuner.v1.ray.environment.rl_task.sandbox import (
     Hook,
-    StageResult,
     exec_in,
     http_upload,
-    tar_dir,
     upload_tar_and_extract,
-    walk_files,
 )
-from xtuner.v1.ray.environment.rl_task.schemas import AgentSpec, CriterionScore, JudgerResult
+from xtuner.v1.ray.environment.rl_task.schemas import (
+    AgentRolloutItem,
+    AgentSpec,
+    JudgerResult,
+    SelectedAgentRecord,
+    StageRecord,
+    StageResult,
+)
 from xtuner.v1.utils import get_logger
+
+
+# ─────────────────────────────────────────────────────────────────
+# Primitive hooks
+# ─────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class UploadMapping:
+    source: str
+    target: str
+    base: str | None = None
+    exclude: list[str] = field(default_factory=list)
+    flatten: bool = False
+
+
+class UploadHook(Hook):
+    """Upload files via a list of explicit source→target mappings."""
+
+    name = "upload"
+
+    def __init__(self, mappings: list[dict | UploadMapping]):
+        self.mappings: list[UploadMapping] = [
+            m if isinstance(m, UploadMapping) else UploadMapping(**m) for m in mappings
+        ]
+
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        files: dict[str, Path] = {}
+        for m in self.mappings:
+            files.update(self._resolve_mapping(m, item))
+        if files:
+            await upload_tar_and_extract(client, files, "/")
+
+    def _resolve_mapping(self, m: UploadMapping, item: AgentRolloutItem) -> dict[str, Path]:
+        task_root = item.task_root
+        if task_root is None:
+            raise ValueError("AgentRolloutItem.task_root is required by UploadHook")
+        base = (task_root / m.base).resolve() if m.base else task_root.resolve()
+        if not base.exists():
+            return {}
+
+        matches = self._match_source(base, m.source)
+        matches = [p for p in matches if not self._is_excluded(p, base, m.exclude)]
+        out: dict[str, Path] = {}
+        for src in matches:
+            rel = src.relative_to(base)
+            if m.target.endswith("/"):
+                dst = Path(m.target) / (src.name if m.flatten else rel)
+                out[dst.as_posix()] = src
+            else:
+                if len(matches) != 1:
+                    raise ValueError(f"target {m.target!r} is a file but {m.source!r} matched {len(matches)} files")
+                out[m.target] = src
+        return out
+
+    def _match_source(self, base: Path, pattern: str) -> list[Path]:
+        if pattern.startswith("re:"):
+            rx = re.compile(pattern[3:])
+            return sorted(
+                p
+                for p in base.rglob("*")
+                if p.is_file() and not self._ignored(p) and rx.search(p.relative_to(base).as_posix())
+            )
+        hits = sorted(p for p in base.glob(pattern) if p.is_file() and not self._ignored(p))
+        if hits:
+            return hits
+        p = base / pattern
+        if p.is_dir():
+            return sorted(f for f in p.rglob("*") if f.is_file() and not self._ignored(f))
+        return []
+
+    def _is_excluded(self, host: Path, base: Path, patterns: list[str]) -> bool:
+        rel = host.relative_to(base).as_posix()
+        for pat in patterns:
+            if pat.startswith("re:"):
+                if re.search(pat[3:], rel):
+                    return True
+            elif fnmatch.fnmatch(rel, pat):
+                return True
+        return False
+
+    def _ignored(self, p: Path) -> bool:
+        parts = set(p.parts)
+        return "__pycache__" in parts or ".git" in parts or p.suffix == ".pyc"
+
+
+class ExecHook(Hook):
+    """Run a shell command in the sandbox with env vars."""
+
+    name = "exec"
+
+    def __init__(
+        self,
+        cmd: str,
+        *,
+        env: dict[str, str] | None = None,
+        timeout: int = 60,
+        optional: bool = False,
+    ):
+        self.cmd = cmd
+        self.env = env
+        self.timeout = timeout
+        self.optional = optional
+
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        await exec_in(
+            client,
+            self.cmd,
+            env=self.env or {},
+            timeout_sec=self.timeout,
+            raise_on_error=not self.optional,
+        )
+
+
+class DownloadHook(Hook):
+    """Pull sandbox paths into ``item.artifacts``."""
+
+    name = "download"
+
+    def __init__(self, paths: list[str]):
+        self.paths = list(paths)
+
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        for path in self.paths:
+            try:
+                blob, _ = await self._download_path(client, path)
+                item.artifacts[path] = blob
+            except Exception as exc:
+                get_logger().warning("download %s failed: %s", path, exc)
+
+    async def _download_path(self, client: Any, remote_path: str) -> tuple[bytes, str]:
+        check = await exec_in(
+            client,
+            f'test -d "{remote_path}" && echo DIR || echo FILE',
+            raise_on_error=False,
+        )
+        is_dir = "DIR" in (check.get("stdout") or "")
+
+        if not is_dir:
+            blob = await client.download_file(remote_path)
+            return blob, "file"
+
+        rp = remote_path.rstrip("/") or "/"
+        parent = rp.rsplit("/", 1)[0] or "/"
+        name = rp.rsplit("/", 1)[-1] or "root"
+        tar_remote = f"/tmp/_dl_{name}.tar.gz"
+        await exec_in(
+            client,
+            f'cd "{parent}" && tar czf {tar_remote} "{name}"',
+        )
+        try:
+            blob = await client.download_file(tar_remote)
+        finally:
+            await exec_in(client, f"rm -f {tar_remote}", raise_on_error=False)
+        return blob, "dir"
+
+
+class ReadFileHook(Hook):
+    """Read a sandbox text file and store its content in ``item.artifacts``."""
+
+    name = "read_file"
+
+    def __init__(
+        self,
+        path: str,
+        key: str,
+        *,
+        encoding: str = "utf-8",
+        errors: str = "replace",
+        optional: bool = False,
+    ):
+        self.path = path
+        self.key = key
+        self.encoding = encoding
+        self.errors = errors
+        self.optional = optional
+
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        try:
+            blob = await client.download_file(self.path)
+            item.artifacts[self.key] = blob.decode(self.encoding, errors=self.errors)
+        except Exception as exc:
+            if self.optional:
+                get_logger().warning("read_file %s (key=%r) failed: %s", self.path, self.key, exc)
+            else:
+                raise
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -48,26 +236,24 @@ from xtuner.v1.utils import get_logger
 
 
 class PickAgent(Hook):
-    """Weighted-pick one agent from ``agents``; record it in ``ctx``.
+    """Weighted-pick one agent from ``agents``; record it on the stage.
 
-    Selection is deterministic on ``ctx["uid"]["root_id"]`` so the same
-    rollout always picks the same agent.  Also stores ``template_root`` in
-    ``ctx["agent_template_root"]`` so downstream hooks
-    (:class:`UploadChosenAgent`, :class:`UploadAgentConfigSource`,
-    :class:`RunAgentInstallDeps`) know where the agent's files live on
-    the host.
+    Selection is deterministic on ``item.uid["root_id"]`` so the same
+    rollout always picks the same agent.  The selected agent record includes
+    enough template/config fields for downstream hooks to run without a
+    separate in-memory context object.
     """
 
     name = "pick_agent"
 
-    def __init__(self, agents: list[AgentSpec], *, template_root: str):
+    def __init__(self, agents: list[AgentSpec | dict[str, Any]], *, template_root: str):
         if not agents:
             raise ValueError("PickAgent.agents is empty")
-        self.agents = agents
+        self.agents = [create_object(agent) for agent in agents]
         self.template_root = Path(template_root)
 
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
-        group_id = (ctx.get("uid") or {}).get("root_id", 0)
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        group_id = (item.uid or {}).get("root_id", 0)
         weights = [max(a.weight, 0.0) for a in self.agents]
         total = sum(weights)
         if total <= 0:
@@ -81,20 +267,20 @@ class PickAgent(Hook):
                 if target < running:
                     chosen = agent
                     break
-        ctx["chosen_agent"] = chosen
-        ctx["agent_template_root"] = self.template_root
+        record.agent = SelectedAgentRecord(
+            name=chosen.name,
+            config=chosen.config,
+            install=chosen.install,
+            tools=chosen.tools,
+            weight=chosen.weight,
+            template_root=self.template_root.as_posix(),
+        )
 
 
 # ─────────────────────────────────────────────────────────────────
-# Lagent runtime (library + python wrapper + minimal inits)
+# Lagent runtime source upload
 # ─────────────────────────────────────────────────────────────────
 
-
-_LAGENT_PY_PATH = "/tmp/lagent-py"
-_LAGENT_PY_WRAPPER = """#!/bin/bash
-PYTHONPATH="${TASK_WORKSPACE:-/workspace}:/tmp:${PYTHONPATH:-}" \
-exec /mnt/llm-ai-infra/miniconda3/envs/train/bin/python "$@"
-"""
 
 # Minimal __init__ replacements so vendored lagent doesn't eager-import
 # optional deps (pandas, etc.) that sandbox images may lack.
@@ -108,23 +294,21 @@ _MINIMAL_HOOKS_INIT = "from .hook import Hook, RemovableHandle\n"
 
 
 class InstallLagent(Hook):
-    """Ship the lagent library + a python wrapper into the sandbox.
+    """Ship the lagent library into the sandbox.
 
-    Reads ``ctx["runtime"]["lagent_src_dir"]`` — if set, uploads the local
+    Reads ``record.runtime["lagent_src_dir"]`` — if set, uploads the local
     ``lagent/`` tree to ``/tmp/lagent/`` and replaces the eager-import
-    ``__init__.py`` files with minimal ones.  Always writes the
-    ``/tmp/lagent-py`` bash wrapper.
+    ``__init__.py`` files with minimal ones.
     """
 
     name = "install_lagent"
 
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
-        lagent_src = (ctx.get("runtime") or {}).get("lagent_src_dir")
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        lagent_src = record.runtime.get("lagent_src_dir")
         if lagent_src is not None:
             blob = await asyncio.to_thread(
-                tar_dir,
+                self._tar_lagent_source,
                 Path(lagent_src) / "lagent",
-                "lagent",
             )
             await http_upload(
                 client,
@@ -145,12 +329,25 @@ class InstallLagent(Hook):
                 "/tmp/lagent/hooks/__init__.py",
                 base64.b64encode(_MINIMAL_HOOKS_INIT.encode()).decode(),
             )
-        await http_upload(
-            client,
-            _LAGENT_PY_PATH,
-            base64.b64encode(_LAGENT_PY_WRAPPER.encode()).decode(),
-        )
-        await exec_in(client, f"chmod +x {_LAGENT_PY_PATH}")
+
+    def _tar_lagent_source(self, src: Path) -> bytes:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for path in self._walk_files(src):
+                rel = path.relative_to(src).as_posix()
+                tar.add(path, arcname=f"lagent/{rel}", recursive=False)
+        return buf.getvalue()
+
+    def _walk_files(self, root: Path) -> list[Path]:
+        if not root.exists():
+            return []
+        if root.is_file():
+            return [root]
+        return [
+            path
+            for path in root.rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+        ]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -166,9 +363,9 @@ class RenderInstruction(Hook):
       1. ``rewrites`` (bench-supplied literal map, with ``$TASK_WORKSPACE``
          in values pre-resolved to the absolute path).
       2. ``{{KEY}}`` → the corresponding env var (from
-         ``ctx["env_vars_for_instruction"]``, if set).
+         ``record.env_vars``, if set).
 
-    Writes the rendered path back into ``ctx["instruction_rendered_path"]``
+    Writes the rendered path back into ``record.metadata["instruction_rendered_path"]``
     so a following :class:`UploadHook` can ship it.
     """
 
@@ -177,22 +374,23 @@ class RenderInstruction(Hook):
     def __init__(self, rewrites: dict[str, str] | None = None):
         self.rewrites = dict(rewrites or {})
 
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
-        data = ctx["data"]
-        workspace = ctx["workspace"]
-        task_root = ctx["task_root"]
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        workspace = record.workspace
+        if not workspace:
+            raise ValueError("StageRecord.workspace is required by RenderInstruction")
+        task_root = item.task_root
+        if task_root is None:
+            raise ValueError("AgentRolloutItem.task_root is required by RenderInstruction")
 
-        src = task_root / data.instruction
+        src = task_root / item.instruction
         if not src.exists():
             return
 
         text = src.read_text(encoding="utf-8")
-        resolved = {
-            needle: bundle.rewrite_text(repl, {"$TASK_WORKSPACE": workspace}) for needle, repl in self.rewrites.items()
-        }
-        text = bundle.rewrite_text(text, resolved)
-        env_for_placeholders = ctx.get("env_vars_for_instruction", {})
-        text = bundle.rewrite_text(
+        resolved = {needle: self._rewrite_text(repl, {"$TASK_WORKSPACE": workspace}) for needle, repl in self.rewrites.items()}
+        text = self._rewrite_text(text, resolved)
+        env_for_placeholders = record.env_vars
+        text = self._rewrite_text(
             text,
             {"{{" + k + "}}": v for k, v in env_for_placeholders.items()},
         )
@@ -200,8 +398,14 @@ class RenderInstruction(Hook):
         tmp = Path("/tmp") / f".rendered_{src.name}"
         tmp.write_text(text, encoding="utf-8")
         # Upload the rendered file over the mirror-version.
-        sandbox_path = f"{workspace}/{data.instruction}"
+        sandbox_path = f"{workspace}/{item.instruction}"
         await upload_tar_and_extract(client, {sandbox_path: tmp}, "/")
+        record.metadata["instruction_rendered_path"] = sandbox_path
+
+    def _rewrite_text(self, text: str, substitutions: dict[str, str]) -> str:
+        for needle, replacement in substitutions.items():
+            text = text.replace(needle, replacement)
+        return text
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -216,7 +420,7 @@ class UploadAgentConfigSource(Hook):
     dict — so ``os.environ`` lookups inside ``config.py`` resolve against
     the sandbox's own env (populated by :class:`BenchEnv`), not the host's.
 
-    Agent template lives at ``ctx["agent_template_root"] / chosen.name /``
+    Agent template lives at ``record.agent.template_root / record.agent.name /``
     (populated by :class:`PickAgent`).
     """
 
@@ -225,10 +429,11 @@ class UploadAgentConfigSource(Hook):
     def __init__(self, dst: str = "/tmp/agent_config.py"):
         self.dst = dst
 
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
-        chosen: AgentSpec = ctx["chosen_agent"]
-        template_root: Path = ctx["agent_template_root"]
-        cfg_path = template_root / chosen.name / chosen.config
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        chosen = record.agent
+        if chosen is None:
+            raise RuntimeError("PickAgent must run before UploadAgentConfigSource")
+        cfg_path = Path(chosen.template_root) / chosen.name / chosen.config
         if not cfg_path.is_file():
             raise FileNotFoundError(f"agent config {cfg_path!r} not found")
         await upload_tar_and_extract(client, {self.dst: cfg_path}, "/")
@@ -242,7 +447,7 @@ class UploadAgentConfigSource(Hook):
 class UploadChosenAgent(Hook):
     """Ship the chosen agent's template dir into the workspace.
 
-    Reads ``ctx["agent_template_root"]`` and ``ctx["chosen_agent"]`` (both
+    Reads ``record.agent`` (populated by :class:`PickAgent`);
     set by :class:`PickAgent`); uploads the chosen subtree under
     ``target_dir/<agent_name>/``.
     """
@@ -252,17 +457,29 @@ class UploadChosenAgent(Hook):
     def __init__(self, *, target_dir: str):
         self.target_dir = target_dir.rstrip("/")
 
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
-        chosen: AgentSpec = ctx["chosen_agent"]
-        template_root: Path = ctx["agent_template_root"]
-        src = template_root / chosen.name
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        chosen = record.agent
+        if chosen is None:
+            raise RuntimeError("PickAgent must run before UploadChosenAgent")
+        src = Path(chosen.template_root) / chosen.name
         if not src.is_dir():
             raise FileNotFoundError(f"agent template {src!r} not found for chosen agent {chosen.name!r}")
         files: dict[str, Path] = {}
-        for f in walk_files(src):
+        for f in self._walk_files(src):
             rel = f.relative_to(src).as_posix()
             files[f"{self.target_dir}/{chosen.name}/{rel}"] = f
         await upload_tar_and_extract(client, files, "/")
+
+    def _walk_files(self, root: Path) -> list[Path]:
+        if not root.exists():
+            return []
+        if root.is_file():
+            return [root]
+        return [
+            path
+            for path in root.rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+        ]
 
 
 class RunAgentInstallDeps(Hook):
@@ -279,8 +496,10 @@ class RunAgentInstallDeps(Hook):
         self.workspace = workspace
         self.timeout = timeout
 
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
-        chosen: AgentSpec = ctx["chosen_agent"]
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        chosen = record.agent
+        if chosen is None:
+            raise RuntimeError("PickAgent must run before RunAgentInstallDeps")
         script = f"{self.workspace}/agent/{chosen.name}/install-deps.sh"
         await exec_in(
             client,
@@ -291,34 +510,83 @@ class RunAgentInstallDeps(Hook):
 
 
 # ─────────────────────────────────────────────────────────────────
-# Env-var builder (replaces lambda env= on SandboxStage)
+# Validate workspace setup
+# ─────────────────────────────────────────────────────────────────
+
+
+class CopyInferWorkspace(Hook):
+    """Validator hook: copy the infer workspace into an isolated judger sandbox.
+
+    ``JudgerValidator`` exposes the source client/path to isolated judger
+    hooks through runtime-only fields on ``StageRecord``.  Putting the copy in
+    a hook keeps the validate data dependency visible in config:
+
+        on_isolated_pre=[dict(type=CopyInferWorkspace)]
+    """
+
+    name = "copy_infer_workspace"
+
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        infer_client = record.runtime.get("infer_client")
+        infer_workspace = record.runtime.get("infer_workspace")
+        target_workspace = record.runtime.get("target_workspace") or record.workspace
+        if infer_client is None:
+            raise RuntimeError("CopyInferWorkspace requires record.runtime['infer_client']")
+        if not infer_workspace:
+            raise RuntimeError("CopyInferWorkspace requires record.runtime['infer_workspace']")
+        if not target_workspace:
+            raise RuntimeError("CopyInferWorkspace requires record.workspace or record.runtime['target_workspace']")
+
+        suffix = uuid.uuid4().hex[:12]
+        infer_tmp = f"/tmp/_infer_ws_{suffix}.tar.gz"
+        target_tmp = f"/tmp/_target_ws_{suffix}.tar.gz"
+        await exec_in(client, f'mkdir -p "{target_workspace}"')
+        try:
+            await exec_in(infer_client, f'cd "{infer_workspace}" && tar czf {infer_tmp} .')
+            blob = await infer_client.download_file(infer_tmp)
+            await http_upload(client, target_tmp, base64.b64encode(blob).decode())
+            await exec_in(
+                client,
+                f'cd "{target_workspace}" && tar xzf {target_tmp} && rm -f {target_tmp}',
+                raise_on_error=False,
+            )
+        finally:
+            try:
+                await exec_in(infer_client, f"rm -f {infer_tmp}", raise_on_error=False)
+            except Exception:
+                pass
+
+
+# ─────────────────────────────────────────────────────────────────
+# Env-var builder
 # ─────────────────────────────────────────────────────────────────
 
 
 class BenchEnv:
-    """Callable that produces the infer stage's env vars from ctx.
+    """Build infer stage env vars from an item/record.
 
     Exports only what wrappers + agent config actually read — no
     speculative vars.  ``extras`` lets a bench-specific pipeline inject
     additional literal vars (e.g. upstream-convention aliases like
     ``WORKSPACE``, ``CLAW_WORKSPACE``) without subclassing.
 
-    Also stores the map in ``ctx["env_vars_for_instruction"]`` so
+    Also stores the map in ``record.env_vars`` so
     :class:`RenderInstruction` can substitute ``{{KEY}}`` placeholders.
 
-    Pass an instance to ``SandboxStage(env=BenchEnv(...))``.
+    Pass an instance to ``SandboxStage(env=BenchEnv(...))``.  The explicit
+    interface is ``build(item, record)``; arbitrary callable stage fields are
+    intentionally not supported.
     """
 
     def __init__(self, *, workspace: str, extras: dict[str, str] | None = None):
         self.workspace = workspace
         self.extras = dict(extras or {})
 
-    def __call__(self, ctx: dict[str, Any]) -> dict[str, str]:
-        data = ctx["data"]
-        runtime = ctx.get("runtime") or {}
+    def build(self, item: AgentRolloutItem, record: StageRecord) -> dict[str, str]:
+        runtime = record.runtime
         env = {
             "TASK_WORKSPACE": self.workspace,
-            "TASK_INSTRUCTION": f"{self.workspace}/{data.instruction}",
+            "TASK_INSTRUCTION": f"{self.workspace}/{item.instruction}",
         }
         for env_key, runtime_key in (
             ("RL_LLM_MODEL", "llm_model"),
@@ -329,7 +597,7 @@ class BenchEnv:
             if val:
                 env[env_key] = val
         env.update(self.extras)
-        ctx["env_vars_for_instruction"] = env
+        record.env_vars = env
         return env
 
 
@@ -343,12 +611,12 @@ class DumpDaemonLogOnFailure(Hook):
 
     Two triggers:
       - Stage's entry returned non-zero (``rc != 0``) — usual sandbox error.
-      - Silent-pass: ``rc == 0`` but the pulled ``message_key`` contents show
+      - Silent-pass: ``rc == 0`` but the collected ``message_key`` contents show
         the last ``policy_agent.messages`` entry lacks ``raw_content_ids``
         (LLM call somehow produced no token ids — typically an exception
         swallowed by the agent layer).  Disable by passing ``message_key=None``.
 
-    Always stores the full daemon log at ``ctx["pulled"][key]`` for
+    Always stores the full daemon log at ``item.artifacts[key]`` for
     downstream consumers regardless of whether we log.
     """
 
@@ -367,22 +635,22 @@ class DumpDaemonLogOnFailure(Hook):
         self.key = key
         self.message_key = message_key
 
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
         try:
             blob = await client.download_file(self.path)
         except Exception as exc:
             get_logger().warning(f"could not download daemon log at {self.path}: {exc}")
             return
         text = blob.decode(errors="replace")
-        ctx.setdefault("pulled", {})[self.key] = text
+        item.artifacts[self.key] = text
 
-        result = ctx.get("result")
+        result = record.entry_result
         rc = getattr(result, "return_code", 0) if result else 0
 
         should_dump = rc != 0
         reason = f"rc={rc}"
         if not should_dump and self.message_key:
-            raw = (ctx.get("pulled") or {}).get(self.message_key) or ""
+            raw = item.artifacts.get(self.message_key) or ""
             try:
                 msgs = json.loads(raw).get("policy_agent.messages", []) if raw else []
             except Exception:
@@ -407,7 +675,7 @@ class DumpDaemonLogOnFailure(Hook):
 
 class ParseJudgerStdout(Hook):
     """Turn the stage's stdout into a :class:`JudgerResult` at
-    ``ctx['judger_result']``.
+    ``record.result``.
 
     Accepts the two payload shapes the wrappers can emit:
       - JudgerResult-shaped dict (has ``total`` key).
@@ -419,8 +687,10 @@ class ParseJudgerStdout(Hook):
     def __init__(self, judger_name: str):
         self.judger_name = judger_name
 
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
-        ctx["judger_result"] = _parse_stage_stdout(self.judger_name, ctx["result"])
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        if record.entry_result is None:
+            raise RuntimeError("ParseJudgerStdout requires record.entry_result")
+        record.result = _parse_stage_stdout(self.judger_name, record.entry_result)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -460,7 +730,7 @@ def _parse_stage_stdout(name: str, result: StageResult) -> JudgerResult:
 
     if isinstance(payload, dict) and "total_score" in payload:
         total = float(payload.pop("total_score"))
-        criteria = {k: CriterionScore(score=float(v)) for k, v in payload.items() if isinstance(v, (int, float))}
+        criteria = {k: {"score": float(v)} for k, v in payload.items() if isinstance(v, (int, float))}
         return JudgerResult(judger_name=name, total=total, criteria=criteria)
 
     return JudgerResult(

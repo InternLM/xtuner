@@ -1,39 +1,42 @@
-"""claw-bench pipeline factory — all-explicit, hook-composed.
-
-Read :func:`claw_pipeline` top-to-bottom: infer-stage pre-hooks and the
-one rule_grader judger are both spelled out inline.  Same config level,
-no factory hiding.  The only module that knows what a claw-bench task
-looks like; core stays bench-agnostic.
-"""
+"""claw-bench rollout runner configs."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
-from xtuner.v1.ray.environment.rl_task.hooks import (
+from xtuner.v1.rl_task import (
+    AgentSpec,
     BenchEnv,
+    DetachedShellEntry,
+    DownloadHook,
+    EntryCapture,
+    EntryDiagnostics,
+    EntryFailurePolicy,
+    EntryMonitor,
+    EntryProcessHealthCheck,
     DumpDaemonLogOnFailure,
+    ExecHook,
+    GatewayProvider,
     InstallLagent,
+    Judger,
+    JudgerValidator,
     ParseJudgerStdout,
     PickAgent,
-    RenderInstruction,
+    ReadFileHook,
+    ReturnCodeFileCompletion,
+    Runner,
     RunAgentInstallDeps,
+    SandboxHealthCheck,
+    SandboxSpec,
+    ShellEntry,
+    Stage,
     UploadAgentConfigSource,
     UploadChosenAgent,
-)
-from xtuner.v1.ray.environment.rl_task.judgers import Judger
-from xtuner.v1.ray.environment.rl_task.runner import Runner
-from xtuner.v1.ray.environment.rl_task.sandbox import (
-    DownloadHook,
-    ExecHook,
-    ReadFileHook,
-    SandboxStage,
     UploadHook,
 )
-from xtuner.v1.ray.environment.rl_task.schemas import AgentSpec, SandboxSpec
-from xtuner.v1.ray.environment.rl_task.validator import JudgerValidator
 
 HERE = Path(__file__).resolve().parent
 WRAPPERS = HERE / "wrappers"
@@ -52,237 +55,306 @@ AGENT_TEMPLATES = HERE / "agents"
 #   solution/solve.sh     — oracle (for SolutionScriptInferencer variant)
 #   verifier/test_output.py  — pytest grader
 
-CLAW_INSTRUCTION_REWRITES: dict[str, str] = {
-    "workspace/": "$TASK_WORKSPACE/",
-    "`workspace/": "`$TASK_WORKSPACE/",
-}
-
-
 # ─────────────────────────────────────────────────────────────────
 # Sandbox runtime paths  (where things live once running)
 # ─────────────────────────────────────────────────────────────────
 
 PATHS = SimpleNamespace(
     wrappers_bench="/tmp/wrappers/claw_bench",
-    wrappers_lagent="/tmp/wrappers/lagent",
     agent_config="/tmp/agent_config.py",
+    agent_sock="/tmp/lagent_agent.sock",
+    agent_daemon_log="/tmp/agent_daemon.log",
+    agent_daemon_pid="/tmp/agent_daemon.pid",
+    agent_response="/tmp/agent_response.txt",
     trajectory="/tmp/trajectory.json",
     message="/tmp/message.json",
     verifier="/tmp/verifier",
 )
 
+SHARED_LAGENT_PYTHON = os.getenv(
+    "LAGENT_PYTHON",
+    "/mnt/llm-ai-infra/miniconda3/envs/train/bin/python",
+)
+LAGENT_PYTHONPATH = "${TASK_WORKSPACE:-/workspace}:/tmp:${PYTHONPATH:-}"
 
 # Entry commands.  ``cd /`` before the script is upstream convention — they
 # run with ``cwd=task_dir`` so that relative ``workspace/<file>`` paths land
 # under ``/workspace/``.  Equivalent here: the parent of $TASK_WORKSPACE is /,
 # so cd / makes ``workspace/foo`` resolve to ``/workspace/foo``.
-AGENT_ENTRY = (
-    f"bash {PATHS.wrappers_bench}/pre_entry.sh && "
-    f"bash {PATHS.wrappers_lagent}/lagent_entry.sh "
-    f"--config {PATHS.agent_config} "
-    f"--instruction-file $TASK_INSTRUCTION "
-    f"--response-out /tmp/agent_response.txt "
-    f"--trajectory-out {PATHS.trajectory} "
-    f"--message-out {PATHS.message}"
+START_AGENT_DAEMON = (
+    f'PYTHONPATH="{LAGENT_PYTHONPATH}" "{SHARED_LAGENT_PYTHON}" '
+    f"-m lagent.serving.sandbox.client_cli start-agent-daemon "
+    f"--mode agent --config {PATHS.agent_config} --sock {PATHS.agent_sock} "
+    f"--pid-file {PATHS.agent_daemon_pid} --log {PATHS.agent_daemon_log} --truncate-log"
+)
+WAIT_AGENT_DAEMON = (
+    f'PYTHONPATH="{LAGENT_PYTHONPATH}" "{SHARED_LAGENT_PYTHON}" '
+    f"-m lagent.serving.sandbox.client_cli wait-ready "
+    f"--sock {PATHS.agent_sock} --pid-file {PATHS.agent_daemon_pid} "
+    f"--log {PATHS.agent_daemon_log} --timeout 60"
+)
+AGENT_CHAT = (
+    f'PYTHONPATH="{LAGENT_PYTHONPATH}" "{SHARED_LAGENT_PYTHON}" '
+    f"-m lagent.serving.sandbox.client_cli chat "
+    f"--sock {PATHS.agent_sock} --instruction-file \"$TASK_INSTRUCTION\" "
+    f"--response-out {PATHS.agent_response} --log {PATHS.agent_daemon_log}"
+)
+AGENT_STATE_DICT = (
+    f'PYTHONPATH="{LAGENT_PYTHONPATH}" "{SHARED_LAGENT_PYTHON}" '
+    f"-m lagent.serving.sandbox.client_cli state-dict "
+    f"--sock {PATHS.agent_sock} --trajectory-out {PATHS.trajectory} "
+    f"--log {PATHS.agent_daemon_log}"
+)
+AGENT_GET_MESSAGES = (
+    f'PYTHONPATH="{LAGENT_PYTHONPATH}" "{SHARED_LAGENT_PYTHON}" '
+    f"-m lagent.serving.sandbox.client_cli get-messages "
+    f"--sock {PATHS.agent_sock} --message-out {PATHS.message} "
+    f"--log {PATHS.agent_daemon_log}"
+)
+STOP_AGENT_DAEMON = (
+    f'PYTHONPATH="{LAGENT_PYTHONPATH}" "{SHARED_LAGENT_PYTHON}" '
+    f"-m lagent.serving.sandbox.client_cli shutdown "
+    f"--sock {PATHS.agent_sock} --pid-file {PATHS.agent_daemon_pid} "
+    f"--log {PATHS.agent_daemon_log}"
 )
 
 
-SOLUTION_ENTRY = (
-    f"bash {PATHS.wrappers_bench}/pre_entry.sh && " f"cd / && bash $TASK_WORKSPACE/solution/solve.sh $TASK_WORKSPACE"
-)
+SOLUTION_ENTRY = "cd / && bash $TASK_WORKSPACE/solution/solve.sh $TASK_WORKSPACE"
+
+
+def entry_failure(*, include_entry_output: bool = False) -> dict[str, Any]:
+    files = [dict(path=PATHS.agent_daemon_log, key="daemon_log", optional=True)]
+    if include_entry_output:
+        files.extend(
+            [
+                dict(entry_file="stdout", key="entry_stdout", optional=True),
+                dict(entry_file="stderr", key="entry_stderr", optional=True),
+            ]
+        )
+    return dict(
+        type=EntryFailurePolicy,
+        diagnostics=dict(type=EntryDiagnostics, files=files),
+        diagnostic_error_policy="preserve_entry_error",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────
 # Defaults
 # ─────────────────────────────────────────────────────────────────
 
-DEFAULT_AGENTS: list[AgentSpec] = [
-    AgentSpec(
+DEFAULT_WORKSPACE = "/workspace"
+DEFAULT_AGENTS: list[dict[str, Any]] = [
+    dict(
+        type=AgentSpec,
         name="internclaw",
         config="config.py",
         install="install-deps.sh",
         tools="tools",
         weight=1.0,
-    ),
+    )
 ]
 
-DEFAULT_SANDBOX = SandboxSpec(
-    image="ubuntu2404-v2", ttl_seconds=1800, key=os.getenv('SANDBOX_PROVIDER_KEY'), workspace_path="/workspace"
+DEFAULT_SANDBOX = dict(
+    type=SandboxSpec,
+    image="ubuntu2404-v2",
+    ttl_seconds=1800,
+    key=os.getenv("SANDBOX_PROVIDER_KEY"),
+    workspace_path=DEFAULT_WORKSPACE,
+)
+DEFAULT_PROVIDER = {
+    "type": GatewayProvider,
+    "gateway_url": os.getenv("SANDBOX_GATEWAY_URL", "http://env-gateway.ailab.ailab.ai"),
+}
+
+runner = dict(
+    type=Runner,
+    provider=DEFAULT_PROVIDER,
+    sandboxes={"main": DEFAULT_SANDBOX},
+    infer=dict(
+        type=Stage,
+        sandbox="main",
+        runtime={},
+        pre=[
+            dict(
+                type=UploadHook,
+                mappings=[
+                    dict(base=str(WRAPPERS / "claw_bench"), source="*", target=PATHS.wrappers_bench + "/", flatten=True),
+                ],
+            ),
+            dict(type=InstallLagent),
+            dict(type=PickAgent, agents=DEFAULT_AGENTS, template_root=str(AGENT_TEMPLATES)),
+            dict(
+                type=UploadHook,
+                mappings=[
+                    dict(
+                        source="**/*",
+                        target=f"{DEFAULT_WORKSPACE}/",
+                        exclude=["task.toml", "task.py", "reference/**", "verifier/**", "solution/**", "agent/**"],
+                    )
+                ],
+            ),
+            dict(
+                type=ExecHook,
+                cmd=f"bash {PATHS.wrappers_bench}/pre_entry.sh",
+                env={"TASK_WORKSPACE": DEFAULT_WORKSPACE},
+                timeout=300,
+            ),
+            dict(type=UploadChosenAgent, target_dir=f"{DEFAULT_WORKSPACE}/agent/"),
+            dict(type=ExecHook, cmd=f"mkdir -p {DEFAULT_WORKSPACE}"),
+            dict(type=UploadAgentConfigSource, dst=PATHS.agent_config),
+            dict(type=RunAgentInstallDeps, workspace=DEFAULT_WORKSPACE),
+        ],
+        entries=[
+            dict(
+                type=ShellEntry,
+                name="start_agent_daemon",
+                cmd=START_AGENT_DAEMON,
+                timeout=60,
+                failure=entry_failure(),
+            ),
+            dict(
+                type=ShellEntry,
+                name="wait_agent_daemon",
+                cmd=WAIT_AGENT_DAEMON,
+                timeout=90,
+                failure=entry_failure(),
+            ),
+            dict(
+                type=DetachedShellEntry,
+                name="agent_chat",
+                cmd=AGENT_CHAT,
+                capture=dict(type=EntryCapture, root="/tmp", prefix="xt_entry"),
+                monitor=dict(
+                    type=EntryMonitor,
+                    timeout=1800,
+                    probes=[
+                        dict(type=ReturnCodeFileCompletion, interval_sec=2.0),
+                        dict(type=SandboxHealthCheck, interval_sec=10.0, probe_timeout_sec=10.0, fail_after=3),
+                        dict(type=EntryProcessHealthCheck, interval_sec=10.0, probe_timeout_sec=10.0, fail_after=2),
+                    ],
+                ),
+                failure=entry_failure(include_entry_output=True),
+            ),
+            dict(
+                type=ShellEntry,
+                name="agent_state_dict",
+                cmd=AGENT_STATE_DICT,
+                timeout=300,
+                failure=entry_failure(),
+            ),
+            dict(
+                type=ShellEntry,
+                name="agent_get_messages",
+                cmd=AGENT_GET_MESSAGES,
+                timeout=300,
+                failure=entry_failure(),
+            ),
+        ],
+        env=dict(
+            type=BenchEnv,
+            workspace=DEFAULT_WORKSPACE,
+            extras={"WORKSPACE": DEFAULT_WORKSPACE, "CLAW_WORKSPACE": DEFAULT_WORKSPACE},
+        ),
+        post=[
+            dict(type=DownloadHook, paths=[DEFAULT_WORKSPACE, PATHS.agent_response]),
+            dict(type=ReadFileHook, path="/tmp/message.json", key="message"),
+            dict(type=DumpDaemonLogOnFailure),
+            dict(type=ExecHook, cmd=STOP_AGENT_DAEMON, optional=True, timeout=30),
+        ],
+    ),
+    validate=dict(
+        type=JudgerValidator,
+        judgers=[
+            dict(
+                type=Judger,
+                name="rule_grader",
+                weight=1.0,
+                stage=dict(
+                    type=Stage,
+                    sandbox="main",
+                    pre=[
+                        dict(
+                            type=UploadHook,
+                            mappings=[
+                                dict(base="verifier", source="**/*", target=f"{PATHS.verifier}/rule_grader/")
+                            ],
+                        )
+                    ],
+                    entries=[
+                        dict(
+                            type=ShellEntry,
+                            name="run_tests",
+                            cmd=f"bash {PATHS.wrappers_bench}/pytest_ctrf.sh",
+                                        timeout=300,
+                        )
+                    ],
+                    env={
+                        "JUDGER_NAME": "rule_grader",
+                        "TASK_WORKSPACE": DEFAULT_WORKSPACE,
+                        "TASK_JUDGER_DIR": f"{PATHS.verifier}/rule_grader",
+                        "PYTEST_TARGET": f"{PATHS.verifier}/rule_grader/test_output.py",
+                    },
+                    post=[dict(type=ParseJudgerStdout, judger_name="rule_grader")],
+                ),
+            )
+        ],
+    ),
 )
 
-
-# ─────────────────────────────────────────────────────────────────
-# Judger (claw-bench only ever runs one pytest grader per task)
-# ─────────────────────────────────────────────────────────────────
-
-
-def _rule_grader(ws: str) -> Judger:
-    """Claw-bench's single pytest-based judger.  Reads ``verifier/test_output.py``
-    from the task dir, ships it to the infer sandbox, runs it via the shared
-    pytest wrapper, parses CTRF JSON on stdout.
-
-    Every piece of the SandboxStage is spelled out inline — the env vars
-    are literal, the pre-hook upload mapping is literal, no factory helper.
-    """
-    root = f"{PATHS.verifier}/rule_grader"
-    return Judger(
-        name="rule_grader",
-        weight=1.0,
-        sandbox="shared",  # reuse the infer sandbox (no extra provisioning)
-        stage=SandboxStage(
-            pre=[
-                # Ship verifier/ tree to /tmp/verifier/rule_grader/.
-                UploadHook(
-                    [
-                        {"base": "verifier", "source": "**/*", "target": f"{root}/"},
-                    ]
-                ),
-            ],
-            entry=f"bash {PATHS.wrappers_bench}/pytest_ctrf.sh",
-            env={
-                "JUDGER_NAME": "rule_grader",
-                "TASK_WORKSPACE": ws,
-                "TASK_JUDGER_DIR": root,
-                "PYTEST_TARGET": f"{root}/test_output.py",
-            },
-            timeout=300,
-            post=[ParseJudgerStdout("rule_grader")],
-        ),
-    )
-
-
-# ─────────────────────────────────────────────────────────────────
-# Pipeline factories
-# ─────────────────────────────────────────────────────────────────
-
-
-def claw_pipeline(
-    *,
-    sandbox: SandboxSpec = DEFAULT_SANDBOX,
-    agents: list[AgentSpec] = DEFAULT_AGENTS,
-) -> Runner:
-    """Build a Runner for a claw-bench task.  Infer stage + rule_grader
-    judger both read top-to-bottom.
-    """
-    ws = sandbox.workspace_path
-
-    infer = SandboxStage(
-        sandbox=sandbox,
+solution_runner = dict(
+    type=Runner,
+    provider=DEFAULT_PROVIDER,
+    sandboxes={
+        "main": dict(
+            type=SandboxSpec,
+            image="ubuntu2404-v2",
+            ttl_seconds=600,
+            workspace_path=DEFAULT_WORKSPACE,
+        )
+    },
+    infer=dict(
+        type=Stage,
+        sandbox="main",
+        runtime={},
         pre=[
-            # 1. Ship wrapper scripts (bench + agent-framework) into /tmp/wrappers/.
-            UploadHook(
-                [
-                    {
-                        "base": str(WRAPPERS / "claw_bench"),
-                        "source": "*",
-                        "target": PATHS.wrappers_bench + "/",
-                        "flatten": True,
-                    },
-                    {
-                        "base": str(WRAPPERS / "lagent"),
-                        "source": "*",
-                        "target": PATHS.wrappers_lagent + "/",
-                        "flatten": True,
-                    },
-                ]
+            dict(type=ExecHook, cmd=f"mkdir -p {DEFAULT_WORKSPACE}"),
+            dict(
+                type=UploadHook,
+                mappings=[
+                    dict(base=str(WRAPPERS / "claw_bench"), source="*", target=PATHS.wrappers_bench + "/", flatten=True),
+                ],
             ),
-            # 2. Install lagent library + /tmp/lagent-py python wrapper.
-            InstallLagent(),
-            # 3. Weighted-pick one agent; record choice + template_root in ctx.
-            PickAgent(agents=agents, template_root=str(AGENT_TEMPLATES)),
-            # 4. Mirror the task tree into $TASK_WORKSPACE.  Exclude oracle /
-            #    judger dirs so the agent can't see them; exclude task.toml
-            #    since it's metadata the agent has no use for.
-            UploadHook(
-                [
-                    {
-                        "source": "**/*",
-                        "target": f"{ws}/",
-                        "exclude": ["task.toml", "task.py", "reference/**", "verifier/**", "solution/**", "agent/**"],
-                    },
-                ]
+            dict(
+                type=UploadHook,
+                mappings=[
+                    dict(
+                        source="**/*",
+                        target=f"{DEFAULT_WORKSPACE}/",
+                        exclude=["task.toml", "task.py", "verifier/**", "agent/**"],
+                    )
+                ],
             ),
-            # 5. Overlay chosen agent's template at $TASK_WORKSPACE/agent/<name>/.
-            UploadChosenAgent(target_dir=f"{ws}/agent/"),
-            # 6. Ensure workspace dir exists (mirror doesn't create empty dirs).
-            ExecHook(f"mkdir -p {ws}"),
-            # 7. Render instruction.md: `workspace/` → abs path + {{KEY}} → env.
-            # RenderInstruction(rewrites=CLAW_INSTRUCTION_REWRITES),
-            # 8. Upload chosen agent's config.py — daemon execs it in-sandbox.
-            UploadAgentConfigSource(dst=PATHS.agent_config),
-            # 9. Run install-deps.sh if the chosen agent template has one.
-            RunAgentInstallDeps(workspace=ws),
+            dict(
+                type=ExecHook,
+                cmd=f"bash {PATHS.wrappers_bench}/pre_entry.sh",
+                env={"TASK_WORKSPACE": DEFAULT_WORKSPACE},
+                timeout=300,
+            ),
         ],
-        entry=AGENT_ENTRY,
-        env=BenchEnv(
-            workspace=ws,
-            # Upstream setup.sh/solve.sh conventions.
-            extras={"WORKSPACE": ws, "CLAW_WORKSPACE": ws},
+        entries=[
+            dict(
+                type=ShellEntry,
+                name="solution",
+                cmd=SOLUTION_ENTRY,
+                timeout=600,
+            )
+        ],
+        env=dict(
+            type=BenchEnv,
+            workspace=DEFAULT_WORKSPACE,
+            extras={"WORKSPACE": DEFAULT_WORKSPACE, "CLAW_WORKSPACE": DEFAULT_WORKSPACE},
         ),
-        timeout=1800,
-        post=[
-            DownloadHook(["/workspace", "/tmp/agent_response.txt"]),
-            ReadFileHook("/tmp/message.json", "message"),
-            DumpDaemonLogOnFailure(),
-        ],
-    )
-
-    return Runner(
-        infer=infer,
-        validate=JudgerValidator([_rule_grader(ws)]),
-    )
-
-
-def claw_solution_pipeline() -> Runner:
-    """Variant: run ``solution/solve.sh`` instead of an LLM rollout."""
-    sandbox = SandboxSpec(
-        image="ubuntu2404-v2",
-        ttl_seconds=600,
-        workspace_path="/workspace",
-    )
-    ws = sandbox.workspace_path
-
-    infer = SandboxStage(
-        sandbox=sandbox,
-        pre=[
-            ExecHook(f"mkdir -p {ws}"),
-            UploadHook(
-                [
-                    {
-                        "base": str(WRAPPERS / "claw_bench"),
-                        "source": "*",
-                        "target": PATHS.wrappers_bench + "/",
-                        "flatten": True,
-                    },
-                    {
-                        "base": str(WRAPPERS / "lagent"),
-                        "source": "*",
-                        "target": PATHS.wrappers_lagent + "/",
-                        "flatten": True,
-                    },
-                ]
-            ),
-            # Oracle may consult reference/ and solution/ — those stay in the mirror.
-            UploadHook(
-                [
-                    {
-                        "source": "**/*",
-                        "target": f"{ws}/",
-                        "exclude": ["task.toml", "task.py", "verifier/**", "agent/**"],
-                    },
-                ]
-            ),
-        ],
-        entry=SOLUTION_ENTRY,
-        env=BenchEnv(
-            workspace=ws,
-            extras={"WORKSPACE": ws, "CLAW_WORKSPACE": ws},
-        ),
-        timeout=600,
-        post=[DownloadHook(["/workspace"])],
-    )
-
-    return Runner(
-        infer=infer,
-        validate=JudgerValidator([_rule_grader(ws)]),
-    )
+        post=[dict(type=DownloadHook, paths=[DEFAULT_WORKSPACE])],
+    ),
+    validate=runner["validate"],
+)

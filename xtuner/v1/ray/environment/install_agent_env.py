@@ -1,13 +1,18 @@
 import asyncio
-import importlib
+import json
+from copy import deepcopy
+from functools import lru_cache
+from importlib import import_module
 import inspect
 import os
 import re
 import traceback
-from typing import Callable, List, Self, Tuple
+from pathlib import Path
+from typing import Any, Callable, Mapping, List, Self, Tuple
 
 import ray
 from lagent.serving.sandbox.providers.gateway import GatewayProvider
+from lagent.utils import create_object
 
 from xtuner.v1.data_proto.rl_data import (
     RLDataFlowItem,
@@ -16,7 +21,7 @@ from xtuner.v1.data_proto.rl_data import (
     update_dataflow_item,
 )
 from xtuner.v1.ray.environment.lagent.schema import AgentMessage
-from xtuner.v1.ray.environment.rl_task.schemas import SandboxSpec
+from xtuner.v1.ray.environment.rl_task.schemas import AgentRolloutItem, JudgerResult, PipelineConfig, RolloutStatus
 from xtuner.v1.ray.environment.trace import emit_fate, init_writer, span
 from xtuner.v1.utils import get_logger
 
@@ -38,53 +43,70 @@ def check_dead_actors():
     return dead_actors
 
 
-DEFAULT_GATEWAY = "http://env-gateway.ailab.ailab.ai"
-# DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/wangziyi/projs/lagent"
-DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent"
-
-
-def _import_from_path(path: str):
-    """Import an object from a dotted path like 'pkg.mod.attr'."""
-    if not path or not isinstance(path, str):
-        raise TypeError(f"pipeline must be a non-empty str, got {type(path)}")
-    module_name, _, attr = path.rpartition(".")
-    if not module_name or not attr:
-        raise ValueError(f"Invalid import path: {path!r}. Expected 'module.attr'.")
-    module = importlib.import_module(module_name)
-    return getattr(module, attr)
-
-
-def _resolve_pipeline(pipeline_spec, sandbox_spec: dict | None = None):
-    """Resolve pipeline spec into a Runner-like object with run_single().
-
-    If ``sandbox_spec`` is provided (from the data sample's extra_info), it is
-    merged *on top of* the factory's default ``SandboxSpec`` rather than
-    replacing it wholesale — so fields omitted by the data (e.g. ``ttl_seconds``,
-    ``workspace_path``) fall back to the pipeline's own ``DEFAULT_SANDBOX``.
-    """
-    obj = _import_from_path(pipeline_spec)
-    if not sandbox_spec:
-        return obj()
-    try:
-        default_sb = inspect.signature(obj).parameters["sandbox"].default
-    except (ValueError, KeyError):
-        default_sb = None
-    if isinstance(default_sb, SandboxSpec):
-        merged = {**default_sb.model_dump(), **sandbox_spec}
+@lru_cache(maxsize=None)
+def _load_config_path(spec: str) -> Any:
+    if ":" in spec:
+        module_name, attr_path = spec.split(":", 1)
     else:
-        merged = dict(sandbox_spec)
-    return obj(sandbox=SandboxSpec(**merged))
+        module_name, _, attr_path = spec.rpartition(".")
+    if not module_name or not attr_path:
+        raise ValueError(f"invalid pipeline config reference: {spec!r}")
+
+    obj = import_module(module_name)
+    for name in attr_path.split("."):
+        obj = getattr(obj, name)
+    return obj
+
+
+def _deep_merge(base: Any, override: Any) -> Any:
+    if override is None:
+        return deepcopy(base)
+    if isinstance(base, dict) and isinstance(override, Mapping):
+        result = deepcopy(base)
+        for key, value in override.items():
+            result[key] = _deep_merge(result[key], value) if key in result else deepcopy(value)
+        return result
+    return deepcopy(override)
+
+
+def _resolve_pipeline(
+    pipeline_spec: PipelineConfig | Any,
+    provider,
+    runtime: dict | None = None,
+    overrides: Mapping[str, Any] | None = None,
+):
+    """Load and build a Runner-like pipeline from a plain Python config."""
+    cfg = _load_config_path(pipeline_spec) if isinstance(pipeline_spec, str) else pipeline_spec
+    if isinstance(cfg, dict):
+        cfg = _deep_merge(cfg, overrides or {})
+        if "type" not in cfg:
+            raise TypeError("pipeline config dict must contain 'type'")
+        if provider is not None:
+            cfg["provider"] = provider
+        if runtime:
+            infer = dict(cfg.get("infer") or {})
+            infer["runtime"] = {**dict(infer.get("runtime") or {}), **runtime}
+            cfg["infer"] = infer
+    elif overrides:
+        raise TypeError(f"pipeline_overrides require a dict pipeline config, got {type(cfg)}")
+
+    pipeline = create_object(cfg)
+    if not hasattr(pipeline, "run"):
+        raise TypeError(f"pipeline config did not build a Runner-like object: {type(pipeline)}")
+    return pipeline
 
 
 def _sample_task_id(sample: RLDataFlowItem) -> str | None:
     """Best-effort task_id extraction for trace emission — safe even when the
-    sample ended up failing before run_single populated its result."""
+    sample ended up failing before the runner populated its result."""
     try:
         extra = getattr(sample.data, "extra_info", None) or {}
-        td = extra.get("task_data") if isinstance(extra, dict) else None
+        rollout_item = extra.get("rollout_item") if isinstance(extra, dict) else None
+        if isinstance(rollout_item, dict):
+            rollout_item = AgentRolloutItem.model_validate(rollout_item)
         return (
-            str(td.id)
-            if td is not None and hasattr(td, "id")
+            str(rollout_item.id)
+            if rollout_item is not None and hasattr(rollout_item, "id")
             else extra.get("task_id")
             if isinstance(extra, dict)
             else None
@@ -97,13 +119,13 @@ _RE_RETURN_CODE = re.compile(r"return_code=(-?\d+)")
 
 
 def _classify_mark_failed_reason(reason: str | None) -> str:
-    """Bucketize a ``_mark_failed`` reason string into a finer ``failed_stage``
+    """Bucketize an env-envelope failure reason into a finer ``failed_stage``
     label for fates.jsonl.  Falls back to ``mark_failed`` when no pattern
     matches — that should be rare and worth chasing.
 
     Args:
         reason (str | None): The ``failure_reason`` string produced by
-            :func:`runner._mark_failed` (or its caller).
+            the env conversion's failure branch.
 
     Returns:
         str: Short kebab-style label used as the fate ``failed_stage``.
@@ -163,10 +185,13 @@ class InstallAgentEnvironment(BaseEnvironment):
             AgentMessage(role="user", content=item.data.messages[0]["content"]),  # type: ignore[index]
         ),
         postprocess_func: Callable[[Self, List[RLDataFlowItem]], List[RLDataFlowItem]] = lambda _, items: items,
+        gateway_url: str = "http://env-gateway.ailab.ailab.ai",
+        lagent_src_dir: str = "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent",
     ):
         super().__init__(environment, None, None, None, None)
         self.rollout_controller = rollout_controller
-        self.provider = GatewayProvider(DEFAULT_GATEWAY)
+        self.provider = GatewayProvider(gateway_url)
+        self.lagent_src_dir = lagent_src_dir
         self.preprocess_func = preprocess_func
         self.postprocess_func = postprocess_func
         # Trace writer is per-actor-process; safe to call twice (later calls
@@ -176,6 +201,171 @@ class InstallAgentEnvironment(BaseEnvironment):
         except Exception:
             actor_id = None
         init_writer(actor_id=actor_id)
+
+    def _agent_rollout_item_to_env_result(self, item: AgentRolloutItem) -> dict[str, Any]:
+        """Adapt Runner's AgentRolloutItem protocol to XTuner DataFlow env output."""
+
+        metadata = self._env_metadata(item)
+        if item.status == RolloutStatus.COMPLETED:
+            judge = item.validation.result
+            if not isinstance(judge, JudgerResult):
+                raise ValueError("completed AgentRolloutItem requires validation.result")
+            return self._mark_completed(
+                item,
+                metadata=metadata,
+                judge=judge,
+                artifacts=item.artifacts,
+            )
+
+        return self._mark_failed(
+            item,
+            self._error_message(item),
+            metadata=metadata,
+            artifacts=item.artifacts,
+        )
+
+    def _error_message(self, item: AgentRolloutItem) -> str:
+        if item.error is not None:
+            return item.error.message
+        if item.infer.error is not None:
+            return item.infer.error.message
+        if item.validation.error is not None:
+            return item.validation.error.message
+        return item.status.value
+
+    def _env_metadata(self, item: AgentRolloutItem) -> dict[str, Any]:
+        metadata: dict[str, Any] = dict(item.metadata)
+        self._merge_stage_metadata(metadata, item.infer)
+        if item.error is not None:
+            metadata.setdefault("failed_stage", item.error.category)
+            if item.error.type:
+                metadata.setdefault("exception_type", item.error.type)
+        elif item.infer.error is not None:
+            metadata.setdefault("failed_stage", item.infer.error.category)
+            if item.infer.error.type:
+                metadata.setdefault("exception_type", item.infer.error.type)
+        elif item.validation.error is not None:
+            metadata.setdefault("failed_stage", item.validation.error.category)
+            if item.validation.error.type:
+                metadata.setdefault("exception_type", item.validation.error.type)
+
+        hook_errors = list(item.infer.hook_errors) + list(item.validation.hook_errors)
+        for record in item.judgers.values():
+            hook_errors.extend(record.hook_errors)
+        if hook_errors:
+            metadata["hook_errors"] = hook_errors
+        return metadata
+
+    def _merge_stage_metadata(self, metadata: dict[str, Any], record: Any) -> None:
+        latest_entry = record.entries[-1] if getattr(record, "entries", None) else None
+        fields = {
+            "workspace": record.workspace,
+            "sandbox_name": record.sandbox_name,
+            "sandbox_image": record.sandbox_image,
+            "sandbox_env_id": record.sandbox_env_id,
+            "sandbox_url": record.sandbox_url,
+            "entry_rc": record.return_code,
+        }
+        if latest_entry is not None:
+            fields["entry_name"] = latest_entry.name
+            if latest_entry.outcome is not None:
+                fields["entry_outcome_source"] = latest_entry.outcome.source
+                fields["entry_outcome_reason"] = latest_entry.outcome.reason
+                fields["entry_retryable"] = latest_entry.outcome.retryable
+        result = record.entry_result
+        if result is not None and getattr(result, "stderr", None):
+            fields["entry_stderr"] = (result.stderr or "")[:400]
+        if record.agent is not None:
+            fields["agent_name"] = record.agent.name
+            fields["agent_template_root"] = record.agent.template_root
+        for key, value in fields.items():
+            if value is not None:
+                metadata[key] = value
+
+    def _message_dict_from_artifacts(self, artifacts: dict[str, Any]) -> dict[str, Any]:
+        message = artifacts.get("message")
+        if not message:
+            return {}
+        if isinstance(message, dict):
+            return message
+        if isinstance(message, bytes):
+            message = message.decode(errors="replace")
+        if isinstance(message, str):
+            try:
+                parsed = json.loads(message)
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    def _mark_completed(
+        self,
+        item: AgentRolloutItem,
+        *,
+        metadata: dict[str, Any],
+        judge: JudgerResult,
+        artifacts: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "uid": item.uid,
+            "data": {
+                "extra_info": {
+                    "task_id": item.id,
+                    "data_source": item.data_source,
+                    "ability": item.ability,
+                    "tags": item.tags,
+                },
+            },
+            "env": {
+                "rollout": {
+                    "state": "completed",
+                    "finish_reason": "stop",
+                    "extra_info": metadata,
+                },
+                "judger": {
+                    "total": judge.total,
+                    "per_judger": [r.model_dump(mode="json") for r in judge.per_judger],
+                    "failed": judge.failed,
+                },
+                "agent": {
+                    "message_dict": self._message_dict_from_artifacts(artifacts),
+                    "daemon_log": artifacts.get("daemon_log", ""),
+                },
+            },
+        }
+
+    def _mark_failed(
+        self,
+        item: AgentRolloutItem,
+        reason: str,
+        *,
+        metadata: dict[str, Any],
+        artifacts: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "uid": item.uid,
+            "data": {
+                "extra_info": {
+                    "task_id": item.id,
+                    "data_source": item.data_source,
+                },
+            },
+            "env": {
+                "rollout": {
+                    "state": "failed",
+                    "finish_reason": "failed",
+                    "extra_info": {
+                        "failure_reason": reason,
+                        **metadata,
+                    },
+                },
+                "judger": None,
+                "agent": {
+                    "message_dict": self._message_dict_from_artifacts(artifacts),
+                    "daemon_log": artifacts.get("daemon_log", ""),
+                },
+            },
+        }
 
     async def generate(  # type: ignore[override]
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
@@ -188,32 +378,36 @@ class InstallAgentEnvironment(BaseEnvironment):
                 return "Passed"
 
             # agent_inputs = self.preprocess_func(self, deepcopy(item))
-            pipeline = item.data.extra_info.get("pipeline", None)
-            sandbox_spec = item.data.extra_info.get("sandbox_spec", None)
-            pipeline = _resolve_pipeline(pipeline, sandbox_spec)
+            rollout_item = item.data.extra_info.get("rollout_item", None)
+            if isinstance(rollout_item, dict):
+                rollout_item = AgentRolloutItem.model_validate(rollout_item)
+            if not isinstance(rollout_item, AgentRolloutItem):
+                raise TypeError(f"extra_info['rollout_item'] must be AgentRolloutItem, got {type(rollout_item)}")
+            pipeline = rollout_item.pipeline
+            pipeline_overrides = rollout_item.pipeline_overrides
+            runtime = {
+                "lagent_src_dir": self.lagent_src_dir,
+                "llm_model": os.environ.get("RL_LLM_MODEL"),
+                "llm_base_url": os.environ.get("RL_LLM_BASE_URL"),
+                "llm_api_key": os.environ.get("RL_LLM_API_KEY"),
+            }
+            pipeline = _resolve_pipeline(pipeline, self.provider, runtime, pipeline_overrides)
 
-            task_dir = item.data.extra_info.get("task_dir", None)
-            data = item.data.extra_info.get("task_data", None)
             uid = {
                 "root_id": item.uid.root_id,
                 "action_id": item.uid.action_id,
                 "observation_id": item.uid.observation_id,
             }
-            get_logger().info(f"running task={task_dir} (dataset={data.id})")
+            get_logger().info(f"running task={rollout_item.task_root} (dataset={rollout_item.id})")
 
             uid_obs = str(item.uid.observation_id)
             with span(uid_obs, "env_sample_total", task_id=_sample_task_id(item)):
                 try:
-                    return await pipeline.run_single(
-                        task_dir,
-                        data,
-                        uid,
-                        provider=self.provider,
-                        lagent_src_dir=DEFAULT_LAGENT_SRC,
-                        llm_model=os.environ.get("RL_LLM_MODEL"),
-                        llm_base_url=os.environ.get("RL_LLM_BASE_URL"),
-                        llm_api_key=os.environ.get("RL_LLM_API_KEY"),
-                    )
+                    run_item = rollout_item.model_copy(update={"uid": uid})
+                    if run_item.task_root is not None:
+                        run_item.task_root = Path(run_item.task_root)
+                    outcome = await pipeline.run(run_item)
+                    return self._agent_rollout_item_to_env_result(outcome)
                 except asyncio.CancelledError:
                     raise
                 except BaseException as exc:
@@ -286,10 +480,9 @@ class InstallAgentEnvironment(BaseEnvironment):
                 task_id = (result.get("data") or {}).get("extra_info", {}).get("task_id")
                 extra = result["env"]["rollout"].get("extra_info") or {}
                 if finish_reason == "failed":
-                    # Structured fields from runner.py::_infer_metadata —
-                    # the runner directly knows which stage failed and with
-                    # what rc.  Regex fallback only kicks in if those fields
-                    # are absent (e.g. older fates, unusual code paths).
+                    # Structured fields from the AgentRolloutItem metadata
+                    # tell us which stage failed and with what rc. Regex
+                    # fallback only kicks in if those fields are absent.
                     failure_reason = extra.get("failure_reason", "unknown")
                     fine_stage = extra.get("failed_stage") or _classify_mark_failed_reason(failure_reason)
                     fate_fields = {

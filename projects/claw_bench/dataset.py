@@ -1,20 +1,19 @@
-"""claw-bench dataset: iterate task.toml dirs, load TaskData.
+"""claw-bench dataset: iterate task.toml dirs, load AgentRolloutItem.
 
 The dataset is deliberately thin:
-  - ``iter_tasks()`` yields ``(task_dir, TaskData)`` for every ``task.toml``
-    under ``tasks_root``.
-  - ``pipeline`` is whatever the caller's config built — :class:`ClawBench`
-    never constructs one on its own.  Judger config lives inside the
-    pipeline factory, not here.
+  - ``iter_tasks()`` yields ``(task_dir, AgentRolloutItem)`` for every
+    ``task.toml`` under ``tasks_root``.
+  - ``pipeline`` is a runner object or a lazy ``dict(type=Runner, ...)``.
+    :class:`ClawBench` never constructs one on its own.
 
 Example config::
 
     from claw_bench.dataset import ClawBench
-    from claw_bench.pipeline import claw_pipeline
+    from claw_bench.pipeline import runner
 
     dataset = ClawBench(
         tasks_root="/data/bench/claw-bench/tasks",
-        pipeline=claw_pipeline(),
+        pipeline=runner,
     )
 """
 
@@ -26,7 +25,7 @@ from pathlib import Path
 from typing import Iterator
 
 from xtuner.v1.ray.environment.rl_task.runner import Runner
-from xtuner.v1.ray.environment.rl_task.schemas import TaskData
+from xtuner.v1.ray.environment.rl_task.schemas import AgentRolloutItem
 
 
 logger = logging.getLogger(__name__)
@@ -41,13 +40,13 @@ class ClawBench:
         self,
         tasks_root: str | Path,
         *,
-        pipeline: Runner,
+        pipeline: Runner | dict,
         skip_ids: set[str] | list[str] | None = None,
     ):
         """
         Args:
             tasks_root: Root dir of upstream task.toml layout.
-            pipeline: Shared Runner for every task under this dataset.
+            pipeline: Shared Runner config for every task under this dataset.
             skip_ids: Task ids (dir names) to exclude from iteration — use
                 for known-broken upstream scripts (e.g. solve.sh bugs) so
                 batch runs don't report them as infra failures.
@@ -56,9 +55,9 @@ class ClawBench:
         self.pipeline = pipeline
         self.skip_ids = set(skip_ids or ())
 
-    def iter_tasks(self) -> Iterator[tuple[Path, TaskData]]:
-        """Yield ``(task_dir, TaskData)`` for every task.toml under ``tasks_root``,
-        minus anything in ``skip_ids``.
+    def iter_tasks(self) -> Iterator[tuple[Path, AgentRolloutItem]]:
+        """Yield ``(task_dir, AgentRolloutItem)`` for every task.toml under
+        ``tasks_root``, minus anything in ``skip_ids``.
 
         Matches an entry in ``skip_ids`` either as the full dir name
         (e.g. ``"db-001"``) or as an id prefix with a ``-`` boundary
@@ -82,14 +81,16 @@ class ClawBench:
                 return True
         return False
 
-    def load_task(self, task_dir: Path) -> TaskData:
+    def load_task(self, task_dir: Path) -> AgentRolloutItem:
         toml = _load_task_toml(task_dir / "task.toml")
-        return TaskData(
+        return AgentRolloutItem(
             id=toml.get("id") or task_dir.name,
             data_source=self.name,
             ability=toml.get("domain"),
             tags=list(toml.get("tags") or []),
             instruction="instruction.md",
+            task_root=task_dir,
+            pipeline=self.pipeline,
         )
 
 

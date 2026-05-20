@@ -1,1 +1,1 @@
-"""rl_task framework: bench-agnostic runner / sandbox / hooks / judgers."""
+"""rl_task framework: bench-agnostic runner / sandbox / hooks / validator."""

@@ -8,10 +8,10 @@ Invoke via::
 """
 
 from tb2_rl.dataset import TB2RLBench
-from tb2_rl.pipeline import tb2_rl_pipeline
+from tb2_rl.pipeline import runner
 
 
 dataset = TB2RLBench(
     tasks_root="/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/data/data_process",
-    pipeline=tb2_rl_pipeline(),
+    pipeline=runner,
 )

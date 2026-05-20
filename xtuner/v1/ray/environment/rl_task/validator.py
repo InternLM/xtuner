@@ -6,13 +6,40 @@ Judgers are self-contained: each one's stage declares everything it needs
 
 from __future__ import annotations
 
-import base64
-from typing import Any, Literal
+import time
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Literal, Mapping
 
-from xtuner.v1.ray.environment.rl_task.judgers import Judger
-from xtuner.v1.ray.environment.rl_task.sandbox import exec_in, http_upload
-from xtuner.v1.ray.environment.rl_task.schemas import AggregatedScore, JudgerResult, SandboxSpec
-from xtuner.v1.utils import get_logger
+from lagent.utils import create_object
+
+from xtuner.v1.ray.environment.rl_task.sandbox import Hook, SandboxStage
+from xtuner.v1.ray.environment.rl_task.schemas import (
+    AgentRolloutItem,
+    JudgerResult,
+    RolloutError,
+    StageRecord,
+    StageStatus,
+)
+
+SandboxResolver = Callable[[str], Awaitable[Any]]
+
+
+@dataclass
+class Judger:
+    """A named verifier stage.
+
+    Sandbox selection belongs to ``stage.sandbox``.  The Judger only owns
+    validation semantics: name, weight, and optional isolated-sandbox setup.
+    """
+
+    name: str
+    stage: SandboxStage
+    weight: float = 1.0
+    on_isolated_pre: list[Hook] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.stage = create_object(self.stage)
+        self.on_isolated_pre = [create_object(hook) for hook in self.on_isolated_pre]
 
 
 class JudgerValidator:
@@ -28,7 +55,7 @@ class JudgerValidator:
 
     def __init__(
         self,
-        judgers: list[Judger],
+        judgers: list[Judger | dict[str, Any]],
         *,
         aggregator: Literal[
             "weighted_sum",
@@ -39,115 +66,122 @@ class JudgerValidator:
         ] = "weighted_sum",
         on_error: Literal["zero", "fail"] = "zero",
     ):
-        self.judgers = list(judgers)
+        self.judgers = [create_object(judger) for judger in judgers]
         self.aggregator = aggregator
         self.on_error = on_error
 
     async def run(
         self,
-        infer_client: Any,
-        ctx: dict[str, Any],
-        provider: Any,
+        item: AgentRolloutItem,
+        get_sandbox: SandboxResolver,
+        *,
+        sandboxes: Mapping[str, Any],
+        infer_sandbox: str,
         infer_workspace: str,
-    ) -> AggregatedScore:
-        owned: dict[str, tuple[Any, str]] = {}
+    ) -> JudgerResult:
+        item.validation.status = StageStatus.RUNNING
+        item.validation.started_at = item.validation.started_at or time.monotonic()
         results: list[JudgerResult] = []
         try:
             for j in self.judgers:
-                results.append(await self._run_one(j, infer_client, ctx, provider, infer_workspace, owned))
+                results.append(await self._run_one(j, item, get_sandbox, sandboxes, infer_sandbox, infer_workspace))
+            aggregated = self._aggregate(results)
+            item.validation.result = aggregated
+            item.validation.status = StageStatus.FAILED if aggregated.failed else StageStatus.COMPLETED
+            if aggregated.failed:
+                item.validation.error = RolloutError(
+                    stage="validate",
+                    category="validate",
+                    type="JudgerValidator",
+                    message="all judgers failed" if not results else "validate failed",
+                )
+            else:
+                item.validation.error = None
+            return aggregated
         finally:
-            for _name, (_c, env_id) in owned.items():
-                try:
-                    await provider.delete(env_id)
-                except Exception as exc:
-                    get_logger().warning(f"isolated judger gateway delete: {exc}")
-                try:
-                    await _c.aclose()
-                except Exception as exc:
-                    get_logger().warning(f"isolated judger client aclose: {exc}")
-        return self._aggregate(results)
+            item.validation.finished_at = time.monotonic()
 
     # -- internals --
 
     async def _run_one(
         self,
         j: Judger,
-        infer_client: Any,
-        ctx: dict[str, Any],
-        provider: Any,
+        item: AgentRolloutItem,
+        get_sandbox: SandboxResolver,
+        sandboxes: Mapping[str, Any],
+        infer_sandbox: str,
         infer_workspace: str,
-        owned: dict[str, tuple[Any, str]],
     ) -> JudgerResult:
+        record = item.judgers.setdefault(j.name, StageRecord(judger_name=j.name))
         try:
-            client, j_workspace = await self._acquire_client(
-                j,
-                infer_client,
-                ctx,
-                provider,
-                infer_workspace,
-                owned,
+            sandbox_name = self._stage_sandbox_name(j.stage, sandboxes)
+            client = await get_sandbox(sandbox_name)
+            spec = sandboxes[sandbox_name]
+            isolated = sandbox_name != infer_sandbox
+            j_workspace = spec.workspace_path if isolated else infer_workspace
+            record.sandbox_name = sandbox_name
+            record.sandbox_image = spec.image
+            record.workspace = j_workspace
+            record.judger_name = j.name
+            if isolated:
+                infer_client = await get_sandbox(infer_sandbox)
+                record.runtime.update(
+                    {
+                        "infer_client": infer_client,
+                        "infer_workspace": infer_workspace,
+                        "target_workspace": j_workspace,
+                    }
+                )
+                for hook in j.on_isolated_pre:
+                    await hook(client, item, record)
+            await j.stage.run(client, item, record)
+            if isinstance(record.result, JudgerResult):
+                if record.result.error:
+                    record.status = StageStatus.FAILED
+                    record.error = record.error or RolloutError(
+                        stage=j.name,
+                        category="judger",
+                        type="JudgerResult",
+                        message=record.result.error,
+                    )
+                return record.result
+            record.status = StageStatus.FAILED
+            record.error = record.error or RolloutError(
+                stage=j.name,
+                category="judger",
+                type="JudgerResult",
+                message="no judger_result produced",
             )
-            j_ctx = {
-                **ctx,
-                "workspace": j_workspace,
-                "judger_name": j.name,
-            }
-            await j.stage.run(client, j_ctx)
-            return j_ctx.get("judger_result") or JudgerResult(
+            return JudgerResult(
                 judger_name=j.name,
                 total=0.0,
                 error="no judger_result produced",
             )
         except Exception as exc:
-            return JudgerResult(
+            record.status = StageStatus.FAILED
+            record.error = record.error or RolloutError(
+                stage=j.name,
+                category="judger",
+                type=type(exc).__name__,
+                message=str(exc),
+            )
+            result = JudgerResult(
                 judger_name=j.name,
                 total=0.0,
                 error=f"{type(exc).__name__}: {exc}",
             )
+            record.result = result
+            return result
 
-    async def _acquire_client(
-        self,
-        j: Judger,
-        infer_client: Any,
-        ctx: dict[str, Any],
-        provider: Any,
-        infer_workspace: str,
-        owned: dict[str, tuple[Any, str]],
-    ) -> tuple[Any, str]:
-        if j.sandbox == "shared":
-            return infer_client, infer_workspace
+    def _stage_sandbox_name(self, stage: SandboxStage, sandboxes: Mapping[str, Any]) -> str:
+        name = stage.sandbox
+        if not isinstance(name, str):
+            raise TypeError(f"SandboxStage.sandbox must be a sandbox name, got {type(name).__name__}")
+        if name not in sandboxes:
+            raise KeyError(f"unknown sandbox {name!r}; known sandboxes: {sorted(sandboxes)}")
+        return name
 
-        assert isinstance(j.sandbox, SandboxSpec)
-        client, env_id = await provider.create(
-            image_tag=j.sandbox.image,
-            ttl_seconds=j.sandbox.ttl_seconds,
-        )
-        owned[j.name] = (client, env_id)
-
-        # Seed the isolated sandbox with the agent's workspace.
-        ws = j.sandbox.workspace_path
-        await exec_in(client, f"mkdir -p {ws}")
-        try:
-            blob = await infer_client.download_file(infer_workspace)
-            await http_upload(
-                client,
-                f"/tmp/_ws_{j.name}.tar.gz",
-                base64.b64encode(blob).decode(),
-            )
-            await exec_in(
-                client,
-                f"cd {ws} && tar xzf /tmp/_ws_{j.name}.tar.gz && rm /tmp/_ws_{j.name}.tar.gz",
-                raise_on_error=False,
-            )
-        except Exception as exc:
-            get_logger().warning(f"isolated workspace copy for {j.name} failed: {exc}")
-
-        for hook in j.on_isolated_pre:
-            await hook(client, ctx)
-
-        return client, ws
-
-    def _aggregate(self, results: list[JudgerResult]) -> AggregatedScore:
+    def _aggregate(self, results: list[JudgerResult]) -> JudgerResult:
         weights = {j.name: j.weight for j in self.judgers}
         errors = [r for r in results if r.error]
         usable = [r for r in results if not r.error]
@@ -172,9 +206,9 @@ class JudgerValidator:
         else:
             raise ValueError(f"Unknown aggregator: {self.aggregator}")
 
-        return AggregatedScore(
+        return JudgerResult(
+            judger_name="aggregate",
             total=total,
             per_judger=results,
-            step_rewards=[sr for r in results for sr in r.step_rewards],
             failed=failed,
         )

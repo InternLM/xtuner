@@ -1,4 +1,4 @@
-"""tb2-eval dataset: iterate flat task dirs, load TaskData.
+"""tb2-eval dataset: iterate flat task dirs, load AgentRolloutItem.
 
 Upstream layout (flat — each task dir is a direct child of ``tasks_root``)::
 
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Iterator
 
 from xtuner.v1.ray.environment.rl_task.runner import Runner
-from xtuner.v1.ray.environment.rl_task.schemas import TaskData
+from xtuner.v1.ray.environment.rl_task.schemas import AgentRolloutItem
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +35,14 @@ class TB2EvalBench:
         self,
         tasks_root: str | Path,
         *,
-        pipeline: Runner,
+        pipeline: Runner | dict,
         skip_ids: set[str] | list[str] | None = None,
     ):
         """
         Args:
             tasks_root (str | Path): Root dir containing flat task sub-dirs,
                 each with ``task.toml``.
-            pipeline (Runner): Shared Runner for every task under this dataset.
+            pipeline: Shared Runner config for every task under this dataset.
             skip_ids (set[str] | list[str] | None): Task ids (dir names) to
                 exclude from iteration.  Defaults to ``None``.
         """
@@ -50,12 +50,12 @@ class TB2EvalBench:
         self.pipeline = pipeline
         self.skip_ids = set(skip_ids or ())
 
-    def iter_tasks(self) -> Iterator[tuple[Path, TaskData]]:
-        """Yield ``(task_dir, TaskData)`` for every direct-child ``task.toml``
+    def iter_tasks(self) -> Iterator[tuple[Path, AgentRolloutItem]]:
+        """Yield ``(task_dir, AgentRolloutItem)`` for every direct-child ``task.toml``
         under ``tasks_root``, minus anything in ``skip_ids``.
 
         Returns:
-            Iterator[tuple[Path, TaskData]]: per-task dir + metadata.
+            Iterator[tuple[Path, AgentRolloutItem]]: per-task dir + metadata.
         """
         for toml_path in sorted(self.tasks_root.rglob("task.toml")):
             task_dir = toml_path.parent
@@ -74,23 +74,25 @@ class TB2EvalBench:
             except Exception as exc:
                 logger.warning("skipping %s: %s", task_dir, exc)
 
-    def load_task(self, task_dir: Path) -> TaskData:
-        """Load ``TaskData`` from a task directory.
+    def load_task(self, task_dir: Path) -> AgentRolloutItem:
+        """Load ``AgentRolloutItem`` from a task directory.
 
         Args:
             task_dir (Path): Directory containing ``task.toml`` and ``instruction.md``.
 
         Returns:
-            TaskData: Metadata + instruction-relative path.
+            AgentRolloutItem: Metadata + instruction-relative path.
         """
         toml = _load_task_toml(task_dir / "task.toml")
         tags = list((toml.get("metadata") or {}).get("tags") or toml.get("tags") or [])
-        return TaskData(
+        return AgentRolloutItem(
             id=toml.get("id") or task_dir.name,
             data_source=self.name,
             ability=toml.get("domain") or (tags[1] if len(tags) > 1 else None),
             tags=tags,
             instruction="instruction.md",
+            task_root=task_dir,
+            pipeline=self.pipeline,
         )
 
     def _is_skipped(self, dir_name: str) -> bool:

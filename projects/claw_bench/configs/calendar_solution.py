@@ -15,7 +15,7 @@ validate the infra against the tasks whose solve.sh *does* work.
 """
 
 from claw_bench.dataset import ClawBench
-from claw_bench.pipeline import claw_solution_pipeline
+from claw_bench.pipeline import solution_runner
 
 
 KNOWN_BROKEN_SOLUTIONS: set[str] = {
@@ -46,6 +46,6 @@ KNOWN_BROKEN_SOLUTIONS: set[str] = {
 
 dataset = ClawBench(
     tasks_root="/mnt/shared-storage-user/llmit/user/liukuikun/workspace/bench/claw-bench/tasks",
-    pipeline=claw_solution_pipeline(),
+    pipeline=solution_runner,
     skip_ids=KNOWN_BROKEN_SOLUTIONS,
 )

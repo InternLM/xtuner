@@ -8,7 +8,7 @@ from transformers import PreTrainedTokenizer
 from xtuner.v1.data_proto.rl_data import RLDatasetItem
 from xtuner.v1.datasets.rl_tokenize_fn.rl_tokenize_fn import RLTokenizeFn
 from xtuner.v1.datasets.utils import CachableTokenizeFunction
-from xtuner.v1.ray.environment.rl_task.schemas import TaskData
+from xtuner.v1.ray.environment.rl_task.schemas import AgentRolloutItem
 from xtuner.v1.utils import get_logger
 
 logger = get_logger()
@@ -67,12 +67,23 @@ class RLTB2RLTokenizeFn(RLTokenizeFn):
                 assert num_tokens <= self.max_length, f"num_tokens {num_tokens} > max_length {self.max_length}"
 
         tags = list((toml.get("metadata") or {}).get("tags") or toml.get("tags") or [])
-        task_data = TaskData(
+        rollout_item = AgentRolloutItem(
             id=toml.get("id") or task_dir.name,
             data_source="tb2-rl",
             ability=toml.get("domain") or (tags[1] if len(tags) > 1 else None),
             tags=tags,
             instruction="instruction.md",
+            task_root=task_dir,
+            pipeline="tb2_rl.pipeline.runner",
+            pipeline_overrides={
+                "sandboxes": {
+                    "main": {
+                        "image": item["image"],
+                        "ttl_seconds": 11700,
+                        "workspace_path": "/app",
+                    }
+                }
+            },
         )
 
         rl_out_data = {
@@ -84,11 +95,7 @@ class RLTB2RLTokenizeFn(RLTokenizeFn):
             "ability": toml.get("domain", None),
             "data_source": {"tb2-rl": 1.0},
             "extra_info": {
-                "sandbox_spec": {"image": item["image"], "ttl_seconds": 11700, "workspace_path": "/app"},
-                "task_data": task_data,
-                "task_dir": task_dir.as_posix(),
-                "pipeline": "tb2_rl.pipeline.tb2_rl_pipeline",
-                "origin_data_source": 'tb2-rl',
+                "rollout_item": rollout_item,
             },
         }
         return rl_out_data  # type: ignore

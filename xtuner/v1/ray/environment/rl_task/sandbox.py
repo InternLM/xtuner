@@ -1,693 +1,856 @@
-"""Sandbox primitives: hooks + stage execution + low-level HTTP.
+"""Sandbox runtime primitives: hook base, stage execution, entries, and I/O.
 
 A :class:`SandboxStage` is a sequence of phases::
 
-    pre-hooks  →  entry command  →  pull declared paths  →  post-hooks
+    pre-hooks  →  entries  →  post-hooks
 
 Each hook is a callable with the uniform signature::
 
-    async def hook(client, ctx) -> None
+    async def hook(client, item, record) -> None
 
-where ``ctx`` is a mutable dict threaded through the whole stage — earlier
-hooks read it (``ctx["task_root"]``, ``ctx["data"]``, …) and later hooks
-write to it (``ctx["chosen_agent"]``, ``ctx["result"]``, …).  Three
-primitive hook classes (:class:`UploadHook`, :class:`ExecHook`,
-:class:`DownloadHook`) cover 80% of stage plumbing; specialized hooks
-live in ``hooks.py``.
+where ``item`` is the :class:`AgentRolloutItem` for this sample. Hooks read
+the item input fields and write the current :class:`StageRecord`.
+Concrete hook implementations live in ``hooks.py``.
 
-Reading a stage config top-to-bottom tells you the full execution order.
-No hidden ``prepare()`` methods, no class-level mystery.
+Reading a stage config top-to-bottom tells you the full execution order.  A
+stage's sandbox binding is just ``SandboxStage(sandbox="main")``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import fnmatch
 import io
-import json
 import os
 import re
 import shlex
 import tarfile
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
+from lagent.utils import create_object
+
+from xtuner.v1.ray.environment.rl_task.schemas import (
+    AgentRolloutItem,
+    EntryOutcome,
+    EntryRecord,
+    EntryReturnCode,
+    ReturnCodeKind,
+    RolloutError,
+    StageRecord,
+    StageResult,
+    StageStatus,
+)
 from xtuner.v1.utils import get_logger
 
 
-class DetachConfig(TypedDict, total=False):
-    """Options for ``SandboxStage(detach=...)``.
-
-    All fields are optional (``total=False``) — pass ``{}`` for a
-    minimal detach (background + poll rc file only, default timeouts).
-
-    Keys:
-        daemon_pattern (str | None): ``pgrep -f`` substring that the
-            stage's companion daemon should match while the entry runs.
-            ``None`` or unset → skip daemon liveness check.  Example
-            for the lagent agent loop: ``"lagent.serving.sandbox.daemon"``.
-        poll_sec (float): Seconds between rc/pid/pgrep polls.  Defaults
-            to 30s; drop to 5–10s for short detached entries.
-        probe_timeout_sec (float): Per-probe HTTP budget for the rc/pid
-            reads and ``kill -0`` / ``pgrep`` calls.  Defaults to 10s.
-            Raise it if cross-cluster latency makes individual probes
-            time out even when the sandbox is alive.
-        handshake_timeout_sec (float): HTTP budget for the initial
-            detach ``exec_in`` call that just backgrounds the wrapper.
-            Defaults to 60s.  The wrapper itself runs asynchronously; this
-            cap only protects against a dead sandbox that never ACKs.
-    """
-
-    daemon_pattern: str | None
-    poll_sec: float
-    probe_timeout_sec: float
-    handshake_timeout_sec: float
-
-
 # ─────────────────────────────────────────────────────────────────
-# Detached-entry polling
-# ─────────────────────────────────────────────────────────────────
-#
-# ``SandboxStage.run`` with ``detach=True`` launches the entry command in
-# the background and relies on external polling to detect completion:
-#
-#   1. ``{rc_file}``: written by the wrapping shell once the entry returns.
-#      Presence = finished; content = return code.
-#   2. ``{pid_file}``: written before the entry starts; ``kill -0 <pid>``
-#      reports whether the wrapping shell is still alive.
-#   3. ``pgrep -f <daemon_pattern>``: if the stage's companion daemon has
-#      died while the entry is still running we fail immediately.  Each
-#      stage declares its own pattern (``SandboxStage(daemon_pattern=...)``);
-#      stages that don't spawn a daemon leave it ``None`` to skip.
-#
-# File paths are **per-call** — ``SandboxStage.run`` generates a unique
-# suffix for each invocation.  Earlier builds used fixed paths
-# ``/tmp/lagent_entry.{pid,rc}`` which caused a catastrophic race when two
-# detached stages ran in the same sandbox: the judger's first poll would
-# read the infer stage's stale rc file instantly, the judger's entry would
-# be skipped, ``total`` scored as 0, and training data became silently
-# corrupted.  Keeping the paths per-call isolates stages.
-#
-# This strategy replaces the old heartbeat-file + daemon-log watchdog —
-# that design gave hundreds of false positives on cross-cluster
-# ``/download`` spikes in rc18/rc19 (healthy samples killed mid-rollout).
-
-
-_BUNDLE_SIZE_LOG = Path("/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/work_dir/bundle_sizes.jsonl")
-
-
-def _log_bundle_size(size: int, extract_root: str, file_count: int) -> None:
-    """Append one JSON line describing this upload's tar size.
-
-    Silent on failure — the log file is observational, not required.
-    """
-    try:
-        _BUNDLE_SIZE_LOG.parent.mkdir(parents=True, exist_ok=True)
-        record = {
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
-            "size_bytes": size,
-            "file_count": file_count,
-            "extract_root": extract_root,
-            "pid": os.getpid(),
-        }
-        with _BUNDLE_SIZE_LOG.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception as exc:
-        get_logger().warning(f"bundle-size log failed: {exc}")
-
-
-# ─────────────────────────────────────────────────────────────────
-# StageResult
-# ─────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class StageResult:
-    """Outcome of a single :class:`SandboxStage` execution."""
-
-    stdout: str = ""
-    stderr: str = ""
-    return_code: int = 0
-    pulled: dict[str, bytes] = field(default_factory=dict)
-    error: str | None = None
-
-    @property
-    def ok(self) -> bool:
-        return self.error is None and self.return_code == 0
-
-
-# ─────────────────────────────────────────────────────────────────
-# Hook: base + three primitives
+# Hook base
 # ─────────────────────────────────────────────────────────────────
 
 
 class Hook:
     """A named step in a stage's pre or post pipeline.
 
-    Subclasses implement ``__call__(client, ctx)``.  The ``ctx`` dict is
-    the stage-wide scratchpad — hooks read inputs from it and write
-    outputs to it.  Name it in ``name`` so logs/errors identify the hook.
+    Subclasses implement ``__call__(client, item, record)``.  The item is
+    the single rollout envelope; ``record`` is the current stage row
+    (``item.infer`` / ``item.validation`` / ``item.judgers[name]``). Name it
+    in ``name`` so logs/errors identify the hook.
     """
 
     name: str = "hook"
 
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
         raise NotImplementedError
 
 
-# Type alias: anything callable that resolves to a value given the ctx.
-# Lets hooks accept either a literal or a function(ctx) -> literal.
-Resolvable = Any  # literal value OR a zero-arg function of (ctx) -> value
-
-
-def _resolve(value: Resolvable, ctx: dict[str, Any]) -> Any:
-    return value(ctx) if callable(value) else value
-
-
-class UploadHook(Hook):
-    """Upload files via a list of explicit source→target mappings.
-
-    Each mapping is a dict (or :class:`UploadMapping`) with:
-      - ``source`` (str): glob or literal path relative to ``base``.  Prefix
-        with ``"re:"`` to treat as a regex against POSIX-style relative paths.
-      - ``target`` (str): sandbox destination.  Ending with ``/`` means
-        "directory; preserve tree under source base"; otherwise the matched
-        source must resolve to exactly one file placed at this exact path.
-      - ``base`` (str | None): root that ``source`` is resolved against.
-        Defaults to ``ctx["task_root"]`` at run time.
-      - ``exclude`` (list[str]): glob or ``re:`` patterns matched against the
-        relative path; matches are skipped.
-      - ``flatten`` (bool): collapse the relative path — every match lands
-        as ``target/<filename>``.
-
-    Reading a list of these tells you exactly what gets uploaded without
-    running anything.
-    """
-
-    name = "upload"
-
-    def __init__(self, mappings: list[dict | UploadMapping]):
-        self.mappings: list[UploadMapping] = [
-            m if isinstance(m, UploadMapping) else UploadMapping(**m) for m in mappings
-        ]
-
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
-        files: dict[str, Path] = {}
-        for m in self.mappings:
-            files.update(_resolve_mapping(m, ctx))
-        if files:
-            await upload_tar_and_extract(client, files, "/")
-
-
-class ReadFileHook(Hook):
-    """Read a sandbox file and store its text content in ``ctx["pulled"]``.
-
-    Unlike :class:`DownloadHook` (which stores raw bytes and auto-detects
-    files vs dirs), this hook is intentionally simple: it reads a single
-    text file via ``exec_in`` and writes the decoded string into
-    ``ctx["pulled"][key]``.
-
-    Args:
-        path: Sandbox path to read.  May be a literal string or a
-            callable ``(ctx) -> str``.
-        key:  Key under which the content is stored in ``ctx["pulled"]``.
-            May be a literal string or a callable ``(ctx) -> str``.
-        encoding: Text encoding used to decode the file bytes.
-            Defaults to ``"utf-8"``.
-        errors: Error handler passed to ``bytes.decode``.
-            Defaults to ``"replace"``.
-        optional: When ``True`` a missing / unreadable file logs a warning
-            instead of raising.  Defaults to ``False``.
-    """
-
-    name = "read_file"
-
-    def __init__(
-        self,
-        path: Resolvable,
-        key: Resolvable,
-        *,
-        encoding: str = "utf-8",
-        errors: str = "replace",
-        optional: bool = False,
-    ):
-        self.path = path
-        self.key = key
-        self.encoding = encoding
-        self.errors = errors
-        self.optional = optional
-
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
-        path = _resolve(self.path, ctx)
-        key = _resolve(self.key, ctx)
-        try:
-            blob = await client.download_file(path)
-            content = blob.decode(self.encoding, errors=self.errors)
-            ctx.setdefault("pulled", {})[key] = content
-        except Exception as exc:
-            if self.optional:
-                get_logger().warning("read_file %s (key=%r) failed: %s", path, key, exc)
-            else:
-                raise
+# ─────────────────────────────────────────────────────────────────
+# Entry execution
+# ─────────────────────────────────────────────────────────────────
 
 
 @dataclass
-class UploadMapping:
-    source: str
-    target: str
-    base: str | None = None
-    exclude: list[str] = field(default_factory=list)
-    flatten: bool = False
+class DiagnosticFile:
+    path: str | None = None
+    entry_file: str | None = None
+    key: str | None = None
+    optional: bool = True
+    encoding: str = "utf-8"
+    errors: str = "replace"
+
+    def __post_init__(self) -> None:
+        if (self.path is None) == (self.entry_file is None):
+            raise ValueError("DiagnosticFile requires exactly one of path= or entry_file=")
+        if self.entry_file is not None and self.entry_file not in {"pid", "rc", "stdout", "stderr"}:
+            raise ValueError("DiagnosticFile.entry_file must be one of: pid, rc, stdout, stderr")
+
+    def resolve_path(self, entry: EntryRecord) -> str:
+        if self.path is not None:
+            return self.path
+        entry_paths = {
+            "pid": entry.pid_file,
+            "rc": entry.rc_file,
+            "stdout": entry.stdout_file,
+            "stderr": entry.stderr_file,
+        }
+        path = entry_paths.get(self.entry_file or "")
+        if not path:
+            raise ValueError(f"entry file {self.entry_file!r} is not available for entry {entry.name!r}")
+        return path
 
 
-class ExecHook(Hook):
-    """Run a shell command in the sandbox with env vars.
+class EntryDiagnostics:
+    """Best-effort host-side diagnostic download for failed entries."""
 
-    ``cmd`` / ``env`` may be literals or callable(ctx).  Set
-    ``optional=True`` to downgrade failures to warnings (useful for
-    install-deps etc. that may no-op).
+    def __init__(self, files: list[dict[str, Any] | DiagnosticFile]):
+        self.files = [f if isinstance(f, DiagnosticFile) else DiagnosticFile(**f) for f in files]
+
+    async def collect(
+        self,
+        client: Any,
+        item: AgentRolloutItem,
+        record: StageRecord,
+        entry: EntryRecord,
+    ) -> None:
+        for spec in self.files:
+            path = spec.resolve_path(entry)
+            key = spec.key or path
+            try:
+                blob = await client.download_file(path)
+                item.artifacts[key] = blob.decode(spec.encoding, errors=spec.errors)
+                entry.diagnostics[key] = path
+            except Exception as exc:
+                entry.diagnostic_errors.append(
+                    {
+                        "path": path,
+                        "key": key,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                if not spec.optional:
+                    raise
+                get_logger().warning("entry diagnostic download %s failed: %s", path, exc)
+
+
+class EntryFailurePolicy:
+    """Actions to run after an entry has produced a failed outcome.
+
+    The normal entry path does not know which files are useful for a given
+    task.  This policy makes the failure-side behavior explicit in config,
+    usually by binding :class:`EntryDiagnostics` to the entry.
     """
-
-    name = "exec"
 
     def __init__(
         self,
-        cmd: Resolvable,
         *,
-        env: Resolvable = None,
-        timeout: int = 60,
-        optional: bool = False,
+        diagnostics: EntryDiagnostics | dict[str, Any] | None = None,
+        diagnostic_error_policy: str = "preserve_entry_error",
+    ):
+        if diagnostic_error_policy not in {"preserve_entry_error", "fail_entry"}:
+            raise ValueError(
+                "EntryFailurePolicy.diagnostic_error_policy must be "
+                "'preserve_entry_error' or 'fail_entry'"
+            )
+        self.diagnostics = create_object(diagnostics) if diagnostics is not None else None
+        self.diagnostic_error_policy = diagnostic_error_policy
+
+    async def handle(
+        self,
+        client: Any,
+        item: AgentRolloutItem,
+        record: StageRecord,
+        entry: EntryRecord,
+        outcome: EntryOutcome,
+    ) -> EntryOutcome:
+        if self.diagnostics is None:
+            return outcome
+        try:
+            await self.diagnostics.collect(client, item, record, entry)
+        except Exception as exc:
+            if self.diagnostic_error_policy == "fail_entry":
+                outcome.result.error = (
+                    f"{outcome.result.error or 'entry failed'}; "
+                    f"diagnostics failed: {type(exc).__name__}: {exc}"
+                )
+            else:
+                get_logger().warning(
+                    "entry %s diagnostics failed after %s: %s",
+                    entry.name,
+                    outcome.reason or outcome.source,
+                    exc,
+                )
+        return outcome
+
+
+class EntryMonitorProbe:
+    """One configured monitor probe for a detached entry."""
+
+    def __init__(self, *, interval_sec: float):
+        self.interval_sec = interval_sec
+
+    async def probe(
+        self,
+        client: Any,
+        item: AgentRolloutItem,
+        entry: EntryRecord,
+        state: dict[str, Any],
+    ) -> EntryOutcome | None:
+        raise NotImplementedError
+
+    async def _download_file(self, client: Any, path: str, timeout_sec: float = 5.0) -> bytes | None:
+        if not path:
+            return None
+        try:
+            return await asyncio.wait_for(client.download_file(path), timeout=timeout_sec)
+        except Exception:
+            return None
+
+    async def _read_int_file(self, client: Any, path: str) -> int | None:
+        blob = await self._download_file(client, path)
+        if blob is None:
+            return None
+        try:
+            return int(blob.decode(errors="replace").strip())
+        except ValueError:
+            return None
+
+    async def _sandbox_health_ok(self, client: Any, timeout_sec: float) -> bool:
+        try:
+            result = await asyncio.wait_for(client.health_check(), timeout=timeout_sec)
+        except Exception:
+            return False
+        return bool(result.get("ok"))
+
+    async def _pid_alive(self, client: Any, pid: int, timeout_sec: float) -> bool | None:
+        try:
+            res = await exec_in(
+                client,
+                f"kill -0 {pid} 2>/dev/null && echo Y || echo N",
+                raise_on_error=False,
+                timeout_sec=timeout_sec,
+            )
+        except Exception:
+            return None
+        out = (res.get("stdout") or "").strip()
+        if "Y" in out:
+            return True
+        if "N" in out:
+            return False
+        return None
+
+
+class ReturnCodeFileCompletion(EntryMonitorProbe):
+    """Finish condition: the detached wrapper has written its rc file."""
+
+    def __init__(self, *, interval_sec: float = 2.0):
+        super().__init__(interval_sec=interval_sec)
+
+    async def probe(
+        self,
+        client: Any,
+        item: AgentRolloutItem,
+        entry: EntryRecord,
+        state: dict[str, Any],
+    ) -> EntryOutcome | None:
+        rc = await self._read_int_file(client, entry.rc_file or "")
+        if rc is None:
+            return None
+        get_logger().info("[%s] entry %s finished rc=%s", item.id, entry.name, rc)
+        return EntryOutcome(
+            source=type(self).__name__,
+            reason="rc_file_written",
+            result=StageResult(return_code=rc, error=None if rc == 0 else f"return_code={rc}"),
+        )
+
+
+class SandboxHealthCheck(EntryMonitorProbe):
+    """Failure condition: the sandbox client health endpoint is unreachable."""
+
+    def __init__(self, *, interval_sec: float = 10.0, probe_timeout_sec: float = 10.0, fail_after: int = 3):
+        super().__init__(interval_sec=interval_sec)
+        self.probe_timeout_sec = probe_timeout_sec
+        self.fail_after = fail_after
+
+    async def probe(
+        self,
+        client: Any,
+        item: AgentRolloutItem,
+        entry: EntryRecord,
+        state: dict[str, Any],
+    ) -> EntryOutcome | None:
+        if await self._sandbox_health_ok(client, self.probe_timeout_sec):
+            state["failures"] = 0
+            return None
+        failures = int(state.get("failures") or 0) + 1
+        state["failures"] = failures
+        get_logger().warning(
+            "[%s] entry %s sandbox health failing (%s/%s)",
+            item.id,
+            entry.name,
+            failures,
+            self.fail_after,
+        )
+        if failures < self.fail_after:
+            return None
+        return EntryOutcome(
+            source=type(self).__name__,
+            reason="sandbox_unreachable",
+            retryable=True,
+            details={"failures": failures, "fail_after": self.fail_after},
+            result=StageResult(
+                return_code=EntryReturnCode.SANDBOX_UNREACHABLE,
+                stderr=f"[{item.id}] sandbox unreachable while waiting for entry {entry.name}",
+                error="sandbox unreachable",
+            ),
+        )
+
+
+class EntryProcessHealthCheck(EntryMonitorProbe):
+    """Failure condition: the detached wrapper pid disappears before rc is written."""
+
+    def __init__(self, *, interval_sec: float = 10.0, probe_timeout_sec: float = 10.0, fail_after: int = 2):
+        super().__init__(interval_sec=interval_sec)
+        self.probe_timeout_sec = probe_timeout_sec
+        self.fail_after = fail_after
+
+    async def probe(
+        self,
+        client: Any,
+        item: AgentRolloutItem,
+        entry: EntryRecord,
+        state: dict[str, Any],
+    ) -> EntryOutcome | None:
+        pid = await self._read_int_file(client, entry.pid_file or "")
+        if pid is None:
+            missing_pid_file = int(state.get("missing_pid_file") or 0) + 1
+            state["missing_pid_file"] = missing_pid_file
+            if missing_pid_file < self.fail_after:
+                return None
+            rc = await self._read_int_file(client, entry.rc_file or "")
+            if rc is not None:
+                return EntryOutcome(
+                    source=type(self).__name__,
+                    reason="rc_after_missing_pid_file",
+                    result=StageResult(return_code=rc, error=None if rc == 0 else f"return_code={rc}"),
+                )
+            return EntryOutcome(
+                source=type(self).__name__,
+                reason="pid_file_missing",
+                retryable=True,
+                details={"missing_pid_file": missing_pid_file, "fail_after": self.fail_after},
+                result=StageResult(
+                    return_code=EntryReturnCode.PID_LOST,
+                    stderr=f"[{item.id}] entry {entry.name} pid file was not written",
+                    error="entry pid file missing",
+                ),
+            )
+        state["missing_pid_file"] = 0
+        alive = await self._pid_alive(client, pid, self.probe_timeout_sec)
+        if alive is True:
+            state["missing"] = 0
+            return None
+        if alive is not False:
+            return None
+        missing = int(state.get("missing") or 0) + 1
+        state["missing"] = missing
+        if missing < self.fail_after:
+            return None
+        rc = await self._read_int_file(client, entry.rc_file or "")
+        if rc is not None:
+            return EntryOutcome(
+                source=type(self).__name__,
+                reason="rc_after_pid_exit",
+                result=StageResult(return_code=rc, error=None if rc == 0 else f"return_code={rc}"),
+            )
+        return EntryOutcome(
+            source=type(self).__name__,
+            reason="pid_lost",
+            retryable=True,
+            details={"pid": pid, "missing": missing, "fail_after": self.fail_after},
+            result=StageResult(
+                return_code=EntryReturnCode.PID_LOST,
+                stderr=f"[{item.id}] entry {entry.name} pid {pid} gone without rc file",
+                error="entry pid lost",
+            ),
+        )
+
+
+class EntryMonitor:
+    """Run configured completion/health probes until one returns a result."""
+
+    def __init__(
+        self,
+        *,
+        timeout: int,
+        probes: list[EntryMonitorProbe | dict[str, Any]],
+    ):
+        self.timeout = timeout
+        self.probes = [create_object(probe) for probe in probes]
+        if not self.probes:
+            raise ValueError("EntryMonitor requires at least one probe")
+
+    async def wait(self, client: Any, item: AgentRolloutItem, entry: EntryRecord) -> EntryOutcome:
+        logger = get_logger()
+        start = time.monotonic()
+        next_probe = [start for _ in self.probes]
+        states = [{} for _ in self.probes]
+
+        while True:
+            now = time.monotonic()
+            if now - start > self.timeout:
+                logger.warning("[%s] entry %s exceeded max runtime %ss", item.id, entry.name, self.timeout)
+                return EntryOutcome(
+                    source=type(self).__name__,
+                    reason="timeout",
+                    retryable=True,
+                    details={"timeout": self.timeout},
+                    result=StageResult(
+                        return_code=EntryReturnCode.TIMEOUT,
+                        stderr=f"[{item.id}] entry {entry.name} exceeded max runtime {self.timeout}s",
+                        error=f"entry {entry.name} timed out",
+                    ),
+                )
+
+            for idx, probe in enumerate(self.probes):
+                if now < next_probe[idx]:
+                    continue
+                result = await probe.probe(client, item, entry, states[idx])
+                if result is not None:
+                    return result
+                next_probe[idx] = now + probe.interval_sec
+
+            sleep_until = min([*next_probe, start + self.timeout])
+            await asyncio.sleep(max(0.2, min(1.0, sleep_until - time.monotonic())))
+
+
+class EntryCapture:
+    """Sandbox files written by a detached entry wrapper.
+
+    These files are the contract consumed by monitor probes and diagnostics:
+    ``pid`` and ``rc`` are used to observe completion, while ``stdout`` and
+    ``stderr`` capture the command output.
+    """
+
+    def __init__(self, *, root: str = "/tmp", prefix: str = "xt_entry"):
+        self.root = root.rstrip("/") or "/tmp"
+        self.prefix = prefix
+
+    def bind(self, entry: EntryRecord) -> None:
+        base = f"{self.root}/{self.prefix}_{entry.id}"
+        entry.pid_file = f"{base}.pid"
+        entry.rc_file = f"{base}.rc"
+        entry.stdout_file = f"{base}.stdout"
+        entry.stderr_file = f"{base}.stderr"
+
+
+class ShellEntry:
+    """One synchronous observable shell entry."""
+
+    def __init__(
+        self,
+        cmd: str,
+        *,
+        name: str = "entry",
+        timeout: int = 600,
+        failure: EntryFailurePolicy | dict[str, Any] | None = None,
     ):
         self.cmd = cmd
-        self.env = env
+        self.name = name
         self.timeout = timeout
-        self.optional = optional
+        self.failure = create_object(failure) if failure is not None else None
 
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
-        cmd = _resolve(self.cmd, ctx)
-        env = _resolve(self.env, ctx) or {}
-        await exec_in(
+    async def run(
+        self,
+        client: Any,
+        item: AgentRolloutItem,
+        record: StageRecord,
+        *,
+        env: dict[str, str],
+    ) -> EntryOutcome:
+        entry = self._new_record()
+        record.entries.append(entry)
+        record.entry_cmd = self.cmd
+        entry.status = StageStatus.RUNNING
+        entry.started_at = time.monotonic()
+        try:
+            outcome = await self._execute(client, env)
+            if not outcome.ok and self.failure is not None:
+                outcome = await self.failure.handle(client, item, record, entry, outcome)
+            self._finish_record(entry, outcome)
+            return outcome
+        except Exception as exc:
+            outcome = EntryOutcome(
+                source=type(self).__name__,
+                reason="exception",
+                result=StageResult(return_code=1, stderr=str(exc), error=str(exc)),
+            )
+            if self.failure is not None:
+                outcome = await self.failure.handle(client, item, record, entry, outcome)
+            self._finish_record(entry, outcome, exc=exc)
+            raise
+
+    async def _execute(self, client: Any, env: dict[str, str]) -> EntryOutcome:
+        exec_res = await exec_in(
             client,
-            cmd,
+            self.cmd,
             env=env,
             timeout_sec=self.timeout,
-            raise_on_error=not self.optional,
-        )
-
-
-class DownloadHook(Hook):
-    """Pull sandbox paths into ``ctx["pulled"]``.
-
-    Each entry is auto-detected as file vs directory:
-      - **file** → bytes of the file (from ``/download`` endpoint)
-      - **directory** → bytes of a gzipped tar produced in-sandbox
-        (sandbox ``/download`` only serves files, so dirs are tarred first)
-
-    ``ctx["pulled"]`` is ``{path: bytes}`` in both cases; ``ctx["pulled_kinds"]``
-    records ``{path: "file" | "dir"}`` so consumers know how to interpret.
-    """
-
-    name = "download"
-
-    def __init__(self, paths: Resolvable):
-        self.paths = paths
-
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
-        paths = _resolve(self.paths, ctx)
-        pulled = ctx.setdefault("pulled", {})
-        kinds = ctx.setdefault("pulled_kinds", {})
-        for p in paths:
-            try:
-                blob, kind = await download_path(client, p)
-                pulled[p] = blob
-                kinds[p] = kind
-            except Exception as exc:
-                get_logger().warning(f"download {p} failed: {exc}")
-
-
-# ─────────────────────────────────────────────────────────────────
-# SandboxStage
-# ─────────────────────────────────────────────────────────────────
-
-
-async def _sandbox_cat(client: Any, path: str, timeout_sec: float = 5.0) -> bytes | None:
-    """Download a sandbox file; return ``None`` on any failure."""
-    try:
-        return await asyncio.wait_for(client.download_file(path), timeout=timeout_sec)
-    except Exception:
-        return None
-
-
-async def _read_entry_rc(client: Any, rc_file: str) -> int | None:
-    """Read ``rc_file`` content and parse as int.
-
-    Returns ``None`` when
-    the file doesn't exist yet (entry hasn't finished) or is malformed.
-    """
-    blob = await _sandbox_cat(client, rc_file)
-    if blob is None:
-        return None
-    try:
-        return int(blob.decode(errors="replace").strip())
-    except ValueError:
-        return None
-
-
-async def _read_entry_pid(client: Any, pid_file: str) -> int | None:
-    blob = await _sandbox_cat(client, pid_file)
-    if blob is None:
-        return None
-    try:
-        return int(blob.decode(errors="replace").strip())
-    except ValueError:
-        return None
-
-
-async def _is_pid_alive(client: Any, pid: int, timeout_sec: float) -> bool | None:
-    """``True`` = alive, ``False`` = gone, ``None`` = probe failed."""
-    try:
-        res = await exec_in(
-            client,
-            f"kill -0 {pid} 2>/dev/null && echo Y || echo N",
             raise_on_error=False,
-            timeout_sec=timeout_sec,
         )
-    except Exception:
-        return None
-    out = (res.get("stdout") or "").strip()
-    if "Y" in out:
-        return True
-    if "N" in out:
-        return False
-    return None
-
-
-async def _is_pattern_running(client: Any, pattern: str, timeout_sec: float) -> bool | None:
-    """Pgrep-style liveness probe for a substring match on full command
-    line."""
-    try:
-        res = await exec_in(
-            client,
-            f"pgrep -f {shlex.quote(pattern)} >/dev/null && echo Y || echo N",
-            raise_on_error=False,
-            timeout_sec=timeout_sec,
+        rc = _result_code(exec_res)
+        stderr = exec_res.get("stderr") or ""
+        return EntryOutcome(
+            source="sync_exec",
+            reason="command_returned",
+            result=StageResult(
+                stdout=exec_res.get("stdout") or "",
+                stderr=stderr,
+                return_code=rc,
+                error=None if rc == 0 else f"return_code={rc}: {stderr[:400]}",
+            ),
         )
-    except Exception:
-        return None
-    out = (res.get("stdout") or "").strip()
-    if "Y" in out:
-        return True
-    if "N" in out:
-        return False
-    return None
 
+    def _new_record(self) -> EntryRecord:
+        suffix = uuid.uuid4().hex[:12]
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.name).strip("_") or "entry"
+        entry_id = f"{safe_name}_{suffix}"
+        entry = EntryRecord(
+            id=entry_id,
+            name=self.name,
+            cmd=self.cmd,
+            mode="sync",
+        )
+        return entry
 
-async def wait_for_detached_entry(
-    client: Any,
-    tid: str,
-    *,
-    pid_file: str,
-    rc_file: str,
-    daemon_pattern: str | None,
-    poll_sec: float,
-    probe_timeout_sec: float,
-    max_sec: int,
-) -> dict[str, Any]:
-    """Poll the sandbox until a detached entry command finishes or fails.
-
-    Returns a dict with the same shape as ``client.execute`` results
-    (``return_code`` / ``stdout`` / ``stderr``) so callers can treat it
-    like a normal synchronous ``exec_in`` result.
-
-    Non-zero ``return_code`` encodings we add on top of the entry's own rc:
-
-      * ``-1`` — entry shell died without writing ``rc_file``
-        (SIGKILL, node eviction, or fatal shell error).
-      * ``-2`` — ``daemon_pattern`` no longer matches ``pgrep`` while
-        the entry was still running.  Skipped if ``daemon_pattern`` is
-        ``None`` (stage has no external daemon to monitor, e.g. judgers).
-      * ``-3`` — exceeded ``max_sec`` (safety ceiling, default 2h).
-      * ``-4`` — sandbox env itself has become unreachable for
-        ``sandbox_dead_consecutive`` consecutive polls.  This catches the
-        "gateway TTL killed the env under us" case that used to hide
-        behind probes silently returning ``None`` — pre-fix those hangs
-        quietly spun until ``max_sec`` and surfaced as either a bogus
-        ``entry_timeout`` or a misleading post-hook 404.
-
-    Args:
-        client (Any): SandboxClient.
-        tid (str): Task id for log tags.
-        pid_file (str): Sandbox path of the wrapper shell's PID file;
-            must be unique per call to avoid cross-stage contamination.
-        rc_file (str): Sandbox path of the wrapper shell's exit-code file;
-            must be unique per call.
-        daemon_pattern (str | None): ``pgrep -f`` substring that the
-            stage's companion daemon process should match.  When ``None``,
-            the daemon-alive check is skipped entirely — appropriate for
-            stages that don't spawn or depend on a background process
-            (e.g. a judger's one-shot test runner).
-        poll_sec (float): Seconds between polls.
-        probe_timeout_sec (float): Per-probe HTTP budget for rc/pid reads
-            and ``kill -0`` / ``pgrep`` calls.
-        max_sec (int): Hard ceiling on total wait.
-    """
-    start = time.monotonic()
-    consecutive_entry_missing = 0
-    # Every probe returns ``None`` when the underlying HTTP call failed
-    # (timeout, 404, connection reset).  A single ``None`` can be transient
-    # cross-cluster noise; a run of them means the sandbox env is gone
-    # (TTL expired, gateway evicted, container killed).  We need both
-    # ``_read_*`` probes AND ``_is_pattern_running`` (when applicable)
-    # to come back ``None`` on the same poll for it to count as unreachable
-    # — that rules out a single flaky endpoint.
-    consecutive_sandbox_unreachable = 0
-    _SANDBOX_DEAD_THRESHOLD = 3
-    logger = get_logger()
-    while True:
-        rc = await _read_entry_rc(client, rc_file)
-        if rc is not None:
-            logger.info(f"[{tid}] detached entry finished rc={rc}")
-            return {"return_code": rc, "stdout": "", "stderr": ""}
-
-        entry_pid = await _read_entry_pid(client, pid_file)
-        entry_alive = await _is_pid_alive(client, entry_pid, probe_timeout_sec) if entry_pid else None
-        daemon_alive = await _is_pattern_running(client, daemon_pattern, probe_timeout_sec) if daemon_pattern else None
-
-        # "Sandbox unreachable" = every probe we could run this poll came
-        # back ``None`` AND the rc file is also unreadable.  When daemon
-        # check is disabled (daemon_pattern is None), we skip that leg.
-        rc_probe_failed = rc is None  # already tried above
-        pid_probe_failed = entry_pid is None
-        daemon_probe_failed = daemon_pattern is not None and daemon_alive is None
-        all_failed = rc_probe_failed and pid_probe_failed and (daemon_probe_failed or daemon_pattern is None)
-        if all_failed:
-            consecutive_sandbox_unreachable += 1
-            logger.warning(
-                f"[{tid}] sandbox probes all failing ({consecutive_sandbox_unreachable}/{_SANDBOX_DEAD_THRESHOLD})"
+    def _finish_record(self, entry: EntryRecord, outcome: EntryOutcome, *, exc: Exception | None = None) -> None:
+        entry.finished_at = time.monotonic()
+        entry.return_code = outcome.result.return_code
+        entry.return_code_kind = _return_code_kind(outcome.result.return_code)
+        entry.result = outcome.result
+        entry.outcome = outcome
+        entry.status = StageStatus.COMPLETED if outcome.ok else StageStatus.FAILED
+        if not outcome.ok:
+            entry.error = RolloutError(
+                stage=entry.name,
+                category=entry.return_code_kind.value if entry.return_code_kind else "entry",
+                type=type(exc).__name__
+                if exc is not None
+                else ("EntryReturnCode" if outcome.result.return_code < 0 else "ScriptReturnCode"),
+                message=outcome.result.error or outcome.result.stderr or f"return_code={outcome.result.return_code}",
+                retryable=outcome.retryable,
             )
-            if consecutive_sandbox_unreachable >= _SANDBOX_DEAD_THRESHOLD:
-                logger.warning(f"[{tid}] sandbox appears dead — declaring rc=-4")
-                return {
-                    "return_code": -4,
-                    "stdout": "",
-                    "stderr": f"[{tid}] sandbox unreachable for {consecutive_sandbox_unreachable} consecutive polls",
-                }
-        else:
-            consecutive_sandbox_unreachable = 0
 
-        if daemon_alive is False:
-            logger.warning(f"[{tid}] daemon process (pattern={daemon_pattern!r}) gone while entry still running")
-            return {
-                "return_code": -2,
-                "stdout": "",
-                "stderr": f"[{tid}] daemon process gone (pattern={daemon_pattern!r})",
-            }
 
-        if entry_alive is False:
-            consecutive_entry_missing += 1
-            # One poll of "missing" can be a race with the rc-write step
-            # — the shell may have exited moments before we re-read the
-            # pid.  Require two consecutive misses + rc file still absent
-            # before declaring a crash.
-            if consecutive_entry_missing >= 2:
-                rc = await _read_entry_rc(client, rc_file)
-                if rc is not None:
-                    return {"return_code": rc, "stdout": "", "stderr": ""}
-                logger.warning(f"[{tid}] lagent_entry pid {entry_pid} gone without writing rc file")
-                return {
-                    "return_code": -1,
-                    "stdout": "",
-                    "stderr": f"[{tid}] lagent_entry pid {entry_pid} gone without writing rc file",
-                }
-        else:
-            consecutive_entry_missing = 0
+class DetachedShellEntry:
+    """One detached shell entry using the capture/rc completion protocol."""
 
-        elapsed = time.monotonic() - start
-        if elapsed > max_sec:
-            logger.warning(f"[{tid}] detached entry exceeded max runtime {max_sec}s")
-            return {
-                "return_code": -3,
-                "stdout": "",
-                "stderr": f"[{tid}] entry exceeded max runtime {max_sec}s",
-            }
+    def __init__(
+        self,
+        cmd: str,
+        *,
+        name: str = "entry",
+        timeout: int = 600,
+        capture: EntryCapture | dict[str, Any],
+        monitor: EntryMonitor | dict[str, Any],
+        failure: EntryFailurePolicy | dict[str, Any] | None = None,
+        handshake_timeout_sec: float = 60.0,
+    ):
+        self.cmd = cmd
+        self.name = name
+        self.timeout = timeout
+        self.failure = create_object(failure) if failure is not None else None
+        self.capture = create_object(capture)
+        self.monitor = create_object(monitor)
+        self.handshake_timeout_sec = handshake_timeout_sec
 
-        await asyncio.sleep(poll_sec)
+    async def run(
+        self,
+        client: Any,
+        item: AgentRolloutItem,
+        record: StageRecord,
+        *,
+        env: dict[str, str],
+    ) -> EntryOutcome:
+        entry = self._new_record()
+        self.capture.bind(entry)
+        record.entries.append(entry)
+        record.entry_cmd = self.cmd
+        entry.status = StageStatus.RUNNING
+        entry.started_at = time.monotonic()
+        try:
+            outcome = await self._run_detached(client, item, entry, env)
+            await self._fill_output_files(client, entry, outcome.result)
+            if not outcome.ok and self.failure is not None:
+                outcome = await self.failure.handle(client, item, record, entry, outcome)
+            self._finish_record(entry, outcome)
+            return outcome
+        except Exception as exc:
+            outcome = EntryOutcome(
+                source=type(self).__name__,
+                reason="exception",
+                result=StageResult(return_code=1, stderr=str(exc), error=str(exc)),
+            )
+            if self.failure is not None:
+                outcome = await self.failure.handle(client, item, record, entry, outcome)
+            self._finish_record(entry, outcome, exc=exc)
+            raise
+
+    def _new_record(self) -> EntryRecord:
+        suffix = uuid.uuid4().hex[:12]
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.name).strip("_") or "entry"
+        entry_id = f"{safe_name}_{suffix}"
+        return EntryRecord(
+            id=entry_id,
+            name=self.name,
+            cmd=self.cmd,
+            mode="detach",
+        )
+
+    async def _run_detached(
+        self,
+        client: Any,
+        item: AgentRolloutItem,
+        entry: EntryRecord,
+        env: dict[str, str],
+    ) -> EntryOutcome:
+        assert entry.pid_file and entry.rc_file and entry.stdout_file and entry.stderr_file
+        pid_file = shlex.quote(entry.pid_file)
+        rc_file = shlex.quote(entry.rc_file)
+        stdout_file = shlex.quote(entry.stdout_file)
+        stderr_file = shlex.quote(entry.stderr_file)
+        wrapped = (
+            f"rm -f {pid_file} {rc_file} {stdout_file} {stderr_file}; "
+            f"echo $$ > {pid_file}; "
+            f"({self.cmd}) > {stdout_file} 2> {stderr_file}; "
+            f"echo $? > {rc_file}"
+        )
+        await exec_in(
+            client,
+            wrapped,
+            env=env,
+            timeout_sec=self.handshake_timeout_sec,
+            raise_on_error=True,
+            detach=True,
+        )
+        return await self.monitor.wait(client, item, entry)
+
+    async def _fill_output_files(self, client: Any, entry: EntryRecord, result: StageResult) -> None:
+        if entry.stdout_file:
+            stdout = await self._read_capture_file(client, entry.stdout_file)
+            if stdout is not None:
+                result.stdout = stdout
+        if entry.stderr_file:
+            stderr = await self._read_capture_file(client, entry.stderr_file)
+            if stderr is not None:
+                result.stderr = stderr
+                if result.return_code > 0:
+                    result.error = f"return_code={result.return_code}: {stderr[:400]}"
+
+    async def _read_capture_file(self, client: Any, path: str, timeout_sec: float = 5.0) -> str | None:
+        try:
+            blob = await asyncio.wait_for(client.download_file(path), timeout=timeout_sec)
+        except Exception:
+            return None
+        return blob.decode(errors="replace")
+
+    def _finish_record(self, entry: EntryRecord, outcome: EntryOutcome, *, exc: Exception | None = None) -> None:
+        entry.finished_at = time.monotonic()
+        entry.return_code = outcome.result.return_code
+        entry.return_code_kind = _return_code_kind(outcome.result.return_code)
+        entry.result = outcome.result
+        entry.outcome = outcome
+        entry.status = StageStatus.COMPLETED if outcome.ok else StageStatus.FAILED
+        if not outcome.ok:
+            entry.error = RolloutError(
+                stage=entry.name,
+                category=entry.return_code_kind.value if entry.return_code_kind else "entry",
+                type=type(exc).__name__
+                if exc is not None
+                else ("EntryReturnCode" if outcome.result.return_code < 0 else "ScriptReturnCode"),
+                message=outcome.result.error or outcome.result.stderr or f"return_code={outcome.result.return_code}",
+                retryable=outcome.retryable,
+            )
 
 
 class SandboxStage:
-    """Pre-hooks → entry → post-hooks.  Each field is visible.
+    """Pre-hooks → entries → post-hooks.  Each field is visible.
 
     Not every stage needs every phase:
-      - ``entry`` can be ``None`` (pure setup/teardown stage).
+      - ``entries`` can be empty (pure setup/teardown stage).
       - ``pre`` / ``post`` default to empty.
-      - Downloads live in post-hooks via :class:`DownloadHook` — no separate
-        ``pull`` contract.
+      - Artifact collection is just another configured post-hook; stage has
+        no separate ``pull`` contract.
 
-    ``detach`` controls how the entry command is invoked:
-
-    * ``None`` (default): synchronous ``exec_in`` — the sandbox HTTP call
-      blocks until the command finishes; stdout/stderr are captured and
-      returned.  Use this for short-lived stages (judgers, setup) that
-      need the captured output for parsing.
-    * ``{}`` or populated :class:`DetachConfig`: entry is launched in
-      background via ``detach=True`` with a shell wrapper that writes its
-      own PID and the exit code to per-call paths under ``/tmp/``.  The
-      host polls those files + ``pgrep`` (when ``daemon_pattern`` is set)
-      to detect completion or daemon death.  Use this for long-lived
-      rollout stages whose runtime exceeds the HTTP read timeout on
-      cross-cluster networks.  Stdout/stderr are NOT captured — stages
-      that need them must consume output via files pulled by post-hooks.
+    Entry execution is owned by :class:`ShellEntry` or
+    :class:`DetachedShellEntry`; completion, liveness, and failed-entry
+    diagnostics stay with the entry object that needs them.
+    Post-hooks run only after the entry succeeds.
     """
 
     def __init__(
         self,
         *,
-        sandbox: Any = None,
+        sandbox: str = "main",
         pre: list[Hook] = (),
-        entry: Resolvable = None,
-        env: Resolvable = None,
-        timeout: int = 600,
+        entries: list[ShellEntry | DetachedShellEntry | dict[str, Any]] | None = None,
+        env: dict[str, str] | Any | None = None,
+        runtime: dict[str, Any] | None = None,
         post: list[Hook] = (),
-        detach: DetachConfig | None = None,
+        hook_stuck_warn_sec: float = 30.0,
     ):
         self.sandbox = sandbox
-        self.pre = list(pre)
-        self._entry = entry
-        self._env = env
-        # ``timeout`` is the end-to-end wall-clock ceiling for ``entry``:
-        # in sync mode it's the HTTP read timeout passed to ``exec_in``;
-        # in detach mode it bounds the background poll loop.
-        self.timeout = timeout
-        self.post = list(post)
-        # Unpack detach config once at init.  ``detach is None`` → sync
-        # path; any dict (even ``{}``) opts into the detach path.
-        self.detach = detach is not None
-        if detach is None:
-            detach = {}
-        self.daemon_pattern: str | None = detach.get("daemon_pattern")
-        self.poll_sec: float = detach.get("poll_sec", 30.0)
-        self.probe_timeout_sec: float = detach.get("probe_timeout_sec", 10.0)
-        self.handshake_timeout_sec: float = detach.get("handshake_timeout_sec", 60.0)
-
-    async def run(self, client: Any, ctx: dict[str, Any]) -> StageResult:
-        for hook in self.pre:
-            await _run_hook(hook, client, ctx, phase="pre")
-
-        stdout = stderr = ""
-        rc = 0
-
-        entry = _resolve(self._entry, ctx)
-        if entry:
-            env = _resolve(self._env, ctx) or {}
-            tid = (ctx.get("data") and getattr(ctx["data"], "id", None)) or "?"
-
-            if self.detach:
-                # Long-running entry: wrap with PID/rc files so external polling
-                # can detect completion without holding an HTTP connection for
-                # the full rollout.  The file paths are generated per call so
-                # stages that share a sandbox (infer → judger) cannot race on
-                # a stale rc left by the previous stage.
-                stage_id = uuid.uuid4().hex[:12]
-                pid_file = f"/tmp/xt_stage_{stage_id}.pid"
-                rc_file = f"/tmp/xt_stage_{stage_id}.rc"
-                wrapped = f"rm -f {pid_file} {rc_file}; echo $$ > {pid_file}; {entry}; echo $? > {rc_file}"
-                # The detach HTTP handshake itself should return promptly —
-                # it just tells the sandbox to background the command.  Use
-                # a short cap rather than ``self.timeout`` so a dead sandbox
-                # doesn't block for hours before failing over.
-                await exec_in(
-                    client,
-                    wrapped,
-                    env=env,
-                    timeout_sec=self.handshake_timeout_sec,
-                    raise_on_error=True,
-                    detach=True,
+        self.pre = [create_object(hook) for hook in pre]
+        entry_specs = list(entries or [])
+        self.entries = [create_object(spec) for spec in entry_specs]
+        for stage_entry in self.entries:
+            if not isinstance(stage_entry, (ShellEntry, DetachedShellEntry)):
+                raise TypeError(
+                    "SandboxStage.entries must contain ShellEntry or DetachedShellEntry configs, "
+                    f"got {type(stage_entry).__name__}"
                 )
-                exec_res = await wait_for_detached_entry(
+        self._env = create_object(env)
+        self.runtime = dict(runtime or {})
+        self.post = [create_object(hook) for hook in post]
+        self.hook_stuck_warn_sec = hook_stuck_warn_sec
+
+    async def run(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> StageResult:
+        record.status = StageStatus.RUNNING
+        record.started_at = record.started_at or time.monotonic()
+        record.runtime.update(self.runtime)
+
+        try:
+            for hook in self.pre:
+                await self._run_hook(
+                    hook,
                     client,
-                    tid,
-                    pid_file=pid_file,
-                    rc_file=rc_file,
-                    daemon_pattern=self.daemon_pattern,
-                    poll_sec=self.poll_sec,
-                    probe_timeout_sec=self.probe_timeout_sec,
-                    max_sec=self.timeout,
+                    item,
+                    record,
+                    phase="pre",
+                    stuck_warn_sec=self.hook_stuck_warn_sec,
                 )
-            else:
-                # Synchronous entry: ``exec_in`` blocks until the command
-                # returns and captures stdout/stderr for post-hook parsing
-                # (e.g. ParseJudgerStdout).
-                exec_res = await exec_in(
+
+            env = self._build_env(item, record)
+            result = StageResult()
+            for entry in self.entries:
+                outcome = await entry.run(client, item, record, env=env)
+                result = outcome.result
+                self._apply_result(record, result)
+                if not outcome.ok:
+                    return result
+
+            for hook in self.post:
+                await self._run_hook(
+                    hook,
                     client,
-                    entry,
-                    env=env,
-                    timeout_sec=self.timeout,
-                    raise_on_error=False,
+                    item,
+                    record,
+                    phase="post",
+                    stuck_warn_sec=self.hook_stuck_warn_sec,
                 )
-            rc = _result_code(exec_res)
-            stdout = exec_res.get("stdout") or ""
-            stderr = exec_res.get("stderr") or ""
 
-        result = StageResult(
-            stdout=stdout,
-            stderr=stderr,
-            return_code=rc,
-            pulled=ctx.get("pulled", {}),
-            error=None if rc == 0 else f"return_code={rc}: {stderr[:400]}",
-        )
-        ctx["result"] = result
+            return result
+        except Exception as exc:
+            latest_entry = record.entries[-1] if record.entries else None
+            if latest_entry is not None and latest_entry.result is not None:
+                self._apply_result(record, latest_entry.result)
+            record.status = StageStatus.FAILED
+            if record.error is None:
+                record.error = RolloutError(
+                    stage=record.judger_name,
+                    category="stage",
+                    type=type(exc).__name__,
+                    message=str(exc),
+                )
+            raise
+        finally:
+            record.finished_at = time.monotonic()
 
-        # Post-hooks run best-effort when the entry failed.  A hung entry
-        # (rc=-3 timeout, rc=-1 pid lost, rc=-2 daemon gone, non-zero rc)
-        # typically leaves the sandbox in a broken state where downloads
-        # 404 or the file the hook wants isn't on disk yet.  If we let those
-        # hook exceptions propagate, they replace the real entry error in
-        # ``run_single``'s ``except Exception`` handler — and the fate is
-        # misclassified (rc22: 3468 ``posthook_download_404`` fates that
-        # were actually ``entry_timeout``).  Swallow hook failures in the
-        # entry-failed path but keep them raising on the happy path so real
-        # post-hook bugs still surface.
-        entry_failed = rc != 0
-        for hook in self.post:
-            try:
-                await _run_hook(hook, client, ctx, phase="post")
-            except Exception as hook_exc:
-                if entry_failed:
-                    get_logger().warning(
-                        f"post-hook {type(hook).__name__!r} failed after entry "
-                        f"rc={rc}; preserving entry error: "
-                        f"{type(hook_exc).__name__}: {hook_exc}"
-                    )
-                else:
-                    raise
+    def _build_env(self, item: AgentRolloutItem, record: StageRecord) -> dict[str, str]:
+        env_spec = self._env
+        if env_spec is None:
+            return {}
+        if isinstance(env_spec, dict):
+            return dict(env_spec)
+        build = getattr(env_spec, "build", None)
+        if build is None:
+            raise TypeError(f"SandboxStage.env must be a dict or env builder with build(item, record), got {type(env_spec)}")
+        env = build(item, record)
+        if env is None:
+            return {}
+        if not isinstance(env, dict):
+            raise TypeError(f"SandboxStage.env builder must return dict[str, str], got {type(env)}")
+        return dict(env)
 
-        # Post-hooks may have added downloads; reflect into the returned result.
-        result.pulled = ctx.get("pulled", {})
-        return result
+    def _apply_result(self, record: StageRecord, result: StageResult) -> None:
+        record.entry_result = result
+        record.result = result
+        record.return_code = result.return_code
+        record.return_code_kind = _return_code_kind(result.return_code)
+        if result.ok:
+            record.status = StageStatus.COMPLETED
+            record.error = None
+            return
+        record.status = StageStatus.FAILED
+        latest_entry = record.entries[-1] if record.entries else None
+        if latest_entry is not None and latest_entry.error is not None:
+            record.error = latest_entry.error
+        else:
+            record.error = RolloutError(
+                stage=latest_entry.name if latest_entry is not None else record.judger_name,
+                category=record.return_code_kind.value if record.return_code_kind else "entry",
+                type="EntryReturnCode" if result.return_code < 0 else "ScriptReturnCode",
+                message=result.error or result.stderr or f"return_code={result.return_code}",
+            )
+
+    async def _run_hook(
+        self,
+        hook: Hook,
+        client: Any,
+        item: AgentRolloutItem,
+        record: StageRecord,
+        *,
+        phase: str,
+        stuck_warn_sec: float,
+    ) -> None:
+        started = time.monotonic()
+        hook_name = getattr(hook, "name", hook.__class__.__name__)
+        task_id = item.id
+        done = False
+
+        async def warn_if_stuck() -> None:
+            await asyncio.sleep(stuck_warn_sec)
+            if not done:
+                get_logger().warning(
+                    "[%s] stage hook still running after %.1fs: phase=%s hook=%s",
+                    task_id,
+                    stuck_warn_sec,
+                    phase,
+                    hook_name,
+                )
+
+        warn_task = asyncio.create_task(warn_if_stuck()) if stuck_warn_sec > 0 else None
+        try:
+            await hook(client, item, record)
+        except Exception as exc:
+            record.hook_errors.append(
+                {
+                    "phase": phase,
+                    "hook": hook_name,
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                }
+            )
+            raise
+        finally:
+            done = True
+            if warn_task is not None:
+                warn_task.cancel()
+            elapsed = time.monotonic() - started
+            if elapsed > 1:
+                get_logger().info("[%s] hook done phase=%s hook=%s took=%.1fs", task_id, phase, hook_name, elapsed)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -730,8 +893,8 @@ async def exec_in(
         command = _expand_vars(command, env)
         # Use `export` so vars carry across chained commands (`bash A && bash B`).
         # Inline `VAR=val cmd1 && cmd2` scopes VAR to cmd1 only, which bites
-        # when entry runs pre_entry.sh && lagent_entry.sh — daemon subprocess
-        # wouldn't see RL_LLM_MODEL etc.
+        # when an entry wrapper starts child processes that still need the
+        # stage env (RL_LLM_MODEL, TASK_WORKSPACE, etc.).
         exports = "; ".join(f'export {k}="{v}"' for k, v in env.items())
         command = f"{exports}; {command}"
     result = await client.execute(command, cwd, timeout_sec, detach)
@@ -753,71 +916,12 @@ async def upload_tar_and_extract(
     if not file_map:
         return
     blob = await asyncio.to_thread(_tar_bytes, file_map, extract_root)
-    # _log_bundle_size(len(blob), extract_root, len(file_map))
     tmp = "/tmp/_bundle.tar.gz"
     await http_upload(client, tmp, base64.b64encode(blob).decode())
     await exec_in(
         client,
         f"mkdir -p {extract_root} && cd {extract_root} && tar xzf {tmp}",
     )
-
-
-async def download_path(client: Any, remote_path: str) -> tuple[bytes, str]:
-    """Download a sandbox file or directory.
-
-    Files come back via the ``/download`` endpoint.  Directories are tarred
-    in-sandbox first (``/download`` only serves files), then the tar is
-    downloaded and the tmp tar is cleaned up.
-
-    Returns:
-        tuple[bytes, str]: ``(content, kind)`` where ``kind`` is ``"file"``
-        or ``"dir"``.  For ``"dir"`` the bytes are a gzipped tarball —
-        caller unpacks with ``tarfile.open(fileobj=io.BytesIO(content))``.
-    """
-    check = await exec_in(
-        client,
-        f'test -d "{remote_path}" && echo DIR || echo FILE',
-        raise_on_error=False,
-    )
-    is_dir = "DIR" in (check.get("stdout") or "")
-
-    if not is_dir:
-        blob = await client.download_file(remote_path)
-        return blob, "file"
-
-    # Tar the dir into /tmp, download, remove the tmp.
-    rp = remote_path.rstrip("/") or "/"
-    parent = rp.rsplit("/", 1)[0] or "/"
-    name = rp.rsplit("/", 1)[-1] or "root"
-    tar_remote = f"/tmp/_dl_{name}.tar.gz"
-    await exec_in(
-        client,
-        f'cd "{parent}" && tar czf {tar_remote} "{name}"',
-    )
-    try:
-        blob = await client.download_file(tar_remote)
-    finally:
-        await exec_in(client, f"rm -f {tar_remote}", raise_on_error=False)
-    return blob, "dir"
-
-
-def tar_dir(src: Path, arcname_prefix: str = "") -> bytes:
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for f in walk_files(src):
-            rel = str(f.relative_to(src))
-            arc = f"{arcname_prefix}/{rel}" if arcname_prefix else rel
-            tar.add(f, arcname=arc, recursive=False)
-    return buf.getvalue()
-
-
-def walk_files(root: Path) -> list[Path]:
-    """Recursive file list, skipping pycache / .pyc."""
-    if not root.exists():
-        return []
-    if root.is_file():
-        return [root]
-    return [p for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -843,119 +947,19 @@ def _result_code(exec_res: dict[str, Any]) -> int:
     return int(rc)
 
 
-_HOOK_STUCK_WARN_SEC = 30.0
-
-
-async def _run_hook(hook: Hook, client: Any, ctx: dict[str, Any], *, phase: str) -> None:
-    """Run one hook; on failure, log + stash + re-raise with a label that names
-    the hook class so the traceback says which one blew up."""
-    name = getattr(hook, "name", None) or type(hook).__name__
-    tid = (ctx.get("data") and getattr(ctx["data"], "id", None)) or "?"
-    image = ctx.get("sandbox_image") or "?"
-    label = f"{phase}-hook {type(hook).__name__}({name!r}) image={image}"
-    get_logger().info(f"[{tid}] {label} start")
-    t0 = time.monotonic()
-    hook_task = asyncio.create_task(hook(client, ctx))
-    try:
-        while True:
-            done, _ = await asyncio.wait([hook_task], timeout=_HOOK_STUCK_WARN_SEC)
-            if done:
-                break
-            get_logger().warning(f"[{tid}] {label} still running ({time.monotonic() - t0:.0f}s)")
-        await hook_task  # re-raise if hook failed
-        get_logger().info(f"[{tid}] {label} done ({time.monotonic() - t0:.2f}s)")
-    except Exception as exc:
-        import traceback as _tb
-
-        get_logger().error(f"[{tid}] {label} failed: {exc}\n{_tb.format_exc()}")
-        ctx.setdefault("hook_errors", []).append(
-            {
-                "phase": phase,
-                "hook": type(hook).__name__,
-                "name": name,
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        )
-        raise RuntimeError(f"{label} failed: {exc}") from exc
-
-
-# ─────────────────────────────────────────────────────────────────
-# UploadHook: source-matching (glob / regex / literal)
-# ─────────────────────────────────────────────────────────────────
-
-
-def _resolve_mapping(m: UploadMapping, ctx: dict[str, Any]) -> dict[str, Path]:
-    # ``base`` is absolute if set and absolute; if relative, resolve against
-    # ctx["task_root"]; if None, defaults to ctx["task_root"].
-    if m.base is None:
-        base = Path(ctx["task_root"])
-    else:
-        base = Path(m.base)
-        if not base.is_absolute():
-            base = Path(ctx["task_root"]) / base
-
-    matches = _match_source(base, m.source)
-    matches = [p for p in matches if not _is_excluded(p, base, m.exclude)]
-
-    dir_target = m.target.endswith("/")
-    files: dict[str, Path] = {}
-    if not dir_target:
-        if len(matches) != 1:
-            raise ValueError(
-                f"UploadMapping target {m.target!r} is a file path but source "
-                f"{m.source!r} under {base} matched {len(matches)} files"
-            )
-        files[m.target] = matches[0]
-        return files
-
-    target = m.target.rstrip("/")
-    for host in matches:
-        if m.flatten:
-            sb = f"{target}/{host.name}"
-        else:
-            rel = host.relative_to(base).as_posix()
-            sb = f"{target}/{rel}"
-        files[sb] = host
-    return files
-
-
-def _match_source(base: Path, pattern: str) -> list[Path]:
-    """Return host files matching ``pattern`` under ``base``.
-
-    Supports:
-      - literal path (file → [that file]; dir → rglob)
-      - glob (contains any of ``* ? [``), via :meth:`pathlib.Path.glob`
-      - regex (``re:<regex>``) against POSIX rel path
-    """
-    if pattern.startswith("re:"):
-        rx = re.compile(pattern[3:])
-        return sorted(
-            p for p in base.rglob("*") if p.is_file() and not _ignored(p) and rx.search(p.relative_to(base).as_posix())
-        )
-
-    if any(ch in pattern for ch in "*?["):
-        return sorted(p for p in base.glob(pattern) if p.is_file() and not _ignored(p))
-
-    p = base / pattern
-    if p.is_file():
-        return [p]
-    if p.is_dir():
-        return sorted(f for f in p.rglob("*") if f.is_file() and not _ignored(f))
-    return []
-
-
-def _is_excluded(host: Path, base: Path, patterns: list[str]) -> bool:
-    if not patterns:
-        return False
-    rel = host.relative_to(base).as_posix()
-    for pat in patterns:
-        if pat.startswith("re:"):
-            if re.search(pat[3:], rel):
-                return True
-        elif fnmatch.fnmatch(rel, pat):
-            return True
-    return False
-
-
-def _ignored(p: Path) -> bool:
-    return "__pycache__" in p.parts or p.suffix == ".pyc"
+def _return_code_kind(rc: int) -> ReturnCodeKind:
+    if rc == 0:
+        return ReturnCodeKind.OK
+    if rc == EntryReturnCode.SANDBOX_UNREACHABLE:
+        return ReturnCodeKind.SANDBOX_UNREACHABLE
+    if rc == EntryReturnCode.TIMEOUT:
+        return ReturnCodeKind.TIMEOUT
+    if rc == EntryReturnCode.DAEMON_GONE:
+        return ReturnCodeKind.DAEMON_GONE
+    if rc == EntryReturnCode.PID_LOST:
+        return ReturnCodeKind.PID_LOST
+    if rc in (-9, 137):
+        return ReturnCodeKind.OOM
+    if rc > 0:
+        return ReturnCodeKind.SCRIPT_ERROR
+    return ReturnCodeKind.UNKNOWN
