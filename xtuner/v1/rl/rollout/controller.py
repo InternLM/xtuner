@@ -33,6 +33,7 @@ class WorkerInfo:
 
     actor: RolloutWorker
     url: str
+    session_url: str | None = None
     is_active: bool = True
 
 
@@ -52,7 +53,7 @@ class RolloutWorkerMetadata(TypedDict):
     # worker rank 到服务器 URL 的映射字典，用于训练进程与 rollout workers 通信
     # 键：worker 的 rank ID（字符串形式的整数）
     # 值：对应的服务器地址列表（通常每个 rank 对应一个 URL）
-    server_url_dict: Dict[str, List[str]]
+    server_url_dict: Dict[int, str]
 
     # Rollout 配置对象，包含推理引擎的所有配置参数
     # 包括：并行策略（TP/EP）、超时设置、后端类型（LMDeploy/vLLM/SGLang）等
@@ -66,6 +67,15 @@ class RolloutWorkerMetadata(TypedDict):
     # Gateway HTTP server URL (e.g. "http://1.2.3.4:8080").
     # Set after start_gateway() is called; None if the gateway has not been started.
     api_server_url: Optional[str]
+
+    # worker rank -> SessionServer proxy URL. These are the externally
+    # registered URLs for routedapiproxy; server_url_dict keeps the original
+    # worker URLs for trainer-side weight update / backend control paths.
+    worker_session_url_dict: Dict[int, str]
+
+    # SessionServer URL -> active status. This mirrors worker_server_urls_status
+    # but is keyed by the proxy URL that external traffic uses.
+    worker_session_urls_status: Dict[str, bool]
 
 
 # Keep this as a Ray actor because Ray AgentLoop actors need a shared, cross-process handle to the same controller
@@ -90,7 +100,7 @@ class RolloutController:
         self.num_gpus_per_engine = self.config.num_gpus_per_engine
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
         self.engine_rank_mesh_array: List[List[int]] = []
-        self.worker_server_urls_map: dict[str, List[str]] = {}
+        self.worker_server_urls_map: dict[int, str] = {}
         self.rank2info: dict[int, WorkerInfo] = {}
         self.engine_rank_mesh_array, self.worker_server_urls_map, self.rank2info = self._init_workers(placement_group)
         self.num_active_workers = len(self.rank2info)
@@ -151,12 +161,20 @@ class RolloutController:
         """
         with self.worker_info_lock:
             worker_server_urls_status = {info.url: info.is_active for info in self.rank2info.values()}
+            worker_session_url_dict = {
+                rank: info.session_url for rank, info in self.rank2info.items() if info.session_url is not None
+            }
+            worker_session_urls_status = {
+                info.session_url: info.is_active for info in self.rank2info.values() if info.session_url is not None
+            }
         rollout_metadata: RolloutWorkerMetadata = {
             "engine_rank_mesh_array": self.engine_rank_mesh_array,
             "server_url_dict": self.worker_server_urls_map,
             "rollout_config": self.config,
             "worker_server_urls_status": worker_server_urls_status,
             "api_server_url": self._gateway_url,
+            "worker_session_url_dict": worker_session_url_dict,
+            "worker_session_urls_status": worker_session_urls_status,
         }
         return rollout_metadata
 
@@ -292,9 +310,17 @@ class RolloutController:
         try:
             dist_init_addr = ray.get(worker.init_dist_port.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
             _, url = ray.get(worker.init.remote(dist_init_addr), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+            _, session_url = ray.get(worker.get_session_server_info.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
             is_healthy = ray.get(worker.check_health.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+
             if is_healthy:
                 self.logger.info(f"Successfully restarted worker {worker} with URL {url}.")
+                with self.worker_info_lock:
+                    rank = self._get_rank_by_actor(worker)
+                    if rank is not None:
+                        self.rank2info[rank].url = url
+                        self.rank2info[rank].session_url = session_url
+                        self.worker_server_urls_map[rank] = url
                 return True
             else:
                 self.logger.error(f"Worker {worker} is still unhealthy after restart.")
@@ -456,18 +482,29 @@ class RolloutController:
             nodes_per_engine, server_urls_per_engine, init_dist_init_addrs, self.num_gpus_per_engine
         )
         # launch rollout servers
-        worker_server_urls_map = dict(  # rank -> url
-            ray.get([worker.init.remote(dist_init_addrs[i]) for i, worker in enumerate(active_rollout_workers)])
+        init_results = ray.get(
+            [worker.init.remote(dist_init_addrs[i]) for i, worker in enumerate(active_rollout_workers)]
+        )
+        worker_server_urls_map = dict(init_results)  # rank -> url
+        worker_session_url_dict = dict(
+            ray.get([worker.get_session_server_info.remote() for worker in active_rollout_workers])
         )
         active_rollout_workers, worker_server_urls_map = self._update_active_workers_and_urls_map(
             active_rollout_workers, worker_server_urls_map
         )
+        active_ranks = list(worker_server_urls_map.keys())
+        worker_session_url_dict = {rank: worker_session_url_dict[rank] for rank in active_ranks}
         workers_info = {}
         for i in range(len(active_rollout_workers)):
             rank = list(worker_server_urls_map.keys())[i]
             url = worker_server_urls_map[rank]
-            workers_info[rank] = WorkerInfo(actor=active_rollout_workers[i], url=url)
+            workers_info[rank] = WorkerInfo(
+                actor=active_rollout_workers[i],
+                url=url,
+                session_url=worker_session_url_dict[rank],
+            )
         self.logger.info(f"Rollout worker server URLs: {[info.url for info in workers_info.values()]}")
+        self.logger.info(f"Rollout worker session server URLs: {[info.session_url for info in workers_info.values()]}")
         return engine_rank_mesh_array, worker_server_urls_map, workers_info
 
 
