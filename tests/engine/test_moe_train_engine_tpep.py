@@ -98,7 +98,12 @@ def _build_tiny_moe_cfg(ep_size: int = 1, expert_tp_size: int = 1) -> Qwen3MoECo
     )
 
 
-def _build_engine(ep_size: int, expert_tp_size: int, data_tp_size: int = 1) -> TrainEngine:
+def _build_engine(
+    ep_size: int,
+    expert_tp_size: int,
+    data_tp_size: int = 1,
+    intra_layer_micro_batch: int = 1,
+) -> TrainEngine:
     moe_cfg = _build_tiny_moe_cfg(ep_size, expert_tp_size)
     optim_cfg = AdamWConfig()
     fsdp_cfg = FSDPConfig(
@@ -106,7 +111,12 @@ def _build_engine(ep_size: int, expert_tp_size: int, data_tp_size: int = 1) -> T
         tp_size=data_tp_size,
         cpu_offload=False,
     )
-    return TrainEngine(model_cfg=moe_cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg)
+    return TrainEngine(
+        model_cfg=moe_cfg,
+        optim_cfg=optim_cfg,
+        fsdp_cfg=fsdp_cfg,
+        intra_layer_micro_batch=intra_layer_micro_batch,
+    )
 
 
 def _make_engine_input(device: torch.device, seed_offset: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
@@ -160,17 +170,120 @@ def _run_train_step_without_clip(
     input_ids: torch.Tensor,
     labels: torch.Tensor,
 ) -> float:
-    seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
-    shifted_labels = labels.to(DEVICE)
-
-    LossContext = loss_cfg.loss_ctx_cls
-    loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
-    loss_ctx_list = LossContext.build_batches([loss_ctx])
-    loss_ctx = loss_ctx_list[0]
-
-    engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
+    engine_input = _make_engine_items(loss_cfg, [(input_ids, labels)])
     step_info = engine.train_step(engine_input)
     return step_info["logs_info"]["reduced_llm_loss"]
+
+
+def _make_engine_items(
+    loss_cfg: CELossConfig,
+    batches: list[tuple[torch.Tensor, torch.Tensor]],
+) -> list[ModelItem]:
+    loss_ctx_list = []
+    seq_ctx_list = []
+    for input_ids, labels in batches:
+        seq_ctx_list.append(SequenceContext.from_input_ids((input_ids,), device=DEVICE))
+        shifted_labels = labels.to(DEVICE)
+        loss_ctx_list.append(loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None))
+
+    LossContext = loss_cfg.loss_ctx_cls
+    loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+    return [
+        ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
+        for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
+    ]
+
+
+def _run_train_step_items_without_clip(
+    engine: TrainEngine,
+    loss_cfg: CELossConfig,
+    batches: list[tuple[torch.Tensor, torch.Tensor]],
+) -> float:
+    engine_input = _make_engine_items(loss_cfg, batches)
+    step_info = engine.train_step(engine_input)
+    return step_info["logs_info"]["reduced_llm_loss"]
+
+
+def _record_expert_tp_collective_stages(engine: TrainEngine) -> dict[str, list[str]]:
+    stages: dict[str, list[str]] = {
+        "async_op_true": [],
+        "async_all_gather": [],
+        "async_all_gather_metadata": [],
+        "async_reduce_scatter_sum": [],
+    }
+    current_stage: list[str] = []
+
+    for layer in engine.model.layers.values():
+        dispatcher = layer.dispatcher
+        expert_tp = dispatcher._expert_tp
+        if expert_tp is None:
+            continue
+
+        for stage_name in (
+            "dispatch_preprocess",
+            "dispatch",
+            "dispatch_postprocess",
+            "combine_preprocess",
+            "combine",
+            "combine_postprocess",
+        ):
+            original_stage = getattr(dispatcher, stage_name)
+
+            def stage_wrapper(*args, _original_stage=original_stage, _stage_name=stage_name, **kwargs):
+                if kwargs.get("async_op", False):
+                    stages["async_op_true"].append(_stage_name)
+                current_stage.append(_stage_name)
+                try:
+                    return _original_stage(*args, **kwargs)
+                finally:
+                    current_stage.pop()
+
+            setattr(dispatcher, stage_name, stage_wrapper)
+
+        for collective_name in (
+            "async_all_gather",
+            "async_all_gather_metadata",
+            "async_reduce_scatter_sum",
+        ):
+            original_collective = getattr(expert_tp, collective_name)
+
+            def collective_wrapper(
+                *args,
+                _original_collective=original_collective,
+                _collective_name=collective_name,
+                **kwargs,
+            ):
+                stages[_collective_name].append(current_stage[-1] if current_stage else "<outside>")
+                return _original_collective(*args, **kwargs)
+
+            setattr(expert_tp, collective_name, collective_wrapper)
+
+    return stages
+
+
+def _assert_domino_expert_tp_collective_stages(stages: dict[str, list[str]]) -> None:
+    assert set(stages["async_op_true"]) == {
+        "dispatch_preprocess",
+        "dispatch",
+        "dispatch_postprocess",
+        "combine_preprocess",
+        "combine",
+        "combine_postprocess",
+    }
+    assert stages["async_all_gather"]
+    assert stages["async_all_gather_metadata"]
+    assert stages["async_reduce_scatter_sum"]
+    assert set(stages["async_all_gather"]) == {"dispatch"}
+    assert set(stages["async_all_gather_metadata"]) == {"dispatch"}
+    assert set(stages["async_reduce_scatter_sum"]) == {"combine"}
+
+
+def _assert_rank_inputs_are_distinct(batches: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
+    local_input_ids = tuple(tuple(input_ids.detach().cpu().reshape(-1).tolist()) for input_ids, _ in batches)
+    gathered_input_ids: list[tuple[tuple[int, ...], ...] | None] = [None for _ in range(dist.get_world_size())]
+    dist.all_gather_object(gathered_input_ids, local_input_ids)
+    # ExpertTP-only 下每个 TP rank 使用不同样本，避免重复输入掩盖 shard 问题。
+    assert len(set(gathered_input_ids)) == len(gathered_input_ids)
 
 
 def _get_param_grad(engine: TrainEngine, name_suffix: str) -> torch.Tensor:
@@ -243,6 +356,22 @@ def _sync_engine_weights(engine_ref: TrainEngine, engine_tpep: TrainEngine) -> N
             else:
                 ref_full = _full_tensor(getattr(ref_module, param_name).detach()).to(device=param.device, dtype=param.dtype)
                 _copy_param_from_full(param, ref_full)
+
+
+def _copy_matching_engine_weights(engine_src: TrainEngine, engine_dst: TrainEngine) -> None:
+    """Copy weights between engines that already use the same parameter layout."""
+    src_params = dict(engine_src.model.named_parameters())
+
+    with torch.no_grad():
+        for name, dst_param in engine_dst.model.named_parameters():
+            src_param = src_params[name].detach()
+            if isinstance(dst_param, DTensor):
+                assert isinstance(src_param, DTensor), f"Parameter layout mismatch for {name}"
+                # 两个 engine 的并行布局相同，直接拷贝本 rank 的 DTensor shard。
+                dst_param.copy_(src_param.to(dtype=dst_param.dtype))
+            else:
+                src_tensor = _full_tensor(src_param).to(device=dst_param.device, dtype=dst_param.dtype)
+                dst_param.copy_(src_tensor)
 
 
 def _slice_tpep_weight(grouped_linear: GroupedLinear, full_weight: torch.Tensor, *, fused_gate_up: bool) -> torch.Tensor:
@@ -448,6 +577,67 @@ class TestMoETrainEngineExpertTPOnly(DeterministicDDPTestCase):
             atol=BF16_ATOL,
             rtol=BF16_RTOL,
         )
+
+        dist.barrier()
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except Exception:
+            pass
+
+    @parametrize.parametrize(
+        "device,expert_tp_size",
+        [
+            ("cuda", 2),
+        ],
+    )
+    def test_expert_tp_only_domino_micro_batch_matches_sync_baseline(
+        self, device: str, expert_tp_size: int
+    ) -> None:
+        pg = self.create_pg(device)
+
+        engine_ref = _build_engine(ep_size=1, expert_tp_size=expert_tp_size)
+        engine_ref.init_model_weights()
+
+        engine_domino = _build_engine(
+            ep_size=1,
+            expert_tp_size=expert_tp_size,
+            intra_layer_micro_batch=2,
+        )
+        engine_domino.init_model_weights()
+        _copy_matching_engine_weights(engine_ref, engine_domino)
+        collective_stages = _record_expert_tp_collective_stages(engine_domino)
+        dist.barrier()
+
+        device_obj = torch.device(device, dist.get_rank() % torch.cuda.device_count())
+        batches = [
+            _make_engine_input(device_obj, seed_offset=dist.get_rank() * 2),
+            _make_engine_input(device_obj, seed_offset=dist.get_rank() * 2 + 1),
+        ]
+        _assert_rank_inputs_are_distinct(batches)
+        loss_cfg = CELossConfig()
+
+        loss_domino = _run_train_step_items_without_clip(engine_domino, loss_cfg, batches)
+        norm_domino = engine_domino.clip_grad_norm(do_clip=False).detach().float().cpu()
+
+        loss_ref = _run_train_step_items_without_clip(engine_ref, loss_cfg, batches)
+        norm_ref = engine_ref.clip_grad_norm(do_clip=False).detach().float().cpu()
+
+        _assert_domino_expert_tp_collective_stages(collective_stages)
+        torch.testing.assert_close(
+            torch.tensor(loss_domino),
+            torch.tensor(loss_ref),
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+        torch.testing.assert_close(
+            norm_domino,
+            norm_ref,
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+        assert torch.isfinite(torch.tensor(loss_domino))
+        assert torch.isfinite(norm_domino)
 
         dist.barrier()
         torch.cuda.empty_cache()
