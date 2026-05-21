@@ -893,6 +893,156 @@ post_combined["hidden_states"]: [N, H] = [4, H]
 `combine_postprocess` 不再像 All2All 那样使用 source rank 的 `row_id_map` 和 `topk_weights` 做本地 topK 加权合并；DeepEP 的
 topK 加权已经在 `combine_preprocess` 完成，`combine_postprocess` 主要负责 event 等待和返回 hidden。
 
+## DeepEP + ExpertTP 前向示例
+
+DeepEP + ExpertTP 和 All2All + ExpertTP 的关键区别是 row space 不同：
+
+- **DeepEP received source-token rows** 是 DeepEP dispatch 后收到的 source token 行；TP AllGather 和
+  TP ReduceScatterRowsSum 都按这个行空间记录 `tp_rank_row_counts`。
+- **All2All route-copy rows** 是 All2All dispatch 前已经按 topK 展开的 expert copy 行；DeepEP 不在 dispatch 前展开，
+  只在 `dispatch_postprocess` 里根据 received topK ids 构造本地 route-copy layout。
+
+下面只看一个 DeepEP receiver EP rank 内的 ExpertTP group。这个 EP rank 拥有 local expert `0,1,2`，`K=2`，
+`expert_tp_size=2`。数值只表示 hidden 的第一列，真实实现里是 `[rows, hidden]`。
+
+DeepEP dispatch 后，各 TP rank 先各自拿到本 rank 的 received source-token rows：
+
+```text
+tp0 received source-token rows:
+row:          0        1        2
+source token: S0       S1       S2
+hidden:       10       20       30
+topk_ids:     [0,1]    [2,-1]   [-1,0]
+topk_weights: [.25,.75] [.60,0] [0,.40]
+
+tp1 received source-token rows:
+row:          0        1
+source token: S3       S4
+hidden:       40       50
+topk_ids:     [1,2]    [-1,1]
+topk_weights: [.30,.70] [0,.50]
+```
+
+所以这里的：
+
+```text
+TP rank row counts = [3, 2]
+dispatched["tp_rank_row_counts"] = [3, 2]
+```
+
+这个 `[3, 2]` 描述的是 DeepEP received source-token rows，不是 topK 展开后的 route-copy rows。
+
+### 1. `dispatch`: TP AllGather received source-token rows
+
+`DeepEPDispatcher.dispatch` 在 DeepEP dispatch 后，对 hidden、received topK ids、received topK weights 使用同一份
+`tp_rank_row_counts` 做 TP AllGather，保证三者行顺序一致：
+
+```text
+gathered received rows: S0 S1 S2 | S3 S4
+
+gathered_hidden:
+[10, 20, 30, 40, 50]
+
+gathered_topk_ids:
+[[0, 1], [2, -1], [-1, 0], [1, 2], [-1, 1]]
+
+gathered_topk_weights:
+[[.25, .75], [.60, 0], [0, .40], [.30, .70], [0, .50]]
+```
+
+此时每个 ExpertTP rank 都看到 5 行 source token；还没有变成 7 行 route-copy。
+
+### 2. `dispatch_postprocess`: 构造本地 route-copy layout
+
+`dispatch_postprocess` 消费 gathered `topk_ids`，丢掉 `-1` slot，并在 receiver rank 内按 local expert 分组：
+
+```text
+post row:          0   1 | 2   3   4 | 5   6
+source copy:       S0  S2| S0  S3  S4| S1  S3
+local expert id:   0   0 | 1   1   1 | 2   2
+row_ids_map:       [0, 5, -1, 3, -1, 2, -1, 1, 6, 4]
+tokens_per_expert = [2, 3, 2]
+```
+
+`row_ids_map` 的长度是 `M_recv * K = 5 * 2 = 10`，对应 topk-slot-first 的 received source-token flat 空间。
+有效 route-copy 行数是 `sum(tokens_per_expert) = 7`，它和前面的 received source-token rows 是两个不同的行空间。
+
+### 3. local experts grouped GEMM
+
+为了让数字可检查，示例把两个 ExpertTP rank 的 row-parallel partial output 写成：
+
+```text
+tp0 partial out(source, expert) = hidden
+tp1 partial out(source, expert) = local_expert_id * 100
+```
+
+因此两个 TP rank 在相同 route-copy layout 上分别得到：
+
+```text
+post row:             0   1 | 2    3    4 | 5    6
+source copy:          S0  S2| S0   S3   S4| S1   S3
+local expert id:      0   0 | 1    1    1 | 2    2
+tp0 expert partial:   10  30| 10   40   50| 20   40
+tp1 expert partial:   0   0 | 100  100  100| 200  200
+```
+
+### 4. `combine_preprocess`: Expert-side topK folding
+
+DeepEP 把 topK weights 发到了 expert rank，所以 topK 加权合并发生在 expert side：
+
+```text
+tp0 folded source rows:
+S0 = 10*.25 + 10*.75 = 10
+S1 = 20*.60          = 12
+S2 = 30*.40          = 12
+S3 = 40*.30 + 40*.70 = 40
+S4 = 50*.50          = 25
+
+tp1 folded source rows:
+S0 = 0*.25   + 100*.75 = 75
+S1 = 200*.60           = 120
+S2 = 0*.40             = 0
+S3 = 100*.30 + 200*.70 = 170
+S4 = 100*.50           = 50
+```
+
+这一步输出仍然是 gathered received source-token row space：
+
+```text
+pre_combined tp0 partial: [10, 12, 12, 40, 25]
+pre_combined tp1 partial: [75, 120, 0, 170, 50]
+```
+
+### 5. `combine`: TP ReduceScatterRowsSum 后再 DeepEP combine
+
+`combine` 先执行 TP ReduceScatterRowsSum。它先对两个 TP rank 的 folded partial 做 SUM，再按同一份
+`TP rank row counts = [3, 2]` 切回每个 TP rank 的 received source-token slice：
+
+```text
+SUM over ExpertTP ranks:
+[85, 132, 12, 210, 75]
+
+TP ReduceScatterRowsSum output:
+tp0 rows [0:3] -> [85, 132, 12]
+tp1 rows [3:5] -> [210, 75]
+```
+
+DeepEP combine 在 TP ReduceScatterRowsSum 之后运行；它消费的是每个 TP rank 自己的 reduced source-token rows，
+不是 gathered 5 行，也不是 route-copy 7 行：
+
+```text
+DeepEP combine input on tp0: S0=85, S1=132, S2=12
+DeepEP combine input on tp1: S3=210, S4=75
+```
+
+这个 forward order 和上面的期望输出由脚本校验：
+
+```bash
+python ci/scripts/validate_dispatcher_documentation_examples.py
+```
+
+脚本同时校验本文件里的 All2All 和 DeepEP-only 文档例子，避免 DeepEP + ExpertTP 示例更新时破坏已有例子的行空间推导。
+
 ## Host metadata 同步
 
 DeepEP 不像 `TorchAll2AllDispatcher` 那样在 XTuner 代码里显式执行：
@@ -922,8 +1072,9 @@ num_recv_tokens_per_expert_list, handle, event
 
 ## 当前支持边界
 
-当前 `build_dispatcher(dispatcher="deepep", tp_group=...)` 会直接构造 `DeepEPDispatcher`，`tp_group` 没有接入
-DeepEP dispatcher。也就是说，XTuner 当前的 DeepEP 路径是 EP dispatcher，不包含 `TorchAll2AllTPEPDispatcher`
-那套 TP AllGather / TP ReduceScatterRowsSum 通信段。DeepEP + ExpertTP 如果要成为 Domino-compatible ExpertTP，需要
-额外设计 DeepEP dispatch 后的 TP AllGather、combine 前的 TP ReduceScatterRowsSum，以及相应的 `topk_weights`
-event 语义；这部分见 `xtuner_etp.md`。
+当前 `build_dispatcher(dispatcher="deepep", tp_group=...)` 仍然构造 `DeepEPDispatcher`。`tp_group=None` 时保持
+DeepEP-only 语义；`tp_group` 大小大于 1 时，`DeepEPDispatcher` 在 DeepEP dispatch 后接入 TP AllGather，并在
+DeepEP combine 前接入 TP ReduceScatterRowsSum。
+
+这个支持目标覆盖 BF16 训练 forward/backward 和 Domino-compatible ExpertTP 的 dispatcher 通信边界；`decoding=True`
+和 FP8 DeepEP 通信仍不属于当前范围。
