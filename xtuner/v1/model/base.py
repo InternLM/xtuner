@@ -912,8 +912,9 @@ class BaseModel(nn.Module):
 
         local_status = {"rank": rank, "ok": local_ok, "error": local_error, "weight_map": local_weight_map}
         if dist.is_initialized():
-            all_status: list[dict[str, Any]] = [None for _ in range(world_size)]  # type: ignore[list-item]
-            dist.all_gather_object(all_status, local_status)
+            gathered_status: list[Any] = [None for _ in range(world_size)]
+            dist.all_gather_object(gathered_status, local_status)
+            all_status = cast(list[dict[str, Any]], gathered_status)
         else:
             all_status = [local_status]
 
