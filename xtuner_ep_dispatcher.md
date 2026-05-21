@@ -433,7 +433,99 @@ router_weights: [N, E]
 第二次 `post_dispatched["row_ids_map"] [M_recv]` 是 destination EP rank 上第二次 `permute` 产生的还原 map，
 语义相同（scatter，1D indices 无 topk 展开），只负责 expert 计算后恢复 source-block 顺序，方便反向 all2all。
 
-## torch.compile 与 dispatcher 边界
+## TP+EP 中 ReduceScatterRowsSum 与 padding/capacity 取舍
+
+`TorchAll2AllTPEPDispatcher` 在 EP dispatch 之后会额外做 TP AllGather，在 combine 阶段会做 TP
+ReduceScatterRowsSum。这里的 **TP ReduceScatterRowsSum** 是语义名：对同一 TP group 中完整 token 批的 hidden 做
+SUM 归约，并只保留当前 TP rank 负责的 token slice。它同时出现在两个方向：
+
+- combine forward：row-parallel expert output 先做 TP ReduceScatterRowsSum，再进入 EP combine all2all。
+- TP AllGather backward：AllGather 的反向也是 TP ReduceScatterRowsSum。
+
+TP+EP MoE routing 后，同一个 EP rank 上的不同 TP rank 不一定收到相同数量的 token。以 `tp_size=2` 为例：
+
+```text
+EP dispatch 后：
+  TP rank0 hidden: [3, H]
+  TP rank1 hidden: [5, H]
+
+TP rank row counts:
+  tp_rank_row_counts = [3, 5]
+
+TP AllGather 后每个 TP rank 都看到：
+  gathered hidden: [8, H] = rank0 rows [0:3] | rank1 rows [3:8]
+```
+
+expert 的 row-parallel down projection 后，两个 TP rank 都有 `[8, H]` 的 partial hidden。TP ReduceScatterRowsSum 需要
+对这两个 `[8, H]` 做 SUM，并按同一个 `tp_rank_row_counts` 切回：
+
+```text
+TP rank0 output: rows [0:3] -> [3, H]
+TP rank1 output: rows [3:8] -> [5, H]
+```
+
+因此当前设计选择是：**优先实现真正的变长 `reduce_scatter`，不引入 padding/capacity**。dispatcher 已经有
+`tp_rank_row_counts` 正好可以作为变长 reduce scatter 的 split 边界：
+
+```python
+input_tensor_list = list(torch.split(hidden.contiguous(), tp_rank_row_counts, dim=0))
+output = torch.empty_like(input_tensor_list[tp_rank])
+dist.reduce_scatter(output, input_tensor_list, op=dist.ReduceOp.SUM, group=tp_group)
+```
+
+当 `tp_rank_row_counts` 全部相等时，可以在共享核心函数内部走等长 fast path：
+
+```python
+dist.reduce_scatter_tensor(output, hidden.contiguous(), op=dist.ReduceOp.SUM, group=tp_group)
+```
+
+但这只是实现优化，不改变 dispatcher 对外的 `tp_rank_row_counts` 语义。真正的 ReduceScatterRowsSum 实现应集中在一个共享核心
+函数中，避免 combine forward 和 TP AllGather backward 分叉。
+
+### 为什么不先做 padding/capacity
+
+padding 和 capacity 带来的收益不同，需要分开看：
+
+- **padding 的收益** 是把一次变长 collective 包装成等长 collective。通信前把每个 TP rank 的真实 slice pad 到同一
+  长度，通信时就可以使用 `reduce_scatter_tensor` / `all_gather_into_tensor` 这类 tensor fast path。若 capacity
+  仍由本 step 的 `max(tp_rank_row_counts)` 动态决定，padding 只减少大块 hidden collective 的 variable-list
+  split 开销，不能消除 `tp_rank_row_counts` 的 CPU 同步。
+- **固定 capacity 的收益** 是让这个等长长度跨 step 稳定下来。只有 capacity 是配置值或静态上界时，shape 才稳定，
+  大块通信 shape 才能从本 step 的 Python split list 中解耦，后续也才更容易做 CUDA graph、buffer 复用或通信
+  buffer 预分配。
+- **对 Domino 的影响** 主要来自 host CPU split metadata 同步。只做动态 padding 时，host 仍要拿到
+  `tp_rank_row_counts` 来决定 pad/unpad 边界和本步 capacity，因此这个同步点仍然存在；固定 capacity 才可能减少
+  运行时 shape 决策，并把大块通信从 split-list 发起路径中移出。这和前面 EP All2All 的 host metadata 同步问题
+  类似：host 等 split list 时，已经 enqueue 到 GPU 的另一个 micro batch 计算仍可继续，但 host 不能继续
+  enqueue 后续本地算子和通信；如果等待时间超过可覆盖窗口，会压缩 Domino 的真实 overlap。
+
+因此，如果只是每步动态取 `capacity = max(tp_rank_row_counts)`，它仍然需要 `tp_rank_row_counts` 的 CPU 同步，只能减少
+variable collective 的 split-list 开销，不能获得固定 shape / CUDA graph，也不能消除 `tp_rank_row_counts` 对 Domino
+host enqueue 的影响。
+
+但它会把问题从通信层扩散到 layout 层。至少有两种做法：
+
+1. **通信内部 padding，通信后立刻 unpad。**
+
+   例如 `tp_rank_row_counts` 是 `[3, 5]`，capacity 取 `5`。AllGather 前把 rank0 的 `[3, H]` pad 到 `[5, H]`，
+   rank1 保持 `[5, H]`；等长 AllGather 得到 `[10, H]` 后再按真实 sizes compact 回 `[8, H]`。ReduceScatter
+   则需要先按 `[3, 5]` 切分、分别 pad 到 `[5, H]`，concat 成 `[10, H]` 后走 `reduce_scatter_tensor`，
+   最后再 unpad 成当前 rank 的真实 `[3, H]` 或 `[5, H]`。
+
+   这个方案不改变 expert 看到的 token 数，但增加 pad/unpad copy，并且仍然需要 `tp_rank_row_counts`。收益要靠 benchmark
+   证明。
+
+2. **端到端 capacity，让 padding token 进入 expert layout。**
+
+   这种方案会让 `[tp_size * capacity, H]` 直接进入 `dispatch_postprocess` 和 grouped GEMM。它需要定义 padding
+   token 的 expert 归属、`tokens_per_expert` 是否包含 padding、grouped GEMM 是否计算 padding、combine 如何剔除
+   padding，以及 `row_ids_map` / `topk_weights` 如何保证 padding 不影响真实 token。
+
+   这会把改动扩散到 routing、expert layout、postprocess/combine，不适合作为替换 `all_reduce + slice` 的第一步。
+
+因此当前阶段的目标是局部替换：用真正的 TP ReduceScatterRowsSum 取代 `all_reduce + slice`，输出 shape 严格按照
+`tp_rank_row_counts[tp_rank]` 分配，允许 0 行，不做 padding/capacity。
+# torch.compile 与 dispatcher 边界
 
 `FSDPConfig.torch_compile=True` 目前只是一个兼容入口，真正决定 compile 行为的是
 `XTunerBaseModelConfig.compile_cfg`：
@@ -471,6 +563,7 @@ router_weights: [N, E]
 它不能把 dispatcher 的 host 等待变成 GPU-only 异步，也不能改变 2.1 和 DeepEP “Host metadata 同步”小节里的重叠约束。
 如果 host metadata 等待超过另一个 micro batch 能覆盖的计算窗口，真实 overlap 仍会下降。
 
+# DeepEPDispatcher
 ## DeepEPDispatcher: DeepEP Buffer dispatch/combine 原理
 
 `DeepEPDispatcher` 仍然暴露和其他 dispatcher 一样的六阶段接口，但它把 EP all2all 的 routing layout、通信 handle
@@ -589,7 +682,218 @@ DeepEP 的反向复用相反方向的通信原语：
 这解释了为什么 DeepEP dispatch 是一个 composite autograd op：它的 forward 同时产生 `recv_x` 和
 `recv_topk_weights`，backward 也同时返回 `x` 和 `topk_weights` 的梯度。
 
-### Host metadata 同步
+## DeepEPDispatcher 前向示例
+
+继续使用前面 All2All 示例里的配置和 routing：
+
+```text
+EP = 2
+E_local = 3
+E = 6
+K = 2
+每个 EP rank 本地 N = 4 个 token
+
+ep0 owns global expert 0,1,2
+ep1 owns global expert 3,4,5
+
+ep0 source tokens: A0 A1 A2 A3
+ep1 source tokens: B0 B1 B2 B3
+```
+
+routing 仍然是：
+
+```text
+ep0 topk_ids:
+A0 -> [0, 4]
+A1 -> [3, 1]
+A2 -> [2, 5]
+A3 -> [4, 0]
+
+ep1 topk_ids:
+B0 -> [1, 3]
+B1 -> [4, 2]
+B2 -> [5, 0]
+B3 -> [3, 1]
+```
+
+为了把 weighted combine 写成具体数字，取验证脚本里的 `topk_weights`：
+
+```text
+ep0 weights:
+A0 -> [0.25, 0.75]
+A1 -> [0.40, 0.60]
+A2 -> [0.70, 0.30]
+A3 -> [0.80, 0.20]
+
+ep1 weights:
+B0 -> [0.20, 0.80]
+B1 -> [0.50, 0.50]
+B2 -> [0.90, 0.10]
+B3 -> [0.35, 0.65]
+```
+
+### 1. `dispatch_preprocess`: 不做本地 route-copy 展开
+
+DeepEP 不像 `TorchAll2AllDispatcher` 那样先在 source rank 本地把 token 展开成 `[N*K, H]` 并按 global expert 排序。
+`dispatch_preprocess` 只保留原始 token，并把 `topk_ids` 转成 `int64`：
+
+```text
+pre_dispatched["hidden_states"]: [N, H] = [4, H]
+pre_dispatched["topk_ids"]:      [N, K] = [4, 2]
+```
+
+### 2. `dispatch`: 每个目标 EP rank 收一份 source token
+
+DeepEP 的 layout 先判断每个 token 是否需要发送到某个 EP rank：只要 token 的任意 topK expert 在该 rank，本 token 就向该
+rank 发送一行 hidden。也就是说，通信粒度是 **token 到 rank**，不是一开始就按 expert 展开成 route-copy。
+
+本例中每个 token 都正好有一个 expert 在 `ep0`、一个 expert 在 `ep1`，所以两个目标 rank 都收到 8 行 source token：
+
+```text
+dispatched row: 0  1  2  3 | 4  5  6  7
+source token:   A0 A1 A2 A3| B0 B1 B2 B3
+```
+
+DeepEP 同时把 global expert id 转成当前 receiver rank 的 local expert id；不属于当前 rank 的 topK slot 写成 `-1`，
+对应 weight 写成 `0`。
+
+`ep0` 收到：
+
+```text
+recv_topk_idx row:  0      1      2      3    | 4      5      6      7
+source token:       A0     A1     A2     A3   | B0     B1     B2     B3
+recv_topk_idx:      [0,-1] [-1,1] [2,-1] [-1,0] [1,-1] [-1,2] [-1,0] [-1,1]
+recv_topk_weights:  [.25,0] [0,.60] [.70,0] [0,.20] [.20,0] [0,.50] [0,.10] [0,.65]
+```
+
+`ep1` 收到：
+
+```text
+recv_topk_idx row:  0      1      2      3    | 4      5      6      7
+source token:       A0     A1     A2     A3   | B0     B1     B2     B3
+recv_topk_idx:      [-1,1] [0,-1] [-1,2] [1,-1] [-1,0] [1,-1] [2,-1] [0,-1]
+recv_topk_weights:  [0,.75] [.40,0] [0,.30] [.80,0] [0,.80] [.50,0] [.90,0] [.35,0]
+```
+
+两边的 local expert token 数都是：
+
+```text
+num_recv_tokens_per_expert_list = [3, 3, 2]
+```
+
+### 3. `dispatch_postprocess`: receiver rank 内展开并按 local expert 分组
+
+`dispatch_postprocess` 对 `recv_topk_idx` 做本地 `permute`。这一步才真正把收到的 token 展开成 local expert 的
+route-copy，并丢掉 `-1` slot。
+
+对 `ep0`：
+
+```text
+post row:        0  1  2 | 3  4  5 | 6  7
+token copy:      A0 A3 B2| A1 B0 B3| A2 B1
+local expert id: 0  0  0 | 1  1  1 | 2  2
+row_ids_map:     [0,-1,6,-1,4,-1,-1,-1,-1,3,-1,1,-1,7,2,5]
+```
+
+对 `ep1`：
+
+```text
+post row:        0  1  2 | 3  4  5 | 6  7
+token copy:      A1 B0 B3| A0 A3 B1| A2 B2
+local expert id: 0  0  0 | 1  1  1 | 2  2
+row_ids_map:     [-1,0,-1,4,-1,5,7,2,3,-1,6,-1,1,-1,-1,-1]
+```
+
+这里的 `row_ids_map` 长度是 `M_recv*K`，因为它对应的是带 `-1` 的 `recv_topk_idx` flat 空间；`-1` slot 在
+`row_ids_map` 里也保持为 `-1`。这和 All2All 例子中 destination rank 第二次 `permute` 的 `[M_recv]` map 不同。
+
+### 4. local experts grouped GEMM
+
+假设为了便于观察，每个 expert 输出第一列为：
+
+```text
+out(token, global_expert_id) = token_value + global_expert_id * 100
+```
+
+那么 `ep0` grouped GEMM 输出：
+
+```text
+post row:        0  1  2 | 3   4   5  | 6   7
+token copy:      A0 A3 B2| A1  B0  B3 | A2  B1
+global expert:   0  0  0 | 1   1   1  | 2   2
+experts_out:     10 13 22| 111 120 123| 212 221
+```
+
+`ep1` grouped GEMM 输出：
+
+```text
+post row:        0   1   2  | 3   4   5  | 6   7
+token copy:      A1  B0  B3 | A0  A3  B1 | A2  B2
+global expert:   3   3   3  | 4   4   4  | 5   5
+experts_out:     311 320 323| 410 413 421| 512 522
+```
+
+### 5. `combine_preprocess`: expert rank 上先做 topK 加权折叠
+
+DeepEP 已经把 `topk_weights` 发送到了 expert rank，所以 `combine_preprocess` 会在 receiver rank 本地执行：
+
+```python
+hidden_states = unpermute(experts_out, row_ids_map, probs=recv_topk_weights)
+```
+
+输出回到 `dispatch` 后的 source-token 顺序 `[A0 A1 A2 A3 | B0 B1 B2 B3]`，但每行已经只包含当前 EP rank 负责的
+expert 加权结果。
+
+`ep0`：
+
+```text
+pre_combined row: 0    1     2     3   | 4   5     6   7
+source token:     A0   A1    A2    A3  | B0  B1    B2  B3
+weighted output:  2.5  66.6  148.4 2.6 | 24  110.5 2.2 79.95
+```
+
+`ep1`：
+
+```text
+pre_combined row: 0     1      2     3    | 4   5     6     7
+source token:     A0    A1     A2    A3   | B0  B1    B2    B3
+weighted output:  307.5 124.4  153.6 330.4| 256 210.5 469.8 113.05
+```
+
+### 6. `combine`: 使用 DeepEP handle 送回 source rank 并 SUM
+
+DeepEP combine 复用 dispatch 返回的 `handle`，把这些已经加权的 partial output 送回原 source rank，并对同一个 source
+token 来自不同 EP rank 的 partial output 做 SUM。
+
+source `ep0` 收回：
+
+```text
+A0 final = 2.5   + 307.5 = 310
+A1 final = 66.6  + 124.4 = 191
+A2 final = 148.4 + 153.6 = 302
+A3 final = 2.6   + 330.4 = 333
+```
+
+source `ep1` 收回：
+
+```text
+B0 final = 24    + 256    = 280
+B1 final = 110.5 + 210.5  = 321
+B2 final = 2.2   + 469.8  = 472
+B3 final = 79.95 + 113.05 = 193
+```
+
+因此 DeepEP 的：
+
+```text
+combined["hidden_states"]: [N, H] = [4, H]
+post_combined["hidden_states"]: [N, H] = [4, H]
+```
+
+`combine_postprocess` 不再像 All2All 那样使用 source rank 的 `row_id_map` 和 `topk_weights` 做本地 topK 加权合并；DeepEP 的
+topK 加权已经在 `combine_preprocess` 完成，`combine_postprocess` 主要负责 event 等待和返回 hidden。
+
+## Host metadata 同步
 
 DeepEP 不像 `TorchAll2AllDispatcher` 那样在 XTuner 代码里显式执行：
 
@@ -616,103 +920,10 @@ num_recv_tokens_per_expert_list, handle, event
 - 如果 metadata 等待短于可覆盖的另一个 micro batch 计算，重叠效果基本保留。
 - 如果 metadata 等待更长，`xtuner_ep_domino.md` 7.3 中的理想时间线会被压缩，真实重叠比例下降。
 
-### 当前支持边界
+## 当前支持边界
 
 当前 `build_dispatcher(dispatcher="deepep", tp_group=...)` 会直接构造 `DeepEPDispatcher`，`tp_group` 没有接入
 DeepEP dispatcher。也就是说，XTuner 当前的 DeepEP 路径是 EP dispatcher，不包含 `TorchAll2AllTPEPDispatcher`
 那套 TP AllGather / TP ReduceScatterRowsSum 通信段。DeepEP + ExpertTP 如果要成为 Domino-compatible ExpertTP，需要
 额外设计 DeepEP dispatch 后的 TP AllGather、combine 前的 TP ReduceScatterRowsSum，以及相应的 `topk_weights`
 event 语义；这部分见 `xtuner_etp.md`。
-
-## TP+EP 中 ReduceScatterRowsSum 与 padding/capacity 取舍
-
-`TorchAll2AllTPEPDispatcher` 在 EP dispatch 之后会额外做 TP AllGather，在 combine 阶段会做 TP
-ReduceScatterRowsSum。这里的 **TP ReduceScatterRowsSum** 是语义名：对同一 TP group 中完整 token 批的 hidden 做
-SUM 归约，并只保留当前 TP rank 负责的 token slice。它同时出现在两个方向：
-
-- combine forward：row-parallel expert output 先做 TP ReduceScatterRowsSum，再进入 EP combine all2all。
-- TP AllGather backward：AllGather 的反向也是 TP ReduceScatterRowsSum。
-
-TP+EP MoE routing 后，同一个 EP rank 上的不同 TP rank 不一定收到相同数量的 token。以 `tp_size=2` 为例：
-
-```text
-EP dispatch 后：
-  TP rank0 hidden: [3, H]
-  TP rank1 hidden: [5, H]
-
-TP rank row counts:
-  tp_rank_row_counts = [3, 5]
-
-TP AllGather 后每个 TP rank 都看到：
-  gathered hidden: [8, H] = rank0 rows [0:3] | rank1 rows [3:8]
-```
-
-expert 的 row-parallel down projection 后，两个 TP rank 都有 `[8, H]` 的 partial hidden。TP ReduceScatterRowsSum 需要
-对这两个 `[8, H]` 做 SUM，并按同一个 `tp_rank_row_counts` 切回：
-
-```text
-TP rank0 output: rows [0:3] -> [3, H]
-TP rank1 output: rows [3:8] -> [5, H]
-```
-
-因此当前设计选择是：**优先实现真正的变长 `reduce_scatter`，不引入 padding/capacity**。dispatcher 已经有
-`tp_rank_row_counts` 正好可以作为变长 reduce scatter 的 split 边界：
-
-```python
-input_tensor_list = list(torch.split(hidden.contiguous(), tp_rank_row_counts, dim=0))
-output = torch.empty_like(input_tensor_list[tp_rank])
-dist.reduce_scatter(output, input_tensor_list, op=dist.ReduceOp.SUM, group=tp_group)
-```
-
-当 `tp_rank_row_counts` 全部相等时，可以在共享核心函数内部走等长 fast path：
-
-```python
-dist.reduce_scatter_tensor(output, hidden.contiguous(), op=dist.ReduceOp.SUM, group=tp_group)
-```
-
-但这只是实现优化，不改变 dispatcher 对外的 `tp_rank_row_counts` 语义。真正的 ReduceScatterRowsSum 实现应集中在一个共享核心
-函数中，避免 combine forward 和 TP AllGather backward 分叉。
-
-### 为什么不先做 padding/capacity
-
-padding 和 capacity 带来的收益不同，需要分开看：
-
-- **padding 的收益** 是把一次变长 collective 包装成等长 collective。通信前把每个 TP rank 的真实 slice pad 到同一
-  长度，通信时就可以使用 `reduce_scatter_tensor` / `all_gather_into_tensor` 这类 tensor fast path。若 capacity
-  仍由本 step 的 `max(tp_rank_row_counts)` 动态决定，padding 只减少大块 hidden collective 的 variable-list
-  split 开销，不能消除 `tp_rank_row_counts` 的 CPU 同步。
-- **固定 capacity 的收益** 是让这个等长长度跨 step 稳定下来。只有 capacity 是配置值或静态上界时，shape 才稳定，
-  大块通信 shape 才能从本 step 的 Python split list 中解耦，后续也才更容易做 CUDA graph、buffer 复用或通信
-  buffer 预分配。
-- **对 Domino 的影响** 主要来自 host CPU split metadata 同步。只做动态 padding 时，host 仍要拿到
-  `tp_rank_row_counts` 来决定 pad/unpad 边界和本步 capacity，因此这个同步点仍然存在；固定 capacity 才可能减少
-  运行时 shape 决策，并把大块通信从 split-list 发起路径中移出。这和前面 EP All2All 的 host metadata 同步问题
-  类似：host 等 split list 时，已经 enqueue 到 GPU 的另一个 micro batch 计算仍可继续，但 host 不能继续
-  enqueue 后续本地算子和通信；如果等待时间超过可覆盖窗口，会压缩 Domino 的真实 overlap。
-
-因此，如果只是每步动态取 `capacity = max(tp_rank_row_counts)`，它仍然需要 `tp_rank_row_counts` 的 CPU 同步，只能减少
-variable collective 的 split-list 开销，不能获得固定 shape / CUDA graph，也不能消除 `tp_rank_row_counts` 对 Domino
-host enqueue 的影响。
-
-但它会把问题从通信层扩散到 layout 层。至少有两种做法：
-
-1. **通信内部 padding，通信后立刻 unpad。**
-
-   例如 `tp_rank_row_counts` 是 `[3, 5]`，capacity 取 `5`。AllGather 前把 rank0 的 `[3, H]` pad 到 `[5, H]`，
-   rank1 保持 `[5, H]`；等长 AllGather 得到 `[10, H]` 后再按真实 sizes compact 回 `[8, H]`。ReduceScatter
-   则需要先按 `[3, 5]` 切分、分别 pad 到 `[5, H]`，concat 成 `[10, H]` 后走 `reduce_scatter_tensor`，
-   最后再 unpad 成当前 rank 的真实 `[3, H]` 或 `[5, H]`。
-
-   这个方案不改变 expert 看到的 token 数，但增加 pad/unpad copy，并且仍然需要 `tp_rank_row_counts`。收益要靠 benchmark
-   证明。
-
-2. **端到端 capacity，让 padding token 进入 expert layout。**
-
-   这种方案会让 `[tp_size * capacity, H]` 直接进入 `dispatch_postprocess` 和 grouped GEMM。它需要定义 padding
-   token 的 expert 归属、`tokens_per_expert` 是否包含 padding、grouped GEMM 是否计算 padding、combine 如何剔除
-   padding，以及 `row_ids_map` / `topk_weights` 如何保证 padding 不影响真实 token。
-
-   这会把改动扩散到 routing、expert layout、postprocess/combine，不适合作为替换 `all_reduce + slice` 的第一步。
-
-因此当前阶段的目标是局部替换：用真正的 TP ReduceScatterRowsSum 取代 `all_reduce + slice`，输出 shape 严格按照
-`tp_rank_row_counts[tp_rank]` 分配，允许 0 行，不做 padding/capacity。
