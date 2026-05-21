@@ -36,7 +36,6 @@ from xtuner.v1.rl.agent_loop.rl_task import (
     EntryFailurePolicy,
     EntryMonitor,
     EntryProcessHealthCheck,
-    DumpDaemonLogOnFailure,
     ExecHook,
     InstallLagent,
     Judger,
@@ -178,7 +177,9 @@ runner = dict(
     infer=dict(
         type=SandboxStage,
         sandbox="main",
-        runtime={},
+        runtime={
+            "lagent_src_dir": os.getenv("LAGENT_SRC_DIR", "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent"),
+        },
         pre=[
             dict(
                 type=UploadHook,
@@ -249,13 +250,22 @@ runner = dict(
                 timeout=300,
                 failure=entry_failure(),
             ),
+            # `|| true` 让 stop 失败不污染 stage status —— sandbox 一会儿
+            # 也会被 pool.release_all 释放,daemon 自然死。debug 想保留
+            # daemon 的话注释掉这条 entry 即可。
+            dict(
+                type=ShellEntry,
+                name="stop_agent_daemon",
+                cmd=STOP_AGENT_DAEMON + " || true",
+                timeout=30,
+            ),
         ],
         env=dict(type=BenchEnv, workspace=DEFAULT_WORKSPACE, extras={"WORKSPACE": DEFAULT_WORKSPACE}),
         post=[
-            dict(type=DownloadHook, paths=[DEFAULT_WORKSPACE, PATHS.agent_response]),
-            dict(type=ReadFileHook, path="/tmp/message.json", key="message"),
-            dict(type=DumpDaemonLogOnFailure),
-            dict(type=ExecHook, cmd=STOP_AGENT_DAEMON, optional=True, timeout=30),
+            dict(type=ReadFileHook, path=PATHS.message, key="message"),
+            dict(type=ReadFileHook, path=PATHS.agent_response, key="agent_response"),
+            # workspace tar(debug 时本地解压看产物,失败 silent + warning)
+            # dict(type=DownloadHook, paths=[DEFAULT_WORKSPACE]),
         ],
     ),
     validate=dict(

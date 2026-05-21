@@ -11,11 +11,15 @@ import asyncio
 import importlib.util
 import json
 import sys
+import traceback
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from lagent.utils import create_object
+
+from xtuner.v1.rl.agent_loop.rl_task.schemas import AgentRolloutItem
+from xtuner.v1.rl.agent_loop.rl_task.trace import init_writer
 
 
 def _load_config(path: Path) -> Any:
@@ -27,43 +31,59 @@ def _load_config(path: Path) -> Any:
     return mod
 
 
-async def _run_one(dataset: Any, task_dir: Path, uid: dict[str, int]) -> dict[str, Any]:
-    item = dataset.load_task(task_dir)
+async def _run_one(dataset: Any, item: AgentRolloutItem) -> dict[str, Any]:
     runner_cfg = item.pipeline or dataset.pipeline
     runner = create_object(deepcopy(runner_cfg)) if isinstance(runner_cfg, dict) else runner_cfg
-    item = item.model_copy(update={"task_root": Path(task_dir), "uid": uid})
     result = await runner.run(item)
-    return result.model_dump(mode="json", exclude={"artifacts", "pipeline"})
+    dumped = result.model_dump(mode="json", exclude={"artifacts", "pipeline"})
+    dumped["artifacts"] = _serialize_artifacts(result.artifacts)
+    return dumped
+
+
+def _serialize_artifacts(artifacts: dict[str, Any]) -> dict[str, Any]:
+    """Keep text artifacts as-is; collapse bytes blobs to a size placeholder."""
+    out: dict[str, Any] = {}
+    for key, value in artifacts.items():
+        if isinstance(value, (bytes, bytearray)):
+            out[key] = f"<{len(value)} bytes>"
+        else:
+            out[key] = value
+    return out
 
 
 async def main_async(args: argparse.Namespace) -> int:
+    init_writer()
     cfg = _load_config(Path(args.config))
     dataset = cfg.dataset
 
+    pairs: list[tuple[Path, AgentRolloutItem]]
     if args.tasks:
-        dirs = [Path(p) for p in args.tasks]
+        wanted = {str(Path(p).resolve()) for p in args.tasks}
+        pairs = [(td, item) for td, item in dataset.iter_tasks() if str(td.resolve()) in wanted]
     else:
-        dirs = [td for td, _ in dataset.iter_tasks()]
+        pairs = list(dataset.iter_tasks())
         if args.limit:
-            dirs = dirs[: args.limit]
-    if not dirs:
+            pairs = pairs[: args.limit]
+    if not pairs:
         print("no tasks to run", file=sys.stderr)
         return 1
 
-    print(f"running {len(dirs)} task(s) (concurrency={args.concurrency})", file=sys.stderr)
+    print(f"running {len(pairs)} task(s) (concurrency={args.concurrency})", file=sys.stderr)
     sem = asyncio.Semaphore(max(1, args.concurrency))
 
-    async def guarded(idx: int, td: Path) -> dict[str, Any]:
+    async def guarded(idx: int, td: Path, item: AgentRolloutItem) -> dict[str, Any]:
         async with sem:
-            uid = {"root_id": 0, "action_id": idx, "observation_id": idx}
+            item = item.model_copy(update={"group_id": 0, "uid": idx})
             try:
-                return await _run_one(dataset, td, uid)
+                return await _run_one(dataset, item)
             except Exception as exc:
-                return {"task_dir": str(td), "error": f"{type(exc).__name__}: {exc}"}
+                tb = traceback.format_exc()
+                print(f"[{item.id}] uncaught: {type(exc).__name__}: {exc}\n{tb}", file=sys.stderr)
+                return {"id": item.id, "task_dir": str(td), "error": f"{type(exc).__name__}: {exc}", "traceback": tb}
 
     out_fp = open(args.output, "w") if args.output else None
     try:
-        coros = [guarded(i, td) for i, td in enumerate(dirs)]
+        coros = [guarded(i, td, item) for i, (td, item) in enumerate(pairs)]
         for coro in asyncio.as_completed(coros):
             result = await coro
             line = json.dumps(result, ensure_ascii=False)

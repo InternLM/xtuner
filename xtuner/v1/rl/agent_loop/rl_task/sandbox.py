@@ -43,6 +43,7 @@ from xtuner.v1.rl.agent_loop.rl_task.schemas import (
     StageResult,
     StageStatus,
 )
+from xtuner.v1.rl.agent_loop.rl_task.trace import span
 from xtuner.v1.utils import get_logger
 
 
@@ -456,22 +457,24 @@ class ShellEntry:
         record.entry_cmd = self.cmd
         entry.status = StageStatus.RUNNING
         entry.started_at = time.monotonic()
-        try:
-            outcome = await self._execute(client, env)
-            if not outcome.ok and self.failure is not None:
-                outcome = await self.failure.handle(client, item, record, entry, outcome)
-            self._finish_record(entry, outcome)
-            return outcome
-        except Exception as exc:
-            outcome = EntryOutcome(
-                source=type(self).__name__,
-                reason="exception",
-                result=StageResult(return_code=None, stderr=str(exc), error=str(exc)),
-            )
-            if self.failure is not None:
-                outcome = await self.failure.handle(client, item, record, entry, outcome)
-            self._finish_record(entry, outcome, exc=exc)
-            raise
+        uid_obs = str(item.uid) if item.uid is not None else ""
+        with span(uid_obs, f"entry:{self.name}", entry_kind="ShellEntry"):
+            try:
+                outcome = await self._execute(client, env)
+                if not outcome.ok and self.failure is not None:
+                    outcome = await self.failure.handle(client, item, record, entry, outcome)
+                self._finish_record(entry, outcome)
+                return outcome
+            except Exception as exc:
+                outcome = EntryOutcome(
+                    source=type(self).__name__,
+                    reason="exception",
+                    result=StageResult(return_code=None, stderr=str(exc), error=str(exc)),
+                )
+                if self.failure is not None:
+                    outcome = await self.failure.handle(client, item, record, entry, outcome)
+                self._finish_record(entry, outcome, exc=exc)
+                raise
 
     async def _execute(self, client: Any, env: dict[str, str]) -> EntryOutcome:
         exec_res = await exec_in(
@@ -566,23 +569,25 @@ class DetachedShellEntry:
         record.entry_cmd = self.cmd
         entry.status = StageStatus.RUNNING
         entry.started_at = time.monotonic()
-        try:
-            outcome = await self._run_detached(client, item, entry, env)
-            await self._fill_output_files(client, entry, outcome.result)
-            if not outcome.ok and self.failure is not None:
-                outcome = await self.failure.handle(client, item, record, entry, outcome)
-            self._finish_record(entry, outcome)
-            return outcome
-        except Exception as exc:
-            outcome = EntryOutcome(
-                source=type(self).__name__,
-                reason="exception",
-                result=StageResult(return_code=None, stderr=str(exc), error=str(exc)),
-            )
-            if self.failure is not None:
-                outcome = await self.failure.handle(client, item, record, entry, outcome)
-            self._finish_record(entry, outcome, exc=exc)
-            raise
+        uid_obs = str(item.uid) if item.uid is not None else ""
+        with span(uid_obs, f"entry:{self.name}", entry_kind="DetachedShellEntry"):
+            try:
+                outcome = await self._run_detached(client, item, entry, env)
+                await self._fill_output_files(client, entry, outcome.result)
+                if not outcome.ok and self.failure is not None:
+                    outcome = await self.failure.handle(client, item, record, entry, outcome)
+                self._finish_record(entry, outcome)
+                return outcome
+            except Exception as exc:
+                outcome = EntryOutcome(
+                    source=type(self).__name__,
+                    reason="exception",
+                    result=StageResult(return_code=None, stderr=str(exc), error=str(exc)),
+                )
+                if self.failure is not None:
+                    outcome = await self.failure.handle(client, item, record, entry, outcome)
+                self._finish_record(entry, outcome, exc=exc)
+                raise
 
     def _new_record(self) -> EntryRecord:
         suffix = uuid.uuid4().hex[:12]
@@ -702,7 +707,14 @@ class SandboxStage:
                     "SandboxStage.entries must contain ShellEntry or DetachedShellEntry configs, "
                     f"got {type(stage_entry).__name__}"
                 )
-        self._env = create_object(env)
+        # ``env`` accepts three shapes (see ``_build_env``):
+        #   * None
+        #   * plain ``dict[str, str]`` of env vars (no ``type`` key)
+        #   * a builder (lagent dict-config with ``type=...`` or an already-built object)
+        if isinstance(env, dict) and "type" not in env:
+            self._env = dict(env)
+        else:
+            self._env = create_object(env) if env is not None else None
         self.runtime = dict(runtime or {})
         self.post = [create_object(hook) for hook in post]
         self.hook_stuck_warn_sec = hook_stuck_warn_sec
@@ -899,8 +911,8 @@ class SandboxPool:
         health_max_wait_sec: float = 600.0,
         health_poll_interval_sec: float = 2.0,
     ):
-        self._provider = provider
-        self._specs: dict[str, SandboxSpec] = dict(specs)
+        self._provider = create_object(provider)
+        self._specs: dict[str, SandboxSpec] = {name: create_object(spec) for name, spec in specs.items()}
         self._max_attempts = max_attempts
         self._health_max_wait_sec = health_max_wait_sec
         self._health_poll_interval_sec = health_poll_interval_sec

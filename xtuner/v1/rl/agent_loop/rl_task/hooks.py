@@ -238,8 +238,8 @@ class ReadFileHook(Hook):
 class PickAgent(Hook):
     """Weighted-pick one agent from ``agents``; record it on the stage.
 
-    Selection is deterministic on ``item.uid["root_id"]`` so the same
-    rollout always picks the same agent.  The selected agent record includes
+    Selection is deterministic on ``item.group_id`` so the same group's
+    rollouts always pick the same agent.  The selected agent record includes
     enough template/config fields for downstream hooks to run without a
     separate in-memory context object.
     """
@@ -253,7 +253,7 @@ class PickAgent(Hook):
         self.template_root = Path(template_root)
 
     async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
-        group_id = (item.uid or {}).get("root_id", 0)
+        group_id = item.group_id or 0
         weights = [max(a.weight, 0.0) for a in self.agents]
         total = sum(weights)
         if total <= 0:
@@ -601,73 +601,6 @@ class BenchEnv:
         env.update(self.extras)
         record.env_vars = env
         return env
-
-
-# ─────────────────────────────────────────────────────────────────
-# Daemon log retrieval (post-hook)
-# ─────────────────────────────────────────────────────────────────
-
-
-class DumpDaemonLogOnFailure(Hook):
-    """Post-hook: pull ``/tmp/agent_daemon.log`` and log its tail on failure.
-
-    Two triggers:
-      - Stage's entry returned non-zero (``rc != 0``) — usual sandbox error.
-      - Silent-pass: ``rc == 0`` but the collected ``message_key`` contents show
-        the last ``policy_agent.messages`` entry lacks ``raw_content_ids``
-        (LLM call somehow produced no token ids — typically an exception
-        swallowed by the agent layer).  Disable by passing ``message_key=None``.
-
-    Always stores the full daemon log at ``item.artifacts[key]`` for
-    downstream consumers regardless of whether we log.
-    """
-
-    name = "dump_daemon_log_on_failure"
-
-    def __init__(
-        self,
-        path: str = "/tmp/agent_daemon.log",
-        *,
-        tail_lines: int = 500,
-        key: str = "daemon_log",
-        message_key: str | None = "message",
-    ):
-        self.path = path
-        self.tail_lines = tail_lines
-        self.key = key
-        self.message_key = message_key
-
-    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
-        try:
-            blob = await client.download_file(self.path)
-        except Exception as exc:
-            get_logger().warning(f"could not download daemon log at {self.path}: {exc}")
-            return
-        text = blob.decode(errors="replace")
-        item.artifacts[self.key] = text
-
-        result = record.entry_result
-        rc = getattr(result, "return_code", 0) if result else 0
-
-        should_dump = rc != 0
-        reason = f"rc={rc}"
-        if not should_dump and self.message_key:
-            raw = item.artifacts.get(self.message_key) or ""
-            try:
-                msgs = json.loads(raw).get("policy_agent.messages", []) if raw else []
-            except Exception:
-                msgs = []
-            last = msgs[-1] if msgs else {}
-            required = ("raw_content", "raw_content_ids", "raw_content_logprobs")
-            missing = [k for k in required if not last.get(k)]
-            if missing:
-                should_dump = True
-                reason = f"silent-pass (last message missing {missing})"
-
-        if should_dump:
-            lines = text.splitlines()
-            tail = "\n".join(lines[-self.tail_lines :]) if len(lines) > self.tail_lines else text
-            get_logger().error(f"daemon log tail [{reason}] ({self.path}):\n{tail}")
 
 
 # ─────────────────────────────────────────────────────────────────
