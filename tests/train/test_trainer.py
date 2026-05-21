@@ -5,6 +5,7 @@ from unittest.mock import patch, Mock
 import pickle
 import shutil
 import weakref
+from concurrent.futures import Future
 from pydantic import TypeAdapter
 
 import torch
@@ -79,10 +80,17 @@ class FakeEngine:
 
     load_dcp = Mock()
 
-    def save_dcp(self, model_dir: Path, optimizer_dir: Path | None):
-        model_dir.mkdir(parents=True, exist_ok=True)
-        if optimizer_dir is not None:
-            optimizer_dir.mkdir(parents=True, exist_ok=True)
+    def save_dcp(self, weights_dir: Path, save_optimizer: bool = True):
+        weights_dir.mkdir(parents=True, exist_ok=True)
+
+    def async_save_dcp(self, weights_dir: Path) -> Future:
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        f: Future = Future()
+        f.set_result(None)
+        return f
+
+    def destroy_async_checkpoint_pg(self) -> None:
+        pass
 
 
 def prepare(fn):
@@ -257,6 +265,56 @@ class TestTrainerSaveHF(DistributedTestBase):
         for checkpoint, step in zip(trainer.meta.latest_exp.checkpoint_list, [3, 6, 9, 10]):
             assert f"step-{step}" in str(checkpoint)
             assert os.path.exists(checkpoint)
+
+    @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
+    @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
+    @patch("xtuner.v1.train.trainer.Trainer._prepare_model_input", Mock(return_value=[]))
+    @prepare
+    def test_async_save_checkpoint_interval(self):
+        self.create_pg(DEVICE)
+        work_dir_list = [self.work_dir]
+        dist.broadcast_object_list(work_dir_list, src=0)
+        self.work_dir = Path(work_dir_list[0])
+        model_cfg = Qwen3MoE30BA3Config()
+        optim_cfg = AdamWConfig(lr=1e-4, weight_decay=0.01)
+        fsdp_cfg = FSDPConfig(tp_size=1)
+        dataset_cfg = [
+            {
+                "dataset": DatasetConfig(name="alpaca", anno_path=self.alpaca_path, sample_ratio=1.0),
+                "tokenize_fn": FTDPTokenizeFnConfig(),
+            },
+        ]
+        dataloader_cfg = DataloaderConfig()
+        lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0.1, lr_min=1e-6)
+
+        trainer = Trainer(
+            load_from=str(self.fake_hf_model_dir),
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+            dataset_cfg=dataset_cfg,
+            dataloader_cfg=dataloader_cfg,
+            lr_cfg=lr_cfg,
+            tokenizer_path=self.tokenizer_path,
+            global_batch_size=2,
+            total_step=10,
+            work_dir=str(self.work_dir),
+            hf_interval=3,
+            hf_max_keep=2,
+            seed=42,
+            debug=False,
+            checkpoint_interval=5,
+            async_checkpoint=True,
+        )
+
+        trainer.fit()
+        dist.barrier()
+        assert len(trainer.meta.latest_exp.checkpoint_list) == 2
+        for checkpoint, step in zip(trainer.meta.latest_exp.checkpoint_list, [5, 10]):
+            assert f"step-{step}" in str(checkpoint)
+            assert os.path.exists(checkpoint)
+            weights_dir = Path(checkpoint) / "weights"
+            assert weights_dir.exists(), f"Expected weights dir at {weights_dir}"
 
     @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
     @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
@@ -824,8 +882,7 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
         mock_data_load_state_dict.assert_not_called()
         mock_lr_load_state_dict.assert_not_called()
         mock_load_dcp.assert_called_once_with(
-            model_dir=checkpoint_path/Trainer._SAVE_MODEL_DIR,
-            optimizer_dir=checkpoint_path/Trainer._SAVE_OPTIMIZER_DIR,
+            weights_dir=checkpoint_path / Trainer._SAVE_WEIGHTS_DIR,
             load_states=True,
             load_args=True,
         )
@@ -859,8 +916,7 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
         mock_data_load_state_dict.assert_called_once()
         mock_lr_load_state_dict.assert_called_once()
         mock_load_dcp.assert_called_once_with(
-            model_dir=latest_checkpoint/Trainer._SAVE_MODEL_DIR,
-            optimizer_dir=latest_checkpoint/Trainer._SAVE_OPTIMIZER_DIR,
+            weights_dir=latest_checkpoint / Trainer._SAVE_WEIGHTS_DIR,
             load_states=True,
             load_args=True,
         )
