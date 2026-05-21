@@ -54,6 +54,10 @@ class DeepEPDispatchResult(DispatchResult):
     num_recv_tokens_per_expert_group: torch.Tensor
     tp_rank_row_counts: list[int]
     forward_finished_event: EventOverlap | None
+    backward_previous_event: torch.cuda.Event | None
+    hidden_backward_finished_event: torch.cuda.Event | None
+    topk_weights_backward_previous_event: torch.cuda.Event | None
+    topk_weights_backward_finished_event: torch.cuda.Event | None
 
 
 class DeepEPPostDispatchResult(PostDispatchResult):
@@ -63,6 +67,7 @@ class DeepEPPostDispatchResult(PostDispatchResult):
 class DeepEPPreCombineResult(PreCombineResult):
     backward_previous_event: EventOverlap | None
     forward_finished_event: EventOverlap | None
+    tp_backward_finished_event: torch.cuda.Event | None
 
 
 class DeepEPCombineResult(CombineResult):
@@ -87,6 +92,9 @@ class DeepEPDispatch(torch.autograd.Function):
         group: dist.ProcessGroup,
         forward_previous_event: EventOverlap | None = None,
         backward_finished_event: EventOverlap | None = None,
+        hidden_backward_previous_event: torch.cuda.Event | None = None,
+        topk_weights_backward_previous_event: torch.cuda.Event | None = None,
+        topk_weights_backward_finished_event: EventOverlap | None = None,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         torch.Tensor,
@@ -119,6 +127,9 @@ class DeepEPDispatch(torch.autograd.Function):
         ctx.group = group
         ctx.num_experts = num_experts
         ctx.backward_finished_event = backward_finished_event
+        ctx.hidden_backward_previous_event = hidden_backward_previous_event
+        ctx.topk_weights_backward_previous_event = topk_weights_backward_previous_event
+        ctx.topk_weights_backward_finished_event = topk_weights_backward_finished_event
         return (
             recv_x,
             recv_topk_idx,
@@ -135,20 +146,33 @@ class DeepEPDispatch(torch.autograd.Function):
         grad_recv_topk_idx: torch.Tensor,
         grad_recv_topk_weights: torch.Tensor,
         *args,
-    ) -> tuple[torch.Tensor, None, torch.Tensor | None, None, None, None, None, None, None]:
+    ) -> tuple[torch.Tensor, None, torch.Tensor | None, None, None, None, None, None, None, None]:
         # load saved comm handle
         handle = ctx.saved_tensors
+        if ctx.is_async:
+            # 中文注释：DeepEP backward 只能等待 EventOverlap；ExpertTP backward 完成事件
+            # 是 torch.cuda.Event，因此桥接为当前 stream 上的 DeepEP previous_event。
+            if ctx.hidden_backward_previous_event is not None:
+                torch.cuda.current_stream().wait_event(ctx.hidden_backward_previous_event)
+            if ctx.topk_weights_backward_previous_event is not None:
+                torch.cuda.current_stream().wait_event(ctx.topk_weights_backward_previous_event)
+            previous_event = buffer_capture()
+        else:
+            previous_event = buffer_capture()
         combined_grad_x, combined_grad_recv_topk_weights, event = dispatch_backward(
-            grad_recv_x, grad_recv_topk_weights, ctx.num_experts, handle, ctx.group, buffer_capture()
+            grad_recv_x, grad_recv_topk_weights, ctx.num_experts, handle, ctx.group, previous_event
         )
         if not ctx.is_async:
             event.current_stream_wait()
         else:
             ctx.backward_finished_event.event = event.event
+            if ctx.topk_weights_backward_finished_event is not None:
+                ctx.topk_weights_backward_finished_event.event = event.event
         return (
             combined_grad_x,
             None,
             combined_grad_recv_topk_weights,
+            None,
             None,
             None,
             None,
@@ -172,6 +196,7 @@ class DeepEPCombine(torch.autograd.Function):
         forward_previous_event: EventOverlap | None = None,
         backward_previous_event: EventOverlap | None = None,
         backward_finished_event: EventOverlap | None = None,
+        backward_finished_torch_event: torch.cuda.Event | None = None,
     ) -> tuple[torch.Tensor, EventOverlap]:
         if not (
             (forward_previous_event is None) == (backward_finished_event is None) == (backward_previous_event is None)
@@ -197,12 +222,13 @@ class DeepEPCombine(torch.autograd.Function):
         ctx.num_experts = num_experts
         ctx.backward_finished_event = backward_finished_event
         ctx.backward_previous_event = backward_previous_event
+        ctx.backward_finished_torch_event = backward_finished_torch_event
         return combined_x, event
 
     @staticmethod
     def backward(  # type: ignore[invalid-override]
         ctx, grad_combined_x: torch.Tensor, *args
-    ) -> tuple[torch.Tensor | tuple[torch.Tensor, torch.Tensor], None, None, None, None, None, None]:
+    ) -> tuple[torch.Tensor | tuple[torch.Tensor, torch.Tensor], None, None, None, None, None, None, None]:
         # load saved comm handle
         handle = ctx.saved_tensors
         if not ctx.is_async:
@@ -216,7 +242,12 @@ class DeepEPCombine(torch.autograd.Function):
             event.current_stream_wait()
         else:
             ctx.backward_finished_event.event = event.event
-        return grad_x, None, None, None, None, None, None
+            if ctx.backward_finished_torch_event is not None:
+                # 中文注释：TP ReduceScatterRowsSum backward 用 torch.cuda.Event
+                # 等 DeepEP combine backward 完成；桥接逻辑留在 DeepEPDispatcher 内部。
+                event.current_stream_wait()
+                ctx.backward_finished_torch_event.record()
+        return grad_x, None, None, None, None, None, None, None
 
 
 _async_combine = copy_method_signature(DeepEPCombine.forward)(DeepEPCombine.apply)
@@ -241,6 +272,45 @@ def get_backward_hook(backward_finished_event: EventOverlap, name: str | None = 
             backward_finished_event.event = event.event
 
     return _backward_hook
+
+
+def get_torch_backward_pre_hook(
+    backward_previous_event: torch.cuda.Event,
+    name: str | None = None,
+    debug: bool = False,
+):
+    def _backward_pre_hook(*_):
+        if debug:
+            logger.info(f"[{name}] backward pre hook")
+        torch.cuda.current_stream().wait_event(backward_previous_event)
+
+    return _backward_pre_hook
+
+
+def get_torch_backward_hook(
+    backward_finished_event: torch.cuda.Event,
+    name: str | None = None,
+    debug: bool = False,
+):
+    def _backward_hook(*_):
+        if debug:
+            logger.info(f"[{name}] backward hook")
+        backward_finished_event.record()
+
+    return _backward_hook
+
+
+def _torch_event_after_event_overlap(event: EventOverlap | None) -> torch.cuda.Event:
+    if event is not None:
+        event.current_stream_wait()
+    torch_event = torch.cuda.Event()
+    torch_event.record()
+    return torch_event
+
+
+def _event_overlap_after_torch_event(event: torch.cuda.Event) -> EventOverlap:
+    torch.cuda.current_stream().wait_event(event)
+    return buffer_capture()
 
 
 class DeepEPDispatcher(
@@ -278,6 +348,8 @@ class DeepEPDispatcher(
             "If you are training a MoE model, it means that `expert parallel` is not enabled in the config."
         )
         self._expert_tp = ExpertTP(tp_group) if tp_group is not None and tp_group.size() > 1 else None
+        if self._expert_tp is not None and DeepEPDispatcher._comm_stream is None:
+            DeepEPDispatcher._comm_stream = torch.cuda.Stream(device=DEVICE)
 
     @override
     def dispatch_preprocess(
@@ -318,8 +390,25 @@ class DeepEPDispatcher(
         async_op: bool = False,
         decoding: bool = False,
     ) -> DeepEPDispatchResult:
+        hidden_backward_previous_event = None
+        hidden_backward_finished_event = None
+        topk_weights_backward_previous_event = None
+        topk_weights_backward_finished_event = None
+        topk_weights_backward_finished_overlap = None
         if async_op and self._expert_tp is not None:
-            raise NotImplementedError("DeepEP + ExpertTP async dispatcher path is tracked separately.")
+            hidden_backward_previous_event = torch.cuda.Event()
+            hidden_backward_finished_event = torch.cuda.Event()
+            topk_weights_backward_previous_event = torch.cuda.Event()
+            topk_weights_backward_finished_event = torch.cuda.Event()
+            if topk_weights.grad_fn is not None:
+                topk_weights_backward_finished_overlap = EventOverlap(None)
+                topk_weights.grad_fn.register_prehook(
+                    get_backward_pre_hook(
+                        backward_previous_event=topk_weights_backward_finished_overlap,
+                        name="DeepEPDispatcher.dispatch.topk_weights",
+                        debug=XTUNER_DISPATCHER_DEBUG,
+                    )
+                )
 
         (
             dispatched_hidden_states,
@@ -336,6 +425,9 @@ class DeepEPDispatcher(
             self._process_group,
             pre_dispatched["forward_finished_event"],
             pre_dispatched["backward_previous_event"],
+            hidden_backward_finished_event,
+            topk_weights_backward_finished_event,
+            topk_weights_backward_finished_overlap,
         )
 
         if not async_op:
@@ -356,18 +448,60 @@ class DeepEPDispatcher(
             # 这里的 TP rank row counts 记录 source-token rows，不记录 topK 展开后的 route-copy rows。
             dispatched_hidden_states = cast(HiddenStates, dispatched_hidden_states)
             tp_rank_row_counts = self._expert_tp.gather_tp_rank_row_counts(dispatched_hidden_states)
-            dispatched_hidden_states, _ = self._expert_tp.all_gather_rows(
-                dispatched_hidden_states,
-                tp_rank_row_counts,
-            )
-            dispatched_topk_idx = self._expert_tp.all_gather_row_metadata(dispatched_topk_idx, tp_rank_row_counts)
-            dispatched_topk_weights, _ = self._expert_tp.all_gather_rows(
-                dispatched_topk_weights,
-                tp_rank_row_counts,
-            )
-            num_recv_tokens_per_expert_group = self._expert_tp.all_gather_per_rank_metadata(
-                num_recv_tokens_per_expert,
-            )
+            if async_op:
+                assert self._comm_stream is not None
+                assert hidden_backward_previous_event is not None
+                assert hidden_backward_finished_event is not None
+                assert topk_weights_backward_previous_event is not None
+                assert topk_weights_backward_finished_event is not None
+
+                deepep_finished_event = _torch_event_after_event_overlap(event)
+                tp_counts_finished_event = torch.cuda.Event()
+                dispatched_hidden_states = self._expert_tp.async_all_gather_rows(
+                    dispatched_hidden_states,
+                    tp_rank_row_counts=tp_rank_row_counts,
+                    forward_previous_event=deepep_finished_event,
+                    forward_finished_event=None,
+                    backward_previous_event=hidden_backward_previous_event,
+                    backward_finished_event=hidden_backward_finished_event,
+                    comm_stream=self._comm_stream,
+                )
+                dispatched_topk_idx = self._expert_tp.async_all_gather_row_metadata(
+                    dispatched_topk_idx,
+                    tp_rank_row_counts=tp_rank_row_counts,
+                    forward_previous_event=None,
+                    forward_finished_event=None,
+                    comm_stream=self._comm_stream,
+                )
+                dispatched_topk_weights = self._expert_tp.async_all_gather_rows(
+                    dispatched_topk_weights,
+                    tp_rank_row_counts=tp_rank_row_counts,
+                    forward_previous_event=None,
+                    forward_finished_event=None,
+                    backward_previous_event=topk_weights_backward_previous_event,
+                    backward_finished_event=topk_weights_backward_finished_event,
+                    comm_stream=self._comm_stream,
+                )
+                num_recv_tokens_per_expert_group = self._expert_tp.async_all_gather_per_rank_metadata(
+                    num_recv_tokens_per_expert,
+                    forward_previous_event=None,
+                    forward_finished_event=tp_counts_finished_event,
+                    comm_stream=self._comm_stream,
+                )
+                forward_finished_event = _event_overlap_after_torch_event(tp_counts_finished_event)
+            else:
+                dispatched_hidden_states, _ = self._expert_tp.all_gather_rows(
+                    dispatched_hidden_states,
+                    tp_rank_row_counts,
+                )
+                dispatched_topk_idx = self._expert_tp.all_gather_row_metadata(dispatched_topk_idx, tp_rank_row_counts)
+                dispatched_topk_weights, _ = self._expert_tp.all_gather_rows(
+                    dispatched_topk_weights,
+                    tp_rank_row_counts,
+                )
+                num_recv_tokens_per_expert_group = self._expert_tp.all_gather_per_rank_metadata(
+                    num_recv_tokens_per_expert,
+                )
 
         ret = DeepEPDispatchResult(
             hidden_states=cast(HiddenStates, dispatched_hidden_states),
@@ -378,6 +512,10 @@ class DeepEPDispatcher(
             num_recv_tokens_per_expert_group=num_recv_tokens_per_expert_group,
             tp_rank_row_counts=tp_rank_row_counts,
             forward_finished_event=forward_finished_event,
+            backward_previous_event=hidden_backward_previous_event,
+            hidden_backward_finished_event=hidden_backward_finished_event,
+            topk_weights_backward_previous_event=topk_weights_backward_previous_event,
+            topk_weights_backward_finished_event=topk_weights_backward_finished_event,
         )
         return ret
 
@@ -414,6 +552,17 @@ class DeepEPDispatcher(
             num_out_tokens=num_out_tokens,
             num_negative_one_in_indices=num_neg_one_idx,
         )
+        if async_op and self._expert_tp is not None:
+            backward_previous_event = dispatched["backward_previous_event"]
+            assert backward_previous_event is not None, "Please use `async_op=True` for dispatch!"
+            if permuted_hidden_states.grad_fn is not None:
+                permuted_hidden_states.grad_fn.register_hook(
+                    get_torch_backward_hook(
+                        backward_previous_event,
+                        name="DeepEPDispatcher.dispatch_postprocess",
+                        debug=XTUNER_DISPATCHER_DEBUG,
+                    )
+                )
 
         if decoding:
             raise NotImplementedError
@@ -442,19 +591,43 @@ class DeepEPDispatcher(
         )
 
         if async_op:
-            backward_previous_event = EventOverlap(None)
             forward_finished_event = buffer_capture()
-            if hidden_states.grad_fn is not None:
-                hidden_states.grad_fn.register_prehook(
-                    get_backward_pre_hook(
-                        backward_previous_event=backward_previous_event,
-                        name="TorchAll2AllDispatcher.combine_preprocess",
-                        debug=XTUNER_DISPATCHER_DEBUG,
+            tp_backward_finished_event = None
+            if self._expert_tp is not None:
+                backward_previous_event = None
+                tp_backward_finished_event = torch.cuda.Event()
+                if hidden_states.grad_fn is not None:
+                    hidden_states.grad_fn.register_prehook(
+                        get_torch_backward_pre_hook(
+                            backward_previous_event=tp_backward_finished_event,
+                            name="DeepEPDispatcher.combine_preprocess",
+                            debug=XTUNER_DISPATCHER_DEBUG,
+                        )
                     )
-                )
+                    topk_weights_backward_previous_event = dispatched["topk_weights_backward_previous_event"]
+                    if topk_weights_backward_previous_event is not None:
+                        hidden_states.grad_fn.register_hook(
+                            get_torch_backward_hook(
+                                topk_weights_backward_previous_event,
+                                name="DeepEPDispatcher.combine_preprocess.topk_weights",
+                                debug=XTUNER_DISPATCHER_DEBUG,
+                            )
+                        )
+            else:
+                backward_previous_event = EventOverlap(None)
+                tp_backward_finished_event = None
+                if hidden_states.grad_fn is not None:
+                    hidden_states.grad_fn.register_prehook(
+                        get_backward_pre_hook(
+                            backward_previous_event=backward_previous_event,
+                            name="TorchAll2AllDispatcher.combine_preprocess",
+                            debug=XTUNER_DISPATCHER_DEBUG,
+                        )
+                    )
         else:
             backward_previous_event = None
             forward_finished_event = None
+            tp_backward_finished_event = None
 
         if decoding:
             raise NotImplementedError
@@ -463,6 +636,7 @@ class DeepEPDispatcher(
                 hidden_states=hidden_states,
                 forward_finished_event=forward_finished_event,
                 backward_previous_event=backward_previous_event,
+                tp_backward_finished_event=tp_backward_finished_event,
             )
 
     @override
@@ -479,27 +653,57 @@ class DeepEPDispatcher(
         if async_op:
             backward_previous_event = EventOverlap(None)
             assert pre_combined["forward_finished_event"] is not None, "Please use `async_op=True` for combine!"
-            pre_combined["forward_finished_event"].current_stream_wait()
         else:
             backward_previous_event = None
 
         hidden_states_for_combine = pre_combined["hidden_states"]
         if self._expert_tp is not None:
-            # 中文注释：combine 阶段先把各 ExpertTP rank 的 expert partial output 做
-            # TP ReduceScatterRowsSum，回到当前 rank 的 DeepEP received source-token rows。
-            hidden_states_for_combine = self._expert_tp.reduce_scatter_rows_sum(
-                hidden_states_for_combine,
-                dispatched["tp_rank_row_counts"],
-            )
+            if async_op:
+                assert self._comm_stream is not None
+                assert pre_combined["tp_backward_finished_event"] is not None
+                tp_forward_previous_event = _torch_event_after_event_overlap(pre_combined["forward_finished_event"])
+                tp_forward_finished_event = torch.cuda.Event()
+                deepep_backward_finished_event = torch.cuda.Event()
+                # 中文注释：TP ReduceScatterRowsSum 属于 combine 通信段；
+                # DeepEP combine 只等待 TP 输出事件，不直接接触 ExpertTP 内部事件类型。
+                hidden_states_for_combine = self._expert_tp.async_reduce_scatter_rows_sum(
+                    hidden_states_for_combine,
+                    tp_rank_row_counts=dispatched["tp_rank_row_counts"],
+                    forward_previous_event=tp_forward_previous_event,
+                    forward_finished_event=tp_forward_finished_event,
+                    backward_previous_event=deepep_backward_finished_event,
+                    backward_finished_event=pre_combined["tp_backward_finished_event"],
+                    comm_stream=self._comm_stream,
+                )
+                forward_previous_event = _event_overlap_after_torch_event(tp_forward_finished_event)
+                deepep_backward_finished_overlap = EventOverlap(None)
+            else:
+                # 中文注释：combine 阶段先把各 ExpertTP rank 的 expert partial output 做
+                # TP ReduceScatterRowsSum，回到当前 rank 的 DeepEP received source-token rows。
+                hidden_states_for_combine = self._expert_tp.reduce_scatter_rows_sum(
+                    hidden_states_for_combine,
+                    dispatched["tp_rank_row_counts"],
+                )
+                forward_previous_event = pre_combined["forward_finished_event"]
+                deepep_backward_finished_event = None
+                deepep_backward_finished_overlap = pre_combined["backward_previous_event"]
+        else:
+            forward_previous_event = pre_combined["forward_finished_event"]
+            if async_op:
+                assert forward_previous_event is not None, "Please use `async_op=True` for combine!"
+                forward_previous_event.current_stream_wait()
+            deepep_backward_finished_event = None
+            deepep_backward_finished_overlap = pre_combined["backward_previous_event"]
 
         combined_hidden_states, event = _async_combine(
             hidden_states_for_combine,
             self._n_routed_experts,
             dispatched["handle"],
             self._process_group,
-            pre_combined["forward_finished_event"],
+            forward_previous_event,
             backward_previous_event,
-            pre_combined["backward_previous_event"],
+            deepep_backward_finished_overlap,
+            deepep_backward_finished_event,
         )
         if not async_op:
             event.current_stream_wait()

@@ -177,6 +177,222 @@ class TestDeepEPExpertTPDispatcher(DeterministicDDPTestCase):
             dist.destroy_process_group(group)
         dist.destroy_process_group(pg)
 
+    def test_async_path_matches_sync_output_and_gradients(self) -> None:
+        pg = self.create_pg("cuda")
+        rank = dist.get_rank()
+        torch.cuda.set_device(rank % torch.cuda.device_count())
+        device = torch.device("cuda", rank % torch.cuda.device_count())
+
+        ep_size = 2
+        tp_size = 2
+        ep_rank = rank // tp_size
+        tp_rank = rank % tp_size
+        ep_groups, tp_groups = _build_ep_tp_groups(ep_size, tp_size)
+        ep_group = ep_groups[tp_rank]
+        tp_group = tp_groups[ep_rank]
+
+        dispatcher = build_dispatcher(
+            dispatcher="deepep",
+            n_routed_experts=4,
+            ep_group=ep_group,
+            tp_group=tp_group,
+        )
+
+        local_hidden, local_topk_ids, local_topk_weights = _source_payload(rank, device)
+
+        sync_hidden_leaf = local_hidden.detach().clone().requires_grad_(True)
+        sync_topk_weights_leaf = local_topk_weights.detach().clone().requires_grad_(True)
+        sync_result = self._run_public_api(
+            dispatcher=dispatcher,
+            hidden_states=sync_hidden_leaf * 1.25,
+            topk_ids=local_topk_ids,
+            topk_weights=sync_topk_weights_leaf * 0.5,
+            tp_size=tp_size,
+            async_op=False,
+        )
+        sync_result["hidden_states"].float().sum().backward()
+
+        async_hidden_leaf = local_hidden.detach().clone().requires_grad_(True)
+        async_topk_weights_leaf = local_topk_weights.detach().clone().requires_grad_(True)
+        async_result = self._run_public_api(
+            dispatcher=dispatcher,
+            hidden_states=async_hidden_leaf * 1.25,
+            topk_ids=local_topk_ids,
+            topk_weights=async_topk_weights_leaf * 0.5,
+            tp_size=tp_size,
+            async_op=True,
+        )
+        async_result["hidden_states"].float().sum().backward()
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(
+            async_result["hidden_states"],
+            sync_result["hidden_states"],
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+        assert sync_hidden_leaf.grad is not None
+        assert async_hidden_leaf.grad is not None
+        assert sync_topk_weights_leaf.grad is not None
+        assert async_topk_weights_leaf.grad is not None
+        torch.testing.assert_close(
+            async_hidden_leaf.grad,
+            sync_hidden_leaf.grad,
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+        torch.testing.assert_close(
+            async_topk_weights_leaf.grad,
+            sync_topk_weights_leaf.grad,
+            atol=FLOAT32_ATOL,
+            rtol=FLOAT32_RTOL,
+        )
+
+        dist.barrier()
+        for group in ep_groups + tp_groups:
+            dist.destroy_process_group(group)
+        dist.destroy_process_group(pg)
+
+    def test_async_path_accepts_topk_weights_without_gradients(self) -> None:
+        pg = self.create_pg("cuda")
+        rank = dist.get_rank()
+        torch.cuda.set_device(rank % torch.cuda.device_count())
+        device = torch.device("cuda", rank % torch.cuda.device_count())
+
+        ep_size = 2
+        tp_size = 2
+        ep_rank = rank // tp_size
+        tp_rank = rank % tp_size
+        ep_groups, tp_groups = _build_ep_tp_groups(ep_size, tp_size)
+        ep_group = ep_groups[tp_rank]
+        tp_group = tp_groups[ep_rank]
+
+        dispatcher = build_dispatcher(
+            dispatcher="deepep",
+            n_routed_experts=4,
+            ep_group=ep_group,
+            tp_group=tp_group,
+        )
+
+        local_hidden, local_topk_ids, local_topk_weights = _source_payload(rank, device)
+        hidden_leaf = local_hidden.detach().clone().requires_grad_(True)
+        topk_weights = local_topk_weights.detach().clone()
+        assert topk_weights.requires_grad is False
+
+        pre_dispatched = dispatcher.dispatch_preprocess(
+            hidden_states=hidden_leaf,
+            topk_ids=local_topk_ids,
+            async_op=True,
+        )
+        dispatched = dispatcher.dispatch(
+            pre_dispatched=pre_dispatched,
+            topk_weights=topk_weights,
+            decoding=False,
+            async_op=True,
+        )
+
+        expected_tp_rank_row_counts = [
+            sum(ep * tp_size + expected_tp_rank + 2 for ep in range(ep_size))
+            for expected_tp_rank in range(tp_size)
+        ]
+        assert dispatched["tp_rank_row_counts"] == expected_tp_rank_row_counts
+        # 中文注释：async dispatch 返回时已经处于 TP AllGather 后的完整 received source-token row 空间。
+        assert dispatched["hidden_states"].shape[0] == sum(expected_tp_rank_row_counts)
+
+        post_dispatched = dispatcher.dispatch_postprocess(
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            async_op=True,
+        )
+        pre_combined = dispatcher.combine_preprocess(
+            hidden_states=post_dispatched["hidden_states"] / tp_size,
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            async_op=True,
+        )
+        assert pre_combined["hidden_states"].shape[0] == sum(expected_tp_rank_row_counts)
+        combined = dispatcher.combine(
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            pre_combined=pre_combined,
+            decoding=False,
+            async_op=True,
+        )
+        # 中文注释：TP ReduceScatterRowsSum 属于 combine，combine 后回到本 rank 的 local received rows。
+        assert combined["hidden_states"].shape == local_hidden.shape
+        result = dispatcher.combine_postprocess(
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            pre_combined=pre_combined,
+            combined=combined,
+            async_op=True,
+        )
+
+        result["hidden_states"].float().sum().backward()
+        torch.cuda.synchronize()
+        assert hidden_leaf.grad is not None
+
+        dist.barrier()
+        for group in ep_groups + tp_groups:
+            dist.destroy_process_group(group)
+        dist.destroy_process_group(pg)
+
+    def _run_public_api(
+        self,
+        *,
+        dispatcher,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        tp_size: int,
+        async_op: bool,
+    ) -> dict[str, torch.Tensor]:
+        pre_dispatched = dispatcher.dispatch_preprocess(
+            hidden_states=hidden_states,
+            topk_ids=topk_ids,
+            async_op=async_op,
+        )
+        dispatched = dispatcher.dispatch(
+            pre_dispatched=pre_dispatched,
+            topk_weights=topk_weights,
+            decoding=False,
+            async_op=async_op,
+        )
+        post_dispatched = dispatcher.dispatch_postprocess(
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            async_op=async_op,
+        )
+        # 中文注释：测试 dispatcher public API，不模拟真实 row-parallel expert；
+        # 每个 ExpertTP rank 产出 1/tp_size partial，combine 应归约回完整输出。
+        expert_output = post_dispatched["hidden_states"] / tp_size
+        pre_combined = dispatcher.combine_preprocess(
+            hidden_states=expert_output,
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            async_op=async_op,
+        )
+        combined = dispatcher.combine(
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            pre_combined=pre_combined,
+            decoding=False,
+            async_op=async_op,
+        )
+        return dispatcher.combine_postprocess(
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            pre_combined=pre_combined,
+            combined=combined,
+            async_op=async_op,
+        )
+
     @property
     def world_size(self) -> int:
         return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "4"))
