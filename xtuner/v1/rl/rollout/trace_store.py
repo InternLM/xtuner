@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 import ray
@@ -10,6 +11,15 @@ from xtuner.v1.utils import get_logger
 
 _STORE_NAME = "rollout_trace_store"
 _handle_cache: Any = None
+
+
+class TraceState(str, Enum):
+    ROLLOUT_RUNNING = "RolloutRunning"
+    ROLLOUT_FINISHED = "RolloutFinished"
+    TRAIN_RUNNING = "TrainRunning"
+    TRAIN_FINISHED = "TrainFinished"
+    TO_BE_RELEASED = "ToBeReleased"
+    RELEASED = "Released"
 
 
 def _free_ray_refs(obj: Any):
@@ -79,6 +89,13 @@ class Trie:
     def __init__(self):
         """Initialize the prefix tree (Trie)."""
         self.root = TreeNode(value=None, parent=None)
+        self.state = TraceState.ROLLOUT_RUNNING
+        self.release_reason: str | None = None
+        self.updated_at = time.time()
+
+    def touch(self) -> None:
+        """Record that this session was updated."""
+        self.updated_at = time.time()
 
     def keys(self) -> List[str]:
         """Get all keys (i.e., strings) stored in the Trie."""
@@ -117,6 +134,7 @@ class Trie:
                 break
 
         node.value = value
+        self.touch()
 
     def search(self, text: str, filter_none: bool = False) -> Tuple[str, List["TreeNode"]]:
         """Search for the longest prefix matching the input text.
@@ -173,6 +191,7 @@ class Trie:
 
         if key is None:
             _free_subtree(self.root)
+            self.touch()
             return
 
         node = self.root
@@ -193,6 +212,7 @@ class Trie:
         if node.value is not None:
             _free_ray_refs(node.value)
             node.value = None
+            self.touch()
 
         for parent, token in reversed(path):
             child_node = parent.children[token]
@@ -210,8 +230,6 @@ class RolloutTraceStore:
     def __init__(self):
         """Initialize the rollout trace store actor."""
         self.sessions: Dict[str, Trie] = {}
-        self.objects: Dict[str, ray.ObjectRef] = {}
-        self.updated_at: Dict[str, float] = {}
 
     def get_or_create(self, session_id: str) -> Trie:
         """Get the Trie for a session, or create one if it doesn't exist.
@@ -225,6 +243,26 @@ class RolloutTraceStore:
         if session_id not in self.sessions:
             self.sessions[session_id] = Trie()
         return self.sessions[session_id]
+
+    def get_state(self, session_id: str) -> dict | None:
+        """Get lifecycle metadata for a session.
+
+        Args:
+            session_id (str): The session identifier.
+
+        Returns:
+            dict | None: A snapshot of session metadata, or None when the
+                session does not exist.
+        """
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            return None
+        return {
+            "session_id": session_id,
+            "state": trie.state.value,
+            "release_reason": trie.release_reason,
+            "updated_at": trie.updated_at,
+        }
 
     def keys(self, session_id: str) -> List[str]:
         """Get all keys (i.e., strings) stored in a session's Trie.
@@ -312,7 +350,7 @@ class RolloutTraceStore:
         Returns:
             list[ray.ObjectRef]: The mapped ray.ObjectRefs.
         """
-        return [self.objects[key] for key in keys if key in self.objects]
+        raise NotImplementedError("Trace object lookup will be implemented by the routed experts registry.")
 
 
 def get_store():
