@@ -190,18 +190,40 @@ def hc_post(x: Tensor, residual: Tensor, post: Tensor, comb: Tensor) -> Tensor:
             cast back to ``x.dtype``.
     """
     # post * x is broadcast across hidden dim; comb mixes across the residual stream axis.
-    # The mathematically equivalent fused form skips a `[B, S, hc_mult, hc_mult, D]`
-    # intermediate (which dominated peak memory at hc_post — see memory profile at
-    # step-0/rank1_memory_snapshot.pickle) by writing the second term as a matmul:
-    #   sum_j comb[..., i, j] * residual[..., j, d] == (comb @ residual)[..., i, d]
     #
-    # Precision: run the matmul in bf16 with cuBLAS's fp32 internal accumulator
-    # (same numerical contract as the original element-wise fp32 auto-promote,
-    # within bf16 output quantisation). ``comb`` is the small ``[B,S,hc_mult,hc_mult]``
-    # fp32 Sinkhorn output (~1 MB at pack=4096); we cast it down to bf16 so the
-    # matmul stays bf16×bf16 and avoid materialising the 256 MB fp32 copy of
-    # ``residual`` that ``residual.to(comb.dtype)`` would otherwise create (and
-    # save for matmul backward). Across 4 layers × 2 (attn+ffn) × 2 (forward +
-    # recompute), this is ~4 GB of peak memory savings at pack=4096.
-    expanded = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.matmul(comb.to(residual.dtype), residual)
+    # Implementation note. The natural form is::
+    #
+    #   mixed = torch.matmul(comb.to(residual.dtype), residual)
+    #
+    # but ``matmul`` (and ``einsum`` with the same contraction) lowers to
+    # ``aten.bmm`` at the inductor level, and inductor delegates ``bmm`` to
+    # cuBLAS via ``extern_kernels.bmm`` rather than codegening a triton kernel
+    # — ``epilogue_fusion=True`` only fuses pointwise tails onto the matmul,
+    # not the matmul body itself. Here the bmm has inner dim ``K = hc_mult =
+    # 4`` which is below Hopper's wgmma tile floor (K=16), so cuBLAS falls
+    # back to a CUDA-core path that's bandwidth-bound and slow — at
+    # pack=16384 it cost ~3 ms per call × 86 calls/step ≈ 250 ms/step.
+    #
+    # To force inductor to codegen a fused triton kernel for the mixing, we
+    # express it as broadcast-multiply + reduce-sum — both pointwise / reduce
+    # primitives, which are inductor's strongest fusion targets. The
+    # ``[B, S, H_out, H_in, D]`` intermediate that the unsqueeze + multiply
+    # implies in eager mode **never materialises under compile**: inductor
+    # fuses the multiply with the trailing ``.sum(dim=-2)`` into a single
+    # triton kernel that does the H_in reduction in registers and writes only
+    # the ``[B, S, H_out, D]`` output. The cast, the ``post * x`` broadcast
+    # and the final add all join that kernel's epilogue, so the whole
+    # ``hc_post`` body compiles to one fused kernel.
+    #
+    # WARNING: this function MUST be in the active compile cfg (see
+    # ``_V4_LAYER_TARGETS`` in ``deepseek_v4.py``). Running it eagerly would
+    # materialise the 8 GB ``[B, S, H, H, D]`` 5D tensor at pack=16384,
+    # hc_mult=4, hidden=4096. The compile cfg covers it by default; the
+    # ``hc_mult=1`` degenerate path in ``V4DecoderLayer.forward`` skips
+    # ``hc_post`` entirely so unit tests with that setting don't hit this.
+    mixed = (
+        comb.to(residual.dtype).unsqueeze(-1)   # [B, S, H_out, H_in, 1]
+        * residual.unsqueeze(-3)                # [B, S, 1,     H_in, D]
+    ).sum(dim=-2)                                # → [B, S, H_out, D]
+    expanded = post.unsqueeze(-1) * x.unsqueeze(-2) + mixed
     return expanded.type_as(x)
