@@ -22,6 +22,19 @@ class TraceState(str, Enum):
     RELEASED = "Released"
 
 
+_ALLOWED_PREVIOUS_STATES: dict[TraceState, tuple[TraceState, ...]] = {
+    TraceState.ROLLOUT_FINISHED: (TraceState.ROLLOUT_RUNNING,),
+    TraceState.TRAIN_RUNNING: (TraceState.ROLLOUT_FINISHED,),
+    TraceState.TRAIN_FINISHED: (TraceState.TRAIN_RUNNING,),
+    TraceState.TO_BE_RELEASED: (
+        TraceState.ROLLOUT_RUNNING,
+        TraceState.ROLLOUT_FINISHED,
+        TraceState.TRAIN_RUNNING,
+        TraceState.TRAIN_FINISHED,
+    ),
+}
+
+
 def _free_ray_refs(obj: Any):
     """Recursively free ray.ObjectRef instances trapped inside an object.
 
@@ -95,7 +108,6 @@ class Trie:
         """Initialize the prefix tree (Trie)."""
         self.root = TreeNode(value=None, parent=None)
         self.state = TraceState.ROLLOUT_RUNNING
-        self.release_reason: str | None = None
         self.expert_key: str | None = None
         self.updated_at = time.time()
 
@@ -267,10 +279,51 @@ class RolloutTraceStore:
         return {
             "session_id": session_id,
             "state": trie.state.value,
-            "release_reason": trie.release_reason,
             "updated_at": trie.updated_at,
             "has_object_ref": trie.expert_key in self.objects if trie.expert_key is not None else False,
         }
+
+    def _set_state(
+        self,
+        session_id: str,
+        next_state: TraceState,
+    ) -> TraceState:
+        """Set a session state after validating the current state."""
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            raise KeyError(f"Trace session {session_id!r} does not exist.")
+        allowed_previous_states = _ALLOWED_PREVIOUS_STATES.get(next_state)
+        if allowed_previous_states is None:
+            raise RuntimeError(f"Unsupported trace session target state: {next_state.value}.")
+        if trie.state not in allowed_previous_states:
+            allowed_values = ", ".join(state.value for state in allowed_previous_states)
+            raise RuntimeError(
+                f"Cannot transition trace session {session_id!r} from {trie.state.value} "
+                f"to {next_state.value}; allowed from: {allowed_values}."
+            )
+
+        trie.state = next_state
+        trie.touch()
+        self._maybe_release(session_id)
+
+        released = session_id not in self.sessions
+        return TraceState.RELEASED if released else next_state
+
+    def _maybe_release(self, session_id: str) -> None:
+        """Physically release a session once it reaches ToBeReleased."""
+        trie = self.sessions.get(session_id)
+        if trie is None or trie.state != TraceState.TO_BE_RELEASED:
+            return
+        self._release_session(session_id, trie)
+
+    def _release_session(self, session_id: str, trie: Trie) -> None:
+        """Release trie data and routed expert refs for one session."""
+        if trie.expert_key is not None:
+            obj_ref = self.objects.pop(trie.expert_key, None)
+            if obj_ref is not None:
+                _free_ray_refs(obj_ref)
+        trie.release()
+        self.sessions.pop(session_id, None)
 
     def keys(self, session_id: str) -> List[str]:
         """Get all keys (i.e., strings) stored in a session's Trie.
@@ -321,21 +374,6 @@ class RolloutTraceStore:
         """
         trie = self.get_or_create(session_id)
         return trie.search(text, filter_none)
-
-    def release(self, session_id: str):
-        """Release the Trie and free associated resources for a specific
-        session.
-
-        Args:
-            session_id (str): The session identifier.
-        """
-        assert session_id in self.sessions, f"Session ID '{session_id}' not found for release."
-        trie = self.sessions.pop(session_id)
-        if trie.expert_key is not None:
-            obj_ref = self.objects.pop(trie.expert_key, None)
-            if obj_ref is not None:
-                _free_ray_refs(obj_ref)
-        trie.release()
 
     def export_training_trace(self, session_id: str, prompt_text: str) -> dict:
         """Export the stored training trace given a complete prompt text.

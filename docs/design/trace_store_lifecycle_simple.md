@@ -10,7 +10,6 @@
 
 ```text
 state 决定这条 session 当前能做什么、不能做什么。
-release_reason 只解释为什么进入 ToBeReleased，不参与释放判断。
 ```
 
 本版按当前实现边界收敛三个规则：
@@ -175,7 +174,7 @@ flowchart TD
 3. token-level 字段可以组成训练样本。
 4. TrainingWorker 即将消费 Store 返回的 object keys / object refs。
 
-如果 export 前发现 LLMTrace 缺失、prompt render 失败、Trace Store prefix 不完整、object key 缺失，说明这条样本已经无法训练，应进入 `ToBeReleased`，并记录 `release_reason = trace_incomplete`。
+如果 export 前发现 LLMTrace 缺失、prompt render 失败、Trace Store prefix 不完整、object key 缺失，说明这条样本已经无法训练，应进入 `ToBeReleased`。
 
 ## 5. 训练阶段
 
@@ -258,11 +257,11 @@ TrainRunning -> ToBeReleased
 
 `TrainRunning` 下需要进入 `ToBeReleased` 的情况可以归纳为三类。
 
-| 类别 | 典型情况 | `release_reason` 示例 |
-| --- | --- | --- |
-| 训练侧主动放弃 | step 取消、trainer 停止、batch 被撤销、旧 session 被替换 | `train_cancelled` / `batch_cancelled` / `rerun_old_session` |
-| materialize 不可恢复失败 | object key 永久缺失、object ref 损坏、反序列化失败、shape / length 校验无法组成 batch | `materialize_failed` / `object_missing` / `invalid_training_trace` |
-| 重试窗口结束 | worker 崩溃后不再重试、materialize 超时后被调度器放弃 | `train_abandoned` / `materialize_timeout` |
+| 类别 | 典型情况 |
+| --- | --- |
+| 训练侧主动放弃 | step 取消、trainer 停止、batch 被撤销、旧 session 被替换 |
+| materialize 不可恢复失败 | object key 永久缺失、object ref 损坏、反序列化失败、shape / length 校验无法组成 batch |
+| 重试窗口结束 | worker 崩溃后不再重试、materialize 超时后被调度器放弃 |
 
 这些情况有一个共同前提：**所有训练侧消费者都已经停止，或者被调度器明确撤销**。如果还有任何消费者可能继续读取 Store，即使训练看起来已经失败，也必须保持 `TrainRunning`。
 
@@ -277,7 +276,7 @@ TrainRunning -> ToBeReleased
 
 ## 6. 何时进入 ToBeReleased
 
-`ToBeReleased` 是统一释放等待状态。正常完成和异常退出都会进入这里，区别由 `release_reason` 表达。
+`ToBeReleased` 是统一释放等待状态。正常完成和异常退出都会进入这里；具体原因先由调用方日志或上游状态表达。
 
 ```mermaid
 flowchart TD
@@ -290,22 +289,22 @@ flowchart TD
 
 从不同状态进入 `ToBeReleased` 的原因如下。
 
-| 来源状态 | 进入 `ToBeReleased` 的情况 | `release_reason` 示例 |
-| --- | --- | --- |
-| `RolloutRunning` | rollout failed / skipped / final cancelled / timeout | `rollout_failed` / `skipped` / `final_cancelled` / `timeout` |
-| `RolloutRunning` | rollout worker 返回 `FAILED` | `worker_failed` |
-| `RolloutRunning` | rollout worker 返回 `ABORTED`，且 `enable_partial_rollout=False` | `aborted_without_partial_rollout` |
-| `RolloutRunning` | rollout_state 变为 `EXPIRED` | `expired` |
-| `RolloutRunning` | `commit_response` 失败，staged objects 无法形成完整 committed trace | `commit_failed` |
-| `RolloutRunning` | 失败、超时或 worker 崩溃后重跑，并创建了新的 `session_id`，旧 session 不再继续写入 | `rerun_old_session` |
-| `RolloutRunning` | completed rollout 未通过 reward / filter / rule 判定，不能进入训练 | `filtered` |
-| `RolloutFinished` | 训练前被取消、过期且被明确放弃、旧 session 被替换 | `final_cancelled` / `abandoned_expired` / `rerun_old_session` |
-| `RolloutFinished` | LLMTrace 缺失、prompt render 失败、Trace Store 字段不完整，导致无法构造训练样本 | `trace_incomplete` |
-| `TrainRunning` | TrainingWorker materialize 不可恢复失败，且训练侧确认放弃这条 session | `materialize_failed` / `invalid_training_trace` |
-| `TrainRunning` | object key 永久缺失、object ref 损坏、反序列化失败，且不会再重试 | `object_missing` / `object_corrupted` |
-| `TrainRunning` | 训练任务取消、batch 被撤销、旧 session 被替换，且所有消费者都不会再依赖 Store | `train_cancelled` / `batch_cancelled` / `rerun_old_session` |
-| `TrainRunning` | materialize 超时或 worker 崩溃后，调度器明确放弃该 session | `materialize_timeout` / `train_abandoned` |
-| `TrainFinished` | 训练侧已经完成 materialize，不再依赖 Store object refs | `train_finished` |
+| 来源状态 | 进入 `ToBeReleased` 的情况 |
+| --- | --- |
+| `RolloutRunning` | rollout failed / skipped / final cancelled / timeout |
+| `RolloutRunning` | rollout worker 返回 `FAILED` |
+| `RolloutRunning` | rollout worker 返回 `ABORTED`，且 `enable_partial_rollout=False` |
+| `RolloutRunning` | rollout_state 变为 `EXPIRED` |
+| `RolloutRunning` | `commit_response` 失败，staged objects 无法形成完整 committed trace |
+| `RolloutRunning` | 失败、超时或 worker 崩溃后重跑，并创建了新的 `session_id`，旧 session 不再继续写入 |
+| `RolloutRunning` | completed rollout 未通过 reward / filter / rule 判定，不能进入训练 |
+| `RolloutFinished` | 训练前被取消、过期且被明确放弃、旧 session 被替换 |
+| `RolloutFinished` | LLMTrace 缺失、prompt render 失败、Trace Store 字段不完整，导致无法构造训练样本 |
+| `TrainRunning` | TrainingWorker materialize 不可恢复失败，且训练侧确认放弃这条 session |
+| `TrainRunning` | object key 永久缺失、object ref 损坏、反序列化失败，且不会再重试 |
+| `TrainRunning` | 训练任务取消、batch 被撤销、旧 session 被替换，且所有消费者都不会再依赖 Store |
+| `TrainRunning` | materialize 超时或 worker 崩溃后，调度器明确放弃该 session |
+| `TrainFinished` | 训练侧已经完成 materialize，不再依赖 Store object refs |
 
 以下情况不能直接进入 `ToBeReleased`：
 

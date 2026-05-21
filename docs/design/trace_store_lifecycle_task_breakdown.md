@@ -27,7 +27,7 @@
 开发内容：
 
 1. 新增 `TraceState`。
-2. 给 `Trie` 增加 `state`、`release_reason`、`updated_at`。
+2. 给 `Trie` 增加 `state`、`updated_at`。
 3. 增加 `Trie.touch()`。
 4. 增加 `RolloutTraceStore.get_state(session_id)`。
 
@@ -42,8 +42,7 @@
 
 1. `Trie` 名字和 `self.sessions: dict[str, Trie]` 不变。
 2. `state` 默认是 `RolloutRunning`。
-3. `release_reason` 不参与任何判断。
-4. `updated_at` 只用于观测。
+3. `updated_at` 只用于观测。
 
 测试范围：
 
@@ -94,10 +93,11 @@
 
 开发内容：
 
-1. 实现 `_set_state(session_id, next_state, allowed_from=..., release_reason=None)`。
-2. 实现 `_maybe_release(session_id)`。
-3. 实现内部 `_release_session(session_id, trie)`。
-4. 删除 public actor method `release(session_id)`，或改成内部不可外部调用的私有方法。
+1. 实现模块级合法状态转换表。
+2. 实现 `_set_state(session_id, next_state)`。
+3. 实现 `_maybe_release(session_id)`。
+4. 实现内部 `_release_session(session_id, trie)`。
+5. 删除 public actor method `release(session_id)`，或改成内部不可外部调用的私有方法。
 
 不做：
 
@@ -107,10 +107,11 @@
 代码 review 关注点：
 
 1. `_set_state` 不能调用 `get_or_create`。
-2. 非法来源状态必须抛 `RuntimeError`。
-3. missing session 在 `_set_state` 中必须抛 `KeyError`。
-4. `_set_state` 每次状态更新后调用 `_maybe_release`。
-5. `_release_session` 必须释放 trie tree 和该 session 记录的 object ref，再删除 `self.sessions[session_id]`。
+2. `_set_state` 必须从模块级合法状态转换表读取允许来源状态，调用方不能传入来源状态白名单。
+3. 非法来源状态必须抛 `RuntimeError`。
+4. missing session 在 `_set_state` 中必须抛 `KeyError`。
+5. `_set_state` 每次状态更新后调用 `_maybe_release`。
+6. `_release_session` 必须释放 trie tree 和该 session 记录的 object ref，再删除 `self.sessions[session_id]`。
 
 测试范围：
 
@@ -184,8 +185,8 @@
 
 开发内容：
 
-1. 实现 `mark_train_finished(session_id, reason="train_finished")`。
-2. 实现 `mark_train_abandoned(session_id, reason)`。
+1. 实现 `mark_train_finished(session_id)`。
+2. 实现 `mark_train_abandoned(session_id)`。
 
 不做：
 

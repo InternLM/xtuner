@@ -11,12 +11,11 @@
 
 1. 只设计 Trace Store actor 内部的 session 级生命周期管理。
 2. 核心只围绕 `state`。
-3. `release_reason` 只解释为什么进入 `ToBeReleased`，不参与释放判断。
-4. 不引入 `created_at`；`updated_at` 保留，但从 `RolloutTraceStore.updated_at` 下沉为每个 session / `Trie` 自己的属性。
-5. 不引入 trainer rank / materialize 计数。trainer 自己汇总消费状态，并在确认不再依赖 Store 后调用 Trace Store 状态转换 API。
-6. 不引入新的 staged / committed object registry。
-7. routed experts Ray `ObjectRef` 由 `RolloutTraceStore.objects: dict[str, ray.ObjectRef]` 统一持有；`TokenizedSegment.expert_key` 中只保留对应 object key。
-8. 一个 session 只记录一个 routed experts object key；释放 session 时删除这个 key 对应的 object ref。
+3. 不引入 `created_at`；`updated_at` 保留，但从 `RolloutTraceStore.updated_at` 下沉为每个 session / `Trie` 自己的属性。
+4. 不引入 trainer rank / materialize 计数。trainer 自己汇总消费状态，并在确认不再依赖 Store 后调用 Trace Store 状态转换 API。
+5. 不引入新的 staged / committed object registry。
+6. routed experts Ray `ObjectRef` 由 `RolloutTraceStore.objects: dict[str, ray.ObjectRef]` 统一持有；`TokenizedSegment.expert_key` 中只保留对应 object key。
+7. 一个 session 只记录一个 routed experts object key；释放 session 时删除这个 key 对应的 object ref。
 
 非目标：
 
@@ -91,7 +90,6 @@ class TraceState(str, Enum):
 class Trie:
     root: TreeNode
     state: TraceState = TraceState.ROLLOUT_RUNNING
-    release_reason: str | None = None
     expert_key: str | None = None
     updated_at: float
 ```
@@ -108,16 +106,14 @@ self.sessions: Dict[str, Trie]
 
 1. `root`：原有 prefix tree 根节点。
 2. `state`：该 session 当前生命周期状态。
-3. `release_reason`：解释为什么进入 `ToBeReleased`，不参与释放判断。
-4. `expert_key`：该 session 唯一 routed experts object key。
-5. `updated_at`：该 session 最近一次写入、状态转换或 routed experts object key 变更时间。
+3. `expert_key`：该 session 唯一 routed experts object key。
+4. `updated_at`：该 session 最近一次写入、状态转换或 routed experts object key 变更时间。
 
 实现约束：
 
 1. `get_or_create(session_id)` 仍返回 `Trie`。
 2. 现有 `keys` / `insert` / `search` 的外部接口尽量保持兼容。
 3. `Trie` 可以新增内部 helper，例如 `touch()`。
-4. `release_reason` 仅用于 debug 和观测，不影响 `_maybe_release` 判断。
 
 ### 4.1 routed experts object 存储
 
@@ -170,7 +166,6 @@ def get_state(session_id: str) -> dict | None:
 {
     "session_id": session_id,
     "state": "RolloutRunning",
-    "release_reason": None,
     "updated_at": 1234567890.0,
     "has_object_ref": True,
 }
@@ -187,7 +182,6 @@ def mark_rollout_status(
     *,
     enable_partial_rollout: bool = False,
     filtered: bool = False,
-    reason: str | None = None,
 ) -> str:
     ...
 ```
@@ -218,10 +212,10 @@ def mark_rollout_status(
 ### 5.3 rollout 放弃和 commit 失败
 
 ```python
-def mark_commit_failed(session_id: str, reason: str = "commit_failed") -> str:
+def mark_commit_failed(session_id: str) -> str:
     ...
 
-def mark_rollout_discarded(session_id: str, reason: str) -> str:
+def mark_rollout_discarded(session_id: str) -> str:
     ...
 ```
 
@@ -261,7 +255,7 @@ RolloutFinished -> TrainRunning
 RolloutFinished -> ToBeReleased -> Released
 ```
 
-失败原因使用 `release_reason = "trace_incomplete"`，并继续抛出 `ValueError`。
+失败时进入 `ToBeReleased` 并继续抛出 `ValueError`。
 
 约束：`export_training_trace` 必须要求 session 已经是 `RolloutFinished`。不能为了兼容当前代码从 `RolloutRunning`
 直接导出；调用侧必须先通过 rollout 完成事件把 session 推进到 `RolloutFinished`。
@@ -275,10 +269,10 @@ RolloutFinished -> ToBeReleased -> Released
 ### 5.5 trainer 完成或放弃
 
 ```python
-def mark_train_finished(session_id: str, reason: str = "train_finished") -> str:
+def mark_train_finished(session_id: str) -> str:
     ...
 
-def mark_train_abandoned(session_id: str, reason: str) -> str:
+def mark_train_abandoned(session_id: str) -> str:
     ...
 ```
 
@@ -323,25 +317,36 @@ def release(session_id: str):
 所有状态转换必须通过统一 helper 完成，避免某条路径只改状态但漏掉 release：
 
 ```python
+_ALLOWED_PREVIOUS_STATES = {
+    TraceState.ROLLOUT_FINISHED: (TraceState.ROLLOUT_RUNNING,),
+    TraceState.TRAIN_RUNNING: (TraceState.ROLLOUT_FINISHED,),
+    TraceState.TRAIN_FINISHED: (TraceState.TRAIN_RUNNING,),
+    TraceState.TO_BE_RELEASED: (
+        TraceState.ROLLOUT_RUNNING,
+        TraceState.ROLLOUT_FINISHED,
+        TraceState.TRAIN_RUNNING,
+        TraceState.TRAIN_FINISHED,
+    ),
+}
+
+
 def _set_state(
     self,
     session_id: str,
     next_state: TraceState,
-    *,
-    allowed_from: tuple[TraceState, ...],
-    release_reason: str | None = None,
 ) -> TraceState:
     trie = self.sessions.get(session_id)
     if trie is None:
         raise KeyError(f"Trace session {session_id!r} does not exist.")
-    if trie.state not in allowed_from:
+    allowed_previous_states = _ALLOWED_PREVIOUS_STATES.get(next_state)
+    if allowed_previous_states is None:
+        raise RuntimeError(f"Unsupported trace session target state: {next_state.value}.")
+    if trie.state not in allowed_previous_states:
         raise RuntimeError(
             f"Invalid trace session transition for {session_id!r}: "
             f"{trie.state.value} -> {next_state.value}"
         )
     trie.state = next_state
-    if release_reason is not None:
-        trie.release_reason = release_reason
     trie.touch()
     self._maybe_release(session_id)
     return next_state
@@ -353,37 +358,33 @@ def _set_state(
 2. `_set_state` 每次状态更新后都调用 `_maybe_release(session_id)`。
 3. `_maybe_release` 内部只在状态为 `ToBeReleased` 时释放，所以可以在每次状态变更后安全调用。
 4. `_set_state` 不能调用 `get_or_create`，状态事件不能创建空 session。
-5. release-like 事件如果允许 missing session no-op，必须在外层语义 API 中处理，不进入 `_set_state`。
-6. 正常路径 `mark_train_finished` 需要先记录 `TrainFinished`，再进入 `ToBeReleased`：
+5. `_set_state` 必须从模块级合法状态转换表读取允许来源状态，调用方不能传入来源状态白名单。
+6. release-like 事件如果允许 missing session no-op，必须在外层语义 API 中处理，不进入 `_set_state`。
+7. 正常路径 `mark_train_finished` 需要先记录 `TrainFinished`，再进入 `ToBeReleased`：
 
 ```python
-def mark_train_finished(self, session_id: str, reason: str = "train_finished") -> str:
+def mark_train_finished(self, session_id: str) -> str:
     if session_id not in self.sessions:
         return TraceState.RELEASED.value
     self._set_state(
         session_id,
         TraceState.TRAIN_FINISHED,
-        allowed_from=(TraceState.TRAIN_RUNNING,),
     )
     return self._set_state(
         session_id,
         TraceState.TO_BE_RELEASED,
-        allowed_from=(TraceState.TRAIN_FINISHED,),
-        release_reason=reason,
     ).value
 ```
 
-7. 异常放弃路径直接进入 `ToBeReleased`：
+8. 异常放弃路径直接进入 `ToBeReleased`：
 
 ```python
-def mark_train_abandoned(self, session_id: str, reason: str) -> str:
+def mark_train_abandoned(self, session_id: str) -> str:
     if session_id not in self.sessions:
         return TraceState.RELEASED.value
     return self._set_state(
         session_id,
         TraceState.TO_BE_RELEASED,
-        allowed_from=(TraceState.TRAIN_RUNNING,),
-        release_reason=reason,
     ).value
 ```
 
@@ -510,8 +511,6 @@ def gc_stale_sessions(self, ttl_seconds: float) -> list[str]:
         self._set_state(
             sid,
             TraceState.TO_BE_RELEASED,
-            allowed_from=(TraceState.ROLLOUT_RUNNING,),
-            release_reason="ttl_expired",
         )
     return stale
 ```
@@ -534,7 +533,7 @@ def gc_stale_sessions(self, ttl_seconds: float) -> list[str]:
 trainer 在 train controller 的训练结束位置调用 Trace Store 状态转换 API：
 
 1. 正常训练消费结束，确认后续不会再访问 Store 后，调用 `mark_train_finished(session_id)`。
-2. 训练取消、batch 放弃、不可恢复 materialize 失败，并确认后续不会再访问 Store 后，调用 `mark_train_abandoned(session_id, reason)`。
+2. 训练取消、batch 放弃、不可恢复 materialize 失败，并确认后续不会再访问 Store 后，调用 `mark_train_abandoned(session_id)`。
 3. Trace Store 不在 trainer 内部分 rank 维度做判断，只接收 train controller 汇总后的事件。
 
 ## 11. 第一版测试计划
