@@ -2,21 +2,22 @@ import importlib
 import json
 import random
 import socket
+import time
 import typing
+import urllib.request
+import uuid
 from abc import ABC
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, List, Literal, Union
-import time
-import uuid
+
 import requests
 import torch.nn.functional as F
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.data_proto.utils import calculate_seq_staleness as calculate_seq_staleness
 from xtuner.v1.utils.logger import get_logger
-import urllib.request
 
 
 logger = get_logger()

@@ -53,7 +53,7 @@ class RolloutWorkerMetadata(TypedDict):
     # worker rank 到服务器 URL 的映射字典，用于训练进程与 rollout workers 通信
     # 键：worker 的 rank ID（字符串形式的整数）
     # 值：对应的服务器地址列表（通常每个 rank 对应一个 URL）
-    server_url_dict: Dict[str, List[str]]
+    server_url_dict: Dict[int, str]
 
     # Rollout 配置对象，包含推理引擎的所有配置参数
     # 包括：并行策略（TP/EP）、超时设置、后端类型（LMDeploy/vLLM/SGLang）等
@@ -100,7 +100,7 @@ class RolloutController:
         self.num_gpus_per_engine = self.config.num_gpus_per_engine
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
         self.engine_rank_mesh_array: List[List[int]] = []
-        self.worker_server_urls_map: dict[str, List[str]] = {}
+        self.worker_server_urls_map: dict[int, str] = {}
         self.rank2info: dict[int, WorkerInfo] = {}
         self.engine_rank_mesh_array, self.worker_server_urls_map, self.rank2info = self._init_workers(placement_group)
         self.num_active_workers = len(self.rank2info)
@@ -160,18 +160,12 @@ class RolloutController:
                 dictionary, and the rollout configuration.
         """
         with self.worker_info_lock:
-            worker_server_urls_status = {
-                info.url: info.is_active for info in self.rank2info.values()
-            }
+            worker_server_urls_status = {info.url: info.is_active for info in self.rank2info.values()}
             worker_session_url_dict = {
-                rank: info.session_url
-                for rank, info in self.rank2info.items()
-                if info.session_url is not None
+                rank: info.session_url for rank, info in self.rank2info.items() if info.session_url is not None
             }
             worker_session_urls_status = {
-                info.session_url: info.is_active
-                for info in self.rank2info.values()
-                if info.session_url is not None
+                info.session_url: info.is_active for info in self.rank2info.values() if info.session_url is not None
             }
         rollout_metadata: RolloutWorkerMetadata = {
             "engine_rank_mesh_array": self.engine_rank_mesh_array,
@@ -314,18 +308,11 @@ class RolloutController:
 
     def _restart_failed_workers(self, worker: RolloutWorker) -> bool:
         try:
-            dist_init_addr = ray.get(
-                worker.init_dist_port.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT  # type: ignore[attr-defined]
-            )
-            _, url = ray.get(
-                worker.init.remote(dist_init_addr), timeout=ROLLOUT_RAY_GET_TIMEOUT  # type: ignore[attr-defined]
-            )
-            _, session_url = ray.get(
-                worker.get_session_server_info.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT  # type: ignore[attr-defined]
-            )
-            is_healthy = ray.get(
-                worker.check_health.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT  # type: ignore[attr-defined]
-            )
+            dist_init_addr = ray.get(worker.init_dist_port.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+            _, url = ray.get(worker.init.remote(dist_init_addr), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+            _, session_url = ray.get(worker.get_session_server_info.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+            is_healthy = ray.get(worker.check_health.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+
             if is_healthy:
                 self.logger.info(f"Successfully restarted worker {worker} with URL {url}.")
                 with self.worker_info_lock:
@@ -517,9 +504,7 @@ class RolloutController:
                 session_url=worker_session_url_dict[rank],
             )
         self.logger.info(f"Rollout worker server URLs: {[info.url for info in workers_info.values()]}")
-        self.logger.info(
-            f"Rollout worker session server URLs: {[info.session_url for info in workers_info.values()]}"
-        )
+        self.logger.info(f"Rollout worker session server URLs: {[info.session_url for info in workers_info.values()]}")
         return engine_rank_mesh_array, worker_server_urls_map, workers_info
 
 

@@ -48,7 +48,7 @@ from xtuner.v1.rl.utils import (
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
-from xtuner.v1.rl.utils.misc import register_to_routedapiproxy, delete_from_routedapiproxy, check_chat_completions
+from xtuner.v1.rl.utils.misc import check_chat_completions, delete_from_routedapiproxy, register_to_routedapiproxy
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -1247,10 +1247,10 @@ class BaseRLTrainer:
 def add_apiproxy(self):
     info_dict = ray.get(self.rollout_controller.get_rollout_metadata.remote())
     model_name = info_dict["rollout_config"].model_name
-    
+
     delete_from_routedapiproxy(model_name)
     self.logger.info(f"deleted {model_name} from routedapiproxy")
-    self.logger.info(f"registering to routedapiproxy")
+    self.logger.info("registering to routedapiproxy")
 
     worker_session_url_dict = info_dict["worker_session_url_dict"]
     worker_session_urls_status = info_dict["worker_session_urls_status"]
@@ -1263,15 +1263,16 @@ def add_apiproxy(self):
         recheck_status_orig = check_chat_completions(worker_session_url, model_name)
         if not recheck_status_orig:
             raise ValueError(f"check chat completions failed for {worker_session_url}")
-    
+
     # test routed url
-    routed_url = 'http://s-20260104203038-22bhb.ailab-evalservice.pjh-service.org.cn/v1'
+    routed_url = "http://s-20260104203038-22bhb.ailab-evalservice.pjh-service.org.cn/v1"
     recheck_status_routed = check_chat_completions(routed_url, model_name)
     if not recheck_status_routed:
         raise ValueError(f"check chat completions failed for {routed_url}")
     self.logger.info("registered to routedapiproxy")
     # import time
     # time.sleep(1000000)
+
 
 class RLColocateTrainer(BaseRLTrainer):
     _META_PATH = ".xtuner_rl_colocate_trainer"
