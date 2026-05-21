@@ -696,7 +696,9 @@ class BaseModel(nn.Module):
                 "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
             )
         if self._pending_async_hf is not None:
-            raise RuntimeError("Previous async HF save is still pending. Call wait_async_hf before launching a new one.")
+            raise RuntimeError(
+                "Previous async HF save is still pending. Call wait_async_hf before launching a new one."
+            )
         rank = dist.get_rank() if dist.is_initialized() else 0
         world_size = dist.get_world_size() if dist.is_initialized() else 1
 
@@ -708,7 +710,9 @@ class BaseModel(nn.Module):
                 rmtree(tmp_hf_dir)
             tmp_hf_dir.mkdir(parents=True, exist_ok=True)
 
-        status_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{self._async_hf_writer_status_filename(rank, world_size)}"
+        status_path = (
+            tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{self._async_hf_writer_status_filename(rank, world_size)}"
+        )
         cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
         if rank == 0:
             cleanup_done_path.unlink(missing_ok=True)

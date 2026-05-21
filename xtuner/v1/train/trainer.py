@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from shutil import rmtree
-from typing import Any, Annotated, Callable, Literal, Protocol, Sequence, Sized, cast, overload, runtime_checkable
+from typing import Annotated, Callable, Literal, Protocol, Sequence, Sized, cast, overload, runtime_checkable
 
 import torch
 import torch.distributed as dist
