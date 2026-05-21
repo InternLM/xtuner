@@ -77,7 +77,6 @@ class Runner:
         infer_spec = pool.spec(infer_sandbox)
 
         item.status = RolloutStatus.RUNNING
-        item.infer.runtime.update(dict(getattr(self.infer, "runtime", {}) or {}))
         item.infer.sandbox_name = infer_sandbox
         item.infer.sandbox_image = infer_spec.image
         item.infer.workspace = infer_spec.workspace_path
@@ -119,12 +118,7 @@ class Runner:
                 # ─── validate ───────────────────────────────────────────
                 t2 = time.monotonic()
                 with span(uid_obs, "validate", task_id=tid):
-                    score, failed = await self.validate.run(
-                        item,
-                        pool,
-                        infer_sandbox=infer_sandbox,
-                        infer_workspace=infer_spec.workspace_path,
-                    )
+                    score, failed = await self.validate.run(item, pool)
                 t_validate = time.monotonic() - t2
                 item.reward = score
                 if failed:

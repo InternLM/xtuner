@@ -7,12 +7,12 @@ and aggregates ``record.score`` across judger records.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from lagent.utils import create_object
 
-from xtuner.v1.rl.agent_loop.rl_task.sandbox import Hook, SandboxPool, SandboxStage
+from xtuner.v1.rl.agent_loop.rl_task.sandbox import SandboxPool, SandboxStage
 from xtuner.v1.rl.agent_loop.rl_task.schemas import (
     AgentRolloutItem,
     RolloutError,
@@ -26,17 +26,15 @@ class Judger:
     """A named verifier stage.
 
     Sandbox selection belongs to ``stage.sandbox``.  The Judger only owns
-    validation semantics: name, weight, and optional isolated-sandbox setup.
+    validation semantics: name + weight.
     """
 
     name: str
     stage: SandboxStage
     weight: float = 1.0
-    on_isolated_pre: list[Hook] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.stage = create_object(self.stage)
-        self.on_isolated_pre = [create_object(hook) for hook in self.on_isolated_pre]
 
 
 class JudgerValidator:
@@ -67,14 +65,7 @@ class JudgerValidator:
         self.aggregator = aggregator
         self.on_error = on_error
 
-    async def run(
-        self,
-        item: AgentRolloutItem,
-        pool: SandboxPool,
-        *,
-        infer_sandbox: str,
-        infer_workspace: str,
-    ) -> tuple[float, bool]:
+    async def run(self, item: AgentRolloutItem, pool: SandboxPool) -> tuple[float, bool]:
         """Run every judger and aggregate.
 
         Returns:
@@ -82,41 +73,21 @@ class JudgerValidator:
             usable judger remains or ``on_error="fail"`` and any judger errored.
         """
         for j in self.judgers:
-            await self._run_one(j, item, pool, infer_sandbox, infer_workspace)
+            await self._run_one(j, item, pool)
         return self._aggregate(item)
 
     # -- internals --
 
-    async def _run_one(
-        self,
-        j: Judger,
-        item: AgentRolloutItem,
-        pool: SandboxPool,
-        infer_sandbox: str,
-        infer_workspace: str,
-    ) -> None:
+    async def _run_one(self, j: Judger, item: AgentRolloutItem, pool: SandboxPool) -> None:
         record = item.judgers.setdefault(j.name, StageRecord(judger_name=j.name))
         try:
             sandbox_name = _judger_sandbox_name(j.stage, pool)
             client = await pool.get(sandbox_name, record=record)
             spec = pool.spec(sandbox_name)
-            isolated = sandbox_name != infer_sandbox
-            j_workspace = spec.workspace_path if isolated else infer_workspace
             record.sandbox_name = sandbox_name
             record.sandbox_image = spec.image
-            record.workspace = j_workspace
+            record.workspace = spec.workspace_path
             record.judger_name = j.name
-            if isolated:
-                infer_client = await pool.get(infer_sandbox, record=record)
-                record.runtime.update(
-                    {
-                        "infer_client": infer_client,
-                        "infer_workspace": infer_workspace,
-                        "target_workspace": j_workspace,
-                    }
-                )
-                for hook in j.on_isolated_pre:
-                    await hook(client, item, record)
             await j.stage.run(client, item, record)
         except Exception as exc:
             record.status = StageStatus.FAILED
