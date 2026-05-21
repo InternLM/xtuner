@@ -51,6 +51,7 @@ from xtuner.v1.rl.utils import (
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
+from xtuner.v1.rl.utils.misc import check_chat_completions, delete_from_routedapiproxy, register_to_routedapiproxy
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -1317,6 +1318,36 @@ class BaseRLTrainer:
         self._global_train_step += len(workers_log_item[0]["train_metrics"])
 
 
+def add_apiproxy(self):
+    info_dict = ray.get(self.rollout_controller.get_rollout_metadata.remote())
+    model_name = info_dict["rollout_config"].model_name
+
+    delete_from_routedapiproxy(model_name)
+    self.logger.info(f"deleted {model_name} from routedapiproxy")
+    self.logger.info("registering to routedapiproxy")
+
+    worker_session_url_dict = info_dict["worker_session_url_dict"]
+    worker_session_urls_status = info_dict["worker_session_urls_status"]
+    for _, worker_session_url in sorted(worker_session_url_dict.items()):
+        if not worker_session_urls_status.get(worker_session_url, False):
+            continue
+        register_to_routedapiproxy(model_name, worker_session_url)
+
+        # test server url
+        recheck_status_orig = check_chat_completions(worker_session_url, model_name)
+        if not recheck_status_orig:
+            raise ValueError(f"check chat completions failed for {worker_session_url}")
+
+    # test routed url
+    routed_url = "http://s-20260104203038-22bhb.ailab-evalservice.pjh-service.org.cn/v1"
+    recheck_status_routed = check_chat_completions(routed_url, model_name)
+    if not recheck_status_routed:
+        raise ValueError(f"check chat completions failed for {routed_url}")
+    self.logger.info("registered to routedapiproxy")
+    # import time
+    # time.sleep(1000000)
+
+
 class RLColocateTrainer(BaseRLTrainer):
     _META_PATH = ".xtuner_rl_colocate_trainer"
 
@@ -1338,11 +1369,14 @@ class RLColocateTrainer(BaseRLTrainer):
                 )
                 self._rollout_config.skip_load_weights = False
             self.rollout_controller = self._rollout_config.build(self._pg)
-            self._maybe_start_gateway(cfg)
+            # self._maybe_start_gateway(cfg)
+            add_apiproxy(self)
+
             replay_buffer = cfg.replay_buffer_config.build()
             self._build_agent_loop_components(cfg, replay_buffer)
             self._cpu_resource_manager.log_registered_summary()
             self.logger.warning("Debug rollout mode is enabled. Only rollout workers will be started.")
+
             return
 
         self.train_controller = self._train_worker_cfg.build(self._pg)
@@ -1368,8 +1402,10 @@ class RLColocateTrainer(BaseRLTrainer):
         self.train_controller.offload(target="all")
 
         self.rollout_controller = self._rollout_config.build(self._pg)
-        self._maybe_start_gateway(cfg)
+        # self._maybe_start_gateway(cfg)
         bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+
+        add_apiproxy(self)
 
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)

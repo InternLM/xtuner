@@ -6,15 +6,16 @@ from typing import Any, Optional
 import numpy as np
 import ray
 from aiohttp import ClientSession, web
-from transformers import AutoTokenizer
 
+from transformers import AutoTokenizer
 from xtuner.v1.utils import get_logger
 
 from .trace_store import TokenizedSegment, get_store
 
 
 class SessionServer:
-    """SessionServer intercepts and records requests sent to a remote LLM API worker.
+    """SessionServer intercepts and records requests sent to a remote LLM API
+    worker.
 
     It acts as a reverse-proxy (or interceptor) in front of an already running
     worker (like lmdeploy, sglang, or vllm). It binds to a specific (host, port)
@@ -65,7 +66,7 @@ class SessionServer:
         # 2. Store 做 string prefix match。
         prefix, nodes = await self.store.search.remote(session_id, prompt_text, filter_none=True)
         if prefix:
-            get_logger().info(f'Hit prefix cache for session {session_id}')
+            get_logger().info(f"Hit prefix cache for session {session_id}")
         delta, delta_ids = prompt_text[len(prefix) :], []
         if delta:
             delta_ids = self.tokenizer.encode(delta, add_special_tokens=False)
@@ -74,13 +75,13 @@ class SessionServer:
 
         # 3. 组装 OpenAI chat completions 请求。
         worker_req = {
-            **{k: v for k, v in req_body.items() if k not in ['session_id', 'messages']},
-            'messages': [],
-            'input_ids': input_ids,
-            'return_token_ids': True,
-            'return_routed_experts': True,
-            'logprobs': True,
-            'include_stop_str_in_output': True,
+            **{k: v for k, v in req_body.items() if k not in ["session_id", "messages"]},
+            "messages": [],
+            "input_ids": input_ids,
+            "return_token_ids": True,
+            "return_routed_experts": True,
+            "logprobs": True,
+            "include_stop_str_in_output": True,
         }
         return worker_req
 
@@ -88,11 +89,11 @@ class SessionServer:
         """Hook for processing the parsed response received from the worker."""
 
         session_id = worker_resp["session_id"]
-        messages = worker_resp['messages']
-        tools = worker_resp['tools']
+        messages = worker_resp["messages"]
+        tools = worker_resp["tools"]
         choice = worker_resp["choices"][0]
 
-        output_token_ids = choice['output_ids']  # len = N_out
+        output_token_ids = choice["output_ids"]  # len = N_out
         if choice.get("logprobs") and choice["logprobs"].get("content"):
             output_logprobs = [item.get("logprob", 0.0) for item in choice["logprobs"]["content"]]
         else:
@@ -197,13 +198,13 @@ class SessionServer:
             try:
                 request_data = json.loads(request_body)
 
-                orig_logprobs = request_data.get('logprobs', False)
-                orig_return_token_ids = request_data.get('return_token_ids', False)
-                orig_return_routed_experts = request_data.get('return_routed_experts', False)
+                orig_logprobs = request_data.get("logprobs", False)
+                orig_return_token_ids = request_data.get("return_token_ids", False)
+                orig_return_routed_experts = request_data.get("return_routed_experts", False)
 
-                session_id = request_data.get('session_id')
-                messages = request_data.get('messages')
-                tools = request_data.get('tools', None)
+                session_id = request_data.get("session_id")
+                messages = request_data.get("messages")
+                tools = request_data.get("tools", None)
 
                 # Apply purely abstract on_request processing
                 request_data = await self.on_request(request_data)
@@ -263,7 +264,6 @@ class SessionServer:
             async with client.request(
                 method=request.method, url=target_url, headers=forward_headers, data=request_body
             ) as resp:
-
                 # Setup proper stream vs sync response objects
                 if is_stream:
                     response_chunks = []
@@ -330,13 +330,13 @@ class SessionServer:
                 for c in response_data.get("choices", []):
                     if c.get("message") and isinstance(c["message"].get("content"), str):
                         c["message"]["content"] = c["message"]["content"].replace(self.stop_word, "")
-                        for tc in c['message'].get('tool_calls') or []:
-                            if isinstance(tc.get('function', {}).get('arguments'), str):
-                                tc['function']['arguments'] = json.loads(tc['function']['arguments'])
+                        for tc in c["message"].get("tool_calls") or []:
+                            if isinstance(tc.get("function", {}).get("arguments"), str):
+                                tc["function"]["arguments"] = json.loads(tc["function"]["arguments"])
 
-                response_data['session_id'] = session_id
-                response_data['messages'] = messages
-                response_data['tools'] = tools
+                response_data["session_id"] = session_id
+                response_data["messages"] = messages
+                response_data["tools"] = tools
                 await self.on_response(response_data)
 
         return response
@@ -344,7 +344,7 @@ class SessionServer:
     async def _decode_routed_experts(self, routed_experts: Any) -> np.ndarray:
         if isinstance(routed_experts, str):
             if self._lmdeploy_actor is None:
-                self._lmdeploy_actor = ray.get_actor('shared_store', namespace='lmdeploy')
+                self._lmdeploy_actor = ray.get_actor("shared_store", namespace="lmdeploy")
             assert self._lmdeploy_actor is not None, "LMDeploy actor should be available in the shared store."
             routed_experts_data = await self._lmdeploy_actor.get.remote(routed_experts)
             return np.asarray(routed_experts_data)
@@ -387,18 +387,18 @@ class SessionServer:
                     content_parts.append(delta["content"])
 
                 # Check output ids
-                if choice.get('output_ids'):
+                if choice.get("output_ids"):
                     assistant_choice = message["choices"][0]
-                    if 'output_ids' not in assistant_choice:
-                        assistant_choice['output_ids'] = []
-                    assistant_choice['output_ids'].extend(choice['output_ids'])
+                    if "output_ids" not in assistant_choice:
+                        assistant_choice["output_ids"] = []
+                    assistant_choice["output_ids"].extend(choice["output_ids"])
 
                 # Check routed experts
-                if choice.get('routed_experts'):
+                if choice.get("routed_experts"):
                     assistant_choice = message["choices"][0]
-                    if 'routed_experts' not in assistant_choice:
-                        assistant_choice['routed_experts'] = []
-                    assistant_choice['routed_experts'].extend(choice['routed_experts'])
+                    if "routed_experts" not in assistant_choice:
+                        assistant_choice["routed_experts"] = []
+                    assistant_choice["routed_experts"].extend(choice["routed_experts"])
 
                 # Check logprobs
                 if choice.get("logprobs") and choice["logprobs"].get("content"):
@@ -444,3 +444,36 @@ class SessionServer:
             message["usage"] = usage
 
         return message
+
+
+class SessionServerActor:
+    """Ray actor wrapper that owns one SessionServer instance."""
+
+    def __init__(self, worker_base_url: str, tokenizer_path: str, host: str, port: int):
+        self.worker_base_url = worker_base_url
+        self.tokenizer_path = tokenizer_path
+        self.host = host
+        self.port = port
+        self.server: SessionServer | None = None
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+    async def start(self) -> str:
+        if self.server is not None:
+            return self.url
+
+        self.server = SessionServer(
+            worker_base_url=self.worker_base_url,
+            tokenizer_path=self.tokenizer_path,
+            host=self.host,
+            port=self.port,
+        )
+        await self.server.start()
+        return self.server.url
+
+    async def stop(self) -> None:
+        if self.server is not None:
+            await self.server.stop()
+            self.server = None
