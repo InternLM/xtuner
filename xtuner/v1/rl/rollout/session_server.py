@@ -1,8 +1,9 @@
 import json
 from functools import reduce
 from operator import add
-from typing import Optional
+from typing import Any, Optional
 
+import numpy as np
 import ray
 from aiohttp import ClientSession, web
 from transformers import AutoTokenizer
@@ -28,19 +29,29 @@ class SessionServer:
         tokenizer_path (str): The path to the tokenizer model.
         host (str): Host for this session server to listen on.
         port (int): Port for this session server to listen on.
+        read_bufsize (int): Buffer limit for line reader in ClientSession. Default is 64MB (2**26).
     """
 
-    def __init__(self, worker_base_url: str, tokenizer_path: str, host: str = "127.0.0.1", port: int = 8080):
+    def __init__(
+        self,
+        worker_base_url: str,
+        tokenizer_path: str,
+        host: str = "127.0.0.1",
+        port: int = 8080,
+        read_bufsize: int = 2**26,
+    ):
         self.worker_base_url = worker_base_url.rstrip("/")
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
         self.host = host
         self.port = port
+        self.read_bufsize = read_bufsize
         self.store = get_store()
         self.stop_word = self.tokenizer.eos_token or ""
 
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
+        self._lmdeploy_actor: Optional[ray.actor.ActorHandle] = None
 
     async def on_request(self, req_body: dict) -> dict:
         """Hook for processing/modifying the request before forwarding."""
@@ -99,11 +110,12 @@ class SessionServer:
         assert new_prompt.startswith(old_prompt) and new_prompt.endswith(self.stop_word)
 
         if raw_routed_expert is not None:
+            raw_routed_expert = await self._decode_routed_experts(raw_routed_expert)
             if len(raw_routed_expert) > 0:
-                num_layers = len(raw_routed_expert[0])
-                topk_experts = len(raw_routed_expert[0][0])
-                dummy_expert = [[-1] * topk_experts for _ in range(num_layers)]
-                raw_routed_expert = [dummy_expert] + raw_routed_expert
+                num_layers = raw_routed_expert.shape[1]
+                topk_experts = raw_routed_expert.shape[2]
+                dummy_expert = np.full((1, num_layers, topk_experts), -1, dtype=raw_routed_expert.dtype)
+                raw_routed_expert = np.concatenate([dummy_expert, raw_routed_expert], axis=0)
 
             _, nodes = await self.store.search.remote(session_id, old_prompt, filter_none=True)
 
@@ -247,7 +259,7 @@ class SessionServer:
         # read_bufsize controls StreamReader's line buffer limit; SSE events with large
         # tool_calls/reasoning_content payloads can exceed the 64KB default and trigger
         # "Chunk too big" from readuntil(b"\n").
-        async with ClientSession(read_bufsize=2**20) as client:
+        async with ClientSession(read_bufsize=self.read_bufsize) as client:
             async with client.request(
                 method=request.method, url=target_url, headers=forward_headers, data=request_body
             ) as resp:
@@ -328,6 +340,15 @@ class SessionServer:
                 await self.on_response(response_data)
 
         return response
+
+    async def _decode_routed_experts(self, routed_experts: Any) -> np.ndarray:
+        if isinstance(routed_experts, str):
+            if self._lmdeploy_actor is None:
+                self._lmdeploy_actor = ray.get_actor('shared_store', namespace='lmdeploy')
+            assert self._lmdeploy_actor is not None, "LMDeploy actor should be available in the shared store."
+            routed_experts_data = await self._lmdeploy_actor.get.remote(routed_experts)
+            return np.asarray(routed_experts_data)
+        return np.asarray(routed_experts)
 
     @staticmethod
     def _parse_stream_response(raw: bytes) -> Optional[dict]:
