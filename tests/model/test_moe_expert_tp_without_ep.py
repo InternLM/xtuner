@@ -54,11 +54,14 @@ class TestMoEExpertTPWithoutEP(DeterministicDDPTestCase):
 
         # 中文注释：不开 EP 但开启 expert TP 时，EP ownership 维度仍然真实存在，只是 size=1。
         assert model.ep_mesh is not None
-        assert model.tp_mesh is not None
+        assert model.expert_tp_mesh is not None
         assert model.ep_mesh.size() == 1
-        assert model.tp_mesh.size() == 2
+        assert model.expert_tp_mesh.size() == 2
+        assert model.expert_tp_mesh.mesh_dim_names == (f"{model.config.mesh_prefix}.etp",)
         assert layer.experts.fused_w1w3.ep_size == 1
         assert layer.experts.fused_w1w3.tp_size == 2
+        assert layer.experts.fused_w1w3.expert_tp_mesh is not None
+        assert layer.experts.fused_w1w3.expert_tp_mesh.mesh_dim_names == (f"{model.config.mesh_prefix}.etp",)
         assert isinstance(layer.dispatcher, NaiveDispatcher)
 
         dist.barrier()

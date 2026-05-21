@@ -150,7 +150,7 @@ class MoEBlock(nn.Module):
         n_routed_experts: int,
         moe_bias: bool = False,
         ep_mesh: DeviceMesh | None = None,
-        tp_mesh: DeviceMesh | None = None,
+        expert_tp_mesh: DeviceMesh | None = None,
         float8_cfg: Float8Config | None = None,
         moe_act_fn_cfg: MoEActFnConfig,
     ):
@@ -167,7 +167,7 @@ class MoEBlock(nn.Module):
             self.num_routed_experts,
             moe_bias=moe_bias,
             ep_mesh=self.ep_mesh,
-            tp_mesh=tp_mesh,
+            expert_tp_mesh=expert_tp_mesh,
             parallel_style="column",
             float8_cfg=float8_cfg,
         )
@@ -177,7 +177,7 @@ class MoEBlock(nn.Module):
             self.num_routed_experts,
             moe_bias=moe_bias,
             ep_mesh=self.ep_mesh,
-            tp_mesh=tp_mesh,
+            expert_tp_mesh=expert_tp_mesh,
             parallel_style="row",
             float8_cfg=float8_cfg,
         )
@@ -220,7 +220,7 @@ class MoEDecoderLayer(nn.Module):
         layer_idx: int = 0,
         dispatcher: Literal["deepep", "all2all", "agrs"] | None,
         ep_mesh: DeviceMesh | None = None,
-        tp_mesh: DeviceMesh | None = None,
+        expert_tp_mesh: DeviceMesh | None = None,
     ):
         super().__init__()
         self.ep_mesh = ep_mesh
@@ -274,13 +274,13 @@ class MoEDecoderLayer(nn.Module):
             n_routed_experts=n_routed_experts,
             moe_bias=moe_bias,
             ep_mesh=ep_mesh,
-            tp_mesh=tp_mesh,
+            expert_tp_mesh=expert_tp_mesh,
             float8_cfg=float8_cfg,
             moe_act_fn_cfg=moe_act_fn_cfg,
         )
         # TODO: (yehaochen) Maybe should be replaced by build_dispatcher
         process_group = ep_mesh.get_group() if ep_mesh is not None else None
-        tp_group = tp_mesh.get_group() if tp_mesh is not None else None
+        tp_group = expert_tp_mesh.get_group() if expert_tp_mesh is not None else None
         self.dispatcher = build_dispatcher(
             dispatcher=dispatcher,
             n_routed_experts=n_routed_experts,

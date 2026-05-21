@@ -41,6 +41,7 @@ from xtuner.v1.config import AdamWConfig, FSDPConfig
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.module.attention import MHAConfig
+from xtuner.v1.module.dispatcher.base import NaiveDispatcher
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 from xtuner.v1.model.base import ModelItem
@@ -292,6 +293,177 @@ def _slice_tpep_bias(grouped_linear: GroupedLinear, full_bias: torch.Tensor) -> 
         out_end = out_start + local_out_features
         expert_bias = expert_bias[:, out_start:out_end]
     return expert_bias.reshape(grouped_linear.bias.shape)
+
+
+class TestMoETrainEngineExpertTPOnly(DeterministicDDPTestCase):
+    """Verify ExpertTP-only training matches the non-ExpertTP baseline."""
+
+    @parametrize.parametrize(
+        "device,expert_tp_size",
+        [
+            ("cuda", 2),
+        ],
+    )
+    def test_expert_tp_only_engine_constructs_and_trains(self, device: str, expert_tp_size: int) -> None:
+        pg = self.create_pg(device)
+
+        engine = _build_engine(ep_size=1, expert_tp_size=expert_tp_size)
+        engine.init_model_weights()
+
+        assert engine.model.ep_mesh is not None
+        assert engine.model.expert_tp_mesh is not None
+        assert engine.model.ep_mesh.size() == 1
+        assert engine.model.expert_tp_mesh.size() == expert_tp_size
+        assert engine.model.expert_tp_mesh.mesh_dim_names == (f"{engine.model.config.mesh_prefix}.etp",)
+        assert isinstance(engine.model.layers["0"].dispatcher, NaiveDispatcher)
+
+        input_ids, labels = _make_engine_input(
+            torch.device(device, dist.get_rank() % torch.cuda.device_count()),
+            seed_offset=dist.get_rank(),
+        )
+        loss_cfg = CELossConfig()
+
+        loss_val = _run_train_step_without_clip(engine, loss_cfg, input_ids, labels)
+        grad_norm = engine.clip_grad_norm()
+        engine.step_optimizer(grad_norm)
+
+        assert torch.isfinite(torch.tensor(loss_val))
+        assert torch.isfinite(grad_norm)
+
+        dist.barrier()
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except Exception:
+            pass
+
+    @parametrize.parametrize(
+        "device,expert_tp_size",
+        [
+            ("cuda", 2),
+        ],
+    )
+    def test_expert_tp_only_matches_single_with_distinct_source_slices(
+        self, device: str, expert_tp_size: int
+    ) -> None:
+        pg = self.create_pg(device)
+
+        engine_ref = _build_engine(ep_size=1, expert_tp_size=1)
+        engine_ref.init_model_weights()
+
+        engine_etp = _build_engine(ep_size=1, expert_tp_size=expert_tp_size)
+        engine_etp.init_model_weights()
+        _sync_engine_weights(engine_ref, engine_etp)
+        dist.barrier()
+
+        input_ids, labels = _make_engine_input(
+            torch.device(device, dist.get_rank() % torch.cuda.device_count()),
+            seed_offset=dist.get_rank(),
+        )
+        loss_cfg = CELossConfig()
+
+        loss_etp, _, norm_etp = _run_one_step_with_norm(engine_etp, loss_cfg, input_ids, labels)
+        loss_ref, _, norm_ref = _run_one_step_with_norm(engine_ref, loss_cfg, input_ids, labels)
+
+        torch.testing.assert_close(
+            torch.tensor(loss_etp),
+            torch.tensor(loss_ref),
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+
+        gate_grad_ref = _get_param_grad(engine_ref, "layers.0.gate.weight")
+        gate_grad_etp = _get_param_grad(engine_etp, "layers.0.gate.weight")
+        torch.testing.assert_close(
+            gate_grad_etp,
+            gate_grad_ref,
+            atol=BF16_GEMM_ATOL,
+            rtol=BF16_GEMM_RTOL,
+        )
+
+        for module_suffix, fused_gate_up in (
+            ("layers.0.experts.fused_w1w3", True),
+            ("layers.0.experts.fused_w2", False),
+        ):
+            ref_grad = _get_param_grad(engine_ref, f"{module_suffix}.weight")
+            etp_grad = _get_param_grad(engine_etp, f"{module_suffix}.weight")
+            etp_module = _get_tpep_grouped_linear(engine_etp, module_suffix)
+            expected_etp_grad = _slice_tpep_weight(etp_module, ref_grad, fused_gate_up=fused_gate_up)
+            torch.testing.assert_close(
+                etp_grad,
+                expected_etp_grad,
+                atol=BF16_GEMM_ATOL,
+                rtol=BF16_GEMM_RTOL,
+            )
+
+        torch.testing.assert_close(
+            norm_etp,
+            norm_ref,
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+
+        dist.barrier()
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except Exception:
+            pass
+
+    @parametrize.parametrize(
+        "device,expert_tp_size",
+        [
+            ("cuda", 2),
+        ],
+    )
+    def test_expert_tp_only_expert_grad_norm_matches_single_with_distinct_source_slices(
+        self, device: str, expert_tp_size: int
+    ) -> None:
+        pg = self.create_pg(device)
+
+        engine_ref = _build_engine(ep_size=1, expert_tp_size=1)
+        engine_ref.init_model_weights()
+
+        engine_etp = _build_engine(ep_size=1, expert_tp_size=expert_tp_size)
+        engine_etp.init_model_weights()
+        _sync_engine_weights(engine_ref, engine_etp)
+        dist.barrier()
+
+        input_ids, labels = _make_engine_input(
+            torch.device(device, dist.get_rank() % torch.cuda.device_count()),
+            seed_offset=dist.get_rank(),
+        )
+        loss_cfg = CELossConfig()
+
+        _run_train_step_without_clip(engine_etp, loss_cfg, input_ids, labels)
+        _run_train_step_without_clip(engine_ref, loss_cfg, input_ids, labels)
+        _zero_non_expert_grads(engine_etp)
+        _zero_non_expert_grads(engine_ref)
+
+        norm_etp = engine_etp.clip_grad_norm(do_clip=False).detach().float().cpu()
+        norm_ref = engine_ref.clip_grad_norm(do_clip=False).detach().float().cpu()
+        torch.testing.assert_close(
+            norm_etp,
+            norm_ref,
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+
+        dist.barrier()
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except Exception:
+            pass
+
+    @property
+    def world_size(self) -> int:
+        # ExpertTP-only topology: EP=1, TP=2, DP=1.
+        return 2
+
+    @property
+    def destroy_pg_upon_exit(self) -> bool:
+        return False
 
 
 class TestMoETrainEngineTPEP(DeterministicDDPTestCase):

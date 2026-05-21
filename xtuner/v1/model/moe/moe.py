@@ -177,7 +177,7 @@ class MoE(BaseModel):
 
     config: MoEConfig
     ep_mesh: DeviceMesh | None = None
-    tp_mesh: DeviceMesh | None = None
+    expert_tp_mesh: DeviceMesh | None = None
 
     def __init__(self, config: MoEConfig):
         super().__init__(config)
@@ -195,11 +195,11 @@ class MoE(BaseModel):
                     mesh_dim_names=(
                         f"{self.config.mesh_prefix}.dp",
                         f"{self.config.mesh_prefix}.ep",
-                        f"{self.config.mesh_prefix}.tp",
+                        f"{self.config.mesh_prefix}.etp",
                     ),
                 )
                 self.ep_mesh = _init_mesh[f"{self.config.mesh_prefix}.ep"]
-                self.tp_mesh = _init_mesh[f"{self.config.mesh_prefix}.tp"]
+                self.expert_tp_mesh = _init_mesh[f"{self.config.mesh_prefix}.etp"]
             else:
                 _init_mesh = init_device_mesh(
                     DEVICE,
@@ -207,10 +207,10 @@ class MoE(BaseModel):
                     mesh_dim_names=(f"{self.config.mesh_prefix}.dp", f"{self.config.mesh_prefix}.ep"),
                 )
                 self.ep_mesh = _init_mesh[f"{self.config.mesh_prefix}.ep"]
-                self.tp_mesh = None
+                self.expert_tp_mesh = None
         else:
             self.ep_mesh = None
-            self.tp_mesh = None
+            self.expert_tp_mesh = None
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, type=config.rms_norm_type)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
@@ -847,7 +847,7 @@ class MoE(BaseModel):
                     layer_idx=layer_idx,
                     dispatcher=config.dispatcher,
                     ep_mesh=self.ep_mesh,
-                    tp_mesh=self.tp_mesh,
+                    expert_tp_mesh=self.expert_tp_mesh,
                 )
                 if self.config.freeze_routers:
                     layers[str(layer_idx)].gate.requires_grad_(False)
@@ -912,7 +912,7 @@ class MoE(BaseModel):
                 layer_idx=config.num_hidden_layers + i,
                 dispatcher=config.dispatcher,
                 ep_mesh=self.ep_mesh,
-                tp_mesh=self.tp_mesh,
+                expert_tp_mesh=self.expert_tp_mesh,
             )
 
             # Wrap decoder layer in MTPLayer
@@ -979,7 +979,10 @@ class MoE(BaseModel):
             for param in self.parameters():
                 param.requires_grad = False
 
-        if self.ep_mesh.size() > 1:
+        tp_enabled = self.expert_tp_mesh is not None and self.expert_tp_mesh.size() > 1
+        if self.ep_mesh.size() > 1 or tp_enabled:
+            # 中文注释：不开 EP 但开启 expert TP 时，非 expert 参数仍是 TP rank 间的逻辑副本，
+            # 需要显式放到 Replicate DTensor 上，后续梯度才会跨 expert TP 平均。
             self._replicate_other_params(self)
 
         # Although rotary_emb was already constructed in __init__, it was built on the meta device.
@@ -1104,10 +1107,13 @@ class MoE(BaseModel):
             if param.grad is None:
                 continue
 
-            ep_enabled = self.ep_mesh is not None and self.ep_mesh.size() > 1
-            # Scale moe parameters
-            if ep_enabled and ".experts" in name:
-                param.grad.div_(self.ep_mesh.size() * self.config.expert_tp_size)  # type: ignore
+            expert_parallel_size = (
+                self.ep_mesh.size() if self.ep_mesh is not None else 1
+            ) * self.config.expert_tp_size
+            # 中文注释：expert 参数会在 EP 和 expert TP 维度上看到全量 token 梯度和，
+            # 需要按参与该 expert 计算的 rank 数平均，才能对齐普通 DP/FSDP baseline。
+            if expert_parallel_size > 1 and ".experts" in name:
+                param.grad.div_(expert_parallel_size)  # type: ignore
                 continue
 
             if isinstance(param, DTensor):
@@ -1164,11 +1170,11 @@ class MoE(BaseModel):
                         raise ValueError(f"Unsupported placement type {placement} in clip_grad_norm")
 
             if self.config.expert_tp_size > 1 and ".experts" in name:
-                assert self.ep_mesh is not None and self.tp_mesh is not None
+                assert self.ep_mesh is not None and self.expert_tp_mesh is not None
                 # expert 参数的 EP / expert TP 分片不是 DTensor placement，
                 # norm square 需要显式跨这两个维度求和，clip 系数才是全局的。
                 dist.all_reduce(local_norm_squared, op=ReduceOp.SUM, group=self.ep_mesh.get_group())
-                dist.all_reduce(local_norm_squared, op=ReduceOp.SUM, group=self.tp_mesh.get_group())
+                dist.all_reduce(local_norm_squared, op=ReduceOp.SUM, group=self.expert_tp_mesh.get_group())
 
             total_norm_squared += local_norm_squared
 
@@ -1192,7 +1198,7 @@ class MoE(BaseModel):
                     mesh_dim_names=(
                         f"{self.config.mesh_prefix}.fsdp",
                         f"{self.config.mesh_prefix}.ep",
-                        f"{self.config.mesh_prefix}.tp",
+                        f"{self.config.mesh_prefix}.etp",
                     ),
                 )
             else:
@@ -1240,12 +1246,12 @@ class MoE(BaseModel):
                 self.ep_mesh = model_mesh[f"{self.config.mesh_prefix}.ep"]
 
             if expert_tp_size > 1:
-                new_tp_mesh = model_mesh[f"{self.config.mesh_prefix}.tp"]
-                if self.tp_mesh is not None:
-                    assert new_tp_mesh.mesh_dim_names == self.tp_mesh.mesh_dim_names
-                    assert torch.equal(self.tp_mesh.mesh, new_tp_mesh.mesh)
+                new_expert_tp_mesh = model_mesh[f"{self.config.mesh_prefix}.etp"]
+                if self.expert_tp_mesh is not None:
+                    assert new_expert_tp_mesh.mesh_dim_names == self.expert_tp_mesh.mesh_dim_names
+                    assert torch.equal(self.expert_tp_mesh.mesh, new_expert_tp_mesh.mesh)
                 else:
-                    self.tp_mesh = new_tp_mesh
+                    self.expert_tp_mesh = new_expert_tp_mesh
 
             self.fsdp_mesh = model_mesh[f"{self.config.mesh_prefix}.fsdp"]
         else:
@@ -1278,14 +1284,14 @@ class MoE(BaseModel):
                 assert self.ep_mesh is not None
                 replicate_mesh = self.ep_mesh
                 placements = [Replicate()]
-                if self.tp_mesh is not None and self.tp_mesh.size() > 1:
+                if self.expert_tp_mesh is not None and self.expert_tp_mesh.size() > 1:
                     assert self._world_mesh is not None
                     # 非 expert 参数在 EP 和 expert TP 上都是逻辑副本。
                     # FSDP 只支持一维 TP/Replicate 布局，所以这里先把
                     # EP x expert TP 子网格压平成一个 Replicate 维度。
                     replicate_mesh = self._world_mesh[
-                        (f"{self.config.mesh_prefix}.ep", f"{self.config.mesh_prefix}.tp")
-                    ]._flatten(mesh_dim_name=f"{self.config.mesh_prefix}.ep_tp")
+                        (f"{self.config.mesh_prefix}.ep", f"{self.config.mesh_prefix}.etp")
+                    ]._flatten(mesh_dim_name=f"{self.config.mesh_prefix}.ep_etp")
                 dist_param = nn.Parameter(
                     distribute_tensor(param, replicate_mesh, placements),
                     requires_grad=param.requires_grad,

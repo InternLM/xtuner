@@ -22,7 +22,7 @@ class GroupedLinear(nn.Module):
         num_routed_experts: int,
         moe_bias: bool = False,
         ep_mesh: DeviceMesh | None = None,
-        tp_mesh: DeviceMesh | None = None,
+        expert_tp_mesh: DeviceMesh | None = None,
         parallel_style: GroupedLinearParallelStyle | None = None,
     ):
         super().__init__()
@@ -31,15 +31,15 @@ class GroupedLinear(nn.Module):
         self.num_routed_experts = num_routed_experts
 
         self.ep_mesh = ep_mesh
-        self.tp_mesh = tp_mesh
+        self.expert_tp_mesh = expert_tp_mesh
         self.parallel_style: GroupedLinearParallelStyle | None = parallel_style
         self.ep_size = ep_mesh.size() if ep_mesh is not None else 1
-        self.tp_size = tp_mesh.size() if tp_mesh is not None else 1
+        self.tp_size = expert_tp_mesh.size() if expert_tp_mesh is not None else 1
         self.ep_rank = ep_mesh.get_local_rank() if ep_mesh is not None else 0
-        self.tp_rank = tp_mesh.get_local_rank() if tp_mesh is not None else 0
-        self.tp_enabled = self.tp_mesh is not None and self.tp_size > 1 and self.parallel_style is not None
-        if self.tp_mesh is not None and self.tp_mesh.size() > 1 and self.parallel_style is None:
-            raise ValueError("parallel_style must be set when tp_mesh size is greater than 1.")
+        self.tp_rank = expert_tp_mesh.get_local_rank() if expert_tp_mesh is not None else 0
+        self.tp_enabled = self.expert_tp_mesh is not None and self.tp_size > 1 and self.parallel_style is not None
+        if self.expert_tp_mesh is not None and self.expert_tp_mesh.size() > 1 and self.parallel_style is None:
+            raise ValueError("parallel_style must be set when expert_tp_mesh size is greater than 1.")
         if self.num_routed_experts % self.ep_size != 0:
             raise ValueError(
                 f"num_routed_experts ({self.num_routed_experts}) must be divisible by ep_size ({self.ep_size})."
@@ -106,7 +106,7 @@ def build_grouped_linear(
     num_routed_experts: int,
     moe_bias: bool = False,
     ep_mesh: DeviceMesh | None = None,
-    tp_mesh: DeviceMesh | None = None,
+    expert_tp_mesh: DeviceMesh | None = None,
     parallel_style: GroupedLinearParallelStyle | None = None,
     float8_cfg: Float8Config | None = None,
 ):
@@ -118,12 +118,12 @@ def build_grouped_linear(
             num_routed_experts,
             moe_bias=moe_bias,
             ep_mesh=ep_mesh,
-            tp_mesh=tp_mesh,
+            expert_tp_mesh=expert_tp_mesh,
             parallel_style=parallel_style,
         )
     elif float8_cfg.scaling_granularity_grouped_gemm == ScalingGranularity.TILEWISE:
-        if tp_mesh is not None and tp_mesh.size() > 1:
-            raise NotImplementedError("Tile-wise float8 grouped linear does not support TP sharding yet.")
+        if expert_tp_mesh is not None and expert_tp_mesh.size() > 1:
+            raise NotImplementedError("Tile-wise float8 grouped linear does not support expert TP sharding yet.")
         return TileWiseFloat8GroupedLinear(
             in_features, out_features, num_routed_experts, moe_bias=moe_bias, ep_mesh=ep_mesh
         )
