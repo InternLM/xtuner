@@ -1,8 +1,9 @@
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import ray
+from pydantic import BaseModel, Field
 
 from xtuner.v1.utils import get_logger
 
@@ -38,6 +39,24 @@ def _free_ray_refs(obj: Any):
             _free_ray_refs(v)
 
 
+class TokenizedSegment(BaseModel):
+    text: str
+    token_ids: List[int]
+    labels: List[int] | None = Field(default=None, repr=False)
+    logprobs: List[float] | None = Field(default=None, repr=False)
+    expert_key: Any = Field(default=None, repr=False)
+    length: int | None = None
+
+    def model_post_init(self, _):
+        if self.labels is None:
+            self.labels = [-100] * len(self.token_ids)
+        if self.logprobs is None:
+            self.logprobs = [0.0] * len(self.token_ids)
+        if self.length is None:
+            self.length = len(self.token_ids)
+        assert len(self.token_ids) == len(self.labels) == len(self.logprobs)
+
+
 @dataclass
 class TreeNode:
     """A node in the prefix tree (Trie).
@@ -58,7 +77,6 @@ class TreeNode:
 class Trie:
     def __init__(self):
         """Initialize the prefix tree (Trie)."""
-        # 根节点默认没有任何 value
         self.root = TreeNode(value=None, parent=None)
 
     def keys(self) -> List[str]:
@@ -92,12 +110,11 @@ class Trie:
                 node = node.children[best_prefix]
                 key = key[len(best_prefix) :]
             else:
-                # 若节点不存在则创建
+                # create a new child node for the remaining key
                 node.children[key] = TreeNode(value=None, parent=node)
                 node = node.children[key]
                 break
 
-        # 在最终的节点上设置 value
         node.value = value
 
     def search(self, text: str, filter_none: bool = False) -> Tuple[str, List["TreeNode"]]:
@@ -275,10 +292,11 @@ class RolloutTraceStore:
             )
         trace = {'input_ids': [], 'labels': [], 'logprobs': [], 'routed_experts': []}
         for node in nodes:
-            trace['input_ids'].extend(node.value['token_ids'])
-            trace['labels'].extend(node.value['labels'])
-            trace['logprobs'].extend(node.value['logprobs'])
-            trace['routed_experts'].append(node.value['expert_key'])
+            node_val: TokenizedSegment = node.value
+            trace['input_ids'].extend(node_val.token_ids)
+            trace['labels'].extend(node_val.labels)
+            trace['logprobs'].extend(node_val.logprobs)
+            trace['routed_experts'].append(node_val.expert_key)
         return trace
 
     def get_objects(self, keys: list[str]) -> list[ray.ObjectRef]:
