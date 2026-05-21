@@ -289,7 +289,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
         tok_cache_dir: str | None = None  # set inside cache_dir branch when tokenize_fn is CachableTokenizeFunction
         if cache_tag is not None and (cached := self._get_cached_tag(cache_tag, tokenize_fn)) is not None:
-            logger.info(f"[Dataset] Load cached [{self.name}]{self.path} of cache tgs {cache_tag}.")
+            logger.info(f"[Dataset] Load cached [{self.name}]{self.path} of cache tags {cache_tag}.")
             offset_path = cached["offsets"]
             meta_path = cached.get("jsonl_meta")
             offsets = np.load(offset_path, mmap_mode="r" if enable_mmap_shared else None)

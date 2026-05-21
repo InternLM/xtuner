@@ -18,7 +18,14 @@ from typing_extensions import override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model import BaseModel
-from xtuner.v1.model.base import AsyncHFSaveHandle, DEVICE_MODULE, XTunerBaseModelConfig, _set_process_qos
+from xtuner.v1.model.base import (
+    AsyncHFSaveHandle,
+    BatchForwardInfo,
+    DEVICE_MODULE,
+    ModelOutputs,
+    XTunerBaseModelConfig,
+    _set_process_qos,
+)
 from xtuner.v1.utils import get_device, get_logger
 
 from ..utils.misc import update_weight_map_from_safetensors_index
@@ -285,6 +292,9 @@ class BaseComposeModel(BaseModel):
                     raise RuntimeError(f"Missing cached async HF tensor for key: {name}")
                 tensors[name] = cached_tensor
             module._write_hf_save_plan({"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]})
+
+    def post_micro_batch_forward(self, batch_outputs: Sequence[ModelOutputs]) -> BatchForwardInfo:
+        return self.language_model.post_micro_batch_forward(batch_outputs)
 
     def scale_and_reduce_grad(self):
         self.language_model.scale_and_reduce_grad()

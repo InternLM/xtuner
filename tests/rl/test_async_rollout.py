@@ -1,3 +1,22 @@
+"""AgentLoopManager + AsyncProduceStrategy + 真实 rollout controller 的端到端行为测试。
+
+Good Tests:
+- 使用真实 AgentLoopManager、AsyncReplayBuffer、RolloutConfig.build(...) 和 rollout controller 路径验证端到端行为。
+- 断言训练侧可见的 Rollout Group 状态、partial rollout token 拼接、tail-batch/staleness 结果。
+- 测试尽量描述用户可观察的异步 rollout 行为，而不是 manager/strategy 内部如何调度 task。
+
+Bad Tests:
+- 不直接构造私有 manager/strategy 状态来证明路径正确。
+- 不绕过 RolloutConfig 的公开构造入口手写 ray.remote(RolloutController)，避免漏掉运行时资源和 concurrency group 契约。
+- 不测试 _PendingTasks 或 ProduceProgress 的内部细节；这里只验证它们组合后的端到端结果。
+
+本文件主要覆盖的 public 行为:
+- oversampling 后 completed/aborted leftovers 的数量关系和 completed leftovers 保留语义。
+- partial rollout 会保留旧 response_ids/model steps，并在 EOS/max_tokens 时短路。
+- max_staleness 与 tail-batch 会把 stale completed group 标记为 expired，并在重试后重置 staleness。
+- standalone 集成测试显式初始化 CPUResourceManager，以匹配 RolloutConfig.build 的公开构造契约。
+"""
+
 from __future__ import annotations
 
 import os
@@ -19,9 +38,14 @@ from xtuner.v1.rl.agent_loop_manager import (
     TaskSpecConfig,
 )
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
-from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.rl.utils import (
+    AcceleratorResourcesConfig,
+    AutoAcceleratorWorkers,
+    CPUResourceManager,
+    clear_cpu_resource_manager,
+    set_cpu_resource_manager,
+)
 
 MODEL_PATH = os.environ.get("ROLLOUT_MODEL_PATH", "")
 DATA_PATH = os.environ.get("ROLLOUT_DATA_PATH", "")
@@ -55,7 +79,11 @@ def _build_rollout_controller():
         max_retry_per_sample=0,
     )
     pg = AutoAcceleratorWorkers.build_placement_group(resources_cfg)
-    rollout_ctl = ray.remote(RolloutController).remote(rollout_config, pg)
+    # standalone 测试没有 RLTrainer 初始化 CPUResourceManager，这里按本测试的 accelerator PG 显式初始化。
+    clear_cpu_resource_manager()
+    set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=pg))
+    # 测试走 RolloutConfig 的公开构造入口，避免手写 ray.remote 漏掉 controller concurrency group。
+    rollout_ctl = rollout_config.build(pg)
     return rollout_ctl
 
 
@@ -149,9 +177,11 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
         self.rollout_ctl = _build_rollout_controller()
 
     def tearDown(self):
+        clear_cpu_resource_manager()
         ray.shutdown()
 
     async def test_1_1_total_count_after_first_rollout(self):
+        # 验证第一轮 oversampling 后，剩余 completed/aborted 总数符合并发生产与消费数量差。
         """1.1: After produce_batch round 1:
 
             remain_completed + remain_aborted == INITIAL_DATA_CONCURRENCY
@@ -203,6 +233,7 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_1_2_second_rollout_does_not_convert_completed_leftovers(self):
+        # 验证第二轮生产不会把上一轮遗留的 completed group 错误转成 aborted 重试池。
         """1.2: Round 2 no longer destructively converts COMPLETED leftovers.
 
         AsyncProduceStrategy v2.2 keeps completed leftovers in the fresh window.
@@ -301,6 +332,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
     def tearDown(self):
+        clear_cpu_resource_manager()
         ray.shutdown()
 
     def _make_aborted_state(self, uid: int, prompt: str, response_ids: list[int],
@@ -332,6 +364,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         return state
 
     async def test_2_1_partial_rollout_response_ids_are_concatenated(self):
+        # 验证 partial rollout 续写时保留原 response_ids 前缀并追加新 token。
         """2.1: Partial rollout 的 response_ids 前缀必须保持不变。
 
         Setup:
@@ -398,6 +431,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_2_2_eos_in_response_skips_inference_engine(self):
+        # 验证 aborted group 已以 EOS 结束时会短路完成，不再调用推理引擎追加内容。
         """2.2: ABORTED 样本末尾为 EOS token → worker 短路，response_ids 不变。
 
         EOS 短路不调用推理引擎，注入样本几乎瞬间完成，在 3 个并发任务中
@@ -451,6 +485,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_2_3_max_tokens_exhausted_skips_inference_engine(self):
+        # 验证 aborted group 已达到 max_tokens 时会短路完成，不再调用推理引擎追加内容。
         """2.3: len(response_ids)==max_tokens → remaining_tokens==0 → worker 短路，response_ids 不变。
 
         与 test_2_2 同理，短路不调用推理引擎，注入样本在 3 个并发任务中必然最先完成。
@@ -500,6 +535,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_2_4_multi_round_response_ids_never_exceed_max_tokens(self):
+        # 验证多轮 partial rollout 续写后，response_ids 长度始终不超过 max_tokens。
         """2.4: 多轮 partial rollout 后 len(response_ids) <= max_tokens。
 
         over_sample_threshold=2.0 → 每轮 3 个并发任务；注入样本可能经历多次
@@ -578,9 +614,11 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
         self.rollout_ctl = _build_rollout_controller()
 
     def tearDown(self):
+        clear_cpu_resource_manager()
         ray.shutdown()
 
     async def test_3_1_max_staleness_0_marks_expired(self):
+        # 验证 max_staleness=0 时，跨轮遗留 completed group 会被刷新成 expired。
         """3.1a: max_staleness=0 — 需要 3 轮才能在 buffer 中观察到 EXPIRED。
 
         staleness 积累路径（enable_partial_rollout=True）：
@@ -640,6 +678,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_3_2_tail_batch_mode_resets_staleness_to_zero(self):
+        # 验证 tail-batch 从 expired pool 重试后，完成样本的 seq_staleness 会重置为 0。
         """3.2: 真实多轮循环自然触发 tail-batch 模式，验证 seq_staleness 重置为 0。
 
         配置:

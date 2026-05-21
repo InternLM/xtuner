@@ -597,9 +597,6 @@ async def produce_loop(self, batch_size: int):
             await self._wait_for_status_exit(AgentLoopManagerStatus.EXPIRED_BATCH)
             continue
 
-        rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
-        await continue_generation(rollout_ctl)
-
         status = await self._produce_batch_to_buffer(
             batch_size=batch_size,
             progress=self._produce_progress,
@@ -613,13 +610,49 @@ async def produce_loop(self, batch_size: int):
         await asyncio.sleep(0)
 ```
 
+`produce_loop` 不调用 `continue_generation`。当它从 `UPDATE_ABORT` 或 `EXPIRED_BATCH` 等待状态恢复时，必须已经由 trainer 调用过 `continue_produce()`；该方法负责恢复 rollout controller 并把 manager 状态切回 `NORMAL`。如果状态是 `FINISH`，loop 直接退出。
+
 `RLDisaggregatedTrainer._fit` 对应改成：
 
 ```python
 producer_task = create_task(
     self.agent_loop_manager.produce_loop(batch_size=self.train_batch_size)
 )
+train_step = self._cur_step + 1
+while train_step <= self._total_train_steps:
+    produce_result = await self.agent_loop_manager.get_batch(
+        self.train_batch_size,
+        train_step=train_step,
+    )
+    expired = produce_result.status == ProduceBatchStatus.EXPIRED_BATCH
+    trained = False
+    if produce_result.rollout_states:
+        train_one_batch(...)
+        trained = True
+
+    sync_model_step = train_step if trained else train_step - 1
+    need_sync = (
+        expired
+        or sync_model_step % self._sync_weights_interval == 0
+        or sync_model_step == self._total_train_steps
+    )
+    if need_sync:
+        await self.agent_loop_manager.pause_produce(use_global_progress=True)
+        await self._sync_weights_and_save(sync_model_step, step_timer_dict)
+        run_eval_if_needed(sync_model_step)
+        await self.agent_loop_manager.continue_produce(model_step=sync_model_step)
+
+    if trained:
+        self._log_step(train_step, ...)
+        self._cur_step = train_step
+        train_step += 1
 ```
+
+`EXPIRED_BATCH` 跳过训练时没有完成当前 train step，因此不能推进 `_cur_step`，也不能把当前 `train_step` 当作已存在的 model step 同步给 rollout。
+
+如果 `EXPIRED_BATCH` 返回非空 `rollout_states`，表示当前 batch 已 ready 但 producer 已经过期停住；trainer 必须训练这批数据，并在训练完成后立即同步当前 `train_step` 产生的新模型版本。
+
+`_sync_weights_and_save(model_step, ...)` 的参数必须是已完成的模型版本；checkpoint / HF 保存、`agent_loop_manager.save(..., model_step=model_step)` 和 `train_state.json.cur_step` 都写这个 `model_step`，不能写尚未训练完成的 `train_step`。
 
 恢复训练时，由 `agent_loop_manager.resume(...)` 原地恢复 `self._produce_progress` 的各字段，不再依赖 trainer 传入 `_cur_step`。
 
@@ -730,19 +763,39 @@ async def get_batch(self, batch_size: int, rollout_step: int) -> ProduceBatchRes
     await self._refresh_staleness_for_all_tasks(rollout_step)
 
     while not self._finish_event.is_set():
-        if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
+        current_model_step = rollout_step - 1
+        if (
+            self._status == AgentLoopManagerStatus.EXPIRED_BATCH
+            and current_model_step > self._model_rollout_step
+        ):
             return ProduceBatchResult(
                 rollout_states=[],
                 status=ProduceBatchStatus.EXPIRED_BATCH,
             )
 
-        if await self._is_batch_ready(batch_size, rollout_step):
+        ready = await self._is_batch_ready(batch_size, rollout_step)
+        if self._status == AgentLoopManagerStatus.EXPIRED_BATCH and not ready:
+            raise RuntimeError(
+                "EXPIRED_BATCH cannot be skipped and current batch is not ready. "
+                f"rollout_step={rollout_step}, current_model_step={rollout_step - 1}, "
+                f"rollout_model_step={self._model_rollout_step}, status={self._status}, "
+                f"producer_future_step={progress.producer_future_step}, "
+                f"next_consumer_step={progress.next_consumer_step}, "
+                f"target_upto_future_step={progress.target_upto_future_step}, "
+                f"target_samples={progress.target_samples}, "
+                f"consumed_samples={progress.consumed_samples}, "
+                f"leftover_counts={await self.replay_buffer.count_statuses(self.task_names, _LEFTOVER_STATUSES)}"
+            )
+
+        if ready:
             result = await self._get_batch_from_buffer(
                 batch_size,
                 rollout_step,
                 consume_progress=progress,
             )
             if result.rollout_states:
+                if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
+                    result.status = ProduceBatchStatus.EXPIRED_BATCH
                 progress.next_consumer_step = rollout_step + 1
                 await self._refresh_staleness_for_all_tasks(rollout_step + 1)
                 return result
@@ -781,7 +834,11 @@ if use_global_progress:
 
 self._update_event.set()
 self._status = AgentLoopManagerStatus.UPDATE_ABORT
+rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
+await rollout_ctl.pause_generation.remote()
 ```
+
+manager 先发一次 `pause_generation` 是全局刹车信号；`AsyncProduceStrategy.pause_produce` 内部仍保留自己的 `pause_generation` 调用，作为 drain pending 期间的后端兜底。两层调用都要求后端 pause 接口是幂等的。
 
 `use_global_progress=True` 是 sticky pause：状态保持到 trainer 完成权重同步 / 评测后调用 `continue_produce()`。
 
@@ -817,14 +874,18 @@ required = max(0, target_abs - available_abs)
 
 因此不需要 `_target_base_step` / `_target_base_consumed`，也不需要在 resume / sync 后重置生产窗口。
 
-权重同步后的 `continue_produce(model_rollout_step=...)` 只负责恢复状态机和更新 rollout 侧模型版本：
+权重同步后的 `continue_produce(model_rollout_step=...)` 负责恢复 rollout controller、恢复状态机并更新 rollout 侧模型版本。因为要调用 `rollout_ctl.continue_generation.remote()`，该方法是 async 入口：
 
 ```python
-def continue_produce(self, model_rollout_step: int) -> None:
-    self._status = AgentLoopManagerStatus.NORMAL
+async def continue_produce(self, model_rollout_step: int) -> None:
     self._model_rollout_step = model_rollout_step
+    rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
+    await rollout_ctl.continue_generation.remote()
+    self._status = AgentLoopManagerStatus.NORMAL
     self._update_event.clear()
 ```
+
+顺序要求：`model_rollout_step` 先更新；`_status = NORMAL` 和 `_update_event.clear()` 必须在 `continue_generation` 完成后执行，避免后台 `produce_loop` 在 rollout controller 真正恢复前开始发新 rollout。
 
 `progress.producer_future_step`、`progress.target_samples`、`progress.target_upto_future_step` 和 `progress.consumed_samples` 都是训练全局绝对进度，不随 sync 重置。
 
@@ -855,6 +916,7 @@ def continue_produce(self, model_rollout_step: int) -> None:
 
 实现方式：
 
+- 共卡路径不直接调用 `rollout_ctl.continue_generation` / `rollout_ctl.pause_generation`，统一通过 `continue_produce(...)` / `pause_produce(...)` 控制 rollout controller。
 - 共卡路径不使用 disagg 的全局绝对 target 状态，避免污染后台 producer 的累计进度。
 - 共卡路径在调用 `_produce_batch_to_buffer(..., progress=local_progress)` 前构造本次调用的局部 `ProduceProgress`：
   - `next_consumer_step = rollout_step`
@@ -864,7 +926,9 @@ def continue_produce(self, model_rollout_step: int) -> None:
 
 共卡路径每次生产后仍调用 `pause_produce(use_global_progress=False, progress=local_progress)` 收尾 pending，然后 `_get_batch_from_buffer` 返回训练 batch。
 
-共卡模式约束：同一个 `AgentLoopManager` 实例只用一种数据提供模式。`SYNC_PRODUCE_BATCH` 收尾会让 manager 保持 `UPDATE_ABORT` / `_update_event.set()`，下一次 `produce_batch()` 入口先调用 `continue_produce(model_rollout_step=rollout_step - 1)` 恢复。不要在两次 sync `produce_batch()` 之间混用 `produce_loop()` / `get_batch()`。
+共卡 `produce_batch()` 不保留直接调用 rollout controller 的 `try/finally` 兜底；异常清理如果需要，也必须通过 `pause_produce(...)` 入口完成，避免重新出现第二条 pause 路径。
+
+共卡模式约束：同一个 `AgentLoopManager` 实例只用一种数据提供模式。`SYNC_PRODUCE_BATCH` 收尾会让 manager 保持 `UPDATE_ABORT` / `_update_event.set()`，下一次 `produce_batch()` 入口先 `await continue_produce(model_rollout_step=rollout_step - 1)` 恢复。不要在两次 sync `produce_batch()` 之间混用 `produce_loop()` / `get_batch()`。
 
 ## 删除 / 收敛的旧逻辑
 
@@ -931,7 +995,9 @@ manager 在 gather 前检查所有 task 的 `is_model_expired(current_future_ste
 - 当前 `_produce_batch_to_buffer` 直接返回 `EXPIRED_BATCH`
 - 其他 task 不再新发 rollout
 - `produce_loop` 设置 manager status 为 `EXPIRED_BATCH`
-- consumer 的 `get_batch` 返回空 batch + `EXPIRED_BATCH`，trainer 优先同步权重
+- consumer 的 `get_batch` 只有在训练侧当前可用 model step 大于 rollout model step 时，才返回空 batch + `EXPIRED_BATCH`，trainer 优先同步权重
+- 如果训练侧还没有更新模型版本，consumer 只能取当前 step 的 ready batch，trainer 必须先完成训练
+- 如果此时当前 batch 仍不 ready，producer 已停且没有新模型可同步，必须 fail fast，并打印 model/progress/replay buffer 相关不变量辅助定位
 
 ### `_pending_tasks` 不重复 put、不丢 task
 
