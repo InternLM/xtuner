@@ -146,52 +146,73 @@ def _indexer_topk_kernel(
     c_upper = tl.minimum(horizon, sample_c_len)
 
     d_offs = tl.arange(0, HEAD_DIM)
+    h_offs = tl.arange(0, N_HEADS)
     c_block_offs = tl.arange(0, BLOCK_C)
 
-    # Running top-K buffer. Initialised with the ``-inf``-score-packed
-    # sentinel (high 32 bits = ``_INF_NEG_SORTABLE``, low 32 bits arbitrary)
-    # so it sorts strictly below any finite score; post-loop these slots are
-    # detected by :func:`_packed_score_is_inf_neg` and rewritten to ``-1``.
-    # Materialise the constexpr sentinel as uint64 via a 1-element tile cast,
-    # since Python ``int.to(...)`` isn't a thing inside the JIT and shifting a
-    # constexpr produces an ``int`` rather than a Triton scalar.
+    # Load q [N_HEADS, HEAD_DIM] and per-head weights [N_HEADS] ONCE outside
+    # the c-loop. The previous per-c-tile reissue cost ~64 head loads × c-tile
+    # count and dominated runtime; lifting it lets ``tl.dot`` reuse q for the
+    # whole c-axis sweep. Keep q in bf16 — tl.dot's tensor-core path is
+    # bf16/fp16-only on Hopper, and SMEM at V4 dims (q 64×128 + kv 512×128
+    # both fp32 would be 288 KB) exceeds the 232 KB hardware limit.
+    q_addr = pid * q_stride_q + h_offs[:, None] * q_stride_h + d_offs[None, :] * q_stride_d
+    q_tile = tl.load(q_ptr + q_addr).to(tl.bfloat16)
+    w_tile = tl.load(weights_ptr + pid * w_stride_q + h_offs * w_stride_h).to(tl.float32)
+
+    # Per-query full score buffer in registers/SMEM. Sized at ``T_PADDED``
+    # (static upper bound on a sample's compressed length, ≥ K + BLOCK_C and
+    # power of two). Initialised with the ``-inf``-score-packed sentinel so
+    # uninitialised slots sort below any real score in the final ``tl.topk``.
+    # This layout lets BLOCK_C vary independently of K (cat requires equal-
+    # size tiles, but a single per-window scatter sidesteps that) which is
+    # required to keep SMEM under the 232 KB Hopper limit at V4 dims —
+    # ``kv_tile [BLOCK_C, 128]`` is the dominant consumer.
     sentinel_lit = _INF_NEG_SORTABLE * (1 << 32)
-    top_packed = tl.full((K,), sentinel_lit, dtype=tl.uint64)
+    all_packed = tl.full((T_PADDED,), sentinel_lit, dtype=tl.uint64)
+    t_range = tl.arange(0, T_PADDED)
 
     for c_block_start in range(0, c_upper, BLOCK_C):
         c_local = c_block_start + c_block_offs
         c_valid = c_local < c_upper
         c_global = sample_c_start + c_local
 
-        # Load kv tile [BLOCK_C, HEAD_DIM]; out-of-horizon rows zeroed so the
-        # subsequent ``q · k`` produces 0 (under -inf mask below it cannot
-        # enter top-K anyway).
+        # Load kv tile [BLOCK_C, HEAD_DIM] in bf16 to match q. Out-of-horizon
+        # rows zeroed; subsequent ``q · k`` produces 0, the -inf mask below
+        # then keeps them out of the top-K regardless.
         kv_addr = c_global[:, None] * kv_stride_c + d_offs[None, :] * kv_stride_d
-        kv_tile = tl.load(kv_ptr + kv_addr, mask=c_valid[:, None], other=0.0).to(tl.float32)
+        kv_tile = tl.load(kv_ptr + kv_addr, mask=c_valid[:, None], other=0.0).to(tl.bfloat16)
 
-        # Per-head ``relu(q · k) * w``, summed across heads. q and per-head
-        # weight are reloaded per head iter — the per-query slice is small
-        # (q is ``[N_HEADS, HEAD_DIM]`` = 32 KB at V4 dims) so L2 absorbs the
-        # reissue cost cheaply, and this avoids ``tl.dot``'s 16-minimum tile
-        # constraint that breaks the n_heads=4 test fixture.
-        score = tl.zeros((BLOCK_C,), dtype=tl.float32)
-        for h in tl.static_range(N_HEADS):
-            q_h = tl.load(
-                q_ptr + pid * q_stride_q + h * q_stride_h + d_offs * q_stride_d,
-            ).to(tl.float32)
-            w_h = tl.load(weights_ptr + pid * w_stride_q + h * w_stride_h).to(tl.float32)
-            qk = tl.sum(q_h[None, :] * kv_tile, axis=1) * softmax_scale
-            qk = tl.maximum(qk, 0.0)
-            score += qk * w_h
-
+        # ``q · kᵀ`` via ``tl.dot`` — drives tensor cores. q_tile is
+        # ``(N_HEADS, HEAD_DIM)`` bf16, kv_tile is ``(BLOCK_C, HEAD_DIM)`` bf16;
+        # transposed to ``(HEAD_DIM, BLOCK_C)`` for the matmul. Output is
+        # ``(N_HEADS, BLOCK_C)`` fp32 (tensor core accumulator). Requires
+        # ``N_HEADS >= 16`` and ``BLOCK_C >= 16`` — enforced in the Python
+        # wrapper.
+        qk = tl.dot(q_tile, tl.trans(kv_tile)) * softmax_scale  # [N_HEADS, BLOCK_C]
+        qk = tl.maximum(qk, 0.0)
+        score = tl.sum(qk * w_tile[:, None], axis=0)  # [BLOCK_C]
         score = tl.where(c_valid, score, float("-inf"))
 
-        # Bit-pack new scores with their sample-local indices, then merge
-        # into the running top-K via ``cat`` + ``tl.topk``. ``can_reorder=True``
-        # is fine: ``tl.topk`` re-sorts the concatenation anyway.
+        # Bit-pack the BLOCK_C new entries, then scatter into ``all_packed``
+        # at positions ``[c_block_start, c_block_start + BLOCK_C)``. ``tl.where``
+        # over the full T_PADDED tile lifts a constexpr-bounded gather to
+        # parallel SIMD; the ``tl.gather`` builds a ``[T_PADDED]`` view of
+        # ``new_packed`` indexed by ``(t - c_block_start)`` (clamped for the
+        # off-window slots, which the where-mask drops anyway).
         new_packed = _pack_score_idx(score, c_local, T_PADDED)
-        combined = tl.cat(top_packed, new_packed, can_reorder=True)
-        top_packed = tl.topk(combined, K)
+        in_window = (t_range >= c_block_start) & (t_range < (c_block_start + BLOCK_C))
+        local_idx = (t_range - c_block_start).to(tl.int32)
+        # Clamp out-of-window indices so tl.gather doesn't OOB; in_window
+        # masks the bogus values out at the where step.
+        local_idx_safe = tl.maximum(tl.minimum(local_idx, BLOCK_C - 1), 0)
+        new_expanded = tl.gather(new_packed, local_idx_safe, axis=0)
+        all_packed = tl.where(in_window, new_expanded, all_packed)
+
+    # Final descending top-K over the full per-query score buffer. ``tl.topk``
+    # uses bitonic sort with O(log²(T_PADDED)) depth in parallel; for V4
+    # T_PADDED = 2048 this is ~11 stages, far cheaper than the per-c-tile
+    # cat+topk we replaced.
+    top_packed = tl.topk(all_packed, K)
 
     # Unpack sample-local indices. ``-inf``-score sentinel slots map back to
     # -1 so downstream sparse_attn treats them as masked.
@@ -258,12 +279,25 @@ def indexer_topk_triton(
         raise ValueError(f"kv last dim {kv.size(-1)} != q head_dim {head_dim}")
 
     if block_c is None:
-        # Default: match index_topk so the merge tile is ``2 * K``.
-        block_c = index_topk
-    if (index_topk + block_c) & (index_topk + block_c - 1) != 0:
+        # Default 256: halves the number of c-tiles vs block_c=128 at V4 dims
+        # and still keeps SMEM under the 232 KB Hopper limit (kv_tile
+        # [256, 128] bf16 = 64 KB + qk [n_heads=64, 256] fp32 = 64 KB +
+        # all_packed [T_PADDED] uint64 ~ 16 KB + intermediates ~ 200 KB total
+        # under one pipeline stage).
+        block_c = 256
+    if block_c & (block_c - 1) != 0:
+        raise ValueError(f"block_c must be a power of two; got {block_c}")
+    # ``tl.dot`` requires both inner dims ≥ 16 (Triton tile-mma minimum).
+    # The score path multiplies q ``(N_HEADS, HEAD_DIM)`` by kv-transpose
+    # ``(HEAD_DIM, BLOCK_C)``; head_dim is fixed by the model (≥ 64 in
+    # practice) so we only need to guard the two we control here.
+    if n_heads < 16:
         raise ValueError(
-            f"index_topk + block_c must be a power of two; got {index_topk + block_c}"
+            f"Triton indexer kernel requires n_heads >= 16 (tensor-core tile floor); "
+            f"got n_heads={n_heads}. Use backend='native' for small head counts."
         )
+    if block_c < 16:
+        raise ValueError(f"block_c must be >= 16 for tl.dot; got {block_c}")
 
     # ``T_PADDED`` is the static upper bound on a sample's compressed length,
     # used as the modulus for the pack/unpack idx-inversion. Use the next
@@ -311,6 +345,11 @@ def indexer_topk_triton(
         K=index_topk,
         BLOCK_C=block_c,
         T_PADDED=t_padded,
+        # ``num_stages=1`` keeps SMEM under the 232 KB Hopper limit by
+        # disabling kv-load pipelining (the default pipeline would otherwise
+        # double the kv_tile footprint). At V4 dims with BLOCK_C=256 the
+        # pipelined version is what tips us over.
+        num_stages=1,
     )
 
     return cast(torch.Tensor, out.to(torch.long))

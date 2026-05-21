@@ -317,16 +317,21 @@ class TestIndexerTritonParity:
         torch.testing.assert_close(sorted_n, sorted_t, rtol=0, atol=0.05, equal_nan=True)
 
     def test_single_sample_parity(self) -> None:
+        # ``index_n_heads`` is bumped from the rest of the suite's 4 to 16 —
+        # the triton kernel uses ``tl.dot`` for the score path, which requires
+        # ``n_heads >= 16`` (Triton's tensor-core tile minimum). Keeping the
+        # other dims small still exercises the varlen + top-k logic on CPU
+        # time scales while staying inside the kernel's supported tile sizes.
         hidden_size = 512
         rope_head_dim = 64
         seq_len = 64
         native, triton_idx = self._build_pair(
             hidden_size=hidden_size,
             q_lora_rank=128,
-            index_n_heads=4,
+            index_n_heads=16,
             index_head_dim=128,
             rope_head_dim=rope_head_dim,
-            index_topk=8,
+            index_topk=16,
         )
 
         torch.manual_seed(7)
@@ -337,15 +342,16 @@ class TestIndexerTritonParity:
         self._check(native, triton_idx, hidden, qr, cos, sin, cu)
 
     def test_two_samples_parity(self) -> None:
+        # See ``test_single_sample_parity`` for why ``index_n_heads=16``.
         hidden_size = 512
         rope_head_dim = 64
         native, triton_idx = self._build_pair(
             hidden_size=hidden_size,
             q_lora_rank=128,
-            index_n_heads=4,
+            index_n_heads=16,
             index_head_dim=128,
             rope_head_dim=rope_head_dim,
-            index_topk=8,
+            index_topk=16,
         )
 
         torch.manual_seed(11)
