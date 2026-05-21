@@ -7,11 +7,16 @@ import torch
 from transformers import AutoTokenizer
 import tempfile
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.rl.utils import (
+    AcceleratorResourcesConfig,
+    AutoAcceleratorWorkers,
+    CPUResourceManager,
+    clear_cpu_resource_manager,
+    set_cpu_resource_manager,
+)
 from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig
 import asyncio
-from xtuner.v1.rl.rollout import RolloutController
 
 
 MODEL_PATH=os.getenv("QWEN3_VL_DENSE_PATH")
@@ -57,6 +62,7 @@ class TestVLMRollout(unittest.IsolatedAsyncioTestCase):
         self.init_config()
 
     def tearDown(self):
+        clear_cpu_resource_manager()
         ray.shutdown()
         # When lmdeploy enable ep>1, it uses deep_ep. Buffer implicit destroy would cause some ray actor stucked.
         # Use pkill cleen up ray::WorkerWrapper process after close ray cluster connection as workaround.
@@ -84,6 +90,7 @@ class TestVLMRollout(unittest.IsolatedAsyncioTestCase):
         )
         pg1 = AutoAcceleratorWorkers.build_placement_group(resource_config, name="tp_pg")
         pg2 = AutoAcceleratorWorkers.build_placement_group(resource_config, name="ep_pg")
+        set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=[pg1, pg2]))
         dense_model_path = MODEL_PATH
         moe_model_path = MOE_MODEL_PATH
         dist_port_base = 38000
@@ -109,7 +116,7 @@ class TestVLMRollout(unittest.IsolatedAsyncioTestCase):
             dist_port_base=dist_port_base,
             enable_return_routed_experts=ep_size > 1, # ep_size > 1 默认打开r3
         )
-        rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
+        rollout_controller = rollout_config.build(pg)
         result_refs = []
 
         # Test Case 1: 纯文本

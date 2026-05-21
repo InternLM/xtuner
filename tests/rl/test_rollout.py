@@ -8,9 +8,14 @@ import torch
 from transformers import AutoTokenizer
 import tempfile
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.rl.utils import (
+    AcceleratorResourcesConfig,
+    AutoAcceleratorWorkers,
+    CPUResourceManager,
+    clear_cpu_resource_manager,
+    set_cpu_resource_manager,
+)
 from xtuner.v1.data_proto.rl_data import Status, SampleParams, RolloutState
-from xtuner.v1.rl.rollout import RolloutController
 
 TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
@@ -54,6 +59,7 @@ class TestRollout(unittest.IsolatedAsyncioTestCase):
         self.init_config()
 
     def tearDown(self):
+        clear_cpu_resource_manager()
         ray.shutdown()
         # When lmdeploy enable ep>1, it uses deep_ep. Buffer implicit destroy would cause some ray actor stucked.
         # Use pkill cleen up ray::WorkerWrapper process after close ray cluster connection as workaround.
@@ -72,6 +78,7 @@ class TestRollout(unittest.IsolatedAsyncioTestCase):
         pg_name_suffix = os.path.basename(self.temp_dir.name)
         pg1 = AutoAcceleratorWorkers.build_placement_group(resource_config, name=f"tp_pg_{pg_name_suffix}")
         pg2 = AutoAcceleratorWorkers.build_placement_group(resource_config, name=f"ep_pg_{pg_name_suffix}")
+        set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=[pg1, pg2]))
         dense_model_path = MODEL_PATH
         moe_model_path = MOE_MODEL_PATH
         dist_port_base = 38000
@@ -106,7 +113,7 @@ class TestRollout(unittest.IsolatedAsyncioTestCase):
             dist_port_base=dist_port_base,
             enable_return_routed_experts=ep_size > 1, # ep_size > 1 默认打开r3
         )
-        rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
+        rollout_controller = rollout_config.build(pg)
         result_refs = []
 
         # Test Case 1: 文本输入 + 文本输出

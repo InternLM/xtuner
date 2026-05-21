@@ -12,7 +12,13 @@ import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.rl.utils import (
+    AcceleratorResourcesConfig,
+    AutoAcceleratorWorkers,
+    CPUResourceManager,
+    clear_cpu_resource_manager,
+    set_cpu_resource_manager,
+)
 
 
 MODEL_PATH = os.environ.get("ROLLOUT_MODEL_PATH") or os.environ.get("MODEL_PATH", "")
@@ -126,7 +132,7 @@ class TestLMDeployAbortIntegration(unittest.IsolatedAsyncioTestCase):
         self.abort_deadline_s = _env_float("XTUNER_LMDEPLOY_ABORT_TEST_ABORT_DEADLINE_S", 15.0)
         self.startup_activity_timeout_s = _env_float("XTUNER_LMDEPLOY_ABORT_TEST_ACTIVITY_TIMEOUT_S", 60.0)
 
-        ray.init(num_cpus=max(16, self.num_workers * 8), ignore_reinit_error=True)
+        ray.init(num_cpus=18, ignore_reinit_error=True)
         self.temp_dir = tempfile.TemporaryDirectory()
         self.pg = None
         self.rollout_ctl = None
@@ -142,6 +148,7 @@ class TestLMDeployAbortIntegration(unittest.IsolatedAsyncioTestCase):
                 ray.util.remove_placement_group(self.pg)
             except Exception:
                 pass
+        clear_cpu_resource_manager()
         ray.shutdown()
         self.temp_dir.cleanup()
 
@@ -153,6 +160,7 @@ class TestLMDeployAbortIntegration(unittest.IsolatedAsyncioTestCase):
             cpu_memory_per_worker=16 * 1024**3,
         )
         self.pg = AutoAcceleratorWorkers.build_placement_group(resources_cfg, name="lmdeploy_abort_integration_pg")
+        set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=self.pg))
 
         over_concurrency = max(1.0, math.ceil(self.request_count / self.max_batch_size))
         rollout_config = RolloutConfig(
