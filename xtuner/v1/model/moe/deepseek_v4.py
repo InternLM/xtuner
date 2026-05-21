@@ -26,14 +26,24 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 from pydantic import Field
+from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self, override
 
 from transformers import AutoConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module import HashRouterConfig, NoAuxRouterConfig, RouterResults
 from xtuner.v1.module.attention.dsa import DeepSeekSparseAttention, DSAConfig
-from xtuner.v1.module.decoder_layer.hc_block import HCDecoderLayer, HCWrapperConfig
-from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEDecoderLayer
+from xtuner.v1.module.decoder_layer.hc_block import HCWrapperConfig, _unshard_hc_params, hc_post, hc_pre
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
+    MoEActFnConfig,
+    MoEBlock,
+    MoEDecoderLayer,
+    MoEGate,
+    MoEMLP,
+)
+from xtuner.v1.module.dispatcher import build_dispatcher
+from xtuner.v1.module.linear import build_linear
+from xtuner.v1.module.rms_norm import RMSNorm
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.utils import get_logger
@@ -53,23 +63,27 @@ logger = get_logger()
 #   * ``hc_pre`` / ``hc_post`` (top-level fns in ``hc_block.py``) carry the HC
 #     residual-mixing matmul + sinkhorn + RMS rescale. Decorated with
 #     ``@maybe_compile``; entered here so the runtime compile pass enables them.
-#   * ``_V4InnerBlock._ffn_pre_compute`` runs ``post_attention_layernorm`` +
-#     gate (norm+softmax fused into one kernel — the ``vectorized_add`` /
-#     ``FillFunctor`` storm in the trace came from these tiny ops being eager).
-#   * ``_V4InnerBlock._ffn_post_compute`` runs ``+ shared_experts`` and
-#     ``* hidden_factor`` (HC owns the final residual add).
-#   * ``DeepSeekSparseAttention.forward`` is the V4 attention path; pure
+#   * ``V4DecoderLayer._attn_compute`` runs ``input_layernorm`` + DSA. Pure
 #     compute (no dispatcher), safe in both EP and non-EP. Required the
 #     ``xtuner.v1.utils.compile._patch_sympy_mod_eval_negative_subs`` upstream
 #     workaround so inductor's coalescing analysis on the Indexer's symbolic
 #     Mod expressions doesn't crash under EP's dynamic seq_ctx symbols.
-#   * Parent's ``MoEBlock.forward`` covers the expert GEMM (already inherited).
+#   * ``V4DecoderLayer._ffn_pre_compute`` runs ``post_attention_layernorm`` +
+#     gate (norm+softmax fused into one kernel — the ``vectorized_add`` /
+#     ``FillFunctor`` storm in the trace came from these tiny ops being eager).
+#   * ``V4DecoderLayer._ffn_post_compute`` runs ``+ shared_experts`` and
+#     ``* hidden_factor`` (HC owns the final residual add).
+#   * ``DeepSeekSparseAttention.forward`` is the V4 attention path itself,
+#     wrapped as a separate compile target inside ``_attn_compute``.
+#   * Parent's ``MoEBlock.forward`` covers the expert GEMM (already covered
+#     through ``MOE_(NON_)EP_COMPILE_CFG``).
 #
-# ``HCDecoderLayer.forward`` and ``_V4InnerBlock.ffn_block`` are the
-# orchestrators; they MUST stay eager because ``ffn_block`` enters the
-# dispatcher whose ``moe::permute/unpermute`` fakes report a data-dependent
-# output dim that inductor can't reason about (either specialises on the
-# first batch's routing or trips its range heuristics with unbacked symints).
+# ``V4DecoderLayer.forward`` and ``V4DecoderLayer._ffn_compute`` are the
+# orchestrators; they MUST stay eager because ``_ffn_compute`` enters the
+# deepep dispatcher whose ``moe::permute/unpermute`` fakes report a
+# data-dependent output dim that inductor can't reason about (either
+# specialises on the first batch's routing or trips its range heuristics
+# with unbacked symints).
 # ``dynamic=True`` makes dynamo trace with symbolic shapes from the first
 # pass instead of specialising on concrete sizes — critical here because
 # ``intra_layer_micro_batch=2`` plus packed varlen data feeds two distinct
@@ -98,9 +112,9 @@ _LITE = TorchCompileOption(fullgraph=False, dynamic=True)
 _V4_LAYER_TARGETS: dict[str, TorchCompileOption] = {
     "xtuner.v1.module.decoder_layer.hc_block.hc_pre": _HEAVY,
     "xtuner.v1.module.decoder_layer.hc_block.hc_post": _HEAVY,
-    "xtuner.v1.model.moe.deepseek_v4._V4InnerBlock.attn_block": _HEAVY,
-    "xtuner.v1.model.moe.deepseek_v4._V4InnerBlock._ffn_pre_compute": _LITE,
-    "xtuner.v1.model.moe.deepseek_v4._V4InnerBlock._ffn_post_compute": _LITE,
+    "xtuner.v1.model.moe.deepseek_v4.V4DecoderLayer._attn_compute": _HEAVY,
+    "xtuner.v1.model.moe.deepseek_v4.V4DecoderLayer._ffn_pre_compute": _LITE,
+    "xtuner.v1.model.moe.deepseek_v4.V4DecoderLayer._ffn_post_compute": _LITE,
     "xtuner.v1.model.moe.deepseek_v4.DeepSeekV4._hc_head_reduce_compute": _LITE,
     "xtuner.v1.module.attention.dsa.DeepSeekSparseAttention.forward": _HEAVY,
     # The compressor's scatter + softmax + sum + RMSNorm chain is exactly the
@@ -155,95 +169,297 @@ def _build_compressed_position_embeddings(
     return None
 
 
-class _V4InnerBlock(MoEDecoderLayer):
-    """Adapter exposing :class:`MoEDecoderLayer` as an :class:`HCInnerBlock`.
+class V4DecoderLayer(nn.Module):
+    """One DeepSeek-V4-Flash decoder layer: HC residual mix + DSA attn + MoE ffn.
 
-    Hyper-Connections (PR7) defines a narrow contract on its inner block:
+    Owns every submodule and parameter for one layer directly — no inner /
+    outer wrapper, no inheritance through ``MoEDecoderLayer``, no
+    ``set_context`` side-channel. The previous three-class layout
+    (``_V4InnerBlock(MoEDecoderLayer)`` → ``HCDecoderLayer`` → ``V4DecoderLayer``)
+    was a chain of "narrow generic protocol + adapter + bridge" that had exactly
+    one user (V4); inlining the chain removes the ``set_context`` /
+    ``_last_router_results`` mutable state, the dual-registration assert
+    (``hc_layer.inner is inner``) and the inherited-but-never-called
+    ``MoEDecoderLayer.forward``.
 
-    * ``attn_block(x: Tensor) -> Tensor`` runs pre-norm + attention and returns
-      ``[B, S, hidden_size]`` (no residual; HC owns the residual mix).
-    * ``ffn_block(x: Tensor) -> Tensor`` runs pre-norm + MoE dispatch and
-      returns ``[B, S, hidden_size]`` (no residual either).
+    Forward contract:
 
-    :class:`MoEDecoderLayer` does both as a single ``_pre_moe_forward`` →
-    dispatcher → ``_post_moe_forward`` chain that *adds* its own residual and
-    returns ``(hidden, logits, weights)``. This adapter decomposes the chain
-    so HC can call attn and ffn separately and apply its own residual mix
-    between them.
+        layer(hidden_states,
+              *, position_embeddings, position_embeddings_compressed,
+                 seq_ctx, input_ids)
+            -> (hidden_states_out, router_logits, router_weights)
 
-    ``attn_block`` and ``ffn_block`` only receive ``x`` per HC's protocol, but
-    DSA needs ``position_embeddings``, ``position_embeddings_compressed`` and
-    ``seq_ctx``; the MoE gate's hash branch additionally needs ``input_ids``.
-    :meth:`set_context` stashes those tensors on ``self`` once per forward;
-    :class:`DeepSeekV4._forward` calls it before invoking the HC wrapper.
+    All inputs flow in through arguments; router results flow out through
+    the tuple. No hidden state on ``self`` between forward calls.
+
+    Compile boundaries are exposed as separate private methods so the V4
+    compile cfg can target them individually:
+
+    * :meth:`_attn_compute`     — ``input_layernorm`` + DSA (heavy, has matmul + sparse_attn).
+    * :meth:`_ffn_pre_compute`  — ``post_attention_layernorm`` + gate (lite).
+    * :meth:`_ffn_post_compute` — ``+ shared_experts`` + ``* hidden_factor`` (lite).
+    * :meth:`_shared_experts_forward` — shared expert FFN ± gate (called by post).
 
     Args:
-        compress_ratio (int): Per-layer DSA mode (0 / 4 / 128). Passed to
-            DSA at build time; informational on the adapter for parity with
-            ``DeepSeekSparseAttention.compress_ratio``.
+        compress_ratio (int): Per-layer DSA mode (0 / 4 / 128).
+        layer_idx (int): Position in the decoder stack.
+        hidden_size (int): One stream's hidden size.
+        moe_intermediate_size (int): MoE expert FFN intermediate dim.
+        hidden_act (str): MoE expert activation name.
+        num_experts_per_tok (int): Routed experts per token.
+        n_routed_experts (int): Total routed experts.
+        n_shared_experts (int): Shared-expert count (0 disables).
+        moe_act_fn_cfg (MoEActFnConfig): Expert activation policy.
+        router_config (NoAuxRouterConfig | HashRouterConfig): Router topology.
+            HashRouter for the first ``num_hash_layers`` layers; NoAux for
+            the rest.
+        dispatcher (str | None): EP dispatcher backend; ``None`` for non-EP.
+        ep_mesh (DeviceMesh | None): EP device mesh.
+        hc_cfg (HCWrapperConfig): ``hc_mult`` / ``hc_eps`` /
+            ``hc_sinkhorn_iters``. ``hc_mult == 1`` degenerates to a plain
+            pre-norm residual block (kept for parity-anchor testing).
+        attention_module (nn.Module): Pre-built ``DeepSeekSparseAttention``.
+            DSAConfig.build requires a per-layer ``compress_ratio`` so the
+            caller has to construct DSA outside this class.
+        rms_norm_eps (float): RMSNorm epsilon.
+        rms_norm_type ("default" | "zero_centered"): RMSNorm variant.
+        mlp_bias (bool): Bias on shared experts' MLP linears.
+        gate_bias (bool): Bias on the routing gate.
+        moe_bias (bool): Bias on expert linears.
+        with_shared_expert_gate (bool): Whether to add a sigmoid gate over
+            shared experts.
+        hidden_factor (float): Scalar applied to the combined FFN output
+            before the HC ``post`` residual mix.
+        router_compute_dtype ("float32" | "native"): Router math precision.
+        float8_cfg (Float8Config | None): FP8 expert/grouped-linear config.
     """
 
     def __init__(
         self,
         *,
         compress_ratio: int,
-        **kwargs: Any,
+        layer_idx: int,
+        hidden_size: int,
+        moe_intermediate_size: int,
+        hidden_act: str,
+        num_experts_per_tok: int,
+        n_routed_experts: int,
+        n_shared_experts: int,
+        moe_act_fn_cfg: MoEActFnConfig,
+        router_config: NoAuxRouterConfig | HashRouterConfig,
+        dispatcher: str | None,
+        ep_mesh: DeviceMesh | None,
+        hc_cfg: HCWrapperConfig,
+        attention_module: nn.Module,
+        rms_norm_eps: float = 1e-6,
+        rms_norm_type: str = "default",
+        mlp_bias: bool = False,
+        gate_bias: bool = False,
+        moe_bias: bool = False,
+        with_shared_expert_gate: bool = False,
+        hidden_factor: float = 1.0,
+        router_compute_dtype: str = "float32",
+        float8_cfg: Any = None,
     ) -> None:
-        super().__init__(**kwargs)
-        self.compress_ratio = compress_ratio
-        # Initialise context slots to None so a missing `set_context` call surfaces
-        # as a clean AttributeError-from-None instead of a silent stale reuse.
-        self._ctx_position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None
-        self._ctx_position_embeddings_compressed: tuple[torch.Tensor, torch.Tensor] | None = None
-        self._ctx_seq_ctx: SequenceContext | None = None
-        self._ctx_input_ids: torch.Tensor | None = None
-        # Stash the most recent router results so the outer V4DecoderLayer can return
-        # them to MoE._forward after the HC wrapper has run (HC's contract is single-Tensor).
-        self._last_router_results: RouterResults | None = None
+        super().__init__()
 
-    def set_context(
+        self.compress_ratio = compress_ratio
+        self.layer_idx = layer_idx
+        self.hidden_size = hidden_size
+        self.n_routed_experts = n_routed_experts
+        self.n_shared_experts = n_shared_experts
+        self.with_shared_expert_gate = with_shared_expert_gate
+        self.hidden_factor = hidden_factor
+        self.ep_mesh = ep_mesh
+
+        # ─── HC parameters ───
+        # V4 stores HC parameters in fp32 even when the rest of the model is
+        # bf16 (V4 reference: `Block.__init__` uses `with set_dtype(torch.float32)`)
+        # because the 20-iteration Sinkhorn is bf16-unstable.
+        self.hc_mult = hc_cfg.hc_mult
+        self.hc_eps = hc_cfg.hc_eps
+        self.hc_sinkhorn_iters = hc_cfg.hc_sinkhorn_iters
+        mix_dim = (2 + self.hc_mult) * self.hc_mult
+        hc_dim = self.hc_mult * hidden_size
+        fp32 = torch.float32
+        self.hc_attn_fn = nn.Parameter(torch.zeros(mix_dim, hc_dim, dtype=fp32))
+        self.hc_attn_base = nn.Parameter(torch.zeros(mix_dim, dtype=fp32))
+        self.hc_attn_scale = nn.Parameter(torch.zeros(3, dtype=fp32))
+        self.hc_ffn_fn = nn.Parameter(torch.zeros(mix_dim, hc_dim, dtype=fp32))
+        self.hc_ffn_base = nn.Parameter(torch.zeros(mix_dim, dtype=fp32))
+        self.hc_ffn_scale = nn.Parameter(torch.zeros(3, dtype=fp32))
+        # Degenerate-safe init: scale[0]=1 keeps the pre-weight derivative
+        # non-zero so training can escape the all-zero attractor; scale[1] /
+        # scale[2] = 0 starts post and comb from constant uniform values rather
+        # than random softmax noise.
+        with torch.no_grad():
+            self.hc_attn_scale[0] = 1.0
+            self.hc_ffn_scale[0] = 1.0
+
+        # ─── Norms + attention ───
+        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, type=rms_norm_type)  # type: ignore[arg-type]
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, type=rms_norm_type)  # type: ignore[arg-type]
+        # DSA is built outside this class because DSAConfig.build needs a
+        # per-layer ``compress_ratio`` that the generic
+        # ``attention_config.build`` chain in ``MoEDecoderLayer`` doesn't know
+        # how to thread. ``_build_one_layer`` constructs DSA and hands it here.
+        self.self_attn = attention_module
+
+        # ─── MoE routing + experts + dispatcher ───
+        self.gate = MoEGate(
+            hidden_size=hidden_size,
+            n_routed_experts=n_routed_experts,
+            num_experts_per_tok=num_experts_per_tok,
+            router_config=router_config,
+            gate_bias=gate_bias,
+            router_compute_dtype=router_compute_dtype,  # type: ignore[arg-type]
+        )
+        self.experts = MoEBlock(
+            hidden_size=hidden_size,
+            moe_intermediate_size=moe_intermediate_size,
+            n_routed_experts=n_routed_experts,
+            moe_bias=moe_bias,
+            ep_mesh=ep_mesh,
+            float8_cfg=float8_cfg,
+            moe_act_fn_cfg=moe_act_fn_cfg,
+        )
+        process_group = ep_mesh.get_group() if ep_mesh is not None else None
+        self.dispatcher = build_dispatcher(
+            dispatcher=dispatcher,  # type: ignore[arg-type]
+            n_routed_experts=n_routed_experts,
+            ep_group=process_group,
+            training_dtype="fp8" if float8_cfg is not None else "bf16",
+            generate_dtype="bf16",
+        )
+
+        # ─── Shared experts (optional) ───
+        self.shared_experts: MoEMLP | None
+        self.shared_expert_gate: nn.Module | None
+        if n_shared_experts > 0:
+            self.shared_experts = MoEMLP(
+                hidden_size=hidden_size,
+                n_shared_experts=n_shared_experts,
+                moe_intermediate_size=moe_intermediate_size,
+                hidden_act=hidden_act,
+                mlp_bias=mlp_bias,
+                float8_cfg=float8_cfg,
+            )
+            self.shared_expert_gate = (
+                build_linear(hidden_size, 1, bias=False) if with_shared_expert_gate else None
+            )
+        else:
+            self.shared_experts = None
+            self.shared_expert_gate = None
+
+    # ───────── public forward ─────────
+
+    def forward(
         self,
+        hidden_states: torch.Tensor,
         *,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         position_embeddings_compressed: tuple[torch.Tensor, torch.Tensor] | None,
         seq_ctx: SequenceContext,
         input_ids: torch.Tensor | None,
-    ) -> None:
-        """Stash per-forward context for ``attn_block`` and ``ffn_block``.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """One V4-Flash decoder pass: HC-wrapped attn then HC-wrapped ffn.
 
         Args:
-            position_embeddings (tuple[Tensor, Tensor]): Dense ``(cos, sin)``
-                consumed by DSA sliding-window heads.
-            position_embeddings_compressed (tuple[Tensor, Tensor] | None):
-                Compressed ``(cos, sin)`` consumed by DSA Indexer; ``None`` for
-                ``compress_ratio == 0`` layers (DSA will assert if it actually
-                needs them).
-            seq_ctx (SequenceContext): Carries ``cu_seq_lens`` for varlen
-                attention and packing-aware MoE dispatch.
-            input_ids (Tensor | None): Per-token ids consumed by HashRouter;
-                None for score-routed layers.
-        """
-        self._ctx_position_embeddings = position_embeddings
-        self._ctx_position_embeddings_compressed = position_embeddings_compressed
-        self._ctx_seq_ctx = seq_ctx
-        self._ctx_input_ids = input_ids
+            hidden_states (torch.Tensor): HC-expanded packed varlen activations,
+                shape ``[1, total_tokens, hc_mult, hidden_size]``.
+            position_embeddings (tuple[torch.Tensor, torch.Tensor]):
+                ``(cos, sin)`` for the dense rope basis; consumed by the DSA
+                sliding-window heads.
+            position_embeddings_compressed (tuple[torch.Tensor, torch.Tensor] | None):
+                ``(cos, sin)`` for the yarn'd ``compress_rope_theta`` basis;
+                required when this layer's ``compress_ratio == 4`` (the
+                Indexer consumes it), ignored otherwise.
+            seq_ctx (SequenceContext): Carries ``cu_seq_lens`` for varlen and
+                ``rollout_routed_experts`` for the gate fast-path.
+            input_ids (torch.Tensor | None): Per-token ids consumed by
+                :class:`HashRouter` in the first ``num_hash_layers`` layers;
+                ignored by ``NoAuxRouter``.
 
-    def attn_block(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
-        # The signature carries `*args`/`**kwargs` purely to satisfy the structural
-        # HCInnerBlock protocol; HCDecoderLayer.forward forwards its extra args here.
-        # We deliberately ignore them: all DSA inputs are pinned via `set_context`.
-        del args, kwargs
-        assert self._ctx_position_embeddings is not None, "attn_block called without set_context"
-        assert self._ctx_seq_ctx is not None
+        Returns:
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                - ``hidden_states`` ``[1, total_tokens, hc_mult, hidden_size]``
+                - ``router_logits`` (passed to ``MoE.aux_loss.accumulate``)
+                - ``router_weights`` (passed to ``MoE.aux_loss.accumulate``)
+        """
+        if self.hc_mult == 1:
+            # Degenerate path: HC carries no mixing information at H=1; this
+            # branch falls back to the plain pre-norm residual that non-HC
+            # decoders use. Kept as a structural parity anchor for testing.
+            return self._plain_residual_forward(
+                hidden_states,
+                position_embeddings,
+                position_embeddings_compressed,
+                seq_ctx,
+                input_ids,
+            )
+
+        # ─── HC-wrapped attention ───
+        # Hoist DTensor.full_tensor() out of any compile region: doing it here
+        # (eager) lets the downstream ``hc_pre`` stay a single contiguous
+        # compiled graph instead of breaking three times mid-trace for each
+        # HC param under FSDP/EP.
+        attn_fn, attn_scale, attn_base = _unshard_hc_params(
+            self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+        )
+        residual = hidden_states
+        x_reduced, post_a, comb_a = hc_pre(
+            hidden_states,
+            attn_fn,
+            attn_scale,
+            attn_base,
+            self.hc_mult,
+            self.hc_sinkhorn_iters,
+            self.hc_eps,
+        )
+        attn_out = self._attn_compute(
+            x_reduced, position_embeddings, position_embeddings_compressed, seq_ctx
+        )
+        hidden_states = hc_post(attn_out, residual, post_a, comb_a)
+
+        # ─── HC-wrapped FFN (MoE) ───
+        ffn_fn, ffn_scale, ffn_base = _unshard_hc_params(
+            self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+        )
+        residual = hidden_states
+        x_reduced, post_f, comb_f = hc_pre(
+            hidden_states,
+            ffn_fn,
+            ffn_scale,
+            ffn_base,
+            self.hc_mult,
+            self.hc_sinkhorn_iters,
+            self.hc_eps,
+        )
+        ffn_out, router_results = self._ffn_compute(x_reduced, seq_ctx, input_ids)
+        hidden_states = hc_post(ffn_out, residual, post_f, comb_f)
+
+        return hidden_states, router_results["logits"], router_results["router_weights"]
+
+    # ───────── compile-target sub-graphs ─────────
+
+    def _attn_compute(
+        self,
+        x: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        position_embeddings_compressed: tuple[torch.Tensor, torch.Tensor] | None,
+        seq_ctx: SequenceContext,
+    ) -> torch.Tensor:
+        # Compile-friendly: pre-norm + DSA. Pure tensor ops, no all2all, no
+        # mutable state. ``DSA.forward`` is itself a compile target so this
+        # graph effectively brackets the layernorm + the o-proj epilogue
+        # around an opaque DSA call.
         h = self.input_layernorm(x)
-        # `self_attn` is statically typed as a union over MLA/MHA/Gated/DSA on the
-        # parent class for shared backward compat; V4 always wires DSA here.
         dsa = cast(DeepSeekSparseAttention, self.self_attn)
         attn = dsa(
             hidden_states=h,
-            position_embeddings=self._ctx_position_embeddings,
-            position_embeddings_compressed=self._ctx_position_embeddings_compressed,
-            seq_ctx=self._ctx_seq_ctx,
+            position_embeddings=position_embeddings,
+            position_embeddings_compressed=position_embeddings_compressed,
+            seq_ctx=seq_ctx,
         )
         return attn["projected_output"]
 
@@ -252,56 +468,58 @@ class _V4InnerBlock(MoEDecoderLayer):
         x: torch.Tensor,
         rollout_routed_experts: torch.Tensor | None,
         input_ids: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, "RouterResults"]:
-        """Compile-friendly: post-attn-norm + gate.
-
-        Mirrors parent ``MoEDecoderLayer._pre_moe_forward``'s norm+gate tail,
-        but standalone (no attention, no residual) so HC can sit between attn
-        and ffn and apply its own residual mixing. The compiled graph here
-        fuses ``post_attention_layernorm`` with the gate projection / softmax /
-        top-k pick (with the layernorm and softmax fused into one kernel
-        instead of separate small kernels).
-        """
+    ) -> tuple[torch.Tensor, RouterResults]:
+        # Compile-friendly: post-attn-norm + gate. Fuses RMSNorm with the
+        # gate projection / softmax / top-k pick.
         h = self.post_attention_layernorm(x)
         router_results: RouterResults = self.gate(h, rollout_routed_experts, input_ids=input_ids)
         return h, router_results
 
-    def _ffn_post_compute(self, combined_hidden_states: torch.Tensor, h_normed: torch.Tensor) -> torch.Tensor:
-        """Compile-friendly: shared-experts add + hidden_factor scale.
-
-        HC owns the final residual add, so this method skips it (unlike the
-        parent's ``_post_moe_forward`` which folds the residual in). Compiling
-        this fuses ``combined + shared_experts(h)`` and ``* hidden_factor`` into
-        one kernel — both contribute to the ``vectorized_add`` storm trace
-        showed.
-        """
+    def _ffn_post_compute(
+        self,
+        combined_hidden_states: torch.Tensor,
+        h_normed: torch.Tensor,
+    ) -> torch.Tensor:
+        # Compile-friendly: combined + shared experts + scalar scale. HC owns
+        # the residual add (it happens outside this method, in ``forward``),
+        # so we deliberately skip it here — unlike the parent's
+        # ``MoEDecoderLayer._post_moe_forward`` which folds the residual in.
         if self.n_shared_experts > 0:
-            shared_out = self._shared_experts_forward(hidden_states=h_normed)
+            shared_out = self._shared_experts_forward(h_normed)
             combined_hidden_states = combined_hidden_states + shared_out
         return combined_hidden_states * self.hidden_factor
 
-    def ffn_block(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
-        # Eager orchestrator (mirrors parent ``MoEDecoderLayer._forward``):
-        # compile-friendly subs (``_ffn_pre_compute``, ``self.experts`` =
-        # ``MoEBlock.forward``, ``_ffn_post_compute``) bracket the eager
-        # dispatcher chain. The split exists so dynamo never has to trace
-        # across the dispatcher boundary — its data-dependent post-all2all
-        # token count would otherwise either bake into inductor codegen
-        # (specialised on the first batch's routing) or, with unbacked symints,
-        # crash inductor's range heuristics. See V4_EP_COMPILE_CFG comment.
-        del args, kwargs
-        assert self._ctx_seq_ctx is not None
-        seq_ctx = self._ctx_seq_ctx
+    def _shared_experts_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self.shared_experts is not None
+        shared_out = self.shared_experts(hidden_states)
+        if self.with_shared_expert_gate:
+            assert self.shared_expert_gate is not None
+            shared_out = torch.sigmoid(self.shared_expert_gate(hidden_states)) * shared_out
+        return shared_out
 
-        if seq_ctx.rollout_routed_experts is not None and self.layer_idx < seq_ctx.rollout_routed_experts.shape[1]:
+    # ───────── private orchestrator (FFN dispatch chain) ─────────
+
+    def _ffn_compute(
+        self,
+        x: torch.Tensor,
+        seq_ctx: SequenceContext,
+        input_ids: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, RouterResults]:
+        # Eager orchestrator that brackets compile-friendly sub-graphs around
+        # the deepep dispatcher chain. The split exists so dynamo never traces
+        # across the dispatcher boundary — its data-dependent post-all2all
+        # token count would either bake into inductor codegen (specialised on
+        # the first batch's routing) or, with unbacked symints, crash
+        # inductor's range heuristics. See ``V4_EP_COMPILE_CFG`` comment.
+        if (
+            seq_ctx.rollout_routed_experts is not None
+            and self.layer_idx < seq_ctx.rollout_routed_experts.shape[1]
+        ):
             rollout_routed_experts = seq_ctx.rollout_routed_experts[:, self.layer_idx, :]
         else:
             rollout_routed_experts = None
 
-        h, router_results = self._ffn_pre_compute(x, rollout_routed_experts, self._ctx_input_ids)
-        # Stash so the outer V4DecoderLayer can forward router results to MoE._forward
-        # after HC wrapping is done; HC's forward returns a single tensor only.
-        self._last_router_results = router_results
+        h, router_results = self._ffn_pre_compute(x, rollout_routed_experts, input_ids)
 
         origin_shape = h.shape
         pre_dispatched = self.dispatcher.dispatch_preprocess(
@@ -345,67 +563,36 @@ class _V4InnerBlock(MoEDecoderLayer):
         )
         combined_hidden_states = post_combined["hidden_states"].view(*origin_shape)
 
-        return self._ffn_post_compute(combined_hidden_states, h)
+        ffn_out = self._ffn_post_compute(combined_hidden_states, h)
+        return ffn_out, router_results
 
+    # ───────── hc_mult == 1 degenerate path ─────────
 
-class _V4DecoderLayer(nn.Module):
-    """Composition wrapper: HC + ``_V4InnerBlock``.
-
-    Stored in :class:`DeepSeekV4.layers`. Bridges between :class:`MoE._forward`
-    (which expects ``layer(hidden, position_embeddings=, seq_ctx=) -> (hidden,
-    logits, weights)``) and :class:`HCDecoderLayer` (which expects
-    ``forward(x) -> x`` and exposes only a single-tensor output).
-    """
-
-    def __init__(
+    def _plain_residual_forward(
         self,
-        *,
-        inner: _V4InnerBlock,
-        hc_layer: HCDecoderLayer,
-    ) -> None:
-        super().__init__()
-        # Register `inner` ONLY via `self.hc_layer.inner` to avoid double-registration
-        # under `_V4DecoderLayer` — duplicate module registration can confuse FSDP's
-        # unshard-hook attachment so that params under `inner` (e.g. DSA's `wq_a`)
-        # remain DTensor inside `attn_block`, crashing with "mixed Tensor and DTensor".
-        assert hc_layer.inner is inner, "HCDecoderLayer.inner must already be the same inner block"
-        self.hc_layer = hc_layer
-        self.layer_idx = inner.layer_idx
-
-    @property
-    def inner(self) -> _V4InnerBlock:
-        return cast(_V4InnerBlock, self.hc_layer.inner)
-
-    @property
-    def gate(self) -> "nn.Module":
-        # `MoE.update_bias` in moe.py:299 accesses `layers[i].gate` directly to
-        # update the NoAux router's e_score_correction_bias buffer. The HC wrapper
-        # nests the gate one extra hop down — expose it at the same name so the
-        # parent's bias-update loop works without an override.
-        return self.hc_layer.inner.gate
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        *,
+        x: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         position_embeddings_compressed: tuple[torch.Tensor, torch.Tensor] | None,
         seq_ctx: SequenceContext,
         input_ids: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # HC requires the inner block to access rope / seq_ctx / input_ids without
-        # widening its `attn_block(x)` / `ffn_block(x)` signatures; set_context is
-        # the pre-call stashing point that fulfills that contract.
-        self.inner.set_context(
-            position_embeddings=position_embeddings,
-            position_embeddings_compressed=position_embeddings_compressed,
-            seq_ctx=seq_ctx,
-            input_ids=input_ids,
+        # hc_mult==1 carries no HC mixing information. The input arrives as
+        # ``[1, S, 1, D]`` (the model-level HC expand is unconditional); we
+        # squeeze the singleton hc axis, run the plain pre-norm residual
+        # pattern, then re-add the axis so downstream code stays
+        # rank-invariant.
+        x_single = x.squeeze(-2)
+        attn_out = self._attn_compute(
+            x_single, position_embeddings, position_embeddings_compressed, seq_ctx
         )
-        out = self.hc_layer(hidden_states)
-        router_results = self.inner._last_router_results
-        assert router_results is not None, "ffn_block did not stash router_results"
-        return out, router_results["logits"], router_results["router_weights"]
+        x_single = x_single + attn_out
+        ffn_out, router_results = self._ffn_compute(x_single, seq_ctx, input_ids)
+        x_single = x_single + ffn_out
+        return (
+            x_single.unsqueeze(-2),
+            router_results["logits"],
+            router_results["router_weights"],
+        )
 
 
 class DeepSeekV4Config(MoEConfig):
@@ -626,8 +813,8 @@ class DeepSeekV4(MoE):
       :class:`DeepSeekSparseAttention` with a per-layer
       ``compress_ratio in {0, 4, 128}`` pulled from
       ``rope_parameters_cfg.compress_ratios``.
-    * **Hyper-Connections** — every decoder layer is wrapped in
-      :class:`HCDecoderLayer` so the model carries ``hc_mult`` residual streams.
+    * **Hyper-Connections** — every decoder layer is a :class:`V4DecoderLayer`
+      which inlines the HC residual mix, so the model carries ``hc_mult`` residual streams.
       The embedding is expanded to ``[B, S, hc_mult, D]`` and reduced back to
       ``[B, S, D]`` via a learned ``hc_head_*`` triple before the final norm.
     * **Forward override** — the standard :class:`MoE._forward` assumes
@@ -701,9 +888,10 @@ class DeepSeekV4(MoE):
         # routing dispatch as the main stack. Reusing the parent's MTPBlock builder
         # would route through MoEDecoderLayer with the default attention_config.build
         # path, which crashes for DSAConfig (no compress_ratio). PR9 leaves MTP as a
-        # TODO follow-up: the structural pieces (HCDecoderLayer + _V4InnerBlock) are
-        # in place, but the MTP-specific e_proj/h_proj/enorm/hnorm/hc_head_* glue and
-        # its `compress_ratios[-1]`-driven attention mode need their own wiring pass.
+        # TODO follow-up: the structural pieces (``V4DecoderLayer`` reusable for
+        # the MTP body) are in place, but the MTP-specific
+        # e_proj / h_proj / enorm / hnorm / hc_head_* glue and its
+        # ``compress_ratios[-1]``-driven attention mode need their own wiring pass.
         if config.mtp_config is not None:
             logger.warning(
                 "DeepSeekV4: mtp_config is set but MTP forward + parameter wiring is not "
@@ -828,7 +1016,7 @@ class DeepSeekV4(MoE):
 
         offload_active = int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1
         for idx, decoder_layer in self.layers.items():
-            v4_layer = cast(_V4DecoderLayer, decoder_layer)
+            v4_layer = cast(V4DecoderLayer, decoder_layer)
             # Mirror the parent's per-layer activation offload window: with the HC-expanded
             # `[B, S, hc_mult, D]` activation (4× the parent's `[B, S, D]`), staging each
             # layer's residual on CPU is the main lever for fitting 256-expert layers on
@@ -925,7 +1113,7 @@ class DeepSeekV4(MoE):
         #   1) `[B, S, hc_mult, D]` HC-expanded activations
         #   2) dual rope (`position_embeddings` + `position_embeddings_compressed`)
         #   3) `_hc_head_reduce` before the final norm
-        # Plus `_V4DecoderLayer.forward` takes a single seq_ctx / position_embeddings
+        # Plus `V4DecoderLayer.forward` takes a single seq_ctx / position_embeddings
         # (not a list like `MoEDecoderLayer.forward` does), so MBs are looped per
         # layer here rather than batched into one layer call. That loses parent's
         # cross-MB domino-EP overlap; recovering it would require widening the
@@ -942,7 +1130,7 @@ class DeepSeekV4(MoE):
         n_mb = len(seq_ctx_list)
 
         # Per-MB: embed → dual rope → HC expand. Each MB stays as its own tensor in
-        # the list; we never cat across MBs along the seq dim because `_V4DecoderLayer`
+        # the list; we never cat across MBs along the seq dim because `V4DecoderLayer`
         # is called once per MB anyway, and a cat-then-chunk round-trip would only
         # add the same `i.clone()` workaround the parent needs for `async_save_on_cpu`.
         hidden_states_list: list[torch.Tensor] = []
@@ -974,7 +1162,7 @@ class DeepSeekV4(MoE):
         offload_active = int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1
 
         for idx, decoder_layer in self.layers.items():
-            v4_layer = cast(_V4DecoderLayer, decoder_layer)
+            v4_layer = cast(V4DecoderLayer, decoder_layer)
             layer_router_logits: list[torch.Tensor] = []
             layer_router_weights: list[torch.Tensor] = []
 
@@ -1097,7 +1285,7 @@ class DeepSeekV4(MoE):
     def _hc_head_reduce(self, x: torch.Tensor) -> torch.Tensor:
         # Eager wrapper: unshard the DTensor params once, then enter the
         # compile-friendly compute. Splitting at this boundary mirrors the
-        # `HCDecoderLayer.forward → _unshard_hc_params → hc_pre` pattern.
+        # ``V4DecoderLayer.forward → _unshard_hc_params → hc_pre`` pattern.
         from torch.distributed.tensor import DTensor as _DTensor
 
         hc_head_fn = self.hc_head_fn.full_tensor() if isinstance(self.hc_head_fn, _DTensor) else self.hc_head_fn
@@ -1142,7 +1330,7 @@ class DeepSeekV4(MoE):
         config: DeepSeekV4Config,
         layer_idx: int,
         compress_ratio: int,
-    ) -> _V4DecoderLayer:
+    ) -> V4DecoderLayer:
         # Pick the router topology per-layer; hash layers do not need group/topk_group
         # because they bypass scoring entirely.
         router_config: NoAuxRouterConfig | HashRouterConfig
@@ -1155,116 +1343,97 @@ class DeepSeekV4(MoE):
         else:
             router_config = config.router
 
-        # DSA is constructed externally because DSAConfig.build requires per-layer
-        # `compress_ratio`; we hand the pre-built module to MoEDecoderLayer via its
-        # `attention_module` override (see MoEDecoderLayer.__init__ note).
+        # DSAConfig.build requires per-layer `compress_ratio` which the generic
+        # `attention_config.build` chain doesn't know about, so DSA is
+        # constructed here and handed to V4DecoderLayer via the
+        # `attention_module` kwarg.
         attention_module = config.attention.build(
             hidden_size=config.hidden_size,
             layer_idx=layer_idx,
             compress_ratio=compress_ratio,
         )
 
-        inner = _V4InnerBlock(
+        return V4DecoderLayer(
             compress_ratio=compress_ratio,
+            layer_idx=layer_idx,
             hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
             moe_intermediate_size=config.moe_intermediate_size,
-            mlp_bias=config.mlp_bias,
-            gate_bias=False,
-            moe_bias=config.moe_bias,
             hidden_act=config.hidden_act,
-            rms_norm_eps=config.rms_norm_eps,
-            rms_norm_type=config.rms_norm_type,
             num_experts_per_tok=config.num_experts_per_tok,
             n_routed_experts=config.n_routed_experts,
             n_shared_experts=config.n_shared_experts,
-            with_shared_expert_gate=config.with_shared_expert_gate,
-            hidden_factor=config.hidden_factor,
-            attention_config=config.attention,
-            rope_scaling_cfg=None,
-            layer_type=None,
-            generate_config=config.generate_config,
-            router_config=router_config,
-            router_compute_dtype=config.router_compute_dtype,
             moe_act_fn_cfg=config.moe_act_fn_cfg,
-            float8_cfg=config.float8_cfg,
-            layer_idx=layer_idx,
+            router_config=router_config,
             dispatcher=config.dispatcher,
             ep_mesh=self.ep_mesh,
+            hc_cfg=config.hc_cfg,
             attention_module=attention_module,
+            rms_norm_eps=config.rms_norm_eps,
+            rms_norm_type=config.rms_norm_type,
+            mlp_bias=config.mlp_bias,
+            gate_bias=False,
+            moe_bias=config.moe_bias,
+            with_shared_expert_gate=config.with_shared_expert_gate,
+            hidden_factor=config.hidden_factor,
+            router_compute_dtype=config.router_compute_dtype,
+            float8_cfg=config.float8_cfg,
         )
-
-        hc_layer = HCDecoderLayer(inner=inner, hc_cfg=config.hc_cfg, hidden_size=config.hidden_size)
-        return _V4DecoderLayer(inner=inner, hc_layer=hc_layer)
 
     def _translate_layer_tail(self, tail: str, layer_idx: str, n_routed_experts: int) -> list[str]:
         # XTuner module names → HF key fragments (per BF16 safetensors index).
-        # Wrapping layout: `_V4DecoderLayer.hc_layer.{hc_attn_*|hc_ffn_*}` and
-        # `_V4DecoderLayer.hc_layer.inner.{input_layernorm|self_attn|...}`. HF
-        # keeps everything flat under `layers.L.`. The mapping below is the
-        # authoritative bridge; if you change the wrapper layout, update it here.
+        # ``V4DecoderLayer`` owns every parameter directly, so XTuner-side
+        # tails arrive flat: ``layers.L.hc_attn_fn``, ``layers.L.input_layernorm.weight``,
+        # ``layers.L.experts.fused_w1w3.weight`` etc. HF also keeps things flat
+        # under ``layers.L.`` but renames some of the slots. The mapping below
+        # is the authoritative bridge.
         del layer_idx  # only used for the outer prefix already prepended
 
-        # HC parameters live on the wrapper at `hc_layer.hc_{attn,ffn}_*`; PyTorch's
-        # named_parameters walks the inner MoEDecoderLayer via `hc_layer.inner.*`
-        # because _V4DecoderLayer.__init__ registers `inner` only through
-        # `self.hc_layer.inner` (the duplicate `self.inner` attribute is a property,
-        # not a registered submodule, so parameter walking never reaches `inner.*`
-        # directly).
-        if tail.startswith("hc_layer.hc_attn_") or tail.startswith("hc_layer.hc_ffn_"):
-            return [tail[len("hc_layer.") :]]
-
-        # Everything else lives inside the inner MoEDecoderLayer, surfaced under
-        # `hc_layer.inner.*`.
-        inner_prefix = "hc_layer.inner."
-        if not tail.startswith(inner_prefix):
-            # Composition wrapper itself has no other parameters; treat as identity
-            # to avoid silently dropping anything new.
+        # HC mix parameters: name 1:1 with HF (no prefix change).
+        if tail.startswith("hc_attn_") or tail.startswith("hc_ffn_"):
             return [tail]
-        inner_tail = tail[len(inner_prefix) :]
 
         # Pre-attention / post-attention layernorms map to `attn_norm` / `ffn_norm`.
-        if inner_tail == "input_layernorm.weight":
+        if tail == "input_layernorm.weight":
             return ["attn_norm.weight"]
-        if inner_tail == "post_attention_layernorm.weight":
+        if tail == "post_attention_layernorm.weight":
             return ["ffn_norm.weight"]
 
         # Attention: XTuner `self_attn.*` → HF `attn.*`.
-        if inner_tail.startswith("self_attn."):
-            return ["attn." + inner_tail[len("self_attn.") :]]
+        if tail.startswith("self_attn."):
+            return ["attn." + tail[len("self_attn.") :]]
 
         # MoE gate: XTuner `gate.weight` is the linear projection; `gate.router.*` are
         # the router-specific buffers (tid2eid for hash, e_score_correction_bias for noaux).
-        if inner_tail == "gate.weight":
+        if tail == "gate.weight":
             return ["ffn.gate.weight"]
-        if inner_tail == "gate.bias":
+        if tail == "gate.bias":
             return ["ffn.gate.bias"]
-        if inner_tail == "gate.router.tid2eid":
+        if tail == "gate.router.tid2eid":
             return ["ffn.gate.tid2eid"]
-        if inner_tail == "gate.router.e_score_correction_bias":
+        if tail == "gate.router.e_score_correction_bias":
             return ["ffn.gate.bias"]
 
         # Experts: fused tensors expand to per-expert HF keys.
-        if inner_tail == "experts.fused_w1w3.weight":
+        if tail == "experts.fused_w1w3.weight":
             keys: list[str] = []
             for i in range(n_routed_experts):
                 keys.append(f"ffn.experts.{i}.w1.weight")
                 keys.append(f"ffn.experts.{i}.w3.weight")
             return keys
-        if inner_tail == "experts.fused_w2.weight":
+        if tail == "experts.fused_w2.weight":
             return [f"ffn.experts.{i}.w2.weight" for i in range(n_routed_experts)]
 
         # Shared experts: XTuner uses gate_proj/up_proj/down_proj names; HF uses w1/w3/w2.
-        if inner_tail == "shared_experts.gate_proj.weight":
+        if tail == "shared_experts.gate_proj.weight":
             return ["ffn.shared_experts.w1.weight"]
-        if inner_tail == "shared_experts.up_proj.weight":
+        if tail == "shared_experts.up_proj.weight":
             return ["ffn.shared_experts.w3.weight"]
-        if inner_tail == "shared_experts.down_proj.weight":
+        if tail == "shared_experts.down_proj.weight":
             return ["ffn.shared_experts.w2.weight"]
 
-        # Fallback: pass through (catches anything PR9 forgot — surfaces as a missing
+        # Fallback: pass through (catches anything we missed — surfaces as a missing
         # key in `from_hf` rather than silent skipping).
-        return [inner_tail]
+        return [tail]
 
     def _translate_mtp_tail(self, tail: str, n_routed_experts: int) -> list[str]:
         # XTuner MTP layer wraps a decoder_layer + extra fields (e_proj/h_proj/enorm/
@@ -1275,5 +1444,5 @@ class DeepSeekV4(MoE):
         # to the new HC head pattern.
         if tail.startswith("decoder_layer."):
             inner_tail = tail[len("decoder_layer.") :]
-            return self._translate_layer_tail("hc_layer.inner." + inner_tail, "0", n_routed_experts)
+            return self._translate_layer_tail(inner_tail, "0", n_routed_experts)
         return [tail]

@@ -16,8 +16,10 @@
 # license as the rest of XTuner (see LICENSE at the repository root).
 """Pure-PyTorch port of DeepSeek-V4-Flash ``hc_split_sinkhorn``.
 
-Used by :class:`xtuner.v1.module.decoder_layer.hc_block.HCDecoderLayer` to compute
-the ``pre`` / ``post`` / ``comb`` mixing weights that wrap an attention or FFN block.
+Used by :func:`xtuner.v1.module.decoder_layer.hc_block.hc_pre` to compute the
+``pre`` / ``post`` / ``comb`` mixing weights that
+:class:`xtuner.v1.model.moe.deepseek_v4.V4DecoderLayer` consumes around its
+attention and FFN sub-blocks.
 """
 
 import torch

@@ -7,30 +7,32 @@
 # We re-implement the same numerical contract in pure PyTorch on top of
 # :func:`xtuner.v1.module.decoder_layer.hc_sinkhorn.hc_split_sinkhorn` so XTuner
 # can train without depending on TileLang.
-"""Hyper-Connections (HC) decoder wrapper for DeepSeek-V4-Flash.
+"""Hyper-Connections (HC) primitives for DeepSeek-V4-Flash.
 
-The HC wrapper keeps ``hc_mult`` copies of the hidden state and replaces the
+The HC machinery keeps ``hc_mult`` copies of the hidden state and replaces the
 plain ``x = x + block(norm(x))`` residual with a learned mix:
 
-1. ``hc_pre`` reduces the ``hc_mult`` streams to one weighted stream that the
-   inner attention or FFN block consumes.
-2. ``hc_post`` re-expands the block output into ``hc_mult`` streams using a
-   learned doubly-stochastic combination of the original streams plus the
-   block output.
+1. :func:`hc_pre` reduces the ``hc_mult`` streams to one weighted stream that
+   an attention or FFN sub-block consumes.
+2. :func:`hc_post` re-expands the sub-block output into ``hc_mult`` streams
+   using a learned doubly-stochastic combination of the original streams plus
+   the sub-block output.
 
-This wrapper is *layout-only*: it does not touch ``input_layernorm`` /
-``post_attention_layernorm`` itself. The contract with ``inner`` is therefore
-narrow: ``inner`` must expose ``attn_block(x) -> Tensor`` and
-``ffn_block(x) -> Tensor`` callables that take and return ``[B, S, hidden_size]``
-and that internally apply the norm + sub-block. PR9 (DeepSeekV4 glue) is
-responsible for adapting the real :class:`MoEDecoderLayer` to this contract; in
-this PR the wrapper is exercised with a small mock block.
+These two functions plus :class:`HCWrapperConfig` and
+:func:`_unshard_hc_params` are the public surface — they are consumed by
+:class:`xtuner.v1.model.moe.deepseek_v4.V4DecoderLayer`, which inlines the
+HC residual-mix pattern around its own attention and FFN sub-blocks.
+
+History note. An earlier version of this file shipped a ``HCDecoderLayer``
+class plus an ``HCInnerBlock`` structural protocol, intended as a generic
+"any attn+ffn block" wrapper. V4 was the only user and the protocol was too
+narrow for DSA's kwargs (it forced a ``set_context`` side-channel on the
+inner block). The class was removed during the V4 layer consolidation; the
+math is now consumed directly as functions, which is also more compile-
+friendly (no nested ``nn.Module`` for dynamo to trace into).
 """
 
-from typing import Any, Protocol, cast, runtime_checkable
-
 import torch
-import torch.nn as nn
 from pydantic import BaseModel, ConfigDict
 from torch import Tensor
 
@@ -39,25 +41,16 @@ from xtuner.v1.utils.compile import maybe_compile
 from .hc_sinkhorn import hc_split_sinkhorn
 
 
-@runtime_checkable
-class HCInnerBlock(Protocol):
-    """Structural contract that :class:`HCDecoderLayer` requires of its inner
-    block."""
-
-    def attn_block(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor: ...
-
-    def ffn_block(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor: ...
-
-
 class HCWrapperConfig(BaseModel):
-    """Configuration for :class:`HCDecoderLayer`.
+    """Configuration for the HC residual-mix pattern.
 
     Mirrors the three HC-related fields of the DeepSeek-V4-Flash config:
     ``hc_mult``, ``hc_eps``, ``hc_sinkhorn_iters``.
 
     Args:
-        hc_mult (int): Number of hyper-connection streams. ``1`` makes the wrapper
-            degenerate to a plain pre-norm residual block.
+        hc_mult (int): Number of hyper-connection streams. ``1`` makes the
+            HC math degenerate to a plain pre-norm residual block (used as a
+            structural parity anchor in tests).
         hc_eps (float): Stabilizer used inside the Sinkhorn normalization.
         hc_sinkhorn_iters (int): Number of Sinkhorn iterations.
     """
@@ -212,124 +205,3 @@ def hc_post(x: Tensor, residual: Tensor, post: Tensor, comb: Tensor) -> Tensor:
     # recompute), this is ~4 GB of peak memory savings at pack=4096.
     expanded = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.matmul(comb.to(residual.dtype), residual)
     return expanded.type_as(x)
-
-
-class HCDecoderLayer(nn.Module):
-    """Hyper-Connections wrapper around an attention + FFN inner block.
-
-    The wrapper owns the HC parameters (``hc_attn_*`` and ``hc_ffn_*``) and the
-    HC-expanded forward pattern; the ``inner`` module remains responsible for
-    its own norms and sub-block math. The contract with ``inner`` is:
-
-    - ``inner.attn_block(x, *args, **kwargs) -> Tensor``: pre-norm + attention
-      sub-block, ``[B, S, hidden_size]`` in/out.
-    - ``inner.ffn_block(x, *args, **kwargs) -> Tensor``: pre-norm + FFN sub-block,
-      ``[B, S, hidden_size]`` in/out.
-
-    PR9 (DeepSeekV4 glue) will adapt :class:`MoEDecoderLayer` to expose these
-    callables. ``hc_mult == 1`` short-circuits to a plain pre-norm residual
-    block, which makes the wrapper structurally compatible with non-HC models
-    and gives a clean degenerate-equivalence anchor for unit tests.
-
-    Args:
-        inner (nn.Module): Module exposing ``attn_block`` and ``ffn_block`` as
-            described above.
-        hc_cfg (HCWrapperConfig): HC hyper-parameters.
-        hidden_size (int): Hidden size ``D`` of a single stream.
-    """
-
-    def __init__(self, inner: nn.Module, hc_cfg: HCWrapperConfig, hidden_size: int):
-        super().__init__()
-        self.inner = inner
-        self.hc_mult = hc_cfg.hc_mult
-        self.hc_eps = hc_cfg.hc_eps
-        self.hc_sinkhorn_iters = hc_cfg.hc_sinkhorn_iters
-        self.hidden_size = hidden_size
-
-        mix_dim = (2 + self.hc_mult) * self.hc_mult
-        hc_dim = self.hc_mult * hidden_size
-
-        # V4 stores HC parameters in fp32 even when the rest of the model is bf16
-        # (reference: model.py:Block.__init__ uses `with set_dtype(torch.float32)`),
-        # because Sinkhorn over 20 iterations is bf16-unstable. We match that.
-        fp32 = torch.float32
-        self.hc_attn_fn = nn.Parameter(torch.zeros(mix_dim, hc_dim, dtype=fp32))
-        self.hc_attn_base = nn.Parameter(torch.zeros(mix_dim, dtype=fp32))
-        self.hc_attn_scale = nn.Parameter(torch.zeros(3, dtype=fp32))
-        self.hc_ffn_fn = nn.Parameter(torch.zeros(mix_dim, hc_dim, dtype=fp32))
-        self.hc_ffn_base = nn.Parameter(torch.zeros(mix_dim, dtype=fp32))
-        self.hc_ffn_scale = nn.Parameter(torch.zeros(3, dtype=fp32))
-
-        # Degenerate-safe init: scale[0]=1 (pre) keeps the pre-weight derivative non-zero
-        # so training can move it off the all-zero attractor; scale[1]=scale[2]=0 makes
-        # post and comb start from constant uniform values rather than random softmax noise.
-        with torch.no_grad():
-            self.hc_attn_scale[0] = 1.0
-            self.hc_ffn_scale[0] = 1.0
-
-    def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        """Run one attention-then-FFN HC-wrapped pass.
-
-        Args:
-            x (Tensor): HC-expanded hidden states, shape ``[B, S, hc_mult, hidden_size]``.
-            *args: Extra positional arguments forwarded to both ``inner.attn_block`` and ``inner.ffn_block``.
-            **kwargs: Extra keyword arguments forwarded the same way.
-
-        Returns:
-            Tensor: HC-expanded hidden states, shape ``[B, S, hc_mult, hidden_size]``.
-        """
-        if self.hc_mult == 1:
-            # Degenerate path: H=1 carries no mixing information. Bypass the HC math
-            # entirely and apply the plain pre-norm residual, matching how non-HC
-            # decoder blocks behave. This is the structural anchor used by
-            # `test_hc_mult_1_equals_plain_residual`.
-            return self._plain_residual_forward(x, *args, **kwargs)
-
-        # nn.Module.__getattr__ erases the `attn_block`/`ffn_block` attributes for the
-        # type checker; cast to the structural protocol that documents the contract.
-        inner = cast(HCInnerBlock, self.inner)
-
-        # Hoist DTensor.full_tensor() out of the compile region: doing it here
-        # (eager) lets `hc_pre` stay a single contiguous compiled graph instead
-        # of breaking three times mid-trace for each HC param under FSDP/EP.
-        attn_fn, attn_scale, attn_base = _unshard_hc_params(
-            self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
-        )
-        ffn_fn, ffn_scale, ffn_base = _unshard_hc_params(
-            self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
-        )
-
-        residual = x
-        x_reduced, post_a, comb_a = hc_pre(
-            x,
-            attn_fn,
-            attn_scale,
-            attn_base,
-            self.hc_mult,
-            self.hc_sinkhorn_iters,
-            self.hc_eps,
-        )
-        attn_out = inner.attn_block(x_reduced, *args, **kwargs)
-        x = hc_post(attn_out, residual, post_a, comb_a)
-
-        residual = x
-        x_reduced, post_f, comb_f = hc_pre(
-            x,
-            ffn_fn,
-            ffn_scale,
-            ffn_base,
-            self.hc_mult,
-            self.hc_sinkhorn_iters,
-            self.hc_eps,
-        )
-        ffn_out = inner.ffn_block(x_reduced, *args, **kwargs)
-        x = hc_post(ffn_out, residual, post_f, comb_f)
-        return x
-
-    def _plain_residual_forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        inner = cast(HCInnerBlock, self.inner)
-        # Squeeze the singleton hc axis so the inner sub-blocks see a clean [B, S, D] tensor.
-        x_single = x.squeeze(-2)
-        x_single = x_single + inner.attn_block(x_single, *args, **kwargs)
-        x_single = x_single + inner.ffn_block(x_single, *args, **kwargs)
-        return x_single.unsqueeze(-2)

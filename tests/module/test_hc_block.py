@@ -1,34 +1,34 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""Unit tests for :class:`xtuner.v1.module.decoder_layer.hc_block.HCDecoderLayer`."""
+"""Unit tests for :func:`xtuner.v1.module.decoder_layer.hc_block.hc_pre` and
+:func:`hc_post`.
+
+These tests exercise the HC residual-mix math directly as functions; the
+previous test surface (``HCDecoderLayer`` wrapping a mock attn+ffn inner
+block) was removed when the V4 layer was consolidated and the class no
+longer exists. The math is the same; the test fixture now constructs the
+HC parameters explicitly and calls ``hc_pre`` / ``hc_post`` in the same
+order :class:`xtuner.v1.model.moe.deepseek_v4.V4DecoderLayer.forward`
+does.
+"""
 
 import torch
 import torch.nn as nn
 
-from xtuner.v1.module.decoder_layer import HCDecoderLayer, HCWrapperConfig
+from xtuner.v1.module.decoder_layer import HCWrapperConfig, hc_post, hc_pre
 
 
-class MockBlock(nn.Module):
-    """Minimal inner-block stub that satisfies the ``HCDecoderLayer`` contract.
-
-    Exposes ``attn_block`` and ``ffn_block`` as ``[B, S, D]`` → ``[B, S, D]``
-    callables that include an internal RMS-style norm followed by a linear
-    projection — enough to exercise the wrapper without dragging in
-    ``MoEDecoderLayer`` and its dispatcher / EP dependencies.
-    """
+class _MockSubBlock(nn.Module):
+    """Minimal ``[B, S, D] -> [B, S, D]`` callable used as a stand-in for the
+    attn / ffn sub-block inside the HC residual pattern."""
 
     def __init__(self, hidden_size: int, *, seed: int = 0):
         super().__init__()
         torch.manual_seed(seed)
-        self.input_layernorm = _RMSNorm(hidden_size)
-        self.post_attention_layernorm = _RMSNorm(hidden_size)
-        self.self_attn = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.mlp = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.norm = _RMSNorm(hidden_size)
+        self.proj = nn.Linear(hidden_size, hidden_size, bias=False)
 
-    def attn_block(self, x: torch.Tensor) -> torch.Tensor:
-        return self.self_attn(self.input_layernorm(x))
-
-    def ffn_block(self, x: torch.Tensor) -> torch.Tensor:
-        return self.mlp(self.post_attention_layernorm(x))
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.norm(x))
 
 
 class _RMSNorm(nn.Module):
@@ -43,99 +43,102 @@ class _RMSNorm(nn.Module):
         return (x_f * rms).to(x.dtype) * self.weight
 
 
-class TestHCDecoderLayer:
-    def test_hc_mult_1_equals_plain_residual(self):
-        """``hc_mult=1`` must structurally degenerate to a plain pre-norm residual block."""
-        hidden = 32
-        torch.manual_seed(123)
-        inner = MockBlock(hidden_size=hidden, seed=7)
-        cfg = HCWrapperConfig(hc_mult=1)
-        wrapper = HCDecoderLayer(inner=inner, hc_cfg=cfg, hidden_size=hidden)
+def _make_hc_params(hc_mult: int, hidden_size: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build (hc_fn, hc_scale, hc_base) at the V4DecoderLayer's documented
+    degenerate init: zeros plus ``scale[0] = 1`` so ``hc_pre`` produces a
+    uniform mean over the streams instead of softmax noise."""
+    mix_dim = (2 + hc_mult) * hc_mult
+    hc_dim = hc_mult * hidden_size
+    hc_fn = torch.zeros(mix_dim, hc_dim, dtype=torch.float32)
+    hc_base = torch.zeros(mix_dim, dtype=torch.float32)
+    hc_scale = torch.zeros(3, dtype=torch.float32)
+    hc_scale[0] = 1.0
+    return hc_fn, hc_scale, hc_base
 
-        x_single = torch.randn(2, 4, hidden, dtype=torch.float32)
-        x_hc = x_single.unsqueeze(-2)  # [B, S, 1, D]
 
-        wrapper_out = wrapper(x_hc).squeeze(-2)
+def _apply_hc_pair(
+    x: torch.Tensor,
+    sub_block: nn.Module,
+    cfg: HCWrapperConfig,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+) -> torch.Tensor:
+    """Run one ``hc_pre`` → sub_block → ``hc_post`` pass, the same pattern
+    :class:`V4DecoderLayer.forward` uses for both the attn and ffn halves."""
+    residual = x
+    x_reduced, post, comb = hc_pre(
+        x, hc_fn, hc_scale, hc_base, cfg.hc_mult, cfg.hc_sinkhorn_iters, cfg.hc_eps
+    )
+    out = sub_block(x_reduced)
+    return hc_post(out, residual, post, comb)
 
-        # Reference plain pre-norm residual computed without HC machinery.
-        ref = x_single + inner.attn_block(x_single)
-        ref = ref + inner.ffn_block(ref)
 
-        torch.testing.assert_close(wrapper_out, ref, atol=1e-5, rtol=1e-5)
-
-    def test_zero_init_passes_through(self):
-        """With the documented degenerate init the wrapper output stays finite and matches
-        the analytic ``post=1, pre=0.5+eps, comb=1/H`` HC-mean prediction."""
+class TestHCResidualMath:
+    def test_zero_init_passes_through(self) -> None:
+        """With the documented degenerate init, ``hc_pre`` produces a uniform
+        ``0.5 + eps`` weight per stream and ``hc_post`` produces a per-stream
+        ``post=1, comb=1/H`` mix. Closed form: each output stream =
+        ``sub_block((0.5+eps) * H * mean_h x[h]) + mean_h x[h]``."""
         hidden = 16
         hc_mult = 4
         torch.manual_seed(2024)
-        inner = MockBlock(hidden_size=hidden, seed=3)
+        sub_block = _MockSubBlock(hidden_size=hidden, seed=3)
         cfg = HCWrapperConfig(hc_mult=hc_mult)
-        wrapper = HCDecoderLayer(inner=inner, hc_cfg=cfg, hidden_size=hidden)
+        hc_fn, hc_scale, hc_base = _make_hc_params(hc_mult, hidden)
 
-        # Sanity: documented init left hc_*_fn / hc_*_base at 0 and only scale[0]=1.
-        assert torch.equal(wrapper.hc_attn_fn, torch.zeros_like(wrapper.hc_attn_fn))
-        assert torch.equal(wrapper.hc_attn_base, torch.zeros_like(wrapper.hc_attn_base))
-        assert torch.equal(wrapper.hc_ffn_fn, torch.zeros_like(wrapper.hc_ffn_fn))
-        assert torch.equal(wrapper.hc_ffn_base, torch.zeros_like(wrapper.hc_ffn_base))
-        torch.testing.assert_close(wrapper.hc_attn_scale, torch.tensor([1.0, 0.0, 0.0]))
-        torch.testing.assert_close(wrapper.hc_ffn_scale, torch.tensor([1.0, 0.0, 0.0]))
+        # Feed uniform streams so the closed form is tractable: streams are
+        # identical so ``mean_h x[h] == x[:, :, 0, :]`` and ``sum_h x[h] == H * x[:, :, 0, :]``.
+        x_single = torch.randn(1, 4, 1, hidden, dtype=torch.float32)
+        x_uniform = x_single.expand(1, 4, hc_mult, hidden).contiguous()
 
-        x = torch.randn(1, 4, hc_mult, hidden, dtype=torch.float32)
-        out = wrapper(x)
+        out = _apply_hc_pair(x_uniform, sub_block, cfg, hc_fn, hc_scale, hc_base)
 
-        assert out.shape == x.shape
+        assert out.shape == x_uniform.shape
         assert torch.isfinite(out).all()
 
-        # Closed-form prediction under zero init: pre=0.5+eps (uniform), post=1, comb=1/H.
-        # hc_pre output `y = (0.5+eps) * sum_h x[:,:,h]`; in degenerate state all h
-        # streams are identical (we will check that explicitly below by feeding a uniform x).
-        x_uniform = torch.randn(1, 4, 1, hidden, dtype=torch.float32).expand(1, 4, hc_mult, hidden).contiguous()
-        out_uniform = wrapper(x_uniform)
-        x_single = x_uniform[:, :, 0, :]
-        # With uniform streams: sum_h x[:,:,h] = H * x_single, pre=0.5+eps -> y = (0.5+eps)*H*x_single.
-        y_attn = (0.5 + cfg.hc_eps) * hc_mult * x_single
-        attn_out = inner.attn_block(y_attn)
-        # After hc_post (post=1, comb=1/H), each output stream = attn_out + mean_h(x_uniform) = attn_out + x_single.
-        post_attn_stream = attn_out + x_single
-        # Repeat for FFN.
-        # New uniform residual: each stream equals post_attn_stream.
-        y_ffn = (0.5 + cfg.hc_eps) * hc_mult * post_attn_stream
-        ffn_out = inner.ffn_block(y_ffn)
-        expected_stream = ffn_out + post_attn_stream
+        # Closed-form prediction. ``hc_pre`` weight per stream is ``0.5 + eps``,
+        # so the reduced input is ``(0.5+eps) * H * x_single``. After hc_post:
+        # each output stream = ``sub_block_out + mean_h(x_uniform) = sub_block_out + x_single``.
+        x_reduced_expected = (0.5 + cfg.hc_eps) * hc_mult * x_single.squeeze(-2)
+        sub_out = sub_block(x_reduced_expected)
+        expected_stream = sub_out + x_single.squeeze(-2)
 
         for h in range(hc_mult):
-            torch.testing.assert_close(out_uniform[:, :, h, :], expected_stream, atol=1e-4, rtol=1e-4)
+            torch.testing.assert_close(out[:, :, h, :], expected_stream, atol=1e-4, rtol=1e-4)
 
-    def test_forward_shapes(self):
+    def test_forward_shapes(self) -> None:
         hidden = 128
         hc_mult = 4
         torch.manual_seed(0)
-        inner = MockBlock(hidden_size=hidden, seed=11)
+        sub_block = _MockSubBlock(hidden_size=hidden, seed=11)
         cfg = HCWrapperConfig(hc_mult=hc_mult)
-        wrapper = HCDecoderLayer(inner=inner, hc_cfg=cfg, hidden_size=hidden)
+        hc_fn, hc_scale, hc_base = _make_hc_params(hc_mult, hidden)
 
         x = torch.randn(1, 4, hc_mult, hidden, dtype=torch.float32)
-        out = wrapper(x)
+        out = _apply_hc_pair(x, sub_block, cfg, hc_fn, hc_scale, hc_base)
+
         assert out.shape == (1, 4, hc_mult, hidden)
         assert torch.isfinite(out).all()
 
-    def test_grad_flows(self):
+    def test_grad_flows(self) -> None:
+        """Push the HC mix params off the zero attractor and verify gradients
+        flow back into ``hc_fn`` through the ``hc_pre`` + sub_block + ``hc_post``
+        chain."""
         hidden = 32
         hc_mult = 4
         torch.manual_seed(0)
-        inner = MockBlock(hidden_size=hidden, seed=5)
+        sub_block = _MockSubBlock(hidden_size=hidden, seed=5)
         cfg = HCWrapperConfig(hc_mult=hc_mult)
-        wrapper = HCDecoderLayer(inner=inner, hc_cfg=cfg, hidden_size=hidden)
-
-        # Push hc_attn_fn off the zero attractor so its gradient is non-trivial.
-        with torch.no_grad():
-            wrapper.hc_attn_fn.add_(0.01 * torch.randn_like(wrapper.hc_attn_fn))
+        hc_fn, hc_scale, hc_base = _make_hc_params(hc_mult, hidden)
+        hc_fn = (hc_fn + 0.01 * torch.randn_like(hc_fn)).requires_grad_(True)
+        hc_scale = hc_scale.requires_grad_(True)
+        hc_base = hc_base.requires_grad_(True)
 
         x = torch.randn(1, 4, hc_mult, hidden, dtype=torch.float32, requires_grad=True)
-        out = wrapper(x)
+        out = _apply_hc_pair(x, sub_block, cfg, hc_fn, hc_scale, hc_base)
         out.sum().backward()
 
-        assert wrapper.hc_attn_fn.grad is not None
-        assert torch.isfinite(wrapper.hc_attn_fn.grad).all()
-        assert wrapper.hc_attn_fn.grad.abs().sum().item() > 0.0
+        assert hc_fn.grad is not None
+        assert torch.isfinite(hc_fn.grad).all()
+        assert hc_fn.grad.abs().sum().item() > 0.0
