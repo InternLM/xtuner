@@ -47,9 +47,10 @@ trainer = TrainerConfig(
     loss_cfg=loss_cfg,
     tokenizer_path=QWEN3_MOE_PATH,
     global_batch_size=16,
-    total_epoch=1,
+    total_step=int(os.environ.get("TOTAL_STEPS", "40")),
     work_dir=f"{os.environ['WORK_DIR']}",
     seed=0,
-    checkpoint_interval=10,
-    checkpoint_maxkeep=2,
+    checkpoint_interval=int(os.environ.get("CKPT_INTERVAL", "10")),
+    checkpoint_maxkeep=1,
+    async_checkpoint=os.environ.get("ASYNC_CHECKPOINT", "0") == "1",
 )

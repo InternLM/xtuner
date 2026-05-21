@@ -310,15 +310,15 @@ class TestMoEEngine(DeterministicDDPTestCase):
 
             engine.from_hf(load_from, strict=not tiny_model)
             dist.barrier()
-            model_dir, optimizer_dir = tmpdir / "model", tmpdir / "optimizer"
-            engine.save_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir)
+            weights_dir = tmpdir / "weights"
+            engine.save_dcp(weights_dir=weights_dir)
 
             dist.barrier()
             time.sleep(1)
 
             engine2 = create_engine_from_hf(load_from, dispatcher, ep_size, tiny=tiny_model)
             engine2.init_model_weights()
-            engine2.load_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir)
+            engine2.load_dcp(weights_dir=weights_dir)
             # 3. check
             # check the model state
             state_dict = engine.model.state_dict()
@@ -379,8 +379,7 @@ class TestMoEEngine(DeterministicDDPTestCase):
             temp_dir = [None]
         dist.broadcast_object_list(temp_dir, src=0)
         temp_dir = Path(temp_dir[0])
-        model_dir = temp_dir / "model"
-        optimizer_dir = temp_dir / "optimizer"
+        weights_dir = temp_dir / "weights"
         moe_cfg = Qwen3MoE30BA3Config(
             num_hidden_layers=2,
         )
@@ -394,7 +393,7 @@ class TestMoEEngine(DeterministicDDPTestCase):
             fsdp_cfg=fsdp_cfg,
         )
         engine.init_model_weights()
-        engine.save_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir)
+        engine.save_dcp(weights_dir=weights_dir)
         dist.barrier()
         time.sleep(1)
 
@@ -406,7 +405,7 @@ class TestMoEEngine(DeterministicDDPTestCase):
             optim_cfg=optim_cfg2,
             fsdp_cfg=fsdp_cfg,
         )
-        engine2.load_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir, load_args=False)
+        engine2.load_dcp(weights_dir=weights_dir, load_args=False)
         assert len(engine.optimizer.state) == len(engine2.optimizer.state)
         assert len(engine.optimizer.state) != 0
         for param_group in engine2.optimizer.param_groups:
@@ -421,7 +420,7 @@ class TestMoEEngine(DeterministicDDPTestCase):
             optim_cfg=optim_cfg3,
             fsdp_cfg=fsdp_cfg,
         )
-        engine3.load_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir, load_states=False)
+        engine3.load_dcp(weights_dir=weights_dir, load_states=False)
         assert len(engine3.optimizer.state) == 0
         for param_group in engine3.optimizer.param_groups:
             assert param_group['lr'] == lr1
