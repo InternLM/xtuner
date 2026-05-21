@@ -26,6 +26,7 @@ from .base import (
     PreCombineResult,
     PreDispatchResult,
 )
+from .expert_tp import ExpertTP
 
 
 if get_device() == "npu":
@@ -50,6 +51,8 @@ class DeepEPDispatchResult(DispatchResult):
     handle: DeepEPHandle
     topk_ids: torch.Tensor
     num_recv_tokens_per_expert_list: list[int]
+    num_recv_tokens_per_expert_group: torch.Tensor
+    tp_rank_row_counts: list[int]
     forward_finished_event: EventOverlap | None
 
 
@@ -258,6 +261,7 @@ class DeepEPDispatcher(
         *,
         n_routed_experts: int,
         process_group: torch.distributed.ProcessGroup,
+        tp_group: torch.distributed.ProcessGroup | None = None,
         training_dtype: Literal["fp8", "bf16"] = "bf16",
         generate_dtype: Literal["fp8", "bf16"] = "bf16",
     ):
@@ -273,6 +277,7 @@ class DeepEPDispatcher(
             "Process group must be provided for `DeepEPDispatcher`. "
             "If you are training a MoE model, it means that `expert parallel` is not enabled in the config."
         )
+        self._expert_tp = ExpertTP(tp_group) if tp_group is not None and tp_group.size() > 1 else None
 
     @override
     def dispatch_preprocess(
@@ -313,6 +318,9 @@ class DeepEPDispatcher(
         async_op: bool = False,
         decoding: bool = False,
     ) -> DeepEPDispatchResult:
+        if async_op and self._expert_tp is not None:
+            raise NotImplementedError("DeepEP + ExpertTP async dispatcher path is tracked separately.")
+
         (
             dispatched_hidden_states,
             dispatched_topk_idx,
@@ -336,12 +344,39 @@ class DeepEPDispatcher(
         else:
             forward_finished_event = event
 
+        tp_rank_row_counts = [cast(HiddenStates, dispatched_hidden_states).shape[0]]
+        num_recv_tokens_per_expert = torch.tensor(
+            num_recv_tokens_per_expert_list,
+            dtype=torch.long,
+            device=dispatched_topk_weights.device,
+        )
+        num_recv_tokens_per_expert_group = num_recv_tokens_per_expert.unsqueeze(0)
+        if self._expert_tp is not None:
+            # 中文注释：DeepEP dispatch 后的 hidden/topK 仍处于 received source-token row 空间；
+            # 这里的 TP rank row counts 记录 source-token rows，不记录 topK 展开后的 route-copy rows。
+            dispatched_hidden_states = cast(HiddenStates, dispatched_hidden_states)
+            tp_rank_row_counts = self._expert_tp.gather_tp_rank_row_counts(dispatched_hidden_states)
+            dispatched_hidden_states, _ = self._expert_tp.all_gather_rows(
+                dispatched_hidden_states,
+                tp_rank_row_counts,
+            )
+            dispatched_topk_idx = self._expert_tp.all_gather_row_metadata(dispatched_topk_idx, tp_rank_row_counts)
+            dispatched_topk_weights, _ = self._expert_tp.all_gather_rows(
+                dispatched_topk_weights,
+                tp_rank_row_counts,
+            )
+            num_recv_tokens_per_expert_group = self._expert_tp.all_gather_per_rank_metadata(
+                num_recv_tokens_per_expert,
+            )
+
         ret = DeepEPDispatchResult(
             hidden_states=cast(HiddenStates, dispatched_hidden_states),
             topk_weights=dispatched_topk_weights,
             topk_ids=dispatched_topk_idx,
             handle=dispatch_handle,
             num_recv_tokens_per_expert_list=num_recv_tokens_per_expert_list,
+            num_recv_tokens_per_expert_group=num_recv_tokens_per_expert_group,
+            tp_rank_row_counts=tp_rank_row_counts,
             forward_finished_event=forward_finished_event,
         )
         return ret
@@ -359,8 +394,17 @@ class DeepEPDispatcher(
             assert dispatched["forward_finished_event"] is not None, "Please use `async_op=True` for dispatch!"
             dispatched["forward_finished_event"].current_stream_wait()
 
-        num_recv_tokens_per_expert_list = dispatched["num_recv_tokens_per_expert_list"]
-        num_out_tokens = sum(dispatched["num_recv_tokens_per_expert_list"])
+        if self._expert_tp is not None:
+            tokens_per_expert = dispatched["num_recv_tokens_per_expert_group"].sum(dim=0).to(torch.long)
+            num_out_tokens = int(tokens_per_expert.sum().item())
+        else:
+            num_recv_tokens_per_expert_list = dispatched["num_recv_tokens_per_expert_list"]
+            num_out_tokens = sum(num_recv_tokens_per_expert_list)
+            tokens_per_expert = torch.tensor(
+                num_recv_tokens_per_expert_list,
+                dtype=torch.long,
+                device=dispatched["topk_weights"].device,
+            )
         recv_topk_idx_numel = dispatched["topk_ids"].numel()
         num_neg_one_idx = recv_topk_idx_numel - num_out_tokens
 
@@ -369,11 +413,6 @@ class DeepEPDispatcher(
             dispatched["topk_ids"].int(),
             num_out_tokens=num_out_tokens,
             num_negative_one_in_indices=num_neg_one_idx,
-        )
-        tokens_per_expert = torch.tensor(
-            num_recv_tokens_per_expert_list,
-            dtype=torch.long,
-            device=dispatched["topk_weights"].device,
         )
 
         if decoding:
@@ -444,8 +483,17 @@ class DeepEPDispatcher(
         else:
             backward_previous_event = None
 
+        hidden_states_for_combine = pre_combined["hidden_states"]
+        if self._expert_tp is not None:
+            # 中文注释：combine 阶段先把各 ExpertTP rank 的 expert partial output 做
+            # TP ReduceScatterRowsSum，回到当前 rank 的 DeepEP received source-token rows。
+            hidden_states_for_combine = self._expert_tp.reduce_scatter_rows_sum(
+                hidden_states_for_combine,
+                dispatched["tp_rank_row_counts"],
+            )
+
         combined_hidden_states, event = _async_combine(
-            pre_combined["hidden_states"],
+            hidden_states_for_combine,
             self._n_routed_experts,
             dispatched["handle"],
             self._process_group,

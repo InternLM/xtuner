@@ -59,6 +59,7 @@ def build_dispatcher(
         return DeepEPDispatcher(
             n_routed_experts=n_routed_experts,
             process_group=ep_group,
+            tp_group=tp_group,
             training_dtype=training_dtype,
             generate_dtype=generate_dtype,
         )  # type: ignore
