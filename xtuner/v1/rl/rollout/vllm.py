@@ -256,7 +256,7 @@ class vLLMWorker(RolloutWorker):
         return response.text
 
     def pause_generation(self):
-        pass
+        self.receive_abort_request.set()
 
     def continue_generation(self):
         # 恢复生成时必须清掉上一轮 abort 标志，否则新请求会在发送前被本地直接标成 ABORTED。

@@ -62,6 +62,11 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._evaluate_step = 1
         trainer._debug_rollout = False
         trainer._display_all_workers_log = False
+        trainer._num_workers = 1.0
+        trainer._rollout_num_workers = 1.0
+        trainer._benchmark_start_time_s = 100.0
+        trainer._benchmark_training_samples = 0
+        trainer._benchmark_training_tokens = 0
         trainer._cpu_resource_manager = None
         trainer._train_worker_cfg = SimpleNamespace(pack_max_length=16)
         trainer._meta = SimpleNamespace(
@@ -87,12 +92,38 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         )
         trainer.rollout_controller = SimpleNamespace(
             recover_failed_workers=SimpleNamespace(remote=MagicMock(return_value="recover")),
+            pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause")),
+            continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue")),
             onload_weights=SimpleNamespace(remote=MagicMock(return_value="onload_weights")),
             onload_kvcache=SimpleNamespace(remote=MagicMock(return_value="onload_kvcache")),
-            pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause_generation")),
-            continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue_generation")),
         )
         return trainer
+
+    def _minimal_train_info(
+        self,
+        *,
+        training_samples: int,
+        training_tokens: int,
+    ):
+        return {
+            "data_info": {
+                "batch_size": training_samples,
+                "rewards/mean": 1.0,
+                "training_samples": training_samples,
+                "training_tokens": training_tokens,
+                "benchmark_end_time_s": 108.0,
+            },
+            "workers_log_item": [
+                {
+                    "rollout_is_metrics": {},
+                    "mismatch_metrics": {},
+                    "rollout_entropy": 0.0,
+                    "train_entropy": 0.0,
+                    "train_metrics": [],
+                    "sft_train_metrics": {},
+                }
+            ],
+        }
 
     def test_sync_weights_and_save_saves_before_update_weights(self):
         manager = _FakeManager([])
@@ -128,6 +159,26 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._sync_weights_and_save.assert_awaited_once()
         self.assertIn(("continue_produce", 1), manager.calls)
         self.assertIn("produce_loop_exit", manager.calls)
+
+    def test_log_step_records_pause_time_without_group_timing(self):
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer._log_step = RLDisaggregatedTrainer._log_step.__get__(trainer, RLDisaggregatedTrainer)
+
+        trainer._log_step(
+            train_step=1,
+            step_timer_dict={},
+            produce_result=ProduceBatchResult(
+                rollout_states=[],
+                status=ProduceBatchStatus.EXPIRED_BATCH,
+                group_gen_pause_time_s=1.5,
+            ),
+            train_info={},
+            eval_info={},
+        )
+
+        logged_scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
+        self.assertEqual(logged_scalars["timing/pause_s"], 1.5)
+        self.assertNotIn("timing/task_n", logged_scalars)
 
     def test_fit_runs_eval_before_reset_and_stops_producer(self):
         # 确定性排序依赖 RolloutState 的 message_uid 和 uid，测试用轻量对象模拟即可。
@@ -165,6 +216,42 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertEqual(events, ["sync", "eval", "continue_produce"])
         self.assertTrue(manager._finish_event.is_set())
         self.assertIn("produce_loop_exit", manager.calls)
+
+    def test_log_step_records_disaggregated_effective_e2e_window(self):
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer._log_step = RLDisaggregatedTrainer._log_step.__get__(trainer, RLDisaggregatedTrainer)
+        trainer._num_workers = 3.0
+        trainer._rollout_num_workers = 2.0
+
+        trainer._log_step(
+            train_step=1,
+            step_timer_dict={
+                "step": 10.0,
+                "get_batch": 5.0,
+                "prepare_data": 1.0,
+                "training": 2.0,
+            },
+            produce_result=ProduceBatchResult(
+                rollout_states=[],
+                produced_samples=4,
+                produced_tokens=120,
+                produce_time_s=4.0,
+            ),
+            train_info=self._minimal_train_info(
+                training_samples=3,
+                training_tokens=60,
+            ),
+            eval_info={},
+        )
+
+        scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
+        self.assertEqual(scalars["throughput/e2e_effective_samples_per_s"], 0.375)
+        self.assertEqual(scalars["throughput/e2e_effective_tgs"], 2.5)
+        self.assertEqual(scalars["throughput/effective_samples_per_s"], 0.3)
+        self.assertEqual(scalars["throughput/effective_tgs"], 2.0)
+        self.assertEqual(scalars["throughput/training_tgs"], 10.0)
+        self.assertEqual(scalars["throughput/rollout_samples_per_s"], 1.0)
+        self.assertEqual(scalars["throughput/rollout_tgs"], 15.0)
 
     def test_update_weights_pauses_generation_without_onloading_rollout(self):
         manager = _FakeManager([])

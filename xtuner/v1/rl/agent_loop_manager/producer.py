@@ -22,7 +22,6 @@ from xtuner.v1.data_proto.rl_data import (
 )
 from xtuner.v1.rl.agent_loop import AgentLoopSpec, get_agent_loop_rollout_ctl
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
-from xtuner.v1.rl.rollout.utils import pause_generation
 from xtuner.v1.rl.utils import calculate_seq_staleness, create_task
 from xtuner.v1.utils import get_logger
 
@@ -97,6 +96,9 @@ class ProduceProgress:
     - target_upto_future_step：target_samples 已覆盖到的最大 future step。
     - raw_rewards_sum / raw_rewards_count：各 task 自上次 consumer 取 batch 后，producer 实际生成出的
       completed group reward 统计。filtered group 在过滤前仍按 completed 生成结果计入。
+    - produced_samples / produced_tokens：各 task 自上次 consumer 取 batch 后，producer 实际返回的样本数和
+      response token 数，包含 filtered / aborted / 未被训练消费的 completed 样本。
+    - produce_time_s：自上次 consumer 取 batch 后，producer 实际执行 produce_batch 的累计 wall time。
     """
 
     next_consumer_step: int = 1
@@ -106,6 +108,9 @@ class ProduceProgress:
     target_upto_future_step: int = 0
     raw_rewards_sum: dict[str, float] = field(default_factory=dict)
     raw_rewards_count: dict[str, int] = field(default_factory=dict)
+    produced_samples: dict[str, int] = field(default_factory=dict)
+    produced_tokens: dict[str, int] = field(default_factory=dict)
+    produce_time_s: float = 0.0
 
     @classmethod
     def build(cls, task_names: list[str]) -> "ProduceProgress":
@@ -114,6 +119,8 @@ class ProduceProgress:
             target_samples={task_name: 0 for task_name in task_names},
             raw_rewards_sum={task_name: 0.0 for task_name in task_names},
             raw_rewards_count={task_name: 0 for task_name in task_names},
+            produced_samples={task_name: 0 for task_name in task_names},
+            produced_tokens={task_name: 0 for task_name in task_names},
         )
 
     @classmethod
@@ -132,6 +139,8 @@ class ProduceProgress:
             target_upto_future_step=train_step,
             raw_rewards_sum={task_name: 0.0 for task_name in task_names},
             raw_rewards_count={task_name: 0 for task_name in task_names},
+            produced_samples={task_name: 0 for task_name in task_names},
+            produced_tokens={task_name: 0 for task_name in task_names},
         )
 
     def ensure_target_upto(
@@ -164,6 +173,25 @@ class ProduceProgress:
         self.raw_rewards_sum[task_name] += rewards_sum
         self.raw_rewards_count[task_name] += rewards_count
 
+    def add_produced(self, task_name: str, samples: int, tokens: int) -> None:
+        self.produced_samples[task_name] += samples
+        self.produced_tokens[task_name] += tokens
+
+    def add_produce_time(self, elapsed_s: float) -> None:
+        self.produce_time_s += elapsed_s
+
+    def consume_produced(self, task_name: str) -> tuple[int, int]:
+        samples = self.produced_samples[task_name]
+        tokens = self.produced_tokens[task_name]
+        self.produced_samples[task_name] = 0
+        self.produced_tokens[task_name] = 0
+        return samples, tokens
+
+    def consume_produce_time(self) -> float:
+        produce_time_s = self.produce_time_s
+        self.produce_time_s = 0.0
+        return produce_time_s
+
     def consume_raw_rewards(self, task_name: str) -> tuple[float, int]:
         rewards_sum = self.raw_rewards_sum[task_name]
         rewards_count = self.raw_rewards_count[task_name]
@@ -186,6 +214,9 @@ class ProduceProgress:
             "target_upto_future_step": self.target_upto_future_step,
             "raw_rewards_sum": dict(self.raw_rewards_sum),
             "raw_rewards_count": dict(self.raw_rewards_count),
+            "produced_samples": dict(self.produced_samples),
+            "produced_tokens": dict(self.produced_tokens),
+            "produce_time_s": self.produce_time_s,
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -206,6 +237,17 @@ class ProduceProgress:
         self.raw_rewards_count.update(
             {task_name: int(state.get("raw_rewards_count", {}).get(task_name, 0)) for task_name in task_names}
         )
+        produced_samples_state = state.get("produced_samples", {})
+        produced_tokens_state = state.get("produced_tokens", {})
+        self.produced_samples.clear()
+        self.produced_samples.update(
+            {task_name: int(produced_samples_state.get(task_name, 0)) for task_name in task_names}
+        )
+        self.produced_tokens.clear()
+        self.produced_tokens.update(
+            {task_name: int(produced_tokens_state.get(task_name, 0)) for task_name in task_names}
+        )
+        self.produce_time_s = float(state.get("produce_time_s", 0.0))
 
 
 class ProduceBatchStatus(Enum):
@@ -341,6 +383,13 @@ class ProduceContext:
             current_train_step=self.consumer_step,
             stale_threshold=self.stale_threshold,
         )
+        produced_tokens = 0
+        for item in group:
+            response_ids = getattr(item, "response_ids", None)
+            if response_ids is None:
+                continue
+            produced_tokens += int(response_ids.numel()) if hasattr(response_ids, "numel") else len(response_ids)
+        self.progress.add_produced(self.task_name, samples=len(group), tokens=produced_tokens)
         # replay_buffer.put 可能把 stale group 转为 EXPIRED，返回前重新判断是否仍可训练。
         is_completed = get_group_status(group) == Status.COMPLETED
         return is_completed
@@ -607,6 +656,8 @@ class SyncProduceStrategy(ProduceStrategy):
 
 
 class AsyncProduceStrategy(ProduceStrategy):
+    PENDING_TASK_COLLECT_TIMEOUT_S = 300.0
+
     def __init__(
         self,
         over_sample_threshold: float,
@@ -638,7 +689,6 @@ class AsyncProduceStrategy(ProduceStrategy):
         self.stale_threshold = calculate_stale_threshold(max_staleness, sync_weights_interval)
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self._pending_tasks = _PendingTasks()
-        self.cleanup_task_time = 5 * 60  # 5 minutes
 
     def is_model_expired(self, train_step: int, model_step: int) -> bool:
         staleness = calculate_seq_staleness(model_step, train_step)
@@ -668,14 +718,21 @@ class AsyncProduceStrategy(ProduceStrategy):
             return 0.0
 
         rollout_ctl = await get_agent_loop_rollout_ctl(ctx.agent_loop)
-        await pause_generation(rollout_ctl)
+        await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
+
+        logger.info(
+            f"Pause signal sent for task {ctx.task_name}. Waiting for {self._pending_tasks.count()} pending tasks to complete..."
+        )
         cleanup_start_time = time.perf_counter()
+        aborted_count = 0
+        aborted_tokens_sum = 0
+        aborted_zero_token_count = 0
         while True:
             elapsed_time = time.perf_counter() - cleanup_start_time
-            if elapsed_time > self.cleanup_task_time:
+            if elapsed_time > self.PENDING_TASK_COLLECT_TIMEOUT_S:
                 cancelled_count = await self._pending_tasks.cancel_all()
                 logger.warning(
-                    f"Cleanup timeout of {self.cleanup_task_time}s reached. "
+                    f"Cleanup timeout of {self.PENDING_TASK_COLLECT_TIMEOUT_S}s reached. "
                     f"Forcefully cancelling {cancelled_count} remaining tasks."
                 )
                 break
@@ -687,16 +744,27 @@ class AsyncProduceStrategy(ProduceStrategy):
             for task in claimed_done:
                 paused_items = task.result()
                 for item in paused_items:
+                    if item.status == Status.ABORTED:
+                        token_count = len(item.response_ids or [])
+                        aborted_count += 1
+                        aborted_tokens_sum += token_count
+                        if token_count == 0:
+                            aborted_zero_token_count += 1
                     logger.debug(
                         f"[{self.__class__.__name__}] Task {ctx.task_name} | "
                         f"Collecting paused sample (uid: {item.uid}, status: {item.status}, "
                         f"length: {len(item.response_ids or [])}) after pausing generation."
                     )
                 await ctx.put_generated_group(paused_items)
-            if self._pending_tasks.count() > 0:
-                await pause_generation(rollout_ctl)
-                await asyncio.sleep(1)
-        return time.perf_counter() - pause_start
+        await rollout_ctl.cleanup_after_pause.remote()  # type: ignore[attr-defined]
+        pause_time = time.perf_counter() - pause_start
+        aborted_tokens_mean = aborted_tokens_sum / aborted_count if aborted_count > 0 else 0.0
+        logger.info(
+            f"pause_produce completed for task {ctx.task_name} within {pause_time}s. "
+            f"aborted_count={aborted_count}, aborted_tokens_mean={aborted_tokens_mean:.1f}, "
+            f"aborted_zero_token_count={aborted_zero_token_count}."
+        )
+        return pause_time
 
     async def produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:
         if ctx.task_name not in ctx.progress.consumed_samples:

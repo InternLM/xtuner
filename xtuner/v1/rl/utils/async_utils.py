@@ -58,6 +58,22 @@ def create_task(
     return task
 
 
+async def cancel_and_drain(tasks: list[Task | None]) -> None:
+    """Cancel tasks and consume their terminal exceptions.
+
+    Use this when a parent coroutine handles cancellation itself but owns child tasks that must not keep running in the
+    background.
+    """
+    tasks_to_drain = [task for task in tasks if task is not None]
+    if not tasks_to_drain:
+        return
+    for task in tasks_to_drain:
+        if task.done():
+            continue
+        task.cancel()
+    await asyncio.gather(*tasks_to_drain, return_exceptions=True)
+
+
 def _get_default_asyncio_loop() -> AbstractEventLoop:
     """Get a module-level event loop reused by ``asyncio_run``."""
     global _ASYNCIO_RUN_LOOP

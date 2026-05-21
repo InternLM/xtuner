@@ -13,7 +13,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop import AgentLoopConfig, AgentLoopSpec, get_agent_loop_rollout_ctl
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
-from xtuner.v1.rl.rollout import RolloutController, continue_generation, pause_generation
+from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import asyncio_run
 from xtuner.v1.utils import get_logger
 
@@ -50,6 +50,9 @@ class ProduceBatchResult:
         leftover_filtered (int): Number of filtered groups remaining in the replay buffer.
         raw_rewards_sum (float): Sum of rewards produced before replay-buffer insertion for the current window.
         raw_rewards_count (int): Number of reward-bearing samples included in ``raw_rewards_sum``.
+        produced_samples (int): Number of rollout samples produced in the current produce window.
+        produced_tokens (int): Number of response tokens produced in the current produce window.
+        produce_time_s (float): Wall-clock production time consumed by the current produce window.
     """
 
     rollout_states: list[list[RolloutState]]
@@ -71,6 +74,9 @@ class ProduceBatchResult:
     # rewards produced during the current produce window, including completed and filtered groups.
     raw_rewards_sum: float = 0.0
     raw_rewards_count: int = 0
+    produced_samples: int = 0
+    produced_tokens: int = 0
+    produce_time_s: float = 0.0
     task_batch_sizes: dict[str, int] | None = None
     task_results: dict[str, "ProduceBatchResult"] | None = None
 
@@ -492,6 +498,9 @@ class AgentLoopManager:
         total_pause_time_s = 0.0
         raw_rewards_sum = 0.0
         raw_rewards_count = 0
+        produced_samples = 0
+        produced_tokens = 0
+        produce_time_s = 0.0
 
         for task in ordered_tasks:
             result = task_results[task.task_name]
@@ -504,6 +513,9 @@ class AgentLoopManager:
             leftover_filtered += result.leftover_filtered
             raw_rewards_sum += result.raw_rewards_sum
             raw_rewards_count += result.raw_rewards_count
+            produced_samples += result.produced_samples
+            produced_tokens += result.produced_tokens
+            produce_time_s += result.produce_time_s
             if result.group_gen_count is not None and result.group_gen_mean_s is not None:
                 total_group_count += result.group_gen_count
                 weighted_group_mean_sum += result.group_gen_count * result.group_gen_mean_s
@@ -522,6 +534,9 @@ class AgentLoopManager:
             leftover_filtered=leftover_filtered,
             raw_rewards_sum=raw_rewards_sum,
             raw_rewards_count=raw_rewards_count,
+            produced_samples=produced_samples,
+            produced_tokens=produced_tokens,
+            produce_time_s=produce_time_s,
             task_results={task.task_name: task_results[task.task_name] for task in ordered_tasks},
         )
         if total_group_count > 0:
@@ -555,22 +570,26 @@ class AgentLoopManager:
         active_tasks = [task for task in self.task_runners if progress.target_samples[task.task_name] > 0]
         assert active_tasks, "No active tasks found"
 
-        statuses = await asyncio.gather(
-            *[
-                task.produce_strategy.produce_batch(
-                    _build_produce_context(
-                        task,
-                        self.replay_buffer,
-                        task_batch_sizes[task.task_name],
-                        current_future_step,
-                        model_step,
-                        self._update_event,
-                        progress,
+        produce_start = time.perf_counter()
+        try:
+            statuses = await asyncio.gather(
+                *[
+                    task.produce_strategy.produce_batch(
+                        _build_produce_context(
+                            task,
+                            self.replay_buffer,
+                            task_batch_sizes[task.task_name],
+                            current_future_step,
+                            model_step,
+                            self._update_event,
+                            progress,
+                        )
                     )
-                )
-                for task in active_tasks
-            ]
-        )
+                    for task in active_tasks
+                ]
+            )
+        finally:
+            progress.add_produce_time(time.perf_counter() - produce_start)
         return _aggregate_status(statuses)
 
     async def pause_produce(
@@ -653,28 +672,38 @@ class AgentLoopManager:
         if len(self.task_runners) == 1:
             task = self.task_runners[0]
             raw_rewards_sum, raw_rewards_count = progress.consume_raw_rewards(task.task_name)
+            produced_samples, produced_tokens = progress.consume_produced(task.task_name)
+            produce_time_s = progress.consume_produce_time()
             result = ProduceBatchResult(
                 rollout_states=batch_by_task.get(task.task_name, []),
                 raw_rewards_sum=raw_rewards_sum,
                 raw_rewards_count=raw_rewards_count,
+                produced_samples=produced_samples,
+                produced_tokens=produced_tokens,
+                produce_time_s=produce_time_s,
             )
             _fill_leftover_counts(result, leftover_counts.get(task.task_name, {}))
             _fill_group_timing_stats(result, result.rollout_states, pause_time_s=pause_time_s)
             return result
 
         task_results: dict[str, ProduceBatchResult] = {}
+        produce_time_s = progress.consume_produce_time()
         for task in self.task_runners:
             raw_rewards_sum, raw_rewards_count = progress.consume_raw_rewards(task.task_name)
+            produced_samples, produced_tokens = progress.consume_produced(task.task_name)
             result = ProduceBatchResult(
                 rollout_states=batch_by_task.get(task.task_name, []),
                 raw_rewards_sum=raw_rewards_sum,
                 raw_rewards_count=raw_rewards_count,
+                produced_samples=produced_samples,
+                produced_tokens=produced_tokens,
             )
             _fill_leftover_counts(result, leftover_counts.get(task.task_name, {}))
             task_results[task.task_name] = result
 
         ordered_tasks = sorted(self.task_runners, key=lambda task: (task.task_name, task.order))
         aggregated = self._aggregate_task_results(ordered_tasks, task_results)
+        aggregated.produce_time_s = produce_time_s
         aggregated.task_batch_sizes = {task.task_name: task_batch_sizes[task.task_name] for task in ordered_tasks}
         _fill_group_timing_stats(aggregated, aggregated.rollout_states, pause_time_s=pause_time_s)
         return aggregated
@@ -753,7 +782,7 @@ class AgentLoopManager:
 
         rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
         # TODO: put in self.continue_produce()
-        await continue_generation(rollout_ctl)
+        await rollout_ctl.continue_generation.remote()  # type: ignore[attr-defined]
         try:
             # 共卡路径不复用非共卡的 paused producer 状态机。
             # 即使 manager 是从 resume() 恢复出来、当前仍处在 UPDATE_WEIGHT_AND_ABORT，
@@ -784,7 +813,7 @@ class AgentLoopManager:
             )
         finally:
             # TODO: put in self.pause_produce()
-            await pause_generation(rollout_ctl)
+            await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
 
         self.logger.info(
             f"[AgentLoopManager][{self.name}] produce_batch done "
@@ -813,7 +842,7 @@ class AgentLoopManager:
                 continue
 
             rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
-            await continue_generation(rollout_ctl)
+            await rollout_ctl.continue_generation.remote()  # type: ignore[attr-defined]
             task_batch_sizes = self._produce_progress.ensure_target_upto(
                 batch_size=batch_size,
                 future_step=self._produce_progress.producer_future_step,
@@ -853,10 +882,15 @@ class AgentLoopManager:
 
         while not self._finish_event.is_set():
             if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
-                return ProduceBatchResult(
+                pause_time_s = self._pause_time_s
+                self._pause_time_s = 0.0
+                result = ProduceBatchResult(
                     rollout_states=[],
                     status=ProduceBatchStatus.EXPIRED_BATCH,
                 )
+                if pause_time_s > 0:
+                    result.group_gen_pause_time_s = pause_time_s
+                return result
             if await self.replay_buffer.is_ready(task_batch_sizes):
                 result = await self._get_batch_from_buffer(
                     batch_size=batch_size,
