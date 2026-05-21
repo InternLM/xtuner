@@ -331,6 +331,38 @@ def _copy_hf_to_xtuner_layer(
 # ─── Forward driver ─────────────────────────────────────────────────────────────
 
 
+def _build_sliding_causal_mask(
+    seq_len: int,
+    sliding_window: int,
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build a ``[1, 1, S, S]`` causal + sliding-window additive mask.
+
+    Cell ``(i, j)`` is ``0.0`` (allowed) iff ``j <= i`` and ``i - j < window``,
+    else ``-inf``. This matches what
+    :func:`transformers.create_sliding_window_causal_mask` produces in
+    ``DeepseekV4Model.forward`` — we build it directly here instead of going
+    through that helper because the helper expects a full ``inputs_embeds``
+    tensor and a ``past_key_values`` cache and we already have everything we
+    need.
+
+    Required because HF's ``eager_attention_forward`` does:
+        ``if attention_mask is not None: attn_weights += attention_mask``
+    — i.e. ``None`` means *no* mask, so HF would attend over the full
+    sequence (non-causal). XTuner's ``sparse_attn`` is causal by construction
+    (the topk_idxs only includes ``j <= i`` positions in its sliding window),
+    so to match HF must receive an explicit causal+window mask.
+    """
+    positions = torch.arange(seq_len, device=device)
+    rel = positions.unsqueeze(0) - positions.unsqueeze(1)   # rel[i, j] = j - i
+    valid = (rel <= 0) & (rel > -sliding_window)
+    mask = torch.zeros(seq_len, seq_len, dtype=dtype, device=device)
+    mask = mask.masked_fill(~valid, float("-inf"))
+    return mask.view(1, 1, seq_len, seq_len)
+
+
 def _run_hf_layer(
     hf_model: HFV4Model,
     layer_idx: int,
@@ -355,11 +387,17 @@ def _run_hf_layer(
         "main": hf_model.rotary_emb(hidden_states.flatten(2), position_ids=position_ids, layer_type="main"),
         "compress": hf_model.rotary_emb(hidden_states.flatten(2), position_ids=position_ids, layer_type="compress"),
     }
+    causal_mask = _build_sliding_causal_mask(
+        position_ids.shape[1],
+        hf_model.config.sliding_window,
+        dtype=hidden_states.dtype,
+        device=hidden_states.device,
+    )
     return hf_model.layers[layer_idx](
         hidden_states,
         position_embeddings=position_embeddings,
         position_ids=position_ids,
-        attention_mask=None,                  # eager-attention handles None as fully causal
+        attention_mask=causal_mask,
         input_ids=input_ids,
         past_key_values=None,
     )
