@@ -195,7 +195,7 @@ class NaivePreDispatchResult(PreDispatchResult):
 
 class NaiveDispatchResult(DispatchResult):
     topk_ids: torch.Tensor
-    tp_size_meta: list[int]
+    tp_rank_row_counts: list[int]
     forward_finished_event: torch.cuda.Event | None
     backward_previous_event: torch.cuda.Event | None
     topk_weights_backward_previous_event: torch.cuda.Event | None
@@ -302,7 +302,7 @@ class NaiveDispatcher(
             assert backward_finished_event is not None, "Use async_op=True for dispatch_preprocess!"
             assert self._comm_stream is not None
 
-            tp_size_meta = self._expert_tp.gather_size_meta(pre_dispatched["hidden_states"])
+            tp_rank_row_counts = self._expert_tp.gather_tp_rank_row_counts(pre_dispatched["hidden_states"])
             # 中文注释：dispatch 内部的 TP AllGather 都排在同一个 comm stream，
             # 互相不需要 event 串行化；只在 dispatch 阶段边界记录最终完成事件。
             forward_finished_event = torch.cuda.Event()
@@ -312,25 +312,25 @@ class NaiveDispatcher(
             if topk_weights.grad_fn is not None:
                 topk_weights.grad_fn.register_prehook(_get_backward_pre_hook(topk_weights_backward_finished_event))
 
-            hidden_states = self._expert_tp.async_all_gather(
+            hidden_states = self._expert_tp.async_all_gather_rows(
                 pre_dispatched["hidden_states"],
-                all_sizes=tp_size_meta,
+                tp_rank_row_counts=tp_rank_row_counts,
                 forward_previous_event=forward_previous_event,
                 forward_finished_event=None,
                 backward_previous_event=hidden_backward_previous_event,
                 backward_finished_event=backward_finished_event,
                 comm_stream=self._comm_stream,
             )
-            topk_ids = self._expert_tp.async_all_gather_metadata(
+            topk_ids = self._expert_tp.async_all_gather_row_metadata(
                 pre_dispatched["topk_ids"],
-                all_sizes=tp_size_meta,
+                tp_rank_row_counts=tp_rank_row_counts,
                 forward_previous_event=None,
                 forward_finished_event=None,
                 comm_stream=self._comm_stream,
             )
-            topk_weights = self._expert_tp.async_all_gather(
+            topk_weights = self._expert_tp.async_all_gather_rows(
                 topk_weights,
-                all_sizes=tp_size_meta,
+                tp_rank_row_counts=tp_rank_row_counts,
                 forward_previous_event=None,
                 forward_finished_event=forward_finished_event,
                 backward_previous_event=topk_weights_backward_previous_event,
@@ -342,21 +342,21 @@ class NaiveDispatcher(
                 hidden_states=hidden_states,
                 topk_ids=topk_ids,
                 topk_weights=topk_weights,
-                tp_size_meta=tp_size_meta,
+                tp_rank_row_counts=tp_rank_row_counts,
                 forward_finished_event=forward_finished_event,
                 backward_previous_event=hidden_backward_previous_event,
                 topk_weights_backward_previous_event=topk_weights_backward_previous_event,
             )
 
         if self._expert_tp is not None:
-            hidden_states, tp_size_meta = self._expert_tp.all_gather(pre_dispatched["hidden_states"])
-            topk_ids = self._expert_tp.all_gather_metadata(pre_dispatched["topk_ids"], tp_size_meta)
-            topk_weights = self._expert_tp.all_gather_metadata(topk_weights, tp_size_meta)
+            hidden_states, tp_rank_row_counts = self._expert_tp.all_gather_rows(pre_dispatched["hidden_states"])
+            topk_ids = self._expert_tp.all_gather_row_metadata(pre_dispatched["topk_ids"], tp_rank_row_counts)
+            topk_weights = self._expert_tp.all_gather_row_metadata(topk_weights, tp_rank_row_counts)
             return NaiveDispatchResult(
                 hidden_states=hidden_states,
                 topk_ids=topk_ids,
                 topk_weights=topk_weights,
-                tp_size_meta=tp_size_meta,
+                tp_rank_row_counts=tp_rank_row_counts,
                 forward_finished_event=None,
                 backward_previous_event=None,
                 topk_weights_backward_previous_event=None,
@@ -366,7 +366,7 @@ class NaiveDispatcher(
             hidden_states=pre_dispatched["hidden_states"],
             topk_ids=pre_dispatched["topk_ids"],
             topk_weights=topk_weights,
-            tp_size_meta=[],
+            tp_rank_row_counts=[],
             forward_finished_event=None,
             backward_previous_event=None,
             topk_weights_backward_previous_event=None,
@@ -479,9 +479,9 @@ class NaiveDispatcher(
 
                     forward_finished_event = torch.cuda.Event()
                     backward_previous_event = torch.cuda.Event()
-                    hidden_states = self._expert_tp.async_reduce_scatter_sum(
+                    hidden_states = self._expert_tp.async_reduce_scatter_rows_sum(
                         pre_combined["hidden_states"],
-                        all_sizes=dispatched["tp_size_meta"],
+                        tp_rank_row_counts=dispatched["tp_rank_row_counts"],
                         forward_previous_event=forward_previous_event,
                         forward_finished_event=forward_finished_event,
                         backward_previous_event=backward_previous_event,
@@ -494,9 +494,9 @@ class NaiveDispatcher(
                         backward_previous_event=backward_previous_event,
                     )
 
-                hidden_states = self._expert_tp.reduce_scatter_sum(
+                hidden_states = self._expert_tp.reduce_scatter_rows_sum(
                     pre_combined["hidden_states"],
-                    dispatched["tp_size_meta"],
+                    dispatched["tp_rank_row_counts"],
                 )
                 return NaiveCombineResult(
                     hidden_states=hidden_states,

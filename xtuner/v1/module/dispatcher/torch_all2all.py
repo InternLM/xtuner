@@ -19,6 +19,7 @@ from .base import (
     PreCombineResult,
     PreDispatchResult,
 )
+from .expert_tp import ExpertTP
 
 
 if get_device() == "npu":
@@ -51,6 +52,7 @@ class TorchAll2AllDispatchResult(DispatchResult):
     tokens_per_expert_group: torch.Tensor
     input_splits: list[int]
     output_splits: list[int]
+    tp_rank_row_counts: list[int]
     forward_finished_event: torch.cuda.Event | None
     backward_previous_event: torch.cuda.Event | None
 
@@ -285,6 +287,7 @@ class TorchAll2AllDispatcher(
     ]
 ):
     _comm_stream = None
+    _tp_row_count_stream: torch.cuda.Stream | None = None
     _process_group: dist.ProcessGroup
 
     def __init__(
@@ -292,6 +295,7 @@ class TorchAll2AllDispatcher(
         *,
         n_routed_experts: int,
         process_group: torch.distributed.ProcessGroup,
+        tp_group: torch.distributed.ProcessGroup | None = None,
         training_dtype: Literal["fp8", "bf16"] = "bf16",
         generate_dtype: Literal["fp8", "bf16"] = "bf16",
     ):
@@ -314,6 +318,10 @@ class TorchAll2AllDispatcher(
         )
         if TorchAll2AllDispatcher._comm_stream is None:
             TorchAll2AllDispatcher._comm_stream = cast(torch.cuda.Stream, torch.cuda.Stream(device=DEVICE))
+        self._expert_tp = ExpertTP(tp_group) if tp_group is not None and tp_group.size() > 1 else None
+        if self._expert_tp is not None and TorchAll2AllDispatcher._tp_row_count_stream is None:
+            TorchAll2AllDispatcher._tp_row_count_stream = torch.cuda.Stream(device=DEVICE)
+        self._tp_row_count_stream = TorchAll2AllDispatcher._tp_row_count_stream
         # if training_dtype == "fp8":
         #     raise NotImplementedError
 
@@ -368,6 +376,10 @@ class TorchAll2AllDispatcher(
                 self._n_routed_experts,
                 self._process_group,
             )
+            tp_rank_row_counts = [hidden_states.shape[0]]
+            if self._expert_tp is not None:
+                hidden_states, tp_rank_row_counts = self._expert_tp.all_gather_rows(hidden_states)
+                tokens_per_expert_group = self._expert_tp.all_gather_per_rank_metadata(tokens_per_expert_group)
             if decoding:
                 raise NotImplementedError
             else:
@@ -377,6 +389,7 @@ class TorchAll2AllDispatcher(
                     tokens_per_expert_group=cast(torch.Tensor, tokens_per_expert_group),
                     input_splits=cast(list[int], input_splits),
                     output_splits=cast(list[int], output_splits),
+                    tp_rank_row_counts=tp_rank_row_counts,
                     forward_finished_event=None,
                     backward_previous_event=None,
                 )
@@ -400,6 +413,36 @@ class TorchAll2AllDispatcher(
                 self._comm_stream,
                 self._process_group,
             )
+            tp_rank_row_counts = [hidden_states.shape[0]]
+            if self._expert_tp is not None:
+                comm_stream = cast(torch.cuda.Stream, self._comm_stream)
+                assert self._tp_row_count_stream is not None
+                # 中文注释：只同步 TP 变长 tp_rank_row_counts；
+                # hidden/counts TP 通信继续排在 dispatcher comm stream。
+                tp_rank_row_counts = self._expert_tp.gather_tp_rank_row_counts(
+                    hidden_states,
+                    stream=self._tp_row_count_stream,
+                )
+                tp_hidden_finished_event = cast(torch.cuda.Event, torch.cuda.Event())
+                tp_counts_finished_event = cast(torch.cuda.Event, torch.cuda.Event())
+                tp_backward_previous_event = cast(torch.cuda.Event, torch.cuda.Event())
+                hidden_states = self._expert_tp.async_all_gather_rows(
+                    hidden_states,
+                    tp_rank_row_counts=tp_rank_row_counts,
+                    forward_previous_event=forward_finished_event,
+                    forward_finished_event=tp_hidden_finished_event,
+                    backward_previous_event=tp_backward_previous_event,
+                    backward_finished_event=backward_finished_event,
+                    comm_stream=comm_stream,
+                )
+                tokens_per_expert_group = self._expert_tp.async_all_gather_per_rank_metadata(
+                    tokens_per_expert_group,
+                    forward_previous_event=tp_hidden_finished_event,
+                    forward_finished_event=tp_counts_finished_event,
+                    comm_stream=comm_stream,
+                )
+                forward_finished_event = tp_counts_finished_event
+                backward_previous_event = tp_backward_previous_event
             if decoding:
                 raise NotImplementedError
             else:
@@ -409,6 +452,7 @@ class TorchAll2AllDispatcher(
                     tokens_per_expert_group=tokens_per_expert_group,
                     input_splits=cast(list[int], input_splits),
                     output_splits=cast(list[int], output_splits),
+                    tp_rank_row_counts=tp_rank_row_counts,
                     backward_previous_event=backward_previous_event,
                     forward_finished_event=forward_finished_event,
                 )
@@ -427,9 +471,20 @@ class TorchAll2AllDispatcher(
             self.wait_comm_stream(dispatched["forward_finished_event"])
 
         tokens_per_expert_group = dispatched["tokens_per_expert_group"]
-        token_counts = tokens_per_expert_group.ravel()
+        token_counts = tokens_per_expert_group.ravel().to(torch.long)
+        if self._expert_tp is not None:
+            local_expert_ids = self._expert_ids_per_ep_rank.repeat(self._expert_tp.size)
+            output_size = dispatched["hidden_states"].shape[0]
+            tokens_per_expert = tokens_per_expert_group.sum(dim=(0, 1))
+        else:
+            local_expert_ids = self._expert_ids_per_ep_rank
+            output_size = sum(dispatched["output_splits"])
+            tokens_per_expert = tokens_per_expert_group.sum(dim=0)
+
         global_input_tokens_local_experts_indices = torch.repeat_interleave(
-            self._expert_ids_per_ep_rank, token_counts, output_size=sum(dispatched["output_splits"])
+            local_expert_ids,
+            token_counts,
+            output_size=output_size,
         )
 
         # The dispatch result is already permuted, so we can return it directly.
@@ -437,7 +492,6 @@ class TorchAll2AllDispatcher(
             dispatched["hidden_states"],
             global_input_tokens_local_experts_indices.to(torch.int32),
         )
-        tokens_per_expert = tokens_per_expert_group.sum(dim=0)
 
         if async_op:
             assert dispatched["backward_previous_event"] is not None, "Please use `async_op=True` for dispatch!"
@@ -513,8 +567,14 @@ class TorchAll2AllDispatcher(
         decoding: bool = False,
     ) -> CombineResult:
         if not async_op:
+            hidden_states_for_combine = pre_combined["hidden_states"]
+            if self._expert_tp is not None:
+                hidden_states_for_combine = self._expert_tp.reduce_scatter_rows_sum(
+                    hidden_states_for_combine,
+                    dispatched["tp_rank_row_counts"],
+                )
             hidden_states = all_to_all_single_autograd(
-                pre_combined["hidden_states"],
+                hidden_states_for_combine,
                 input_split_sizes=dispatched["output_splits"],
                 output_split_sizes=dispatched["input_splits"],
                 group=self._process_group,
@@ -530,8 +590,26 @@ class TorchAll2AllDispatcher(
             assert forward_previous_event is not None, "Please use `async_op=True` for combine_preprocess!"
             assert backward_finished_event is not None, "Please use `async_op=True` for combine_preprocess!"
 
+            hidden_states_for_combine = pre_combined["hidden_states"]
+            if self._expert_tp is not None:
+                tp_forward_finished_event = cast(torch.cuda.Event, torch.cuda.Event())
+                tp_backward_previous_event = cast(torch.cuda.Event, torch.cuda.Event())
+                # 中文注释：TP ReduceScatterRowsSum 属于 combine 通信段，
+                # EP combine 等 TP 输出事件后再发起。
+                hidden_states_for_combine = self._expert_tp.async_reduce_scatter_rows_sum(
+                    hidden_states_for_combine,
+                    tp_rank_row_counts=dispatched["tp_rank_row_counts"],
+                    forward_previous_event=forward_previous_event,
+                    forward_finished_event=tp_forward_finished_event,
+                    backward_previous_event=tp_backward_previous_event,
+                    backward_finished_event=backward_finished_event,
+                    comm_stream=cast(torch.cuda.Stream, self._comm_stream),
+                )
+                forward_previous_event = tp_forward_finished_event
+                backward_finished_event = tp_backward_previous_event
+
             hidden_states = _async_combine(
-                pre_combined["hidden_states"],
+                hidden_states_for_combine,
                 dispatched["output_splits"],
                 dispatched["input_splits"],
                 forward_previous_event,

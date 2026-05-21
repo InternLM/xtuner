@@ -5,8 +5,8 @@ import torch.distributed as dist
 from xtuner.v1.module.dispatcher import torch_all2all
 from xtuner.v1.module.dispatcher.torch_all2all_tpep import (
     TorchAll2AllTPEPDispatcher,
-    _async_tp_all_gather,
-    _async_tp_reduce_scatter_sum,
+    _async_tp_all_gather_rows,
+    _async_tp_reduce_scatter_rows_sum,
 )
 
 
@@ -78,7 +78,7 @@ def test_async_tpep_dispatch_returns_tp_gathered_payload(monkeypatch) -> None:
 
     # 中文注释：TP 通信的归属边界是 dispatch，postprocess 只能看到已经 gather 好的 token。
     assert dispatched["hidden_states"].shape == (64, 128)
-    assert dispatched["output_splits_tp"] == [32, 32]
+    assert dispatched["tp_rank_row_counts"] == [32, 32]
     torch.testing.assert_close(dispatched["hidden_states"][32:], pre_dispatched["hidden_states"] + 10)
 
 
@@ -112,7 +112,7 @@ def test_async_tpep_combine_owns_tp_reduce_scatter(monkeypatch) -> None:
         output.copy_(input_list[getattr(group, "rank", 0)])
 
     def fake_all_reduce(tensor, op=None, group=None) -> None:
-        raise AssertionError("TP ReduceScatterSum should not use all_reduce + slice")
+        raise AssertionError("TP ReduceScatterRowsSum should not use all_reduce + slice")
 
     def fake_all_gather(chunks, tensor, group=None) -> None:
         chunks[0].copy_(tensor)
@@ -201,9 +201,9 @@ def test_async_tp_all_gather_uses_comm_stream(monkeypatch) -> None:
     backward_finished_event = torch.cuda.Event()
     forward_previous_event.record()
 
-    out = _async_tp_all_gather(
+    out = _async_tp_all_gather_rows(
         hidden,
-        all_sizes=[2, 2],
+        tp_rank_row_counts=[2, 2],
         tp_group=group,  # type: ignore[arg-type]
         forward_previous_event=forward_previous_event,
         forward_finished_event=forward_finished_event,
@@ -240,7 +240,7 @@ def test_async_tp_reduce_scatter_uses_comm_stream(monkeypatch) -> None:
         output.copy_(input_list[getattr(group, "rank", 0)])
 
     def fake_all_reduce(tensor, op=None, group=None) -> None:
-        raise AssertionError("TP ReduceScatterSum should use reduce_scatter")
+        raise AssertionError("TP ReduceScatterRowsSum should use reduce_scatter")
 
     def fake_all_gather(chunks, tensor, group=None) -> None:
         calls.append(("all_gather", _stream_id()))
@@ -259,9 +259,9 @@ def test_async_tp_reduce_scatter_uses_comm_stream(monkeypatch) -> None:
     backward_finished_event = torch.cuda.Event()
     forward_previous_event.record()
 
-    out = _async_tp_reduce_scatter_sum(
+    out = _async_tp_reduce_scatter_rows_sum(
         hidden,
-        all_sizes=[1, 3],
+        tp_rank_row_counts=[1, 3],
         tp_group=group,  # type: ignore[arg-type]
         forward_previous_event=forward_previous_event,
         forward_finished_event=forward_finished_event,

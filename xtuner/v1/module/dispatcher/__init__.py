@@ -64,17 +64,10 @@ def build_dispatcher(
         )  # type: ignore
     elif dispatcher == "all2all":
         assert ep_group is not None, "TorchAll2AllDispatcher requires a non-null ep_group."
-        if tp_group is not None and tp_group.size() > 1:
-            return TorchAll2AllTPEPDispatcher(
-                n_routed_experts=n_routed_experts,
-                ep_group=ep_group,
-                tp_group=tp_group,
-                training_dtype=training_dtype,
-                generate_dtype=generate_dtype,
-            )  # type: ignore[return-value]
         return TorchAll2AllDispatcher(
             n_routed_experts=n_routed_experts,
             process_group=ep_group,
+            tp_group=tp_group,
             training_dtype=training_dtype,
             generate_dtype=generate_dtype,
         )  # type: ignore[return-value]

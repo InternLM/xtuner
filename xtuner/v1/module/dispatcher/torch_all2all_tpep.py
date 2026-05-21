@@ -7,7 +7,7 @@ Forward data flow (adds two TP collectives around the existing EP dispatcher):
     dispatch_postprocess: permute by local expert (for grouped GEMM)
     [Expert GEMM]       : column-parallel gate/up + row-parallel down projection
     combine_preprocess  : unpermute back to TP-AllGather order
-    combine             : TP ReduceScatterSum → EP AlltoAll reverse
+    combine             : TP ReduceScatterRowsSum → EP AlltoAll reverse
     combine_postprocess : unpermute with topk_weights → [N_local, H] per TP rank
 
 Design rationale (mirrors Megatron MoEAlltoAllTokenDispatcher with TP+EP):
@@ -15,7 +15,7 @@ Design rationale (mirrors Megatron MoEAlltoAllTokenDispatcher with TP+EP):
     parallelism.
   - TP AllGather before experts gives every TP rank the same token batch for its local
     expert weight shard.
-  - TP ReduceScatterSum after the row-parallel down projection sums partial hidden states
+  - TP ReduceScatterRowsSum after the row-parallel down projection sums partial hidden states
     across TP ranks, then returns each rank's original token slice.
 """
 
@@ -45,18 +45,16 @@ from .torch_all2all import (
 class TorchAll2AllTPEPDispatchResult(TorchAll2AllDispatchResult):
     """Dispatch result after EP AlltoAll and TP AllGather.
 
-    ``output_splits_tp`` records the pre-AllGather token count per TP rank.  The
+    ``tp_rank_row_counts`` records the pre-AllGather token count per TP rank.  The
     later combine phase uses it to restore this TP rank's slice after the
     row-parallel expert output is summed.
 
-    中文注释：TP size meta 指的就是 ``output_splits_tp``。例如 ``tp_size=2``，
+    中文注释：``tp_rank_row_counts`` 是每个 TP rank 在 AllGather 前的行数。例如 ``tp_size=2``，
     EP dispatch 后 TP rank0 的 hidden 是 ``[3, H]``，rank1 是 ``[5, H]``，
-    两个 rank 都会拿到 ``output_splits_tp=[3, 5]``。TP AllGather 用它把
+    两个 rank 都会拿到 ``tp_rank_row_counts=[3, 5]``。TP AllGather 用它把
     变长 hidden 拼成 ``[8, H]``，combine 再按相同边界切回本 rank 的
     ``[3, H]`` 或 ``[5, H]``。
     """
-
-    output_splits_tp: list[int]
 
 
 class TorchAll2AllTPEPPostDispatchResult(TorchAll2AllPostDispatchResult): ...
@@ -70,74 +68,79 @@ def _record_stream(value: Any, stream: torch.cuda.Stream) -> None:
             _record_stream(item, stream)
 
 
-def _tp_all_gather_forward_impl(
+def _tp_all_gather_rows_forward_impl(
     hidden: torch.Tensor,
-    all_sizes: list[int],
+    tp_rank_row_counts: list[int],
     tp_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
     """Run TP AllGather forward and return tensors whose lifetime may need
     recording."""
     hidden = hidden.contiguous()
-    chunks = [torch.empty(s, hidden.shape[1], dtype=hidden.dtype, device=hidden.device) for s in all_sizes]
+    chunks = [torch.empty(s, hidden.shape[1], dtype=hidden.dtype, device=hidden.device) for s in tp_rank_row_counts]
     dist.all_gather(chunks, hidden, group=tp_group)
     return torch.cat(chunks, dim=0), hidden, chunks
 
 
-def _tp_all_gather_backward_impl(
+def _tp_all_gather_rows_backward_impl(
     grad: torch.Tensor,
-    all_sizes: list[int],
+    tp_rank_row_counts: list[int],
     tp_rank: int,
     tp_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
-    return _tp_reduce_scatter_sum_impl(grad, all_sizes, tp_rank, tp_group)
+    return _tp_reduce_scatter_rows_sum_impl(grad, tp_rank_row_counts, tp_rank, tp_group)
 
 
-def _tp_reduce_scatter_sum_impl(
+def _tp_reduce_scatter_rows_sum_impl(
     hidden: torch.Tensor,
-    all_sizes: list[int],
+    tp_rank_row_counts: list[int],
     tp_rank: int,
     tp_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
-    """Run TP ReduceScatterSum and return tensors whose lifetime may need
+    """Run TP ReduceScatterRowsSum and return tensors whose lifetime may need
     recording."""
     hidden = hidden.contiguous()
-    assert hidden.shape[0] == sum(all_sizes), "TP ReduceScatterSum input rows must match TP size meta."
+    assert hidden.shape[0] == sum(tp_rank_row_counts), (
+        "TP ReduceScatterRowsSum input rows must match tp_rank_row_counts."
+    )
 
-    out = hidden.new_empty((all_sizes[tp_rank], *hidden.shape[1:]))
+    out = hidden.new_empty((tp_rank_row_counts[tp_rank], *hidden.shape[1:]))
     if hidden.shape[0] == 0:
         # 中文注释：所有 TP rank 都没有 token 时没有实际通信量，直接返回合法的 0 行 slice。
         return out, hidden, []
 
-    if all(size == all_sizes[0] for size in all_sizes):
+    if all(size == tp_rank_row_counts[0] for size in tp_rank_row_counts):
         dist.reduce_scatter_tensor(out, hidden, op=dist.ReduceOp.SUM, group=tp_group)
         return out, hidden, []
 
-    input_chunks = list(torch.split(hidden, all_sizes, dim=0))
+    input_chunks = list(torch.split(hidden, tp_rank_row_counts, dim=0))
     dist.reduce_scatter(out, input_chunks, op=dist.ReduceOp.SUM, group=tp_group)
     return out, hidden, input_chunks
 
 
-def _tp_reduce_scatter_sum_forward_impl(
+def _tp_reduce_scatter_rows_sum_forward_impl(
     hidden: torch.Tensor,
-    all_sizes: list[int],
+    tp_rank_row_counts: list[int],
     tp_rank: int,
     tp_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
-    return _tp_reduce_scatter_sum_impl(hidden, all_sizes, tp_rank, tp_group)
+    return _tp_reduce_scatter_rows_sum_impl(hidden, tp_rank_row_counts, tp_rank, tp_group)
 
 
-def _tp_reduce_scatter_sum_backward_impl(
+def _tp_reduce_scatter_rows_sum_backward_impl(
     grad_slice: torch.Tensor,
-    all_sizes: list[int],
+    tp_rank_row_counts: list[int],
     tp_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
     grad_slice = grad_slice.contiguous()
-    chunks = [torch.empty(s, grad_slice.shape[1], dtype=grad_slice.dtype, device=grad_slice.device) for s in all_sizes]
+    chunks = [
+        torch.empty(s, grad_slice.shape[1], dtype=grad_slice.dtype, device=grad_slice.device)
+        for s in tp_rank_row_counts
+    ]
     dist.all_gather(chunks, grad_slice, group=tp_group)
     return torch.cat(chunks, dim=0), grad_slice, chunks
 
 
-class _TPAllGather(torch.autograd.Function):
+class _TPAllGatherRows(torch.autograd.Function):
     """TP AllGather with autograd support.
 
     Forward : ``all_gather`` across the TP group, concatenating along the token dim.
@@ -148,16 +151,16 @@ class _TPAllGather(torch.autograd.Function):
     def forward(
         ctx: Any,
         hidden: torch.Tensor,
-        all_sizes: list[int],
+        tp_rank_row_counts: list[int],
         tp_group: dist.ProcessGroup,
         tp_size: int,
         tp_rank: int,
     ) -> torch.Tensor:
-        gathered, _, _ = _tp_all_gather_forward_impl(hidden, all_sizes, tp_group)
+        gathered, _, _ = _tp_all_gather_rows_forward_impl(hidden, tp_rank_row_counts, tp_group)
         ctx.tp_group = tp_group
         ctx.tp_size = tp_size
         ctx.tp_rank = tp_rank
-        ctx.all_sizes = all_sizes
+        ctx.tp_rank_row_counts = tp_rank_row_counts
         return gathered
 
     @staticmethod
@@ -165,11 +168,11 @@ class _TPAllGather(torch.autograd.Function):
         ctx: Any,
         grad: torch.Tensor,
     ) -> tuple[torch.Tensor, None, None, None, None]:
-        grad_input, _, _ = _tp_all_gather_backward_impl(grad, ctx.all_sizes, ctx.tp_rank, ctx.tp_group)
+        grad_input, _, _ = _tp_all_gather_rows_backward_impl(grad, ctx.tp_rank_row_counts, ctx.tp_rank, ctx.tp_group)
         return grad_input, None, None, None, None
 
 
-class _AsyncTPAllGather(torch.autograd.Function):
+class _AsyncTPAllGatherRows(torch.autograd.Function):
     """TP AllGather on dispatcher comm stream.
 
     Forward : wait for the previous event, then all-gather token slices.
@@ -181,7 +184,7 @@ class _AsyncTPAllGather(torch.autograd.Function):
     def forward(
         ctx: Any,
         hidden: torch.Tensor,
-        all_sizes: list[int],
+        tp_rank_row_counts: list[int],
         tp_group: dist.ProcessGroup,
         tp_size: int,
         tp_rank: int,
@@ -193,16 +196,17 @@ class _AsyncTPAllGather(torch.autograd.Function):
     ) -> torch.Tensor:
         with torch.cuda.stream(comm_stream):
             comm_stream.wait_event(forward_previous_event)
-            gathered, hidden_for_comm, chunks = _tp_all_gather_forward_impl(hidden, all_sizes, tp_group)
+            gathered, hidden_for_comm, chunks = _tp_all_gather_rows_forward_impl(hidden, tp_rank_row_counts, tp_group)
 
-            # 中文注释：同步/异步共用 TP AllGather 核心逻辑；异步只额外管理 stream/event 生命周期。
+            # 中文注释：同步/异步共用 TP AllGather 核心逻辑；
+            # 异步只额外管理 stream/event 生命周期。
             _record_stream((hidden_for_comm, chunks, gathered), comm_stream)
             forward_finished_event.record(comm_stream)
 
         ctx.tp_group = tp_group
         ctx.tp_size = tp_size
         ctx.tp_rank = tp_rank
-        ctx.all_sizes = all_sizes
+        ctx.tp_rank_row_counts = tp_rank_row_counts
         ctx.backward_previous_event = backward_previous_event
         ctx.backward_finished_event = backward_finished_event
         ctx.comm_stream = comm_stream
@@ -215,9 +219,9 @@ class _AsyncTPAllGather(torch.autograd.Function):
     ) -> tuple[torch.Tensor, None, None, None, None, None, None, None, None, None]:
         with torch.cuda.stream(ctx.comm_stream):
             ctx.comm_stream.wait_event(ctx.backward_previous_event)
-            grad_input, grad_for_comm, chunks = _tp_all_gather_backward_impl(
+            grad_input, grad_for_comm, chunks = _tp_all_gather_rows_backward_impl(
                 grad,
-                ctx.all_sizes,
+                ctx.tp_rank_row_counts,
                 ctx.tp_rank,
                 ctx.tp_group,
             )
@@ -228,8 +232,8 @@ class _AsyncTPAllGather(torch.autograd.Function):
         return grad_input, None, None, None, None, None, None, None, None, None
 
 
-class _TPReduceScatterSum(torch.autograd.Function):
-    """TP ReduceScatterSum with autograd support.
+class _TPReduceScatterRowsSum(torch.autograd.Function):
+    """TP ReduceScatterRowsSum with autograd support.
 
     Forward : ``reduce_scatter`` (SUM) to this TP rank's local token slice.
     Backward: ``all_gather`` the gradient slices to reconstruct the full gradient tensor,
@@ -240,16 +244,16 @@ class _TPReduceScatterSum(torch.autograd.Function):
     def forward(
         ctx: Any,
         hidden: torch.Tensor,
-        all_sizes: list[int],
+        tp_rank_row_counts: list[int],
         tp_group: dist.ProcessGroup,
         tp_size: int,
         tp_rank: int,
     ) -> torch.Tensor:
-        out, _, _ = _tp_reduce_scatter_sum_forward_impl(hidden, all_sizes, tp_rank, tp_group)
+        out, _, _ = _tp_reduce_scatter_rows_sum_forward_impl(hidden, tp_rank_row_counts, tp_rank, tp_group)
         ctx.tp_group = tp_group
         ctx.tp_size = tp_size
         ctx.tp_rank = tp_rank
-        ctx.all_sizes = all_sizes
+        ctx.tp_rank_row_counts = tp_rank_row_counts
         return out
 
     @staticmethod
@@ -257,18 +261,18 @@ class _TPReduceScatterSum(torch.autograd.Function):
         ctx: Any,
         grad_slice: torch.Tensor,
     ) -> tuple[torch.Tensor, None, None, None, None]:
-        full_grad, _, _ = _tp_reduce_scatter_sum_backward_impl(grad_slice, ctx.all_sizes, ctx.tp_group)
+        full_grad, _, _ = _tp_reduce_scatter_rows_sum_backward_impl(grad_slice, ctx.tp_rank_row_counts, ctx.tp_group)
         return full_grad, None, None, None, None
 
 
-class _AsyncTPReduceScatterSum(torch.autograd.Function):
-    """TP ReduceScatterSum on dispatcher comm stream."""
+class _AsyncTPReduceScatterRowsSum(torch.autograd.Function):
+    """TP ReduceScatterRowsSum on dispatcher comm stream."""
 
     @staticmethod
     def forward(
         ctx: Any,
         hidden: torch.Tensor,
-        all_sizes: list[int],
+        tp_rank_row_counts: list[int],
         tp_group: dist.ProcessGroup,
         tp_size: int,
         tp_rank: int,
@@ -280,7 +284,12 @@ class _AsyncTPReduceScatterSum(torch.autograd.Function):
     ) -> torch.Tensor:
         with torch.cuda.stream(comm_stream):
             comm_stream.wait_event(forward_previous_event)
-            out, hidden_for_comm, chunks = _tp_reduce_scatter_sum_forward_impl(hidden, all_sizes, tp_rank, tp_group)
+            out, hidden_for_comm, chunks = _tp_reduce_scatter_rows_sum_forward_impl(
+                hidden,
+                tp_rank_row_counts,
+                tp_rank,
+                tp_group,
+            )
 
             # 中文注释：同步/异步共用 TP ReduceScatter 核心逻辑；异步只额外管理 stream/event。
             _record_stream((hidden_for_comm, chunks, out), comm_stream)
@@ -289,7 +298,7 @@ class _AsyncTPReduceScatterSum(torch.autograd.Function):
         ctx.tp_group = tp_group
         ctx.tp_size = tp_size
         ctx.tp_rank = tp_rank
-        ctx.all_sizes = all_sizes
+        ctx.tp_rank_row_counts = tp_rank_row_counts
         ctx.backward_previous_event = backward_previous_event
         ctx.backward_finished_event = backward_finished_event
         ctx.comm_stream = comm_stream
@@ -302,9 +311,9 @@ class _AsyncTPReduceScatterSum(torch.autograd.Function):
     ) -> tuple[torch.Tensor, None, None, None, None, None, None, None, None, None]:
         with torch.cuda.stream(ctx.comm_stream):
             ctx.comm_stream.wait_event(ctx.backward_previous_event)
-            full_grad, grad_slice_for_comm, chunks = _tp_reduce_scatter_sum_backward_impl(
+            full_grad, grad_slice_for_comm, chunks = _tp_reduce_scatter_rows_sum_backward_impl(
                 grad_slice,
-                ctx.all_sizes,
+                ctx.tp_rank_row_counts,
                 ctx.tp_group,
             )
 
@@ -314,7 +323,7 @@ class _AsyncTPReduceScatterSum(torch.autograd.Function):
         return full_grad, None, None, None, None, None, None, None, None, None
 
 
-def _tp_all_gather_sizes(
+def _tp_gather_tp_rank_row_counts(
     hidden: torch.Tensor,
     tp_group: dist.ProcessGroup,
     stream: torch.cuda.Stream | None = None,
@@ -327,24 +336,24 @@ def _tp_all_gather_sizes(
 
     if stream is None:
         local_size = hidden.new_tensor([hidden.shape[0]], dtype=torch.long)
-        all_sizes_t = hidden.new_empty([tp_size], dtype=torch.long)
-        dist.all_gather_into_tensor(all_sizes_t, local_size, group=tp_group)
+        tp_rank_row_counts_t = hidden.new_empty([tp_size], dtype=torch.long)
+        dist.all_gather_into_tensor(tp_rank_row_counts_t, local_size, group=tp_group)
     else:
         # 中文注释：尺寸通信不依赖计算流，避免为了取 Python list 等待前面的 compute kernel。
         with torch.cuda.stream(stream):
             local_size = hidden.new_tensor([hidden.shape[0]], dtype=torch.long)
-            all_sizes_t = hidden.new_empty([tp_size], dtype=torch.long)
-            dist.all_gather_into_tensor(all_sizes_t, local_size, group=tp_group)
+            tp_rank_row_counts_t = hidden.new_empty([tp_size], dtype=torch.long)
+            dist.all_gather_into_tensor(tp_rank_row_counts_t, local_size, group=tp_group)
             local_size.record_stream(stream)
-            all_sizes_t.record_stream(stream)
+            tp_rank_row_counts_t.record_stream(stream)
         stream.synchronize()
-    return [int(s) for s in all_sizes_t.tolist()]
+    return [int(s) for s in tp_rank_row_counts_t.tolist()]
 
 
-def _tp_all_gather(
+def _tp_all_gather_rows(
     hidden: torch.Tensor,
     tp_group: dist.ProcessGroup,
-    all_sizes: list[int] | None = None,
+    tp_rank_row_counts: list[int] | None = None,
 ) -> tuple[torch.Tensor, list[int]]:
     """All-gather ``hidden`` across the TP group and return the gathered tensor
     plus per-rank sizes."""
@@ -353,16 +362,16 @@ def _tp_all_gather(
         return hidden, [hidden.shape[0]]
 
     tp_rank = dist.get_rank(group=tp_group)
-    if all_sizes is None:
-        all_sizes = _tp_all_gather_sizes(hidden, tp_group)
+    if tp_rank_row_counts is None:
+        tp_rank_row_counts = _tp_gather_tp_rank_row_counts(hidden, tp_group)
 
-    gathered = _TPAllGather.apply(hidden, all_sizes, tp_group, tp_size, tp_rank)
-    return gathered, all_sizes
+    gathered = _TPAllGatherRows.apply(hidden, tp_rank_row_counts, tp_group, tp_size, tp_rank)
+    return gathered, tp_rank_row_counts
 
 
-def _async_tp_all_gather(
+def _async_tp_all_gather_rows(
     hidden: torch.Tensor,
-    all_sizes: list[int],
+    tp_rank_row_counts: list[int],
     tp_group: dist.ProcessGroup,
     forward_previous_event: torch.cuda.Event,
     forward_finished_event: torch.cuda.Event,
@@ -377,9 +386,9 @@ def _async_tp_all_gather(
         return hidden
 
     tp_rank = dist.get_rank(group=tp_group)
-    return _AsyncTPAllGather.apply(
+    return _AsyncTPAllGatherRows.apply(
         hidden,
-        all_sizes,
+        tp_rank_row_counts,
         tp_group,
         tp_size,
         tp_rank,
@@ -391,9 +400,9 @@ def _async_tp_all_gather(
     )
 
 
-def _tp_reduce_scatter_sum(
+def _tp_reduce_scatter_rows_sum(
     hidden: torch.Tensor,
-    all_sizes: list[int],
+    tp_rank_row_counts: list[int],
     tp_group: dist.ProcessGroup,
 ) -> torch.Tensor:
     """Sum-reduce-scatter ``hidden`` across the TP group, returning this rank's
@@ -403,12 +412,12 @@ def _tp_reduce_scatter_sum(
         return hidden
 
     tp_rank = dist.get_rank(group=tp_group)
-    return _TPReduceScatterSum.apply(hidden, all_sizes, tp_group, tp_size, tp_rank)
+    return _TPReduceScatterRowsSum.apply(hidden, tp_rank_row_counts, tp_group, tp_size, tp_rank)
 
 
-def _async_tp_reduce_scatter_sum(
+def _async_tp_reduce_scatter_rows_sum(
     hidden: torch.Tensor,
-    all_sizes: list[int],
+    tp_rank_row_counts: list[int],
     tp_group: dist.ProcessGroup,
     forward_previous_event: torch.cuda.Event,
     forward_finished_event: torch.cuda.Event,
@@ -416,16 +425,16 @@ def _async_tp_reduce_scatter_sum(
     backward_finished_event: torch.cuda.Event,
     comm_stream: torch.cuda.Stream,
 ) -> torch.Tensor:
-    """Async TP ReduceScatterSum wrapper used by Domino TP+EP path."""
+    """Async TP ReduceScatterRowsSum wrapper used by Domino TP+EP path."""
     tp_size = tp_group.size()
     if tp_size == 1:
         forward_finished_event.record()
         return hidden
 
     tp_rank = dist.get_rank(group=tp_group)
-    return _AsyncTPReduceScatterSum.apply(
+    return _AsyncTPReduceScatterRowsSum.apply(
         hidden,
-        all_sizes,
+        tp_rank_row_counts,
         tp_group,
         tp_size,
         tp_rank,
@@ -437,12 +446,12 @@ def _async_tp_reduce_scatter_sum(
     )
 
 
-def _tp_all_gather_tokens_per_expert_group(
+def _tp_all_gather_per_rank_metadata(
     tokens_per_expert_group: torch.Tensor,
     tp_group: dist.ProcessGroup,
 ) -> torch.Tensor:
     """Gather per-TP expert counts in the same TP-rank order as
-    ``_tp_all_gather``."""
+    ``_tp_all_gather_rows``."""
     tp_size = tp_group.size()
     if tp_size == 1:
         return tokens_per_expert_group.unsqueeze(0)
@@ -452,7 +461,7 @@ def _tp_all_gather_tokens_per_expert_group(
     return gathered
 
 
-def _async_tp_all_gather_tokens_per_expert_group(
+def _async_tp_all_gather_per_rank_metadata(
     tokens_per_expert_group: torch.Tensor,
     tp_group: dist.ProcessGroup,
     forward_previous_event: torch.cuda.Event,
@@ -479,7 +488,7 @@ def _async_tp_all_gather_tokens_per_expert_group(
 
 class TorchAll2AllTPEPDispatcher(TorchAll2AllDispatcher):
     """TP+EP dispatcher: wraps ``TorchAll2AllDispatcher`` with TP AllGather and
-    ReduceScatterSum.
+    ReduceScatterRowsSum.
 
     Keeps ``dispatch_preprocess`` and ``combine_postprocess`` from the EP-only
     base class, and moves the TP collectives into the communication methods
@@ -493,10 +502,10 @@ class TorchAll2AllTPEPDispatcher(TorchAll2AllDispatcher):
         generate_dtype (str): Dtype for generation, ``"bf16"`` or ``"fp8"``.
     """
 
-    # 中文注释：_tp_meta_stream 只跑 output_splits_tp 这类小的尺寸 all_gather。
+    # 中文注释：_tp_row_count_stream 只跑 tp_rank_row_counts 这类小的尺寸 all_gather。
     # 尺寸结果要同步回 Python list；如果复用 _comm_stream，会连同前面排队的大块
     # EP AllToAll 一起等完，削弱 Domino 隐藏 TP/EP 通信的效果。
-    _tp_meta_stream: torch.cuda.Stream | None = None
+    _tp_row_count_stream: torch.cuda.Stream | None = None
 
     def __init__(
         self,
@@ -515,9 +524,9 @@ class TorchAll2AllTPEPDispatcher(TorchAll2AllDispatcher):
         )
         self._tp_group = tp_group
         self._tp_size = tp_group.size()
-        if TorchAll2AllTPEPDispatcher._tp_meta_stream is None:
-            TorchAll2AllTPEPDispatcher._tp_meta_stream = torch.cuda.Stream()
-        self._tp_meta_stream = TorchAll2AllTPEPDispatcher._tp_meta_stream
+        if TorchAll2AllTPEPDispatcher._tp_row_count_stream is None:
+            TorchAll2AllTPEPDispatcher._tp_row_count_stream = torch.cuda.Stream()
+        self._tp_row_count_stream = TorchAll2AllTPEPDispatcher._tp_row_count_stream
 
     @override
     def dispatch(
@@ -539,20 +548,21 @@ class TorchAll2AllTPEPDispatcher(TorchAll2AllDispatcher):
             assert ep_dispatched["forward_finished_event"] is not None, "Use async_op=True for dispatch!"
             assert ep_dispatched["backward_previous_event"] is not None, "Use async_op=True for dispatch!"
             comm_stream = cast(torch.cuda.Stream, self._comm_stream)
-            # 中文注释：只同步变长 all_gather 的尺寸；大块 TP hidden 通信放到 comm stream 中隐藏。
-            # 这里刻意使用 _tp_meta_stream，避免为了拿 output_splits_tp 的 Python list
+            # 中文注释：只同步变长 all_gather 的尺寸；
+            # 大块 TP hidden 通信放到 comm stream 中隐藏。
+            # 这里刻意使用 _tp_row_count_stream，避免为了拿 tp_rank_row_counts 的 Python list
             # 去同步 _comm_stream 上已经排队的 EP hidden AllToAll。
-            output_splits_tp = _tp_all_gather_sizes(
+            tp_rank_row_counts = _tp_gather_tp_rank_row_counts(
                 ep_dispatched["hidden_states"],
                 self._tp_group,
-                stream=self._tp_meta_stream,
+                stream=self._tp_row_count_stream,
             )
             tp_hidden_finished_event = cast(torch.cuda.Event, torch.cuda.Event())
             tp_counts_finished_event = cast(torch.cuda.Event, torch.cuda.Event())
             tp_backward_previous_event = cast(torch.cuda.Event, torch.cuda.Event())
-            hidden_states = _async_tp_all_gather(
+            hidden_states = _async_tp_all_gather_rows(
                 ep_dispatched["hidden_states"],
-                all_sizes=output_splits_tp,
+                tp_rank_row_counts=tp_rank_row_counts,
                 tp_group=self._tp_group,
                 forward_previous_event=ep_dispatched["forward_finished_event"],
                 forward_finished_event=tp_hidden_finished_event,
@@ -560,7 +570,7 @@ class TorchAll2AllTPEPDispatcher(TorchAll2AllDispatcher):
                 backward_finished_event=ep_dispatched["backward_previous_event"],
                 comm_stream=comm_stream,
             )
-            tokens_per_expert_group = _async_tp_all_gather_tokens_per_expert_group(
+            tokens_per_expert_group = _async_tp_all_gather_per_rank_metadata(
                 ep_dispatched["tokens_per_expert_group"],
                 tp_group=self._tp_group,
                 forward_previous_event=tp_hidden_finished_event,
@@ -570,11 +580,11 @@ class TorchAll2AllTPEPDispatcher(TorchAll2AllDispatcher):
             forward_finished_event = tp_counts_finished_event
             backward_previous_event = tp_backward_previous_event
         else:
-            hidden_states, output_splits_tp = _tp_all_gather(
+            hidden_states, tp_rank_row_counts = _tp_all_gather_rows(
                 ep_dispatched["hidden_states"],
                 tp_group=self._tp_group,
             )
-            tokens_per_expert_group = _tp_all_gather_tokens_per_expert_group(
+            tokens_per_expert_group = _tp_all_gather_per_rank_metadata(
                 ep_dispatched["tokens_per_expert_group"],
                 tp_group=self._tp_group,
             )
@@ -592,7 +602,7 @@ class TorchAll2AllTPEPDispatcher(TorchAll2AllDispatcher):
             output_splits=ep_dispatched["output_splits"],
             forward_finished_event=forward_finished_event,
             backward_previous_event=backward_previous_event,
-            output_splits_tp=output_splits_tp,
+            tp_rank_row_counts=tp_rank_row_counts,
         )
 
     @override
@@ -704,9 +714,9 @@ class TorchAll2AllTPEPDispatcher(TorchAll2AllDispatcher):
             tp_forward_finished_event = cast(torch.cuda.Event, torch.cuda.Event())
             tp_backward_previous_event = cast(torch.cuda.Event, torch.cuda.Event())
             # 中文注释：TP ReduceScatter 属于 combine 通信段，EP combine 等它完成后再发起。
-            hidden_states = _async_tp_reduce_scatter_sum(
+            hidden_states = _async_tp_reduce_scatter_rows_sum(
                 pre_combined["hidden_states"],
-                all_sizes=tpep_dispatched["output_splits_tp"],
+                tp_rank_row_counts=tpep_dispatched["tp_rank_row_counts"],
                 tp_group=self._tp_group,
                 forward_previous_event=forward_previous_event,
                 forward_finished_event=tp_forward_finished_event,
@@ -720,9 +730,9 @@ class TorchAll2AllTPEPDispatcher(TorchAll2AllDispatcher):
                 forward_finished_event=tp_forward_finished_event,
             )
         else:
-            hidden_states = _tp_reduce_scatter_sum(
+            hidden_states = _tp_reduce_scatter_rows_sum(
                 pre_combined["hidden_states"],
-                all_sizes=tpep_dispatched["output_splits_tp"],
+                tp_rank_row_counts=tpep_dispatched["tp_rank_row_counts"],
                 tp_group=self._tp_group,
             )
             pre_combined_for_ep = TorchAll2AllPreCombineResult(

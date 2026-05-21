@@ -42,6 +42,8 @@ from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.dispatcher.base import NaiveDispatcher
+from xtuner.v1.module.dispatcher.torch_all2all import TorchAll2AllDispatcher
+from xtuner.v1.module.dispatcher.torch_all2all_tpep import TorchAll2AllTPEPDispatcher
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 from xtuner.v1.model.base import ModelItem
@@ -207,9 +209,10 @@ def _run_train_step_items_without_clip(
 def _record_expert_tp_collective_stages(engine: TrainEngine) -> dict[str, list[str]]:
     stages: dict[str, list[str]] = {
         "async_op_true": [],
-        "async_all_gather": [],
-        "async_all_gather_metadata": [],
-        "async_reduce_scatter_sum": [],
+        "async_all_gather_rows": [],
+        "async_all_gather_row_metadata": [],
+        "async_all_gather_per_rank_metadata": [],
+        "async_reduce_scatter_rows_sum": [],
     }
     current_stage: list[str] = []
 
@@ -241,9 +244,10 @@ def _record_expert_tp_collective_stages(engine: TrainEngine) -> dict[str, list[s
             setattr(dispatcher, stage_name, stage_wrapper)
 
         for collective_name in (
-            "async_all_gather",
-            "async_all_gather_metadata",
-            "async_reduce_scatter_sum",
+            "async_all_gather_rows",
+            "async_all_gather_row_metadata",
+            "async_all_gather_per_rank_metadata",
+            "async_reduce_scatter_rows_sum",
         ):
             original_collective = getattr(expert_tp, collective_name)
 
@@ -270,12 +274,29 @@ def _assert_domino_expert_tp_collective_stages(stages: dict[str, list[str]]) -> 
         "combine",
         "combine_postprocess",
     }
-    assert stages["async_all_gather"]
-    assert stages["async_all_gather_metadata"]
-    assert stages["async_reduce_scatter_sum"]
-    assert set(stages["async_all_gather"]) == {"dispatch"}
-    assert set(stages["async_all_gather_metadata"]) == {"dispatch"}
-    assert set(stages["async_reduce_scatter_sum"]) == {"combine"}
+    assert stages["async_all_gather_rows"]
+    assert stages["async_all_gather_row_metadata"]
+    assert stages["async_reduce_scatter_rows_sum"]
+    assert set(stages["async_all_gather_rows"]) == {"dispatch"}
+    assert set(stages["async_all_gather_row_metadata"]) == {"dispatch"}
+    assert set(stages["async_reduce_scatter_rows_sum"]) == {"combine"}
+
+
+def _assert_domino_all2all_expert_tp_collective_stages(stages: dict[str, list[str]]) -> None:
+    assert set(stages["async_op_true"]) == {
+        "dispatch_preprocess",
+        "dispatch",
+        "dispatch_postprocess",
+        "combine_preprocess",
+        "combine",
+        "combine_postprocess",
+    }
+    assert stages["async_all_gather_rows"]
+    assert stages["async_all_gather_per_rank_metadata"]
+    assert stages["async_reduce_scatter_rows_sum"]
+    assert set(stages["async_all_gather_rows"]) == {"dispatch"}
+    assert set(stages["async_all_gather_per_rank_metadata"]) == {"dispatch"}
+    assert set(stages["async_reduce_scatter_rows_sum"]) == {"combine"}
 
 
 def _assert_rank_inputs_are_distinct(batches: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
@@ -884,6 +905,71 @@ class TestMoETrainEngineTPEP(DeterministicDDPTestCase):
             atol=BF16_ATOL,
             rtol=BF16_RTOL,
         )
+
+        dist.barrier()
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except Exception:
+            pass
+
+    @parametrize.parametrize(
+        "device,ep_size,expert_tp_size",
+        [
+            ("cuda", 2, 2),
+        ],
+    )
+    def test_tpep_domino_micro_batch_matches_sync_baseline(
+        self, device: str, ep_size: int, expert_tp_size: int
+    ) -> None:
+        pg = self.create_pg(device)
+
+        engine_ref = _build_engine(ep_size=ep_size, expert_tp_size=expert_tp_size)
+        engine_ref.init_model_weights()
+
+        engine_domino = _build_engine(
+            ep_size=ep_size,
+            expert_tp_size=expert_tp_size,
+            intra_layer_micro_batch=2,
+        )
+        engine_domino.init_model_weights()
+        _copy_matching_engine_weights(engine_ref, engine_domino)
+
+        for layer in engine_domino.model.layers.values():
+            assert isinstance(layer.dispatcher, TorchAll2AllDispatcher)
+            assert not isinstance(layer.dispatcher, TorchAll2AllTPEPDispatcher)
+        collective_stages = _record_expert_tp_collective_stages(engine_domino)
+        dist.barrier()
+
+        device_obj = torch.device(device, dist.get_rank() % torch.cuda.device_count())
+        batches = [
+            _make_engine_input(device_obj, seed_offset=dist.get_rank() * 2),
+            _make_engine_input(device_obj, seed_offset=dist.get_rank() * 2 + 1),
+        ]
+        _assert_rank_inputs_are_distinct(batches)
+        loss_cfg = CELossConfig()
+
+        loss_domino = _run_train_step_items_without_clip(engine_domino, loss_cfg, batches)
+        norm_domino = engine_domino.clip_grad_norm(do_clip=False).detach().float().cpu()
+
+        loss_ref = _run_train_step_items_without_clip(engine_ref, loss_cfg, batches)
+        norm_ref = engine_ref.clip_grad_norm(do_clip=False).detach().float().cpu()
+
+        _assert_domino_all2all_expert_tp_collective_stages(collective_stages)
+        torch.testing.assert_close(
+            torch.tensor(loss_domino),
+            torch.tensor(loss_ref),
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+        torch.testing.assert_close(
+            norm_domino,
+            norm_ref,
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+        assert torch.isfinite(torch.tensor(loss_domino))
+        assert torch.isfinite(norm_domino)
 
         dist.barrier()
         torch.cuda.empty_cache()

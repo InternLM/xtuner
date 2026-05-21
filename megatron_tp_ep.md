@@ -23,7 +23,7 @@
 
 - `input_splits [EP]`：本 rank 要向各 EP rank 发送多少 token
 - `output_splits [EP]`：本 rank 将从各 EP rank 收到多少 token（仅计我的 TP 切片）
-- `output_splits_tp [TP]`：EP A2A 后，各 TP rank 各持有多少 token（用于后续 AllGather 的不等分）
+- `tp_rank_row_counts [TP]`：EP A2A 后，各 TP rank 各持有多少 token（用于后续 AllGather 的不等分）
 - `num_global_tokens_per_local_expert_cpu`：每个本地专家将处理多少 token（用于 sort_chunks）
 
 ---
@@ -60,7 +60,7 @@ all_to_all(ep_group,
 if self.tp_size > 1:
     global_input_tokens = gather_from_sequence_parallel_region(
         global_input_tokens, group=tp_group,
-        output_split_sizes=output_splits_tp.tolist()
+        output_split_sizes=tp_rank_row_counts.tolist()
     )
 → global_input_tokens [M_total, H]
 ```
@@ -118,7 +118,7 @@ if self.num_local_experts > 1:
 if self.tp_size > 1:
     hidden_states = reduce_scatter_to_sequence_parallel_region(
         hidden_states, group=tp_group,
-        input_split_sizes=output_splits_tp.tolist()
+        input_split_sizes=tp_rank_row_counts.tolist()
     )
 → [M_ep_recv, H]
 ```

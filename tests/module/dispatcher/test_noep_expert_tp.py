@@ -51,7 +51,7 @@ def _run_dispatcher(
         async_op=async_op,
     )
     # 中文注释：dispatcher 测试不跑真实 row-parallel expert；
-    # 每个 TP rank 提供 1/tp_size 的 partial output，真实 ReduceScatterSum 后应回到 baseline。
+    # 每个 TP rank 提供 1/tp_size 的 partial output，真实 ReduceScatterRowsSum 后应回到 baseline。
     experts_results = post_dispatched["hidden_states"] * expert_scale
     pre_combined = dispatcher.combine_preprocess(
         hidden_states=experts_results,
@@ -123,9 +123,9 @@ class TestNaiveExpertTPDispatcher(DeterministicDDPTestCase):
             expert_scale=1.0 / world_size,
         )
 
-        all_sizes = [tp_rank + 2 for tp_rank in range(world_size)]
-        slice_start = sum(all_sizes[:rank])
-        slice_end = slice_start + all_sizes[rank]
+        tp_rank_row_counts = [tp_rank + 2 for tp_rank in range(world_size)]
+        slice_start = sum(tp_rank_row_counts[:rank])
+        slice_end = slice_start + tp_rank_row_counts[rank]
 
         torch.testing.assert_close(dispatched["hidden_states"], full_hidden)
         torch.testing.assert_close(dispatched["topk_ids"], full_topk_ids)
