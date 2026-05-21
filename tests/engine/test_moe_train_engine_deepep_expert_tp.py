@@ -24,11 +24,28 @@ from .test_moe_train_engine_tpep import (
     _build_tiny_moe_cfg,
     _copy_matching_engine_weights,
     _get_param_grad,
+    _get_tpep_grouped_linear,
     _make_engine_input,
     _run_one_step_with_norm,
+    _run_train_step_without_clip,
+    _slice_tpep_weight,
+    _sync_engine_weights,
+    _zero_non_expert_grads,
 )
 
 BF16_RTOL, BF16_ATOL = default_tolerances(torch.bfloat16)
+BF16_GRAD_ATOL = BF16_ATOL * 2
+
+
+def _assert_bf16_training_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    # 中文注释：梯度矩阵经过 grouped-GEMM 与 TP/EP 规约，近 0 元素会出现极小累加顺序差异；
+    # 这里仍以 torch.testing 的 bf16 默认精度为基准，只给梯度绝对误差留 2 倍余量。
+    torch.testing.assert_close(
+        actual.to(torch.bfloat16),
+        expected.to(torch.bfloat16),
+        atol=BF16_GRAD_ATOL,
+        rtol=BF16_RTOL,
+    )
 
 
 def _build_engine(
@@ -111,15 +128,125 @@ class TestMoETrainEngineDeepEPExpertTP(DeterministicDDPTestCase):
 
         gate_grad_deepep = _get_param_grad(engine_deepep, "layers.0.gate.weight")
         gate_grad_all2all = _get_param_grad(engine_all2all, "layers.0.gate.weight")
-        torch.testing.assert_close(
-            gate_grad_deepep,
-            gate_grad_all2all,
-            atol=BF16_ATOL,
-            rtol=BF16_RTOL,
-        )
+        _assert_bf16_training_close(gate_grad_deepep, gate_grad_all2all)
         torch.testing.assert_close(
             norm_deepep,
             norm_all2all,
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+
+        dist.barrier()
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except Exception:
+            pass
+
+    def test_deepep_expert_tp_matches_single_model_baseline(self) -> None:
+        pg = self.create_pg("cuda")
+
+        ep_size = 2
+        expert_tp_size = 2
+        engine_ref = _build_engine(
+            dispatcher="all2all",
+            ep_size=1,
+            expert_tp_size=1,
+        )
+        engine_ref.init_model_weights()
+
+        engine_deepep = _build_engine(
+            dispatcher="deepep",
+            ep_size=ep_size,
+            expert_tp_size=expert_tp_size,
+        )
+        engine_deepep.init_model_weights()
+        _sync_engine_weights(engine_ref, engine_deepep)
+        dist.barrier()
+
+        assert isinstance(engine_deepep.model.layers["0"].dispatcher, DeepEPDispatcher)
+        assert engine_deepep.model.ep_mesh is not None
+        assert engine_deepep.model.expert_tp_mesh is not None
+        assert engine_deepep.model.ep_mesh.size() == ep_size
+        assert engine_deepep.model.expert_tp_mesh.size() == expert_tp_size
+
+        device = torch.device("cuda", dist.get_rank() % torch.cuda.device_count())
+        input_ids, labels = _make_engine_input(device=device, seed_offset=dist.get_rank())
+        loss_cfg = CELossConfig()
+
+        loss_deepep, _, norm_deepep = _run_one_step_with_norm(engine_deepep, loss_cfg, input_ids, labels)
+        loss_ref, _, norm_ref = _run_one_step_with_norm(engine_ref, loss_cfg, input_ids, labels)
+
+        torch.testing.assert_close(
+            torch.tensor(loss_deepep),
+            torch.tensor(loss_ref),
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+
+        gate_grad_deepep = _get_param_grad(engine_deepep, "layers.0.gate.weight")
+        gate_grad_ref = _get_param_grad(engine_ref, "layers.0.gate.weight")
+        _assert_bf16_training_close(gate_grad_deepep, gate_grad_ref)
+
+        for module_suffix, fused_gate_up in (
+            ("layers.0.experts.fused_w1w3", True),
+            ("layers.0.experts.fused_w2", False),
+        ):
+            ref_grad = _get_param_grad(engine_ref, f"{module_suffix}.weight")
+            deepep_grad = _get_param_grad(engine_deepep, f"{module_suffix}.weight")
+            deepep_module = _get_tpep_grouped_linear(engine_deepep, module_suffix)
+            expected_deepep_grad = _slice_tpep_weight(deepep_module, ref_grad, fused_gate_up=fused_gate_up)
+            _assert_bf16_training_close(deepep_grad, expected_deepep_grad)
+
+        torch.testing.assert_close(
+            norm_deepep,
+            norm_ref,
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+
+        dist.barrier()
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except Exception:
+            pass
+
+    def test_deepep_expert_tp_expert_only_grad_norm_matches_single_model_baseline(self) -> None:
+        pg = self.create_pg("cuda")
+
+        ep_size = 2
+        expert_tp_size = 2
+        engine_ref = _build_engine(
+            dispatcher="all2all",
+            ep_size=1,
+            expert_tp_size=1,
+        )
+        engine_ref.init_model_weights()
+
+        engine_deepep = _build_engine(
+            dispatcher="deepep",
+            ep_size=ep_size,
+            expert_tp_size=expert_tp_size,
+        )
+        engine_deepep.init_model_weights()
+        _sync_engine_weights(engine_ref, engine_deepep)
+        dist.barrier()
+
+        device = torch.device("cuda", dist.get_rank() % torch.cuda.device_count())
+        input_ids, labels = _make_engine_input(device=device, seed_offset=dist.get_rank())
+        loss_cfg = CELossConfig()
+
+        _run_train_step_without_clip(engine_deepep, loss_cfg, input_ids, labels)
+        _run_train_step_without_clip(engine_ref, loss_cfg, input_ids, labels)
+        # 中文注释：expert-only norm 单独验证 EP 和 ExpertTP shard 的 norm-square 汇总语义。
+        _zero_non_expert_grads(engine_deepep)
+        _zero_non_expert_grads(engine_ref)
+        expert_norm_deepep = engine_deepep.clip_grad_norm(do_clip=False).detach().float().cpu()
+        expert_norm_ref = engine_ref.clip_grad_norm(do_clip=False).detach().float().cpu()
+        torch.testing.assert_close(
+            expert_norm_deepep,
+            expert_norm_ref,
             atol=BF16_ATOL,
             rtol=BF16_RTOL,
         )
