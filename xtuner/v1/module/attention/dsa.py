@@ -17,7 +17,7 @@
 # `RotaryEmbedding` cos/sin output shape `[B, S, rope_head_dim]`.
 # ============================================================================
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 import torch
 from cyclopts import Parameter
@@ -86,6 +86,21 @@ class DSAConfig(BaseModel):
     index_n_heads: Annotated[int, Parameter(group="attention")] = 64
     index_topk: Annotated[int, Parameter(group="attention")] = 512
     rms_norm_eps: float = 1e-6
+    # Backend selecting the sparse-attention kernel used for the layer's
+    # ``sparse_attn`` call:
+    #   * ``"native"``  — the pure-PyTorch reference in :mod:`sparse_attn`.
+    #     Slow but autograd-correct, has no extra deps. Default.
+    #   * ``"flash_mla"`` — Phase-1 fused backend: forward uses
+    #     :func:`flash_mla.flash_mla_sparse_fwd` (DeepSeek-AI's FlashMLA C++
+    #     kernel, requires SM90/SM100 and ``pip install`` of the FlashMLA repo);
+    #     backward re-runs the native sparse_attn under an autograd.Function so
+    #     numerical gradients match ``"native"`` exactly. Future phases will
+    #     swap the backward path to cudnn-frontend ``SparseAttentionBackward``.
+    #   * ``"cudnn"``     — Phase-2 fused backend: forward stays on FlashMLA
+    #     (same as ``"flash_mla"``); backward uses cudnn-frontend's
+    #     ``sparse_attention_backward_wrapper`` (DSA bwd, FlashMLA-shape,
+    #     SM90/SM100). Requires ``pip install nvidia-cudnn-frontend>=1.24.0``.
+    backend: Annotated[Literal["native", "flash_mla", "cudnn"], Parameter(group="attention")] = "native"
 
     def build(
         self,
@@ -159,6 +174,7 @@ class DeepSeekSparseAttention(nn.Module):
         self.layer_idx = layer_idx
         self.hidden_size = hidden_size
         self.compress_ratio = compress_ratio
+        self.backend = dsa_cfg.backend
         self.num_attention_heads = dsa_cfg.num_attention_heads
         self.num_key_value_heads = dsa_cfg.num_key_value_heads
         self.head_dim = dsa_cfg.head_dim
@@ -305,104 +321,124 @@ class DeepSeekSparseAttention(nn.Module):
         # why: V4 applies a second per-head RMSNorm to q (model.py L498),
         # separate from `q_norm` which acted on the low-rank stream. This
         # stabilises the dot-product scale across heads.
-        q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.rms_norm_eps).to(q.dtype)
+        # Per-head RMS norm. ``q.float()`` would allocate a fp32 copy of the
+        # full [1, total_q, n_heads, head_dim] q (128 MB at pack=4096) and save
+        # it for the multiplication's backward. Instead, square in bf16 and let
+        # the mean's ``dtype=fp32`` accumulator promote on reduction — peak
+        # transient drops to one bf16 square (half the size, freed before the
+        # multiply runs) plus a tiny ``[B, S, H, 1]`` fp32 scalar.
+        q_sq = q * q
+        q_inv_norm = torch.rsqrt(q_sq.mean(-1, keepdim=True, dtype=torch.float32) + self.rms_norm_eps).to(q.dtype)
+        q = q * q_inv_norm
         q = _apply_rope_split(q, cos, sin, self.qk_rope_head_dim)
 
         # 2. KV (single head, MQA).
         kv = self.kv_norm(self.wkv(hidden_states))  # [1, S, head_dim]
         kv = _apply_rope_split(kv, cos, sin, self.qk_rope_head_dim)
 
-        # 3. Per-sample loop. We deviate from the V4 reference (which assumes
-        # one contiguous sequence) because XTuner packs multiple samples per
-        # forward; matching KVCompressor / Indexer per-sample convention is
-        # the only way to avoid cross-sample contamination in the window /
-        # compressed-KV indexing.
-        cu = seq_ctx.cu_seq_lens_q.detach().cpu().tolist()
-        num_samples = len(cu) - 1
-        output_pieces: list[torch.Tensor] = []
+        # 3. Single varlen forward over the whole pack. The three sparse-attn
+        # backends (native / flash_mla / cudnn) all gather kv by global index
+        # and have no notion of samples; cross-sample isolation is the caller's
+        # responsibility — i.e. *ours* — and is achieved by
+        #   (a) laying ``kv_full`` out as ``[W_0, C_0, W_1, C_1, ...]`` so each
+        #       sample owns a contiguous slab, and
+        #   (b) building ``topk_idxs`` whose entries are sample-local then
+        #       shifted by ``cu_packed[sample_id]`` (+ ``q_len[sample_id]`` for
+        #       the compressed half), so no token can attend across sample
+        #       boundaries.
+        # This replaces an old per-sample Python loop that called the compressor,
+        # indexer, and sparse_attn N times with one .cpu()/.tolist() sync at the
+        # top — N times per layer, per micro-batch, per step.
+        cu_q = seq_ctx.cu_seq_lens_q
+        device = q.device
 
-        for i in range(num_samples):
-            s0, s1 = cu[i], cu[i + 1]
-            sample_len = s1 - s0
-            if sample_len == 0:
-                continue
-            sample_cu = torch.tensor([0, sample_len], dtype=torch.int32, device=hidden_states.device)
+        window_topk = _build_window_topk_idxs_varlen(self.sliding_window, cu_q, total_tokens)
 
-            q_s = q[:, s0:s1]
-            kv_s = kv[:, s0:s1]
-            x_s = hidden_states[:, s0:s1]
-            cos_s = cos[:, s0:s1]
-            sin_s = sin[:, s0:s1]
-
-            window_topk = _build_window_topk_idxs(self.sliding_window, sample_len, q.device)
-
-            if self.compress_ratio > 0:
-                kv_compressed, _ = self.compressor(x_s, sample_cu)  # [1, T_c, head_dim]
-                t_c = kv_compressed.size(1)
-                if self.compress_ratio == 4:
-                    qlr_s = q_lowrank[:, s0:s1]
-                    cos_c_full, sin_c_full = position_embeddings_compressed  # type: ignore[misc]
-                    # why: the Indexer's internal RoPE uses the complex-pair
-                    # (`view_as_complex`) convention from the V4 reference and
-                    # therefore expects half-dim cos/sin. XTuner's dual-rope
-                    # module emits full-dim rotate-half cos/sin which carries
-                    # the same frequency vector duplicated as
-                    # `cat((freqs, freqs), dim=-1)`; the first half is exactly
-                    # the half-dim cos/sin the Indexer needs.
-                    half = self.qk_rope_head_dim // 2
-                    cos_c_s = cos_c_full[:, s0:s1, :half]
-                    sin_c_s = sin_c_full[:, s0:s1, :half]
-                    compress_topk = self.indexer(x_s, qlr_s, (cos_c_s, sin_c_s), sample_cu)
-                else:
-                    # compress_ratio == 128: deterministic positional top-k.
-                    compress_topk = _build_compress_topk_idxs(self.compress_ratio, sample_len, t_c, q.device)
-
-                # Compressed indices live in [0, t_c); after concatenating
-                # window KV (length `sample_len`) and compressed KV in that
-                # order, shift compressed entries by `sample_len`. -1 stays
-                # -1 (masked-out slot in sparse_attn).
-                compress_topk_shifted = torch.where(compress_topk == -1, compress_topk, compress_topk + sample_len)
-                kv_full = torch.cat([kv_s, kv_compressed], dim=1)
-                topk_idxs = torch.cat([window_topk, compress_topk_shifted], dim=-1)
+        if self.compress_ratio > 0:
+            # Compressor / Indexer accept cu_seq_lens by API today but still
+            # loop per-sample internally; Phase 2/3 will vectorise them. Even
+            # so, the single outer call eliminates N entry/exit pairs and
+            # batches the GEMMs at the layer boundary.
+            assert self.compressor is not None  # compress_ratio > 0 always materialises it
+            kv_compressed, cu_c = self.compressor(hidden_states, cu_q)  # [1, total_c, D], [B+1]
+            if self.compress_ratio == 4:
+                half = self.qk_rope_head_dim // 2
+                cos_c_full, sin_c_full = position_embeddings_compressed  # type: ignore[misc]
+                # why: the Indexer's internal RoPE uses the complex-pair
+                # (``view_as_complex``) convention from the V4 reference and
+                # therefore expects half-dim cos/sin. XTuner's dual-rope
+                # module emits full-dim rotate-half cos/sin which carries the
+                # same frequency vector duplicated as ``cat((freqs, freqs), dim=-1)``;
+                # the first half is exactly the half-dim cos/sin the Indexer needs.
+                cos_c = cos_c_full[..., :half]
+                sin_c = sin_c_full[..., :half]
+                assert self.indexer is not None  # compress_ratio == 4 always materialises it
+                compress_topk = self.indexer(hidden_states, q_lowrank, (cos_c, sin_c), cu_q)
             else:
-                kv_full = kv_s
-                topk_idxs = window_topk
-
-            topk_idxs = topk_idxs.int()
-
-            attn_sink = (
-                self.attn_sink
-                if self.attn_sink is not None
-                else q_s.new_zeros(self.num_attention_heads, dtype=torch.float32)
-            )
-
-            o_s = sparse_attn(
-                q_s,
-                kv_full,
-                attn_sink,
-                topk_idxs,
-                self.softmax_scale,
-                sample_cu,
-            )  # [1, sample_len, H, head_dim]
-
-            # 4. De-rotate the rope tail on the output (V4 reference L534).
-            # Forward and inverse cancel on the rope-carrying dims so the
-            # output's rope tail is positionally neutral before O-LoRA.
-            o_s = _apply_rope_inverse_split(o_s, cos_s, sin_s, self.qk_rope_head_dim)
-
-            output_pieces.append(o_s)
-
-        # Concatenate per-sample outputs back into the packed layout.
-        if len(output_pieces) == 0:
-            raw_output = q.new_zeros(1, 0, self.num_attention_heads, self.head_dim)
+                # compress_ratio == 128: deterministic positional top-k. The K
+                # dim is bounded by the longest sample's compressed length;
+                # ``total_tokens // ratio + 1`` is a static upper bound that
+                # dynamo can specialise. Per-token rows fewer than this width
+                # are -1-padded.
+                max_compressed_width = total_tokens // self.compress_ratio + 1
+                compress_topk = _build_compress_topk_idxs_varlen(
+                    self.compress_ratio, cu_q, cu_c, total_tokens, max_compressed_width
+                )
         else:
-            raw_output = torch.cat(output_pieces, dim=1)
+            kv_compressed = kv.new_zeros(1, 0, kv.size(-1))
+            cu_c = torch.zeros_like(cu_q)
+            compress_topk = None
+
+        # Sample-interleaved kv_full layout and the cumulative offsets we shift
+        # topk indices against.
+        q_lens = cu_q[1:] - cu_q[:-1]
+        c_lens = cu_c[1:] - cu_c[:-1]
+        packed_lens = q_lens + c_lens
+        cu_packed = torch.zeros(packed_lens.numel() + 1, dtype=cu_q.dtype, device=device)
+        cu_packed[1:] = torch.cumsum(packed_lens, dim=0)
+
+        kv_full = _interleave_window_compressed_kv(kv, kv_compressed, cu_q, cu_c, cu_packed)
+        topk_idxs = _shift_topk_to_global(window_topk, compress_topk, cu_q, cu_packed).int()
+
+        # Under ep_size > 1, ``_replicate_other_params`` wraps ``self.attn_sink``
+        # as a Replicate-on-ep DTensor. ``sparse_attn`` cats it with plain-tensor
+        # logits via ``torch.cat``, which would crash with "mixed Tensor and DTensor".
+        # ``.to_local()`` is a no-op on plain tensors (ep=1 path).
+        if self.attn_sink is None:
+            attn_sink = q.new_zeros(self.num_attention_heads, dtype=torch.float32)
+        else:
+            from torch.distributed.tensor import DTensor as _DTensor
+
+            attn_sink = self.attn_sink.to_local() if isinstance(self.attn_sink, _DTensor) else self.attn_sink
+
+        if self.backend == "flash_mla":
+            from ._flash_mla_sparse_attn import flash_mla_sparse_attn
+
+            attn_out = flash_mla_sparse_attn(q, kv_full, attn_sink, topk_idxs, self.softmax_scale, cu_q)
+        elif self.backend == "cudnn":
+            from ._flash_mla_sparse_attn import cudnn_sparse_attn
+
+            attn_out = cudnn_sparse_attn(q, kv_full, attn_sink, topk_idxs, self.softmax_scale, cu_q)
+        else:
+            attn_out = sparse_attn(q, kv_full, attn_sink, topk_idxs, self.softmax_scale, cu_q)
+
+        # 4. De-rotate the rope tail on the output (V4 reference L534) over the
+        # whole packed batch; the op is per-token so it cancels rope cleanly on
+        # each sample without needing per-sample slicing.
+        raw_output = _apply_rope_inverse_split(attn_out, cos, sin, self.qk_rope_head_dim)
 
         # 5. Grouped O-LoRA. `wo_a` is conceptually
         # `[o_groups, o_lora_rank, head_dim_per_group]`; the einsum mirrors
-        # V4 reference L538-541.
+        # V4 reference L538-541. We access `.weight` directly (bypassing the
+        # Linear forward) so the patched `nn.Linear.forward` `.to_local()`
+        # shim doesn't fire here — do the unwrap explicitly to keep ep>1 working.
+        from torch.distributed.tensor import DTensor as _DTensor
+
+        wo_a_weight = self.wo_a.weight
+        if isinstance(wo_a_weight, _DTensor):
+            wo_a_weight = wo_a_weight.to_local()
         o_grouped = raw_output.reshape(1, raw_output.size(1), self.o_groups, self.head_dim_per_group)
-        wo_a_view = self.wo_a.weight.view(self.o_groups, self.o_lora_rank, self.head_dim_per_group)
+        wo_a_view = wo_a_weight.view(self.o_groups, self.o_lora_rank, self.head_dim_per_group)
         o_proj = torch.einsum("bsgd,grd->bsgr", o_grouped, wo_a_view)  # [1, S, o_groups, o_lora_rank]
         projected_output = self.wo_b(o_proj.flatten(2))  # [1, S, hidden_size]
 
@@ -496,34 +532,165 @@ def _broadcast_cos_sin(
     raise ValueError(f"Cannot broadcast cos/sin {tuple(cos.shape)} against x {tuple(x.shape)}")
 
 
-def _build_window_topk_idxs(window_size: int, seqlen: int, device: torch.device) -> torch.Tensor:
-    # Ports `get_window_topk_idxs` (model.py L262-264) for the start_pos == 0
-    # branch. For each query position we list the indices of the up-to-
-    # `window_size` preceding KV positions; entries that would point below 0
-    # are masked with -1 and dropped by sparse_attn.
-    base = torch.arange(seqlen, device=device, dtype=torch.long).unsqueeze(1)
-    matrix = (base - window_size + 1).clamp(min=0) + torch.arange(
-        min(seqlen, window_size), device=device, dtype=torch.long
-    )
-    matrix = torch.where(matrix > base, torch.full_like(matrix, -1), matrix)
-    return matrix.unsqueeze(0)  # [1, seqlen, min(seqlen, window_size)]
+# -- Varlen path helpers (one packed call across all samples; no .cpu() sync, no Python loop) --
 
 
-def _build_compress_topk_idxs(
-    ratio: int,
-    seqlen: int,
-    t_compressed: int,
-    device: torch.device,
+def _build_window_topk_idxs_varlen(
+    window_size: int,
+    cu_q: torch.Tensor,
+    total_tokens: int,
 ) -> torch.Tensor:
-    # Ports `get_compress_topk_idxs` (model.py L273-275) for the
-    # start_pos == 0 branch. Each query position s (1-indexed) can attend to
-    # compressed positions in [0, (s + 1) // ratio); anything outside this
-    # horizon is marked -1. We deliberately clamp the column count to
-    # `t_compressed` (the actual compressed length emitted by KVCompressor for
-    # this sample) rather than `seqlen // ratio` — they differ when the sample
-    # length is not a multiple of `ratio`, because KVCompressor pads to a
-    # whole group.
-    matrix = torch.arange(t_compressed, device=device, dtype=torch.long).repeat(seqlen, 1)
-    horizon = torch.arange(1, seqlen + 1, device=device, dtype=torch.long).unsqueeze(1) // ratio
-    matrix = torch.where(matrix >= horizon, torch.full_like(matrix, -1), matrix)
-    return matrix.unsqueeze(0)  # [1, seqlen, t_compressed]
+    """Varlen replacement for :func:`_build_window_topk_idxs`.
+
+    Returns sample-local sliding-window indices for every query token in the
+    packed batch in one tensor op. Each token at sample-local position ``s``
+    sees the indices ``s-window_size+1 .. s`` clamped to ``[0, s]``;
+    out-of-range entries are masked with ``-1``. Caller is responsible for
+    shifting these into the global kv_full coordinate space via
+    :func:`_shift_topk_to_global`.
+
+    Args:
+        window_size (int): Sliding-window span (statically known).
+        cu_q (torch.Tensor): ``[B+1]`` cumulative query lengths.
+        total_tokens (int): ``cu_q[-1]`` as a Python int (taken from the q tensor's shape).
+
+    Returns:
+        torch.Tensor: ``[1, total_tokens, window_size]`` int64 sample-local indices.
+    """
+    device = cu_q.device
+    pos = torch.arange(total_tokens, device=device, dtype=torch.long)
+    sample_id = torch.searchsorted(cu_q, pos, right=True) - 1  # [total_tokens]
+    in_sample_pos = (pos - cu_q[sample_id]).unsqueeze(-1)  # [total_tokens, 1]
+    k_axis = torch.arange(window_size, device=device, dtype=torch.long).unsqueeze(0)  # [1, window_size]
+    base = in_sample_pos - (window_size - 1) + k_axis
+    valid = (base >= 0) & (base <= in_sample_pos)
+    return torch.where(valid, base, torch.full_like(base, -1)).unsqueeze(0)
+
+
+def _build_compress_topk_idxs_varlen(
+    ratio: int,
+    cu_q: torch.Tensor,
+    cu_c: torch.Tensor,
+    total_tokens: int,
+    max_compressed_width: int,
+) -> torch.Tensor:
+    """Varlen replacement for :func:`_build_compress_topk_idxs` (compress_ratio==128 deterministic path).
+
+    For each query token at sample-local position ``s``, the valid compressed
+    horizon is ``[0, (s+1)//ratio)`` clamped further by the sample's actual
+    compressed kv length (``cu_c[i+1] - cu_c[i]``). Output columns beyond the
+    per-token horizon are masked with ``-1``. Result is sample-local; caller
+    shifts into kv_full coordinates.
+
+    Args:
+        ratio (int): ``compress_ratio`` (positional ratio when not using the indexer).
+        cu_q (torch.Tensor): ``[B+1]`` cumulative query lengths.
+        cu_c (torch.Tensor): ``[B+1]`` cumulative compressed kv lengths (from the compressor).
+        total_tokens (int): ``cu_q[-1]`` as a Python int.
+        max_compressed_width (int): Static upper bound on the K dim, derived from
+            ``(pack_max_length + ratio - 1) // ratio`` so dynamo can specialize.
+
+    Returns:
+        torch.Tensor: ``[1, total_tokens, max_compressed_width]`` int64.
+    """
+    device = cu_q.device
+    pos = torch.arange(total_tokens, device=device, dtype=torch.long)
+    sample_id = torch.searchsorted(cu_q, pos, right=True) - 1
+    in_sample_pos = pos - cu_q[sample_id]
+    horizon = (in_sample_pos + 1) // ratio  # [total_tokens] — how far the token can see
+    c_lens_per_sample = cu_c[1:] - cu_c[:-1]
+    c_lens_per_token = c_lens_per_sample[sample_id]
+    upper = torch.minimum(horizon, c_lens_per_token).unsqueeze(-1)  # [total_tokens, 1]
+    k_axis = torch.arange(max_compressed_width, device=device, dtype=torch.long).unsqueeze(0)
+    return torch.where(k_axis < upper, k_axis, torch.full_like(k_axis, -1)).unsqueeze(0)
+
+
+def _interleave_window_compressed_kv(
+    kv_window: torch.Tensor,
+    kv_compressed: torch.Tensor,
+    cu_q: torch.Tensor,
+    cu_c: torch.Tensor,
+    cu_packed: torch.Tensor,
+) -> torch.Tensor:
+    """Lay kv out as per-sample ``[W_0, C_0, W_1, C_1, ...]`` in a single GPU permutation.
+
+    The three sparse-attn backends (native / flash_mla / cudnn) gather kv by
+    global index and have no notion of samples; this layout keeps every
+    sample's local topk indices inside its own ``[W_i, C_i]`` contiguous region
+    after :func:`_shift_topk_to_global` shifts them.
+
+    Args:
+        kv_window (torch.Tensor): ``[1, total_q, D]`` packed window kv.
+        kv_compressed (torch.Tensor): ``[1, total_c, D]`` packed compressed kv. May be empty.
+        cu_q (torch.Tensor): ``[B+1]`` window cumulative lengths.
+        cu_c (torch.Tensor): ``[B+1]`` compressed cumulative lengths.
+        cu_packed (torch.Tensor): ``[B+1]`` cumulative ``(q_len + c_len)`` per sample.
+
+    Returns:
+        torch.Tensor: ``[1, total_q + total_c, D]`` kv_full in interleaved layout.
+    """
+    device = kv_window.device
+    total_kv = kv_window.size(1) + kv_compressed.size(1)
+    out_pos = torch.arange(total_kv, device=device, dtype=torch.long)
+    sample_id = torch.searchsorted(cu_packed, out_pos, right=True) - 1
+    in_packed_pos = out_pos - cu_packed[sample_id]
+    q_lens = cu_q[1:] - cu_q[:-1]
+    q_lens_per_pos = q_lens[sample_id]
+    is_window = in_packed_pos < q_lens_per_pos
+    # Both branches of `torch.where` evaluate, so clamp source indices to a
+    # legal range. The clamped value is meaningless on the branch it isn't
+    # selected for; the mask drops it.
+    win_src = (cu_q[sample_id] + in_packed_pos).clamp(min=0, max=max(kv_window.size(1) - 1, 0))
+    if kv_compressed.size(1) == 0:
+        return kv_window[0].index_select(0, win_src).unsqueeze(0)
+    com_src = (cu_c[sample_id] + (in_packed_pos - q_lens_per_pos)).clamp(
+        min=0, max=kv_compressed.size(1) - 1
+    )
+    win_gathered = kv_window[0].index_select(0, win_src)
+    com_gathered = kv_compressed[0].index_select(0, com_src)
+    return torch.where(is_window.unsqueeze(-1), win_gathered, com_gathered).unsqueeze(0)
+
+
+def _shift_topk_to_global(
+    window_topk_local: torch.Tensor,
+    compress_topk_local: torch.Tensor | None,
+    cu_q: torch.Tensor,
+    cu_packed: torch.Tensor,
+) -> torch.Tensor:
+    """Shift sample-local topk indices into the kv_full coordinate space.
+
+    Window indices shift by ``cu_packed[sample_id]``; compressed indices shift
+    by ``cu_packed[sample_id] + q_len[sample_id]`` (skipping past each sample's
+    window region). ``-1`` entries pass through untouched so sparse_attn still
+    masks them out.
+
+    Args:
+        window_topk_local (torch.Tensor): ``[1, total_q, K_w]`` sample-local indices.
+        compress_topk_local (torch.Tensor | None): ``[1, total_q, K_c]``
+            sample-local indices, or ``None`` when ``compress_ratio == 0``.
+        cu_q (torch.Tensor): ``[B+1]`` cumulative query lengths.
+        cu_packed (torch.Tensor): ``[B+1]`` cumulative packed-kv lengths.
+
+    Returns:
+        torch.Tensor: ``[1, total_q, K_w (+ K_c)]`` int64 indices into kv_full.
+    """
+    device = window_topk_local.device
+    total_q = window_topk_local.size(1)
+    pos = torch.arange(total_q, device=device, dtype=torch.long)
+    sample_id = torch.searchsorted(cu_q, pos, right=True) - 1
+    cu_packed_per_pos = cu_packed[sample_id].view(1, -1, 1)
+    window_shifted = torch.where(
+        window_topk_local == -1,
+        window_topk_local,
+        window_topk_local + cu_packed_per_pos,
+    )
+    if compress_topk_local is None:
+        return window_shifted
+    q_lens = cu_q[1:] - cu_q[:-1]
+    compress_shift = (cu_packed[sample_id] + q_lens[sample_id]).view(1, -1, 1)
+    compress_shifted = torch.where(
+        compress_topk_local == -1,
+        compress_topk_local,
+        compress_topk_local + compress_shift,
+    )
+    return torch.cat([window_shifted, compress_shifted], dim=-1)

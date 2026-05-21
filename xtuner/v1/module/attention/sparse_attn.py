@@ -146,13 +146,12 @@ def _build_horizon_mask(
     if kv_total <= 0:
         return torch.zeros_like(safe_idxs, dtype=torch.bool)
     mask = (safe_idxs >= 0) & (safe_idxs < kv_total)
-    # cu_seq_lens is currently informational: when sparse_attn is called per
-    # sample by the DSA layer (PR5) the index ranges are already
-    # sample-local. We still validate the shape so a mis-wired caller fails
-    # early rather than silently producing cross-sample contamination.
-    if cu_seq_lens[-1].item() != safe_idxs.size(1):
-        raise ValueError(
-            "cu_seq_lens total does not match q's token axis: "
-            f"cu_seq_lens[-1]={int(cu_seq_lens[-1].item())} vs total_tokens={safe_idxs.size(1)}"
-        )
+    # cu_seq_lens is currently informational. Cross-sample isolation is the
+    # caller's responsibility — DSA's varlen path lays kv out as per-sample
+    # ``[W_i, C_i]`` slabs and pre-shifts ``topk_idxs`` so each token's entries
+    # stay inside its own slab. We deliberately *don't* validate
+    # ``cu_seq_lens[-1] == safe_idxs.size(1)`` here: ``.item()`` would force a
+    # device→host sync on the hot path, defeating the whole point of
+    # eliminating the per-sample Python loop. The invariant is enforced by
+    # construction in :class:`DeepSeekSparseAttention.forward`.
     return mask

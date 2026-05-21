@@ -100,7 +100,11 @@ class MoEModelOutputs(ModelOutputs):
     router_weights: dict[str, torch.Tensor] | None = None
     balancing_loss: torch.Tensor | None = None
     z_loss: torch.Tensor | None = None
-    tokens_per_expert_global: torch.Tensor
+    # Optional so models with no MoE-routed layer this step (e.g. V4 smoke
+    # configs where `num_hash_layers >= num_hidden_layers` makes every layer
+    # hash-routed) can emit `None` instead of fabricating a tensor.
+    # `internal_metrics.py` already short-circuits on `is None`.
+    tokens_per_expert_global: torch.Tensor | None = None
     mtp_loss: torch.Tensor | None = None
 
     def free_nongrad_feature(self):
@@ -292,14 +296,37 @@ class MoE(BaseModel):
 
         first_k_dense_replace = self.config.first_k_dense_replace
         bias_update_speed = cast(NoAuxRouterConfig, self.config.router).router_bias_update_speed
-        n_layer, _ = total_expert_counts_pre_iter.size()
+        # ``total_expert_counts_pre_iter`` only carries counts for *score-routed*
+        # layers (the ones aux_loss.accumulate ran over — see
+        # ``_should_compute_aux_loss``). V4 mixes ``HashRouter`` (no learnable
+        # bias) on the first ``num_hash_layers`` layers and ``NoAuxRouter`` on
+        # the rest, so the row index into ``total_expert_counts_pre_iter`` must
+        # advance only for the latter. ``score_cursor`` does that bookkeeping.
+        score_cursor = 0
+        num_score_layers = total_expert_counts_pre_iter.size(0)
+        n_moe_layers = len(self.layers) - first_k_dense_replace
 
-        for i_layer in range(n_layer):
-            # 前 l 层是 mlp 层，跳过
+        for i_layer in range(n_moe_layers):
+            # ``_should_compute_aux_loss`` is V4's override hook — it returns
+            # False for hash-routed layers so they're skipped here too.
+            if not self._should_compute_aux_loss(i_layer):
+                continue
             gate = cast(MoEDecoderLayer, self.layers[str(first_k_dense_replace + i_layer)]).gate
-            e_score_correction_bias = cast(NoAuxRouter, gate.router).e_score_correction_bias
-            expected_load = expected_loads[i_layer]
-            current_loads = total_expert_counts_pre_iter[i_layer]
+            router = gate.router
+            # Defensive: only NoAuxRouter has a learnable bias. ``_should_compute_aux_loss``
+            # is already meant to filter this out, but guard anyway in case a
+            # subclass returns True for a non-NoAux router (e.g. a future hybrid).
+            if not isinstance(router, NoAuxRouter):
+                continue
+            if score_cursor >= num_score_layers:
+                # More score-routed layers than counts — accumulate / finalize
+                # disagreed about which layers contribute. Shouldn't happen, but
+                # bail rather than index out of range.
+                break
+            e_score_correction_bias = router.e_score_correction_bias
+            expected_load = expected_loads[score_cursor]
+            current_loads = total_expert_counts_pre_iter[score_cursor]
+            score_cursor += 1
 
             load_diff = current_loads - expected_load
             update_mask = load_diff != 0  # 只更新需要调整的专家
@@ -406,19 +433,24 @@ class MoE(BaseModel):
         base_info = super().post_micro_batch_forward(batch_outputs)
         logs_info = base_info["logs_info"]
 
+        # No-MoE-layer step (e.g. V4 smoke where every layer is hash-routed):
+        # `tokens_per_expert_global` is None across micro-batches. Skip the
+        # maxvio / bias-update aggregation; logs simply omit `maxvio` for the
+        # step and bias updates have nothing to apply.
         first_tokens_per_expert = batch_outputs[0]["tokens_per_expert_global"]
-        tokens_per_expert_global = torch.zeros_like(first_tokens_per_expert)
-        for output in batch_outputs:
-            tokens_per_expert_global += output["tokens_per_expert_global"]
+        if first_tokens_per_expert is not None:
+            tokens_per_expert_global = torch.zeros_like(first_tokens_per_expert)
+            for output in batch_outputs:
+                tokens_per_expert_global += output["tokens_per_expert_global"]
 
-        avg_count_load = tokens_per_expert_global.float().mean(1)
-        max_load_i, _ = torch.max(tokens_per_expert_global, dim=1)
-        maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
-        maxvio = maxvio_all_layers.mean()
-        logs_info["maxvio"] = maxvio.item()
+            avg_count_load = tokens_per_expert_global.float().mean(1)
+            max_load_i, _ = torch.max(tokens_per_expert_global, dim=1)
+            maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
+            maxvio = maxvio_all_layers.mean()
+            logs_info["maxvio"] = maxvio.item()
 
-        if self.need_update_bias:
-            self.update_bias(tokens_per_expert_global, avg_count_load)  # type: ignore
+            if self.need_update_bias:
+                self.update_bias(tokens_per_expert_global, avg_count_load)  # type: ignore
 
         moe_info = cast(MoEBatchForwardInfo, base_info)
         return moe_info
@@ -1127,9 +1159,33 @@ class MoE(BaseModel):
         )
         self.set_modules_to_forward_prefetch([self.embed_tokens, self.layers["0"]])  # type: ignore
 
-        for _, module in self.named_modules():
-            if isinstance(module, nn.Embedding):
+        # Patch nn.Embedding and nn.Linear forwards on the non-MoE backbone so that
+        # weights pre-wrapped as Replicate-on-ep DTensor by `_replicate_other_params`
+        # get .to_local()'d before F.embedding / F.linear. Without this, callers that
+        # pass plain-Tensor activations (V4 HC helpers, attn_block / ffn_block hops
+        # that bypass MoEDecoderLayer.forward's torch.compile coercion) crash with
+        # "got mixed torch.Tensor and DTensor". The walk skips MoEBlock to leave the
+        # expert / gate / shared-expert weights untouched — those are ep-sharded on
+        # purpose by the MoE dispatch path.
+        def _patch_non_moe_block_linears_and_embeds(module: nn.Module) -> None:
+            from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEBlock
+
+            if isinstance(module, MoEBlock):
+                return
+            # Patch only when the module's forward is the stock implementation —
+            # subclasses with a custom forward (e.g. xtuner.v1.module.lm_head.LMHead
+            # inherits nn.Linear with a 2-arg forward(hidden_states, loss_ctx))
+            # must not be replaced. `isinstance` is needed (instead of `type is`)
+            # because FSDP-managed modules can be reachable through synthetic
+            # subclasses without ever overriding `forward`.
+            if isinstance(module, nn.Embedding) and module.__class__.forward is nn.Embedding.forward:
                 module.forward = types.MethodType(self.patched_emb_forward, module)  # type: ignore
+            elif isinstance(module, nn.Linear) and module.__class__.forward is nn.Linear.forward:
+                module.forward = types.MethodType(self.patched_linear_forward, module)  # type: ignore
+            for child in module.children():
+                _patch_non_moe_block_linears_and_embeds(child)
+
+        _patch_non_moe_block_linears_and_embeds(self)
 
         self._to_empty_meta()
         return self
@@ -1303,6 +1359,24 @@ class MoE(BaseModel):
             self.scale_grad_by_freq,
             self.sparse,
         )
+
+    @staticmethod
+    def patched_linear_forward(self, input):
+        # Same shape as `patched_emb_forward`. After FSDP unshards on the fsdp_mesh
+        # dim, an ep-replicated parameter is still a DTensor with Replicate placement
+        # on ep_mesh. F.linear's DTensor dispatch only auto-promotes scalar plain
+        # tensors, so callers with plain-Tensor activations crash. .to_local() is a
+        # no-op for plain Tensors; for Replicate DTensors it costs nothing (every
+        # rank already holds the full copy locally).
+        if isinstance(self.weight, DTensor):
+            w = self.weight.to_local()
+        else:
+            w = self.weight
+        if isinstance(self.bias, DTensor):
+            b = self.bias.to_local()
+        else:
+            b = self.bias
+        return F.linear(input, w, b)
 
     def _should_recompute(
         self,

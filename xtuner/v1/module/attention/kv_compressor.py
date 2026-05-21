@@ -15,6 +15,7 @@
 
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor as _DTensor
 
 from ..rms_norm import RMSNorm
 
@@ -126,86 +127,122 @@ class KVCompressor(nn.Module):
         if cu_seq_lens.dim() != 1 or cu_seq_lens.numel() < 2:
             raise ValueError(f"cu_seq_lens must be 1D with at least 2 entries; got shape {tuple(cu_seq_lens.shape)}")
 
-        boundaries = cu_seq_lens.detach().cpu().tolist()
-        num_samples = len(boundaries) - 1
+        ratio = self.compress_ratio
+        head_dim = self.head_dim
+        coff = self._coff
+        device = packed.device
+        total_q = packed.size(1)
 
-        compressed_chunks: list[torch.Tensor] = []
-        compressed_lengths: list[int] = [0]
-        running_total = 0
-        for i in range(num_samples):
-            start, end = boundaries[i], boundaries[i + 1]
-            sample = packed[:, start:end, :]
-            compressed_sample = self._compress_sample(sample)
-            compressed_chunks.append(compressed_sample)
-            running_total += compressed_sample.size(1)
-            compressed_lengths.append(running_total)
+        # 1. Per-sample compressed-chunk count. ceil(L_i / ratio) per sample.
+        q_lens = cu_seq_lens[1:] - cu_seq_lens[:-1]
+        c_lens = (q_lens + ratio - 1) // ratio
+        cu_seq_lens_out = torch.zeros(c_lens.numel() + 1, dtype=cu_seq_lens.dtype, device=device)
+        cu_seq_lens_out[1:] = torch.cumsum(c_lens, dim=0)
+        # ``.item()`` forces one host sync per layer — down from the prior
+        # ``1 + num_samples`` syncs (top-of-loop ``.cpu().tolist()`` plus every
+        # ``torch.cat`` of per-sample chunks). DSA.forward is the only compile
+        # target on the V4 path; compressor stays eager, so the sync only
+        # graph-breaks compile *across* this call, not inside it.
+        total_c = int(cu_seq_lens_out[-1].item())
 
-        compressed = torch.cat(compressed_chunks, dim=1)
-        cu_seq_lens_out = torch.tensor(
-            compressed_lengths,
-            dtype=cu_seq_lens.dtype,
-            device=cu_seq_lens.device,
-        )
+        # 2. Project every token in two GEMMs over the full pack — no per-sample padding.
+        # Each input token at sample-local position ``s`` lands in chunk ``s // ratio``
+        # at slot ``s % ratio``; tokens that don't fill the tail of a chunk leave
+        # that slot at the buffer's init value (kv=0 / score=-inf), reproducing the
+        # original code's "zero-pad the input + softmax masks it out" behaviour
+        # without ever materialising the padding.
+        kv_proj = self.wkv(packed).view(total_q, coff * head_dim)
+        score_proj = self.wgate(packed).view(total_q, coff * head_dim)
+
+        # 3. Per-token chunk assignment.
+        pos = torch.arange(total_q, device=device, dtype=torch.long)
+        sample_id = torch.searchsorted(cu_seq_lens, pos, right=True) - 1
+        in_sample_pos = pos - cu_seq_lens[sample_id]
+        chunk_in_sample = in_sample_pos // ratio
+        pos_in_chunk = in_sample_pos % ratio
+        global_chunk_id = cu_seq_lens_out[sample_id] + chunk_in_sample
+        flat_idx = global_chunk_id * ratio + pos_in_chunk
+
+        # 4. Scatter into chunk layout. Use index_put on a fresh buffer so this
+        # stays a pure functional op (autograd-friendly, no in-place aliasing).
+        chunk_dim = coff * head_dim
+        kv_chunks_flat = kv_proj.new_zeros(total_c * ratio, chunk_dim)
+        score_chunks_flat = score_proj.new_full((total_c * ratio, chunk_dim), float("-inf"))
+        kv_chunks_flat = kv_chunks_flat.index_put((flat_idx,), kv_proj)
+        score_chunks_flat = score_chunks_flat.index_put((flat_idx,), score_proj)
+        kv_chunks = kv_chunks_flat.view(1, total_c, ratio, chunk_dim)
+        score_chunks = score_chunks_flat.view(1, total_c, ratio, chunk_dim)
+
+        # 5. APE + DTensor unwrap (same EP rationale as the original).
+        ape = self.ape.to_local() if isinstance(self.ape, _DTensor) else self.ape
+        score_chunks = score_chunks + ape
+
+        # 6. Overlap (compress_ratio == 4 path). The "previous chunk" link is
+        # per-sample: chunk-0 of each sample has no predecessor inside that
+        # sample, so its first-half slot is filled with the masking value
+        # (0 for kv, -inf for score) rather than the previous sample's last chunk.
+        if self.overlap:
+            kv_chunks = self._overlap_transform_varlen(kv_chunks, cu_seq_lens_out, fill_value=0.0)
+            score_chunks = self._overlap_transform_varlen(score_chunks, cu_seq_lens_out, fill_value=float("-inf"))
+
+        # 7. Softmax + weighted sum + norm.
+        weights = score_chunks.softmax(dim=2)
+        compressed = (kv_chunks * weights).sum(dim=2)
+        compressed = self.norm(compressed)  # [1, total_c, head_dim]
 
         if input_was_2d:
             compressed = compressed.squeeze(0)
         return compressed, cu_seq_lens_out
 
-    def _compress_sample(self, sample: torch.Tensor) -> torch.Tensor:
-        # sample: [1, S_i, hidden_size]; S_i can be < ratio (single short
-        # sample still produces one compressed token after padding).
-        ratio = self.compress_ratio
-        overlap = self.overlap
-        head_dim = self.head_dim
-        seq_len = sample.size(1)
+    def _overlap_transform_varlen(
+        self,
+        tensor: torch.Tensor,
+        cu_chunks: torch.Tensor,
+        fill_value: float,
+    ) -> torch.Tensor:
+        """Varlen replacement for :meth:`_overlap_transform`.
 
-        # Pad each sample to a multiple of ratio. We deviate from the upstream
-        # prefill (which stashes the remainder in kv_state for the next
-        # forward call): in training there is no cross-call state, so we
-        # emit a partial-but-zero-padded final group instead.
-        remainder = seq_len % ratio
-        if remainder != 0:
-            pad_len = ratio - remainder
-            sample = torch.nn.functional.pad(sample, (0, 0, 0, pad_len))
-            seq_len = sample.size(1)
+        Same math as the original (chunk's own second-half stays; previous
+        chunk's first-half is prepended), but the "previous chunk" link is
+        sample-aware: each sample's first chunk gets ``fill_value`` for its
+        first-half slot instead of leaking from the previous sample's last
+        chunk.
 
-        num_chunks = seq_len // ratio
-        kv = self.wkv(sample)
-        score = self.wgate(sample)
+        Args:
+            tensor (torch.Tensor): ``[1, total_c, ratio, 2*head_dim]`` chunk-laid input.
+            cu_chunks (torch.Tensor): ``[B+1]`` cumulative compressed-chunk counts;
+                ``cu_chunks[i]`` is the global chunk index where sample ``i`` begins.
+            fill_value (float): What to write into the first-half slots of every
+                sample-first chunk (``0.0`` for kv, ``-inf`` for score).
 
-        # [1, num_chunks, ratio, coff * head_dim]
-        kv = kv.unflatten(1, (num_chunks, ratio))
-        score = score.unflatten(1, (num_chunks, ratio)) + self.ape
-
-        if overlap:
-            kv = self._overlap_transform(kv, fill_value=0.0)
-            score = self._overlap_transform(score, fill_value=float("-inf"))
-
-        weights = score.softmax(dim=2)
-        compressed = (kv * weights).sum(dim=2)
-        compressed = self.norm(compressed)
-        # Output rank matches the input: caller passed a 3D packed tensor
-        # so we keep batch dim here; the public forward strips it again
-        # only if the original input was 2D.
-        return compressed.view(1, num_chunks, head_dim)
-
-    def _overlap_transform(self, tensor: torch.Tensor, fill_value: float) -> torch.Tensor:
-        # Mirrors `Compressor.overlap_transform` from the V4 reference:
-        # doubles the per-chunk window so each compressed token sees its own
-        # group (placed in the second half of the new ratio axis) plus the
-        # previous group's tokens (first half). The chunk with no predecessor
-        # is filled with `fill_value` to be a no-op under softmax (-inf) or
-        # weighted sum (0.0).
-        bsz, num_chunks, ratio, two_d = tensor.shape
+        Returns:
+            torch.Tensor: ``[1, total_c, 2*ratio, head_dim]``.
+        """
+        bsz, total_c, ratio, two_d = tensor.shape
         head_dim = self.head_dim
         assert two_d == 2 * head_dim, f"overlap_transform expects last dim {2 * head_dim}, got {two_d}"
-        new_tensor = tensor.new_full((bsz, num_chunks, 2 * ratio, head_dim), fill_value)
-        # Second half of the new ratio axis: current chunk's "own" half-dim slice.
-        new_tensor[:, :, ratio:, :] = tensor[:, :, :, head_dim:]
-        # First half of the new ratio axis: previous chunk's "shared" half-dim slice.
-        if num_chunks > 1:
-            new_tensor[:, 1:, :ratio, :] = tensor[:, :-1, :, :head_dim]
-        return new_tensor
+        device = tensor.device
+
+        # Identify the sample-first chunk: ``chunk_id == cu_chunks[sample_of_chunk]``.
+        chunk_pos = torch.arange(total_c, device=device, dtype=torch.long)
+        chunk_sample_id = torch.searchsorted(cu_chunks, chunk_pos, right=True) - 1
+        is_first_in_sample = chunk_pos == cu_chunks[chunk_sample_id]
+
+        # Gather the previous chunk's first-half slice. ``prev_idx`` is clamped
+        # so chunk 0 doesn't index out-of-range; the value at index 0 is
+        # overwritten by ``fill_value`` via the mask below anyway.
+        prev_idx = (chunk_pos - 1).clamp(min=0)
+        prev_half = tensor[0].index_select(0, prev_idx)[:, :, :head_dim]  # [total_c, ratio, head_dim]
+        prev_half_masked = torch.where(
+            is_first_in_sample.view(-1, 1, 1),
+            torch.full_like(prev_half, fill_value),
+            prev_half,
+        )
+
+        # Current chunk's own second-half slice — straight slice, no gather.
+        cur_half = tensor[0, :, :, head_dim:]  # [total_c, ratio, head_dim]
+
+        return torch.cat([prev_half_masked, cur_half], dim=1).unsqueeze(0)
 
     def init_weights(self) -> None:
         nn.init.zeros_(self.ape)

@@ -17,6 +17,7 @@ routing, dual rope and Hyper-Connections together into a working
 :class:`MoEConfig` / :class:`MoE` pair for DeepSeek-V4-Flash."""
 
 import json
+import os
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,10 +38,76 @@ from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.utils import get_logger
 
-from .moe import BalancingLossConfig, MoE, MoEConfig, ZLossConfig
+from xtuner.v1.model.base import TorchCompileOption
+
+from .moe import MOE_EP_COMPILE_CFG, MOE_NON_EP_COMPILE_CFG, BalancingLossConfig, MoE, MoEConfig, ZLossConfig
 
 
 logger = get_logger()
+
+
+# V4 compile strategy — mirrors the parent ``MoEDecoderLayer`` pattern of
+# splitting the layer forward into ``compile-friendly compute subs`` +
+# ``eager dispatcher orchestration``:
+#
+#   * ``hc_pre`` / ``hc_post`` (top-level fns in ``hc_block.py``) carry the HC
+#     residual-mixing matmul + sinkhorn + RMS rescale. Decorated with
+#     ``@maybe_compile``; entered here so the runtime compile pass enables them.
+#   * ``_V4InnerBlock._ffn_pre_compute`` runs ``post_attention_layernorm`` +
+#     gate (norm+softmax fused into one kernel — the ``vectorized_add`` /
+#     ``FillFunctor`` storm in the trace came from these tiny ops being eager).
+#   * ``_V4InnerBlock._ffn_post_compute`` runs ``+ shared_experts`` and
+#     ``* hidden_factor`` (HC owns the final residual add).
+#   * ``DeepSeekSparseAttention.forward`` is the V4 attention path; pure
+#     compute (no dispatcher), safe in both EP and non-EP. Required the
+#     ``xtuner.v1.utils.compile._patch_sympy_mod_eval_negative_subs`` upstream
+#     workaround so inductor's coalescing analysis on the Indexer's symbolic
+#     Mod expressions doesn't crash under EP's dynamic seq_ctx symbols.
+#   * Parent's ``MoEBlock.forward`` covers the expert GEMM (already inherited).
+#
+# ``HCDecoderLayer.forward`` and ``_V4InnerBlock.ffn_block`` are the
+# orchestrators; they MUST stay eager because ``ffn_block`` enters the
+# dispatcher whose ``moe::permute/unpermute`` fakes report a data-dependent
+# output dim that inductor can't reason about (either specialises on the
+# first batch's routing or trips its range heuristics with unbacked symints).
+# ``dynamic=True`` makes dynamo trace with symbolic shapes from the first
+# pass instead of specialising on concrete sizes — critical here because
+# ``intra_layer_micro_batch=2`` plus packed varlen data feeds two distinct
+# ``seq_ctx`` shapes into every step, and the inductor autotune cache
+# specialises per shape variant; without ``dynamic=True`` each new
+# (cu_seq_lens layout, total_tokens) combination triggers a fresh autotune
+# search (visible as 30-70 s step-time spikes between 5 s cache hits).
+#
+# ``coordinate_descent_tuning`` and ``shape_padding`` were tried but
+# multiplied first-compile cost (steps 5-13 oscillated 4-70 s while the
+# tuner searched per shape variant); they are net-negative when the workload
+# has shape diversity. ``epilogue_fusion`` is cheap (no extra autotune) and
+# enables matmul-epilogue fusion in the hc_pre / hc_post / attn_block
+# matmul-dominant graphs, which is where most launch-storm reduction lives.
+_HEAVY_INDUCTOR_OPTIONS: dict[str, int | bool | str] = {
+    "epilogue_fusion": True,
+    "triton.unique_kernel_names": True,
+}
+_HEAVY = TorchCompileOption(fullgraph=False, dynamic=True, options=_HEAVY_INDUCTOR_OPTIONS)
+_LITE = TorchCompileOption(fullgraph=False, dynamic=True)
+
+V4_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = MOE_NON_EP_COMPILE_CFG | {
+    "xtuner.v1.module.decoder_layer.hc_block.hc_pre": _HEAVY,
+    "xtuner.v1.module.decoder_layer.hc_block.hc_post": _HEAVY,
+    "xtuner.v1.model.moe.deepseek_v4._V4InnerBlock.attn_block": _HEAVY,
+    "xtuner.v1.model.moe.deepseek_v4._V4InnerBlock._ffn_pre_compute": _LITE,
+    "xtuner.v1.model.moe.deepseek_v4._V4InnerBlock._ffn_post_compute": _LITE,
+    "xtuner.v1.model.moe.deepseek_v4.DeepSeekV4._hc_head_reduce_compute": _LITE,
+    "xtuner.v1.module.attention.dsa.DeepSeekSparseAttention.forward": _HEAVY,
+}
+
+# Empty EP compile cfg: under pack=8192 + intra_layer_micro_batch=1 +
+# recompute_ratio=1.0, any inductor-compiled backward inside an activation
+# checkpoint recompute trips a 130 GiB fp32 dense allocation (observed across
+# DSA, hc_pre/post, and shared/expert paths). Keep the V4 EP path entirely
+# eager until we isolate which fused op's codegen materialises that dense
+# intermediate. The non-EP path is unaffected.
+V4_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {}
 
 
 # V4-Flash ships its `compress_ratios` as a vector of length `num_hidden_layers + 1`
@@ -158,17 +225,58 @@ class _V4InnerBlock(MoEDecoderLayer):
         )
         return attn["projected_output"]
 
+    def _ffn_pre_compute(
+        self,
+        x: torch.Tensor,
+        rollout_routed_experts: torch.Tensor | None,
+        input_ids: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, "RouterResults"]:
+        """Compile-friendly: post-attn-norm + gate.
+
+        Mirrors parent ``MoEDecoderLayer._pre_moe_forward``'s norm+gate tail,
+        but standalone (no attention, no residual) so HC can sit between attn
+        and ffn and apply its own residual mixing. The compiled graph here
+        fuses ``post_attention_layernorm`` with the gate projection / softmax /
+        top-k pick (with the layernorm and softmax fused into one kernel
+        instead of separate small kernels).
+        """
+        h = self.post_attention_layernorm(x)
+        router_results: RouterResults = self.gate(h, rollout_routed_experts, input_ids=input_ids)
+        return h, router_results
+
+    def _ffn_post_compute(self, combined_hidden_states: torch.Tensor, h_normed: torch.Tensor) -> torch.Tensor:
+        """Compile-friendly: shared-experts add + hidden_factor scale.
+
+        HC owns the final residual add, so this method skips it (unlike the
+        parent's ``_post_moe_forward`` which folds the residual in). Compiling
+        this fuses ``combined + shared_experts(h)`` and ``* hidden_factor`` into
+        one kernel — both contribute to the ``vectorized_add`` storm trace
+        showed.
+        """
+        if self.n_shared_experts > 0:
+            shared_out = self._shared_experts_forward(hidden_states=h_normed)
+            combined_hidden_states = combined_hidden_states + shared_out
+        return combined_hidden_states * self.hidden_factor
+
     def ffn_block(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        # Eager orchestrator (mirrors parent ``MoEDecoderLayer._forward``):
+        # compile-friendly subs (``_ffn_pre_compute``, ``self.experts`` =
+        # ``MoEBlock.forward``, ``_ffn_post_compute``) bracket the eager
+        # dispatcher chain. The split exists so dynamo never has to trace
+        # across the dispatcher boundary — its data-dependent post-all2all
+        # token count would otherwise either bake into inductor codegen
+        # (specialised on the first batch's routing) or, with unbacked symints,
+        # crash inductor's range heuristics. See V4_EP_COMPILE_CFG comment.
         del args, kwargs
         assert self._ctx_seq_ctx is not None
         seq_ctx = self._ctx_seq_ctx
-        h = self.post_attention_layernorm(x)
 
         if seq_ctx.rollout_routed_experts is not None and self.layer_idx < seq_ctx.rollout_routed_experts.shape[1]:
             rollout_routed_experts = seq_ctx.rollout_routed_experts[:, self.layer_idx, :]
         else:
             rollout_routed_experts = None
-        router_results: RouterResults = self.gate(h, rollout_routed_experts, input_ids=self._ctx_input_ids)
+
+        h, router_results = self._ffn_pre_compute(x, rollout_routed_experts, self._ctx_input_ids)
         # Stash so the outer V4DecoderLayer can forward router results to MoE._forward
         # after HC wrapping is done; HC's forward returns a single tensor only.
         self._last_router_results = router_results
@@ -215,10 +323,7 @@ class _V4InnerBlock(MoEDecoderLayer):
         )
         combined_hidden_states = post_combined["hidden_states"].view(*origin_shape)
 
-        if self.n_shared_experts > 0:
-            shared_out = self._shared_experts_forward(hidden_states=h)
-            combined_hidden_states = combined_hidden_states + shared_out
-        return combined_hidden_states * self.hidden_factor
+        return self._ffn_post_compute(combined_hidden_states, h)
 
 
 class _V4DecoderLayer(nn.Module):
@@ -237,9 +342,25 @@ class _V4DecoderLayer(nn.Module):
         hc_layer: HCDecoderLayer,
     ) -> None:
         super().__init__()
-        self.inner = inner
+        # Register `inner` ONLY via `self.hc_layer.inner` to avoid double-registration
+        # under `_V4DecoderLayer` — duplicate module registration can confuse FSDP's
+        # unshard-hook attachment so that params under `inner` (e.g. DSA's `wq_a`)
+        # remain DTensor inside `attn_block`, crashing with "mixed Tensor and DTensor".
+        assert hc_layer.inner is inner, "HCDecoderLayer.inner must already be the same inner block"
         self.hc_layer = hc_layer
         self.layer_idx = inner.layer_idx
+
+    @property
+    def inner(self) -> _V4InnerBlock:
+        return cast(_V4InnerBlock, self.hc_layer.inner)
+
+    @property
+    def gate(self) -> "nn.Module":
+        # `MoE.update_bias` in moe.py:299 accesses `layers[i].gate` directly to
+        # update the NoAux router's e_score_correction_bias buffer. The HC wrapper
+        # nests the gate one extra hop down — expose it at the same name so the
+        # parent's bias-update loop works without an override.
+        return self.hc_layer.inner.gate
 
     def forward(
         self,
@@ -500,14 +621,15 @@ class DeepSeekV4(MoE):
     config: DeepSeekV4Config
 
     def __init__(self, config: DeepSeekV4Config) -> None:
-        # Model-level HC head parameters (separate from each layer's HC params).
-        # Allocate before super().__init__ so they exist when `_init_load_spec` walks
-        # named_parameters during the parent init.
         self._hc_mult = config.hc_cfg.hc_mult
         super().__init__(config)
-        # `hc_head_fn` reduces `[B, S, hc_mult, D]` back to `[B, S, D]` before the
+        # `hc_head_*` reduces `[B, S, hc_mult, D]` back to `[B, S, D]` before the
         # final RMSNorm + lm_head. Shape matches V4 reference ParallelHead/Transformer
         # (model.py L797): `[hc_mult, hc_mult * D]`. Stored fp32 for sinkhorn stability.
+        # Registered AFTER super().__init__ — registering earlier would be wiped
+        # by MoE.__init__ → nn.Module.__init__ resetting `_parameters = {}`. We
+        # then re-run `_init_load_spec` so the freshly-registered params land in
+        # `load_spec_mapping` (the parent's first call built it without them).
         hc_mult = config.hc_cfg.hc_mult
         hc_dim = hc_mult * config.hidden_size
         fp32 = torch.float32
@@ -516,6 +638,19 @@ class DeepSeekV4(MoE):
         # V4 reference uses a scalar scale for hc_head (model.py L799); we keep
         # the same shape for HF key parity.
         self.hc_head_scale = nn.Parameter(torch.zeros(1, dtype=fp32))
+        self._init_load_spec()
+
+    @property
+    @override
+    def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
+        # See V4_NON_EP_COMPILE_CFG / V4_EP_COMPILE_CFG at module level for the
+        # rationale on which V4-specific class forwards are added on top of the
+        # parent MoE config. `@property` mirrors the base / parent decorator —
+        # `BaseModel._resolve_compile_cfg` reads `self.default_compile_cfg`
+        # without parens.
+        if self.config.ep_size > 1:
+            return V4_EP_COMPILE_CFG
+        return V4_NON_EP_COMPILE_CFG
 
     @override
     def build_layers(self, config: MoEConfig) -> nn.ModuleDict:
@@ -669,15 +804,38 @@ class DeepSeekV4(MoE):
         non_pad_token = nonpad_indices.numel()
         num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
 
+        offload_active = int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1
         for idx, decoder_layer in self.layers.items():
             v4_layer = cast(_V4DecoderLayer, decoder_layer)
-            hidden_states, router_logits, router_weights = v4_layer(
-                hidden_states,
-                position_embeddings=position_embeddings,
-                position_embeddings_compressed=position_embeddings_compressed,
-                seq_ctx=seq_ctx,
-                input_ids=seq_ctx.input_ids,
-            )
+            # Mirror the parent's per-layer activation offload window: with the HC-expanded
+            # `[B, S, hc_mult, D]` activation (4× the parent's `[B, S, D]`), staging each
+            # layer's residual on CPU is the main lever for fitting 256-expert layers on
+            # bf16 with full pack_max_length. Gated on XTUNER_ACTIVATION_OFFLOAD=1.
+            if offload_active:
+                from xtuner.v1.utils.activation_offload import async_save_on_cpu
+
+                with async_save_on_cpu(
+                    h2d_stream=self.offload_stream,
+                    d2h_stream=self.offload_stream,
+                    block_idx=int(idx),
+                    group="text",
+                    custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
+                ):
+                    hidden_states, router_logits, router_weights = v4_layer(
+                        hidden_states,
+                        position_embeddings=position_embeddings,
+                        position_embeddings_compressed=position_embeddings_compressed,
+                        seq_ctx=seq_ctx,
+                        input_ids=seq_ctx.input_ids,
+                    )
+            else:
+                hidden_states, router_logits, router_weights = v4_layer(
+                    hidden_states,
+                    position_embeddings=position_embeddings,
+                    position_embeddings_compressed=position_embeddings_compressed,
+                    seq_ctx=seq_ctx,
+                    input_ids=seq_ctx.input_ids,
+                )
             if keep_router:
                 output["router_logits"][f"layer{idx}"] = self._maybe_offload_router(router_logits)
                 output["router_weights"][f"layer{idx}"] = self._maybe_offload_router(router_weights)
@@ -706,17 +864,26 @@ class DeepSeekV4(MoE):
         output["logits"] = logits
         output["extra_info"] = extra_info if extra_info is not None else ModelForwardExtraLogInfo()
 
-        split_aux_output = self.aux_loss.finalize(
-            balancing_ctx=balancing_ctx,
-            z_ctx=z_ctx,
-            non_pad_token=non_pad_token,
-        )
-        balancing_loss, z_loss, tokens_per_expert_global = split_aux_output
-        if balancing_loss is not None:
-            output["balancing_loss"] = balancing_loss
-        if z_loss is not None:
-            output["z_loss"] = z_loss
-        output["tokens_per_expert_global"] = tokens_per_expert_global
+        # Hash-routed layers don't accumulate routing stats (see
+        # `_should_compute_aux_loss`). When `num_hash_layers >= num_hidden_layers`
+        # (legal for sub-stack smoke configs like 2 layers + 3 hash layers from
+        # the release config), every layer is hash-routed and aux_loss has nothing
+        # to finalize — calling finalize would raise from `_cal_tokens_per_expert`.
+        # Skip the call and emit None aux outputs; `internal_metrics.py` already
+        # treats `tokens_per_expert_global is None` as "no MoE load this step".
+        if self.config.num_hash_layers < self.config.num_hidden_layers:
+            balancing_loss, z_loss, tokens_per_expert_global = self.aux_loss.finalize(
+                balancing_ctx=balancing_ctx,
+                z_ctx=z_ctx,
+                non_pad_token=non_pad_token,
+            )
+            if balancing_loss is not None:
+                output["balancing_loss"] = balancing_loss
+            if z_loss is not None:
+                output["z_loss"] = z_loss
+            output["tokens_per_expert_global"] = tokens_per_expert_global
+        else:
+            output["tokens_per_expert_global"] = None
 
         if keep_router:
             for layer_name, router_logits_t in output["router_logits"].items():
@@ -724,15 +891,227 @@ class DeepSeekV4(MoE):
 
         return MoEModelOutputs(**output)
 
+    @override
+    def _micro_batch_forward(  # type: ignore[override]
+        self,
+        seq_ctx_list,
+        loss_ctx_list,
+        return_router_logits: bool = False,
+    ):
+        # V4 needs a fresh micro-batch forward (rather than inheriting MoE's) for the
+        # same three reasons `_forward` overrides the parent:
+        #   1) `[B, S, hc_mult, D]` HC-expanded activations
+        #   2) dual rope (`position_embeddings` + `position_embeddings_compressed`)
+        #   3) `_hc_head_reduce` before the final norm
+        # Plus `_V4DecoderLayer.forward` takes a single seq_ctx / position_embeddings
+        # (not a list like `MoEDecoderLayer.forward` does), so MBs are looped per
+        # layer here rather than batched into one layer call. That loses parent's
+        # cross-MB domino-EP overlap; recovering it would require widening the
+        # HC + DSA call signatures, which is out of scope.
+        from xtuner.v1.loss import LMHeadLossContext
+        from xtuner.v1.model.utils import ModelForwardExtraLogInfo
+
+        from .moe import MoEModelOutputs
+
+        if self.config.return_hidden_states:
+            raise NotImplementedError("return_hidden_states is not supported in V4 micro-batch forward")
+        assert len(seq_ctx_list) == len(loss_ctx_list), "seq_ctx and loss_ctx must have same length"
+
+        n_mb = len(seq_ctx_list)
+
+        # Per-MB: embed → dual rope → HC expand. Each MB stays as its own tensor in
+        # the list; we never cat across MBs along the seq dim because `_V4DecoderLayer`
+        # is called once per MB anyway, and a cat-then-chunk round-trip would only
+        # add the same `i.clone()` workaround the parent needs for `async_save_on_cpu`.
+        hidden_states_list: list[torch.Tensor] = []
+        position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]] = []
+        position_embeddings_compressed_list: list[tuple[torch.Tensor, torch.Tensor] | None] = []
+        for seq_ctx in seq_ctx_list:
+            assert seq_ctx.position_ids is not None
+            assert seq_ctx.input_ids is not None, "DeepSeekV4 requires input_ids (HashRouter consumes them)"
+            h = self.embed_tokens(seq_ctx.input_ids)
+            pos_emb = self.rotary_emb(h, seq_ctx.position_ids, use_compressed=False)
+            pos_emb_compressed = _build_compressed_position_embeddings(self.rotary_emb, h, seq_ctx.position_ids)
+            h = h.unsqueeze(-2).expand(-1, -1, self._hc_mult, -1).contiguous()
+            hidden_states_list.append(h)
+            position_embeddings_list.append(pos_emb)
+            position_embeddings_compressed_list.append(pos_emb_compressed)
+
+        # Aux-loss state is computed over the union of all MBs' tokens (matches the
+        # parent's behaviour and what the global mean CE in `ce_loss.py` expects).
+        balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx_list)
+        cat_mask = torch.cat([ctx.mask for ctx in seq_ctx_list], dim=1)
+        nonpad_indices_cat = torch.nonzero(cat_mask, as_tuple=True)[1]
+        non_pad_token = nonpad_indices_cat.numel()
+        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, cat_mask.device)
+
+        output: dict = {}
+        keep_router = self.config.return_router_results or return_router_logits
+        router_logits_per_mb: list[dict[str, torch.Tensor]] = [{} for _ in range(n_mb)] if keep_router else []
+
+        offload_active = int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1
+
+        for idx, decoder_layer in self.layers.items():
+            v4_layer = cast(_V4DecoderLayer, decoder_layer)
+            layer_router_logits: list[torch.Tensor] = []
+            layer_router_weights: list[torch.Tensor] = []
+
+            for mb_idx in range(n_mb):
+                h_mb = hidden_states_list[mb_idx]
+                seq_ctx = seq_ctx_list[mb_idx]
+                pos_emb = position_embeddings_list[mb_idx]
+                pos_emb_compressed = position_embeddings_compressed_list[mb_idx]
+
+                if offload_active:
+                    from xtuner.v1.utils.activation_offload import async_save_on_cpu
+
+                    # `block_idx` must be globally unique per (layer, mb) so the offload
+                    # buffer ring doesn't alias across MBs at the same layer.
+                    with async_save_on_cpu(
+                        h2d_stream=self.offload_stream,
+                        d2h_stream=self.offload_stream,
+                        block_idx=int(idx) * n_mb + mb_idx,
+                        group="text",
+                        custom_check_fn=lambda x, _h=h_mb: x.data_ptr() == _h.data_ptr(),
+                    ):
+                        h_out, r_logits, r_weights = v4_layer(
+                            h_mb,
+                            position_embeddings=pos_emb,
+                            position_embeddings_compressed=pos_emb_compressed,
+                            seq_ctx=seq_ctx,
+                            input_ids=seq_ctx.input_ids,
+                        )
+                else:
+                    h_out, r_logits, r_weights = v4_layer(
+                        h_mb,
+                        position_embeddings=pos_emb,
+                        position_embeddings_compressed=pos_emb_compressed,
+                        seq_ctx=seq_ctx,
+                        input_ids=seq_ctx.input_ids,
+                    )
+                hidden_states_list[mb_idx] = h_out
+                layer_router_logits.append(r_logits)
+                layer_router_weights.append(r_weights)
+                if keep_router:
+                    router_logits_per_mb[mb_idx][f"layer{idx}"] = self._maybe_offload_router(r_logits)
+
+            if self._should_compute_aux_loss(int(idx)):
+                # Concatenate router stats across MBs so aux_loss sees the same global
+                # token set the parent path does. Pin the z-loss carrier to MB0's
+                # hidden_states to mirror the parent — `total_loss.backward()` traverses
+                # MB0's path exactly once.
+                cat_router_weights = torch.cat(layer_router_weights, dim=0)
+                cat_router_logits = torch.cat(layer_router_logits, dim=0)
+                hidden_states_list[0] = self.aux_loss.accumulate(
+                    selected_router_weights=cat_router_weights.index_select(0, nonpad_indices_cat)
+                    .contiguous()
+                    .float(),
+                    selected_router_logits=cat_router_logits.index_select(0, nonpad_indices_cat).contiguous().float(),
+                    hidden_states=hidden_states_list[0],
+                    balancing_ctx=balancing_ctx,
+                    z_ctx=z_ctx,
+                    num_tokens_local=non_pad_token,
+                    num_tokens_global=num_tokens_global,
+                    world_size=z_world_size,
+                )
+
+        # MTP omitted to match `_forward`: V4 MTP wiring (HC head + e_proj/h_proj +
+        # enorm/hnorm) is the PR9 follow-up. When it lands, mirror the parent's
+        # per-MB MTP-loss aggregation here.
+        if self.mtp_block is not None:
+            raise NotImplementedError(
+                "V4 micro-batch forward does not wire MTP yet (same TODO as `_forward`); "
+                "see DeepSeekV4.build_mtp_block."
+            )
+
+        # HC head reduce + final norm + lm_head: cat once across MBs so lm_head runs
+        # as a single GEMM (matches parent's perf).
+        cat_hidden_states = torch.cat(hidden_states_list, dim=1)
+        cat_hidden_states = self._hc_head_reduce(cat_hidden_states)
+        cat_hidden_states = self.norm(cat_hidden_states)
+
+        lm_loss_ctx_list = [loss_ctx_dict["lm"] for loss_ctx_dict in loss_ctx_list]
+        cat_loss_ctx = type(lm_loss_ctx_list[0]).cat(lm_loss_ctx_list)
+        loss, (logits, extra_info) = self.lm_head(cat_hidden_states, cast(LMHeadLossContext, cat_loss_ctx))
+
+        output["loss"] = loss.sum()
+        moe_extra_info = ModelForwardExtraLogInfo()
+        if extra_info:
+            moe_extra_info.append(extra_info)
+        output["extra_info"] = moe_extra_info
+
+        # Same `num_hash_layers >= num_hidden_layers` guard as `_forward`: skip
+        # finalize when no layer accumulated routing stats so the smoke configs
+        # (e.g. release `num_hash_layers=3` with `num_hidden_layers=2`) don't crash.
+        if self.config.num_hash_layers < self.config.num_hidden_layers:
+            balancing_loss, z_loss, tokens_per_expert_global = self.aux_loss.finalize(
+                balancing_ctx=balancing_ctx,
+                z_ctx=z_ctx,
+                non_pad_token=non_pad_token,
+            )
+            if balancing_loss is not None:
+                output["balancing_loss"] = balancing_loss
+            if z_loss is not None:
+                output["z_loss"] = z_loss
+            output["tokens_per_expert_global"] = tokens_per_expert_global
+        else:
+            output["tokens_per_expert_global"] = None
+
+        if keep_router:
+            # Stack per-MB router logits into the same `[1, n_mb, ...]` layout the
+            # parent emits, so downstream consumers don't need a V4-specific branch.
+            router_logits_dict: dict[str, torch.Tensor] = {}
+            layer_names = list(router_logits_per_mb[0].keys())
+            for layer_name in layer_names:
+                stacked = torch.stack(
+                    [router_logits_per_mb[mb][layer_name].detach() for mb in range(n_mb)],
+                    dim=0,
+                ).unsqueeze(0)
+                router_logits_dict[layer_name] = stacked
+            output["router_logits"] = router_logits_dict
+
+        return MoEModelOutputs(**output, logits=logits)
+
     def _hc_head_reduce(self, x: torch.Tensor) -> torch.Tensor:
+        # Eager wrapper: unshard the DTensor params once, then enter the
+        # compile-friendly compute. Splitting at this boundary mirrors the
+        # `HCDecoderLayer.forward → _unshard_hc_params → hc_pre` pattern.
+        from torch.distributed.tensor import DTensor as _DTensor
+
+        hc_head_fn = self.hc_head_fn.full_tensor() if isinstance(self.hc_head_fn, _DTensor) else self.hc_head_fn
+        hc_head_scale = (
+            self.hc_head_scale.full_tensor() if isinstance(self.hc_head_scale, _DTensor) else self.hc_head_scale
+        )
+        hc_head_base = (
+            self.hc_head_base.full_tensor() if isinstance(self.hc_head_base, _DTensor) else self.hc_head_base
+        )
+        return self._hc_head_reduce_compute(x, hc_head_fn, hc_head_scale, hc_head_base)
+
+    def _hc_head_reduce_compute(
+        self,
+        x: torch.Tensor,
+        hc_head_fn: torch.Tensor,
+        hc_head_scale: torch.Tensor,
+        hc_head_base: torch.Tensor,
+    ) -> torch.Tensor:
         # Port of `ParallelHead.hc_head` (model.py L728-735). Mirrors `hc_pre`'s
         # RMS-rescaled mixing but skips Sinkhorn — head reduce uses a per-stream
-        # sigmoid weight, not a doubly-stochastic mix.
+        # sigmoid weight, not a doubly-stochastic mix. Compile-friendly: takes
+        # already-unsharded HC params and contains only tensor ops, so dynamo
+        # traces it as one contiguous graph (matmul + rsqrt + sigmoid + sum
+        # fuse into ~2-3 kernels instead of 8 eager small ops).
+        #
+        # Same fp32-upcast avoidance as :func:`hc_pre`: keep activations in
+        # bf16, only reduce/accumulate in fp32, and run the gate linear in
+        # bf16 (cuBLAS internally accumulates in fp32). The tiny ``mixes``
+        # output is upcast for the sigmoid + per-stream bias, then auto-
+        # promoted on the final ``pre × x_flat`` multiplication.
         shape, dtype = x.size(), x.dtype
-        x_flat = x.flatten(2).float()
-        rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + self.config.rms_norm_eps)
-        mixes = torch.nn.functional.linear(x_flat, self.hc_head_fn.float()) * rsqrt
-        pre = torch.sigmoid(mixes * self.hc_head_scale.float() + self.hc_head_base.float()) + self.config.hc_cfg.hc_eps
+        x_flat = x.flatten(2)
+        sq_mean = (x_flat * x_flat).mean(-1, keepdim=True, dtype=torch.float32)
+        rsqrt = torch.rsqrt(sq_mean + self.config.rms_norm_eps)
+        mixes = torch.nn.functional.linear(x_flat, hc_head_fn.to(x_flat.dtype)).float() * rsqrt
+        pre = torch.sigmoid(mixes * hc_head_scale.float() + hc_head_base.float()) + self.config.hc_cfg.hc_eps
         y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=-2)
         return y.to(dtype)
 
@@ -804,16 +1183,18 @@ class DeepSeekV4(MoE):
         # authoritative bridge; if you change the wrapper layout, update it here.
         del layer_idx  # only used for the outer prefix already prepended
 
-        # HC parameters live on the wrapper; PyTorch's named_parameters surfaces them
-        # under the `hc_layer.*` path while the inner module is surfaced as
-        # `inner.*` (the same module object is registered twice on _V4DecoderLayer
-        # but parameter walking dedupes by id and reports the first attribute path
-        # — see _V4DecoderLayer.__init__).
+        # HC parameters live on the wrapper at `hc_layer.hc_{attn,ffn}_*`; PyTorch's
+        # named_parameters walks the inner MoEDecoderLayer via `hc_layer.inner.*`
+        # because _V4DecoderLayer.__init__ registers `inner` only through
+        # `self.hc_layer.inner` (the duplicate `self.inner` attribute is a property,
+        # not a registered submodule, so parameter walking never reaches `inner.*`
+        # directly).
         if tail.startswith("hc_layer.hc_attn_") or tail.startswith("hc_layer.hc_ffn_"):
             return [tail[len("hc_layer.") :]]
 
-        # Everything else lives inside the inner MoEDecoderLayer.
-        inner_prefix = "inner."
+        # Everything else lives inside the inner MoEDecoderLayer, surfaced under
+        # `hc_layer.inner.*`.
+        inner_prefix = "hc_layer.inner."
         if not tail.startswith(inner_prefix):
             # Composition wrapper itself has no other parameters; treat as identity
             # to avoid silently dropping anything new.

@@ -34,6 +34,8 @@ import torch.nn as nn
 from pydantic import BaseModel, ConfigDict
 from torch import Tensor
 
+from xtuner.v1.utils.compile import maybe_compile
+
 from .hc_sinkhorn import hc_split_sinkhorn
 
 
@@ -67,6 +69,7 @@ class HCWrapperConfig(BaseModel):
     hc_sinkhorn_iters: int = 20
 
 
+@maybe_compile
 def hc_pre(
     x: Tensor,
     hc_fn: Tensor,
@@ -86,6 +89,12 @@ def hc_pre(
     ``mixes`` via ``hc_fn``, run :func:`hc_split_sinkhorn`, then take a weighted
     sum over the stream axis with ``pre`` as the weights.
 
+    The HC parameters are expected to arrive as plain :class:`torch.Tensor`
+    (not :class:`DTensor`); the enclosing :class:`HCDecoderLayer.forward`
+    eagerly materialises the locals via ``_unshard_hc_params`` before calling
+    in, so this function stays a clean compile region without intermediate
+    DTensor unshard graph-breaks.
+
     Args:
         x (Tensor): Hidden states, shape ``[B, S, hc_mult, hidden_size]``.
         hc_fn (Tensor): Mixing projection, shape ``[(2 + hc_mult) * hc_mult, hc_mult * hidden_size]``.
@@ -103,18 +112,73 @@ def hc_pre(
             - ``comb`` (``[B, S, hc_mult, hc_mult]``): combination weights used by :func:`hc_post`.
     """
     shape, dtype = x.size(), x.dtype
-    # Match the V4 reference: do the RMS rescale + linear mix in fp32 to keep
-    # the downstream Sinkhorn iterations stable under bf16.
-    x_flat_f = x.flatten(2).float()
-    rsqrt = torch.rsqrt(x_flat_f.square().mean(-1, keepdim=True) + norm_eps)
-    mixes = torch.nn.functional.linear(x_flat_f, hc_fn.float()) * rsqrt
+    # V4 reference does the RMS rescale + linear mix in fp32 to keep the
+    # downstream Sinkhorn iterations stable under bf16. Naive: ``x.float()``
+    # allocates a 256 MB transient at pack=4096/D=4096/hc_mult=4 and saves it
+    # for the linear's backward, costing ~5 GB cumulatively across 4 layers ×
+    # 2 (attn+ffn) × 2 (forward + recompute backward).
+    #
+    # We keep the *output* in fp32 (Sinkhorn input) but skip materialising the
+    # full upcasted activation:
+    #   * mean-of-squares reduces with ``dtype=fp32`` accumulator, so the only
+    #     allocations are the bf16 squared tensor (transient, half the size)
+    #     and a tiny ``[B, S, 1]`` fp32 scalar
+    #   * the gate linear runs in bf16 (cuBLAS internally accumulates in fp32
+    #     anyway), then the tiny ``[B, S, mix_dim]`` output is upcast to fp32
+    #     before Sinkhorn — mix_dim is ``(2 + hc_mult) * hc_mult`` which is 24
+    #     for hc_mult=4, so the upcast is <1 MB.
+    x_flat = x.flatten(2)
+    sq = x_flat * x_flat
+    rsqrt = torch.rsqrt(sq.mean(-1, keepdim=True, dtype=torch.float32) + norm_eps)
+    mixes = torch.nn.functional.linear(x_flat, hc_fn.to(x_flat.dtype)).float() * rsqrt
 
     pre, post, comb = hc_split_sinkhorn(mixes, hc_scale, hc_base, hc_mult, iters, eps)
 
-    y = torch.sum(pre.unsqueeze(-1) * x_flat_f.view(shape), dim=-2)
+    # ``pre`` is fp32 (Sinkhorn output). Multiplying fp32 × bf16 in PyTorch's
+    # TensorIterator path casts elementwise on read, so we don't need to
+    # materialise a fp32 copy of ``x_flat`` here — the auto-promoted product
+    # is fp32 of the same shape but the bf16 input stays bf16 in memory.
+    y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=-2)
     return y.to(dtype), post, comb
 
 
+def _unshard_hc_params(
+    hc_fn: Tensor,
+    hc_scale: Tensor,
+    hc_base: Tensor,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Eager-mode helper: replace any DTensor-wrapped HC parameter with its
+    full local tensor.
+
+    Why this lives outside :func:`hc_pre`: FSDP shards every
+    :class:`nn.Parameter` into a :class:`DTensor` and only unshards them under
+    the pre-forward hook of the *enclosing* :class:`nn.Module`. The HC params
+    live on the wrapper but are consumed by ``hc_pre``, so we materialise the
+    local view here (cheap, ~100KB per layer) *before* the compile boundary
+    instead of inside the compiled graph (which would graph-break ×3 per HC
+    call: one per parameter).
+
+    Args:
+        hc_fn (Tensor): Mixing projection (potentially a DTensor).
+        hc_scale (Tensor): Sub-block scales (potentially a DTensor).
+        hc_base (Tensor): Per-slot bias (potentially a DTensor).
+
+    Returns:
+        tuple[Tensor, Tensor, Tensor]: Plain-tensor counterparts. Non-DTensor
+        inputs are returned as-is.
+    """
+    from torch.distributed.tensor import DTensor as _DTensor
+
+    if isinstance(hc_fn, _DTensor):
+        hc_fn = hc_fn.full_tensor()
+    if isinstance(hc_scale, _DTensor):
+        hc_scale = hc_scale.full_tensor()
+    if isinstance(hc_base, _DTensor):
+        hc_base = hc_base.full_tensor()
+    return hc_fn, hc_scale, hc_base
+
+
+@maybe_compile
 def hc_post(x: Tensor, residual: Tensor, post: Tensor, comb: Tensor) -> Tensor:
     """Expand the single-stream block output back into ``hc_mult`` streams.
 
@@ -133,7 +197,20 @@ def hc_post(x: Tensor, residual: Tensor, post: Tensor, comb: Tensor) -> Tensor:
             cast back to ``x.dtype``.
     """
     # post * x is broadcast across hidden dim; comb mixes across the residual stream axis.
-    expanded = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=-3)
+    # The mathematically equivalent fused form skips a `[B, S, hc_mult, hc_mult, D]`
+    # intermediate (which dominated peak memory at hc_post — see memory profile at
+    # step-0/rank1_memory_snapshot.pickle) by writing the second term as a matmul:
+    #   sum_j comb[..., i, j] * residual[..., j, d] == (comb @ residual)[..., i, d]
+    #
+    # Precision: run the matmul in bf16 with cuBLAS's fp32 internal accumulator
+    # (same numerical contract as the original element-wise fp32 auto-promote,
+    # within bf16 output quantisation). ``comb`` is the small ``[B,S,hc_mult,hc_mult]``
+    # fp32 Sinkhorn output (~1 MB at pack=4096); we cast it down to bf16 so the
+    # matmul stays bf16×bf16 and avoid materialising the 256 MB fp32 copy of
+    # ``residual`` that ``residual.to(comb.dtype)`` would otherwise create (and
+    # save for matmul backward). Across 4 layers × 2 (attn+ffn) × 2 (forward +
+    # recompute), this is ~4 GB of peak memory savings at pack=4096.
+    expanded = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.matmul(comb.to(residual.dtype), residual)
     return expanded.type_as(x)
 
 
@@ -212,12 +289,22 @@ class HCDecoderLayer(nn.Module):
         # type checker; cast to the structural protocol that documents the contract.
         inner = cast(HCInnerBlock, self.inner)
 
+        # Hoist DTensor.full_tensor() out of the compile region: doing it here
+        # (eager) lets `hc_pre` stay a single contiguous compiled graph instead
+        # of breaking three times mid-trace for each HC param under FSDP/EP.
+        attn_fn, attn_scale, attn_base = _unshard_hc_params(
+            self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+        )
+        ffn_fn, ffn_scale, ffn_base = _unshard_hc_params(
+            self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+        )
+
         residual = x
         x_reduced, post_a, comb_a = hc_pre(
             x,
-            self.hc_attn_fn,
-            self.hc_attn_scale,
-            self.hc_attn_base,
+            attn_fn,
+            attn_scale,
+            attn_base,
             self.hc_mult,
             self.hc_sinkhorn_iters,
             self.hc_eps,
@@ -228,9 +315,9 @@ class HCDecoderLayer(nn.Module):
         residual = x
         x_reduced, post_f, comb_f = hc_pre(
             x,
-            self.hc_ffn_fn,
-            self.hc_ffn_scale,
-            self.hc_ffn_base,
+            ffn_fn,
+            ffn_scale,
+            ffn_base,
             self.hc_mult,
             self.hc_sinkhorn_iters,
             self.hc_eps,

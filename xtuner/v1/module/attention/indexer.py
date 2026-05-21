@@ -241,21 +241,25 @@ class Indexer(nn.Module):
         # Step 3: Hadamard rotation across the head_dim axis.
         q = rotate_activation(q)
 
-        # Step 4: build the per-sample compressed-KV stream.
+        # Step 4: build the per-sample compressed-KV stream. The compressor is
+        # now varlen (single wkv/wgate GEMM over the full pack); we still need
+        # Python-int boundaries for the per-sample score loop below.
         kv_compressed, compressed_cu_seq_lens = self.compressor(hidden_states, cu_seq_lens)
 
         # Step 5: gate weights, scaled exactly as V4 reference L418.
         weights = self.weights_proj(hidden_states) * (self.softmax_scale * self.n_heads**-0.5)
 
-        boundaries = cu_seq_lens.detach().cpu().tolist()
-        compressed_boundaries = compressed_cu_seq_lens.detach().cpu().tolist()
+        # Single D2H transfer for both boundary tensors — one cudaMemcpy + one
+        # stream sync instead of two. The per-sample loop below cannot be
+        # vectorised cheaply: a full-pack ``[total_q, total_c]`` score matrix
+        # would compute every cross-sample (q, kv) pair, only to mask them out
+        # — at typical V4 pack/ratio settings (pack=8192, n_heads=64,
+        # total_c=2048) that is a 137 GFLOPS Indexer per layer vs the
+        # block-diagonal 8 GFLOPS we keep here. The remaining sync is the only
+        # graph break inside this module.
+        cu_stacked = torch.stack([cu_seq_lens, compressed_cu_seq_lens]).detach().cpu().tolist()
+        boundaries, compressed_boundaries = cu_stacked[0], cu_stacked[1]
         num_samples = len(boundaries) - 1
-        if len(compressed_boundaries) != num_samples + 1:
-            raise ValueError(
-                "Indexer and KVCompressor disagree on sample count: "
-                f"cu_seq_lens has {num_samples + 1} entries, compressed_cu_seq_lens has "
-                f"{len(compressed_boundaries)}"
-            )
 
         topk_pad = self.index_topk
         topk_idxs = q.new_full((1, total_tokens, topk_pad), -1, dtype=torch.long)

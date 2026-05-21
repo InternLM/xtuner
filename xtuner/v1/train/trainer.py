@@ -1622,7 +1622,12 @@ class Trainer:
         DEVICE_MODULE.reset_peak_memory_stats()  # type: ignore[attr-defined]
 
     def _maybe_save_hf(self):
-        if self._hf_interval is None:
+        if self._hf_interval is None or self._hf_interval <= 0:
+            # `hf_interval=0` is the disable sentinel — used by configs where save_hf's
+            # collective topology is not yet aligned with the runtime mesh layout
+            # (e.g. DeepSeekV4 + EP, where `_save_hf` calls foreach_all_gather over
+            # a fsdp_mesh assumption that doesn't hold once ep_size>1 splits the
+            # mesh). Local-only `_maybe_save` (torch.save snapshot) still runs.
             return
 
         assert self._can_save_hf, "Model does not support saving in Huggingface format."
