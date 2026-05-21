@@ -1,34 +1,15 @@
 import json
 from functools import reduce
 from operator import add
-from typing import Any, List, Optional
+from typing import Optional
 
 import ray
 from aiohttp import ClientSession, web
-from pydantic import BaseModel
+from transformers import AutoTokenizer
 
 from xtuner.v1.utils import get_logger
 
-from .tokenize_controller import TokenizeController
-from .trace_store import get_store
-
-
-class TokenizedSegment(BaseModel):
-    text: str
-    token_ids: List[int]
-    labels: List[int] | None = None
-    logprobs: List[float] | None = None
-    expert_key: Any = None
-    length: int | None = None
-
-    def model_post_init(self, _):
-        if self.labels is None:
-            self.labels = [-100] * len(self.token_ids)
-        if self.logprobs is None:
-            self.logprobs = [0.0] * len(self.token_ids)
-        if self.length is None:
-            self.length = len(self.token_ids)
-        assert len(self.token_ids) == len(self.labels) == len(self.logprobs)
+from .trace_store import TokenizedSegment, get_store
 
 
 class SessionServer:
@@ -44,20 +25,18 @@ class SessionServer:
 
     Args:
         worker_base_url (str): The base URL of the real worker (e.g. "http://127.0.0.1:8000")
-        tokenizer_controller (TokenizeController): The tokenizer controller to use for tokenization.
+        tokenizer_path (str): The path to the tokenizer model.
         host (str): Host for this session server to listen on.
         port (int): Port for this session server to listen on.
     """
 
-    def __init__(
-        self, worker_base_url: str, tokenizer_controller: TokenizeController, host: str = "127.0.0.1", port: int = 8080
-    ):
+    def __init__(self, worker_base_url: str, tokenizer_path: str, host: str = "127.0.0.1", port: int = 8080):
         self.worker_base_url = worker_base_url.rstrip("/")
-        self.tokenizer = tokenizer_controller
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
         self.host = host
         self.port = port
         self.store = get_store()
-        self.stop_word = ray.get(tokenizer_controller.get_eos_token.remote())
+        self.stop_word = self.tokenizer.eos_token or ""
 
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
@@ -68,17 +47,17 @@ class SessionServer:
 
         session_id = req_body["session_id"]
         # 1. chat_template render 出完整 prompt string，不 tokenize 全量
-        prompt_text = await self.tokenizer.apply_chat_template.remote(
+        prompt_text = self.tokenizer.apply_chat_template(
             req_body["messages"], tools=req_body.get("tools", None), add_generation_prompt=True, tokenize=False
         )
 
         # 2. Store 做 string prefix match。
         prefix, nodes = await self.store.search.remote(session_id, prompt_text, filter_none=True)
         if prefix:
-            get_logger().info(f'Hit prefix cache for session {session_id}: {prefix}')
+            get_logger().info(f'Hit prefix cache for session {session_id}')
         delta, delta_ids = prompt_text[len(prefix) :], []
         if delta:
-            delta_ids = await self.tokenizer.encode.remote(delta, add_special_tokens=False)
+            delta_ids = self.tokenizer.encode(delta, add_special_tokens=False)
             await self.store.insert.remote(session_id, prompt_text, TokenizedSegment(text=delta, token_ids=delta_ids))
         input_ids = reduce(add, [node.value.token_ids for node in nodes] + [delta_ids])
 
@@ -110,14 +89,12 @@ class SessionServer:
         raw_routed_expert = choice.get("routed_experts")  # 本次 call 的 raw routed_expert，可为 None
 
         # 2. Store 把 input_delta / assistant_output 两个节点补齐字段。
-        old_prompt = await self.tokenizer.apply_chat_template.remote(
+        old_prompt = self.tokenizer.apply_chat_template(
             messages, tools=tools, add_generation_prompt=True, tokenize=False
         )
         messages.append(choice["message"])
         new_prompt = (
-            await self.tokenizer.apply_chat_template.remote(
-                messages, tools=tools, add_generation_prompt=False, tokenize=False
-            )
+            self.tokenizer.apply_chat_template(messages, tools=tools, add_generation_prompt=False, tokenize=False)
         ).rstrip()
         assert new_prompt.startswith(old_prompt) and new_prompt.endswith(self.stop_word)
 
