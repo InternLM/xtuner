@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 import ray
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictStr
 
 from xtuner.v1.utils import get_logger
 
@@ -50,12 +50,17 @@ def _free_ray_refs(obj: Any):
             _free_ray_refs(v)
 
 
+def make_expert_key(session_id: str) -> str:
+    """Build a stable key for a routed experts object."""
+    return f"{session_id}:routed_experts"
+
+
 class TokenizedSegment(BaseModel):
     text: str
     token_ids: List[int]
     labels: List[int] | None = Field(default=None, repr=False)
     logprobs: List[float] | None = Field(default=None, repr=False)
-    expert_key: Any = Field(default=None, repr=False)
+    expert_key: StrictStr | None = Field(default=None, repr=False)
     length: int | None = None
 
     def model_post_init(self, _):
@@ -91,6 +96,7 @@ class Trie:
         self.root = TreeNode(value=None, parent=None)
         self.state = TraceState.ROLLOUT_RUNNING
         self.release_reason: str | None = None
+        self.expert_key: str | None = None
         self.updated_at = time.time()
 
     def touch(self) -> None:
@@ -230,6 +236,7 @@ class RolloutTraceStore:
     def __init__(self):
         """Initialize the rollout trace store actor."""
         self.sessions: Dict[str, Trie] = {}
+        self.objects: Dict[str, ray.ObjectRef] = {}
 
     def get_or_create(self, session_id: str) -> Trie:
         """Get the Trie for a session, or create one if it doesn't exist.
@@ -262,6 +269,7 @@ class RolloutTraceStore:
             "state": trie.state.value,
             "release_reason": trie.release_reason,
             "updated_at": trie.updated_at,
+            "has_object_ref": trie.expert_key in self.objects if trie.expert_key is not None else False,
         }
 
     def keys(self, session_id: str) -> List[str]:
@@ -276,16 +284,29 @@ class RolloutTraceStore:
         trie = self.get_or_create(session_id)
         return trie.keys()
 
-    def insert(self, session_id: str, key: str, value: Any):
+    def insert(
+        self,
+        session_id: str,
+        key: str,
+        value: TokenizedSegment,
+        routed_experts: ray.ObjectRef | None = None,
+    ):
         """Insert a (key, value) pair into a session's Trie.
 
         Args:
             session_id (str): The session identifier.
             key (str): The key string.
-            value (Any): The trace segment/value to store.
+            value (TokenizedSegment): The trace segment to store.
+            routed_experts (ray.ObjectRef | None): Optional routed experts
+                object for this session.
         """
         trie = self.get_or_create(session_id)
-        return trie.insert(key, value)
+        if routed_experts is not None:
+            expert_key = make_expert_key(session_id)
+            self.objects[expert_key] = routed_experts
+            value.expert_key = expert_key
+            trie.expert_key = expert_key
+        trie.insert(key, value)
 
     def search(self, session_id: str, text: str, filter_none: bool = False):
         """Search the longest prefix in a session's Trie.
@@ -310,6 +331,10 @@ class RolloutTraceStore:
         """
         assert session_id in self.sessions, f"Session ID '{session_id}' not found for release."
         trie = self.sessions.pop(session_id)
+        if trie.expert_key is not None:
+            obj_ref = self.objects.pop(trie.expert_key, None)
+            if obj_ref is not None:
+                _free_ray_refs(obj_ref)
         trie.release()
 
     def export_training_trace(self, session_id: str, prompt_text: str) -> dict:
@@ -350,7 +375,14 @@ class RolloutTraceStore:
         Returns:
             list[ray.ObjectRef]: The mapped ray.ObjectRefs.
         """
-        raise NotImplementedError("Trace object lookup will be implemented by the routed experts registry.")
+        object_refs: list[ray.ObjectRef] = []
+        for key in keys:
+            if not isinstance(key, str) or not key:
+                raise KeyError(f"Invalid trace object key: {key!r}")
+            if key not in self.objects:
+                raise KeyError(f"Trace object key {key!r} does not exist.")
+            object_refs.append(self.objects[key])
+        return object_refs
 
 
 def get_store():
