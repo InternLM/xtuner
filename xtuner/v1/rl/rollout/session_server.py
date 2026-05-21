@@ -114,7 +114,7 @@ class SessionServer:
             if len(raw_routed_expert) > 0:
                 num_layers = raw_routed_expert.shape[1]
                 topk_experts = raw_routed_expert.shape[2]
-                dummy_expert = np.full((1, num_layers, topk_experts), -1, dtype=raw_routed_expert.dtype)
+                dummy_expert = np.full((1, num_layers, topk_experts), 0, dtype=raw_routed_expert.dtype)
                 raw_routed_expert = np.concatenate([dummy_expert, raw_routed_expert], axis=0)
 
             _, nodes = await self.store.search.remote(session_id, old_prompt, filter_none=True)
