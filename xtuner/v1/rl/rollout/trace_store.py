@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from xtuner.v1.utils import get_logger
 
+
 _STORE_NAME = "rollout_trace_store"
 _handle_cache: Any = None
 
@@ -28,13 +29,13 @@ def _free_ray_refs(obj: Any):
     elif isinstance(obj, (list, tuple)):
         for v in obj:
             _free_ray_refs(v)
-    elif hasattr(obj, 'model_dump'):  # Pydantic v2
-        for v in obj.model_dump().values() if hasattr(obj.model_dump, '__call__') else {}.values():
+    elif hasattr(obj, "model_dump"):  # Pydantic v2
+        for v in obj.model_dump().values() if hasattr(obj.model_dump, "__call__") else {}.values():
             _free_ray_refs(v)
-    elif hasattr(obj, 'dict') and callable(getattr(obj, 'dict')):  # Pydantic v1
+    elif hasattr(obj, "dict") and callable(getattr(obj, "dict")):  # Pydantic v1
         for v in obj.dict().values():
             _free_ray_refs(v)
-    elif hasattr(obj, '__dict__'):
+    elif hasattr(obj, "__dict__"):
         for v in vars(obj).values():
             _free_ray_refs(v)
 
@@ -85,7 +86,7 @@ class Trie:
 
         def _collect(node: TreeNode, path: List[str]):
             if node.value is not None:
-                result.append(''.join(path))
+                result.append("".join(path))
             for token, child in node.children.items():
                 _collect(child, path + [token])
 
@@ -149,10 +150,11 @@ class Trie:
         if filter_none:
             matched_nodes = [n for n in matched_nodes if n.value is not None]
 
-        return ''.join(key_path), matched_nodes
+        return "".join(key_path), matched_nodes
 
     def release(self, key: str | None = None):
-        """Release nodes and free associated resources (e.g. Ray objects) for a given key.
+        """Release nodes and free associated resources (e.g. Ray objects) for a
+        given key.
 
         If the key is None, the entire Trie is released. Prunes empty branches bottom-up.
 
@@ -202,7 +204,8 @@ class Trie:
 
 @ray.remote(num_cpus=0)
 class RolloutTraceStore:
-    """Actor for managing trace stores (Tries) across different rollout sessions."""
+    """Actor for managing trace stores (Tries) across different rollout
+    sessions."""
 
     def __init__(self):
         """Initialize the rollout trace store actor."""
@@ -261,7 +264,8 @@ class RolloutTraceStore:
         return trie.search(text, filter_none)
 
     def release(self, session_id: str):
-        """Release the Trie and free associated resources for a specific session.
+        """Release the Trie and free associated resources for a specific
+        session.
 
         Args:
             session_id (str): The session identifier.
@@ -290,13 +294,13 @@ class RolloutTraceStore:
             raise ValueError(
                 f"Prompt text '{prompt_text}' does not match any trace key '{key}' in session '{session_id}'."
             )
-        trace = {'input_ids': [], 'labels': [], 'logprobs': [], 'routed_experts': []}
+        trace = {"input_ids": [], "labels": [], "logprobs": [], "routed_experts": []}
         for node in nodes:
             node_val: TokenizedSegment = node.value
-            trace['input_ids'].extend(node_val.token_ids)
-            trace['labels'].extend(node_val.labels)
-            trace['logprobs'].extend(node_val.logprobs)
-            trace['routed_experts'].append(node_val.expert_key)
+            trace["input_ids"].extend(node_val.token_ids)
+            trace["labels"].extend(node_val.labels)
+            trace["logprobs"].extend(node_val.logprobs)
+            trace["routed_experts"].append(node_val.expert_key)
         return trace
 
     def get_objects(self, keys: list[str]) -> list[ray.ObjectRef]:
@@ -423,7 +427,7 @@ if __name__ == "__main__":
     reconstructed_string = "".join(reconstructed_string_parts)
     print(f"\n   -> 测试字符串重建: {reconstructed_string == turn2_prompt[:cached_length]}")
 
-    print(f"\n[Result] 统计验证：")
+    print("\n[Result] 统计验证：")
     print(f"  -> Cache 命中的总字符长度: {cached_length} / {len(turn2_prompt)}")
 
     if cached_length == len(turn2_prompt):
