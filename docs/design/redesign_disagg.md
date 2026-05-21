@@ -268,6 +268,8 @@ class _PendingTasks:
 
 保存 checkpoint 前，`AgentLoopManager.save()` 通过 `produce_strategy.pending_task_count()` 检查各 task 是否还有未收尾的 rollout task；manager 不直接读取 `_PendingTasks` 私有集合。
 
+`pause_produce(...)` 的顺序是先置 `_update_event` 和 manager status，再向 rollout controller 发送 `pause_generation`，最后调用各 strategy drain pending；`AsyncProduceStrategy.pause_produce(...)` 在 drain pending 期间仍保留自己的 `pause_generation` 兜底调用，两层 pause 都依赖后端幂等。
+
 `_refresh_for_all_tasks(...)` 不再受环境变量控制，colocate / disagg 都统一刷新传入状态的 staleness；异步策略使用自己的 `stale_threshold`，同步策略没有 `stale_threshold` 时使用默认值 1。
 
 ## 10. 核心流程
@@ -275,7 +277,7 @@ class _PendingTasks:
 ### 10.1 共卡 produce_batch
 
 ```python
-self.continue_produce(model_step)
+await self.continue_produce(model_step)
 task_sizes = self.get_task_batch_sizes(batch_size, train_step)
 local_progress = ProduceProgress.build_local(self.task_names, task_sizes, train_step)
 
@@ -291,6 +293,8 @@ result = await self._get_batch_from_buffer(
 result.status = status
 return result
 ```
+
+共卡 `produce_batch()` 不保留直接调用 rollout controller 的 `try/finally` 兜底；异常清理如果需要，也必须通过 `pause_produce(...)` 入口完成，避免重新出现第二条 pause 路径。
 
 ### 10.2 非共卡 produce_loop
 
@@ -309,6 +313,8 @@ elif status == EXPIRED_BATCH:
     self._status = EXPIRED_BATCH
 ```
 
+`produce_loop` 不调用 `continue_generation`。从 `UPDATE_WEIGHT_AND_ABORT` / `EXPIRED_BATCH` 等待状态恢复时，必须已经由 trainer 调用过 `continue_produce()`；该入口负责恢复 rollout controller 并把 manager 状态切回 `NORMAL`。
+
 ### 10.3 非共卡 get_batch
 
 ```python
@@ -316,16 +322,72 @@ progress.begin_consume(train_step)
 await self._refresh_for_all_tasks(train_step, [Status.COMPLETED, Status.ABORTED])
 
 task_sizes = self.get_task_batch_sizes(batch_size, train_step)
-if await self.replay_buffer.is_ready(task_sizes):
+if self._status == EXPIRED_BATCH and train_step - 1 > self._model_step:
+    return ProduceBatchResult(status=EXPIRED_BATCH, rollout_states=[])
+ready = await self.replay_buffer.is_ready(task_sizes)
+if self._status == EXPIRED_BATCH and not ready:
+    raise RuntimeError(
+        "EXPIRED_BATCH cannot be skipped and current batch is not ready. "
+        f"train_step={train_step}, current_model_step={train_step - 1}, "
+        f"rollout_model_step={self._model_step}, status={self._status}, "
+        f"producer_future_step={progress.producer_future_step}, "
+        f"next_consumer_step={progress.next_consumer_step}, "
+        f"target_upto_future_step={progress.target_upto_future_step}, "
+        f"target_samples={progress.target_samples}, "
+        f"consumed_samples={progress.consumed_samples}, "
+        f"task_sizes={task_sizes}, "
+        f"leftover_counts={await self.replay_buffer.count_statuses(self.task_names, _LEFTOVER_STATUSES)}"
+    )
+if ready:
     result = await self._get_batch_from_buffer(
         batch_size=batch_size,
         task_batch_sizes=task_sizes,
         consume_progress=progress,
     )
+    if self._status == EXPIRED_BATCH:
+        result.status = EXPIRED_BATCH
     progress.finish_consume(train_step)
     await self._refresh_for_all_tasks(train_step + 1, [Status.COMPLETED, Status.ABORTED])
     return result
 ```
+
+### 10.4 非共卡 trainer expired batch
+
+```python
+train_step = self._cur_step + 1
+while train_step <= self._total_train_steps:
+    produce_result = await self.agent_loop_manager.get_batch(batch_size, train_step=train_step)
+    expired = produce_result.status == ProduceBatchStatus.EXPIRED_BATCH
+    trained = False
+    if produce_result.rollout_states:
+        train_one_batch(...)
+        trained = True
+
+    sync_model_step = train_step if trained else train_step - 1
+    need_sync = (
+        expired
+        or sync_model_step % self._sync_weights_interval == 0
+        or sync_model_step == self._total_train_steps
+    )
+    if need_sync:
+        await self.agent_loop_manager.pause_produce(use_global_progress=True)
+        await self._sync_weights_and_save(sync_model_step, step_timer_dict)
+        run_eval_if_needed(sync_model_step)
+        await self.agent_loop_manager.continue_produce(model_step=sync_model_step)
+
+    if trained:
+        self._log_step(train_step, ...)
+        self._cur_step = train_step
+        train_step += 1
+```
+
+`EXPIRED_BATCH` 跳过训练时没有完成当前 train step，只能同步 `train_step - 1` 对应的已存在模型版本，并且不能推进 `_cur_step` 或训练循环的 `train_step`。
+
+`EXPIRED_BATCH` 也可以携带非空 `rollout_states`：这表示 producer 已经过期并停止，但当前 step 的 batch 已经 ready，trainer 必须先训练该 batch，然后立即同步刚产生的 `train_step` 模型版本并恢复 producer。
+
+`_sync_weights_and_save(model_step, ...)` 的参数必须表示已完成的模型版本。checkpoint / HF 保存、`agent_loop_manager.save(..., model_step=model_step)` 和 `train_state.json.cur_step` 都写这个 `model_step`，不能写尚未完成训练的 `train_step`。
+
+如果 `EXPIRED_BATCH` 不能跳过且当前 batch 仍不 ready，不能静默等待；producer 已经停住且没有更新模型可同步，应 fail fast，并打印 `train_step/current_model_step/rollout_model_step/status/producer_future_step/next_consumer_step/target_upto_future_step/target_samples/consumed_samples/task_sizes/leftover_counts` 辅助定位进度不一致。
 
 ## 11. 建议迁移步骤
 
@@ -358,7 +420,7 @@ if await self.replay_buffer.is_ready(task_sizes):
 ### 步骤 5：收敛 AgentLoopManager 公开状态操作
 
 - 保留 `pause_produce(use_global_progress=True)` 作为权重同步前的显式暂停入口。
-- 保留 `continue_produce(model_step)` 作为权重同步后的恢复入口。
+- 保留 `continue_produce(model_step)` 作为权重同步后的恢复入口；该入口需要调用 rollout controller 的 `continue_generation`，因此是 async 方法，调用方必须显式 `await` 或在同步 trainer 中通过 `asyncio_run(...)` 调用。
 - 新增 `shutdown()`，替换 trainer 中直接写 `_status / _finish_event` 的代码。
 - 旧方法可以短期保留为兼容 wrapper。
 
@@ -400,7 +462,7 @@ if await self.replay_buffer.is_ready(task_sizes):
 - 共卡 `produce_batch` 使用 local progress。
 - 非共卡 `produce_loop` 使用 global progress 并推进 future step。
 - 非共卡 `get_batch` 在取出 batch 后推进 consumed 和 consumer step。
-- `EXPIRED_BATCH` 返回空 batch 且不推进 consumed。
+- `EXPIRED_BATCH` 只有在训练侧当前可用 model step 大于 rollout 侧 model step 时才返回空 batch，且不推进 consumed。
 - `shutdown()` 能让后台 producer 退出。
 
 ### AsyncProduceStrategy

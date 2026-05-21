@@ -1,3 +1,23 @@
+"""RLColocateTrainer 的 public 行为测试。
+
+Good Tests:
+- 通过 fit()、debug rollout/train 工作流和 RLThroughputBenchmark 的公开 schema 验证行为。
+- 用轻量 fake AgentLoopManager / TrainController 替代重型 Ray worker。
+- 只断言 step、model_step、文件内容等可观察结果。
+- 对 debug 文件只验证磁盘内容和 fit() 读回的训练输入，不锁定内部 helper 的调用顺序。
+
+Bad Tests:
+- 不直接测试 _sync_weights_and_save、_prepare_train_data、_log_step 等私有 helper。
+- 不把私有 mock 的调用次数或调用顺序当作核心契约。
+- 不重复测试 AgentLoopManager、ReplayBuffer 或 ProduceStrategy 的状态机。
+
+本文件主要覆盖的 public 行为:
+- colocate fit 可以消费 async AgentLoopManager 并完成训练 step。
+- fit 对空 rollout batch fail fast，并按 sync interval 传递 rollout model_step。
+- debug_rollout 通过 fit() 将 batch 落盘；debug_train 通过 fit() 从落盘 batch 训练。
+- debug 文件能保存/恢复 Ray ObjectRef；throughput scalar key schema 保持稳定。
+"""
+
 import asyncio
 import tempfile
 import unittest
@@ -9,10 +29,10 @@ import ray
 import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, ProduceBatchResult, ProduceBatchStatus
+from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, ProduceBatchResult
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import AgentLoopManager, _TaskRunner
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SerializedRayObjectRef
-from xtuner.v1.train.rl_trainer import RLColocateTrainer
+from xtuner.v1.train.rl_trainer import RLColocateTrainer, RLThroughputBenchmark
 
 
 class _FakeRolloutState:
@@ -138,33 +158,8 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
         return trainer
 
-    def _minimal_train_info(
-        self,
-        *,
-        training_samples: int,
-        training_tokens: int,
-    ):
-        return {
-            "data_info": {
-                "batch_size": training_samples,
-                "rewards/mean": 1.0,
-                "training_samples": training_samples,
-                "training_tokens": training_tokens,
-                "benchmark_end_time_s": 108.0,
-            },
-            "workers_log_item": [
-                {
-                    "rollout_is_metrics": {},
-                    "mismatch_metrics": {},
-                    "rollout_entropy": 0.0,
-                    "train_entropy": 0.0,
-                    "train_metrics": [],
-                    "sft_train_metrics": {},
-                }
-            ],
-        }
-
     def test_fit_accepts_async_strategy_manager_on_colocate_path(self):
+        # 验证 colocate fit 可以通过公开入口消费 async manager 产出的 batch。
         replay_buffer = AsyncReplayBufferConfig().build()
         manager = AgentLoopManager(
             task_runners=[
@@ -190,16 +185,10 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer.rollout_controller.offload.remote.assert_called_once_with()
         trainer.train_controller.onload.assert_called_once_with(target="all")
         trainer.train_controller.fit.assert_called_once()
-        trainer._prepare_train_data.assert_called_once()
-        trainer._save_trajectories.assert_called_once()
-        trainer._sync_weights_and_save.assert_called_once()
-        trainer._log_step.assert_called_once()
-        produce_result = trainer._log_step.call_args.args[2]
-        self.assertEqual(produce_result.produced_samples, 1)
-        self.assertEqual(produce_result.produced_tokens, 3)
         self.assertEqual(trainer._cur_step, 1)
 
     def test_fit_requires_non_empty_batch_from_manager(self):
+        # 验证空 rollout batch 会 fail fast，并且不会推进训练 step。
         async def _produce_empty(batch_size, train_step, **kwargs):
             return ProduceBatchResult(rollout_states=[])
 
@@ -216,13 +205,10 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer.rollout_controller.offload.remote.assert_not_called()
         trainer.train_controller.onload.assert_not_called()
         trainer.train_controller.fit.assert_not_called()
-        trainer._prepare_train_data.assert_not_called()
-        trainer._save_trajectories.assert_not_called()
-        trainer._sync_weights_and_save.assert_not_called()
-        trainer._log_step.assert_not_called()
         self.assertEqual(trainer._cur_step, 0)
 
     def test_fit_uses_sync_interval_and_passes_rollout_model_step(self):
+        # 验证 rollout 看到的是按 sync interval 推进后的 model_step。
         produce_calls = []
 
         async def _produce_batch(batch_size, train_step, *, model_step):
@@ -243,13 +229,10 @@ class TestRLColocateTrainer(unittest.TestCase):
             trainer.fit()
 
         self.assertEqual(produce_calls, [(1, 1, 0), (1, 2, 0), (1, 3, 2)])
-        self.assertEqual(
-            [call.args[0] for call in trainer._sync_weights_and_save.call_args_list],
-            [1, 2, 3],
-        )
         self.assertEqual(trainer._cur_step, 3)
 
     def test_debug_rollout_saves_raw_batch_and_skips_training(self):
+        # 验证 debug_rollout 通过 fit() 将原始 rollout batch 落盘且不启动训练。
         rollout_state = RolloutState(
             message=[{"role": "user", "content": "hello"}],
             response="ok",
@@ -276,101 +259,50 @@ class TestRLColocateTrainer(unittest.TestCase):
         saved_batch = torch.load(saved_path, map_location="cpu", weights_only=False)
         self.assertEqual(saved_batch[0][0].response, "ok")
         trainer.train_controller.fit.assert_not_called()
-        trainer._sync_weights_and_save.assert_not_called()
 
-    def test_prepare_train_data_records_training_tokens(self):
-        trainer = RLColocateTrainer.__new__(RLColocateTrainer)
-        trainer.logger = MagicMock()
-        trainer._advantage_estimator = MagicMock()
-        trainer._advantage_estimator.compute.return_value = torch.tensor([0.5, -0.5])
+    def test_throughput_benchmark_exports_stable_scalar_schema(self):
+        # throughput key 是日志对外契约；这里固定 schema，避免在流程测试中硬编码。
+        scalars = RLThroughputBenchmark(
+            e2e_effective_sgs=1.0,
+            e2e_effective_tgs=2.0,
+            effective_sgs=3.0,
+            effective_tgs=4.0,
+            training_tgs=5.0,
+            rollout_sgs=6.0,
+            rollout_tgs=7.0,
+        ).to_scalars()
 
-        group = [
-            RolloutState(
-                message=[{"role": "user", "content": "hello"}],
-                prompt_ids=[10, 11, 12],
-                response="ok",
-                response_ids=[1, 2, 3, 4],
-                reward={"score": 1.0},
-                status=Status.COMPLETED,
-            ),
-            RolloutState(
-                message=[{"role": "user", "content": "hello"}],
-                prompt_ids=[10, 11, 12],
-                response="fine",
-                response_ids=[5, 6],
-                reward={"score": 0.0},
-                status=Status.COMPLETED,
-            ),
-        ]
-
-        data_batches, data_info = trainer._prepare_train_data([group], pack_max_length=16)
-
-        self.assertEqual(len(data_batches), 2)
-        self.assertEqual(data_info["batch_size"], 2)
-        self.assertEqual(data_info["training_samples"], 2)
-        self.assertEqual(data_info["training_tokens"], 10)
-
-    def test_log_step_records_colocate_throughput_metrics(self):
-        trainer = self._make_trainer(MagicMock())
-        trainer._log_step = RLColocateTrainer._log_step.__get__(trainer, RLColocateTrainer)
-        trainer._num_workers = 2.0
-        trainer._rollout_num_workers = 2.0
-
-        trainer._log_step(
-            train_step=1,
-            step_timer_dict={
-                "step": 10.0,
-                "produce_batch": 3.0,
-                "prepare_data": 1.0,
-                "training": 4.0,
+        self.assertEqual(
+            scalars,
+            {
+                "throughput/e2e_effective_sgs": 1.0,
+                "throughput/e2e_effective_tgs": 2.0,
+                "throughput/effective_sgs": 3.0,
+                "throughput/effective_tgs": 4.0,
+                "throughput/training_tgs": 5.0,
+                "throughput/rollout_sgs": 6.0,
+                "throughput/rollout_tgs": 7.0,
             },
-            produce_result=ProduceBatchResult(
-                rollout_states=[],
-                produced_samples=5,
-                produced_tokens=80,
-                produce_time_s=2.0,
-            ),
-            train_info=self._minimal_train_info(
-                training_samples=3,
-                training_tokens=120,
-            ),
-            eval_info={},
         )
-
-        scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
-        self.assertEqual(scalars["throughput/e2e_effective_samples_per_s"], 0.375)
-        self.assertEqual(scalars["throughput/e2e_effective_tgs"], 7.5)
-        self.assertEqual(scalars["throughput/effective_samples_per_s"], 0.3)
-        self.assertEqual(scalars["throughput/effective_tgs"], 6.0)
-        self.assertEqual(scalars["throughput/training_tgs"], 15.0)
-        self.assertEqual(scalars["throughput/rollout_samples_per_s"], 2.5)
-        self.assertEqual(scalars["throughput/rollout_tgs"], 20.0)
-
-    def test_log_step_skips_throughput_without_train_info(self):
-        trainer = self._make_trainer(MagicMock())
-        trainer._log_step = RLColocateTrainer._log_step.__get__(trainer, RLColocateTrainer)
-
-        trainer._log_step(
-            train_step=1,
-            step_timer_dict={"step": 10.0, "produce_batch": 3.0, "prepare_data": 1.0},
-            produce_result=ProduceBatchResult(rollout_states=[], status=ProduceBatchStatus.EXPIRED_BATCH),
-            train_info={},
-            eval_info={},
-        )
-
-        trainer._exp_tracker.add_scalars.assert_called_once()
 
     def test_debug_train_loads_batches_and_skips_weight_sync(self):
+        # 验证 debug_train 通过 fit() 读取落盘 batch，并只推进训练流程。
+        debug_dir = Path(self.temp_dir.name) / "debug_train"
+        debug_dir.mkdir()
+        torch.save([[SimpleNamespace(uid=1, message_uid=1)]], debug_dir / "debug_rollout_1.pt")
+        torch.save([[SimpleNamespace(uid=2, message_uid=2)]], debug_dir / "debug_rollout_2.pt")
+
         trainer = self._make_trainer(MagicMock(), total_train_steps=2)
         trainer._debug_train = True
-        trainer._load_debug_rollout_batch = MagicMock(
-            side_effect=[
-                [[SimpleNamespace(uid=1, message_uid=1)]],
-                [[SimpleNamespace(uid=2, message_uid=2)]],
-            ]
-        )
-        trainer._train_one_batch = MagicMock(
-            return_value={
+        trainer._debug_train_files = {
+            1: debug_dir / "debug_rollout_1.pt",
+            2: debug_dir / "debug_rollout_2.pt",
+        }
+        captured_batches = []
+
+        def train_one_batch(train_batch, train_step, step_timer_dict, **kwargs):
+            captured_batches.append((train_step, train_batch))
+            return {
                 "data_info": {"batch_size": 1},
                 "workers_log_item": [
                     {
@@ -383,16 +315,16 @@ class TestRLColocateTrainer(unittest.TestCase):
                     }
                 ],
             }
-        )
+
+        trainer._train_one_batch = MagicMock(side_effect=train_one_batch)
 
         trainer.fit()
 
-        self.assertEqual([call.args[0] for call in trainer._load_debug_rollout_batch.call_args_list], [1, 2])
-        self.assertEqual(trainer._train_one_batch.call_count, 2)
-        trainer._sync_weights_and_save.assert_not_called()
+        self.assertEqual([(step, batch[0][0].uid) for step, batch in captured_batches], [(1, 1), (2, 2)])
         self.assertEqual(trainer._cur_step, 2)
 
-    def test_debug_rollout_save_resolves_object_refs_and_load_puts_them_back(self):
+    def test_debug_rollout_fit_serializes_object_refs_and_debug_train_fit_restores_them(self):
+        # 验证 debug 文件作为公开调试产物保存值快照，训练回放时恢复为 Ray ObjectRef。
         if not ray.is_initialized():
             try:
                 ray.init(local_mode=True, ignore_reinit_error=True, include_dashboard=False)
@@ -410,9 +342,16 @@ class TestRLColocateTrainer(unittest.TestCase):
                 reward={"score": 1.0},
                 status=Status.COMPLETED,
             )
-            trainer = self._make_trainer(MagicMock())
+
+            async def _produce_batch(batch_size, train_step, *, model_step):
+                return ProduceBatchResult(rollout_states=[[rollout_state]])
+
+            trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch))
+            trainer._debug_rollout = True
             trainer._debug_rollout_dir = Path(self.temp_dir.name) / "debug_refs"
-            trainer._save_debug_rollout_batch([[rollout_state]], train_step=1)
+
+            with patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run):
+                trainer.fit()
 
             saved_batch = torch.load(
                 trainer._debug_rollout_dir / "debug_rollout_1.pt",
@@ -428,99 +367,34 @@ class TestRLColocateTrainer(unittest.TestCase):
             self.assertTrue(torch.equal(saved_pixel_values.value, pixel_values))
             self.assertEqual(saved_routed_experts.value, routed_experts)
 
-            trainer._debug_train_files = {1: trainer._debug_rollout_dir / "debug_rollout_1.pt"}
-            loaded_batch = trainer._load_debug_rollout_batch(train_step=1)
+            replay_trainer = self._make_trainer(MagicMock())
+            replay_trainer._debug_train = True
+            replay_trainer._debug_train_files = {1: trainer._debug_rollout_dir / "debug_rollout_1.pt"}
+            captured_batches = []
+
+            def train_one_batch(train_batch, train_step, step_timer_dict, **kwargs):
+                captured_batches.append(train_batch)
+                return {
+                    "data_info": {"batch_size": 1},
+                    "workers_log_item": [
+                        {
+                            "train_metrics": [],
+                            "sft_train_metrics": {},
+                            "train_entropy": 0.0,
+                        }
+                    ],
+                }
+
+            replay_trainer._train_one_batch = MagicMock(side_effect=train_one_batch)
+            replay_trainer.fit()
+
+            loaded_batch = captured_batches[0]
             self.assertIsInstance(loaded_batch[0][0].mm_info["pixel_values"], ray.ObjectRef)
             self.assertIsInstance(loaded_batch[0][0].routed_experts, ray.ObjectRef)
             self.assertTrue(torch.equal(ray.get(loaded_batch[0][0].mm_info["pixel_values"]), pixel_values))
             self.assertEqual(ray.get(loaded_batch[0][0].routed_experts), routed_experts)
         finally:
             ray.shutdown()
-
-    def test_sync_weights_and_save_can_skip_weight_update_and_restore_rollout(self):
-        trainer = RLColocateTrainer.__new__(RLColocateTrainer)
-        events = []
-        trainer._sync_weights_interval = 2
-        trainer._maybe_save_checkpoint = MagicMock(side_effect=lambda step: events.append(f"save:{step}"))
-        trainer._maybe_save_hf = MagicMock(side_effect=lambda step: events.append(f"hf:{step}"))
-        trainer.train_controller = SimpleNamespace(
-            update_weights=MagicMock(side_effect=lambda: events.append("update_weights")),
-            offload=MagicMock(side_effect=lambda target="all": events.append(("train_offload", target))),
-        )
-        trainer.rollout_controller = SimpleNamespace(
-            recover_failed_workers=SimpleNamespace(
-                remote=MagicMock(side_effect=lambda: events.append("recover_rollout"))
-            ),
-            onload_weights=SimpleNamespace(remote=MagicMock(side_effect=lambda: events.append("onload_weights"))),
-            onload_kvcache=SimpleNamespace(remote=MagicMock(side_effect=lambda: events.append("onload_kvcache"))),
-        )
-
-        with (
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
-            patch(
-                "xtuner.v1.train.rl_trainer.bind_train_rollout",
-                side_effect=lambda train_controller, rollout_controller: events.append("bind"),
-            ),
-        ):
-            synced = trainer._sync_weights_and_save(train_step=1, step_timer_dict={})
-
-        self.assertFalse(synced)
-        self.assertEqual(
-            events,
-            [
-                ("train_offload", "optimizer"),
-                "save:1",
-                "hf:1",
-                "recover_rollout",
-                ("train_offload", "model"),
-                "onload_weights",
-                "onload_kvcache",
-            ],
-        )
-
-    def test_sync_weights_and_save_updates_weights_on_interval_step(self):
-        trainer = RLColocateTrainer.__new__(RLColocateTrainer)
-        events = []
-        trainer.logger = MagicMock()
-        trainer._sync_weights_interval = 2
-        trainer._maybe_save_checkpoint = MagicMock(side_effect=lambda step: events.append(f"save:{step}"))
-        trainer._maybe_save_hf = MagicMock(side_effect=lambda step: events.append(f"hf:{step}"))
-        trainer.train_controller = SimpleNamespace(
-            update_weights=MagicMock(side_effect=lambda: events.append("update_weights")),
-            offload=MagicMock(side_effect=lambda target="all": events.append(("train_offload", target))),
-        )
-        trainer.rollout_controller = SimpleNamespace(
-            recover_failed_workers=SimpleNamespace(
-                remote=MagicMock(side_effect=lambda: events.append("recover_rollout"))
-            ),
-            onload_weights=SimpleNamespace(remote=MagicMock(side_effect=lambda: events.append("onload_weights"))),
-            onload_kvcache=SimpleNamespace(remote=MagicMock(side_effect=lambda: events.append("onload_kvcache"))),
-        )
-
-        with (
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
-            patch(
-                "xtuner.v1.train.rl_trainer.bind_train_rollout",
-                side_effect=lambda train_controller, rollout_controller: events.append("bind"),
-            ),
-        ):
-            synced = trainer._sync_weights_and_save(train_step=2, step_timer_dict={})
-
-        self.assertTrue(synced)
-        self.assertEqual(
-            events,
-            [
-                ("train_offload", "optimizer"),
-                "save:2",
-                "hf:2",
-                "recover_rollout",
-                "bind",
-                "onload_weights",
-                "update_weights",
-                ("train_offload", "model"),
-                "onload_kvcache",
-            ],
-        )
 
 
 if __name__ == "__main__":

@@ -1,3 +1,22 @@
+"""Sampler / ProduceContext / ProduceStrategy 的行为测试。
+
+Good Tests:
+- 通过 Sampler、ProduceContext、SyncProduceStrategy、AsyncProduceStrategy 的公开入口验证生产行为。
+- 断言 replay buffer 中可见的 Rollout Group 状态、ProduceBatchStatus、版本/staleness/metrics 等业务结果。
+- 对复杂异步行为只保留对最终可观察结果的断言；_PendingTasks 的并发协议放在独立测试文件中。
+
+Bad Tests:
+- 不直接测试 _PendingTasks 的内部集合或 claim/cancel 细节。
+- 不把 sampler 调用次数、pending task 数量、mock 调用顺序当成核心契约，除非它们是当前 public 行为的唯一可观测信号。
+- 不测试 AgentLoopManager 的状态机；manager 编排行为放在 test_multi_task_agent_loop_manager.py。
+
+本文件主要覆盖的 public 行为:
+- sampler 优先复用可重试 Rollout Group，耗尽后回退 dataloader。
+- ProduceContext 统一处理生成结果落库、过滤、raw reward 和模型版本记录。
+- SyncProduceStrategy / AsyncProduceStrategy 返回 NORMAL、UPDATE_WEIGHT_AND_ABORT、EXPIRED_BATCH 的行为。
+- AsyncProduceStrategy 的 oversample、tail-batch、partial rollout、pause drain 和 staleness 结果。
+"""
+
 import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock
@@ -11,7 +30,6 @@ from xtuner.v1.rl.agent_loop_manager import (
     SamplerConfig,
     SyncProduceStrategyConfig,
 )
-from xtuner.v1.rl.agent_loop_manager.producer import _PendingTasks
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 
 
@@ -116,120 +134,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             stale_threshold=getattr(strategy, "stale_threshold", None),
         )
 
-    def test_produce_progress_methods_keep_absolute_window(self):
-        progress = ProduceProgress.build(["task_a", "task_b"])
-
-        def allocate(batch_size: int, step: int) -> dict[str, int]:
-            self.assertEqual(batch_size, 4)
-            return {"task_a": step, "task_b": batch_size - step}
-
-        current_sizes = progress.ensure_target_upto(
-            batch_size=4,
-            future_step=2,
-            allocate_batch_sizes=allocate,
-        )
-
-        self.assertEqual(current_sizes, {"task_a": 2, "task_b": 2})
-        self.assertEqual(progress.target_samples, {"task_a": 3, "task_b": 5})
-        self.assertEqual(progress.target_upto_future_step, 2)
-
-        progress.begin_consume(2)
-        progress.mark_consumed({"task_a": 1, "task_b": 2})
-        progress.finish_consume(2)
-        progress.advance_future_step()
-        self.assertEqual(progress.next_consumer_step, 3)
-        self.assertEqual(progress.producer_future_step, 2)
-        self.assertEqual(progress.consumed_samples, {"task_a": 1, "task_b": 2})
-
-        local_progress = ProduceProgress.build_local(["task_a", "task_b"], {"task_a": 1, "task_b": 3}, 7)
-        self.assertEqual(local_progress.target_samples, {"task_a": 1, "task_b": 3})
-        self.assertEqual(progress.target_samples, {"task_a": 3, "task_b": 5})
-
-        consumed_ref = progress.consumed_samples
-        target_ref = progress.target_samples
-        progress.load_state_dict(
-            {
-                "next_consumer_step": 8,
-                "producer_future_step": 9,
-                "consumed_samples": {"task_a": 4, "task_b": 5},
-                "target_samples": {"task_a": 6, "task_b": 7},
-                "target_upto_future_step": 10,
-            }
-        )
-        self.assertIs(progress.consumed_samples, consumed_ref)
-        self.assertIs(progress.target_samples, target_ref)
-        self.assertEqual(progress.state_dict()["target_samples"], {"task_a": 6, "task_b": 7})
-
-    async def test_pending_tasks_claim_ready_only_once(self):
-        pending_tasks = _PendingTasks()
-
-        async def spawn_one():
-            async def done():
-                return "done"
-
-            return asyncio.create_task(done())
-
-        scheduled = await pending_tasks.schedule_one(
-            max_pending=1,
-            should_abort=lambda: False,
-            spawn_one=spawn_one,
-        )
-        self.assertTrue(scheduled)
-        self.assertEqual(pending_tasks.count(), 1)
-
-        await asyncio.sleep(0)
-        claimed = await pending_tasks.claim_ready()
-        self.assertEqual(len(claimed), 1)
-        self.assertEqual(await pending_tasks.claim_ready(), set())
-        self.assertEqual(pending_tasks.count(), 0)
-
-    async def test_pending_tasks_schedule_respects_abort_and_limit(self):
-        pending_tasks = _PendingTasks()
-        spawn_count = 0
-
-        async def spawn_one():
-            nonlocal spawn_count
-            spawn_count += 1
-
-            async def wait_forever():
-                await asyncio.Event().wait()
-
-            return asyncio.create_task(wait_forever())
-
-        self.assertFalse(
-            await pending_tasks.schedule_one(max_pending=0, should_abort=lambda: False, spawn_one=spawn_one)
-        )
-        self.assertFalse(
-            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: True, spawn_one=spawn_one)
-        )
-        self.assertTrue(
-            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
-        )
-        self.assertFalse(
-            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
-        )
-        self.assertEqual(spawn_count, 1)
-
-        self.assertEqual(await pending_tasks.cancel_all(), 1)
-        self.assertEqual(pending_tasks.count(), 0)
-
-    async def test_pending_tasks_cancel_all_clears_before_wait_claims(self):
-        pending_tasks = _PendingTasks()
-
-        async def spawn_one():
-            async def wait_forever():
-                await asyncio.Event().wait()
-
-            return asyncio.create_task(wait_forever())
-
-        self.assertTrue(
-            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
-        )
-        self.assertEqual(await pending_tasks.cancel_all(), 1)
-        self.assertEqual(await pending_tasks.wait_and_claim(timeout_s=0), set())
-        self.assertEqual(pending_tasks.count(), 0)
-
     async def test_sampler_with_replay_buffer(self):
+        # 验证 sampler 优先复用 replay buffer 中可重试的 rollout group，耗尽后回退 dataloader。
         task_name = "test_task"
         sampler = self._build_sampler()
 
@@ -254,6 +160,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data[0].id, 1)
 
     async def test_put_generated_group_only_validates_completed_group(self):
+        # 验证 ProduceContext 只对 completed group 执行业务过滤，aborted group 保持可重试状态。
         task_name = "test_valid_completed_only"
         valid_checked_statuses = []
 
@@ -283,6 +190,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.replay_buffer.count(task_name, Status.ABORTED), 1)
 
     async def test_put_generated_group_records_raw_rewards_before_filtering(self):
+        # 验证 raw reward 在过滤前统计，filtered group 仍能贡献生成侧 reward 指标。
         task_name = "test_raw_reward_before_filter"
 
         def is_valid_sample_fn(samples):
@@ -309,6 +217,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.replay_buffer.count(task_name, Status.FILTERED), 1)
 
     async def test_sync_produce_strategy(self):
+        # 验证同步生产策略会生产指定数量的 completed rollout group 并写入 replay buffer。
         task_name = "test_task"
         mock_agent_loop = self._build_agent_loop({0: 0.0, 1: 0.01})
         produce_strategy_cfg = SyncProduceStrategyConfig()
@@ -338,6 +247,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_data[1][0].id, 1)
 
     async def test_async_produce_strategy(self):
+        # 验证异步生产策略会按超发预算生产，并优先重试 replay buffer 中的 aborted group。
         # 这个async_produce_strategy的测试主要验证超发逻辑 + staleness 优先get的逻辑
         # 异步的其他功能如 partial_rollout, tail_batch不在这里进行验证
         mock_agent_loop = MagicMock()
@@ -385,6 +295,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(group[0].id for group in final_data), [0, 1, 2, 999])
 
     async def test_async_produce_strategy_accepts_context_entrypoint(self):
+        # 验证 AsyncProduceStrategy 通过 ProduceContext public 入口完成一次最小生产。
         task_name = "test_context_entry"
         mock_agent_loop = self._build_agent_loop()
         sampler = self._build_sampler()
@@ -406,6 +317,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)
 
     async def test_async_produce_strategy_uses_live_consumed_progress(self):
+        # 验证策略读取 live consumed 绝对进度，consumer 已取走的 group 不会被误判为缺口。
         task_name = "test_live_consumed"
         call_count = 0
 
@@ -447,6 +359,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)
 
     async def test_async_produce_strategy_uses_fixed_batch_oversample_budget(self):
+        # 验证超发预算按当前 task batch size 固定计算，而不是按剩余缺口缩小。
         task_name = "test_fixed_oversample"
         sampler = MagicMock()
         sample_ids = iter(range(100, 200))
@@ -478,6 +391,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 5)
 
     async def test_async_produce_strategy_tail_batch_is_static_and_no_oversample(self):
+        # 验证 tail-batch 模式固定从 expired/aborted pool 补必要缺口，并禁用额外超发。
         task_name = "test_tail_static"
         for sample_id in (900, 901):
             await self.replay_buffer.put([MockRolloutState(sample_id, status=Status.EXPIRED)], task_name)
@@ -515,6 +429,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(group[0].id for group in completed), [900, 901])
 
     async def test_async_produce_strategy_fails_fast_on_invalid_progress(self):
+        # 验证 progress 缺少当前 task key 时 fail fast，避免静默用 0 掩盖调度状态损坏。
         task_name = "test_invalid_progress"
         strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0).build()
         mock_agent_loop = self._build_agent_loop()
@@ -562,6 +477,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             await strategy.produce_batch(ctx)
 
     async def test_async_produce_strategy_records_sample_version_before_staleness_refresh(self):
+        # 验证新生成 token 会先记录 Rollout Model Step，再按 consumer step 刷新 staleness。
         task_name = "test_sample_version"
 
         async def mock_gen(rs, **kwargs):
@@ -595,6 +511,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed[0][0].seq_staleness, 1)
 
     async def test_async_produce_strategy_preserves_partial_rollout_old_versions(self):
+        # 验证 partial rollout 保留旧 token 版本，新 token 使用本次调度的 Rollout Model Step。
         task_name = "test_partial_rollout_versions"
         partial_item = MockRolloutState(700, status=Status.ABORTED)
         partial_item.response_ids = [10]
@@ -636,6 +553,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed[0][0].seq_staleness, 3)
 
     async def test_async_produce_strategy_reclaims_cross_call_pending_and_records_timing(self):
+        # 验证跨 produce_batch 调用遗留的 pending task 会被回收，并写入生成耗时指标。
         task_name = "test_task"
         mock_agent_loop = self._build_agent_loop({0: 0.01, 1: 0.05, 2: 0.05})
         produce_strategy_cfg = AsyncProduceStrategyConfig(over_sample_threshold=2.0, enable_partial_rollout=True)
@@ -679,6 +597,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(group[0].extra_fields["group_generate_time_s"], 0.0)
 
     async def test_async_produce_strategy_pause_produce_is_explicit(self):
+        # 验证显式 pause_produce 会暂停 rollout controller、drain pending，并把结果落到 replay buffer。
         task_name = "test_cleanup"
         mock_agent_loop = self._build_agent_loop({0: 0.01, 1: 0.2, 2: 0.2})
         produce_strategy_cfg = AsyncProduceStrategyConfig(over_sample_threshold=2.0, enable_partial_rollout=True)
@@ -710,6 +629,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mock_agent_loop.rollout_ctl.cleanup_after_pause.remote.await_count, 1)
 
     async def test_async_produce_strategy_pause_produce_collects_without_cancelling(self):
+        # 验证 pending task 在 pause 等待窗口内完成时会被收集，而不是直接取消丢失结果。
         task_name = "test_cleanup_without_cancel"
         mock_agent_loop = self._build_agent_loop({0: 0.01, 1: 0.03, 2: 0.03})
         produce_strategy_cfg = AsyncProduceStrategyConfig(over_sample_threshold=2.0, enable_partial_rollout=True)
@@ -740,6 +660,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mock_agent_loop.rollout_ctl.cleanup_after_pause.remote.await_count, 1)
 
     async def test_async_produce_strategy_returns_update_abort_without_sampling(self):
+        # 验证 update_event 已设置时策略立即返回 UPDATE_WEIGHT_AND_ABORT，不再采样新 rollout。
         task_name = "test_update_abort"
         strategy = AsyncProduceStrategyConfig(over_sample_threshold=1.0).build()
         mock_agent_loop = self._build_agent_loop()
@@ -765,6 +686,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 0)
 
     async def test_async_produce_strategy_returns_update_abort_after_schedule_pause(self):
+        # 验证调度临界区中途触发 pause 后，策略停止继续调度并返回 UPDATE_WEIGHT_AND_ABORT。
         task_name = "test_update_abort_after_schedule"
         strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0).build()
         mock_agent_loop = self._build_agent_loop({0: 0.05})
@@ -798,6 +720,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.pending_task_count(), 0)
 
     async def test_async_produce_strategy_returns_expired_batch_before_processing_leftovers(self):
+        # 验证 Rollout Model Step 过期时策略先返回 EXPIRED_BATCH，不消费已有 completed leftovers。
         task_name = "test_expired_batch"
         strategy = AsyncProduceStrategyConfig(max_staleness=0).build()
         mock_agent_loop = self._build_agent_loop()
@@ -822,6 +745,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.replay_buffer.count(task_name, Status.ABORTED), 0)
 
     async def test_refresh_staleness_refreshes_before_expire_check(self):
+        # 验证 replay buffer 刷新 staleness 后，会把超过阈值的 completed group 标成 expired。
         task_name = "test_refresh_leftover"
         stale_item = MockRolloutState(1000, seq_staleness=0, status=Status.COMPLETED)
         stale_item.response_model_steps = [3]
