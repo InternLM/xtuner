@@ -444,3 +444,36 @@ class SessionServer:
             message["usage"] = usage
 
         return message
+
+
+class SessionServerActor:
+    """Ray actor wrapper that owns one SessionServer instance."""
+
+    def __init__(self, worker_base_url: str, tokenizer_path: str, host: str, port: int):
+        self.worker_base_url = worker_base_url
+        self.tokenizer_path = tokenizer_path
+        self.host = host
+        self.port = port
+        self.server: SessionServer | None = None
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+    async def start(self) -> str:
+        if self.server is not None:
+            return self.url
+
+        self.server = SessionServer(
+            worker_base_url=self.worker_base_url,
+            tokenizer_path=self.tokenizer_path,
+            host=self.host,
+            port=self.port,
+        )
+        await self.server.start()
+        return self.server.url
+
+    async def stop(self) -> None:
+        if self.server is not None:
+            await self.server.stop()
+            self.server = None
