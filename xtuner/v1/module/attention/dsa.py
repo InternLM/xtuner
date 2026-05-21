@@ -384,7 +384,21 @@ class DeepSeekSparseAttention(nn.Module):
                 cos_c = cos_c_full[..., :half]
                 sin_c = sin_c_full[..., :half]
                 assert self.indexer is not None  # compress_ratio == 4 always materialises it
-                compress_topk = self.indexer(hidden_states, q_lowrank, (cos_c, sin_c), cu_q)
+                # ``self.indexer`` emits the top-k *indices* that feed into
+                # sparse_attn's ``gather``; ``gather`` propagates no gradient
+                # through its index argument, so nothing inside the Indexer
+                # (wq_b, weights_proj, internal KVCompressor, RoPE, the score
+                # path) ever receives backprop in the current V4 design. Running
+                # the entire call under ``torch.no_grad()`` saves the autograd
+                # state these ops would otherwise stash (Linear-input saves on
+                # ``q_lowrank`` / ``hidden_states``, the compressor's scatter
+                # buffers, the softmax outputs) without changing any tensor that
+                # the rest of the model can see — and gives the surrounding
+                # ``DSA.forward`` compile graph one clean ``no_grad`` subregion
+                # to fold into. Remove this wrap if a future variant adds an
+                # auxiliary loss directly on Indexer outputs.
+                with torch.no_grad():
+                    compress_topk = self.indexer(hidden_states, q_lowrank, (cos_c, sin_c), cu_q)
             else:
                 # compress_ratio == 128: deterministic positional top-k. The K
                 # dim is bounded by the longest sample's compressed length;

@@ -261,23 +261,22 @@ class Indexer(nn.Module):
 
         if self.backend == "triton":
             # Fused varlen kernel — no [total_q, n_heads, total_c] intermediate.
-            # ``torch.no_grad`` is correct here: Indexer outputs flow into
-            # sparse_attn's ``gather`` which has no gradient w.r.t. indices, so
-            # there is no useful gradient to back-propagate through wq_b /
-            # weights_proj / the internal Compressor on this path.
+            # Autograd has already been disabled by the caller
+            # (``DSA.forward`` wraps the indexer call in ``torch.no_grad``
+            # because ``gather`` has no gradient through indices); we do not
+            # re-enter the context here.
             from ._indexer_topk_triton import indexer_topk_triton
 
-            with torch.no_grad():
-                return indexer_topk_triton(
-                    q,
-                    kv_compressed,
-                    weights,
-                    cu_seq_lens,
-                    compressed_cu_seq_lens,
-                    ratio=self.compress_ratio,
-                    index_topk=self.index_topk,
-                    softmax_scale=1.0,  # already folded into ``weights``
-                )
+            return indexer_topk_triton(
+                q,
+                kv_compressed,
+                weights,
+                cu_seq_lens,
+                compressed_cu_seq_lens,
+                ratio=self.compress_ratio,
+                index_topk=self.index_topk,
+                softmax_scale=1.0,  # already folded into ``weights``
+            )
 
         # Single D2H transfer for both boundary tensors — one cudaMemcpy + one
         # stream sync instead of two. The per-sample loop below cannot be
