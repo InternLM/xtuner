@@ -426,24 +426,34 @@ class RolloutTraceStore:
 
         Returns:
             dict: The trace dictionary containing `input_ids`, `labels`, `logprobs`,
-                and `routed_experts`.
+                and the session-level `routed_experts` object key.
 
         Raises:
+            KeyError: If the session does not exist.
+            RuntimeError: If the session is not ready for training export.
             ValueError: If the prompt_text does not completely match the trace keys in the session.
         """
-        trie = self.get_or_create(session_id)
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            raise KeyError(f"Trace session {session_id!r} does not exist.")
+        if trie.state != TraceState.ROLLOUT_FINISHED:
+            raise RuntimeError(
+                f"Cannot export training trace for session {session_id!r} in state {trie.state.value}."
+            )
+
         key, nodes = trie.search(prompt_text, filter_none=True)
         if prompt_text != key:
+            self._set_state(session_id, TraceState.TO_BE_RELEASED)
             raise ValueError(
                 f"Prompt text '{prompt_text}' does not match any trace key '{key}' in session '{session_id}'."
             )
-        trace = {"input_ids": [], "labels": [], "logprobs": [], "routed_experts": []}
+        trace = {"input_ids": [], "labels": [], "logprobs": [], "routed_experts": trie.expert_key}
         for node in nodes:
             node_val: TokenizedSegment = node.value
             trace["input_ids"].extend(node_val.token_ids)
             trace["labels"].extend(node_val.labels)
             trace["logprobs"].extend(node_val.logprobs)
-            trace["routed_experts"].append(node_val.expert_key)
+        self._set_state(session_id, TraceState.TRAIN_RUNNING)
         return trace
 
     def get_objects(self, keys: list[str]) -> list[ray.ObjectRef]:

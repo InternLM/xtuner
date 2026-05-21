@@ -169,7 +169,7 @@
 1. 必须严格要求 `RolloutFinished`。
 2. 失败路径不能遗留 session。
 3. 成功路径不能释放 session。
-4. routed experts 返回的是 `session_id` 或 `None`。
+4. routed experts 返回的是 session 级 `expert_key` 或 `None`。
 
 测试范围：
 
