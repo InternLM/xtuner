@@ -110,7 +110,9 @@ def _set_process_qos(cpu_priority: int, io_priority: Optional[int]) -> None:
             # class 3 = idle (only when no other process needs I/O)
             # class 2 = best-effort (default, can set priority 0-7)
             subprocess.run(
-                ["ionice", "-c", str(io_priority), "-p", str(pid)], check=True, capture_output=True
+                ["ionice", "-c", str(io_priority), "-p", str(pid)],
+                check=True,
+                capture_output=True,
             )
             logger.debug(f"PID {pid}: Set I/O priority class to {io_priority}")
         except (subprocess.CalledProcessError, FileNotFoundError, PermissionError) as e:
