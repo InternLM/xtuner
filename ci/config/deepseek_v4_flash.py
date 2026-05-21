@@ -81,7 +81,7 @@ moe_cfg.attention.backend = "cudnn"
 # The 06:00 run with compile_cfg=False reached step 50 at max_mem 114 GB so
 # the baseline fits — debug what compile_cfg=True is changing in the eager
 # code path that adds 130 GB on top.
-moe_cfg.compile_cfg = False
+moe_cfg.compile_cfg = True
 
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
@@ -119,7 +119,7 @@ dataset_config = [
 # XTUNER_ACTIVATION_OFFLOAD additionally stages the inter-layer hidden state on
 # CPU during the original forward, so the next layer's recompute sees a clean
 # slate when it starts.
-dataloader_config = DataloaderConfig(pack_max_length=8192)
+dataloader_config = DataloaderConfig(pack_max_length=4096)
 
 loss_cfg = CELossConfig()
 
@@ -164,6 +164,6 @@ trainer = TrainerConfig(
     # when the rest of the run OOMs before reaching steady state. ``profile_memory``
     # dumps ``rank{r}_memory_snapshot.pickle`` under ``work_dir/profiling_memory/step-0/``,
     # viewable at https://pytorch.org/memory_viz.
-    profile_step=4,
-    profile_memory=True,
+    # profile_step=4,
+    # profile_memory=True,
 )

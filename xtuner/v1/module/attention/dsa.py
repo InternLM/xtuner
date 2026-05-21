@@ -244,6 +244,7 @@ class DeepSeekSparseAttention(nn.Module):
                     index_topk=dsa_cfg.index_topk,
                     compress_ratio=4,
                     rms_norm_eps=dsa_cfg.rms_norm_eps,
+                    backend="native"
                 )
             )
         else:

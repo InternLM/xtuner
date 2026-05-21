@@ -13,7 +13,7 @@
 # rather than the fixed-batch tensors used by the upstream reference.
 # ============================================================================
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 import torch
 from cyclopts import Parameter
@@ -59,6 +59,15 @@ class IndexerConfig(BaseModel):
     index_topk: Annotated[int, Parameter(group="indexer")]
     compress_ratio: Annotated[int, Parameter(group="indexer")]
     rms_norm_eps: float = 1e-6
+    # Forward backend selector:
+    #   * "native"  — pure-PyTorch per-sample loop (default, gradient-safe).
+    #   * "triton"  — varlen fused kernel; eliminates the [S_i, n_heads, T_i]
+    #     fp32 intermediate (17 GiB at pack=8192 / n_heads=64). FORWARD ONLY,
+    #     wraps the call in ``torch.no_grad()``; intended for V4 fine-tuning
+    #     where Indexer params arrive pre-trained and the topk → gather path
+    #     blocks gradient flow anyway. Switch off for any setup that adds an
+    #     aux loss against the indexer scores.
+    backend: Annotated[Literal["native", "triton"], Parameter(group="indexer")] = "native"
 
 
 def rotate_activation(x: torch.Tensor) -> torch.Tensor:
@@ -154,6 +163,7 @@ class Indexer(nn.Module):
         self.rope_head_dim = config.rope_head_dim
         self.index_topk = config.index_topk
         self.compress_ratio = config.compress_ratio
+        self.backend = config.backend
         # why: matches V4 reference `softmax_scale = head_dim ** -0.5` at
         # L395; the extra `n_heads ** -0.5` is fused into `weights_proj`
         # at forward time to keep the score on a stable scale.
@@ -248,6 +258,26 @@ class Indexer(nn.Module):
 
         # Step 5: gate weights, scaled exactly as V4 reference L418.
         weights = self.weights_proj(hidden_states) * (self.softmax_scale * self.n_heads**-0.5)
+
+        if self.backend == "triton":
+            # Fused varlen kernel — no [total_q, n_heads, total_c] intermediate.
+            # ``torch.no_grad`` is correct here: Indexer outputs flow into
+            # sparse_attn's ``gather`` which has no gradient w.r.t. indices, so
+            # there is no useful gradient to back-propagate through wq_b /
+            # weights_proj / the internal Compressor on this path.
+            from ._indexer_topk_triton import indexer_topk_triton
+
+            with torch.no_grad():
+                return indexer_topk_triton(
+                    q,
+                    kv_compressed,
+                    weights,
+                    cu_seq_lens,
+                    compressed_cu_seq_lens,
+                    ratio=self.compress_ratio,
+                    index_topk=self.index_topk,
+                    softmax_scale=1.0,  # already folded into ``weights``
+                )
 
         # Single D2H transfer for both boundary tensors — one cudaMemcpy + one
         # stream sync instead of two. The per-sample loop below cannot be

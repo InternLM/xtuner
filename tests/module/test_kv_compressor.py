@@ -96,14 +96,20 @@ class TestKVCompressor:
 
         # Sample A occupies the first 64 // 4 = 16 compressed tokens; sample
         # B occupies the next 128 // 4 = 32. The B slice in the packed run
-        # should equal the standalone B run bit-for-bit.
+        # should equal the standalone B run within fp tolerance — the GEMM
+        # batch dim differs between the packed (B=192 rows) and standalone
+        # (B=128 rows) calls, so cuBLAS may pick a different algorithm and
+        # produce ULP-level differences. What we actually want to verify is
+        # the absence of cross-sample contamination (an overlap leak from A
+        # into B's first chunk would diverge by O(sample_a.std() * weight),
+        # well above fp32 epsilon).
         a_compressed = 64 // 4
         b_compressed = 128 // 4
         torch.testing.assert_close(
             out_packed[:, a_compressed : a_compressed + b_compressed, :],
             out_b_only,
-            rtol=0.0,
-            atol=0.0,
+            rtol=1e-5,
+            atol=1e-5,
         )
         assert torch.equal(
             cu_out_packed,
