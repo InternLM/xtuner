@@ -456,6 +456,31 @@ class RolloutTraceStore:
         self._set_state(session_id, TraceState.TRAIN_RUNNING)
         return trace
 
+    def mark_train_finished(self, session_id: str) -> str:
+        """Release a session after trainer consumers have finished using it."""
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            return TraceState.RELEASED.value
+        if trie.state != TraceState.TRAIN_RUNNING:
+            raise RuntimeError(
+                f"Cannot handle mark_train_finished for trace session {session_id!r} "
+                f"in state {trie.state.value}."
+            )
+        self._set_state(session_id, TraceState.TRAIN_FINISHED)
+        return self._set_state(session_id, TraceState.TO_BE_RELEASED).value
+
+    def mark_train_abandoned(self, session_id: str) -> str:
+        """Release a training session that trainer will no longer consume."""
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            return TraceState.RELEASED.value
+        if trie.state != TraceState.TRAIN_RUNNING:
+            raise RuntimeError(
+                f"Cannot handle mark_train_abandoned for trace session {session_id!r} "
+                f"in state {trie.state.value}."
+            )
+        return self._set_state(session_id, TraceState.TO_BE_RELEASED).value
+
     def get_objects(self, keys: list[str]) -> list[ray.ObjectRef]:
         """Fetch ray.ObjectRef elements by their keys.
 
