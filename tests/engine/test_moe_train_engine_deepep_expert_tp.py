@@ -26,6 +26,7 @@ from .test_moe_train_engine_tpep import (
     _get_param_grad,
     _get_tpep_grouped_linear,
     _make_engine_input,
+    _run_train_step_items_without_clip,
     _run_one_step_with_norm,
     _run_train_step_without_clip,
     _slice_tpep_weight,
@@ -53,6 +54,7 @@ def _build_engine(
     dispatcher: Literal["all2all", "deepep"],
     ep_size: int,
     expert_tp_size: int,
+    intra_layer_micro_batch: int = 1,
 ) -> TrainEngine:
     moe_cfg = _build_tiny_moe_cfg(ep_size=ep_size, expert_tp_size=expert_tp_size)
     moe_cfg.dispatcher = dispatcher
@@ -65,6 +67,101 @@ def _build_engine(
         model_cfg=moe_cfg,
         optim_cfg=optim_cfg,
         fsdp_cfg=fsdp_cfg,
+        intra_layer_micro_batch=intra_layer_micro_batch,
+    )
+
+
+def _record_deepep_expert_tp_collective_stages(
+    engine: TrainEngine,
+) -> tuple[dict[str, list[str]], list[tuple[str, tuple[int, ...], bool]]]:
+    stages: dict[str, list[str]] = {
+        "async_op_true": [],
+        "async_all_gather_rows": [],
+        "async_all_gather_row_metadata": [],
+        "async_all_gather_per_rank_metadata": [],
+        "async_reduce_scatter_rows_sum": [],
+    }
+    row_gather_inputs: list[tuple[str, tuple[int, ...], bool]] = []
+    current_stage: list[str] = []
+
+    for layer in engine.model.layers.values():
+        dispatcher = layer.dispatcher
+        assert isinstance(dispatcher, DeepEPDispatcher)
+        expert_tp = dispatcher._expert_tp
+        assert expert_tp is not None
+
+        for stage_name in (
+            "dispatch_preprocess",
+            "dispatch",
+            "dispatch_postprocess",
+            "combine_preprocess",
+            "combine",
+            "combine_postprocess",
+        ):
+            original_stage = getattr(dispatcher, stage_name)
+
+            def stage_wrapper(*args, _original_stage=original_stage, _stage_name=stage_name, **kwargs):
+                if kwargs.get("async_op", False):
+                    stages["async_op_true"].append(_stage_name)
+                current_stage.append(_stage_name)
+                try:
+                    return _original_stage(*args, **kwargs)
+                finally:
+                    current_stage.pop()
+
+            setattr(dispatcher, stage_name, stage_wrapper)
+
+        for collective_name in (
+            "async_all_gather_rows",
+            "async_all_gather_row_metadata",
+            "async_all_gather_per_rank_metadata",
+            "async_reduce_scatter_rows_sum",
+        ):
+            original_collective = getattr(expert_tp, collective_name)
+
+            def collective_wrapper(
+                *args,
+                _original_collective=original_collective,
+                _collective_name=collective_name,
+                **kwargs,
+            ):
+                stage = current_stage[-1] if current_stage else "<outside>"
+                stages[_collective_name].append(stage)
+                if _collective_name == "async_all_gather_rows":
+                    tensor = args[0]
+                    row_gather_inputs.append((stage, tuple(tensor.shape[1:]), tensor.requires_grad))
+                return _original_collective(*args, **kwargs)
+
+            setattr(expert_tp, collective_name, collective_wrapper)
+
+    return stages, row_gather_inputs
+
+
+def _assert_domino_deepep_expert_tp_collective_stages(
+    stages: dict[str, list[str]],
+    row_gather_inputs: list[tuple[str, tuple[int, ...], bool]],
+) -> None:
+    assert set(stages["async_op_true"]) == {
+        "dispatch_preprocess",
+        "dispatch",
+        "dispatch_postprocess",
+        "combine_preprocess",
+        "combine",
+        "combine_postprocess",
+    }
+    assert stages["async_all_gather_rows"]
+    assert stages["async_all_gather_row_metadata"]
+    assert stages["async_all_gather_per_rank_metadata"]
+    assert stages["async_reduce_scatter_rows_sum"]
+    assert set(stages["async_all_gather_rows"]) == {"dispatch"}
+    assert set(stages["async_all_gather_row_metadata"]) == {"dispatch"}
+    assert set(stages["async_all_gather_per_rank_metadata"]) == {"dispatch"}
+    assert set(stages["async_reduce_scatter_rows_sum"]) == {"combine"}
+    # 中文注释：shape=(2,) 且 requires_grad=True 的 dispatch-stage row gather
+    # 对应 router topK weights 的可微 ExpertTP gather 路径。
+    assert any(
+        stage == "dispatch" and shape == (2,) and requires_grad
+        for stage, shape, requires_grad in row_gather_inputs
     )
 
 
@@ -250,6 +347,66 @@ class TestMoETrainEngineDeepEPExpertTP(DeterministicDDPTestCase):
             atol=BF16_ATOL,
             rtol=BF16_RTOL,
         )
+
+        dist.barrier()
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except Exception:
+            pass
+
+    def test_deepep_expert_tp_domino_micro_batch_matches_sync_baseline(self) -> None:
+        pg = self.create_pg("cuda")
+
+        ep_size = 2
+        expert_tp_size = 2
+        engine_ref = _build_engine(
+            dispatcher="deepep",
+            ep_size=ep_size,
+            expert_tp_size=expert_tp_size,
+        )
+        engine_ref.init_model_weights()
+
+        engine_domino = _build_engine(
+            dispatcher="deepep",
+            ep_size=ep_size,
+            expert_tp_size=expert_tp_size,
+            intra_layer_micro_batch=2,
+        )
+        engine_domino.init_model_weights()
+        _copy_matching_engine_weights(engine_ref, engine_domino)
+        stages, row_gather_inputs = _record_deepep_expert_tp_collective_stages(engine_domino)
+        dist.barrier()
+
+        device = torch.device("cuda", dist.get_rank() % torch.cuda.device_count())
+        batches = [
+            _make_engine_input(device=device, seed_offset=dist.get_rank() * 2),
+            _make_engine_input(device=device, seed_offset=dist.get_rank() * 2 + 1),
+        ]
+        loss_cfg = CELossConfig()
+
+        loss_domino = _run_train_step_items_without_clip(engine_domino, loss_cfg, batches)
+        norm_domino = engine_domino.clip_grad_norm(do_clip=False).detach().float().cpu()
+        gate_grad_domino = _get_param_grad(engine_domino, "layers.0.gate.weight")
+
+        loss_ref = _run_train_step_items_without_clip(engine_ref, loss_cfg, batches)
+        norm_ref = engine_ref.clip_grad_norm(do_clip=False).detach().float().cpu()
+        gate_grad_ref = _get_param_grad(engine_ref, "layers.0.gate.weight")
+
+        _assert_domino_deepep_expert_tp_collective_stages(stages, row_gather_inputs)
+        torch.testing.assert_close(
+            torch.tensor(loss_domino),
+            torch.tensor(loss_ref),
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+        torch.testing.assert_close(
+            norm_domino,
+            norm_ref,
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+        _assert_bf16_training_close(gate_grad_domino, gate_grad_ref)
 
         dist.barrier()
         torch.cuda.empty_cache()
