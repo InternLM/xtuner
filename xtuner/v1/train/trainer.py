@@ -33,7 +33,7 @@ from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, Da
 from xtuner.v1.engine import TrainEngine
 from xtuner.v1.engine.train_engine import TrainStepInfo
 from xtuner.v1.loss import CELossConfig
-from xtuner.v1.model.base import ModelItem, XTunerBaseModelConfig
+from xtuner.v1.model.base import AsyncHFSaveHandle, ModelItem, XTunerBaseModelConfig
 from xtuner.v1.model.moe.moe import MoEConfig
 from xtuner.v1.patch import patch_dcp_save_state_dict, patch_dcp_save_with_cache_storage, patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
@@ -589,8 +589,9 @@ class Trainer:
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
         self._async_hf_export = async_hf_export
-        self._pending_async_hf_handle: Any | None = None
-        self._pending_async_hf_meta: dict[str, Any] | None = None
+        self._pending_async_hf_handle: AsyncHFSaveHandle | None = None
+        self._pending_async_hf_step: int | None = None
+        self._pending_async_hf_epoch: int | None = None
         self._snapshot_interval = snapshot_interval
         self._check_health_interval = check_health_interval
         self._hf_max_keep = hf_max_keep
@@ -862,19 +863,7 @@ class Trainer:
             if self.cur_step % 50 == 0:
                 gc.collect()
 
-        if self._async_hf_export:
-            if self._pending_async_hf_handle is not None:
-                finalized_hf_path = self._engine.wait_async_hf(self._pending_async_hf_handle)
-                assert self._pending_async_hf_meta is not None
-                assert finalized_hf_path == self._pending_async_hf_meta["path"]
-                self._finalize_hf_save(
-                    finalized_hf_path,
-                    step=self._pending_async_hf_meta["step"],
-                    epoch=self._pending_async_hf_meta["epoch"],
-                    delete_hf_dirs=True,
-                )
-                self._pending_async_hf_handle = None
-                self._pending_async_hf_meta = None
+        self._wait_for_pending_async_hf()
 
         # TODO: Should use flush rather than close
         self._exp_tracker.close()
@@ -1662,39 +1651,10 @@ class Trainer:
 
         save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
         if self._async_hf_export:
-            async_cleanup_hf_dirs: list[str | Path] = []
-            if self._pending_async_hf_handle is not None:
-                assert self._pending_async_hf_meta is not None
-                if self._hf_max_keep is not None and self._hf_max_keep > 0:
-                    pending_hf_list = self.meta.latest_exp.hf_checkpoint_list + [
-                        str(self._pending_async_hf_meta["path"])
-                    ]
-                    if len(pending_hf_list) > self._hf_max_keep:
-                        async_cleanup_hf_dirs = pending_hf_list[: -self._hf_max_keep]
-
-                finalized_hf_path = self._engine.wait_async_hf(self._pending_async_hf_handle)
-                assert finalized_hf_path == self._pending_async_hf_meta["path"]
-                finalized_step = self._pending_async_hf_meta["step"]
-                finalized_epoch = self._pending_async_hf_meta["epoch"]
-                self._pending_async_hf_handle = None
-                self._pending_async_hf_meta = None
-
-                self._finalize_hf_save(
-                    finalized_hf_path,
-                    step=finalized_step,
-                    epoch=finalized_epoch,
-                    delete_hf_dirs=False,
-                )
-
-            self._pending_async_hf_handle = self._engine.async_save_hf(
-                str(save_hf_path),
-                cleanup_hf_dirs=async_cleanup_hf_dirs,
-            )
-            self._pending_async_hf_meta = {
-                "path": save_hf_path,
-                "step": self.cur_step,
-                "epoch": self._cur_epoch,
-            }
+            self._wait_for_pending_async_hf()
+            self._pending_async_hf_handle = self._engine.async_save_hf(str(save_hf_path))
+            self._pending_async_hf_step = self.cur_step
+            self._pending_async_hf_epoch = self._cur_epoch
             return
         else:
             self._engine.save_hf(str(save_hf_path))
@@ -1705,6 +1665,28 @@ class Trainer:
                 delete_hf_dirs=True,
             )
             return
+
+    def _wait_for_pending_async_hf(self) -> None:
+        if self._pending_async_hf_handle is None:
+            return
+
+        handle = self._pending_async_hf_handle
+        step = self._pending_async_hf_step
+        epoch = self._pending_async_hf_epoch
+        self._pending_async_hf_handle = None
+        self._pending_async_hf_step = None
+        self._pending_async_hf_epoch = None
+
+        finalized_hf_path = self._engine.wait_async_hf(handle)
+        assert finalized_hf_path is not None
+        assert step is not None
+        assert epoch is not None
+        self._finalize_hf_save(
+            finalized_hf_path,
+            step=step,
+            epoch=epoch,
+            delete_hf_dirs=True,
+        )
 
     def _finalize_hf_save(self, finalized_hf_path: Path, step: int, epoch: int, delete_hf_dirs: bool) -> None:
         latest_hf_link = self.exp_dir / "hf-latest"

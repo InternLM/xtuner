@@ -5,7 +5,6 @@ import multiprocessing as py_mp
 import os
 import pydoc
 import re
-import subprocess
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
@@ -14,7 +13,7 @@ from importlib import import_module
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree, rmtree
-from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, Optional, Sequence, cast
+from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -58,6 +57,7 @@ from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_co
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
 from xtuner.v1.utils.misc import FunctionEnum, FunctionType, get_function_full_qualname, get_function_type
+from xtuner.v1.utils.process import get_async_save_file_lock_slots, set_async_save_process_qos
 
 from .utils import ModelForwardExtraLogInfo
 
@@ -66,57 +66,6 @@ logger = get_logger()
 
 DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
-
-
-def _set_process_qos(cpu_priority: int, io_priority: Optional[int]) -> None:
-    """
-    Set QoS (Quality of Service) for the current checkpoint writer process.
-    This ensures checkpoint writing doesn't interfere with training.
-
-    Args:
-        cpu_priority: Nice value for CPU scheduling (0-19, higher = lower priority).
-                     Default 19 is the lowest normal CPU scheduling priority.
-        io_priority: Linux ionice scheduling class. If None, do not change I/O priority.
-                    Format: class_id (0-3) where 3 = idle (lowest priority).
-
-    Note: Requires appropriate permissions. Failures are logged but not fatal.
-    """
-    pid = os.getpid()
-
-    # Set CPU priority (nice value). os.nice(increment) adds to current;
-    # get current with os.nice(0). Only increase nice (deprioritize);
-    # decreasing requires superuser.
-    if cpu_priority is not None and cpu_priority >= 0 and cpu_priority <= 19:
-        try:
-            current_nice = os.nice(0)  # 0 = no change, returns current nice value
-            increment = cpu_priority - current_nice
-            if increment == 0:
-                logger.debug(f"PID {pid}: CPU nice already at target {cpu_priority}")
-            elif increment < 0:
-                logger.warning(
-                    f"PID {pid}: Skipping CPU nice change from {current_nice} to {cpu_priority}; "
-                    "lowering nice requires privilege"
-                )
-            else:
-                new_nice = os.nice(increment)
-                logger.debug(f"PID {pid}: Set CPU nice from {current_nice} to {new_nice} (target {cpu_priority})")
-        except (OSError, PermissionError) as e:
-            logger.warning(f"PID {pid}: Failed to set CPU priority: {e}")
-
-    # Set I/O priority (ionice) - Linux only
-    if io_priority is not None:
-        try:
-            # ionice -c <class> -p <pid>
-            # class 3 = idle (only when no other process needs I/O)
-            # class 2 = best-effort (default, can set priority 0-7)
-            subprocess.run(
-                ["ionice", "-c", str(io_priority), "-p", str(pid)],
-                check=True,
-                capture_output=True,
-            )
-            logger.debug(f"PID {pid}: Set I/O priority class to {io_priority}")
-        except (subprocess.CalledProcessError, FileNotFoundError, PermissionError) as e:
-            logger.warning(f"PID {pid}: Failed to set I/O priority: {e}")
 
 
 def compute_local_shape_and_global_offset(*args, **kwargs):
@@ -164,12 +113,6 @@ class HFSaveCfg(PydanticBaseModel):
     max_save_rank: Annotated[int, Parameter(group="model")] = 16
     # Max bytes per generated safetensors shard.
     bucket_size: Annotated[int, Parameter(group="model")] = 1024**3 * 4
-    # Lower async HF writer CPU scheduling priority. 19 is the lowest nice priority for normal users.
-    cpu_priority: Annotated[int, Parameter(group="model")] = 19
-    # Lower async HF writer I/O priority. Linux ionice class 3 means idle I/O priority.
-    io_priority: Annotated[Optional[int], Parameter(group="model")] = 3
-    # Limit concurrent safetensors writes per node. 0 disables locking; 1 serializes writes; 2/4 allow limited concurrency.
-    writer_save_file_lock_slots: Annotated[int, Parameter(group="model")] = 0
     # TODO: `XTunerBaseModel` should also be able to specify which parameters to be trained in fp32,
     # currently it could only be specified in HFSaveCfg
     # Each entry is a **regex** pattern (passed to `re.search`) matched against the HF parameter name.
@@ -763,11 +706,7 @@ class BaseModel(nn.Module):
         if rank == 0:
             if tmp_hf_dir.exists():
                 rmtree(tmp_hf_dir)
-        if dist.is_initialized():
-            dist.barrier()
-        tmp_hf_dir.mkdir(parents=True, exist_ok=True)
-        if dist.is_initialized():
-            dist.barrier()
+            tmp_hf_dir.mkdir(parents=True, exist_ok=True)
 
         status_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{self._async_hf_writer_status_filename(rank, world_size)}"
         cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
@@ -820,10 +759,7 @@ class BaseModel(nn.Module):
         rank: int,
     ) -> None:
         try:
-            _set_process_qos(
-                cpu_priority=self.config.hf_save_cfg.cpu_priority,
-                io_priority=self.config.hf_save_cfg.io_priority,
-            )
+            set_async_save_process_qos()
             self._cleanup_async_hf_dirs_before_write(
                 cleanup_hf_dirs=cleanup_hf_dirs,
                 cleanup_done_path=cleanup_done_path,
@@ -1864,7 +1800,7 @@ class BaseModel(nn.Module):
         if not tensors:
             return
 
-        lock_slots = self.config.hf_save_cfg.writer_save_file_lock_slots
+        lock_slots = get_async_save_file_lock_slots()
         if lock_slots <= 0:
             _save_file(tensors, filename)
             return

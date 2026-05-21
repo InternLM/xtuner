@@ -24,9 +24,9 @@ from xtuner.v1.model.base import (
     DEVICE_MODULE,
     ModelOutputs,
     XTunerBaseModelConfig,
-    _set_process_qos,
 )
 from xtuner.v1.utils import get_device, get_logger
+from xtuner.v1.utils.process import set_async_save_process_qos
 
 from ..utils.misc import update_weight_map_from_safetensors_index
 
@@ -189,13 +189,10 @@ class BaseComposeModel(BaseModel):
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
         tmp_hf_dir = hf_dir.with_name(f"{hf_dir.name}.incomplete")
-        if rank == 0 and tmp_hf_dir.exists():
-            rmtree(tmp_hf_dir)
-        if dist.is_initialized():
-            dist.barrier()
-        tmp_hf_dir.mkdir(parents=True, exist_ok=True)
-        if dist.is_initialized():
-            dist.barrier()
+        if rank == 0:
+            if tmp_hf_dir.exists():
+                rmtree(tmp_hf_dir)
+            tmp_hf_dir.mkdir(parents=True, exist_ok=True)
 
         status_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{self._async_hf_writer_status_filename(rank, world_size)}"
         cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
@@ -257,10 +254,7 @@ class BaseComposeModel(BaseModel):
         rank: int,
     ) -> None:
         try:
-            _set_process_qos(
-                cpu_priority=self.config.hf_save_cfg.cpu_priority,
-                io_priority=self.config.hf_save_cfg.io_priority,
-            )
+            set_async_save_process_qos()
             self._cleanup_async_hf_dirs_before_write(
                 cleanup_hf_dirs=cleanup_hf_dirs,
                 cleanup_done_path=cleanup_done_path,
