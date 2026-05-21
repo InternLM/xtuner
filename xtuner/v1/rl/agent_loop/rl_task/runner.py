@@ -63,7 +63,6 @@ class Runner:
         fails.
         """
         self._validate_input(item)
-        uid = item.uid
         if isinstance(self._pool, SandboxPool):
             if item.pipeline_overrides:
                 raise RuntimeError("pipeline_overrides require dict-form pool config; got pre-built SandboxPool")
@@ -84,7 +83,7 @@ class Runner:
         item.infer.workspace = infer_spec.workspace_path
 
         tid = item.id
-        uid_obs = str(uid.get("observation_id") or "")
+        uid_obs = str(item.uid) if item.uid is not None else ""
         t_acquire: float | None = None
         t_infer: float | None = None
         t_validate: float | None = None
@@ -153,7 +152,7 @@ class Runner:
                     message=str(exc),
                 )
             )
-            get_logger().error(f"[{tid}] runner failed: {_format_error(promoted)}\n{traceback.format_exc()}")
+            get_logger().error(f"[{tid}] traceback:\n{traceback.format_exc()}")
             return self._fail(item, promoted)
         finally:
             self._log_final(tid, item, t_acquire, t_infer, t_validate)
@@ -183,13 +182,15 @@ class Runner:
     def _validate_input(self, item: AgentRolloutItem) -> None:
         if item.task_root is None:
             raise ValueError("AgentRolloutItem.task_root is required by Runner.run")
-        if not item.uid:
+        if item.uid is None:
             raise ValueError("AgentRolloutItem.uid is required by Runner.run")
 
     def _fail(self, item: AgentRolloutItem, error: RolloutError | None) -> AgentRolloutItem:
         item.status = RolloutStatus.FAILED
         if item.error is None:
             item.error = error
+        if error is not None:
+            get_logger().error(f"[{item.id}] failed: {_format_error(error)}")
         return item
 
 

@@ -202,7 +202,8 @@ class AgentRolloutItem(BaseModel):
     # Behavior.
     instruction: str  # relative to task root
     task_root: Path | None = None
-    uid: dict[str, int] = Field(default_factory=dict)
+    group_id: int | None = None  # rollout group identity (same query's K-rollouts share)
+    uid: int | None = None  # per-rollout unique id (different across K-rollouts of same query)
     pipeline: PipelineConfig | Any | None = None
     pipeline_overrides: dict[str, Any] = Field(default_factory=dict)
 

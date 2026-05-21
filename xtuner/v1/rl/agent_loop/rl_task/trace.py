@@ -136,23 +136,39 @@ class SpanHandle:
 
 @contextmanager
 def span(uid: str, stage: str, **extra: Any) -> Iterator[SpanHandle]:
-    """Time a stage and emit a span record on exit.
+    """Time a stage and emit an enter + exit span pair.
 
     The context manager is synchronous but safe to wrap ``await``-bearing
     code because the yield region runs on the caller's event loop.
 
+    Two records are written per span so consumers tailing the file in real
+    time can see "stage entered" before the stage finishes:
+
+      * ``{"event": "enter", "ts", "uid", "stage", **extra}``
+      * ``{"event": "exit",  "ts", "uid", "stage", "duration_ms", "ok", "err",
+          **extra, **annotations}``
+
     Args:
         uid (str): Per-sample observation id.
         stage (str): Short stage name (e.g. ``"acquire"``, ``"infer"``).
-        **extra (Any): Additional keys merged into the record (fixed at
-            entry — use ``SpanHandle.annotate()`` for mid-block values).
+        **extra (Any): Additional keys merged into both records.
 
     Returns:
         SpanHandle: Yielded handle; call ``handle.mark_error(...)`` or
-        ``handle.annotate(...)`` inside the block to customize the record.
+        ``handle.annotate(...)`` inside the block to customize the exit record.
     """
     handle = SpanHandle()
     t_start = time.monotonic()
+    if _writer is not None:
+        enter: dict[str, Any] = {
+            "ts": time.time(),
+            "event": "enter",
+            "uid": uid,
+            "stage": stage,
+        }
+        if extra:
+            enter.update(extra)
+        _writer.write_span(enter)
     try:
         yield handle
     except BaseException as exc:
@@ -164,6 +180,7 @@ def span(uid: str, stage: str, **extra: Any) -> Iterator[SpanHandle]:
         if _writer is not None:
             record: dict[str, Any] = {
                 "ts": time.time(),
+                "event": "exit",
                 "uid": uid,
                 "stage": stage,
                 "duration_ms": duration_ms,

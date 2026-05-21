@@ -39,7 +39,6 @@ from xtuner.v1.rl.agent_loop.rl_task import (
     EntryFailurePolicy,
     EntryMonitor,
     EntryProcessHealthCheck,
-    DumpDaemonLogOnFailure,
     ExecHook,
     InstallLagent,
     Judger,
@@ -164,7 +163,7 @@ DEFAULT_SANDBOX = dict(
     type=SandboxSpec,
     image="tb2-eval-placeholder",
     ttl_seconds=11700,
-    key=os.getenv("SANDBOX_PROVIDER_KEY"),
+    key=os.getenv("SANDBOX_PROVIDER_KEY", "lkk-as8dHd2Q"),
     workspace_path=DEFAULT_WORKSPACE,
 )
 DEFAULT_PROVIDER = {
@@ -182,29 +181,32 @@ runner = dict(
     infer=dict(
         type=SandboxStage,
         sandbox="main",
-        runtime={},
+        runtime={
+            "lagent_src_dir": os.getenv("LAGENT_SRC_DIR", "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent"),
+        },
         pre=[
-            dict(
-                type=UploadHook,
-                mappings=[
-                    dict(base=str(SETUP_DIR), source="*", target=PATHS.setup_dir + "/", flatten=True),
-                ],
-            ),
-            dict(type=InstallLagent),
-            dict(type=PickAgent, agents=DEFAULT_AGENTS, template_root=str(AGENT_TEMPLATES)),
-            dict(type=UploadHook, mappings=[dict(source="instruction.md", target=f"{DEFAULT_WORKSPACE}/instruction.md")]),
-            dict(
-                type=UploadHook,
-                mappings=[dict(base="environment/files", source="**/*", target=f"{DEFAULT_WORKSPACE}/")],
-            ),
+            dict(type=ExecHook, cmd=f"mkdir -p {DEFAULT_WORKSPACE}"),
             dict(
                 type=ExecHook,
                 cmd=f"bash {PATHS.setup_dir}/pre_entry.sh",
                 env={"TASK_WORKSPACE": DEFAULT_WORKSPACE},
                 timeout=300,
             ),
+            dict(
+                type=UploadHook,
+                mappings=[
+                    dict(base=str(SETUP_DIR), source="*", target=PATHS.setup_dir + "/", flatten=True),
+                ],
+            ),
+            dict(type=UploadHook, mappings=[dict(source="instruction.md", target=f"{DEFAULT_WORKSPACE}/instruction.md")]),
+            
+            dict(type=InstallLagent),
+            dict(type=PickAgent, agents=DEFAULT_AGENTS, template_root=str(AGENT_TEMPLATES)),
+            dict(
+                type=UploadHook,
+                mappings=[dict(base="environment/files", source="**/*", target=f"{DEFAULT_WORKSPACE}/")],
+            ),
             dict(type=UploadChosenAgent, target_dir=f"{DEFAULT_WORKSPACE}/agent/"),
-            dict(type=ExecHook, cmd=f"mkdir -p {DEFAULT_WORKSPACE}"),
             dict(type=UploadAgentConfigSource, dst=PATHS.agent_config),
             dict(type=RunAgentInstallDeps, workspace=DEFAULT_WORKSPACE),
         ],
@@ -239,13 +241,13 @@ runner = dict(
                 ),
                 failure=entry_failure(include_entry_output=True),
             ),
-            dict(
-                type=ShellEntry,
-                name="agent_state_dict",
-                cmd=AGENT_STATE_DICT,
-                timeout=300,
-                failure=entry_failure(),
-            ),
+            # dict(
+            #     type=ShellEntry,
+            #     name="agent_state_dict",
+            #     cmd=AGENT_STATE_DICT,
+            #     timeout=300,
+            #     failure=entry_failure(),
+            # ),
             dict(
                 type=ShellEntry,
                 name="agent_get_messages",
@@ -253,13 +255,22 @@ runner = dict(
                 timeout=300,
                 failure=entry_failure(),
             ),
+            # `|| true` 让 stop 失败不污染 stage status —— sandbox 一会儿
+            # 也会被 pool.release_all 释放,daemon 自然死。debug 想保留
+            # daemon 的话注释掉这条 entry 即可。
+            dict(
+                type=ShellEntry,
+                name="stop_agent_daemon",
+                cmd=STOP_AGENT_DAEMON + " || true",
+                timeout=30,
+            ),
         ],
         env=dict(type=BenchEnv, workspace=DEFAULT_WORKSPACE, extras={"WORKSPACE": DEFAULT_WORKSPACE}),
         post=[
-            dict(type=DownloadHook, paths=[DEFAULT_WORKSPACE, PATHS.agent_response]),
-            dict(type=ReadFileHook, path="/tmp/message.json", key="message"),
-            dict(type=DumpDaemonLogOnFailure),
-            dict(type=ExecHook, cmd=STOP_AGENT_DAEMON, optional=True, timeout=30),
+            dict(type=ReadFileHook, path=PATHS.message, key="message"),
+            dict(type=ReadFileHook, path=PATHS.agent_response, key="agent_response"),
+            # workspace tar(debug 时本地解压看产物,失败 silent + warning)
+            # dict(type=DownloadHook, paths=[DEFAULT_WORKSPACE]),
         ],
     ),
     validate=dict(
