@@ -396,6 +396,51 @@ def flash_mla_sparse_attn(
     )
 
 
+def flash_mla_sparse_attn_apply(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    attn_sink: torch.Tensor,
+    topk_idxs: torch.Tensor,
+    softmax_scale: float,
+    cu_seq_lens: torch.Tensor,
+) -> torch.Tensor:
+    """Branch-free FlashMLA dispatch.
+
+    Same contract as :func:`flash_mla_sparse_attn` but without the runtime
+    topk-alignment check / native fallback — the caller is responsible for
+    only invoking this when the layer's topk_max is FlashMLA-compatible (see
+    :func:`_flash_mla_topk_ok`). Designed for use under ``torch.compile``
+    where a runtime ``if`` on ``topk_idxs.size(-1)`` cannot be constant-folded
+    by dynamo and ends up baking *both* branches into the compiled graph
+    (including the native branch's ``[1, S, T, D]`` fp32 expand+gather
+    materialisation that costs ~32 GiB at V4 production dims).
+    """
+    return cast(
+        torch.Tensor,
+        _FlashMLASparseAttnFn.apply(q, kv, attn_sink, topk_idxs, softmax_scale, cu_seq_lens),
+    )
+
+
+def cudnn_sparse_attn_apply(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    attn_sink: torch.Tensor,
+    topk_idxs: torch.Tensor,
+    softmax_scale: float,
+    cu_seq_lens: torch.Tensor,
+) -> torch.Tensor:
+    """Branch-free cudnn dispatch.
+
+    Same contract as :func:`cudnn_sparse_attn` but without the runtime
+    topk-alignment check / native fallback — see
+    :func:`flash_mla_sparse_attn_apply` for the rationale.
+    """
+    return cast(
+        torch.Tensor,
+        _CudnnSparseAttnFn.apply(q, kv, attn_sink, topk_idxs, softmax_scale, cu_seq_lens),
+    )
+
+
 def cudnn_sparse_attn(
     q: torch.Tensor,
     kv: torch.Tensor,

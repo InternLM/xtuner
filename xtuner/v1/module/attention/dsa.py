@@ -25,12 +25,21 @@ from pydantic import BaseModel, ConfigDict
 from torch import nn
 
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.utils import get_logger
 
 from ..rms_norm import RMSNorm
+from ._flash_mla_sparse_attn import (
+    _flash_mla_topk_ok,
+    cudnn_sparse_attn_apply as _cudnn_sparse_attn_apply,
+    flash_mla_sparse_attn_apply as _flash_mla_sparse_attn_apply,
+)
 from .attn_outputs import AttnOutputs
 from .indexer import Indexer, IndexerConfig
 from .kv_compressor import KVCompressor
-from .sparse_attn import sparse_attn
+from .sparse_attn import sparse_attn as _native_sparse_attn
+
+
+logger = get_logger()
 
 
 class DSAConfig(BaseModel):
@@ -260,6 +269,58 @@ class DeepSeekSparseAttention(nn.Module):
         else:
             self.indexer = None  # type: ignore[assignment]
 
+        # Bind the sparse-attn callable once, at construction time. The previous
+        # design called ``cudnn_sparse_attn`` / ``flash_mla_sparse_attn`` and let
+        # them do a runtime check
+        # ``if not _flash_mla_topk_ok(topk_idxs.size(-1)): return _native_sparse_attn(...)``
+        # — which is fine in eager but a trap under ``torch.compile`` +
+        # ``dynamic=True``: dynamo treats ``topk_idxs.size(-1)`` as a symbolic
+        # int (the size comes from ``cat(window_topk, compress_topk).size(-1)``
+        # whose dims are module attributes), can't constant-fold ``% 128``, and
+        # ends up baking the native-fallback branch into the compiled graph even
+        # for layers whose topk *does* satisfy the alignment requirement. The
+        # baked-in native branch then triggers the 32 GiB ``expand+gather``
+        # materialisation in inductor codegen.
+        #
+        # Decide statically here: we know ``sliding_window`` and ``index_topk``
+        # at __init__ time, so we know exactly which topk_max each layer will
+        # see and whether FlashMLA can run it. The forward path becomes a single
+        # function-pointer call with no branch.
+        self._sparse_attn_fn = self._resolve_sparse_attn_fn(dsa_cfg)
+
+    def _resolve_sparse_attn_fn(self, dsa_cfg: "DSAConfig"):
+        # Per-layer topk_max:
+        #   compress_ratio == 0 : window_topk only       → sliding_window
+        #   compress_ratio in {4, 128} : window + indexer → sliding_window + index_topk
+        if self.compress_ratio == 0:
+            topk_max = dsa_cfg.sliding_window
+        else:
+            topk_max = dsa_cfg.sliding_window + dsa_cfg.index_topk
+
+        # ``flash_mla`` / ``cudnn`` both need FlashMLA's forward kernel, which
+        # asserts ``topk % 128 == 0`` at the kernel level. If a per-layer
+        # config violates that, the layer must use native end-to-end (cudnn
+        # can't consume what FlashMLA can't produce). Surface the decision
+        # to the user instead of silently falling back inside the forward.
+        if dsa_cfg.backend in ("flash_mla", "cudnn") and not _flash_mla_topk_ok(topk_max):
+            logger.warning(
+                "DSA layer %d (compress_ratio=%d) has topk_max=%d which is not a multiple "
+                "of FlashMLA's 128-alignment; backend=%r will fall back to native end-to-end "
+                "for this layer. Set sliding_window / index_topk to multiples of 128 to keep "
+                "FlashMLA / cudnn on the fast path.",
+                self.layer_idx,
+                self.compress_ratio,
+                topk_max,
+                dsa_cfg.backend,
+            )
+            return _native_sparse_attn
+
+        if dsa_cfg.backend == "flash_mla":
+            return _flash_mla_sparse_attn_apply
+        if dsa_cfg.backend == "cudnn":
+            return _cudnn_sparse_attn_apply
+        return _native_sparse_attn
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -436,16 +497,7 @@ class DeepSeekSparseAttention(nn.Module):
 
             attn_sink = self.attn_sink.to_local() if isinstance(self.attn_sink, _DTensor) else self.attn_sink
 
-        if self.backend == "flash_mla":
-            from ._flash_mla_sparse_attn import flash_mla_sparse_attn
-
-            attn_out = flash_mla_sparse_attn(q, kv_full, attn_sink, topk_idxs, self.softmax_scale, cu_q)
-        elif self.backend == "cudnn":
-            from ._flash_mla_sparse_attn import cudnn_sparse_attn
-
-            attn_out = cudnn_sparse_attn(q, kv_full, attn_sink, topk_idxs, self.softmax_scale, cu_q)
-        else:
-            attn_out = sparse_attn(q, kv_full, attn_sink, topk_idxs, self.softmax_scale, cu_q)
+        attn_out = self._sparse_attn_fn(q, kv_full, attn_sink, topk_idxs, self.softmax_scale, cu_q)
 
         # 4. De-rotate the rope tail on the output (V4 reference L534) over the
         # whole packed batch; the op is per-token so it cancels rope cleanly on
