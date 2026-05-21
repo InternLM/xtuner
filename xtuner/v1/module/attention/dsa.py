@@ -289,29 +289,55 @@ class DeepSeekSparseAttention(nn.Module):
         self._sparse_attn_fn = self._resolve_sparse_attn_fn(dsa_cfg)
 
     def _resolve_sparse_attn_fn(self, dsa_cfg: "DSAConfig"):
-        # Per-layer topk_max:
-        #   compress_ratio == 0 : window_topk only       → sliding_window
-        #   compress_ratio in {4, 128} : window + indexer → sliding_window + index_topk
+        # Per-layer topk_max for the FlashMLA-alignment decision:
+        #   compress_ratio == 0   : window_topk only
+        #                           → topk_max = sliding_window
+        #   compress_ratio == 4   : window + Indexer top-K (CSA, content-adaptive)
+        #                           → topk_max = sliding_window + index_topk
+        #   compress_ratio == 128 : window + deterministic positional top-K (HCA)
+        #                           → topk_max = sliding_window + (pack // 128 + 1)
+        #                                        which depends on the runtime pack length.
+        #
+        # HCA is structurally FlashMLA-incompatible. The deterministic
+        # positional path pads to ``total_tokens // compress_ratio + 1`` so the
+        # combined topk is ``sliding_window + pack/128 + 1`` — at V4's
+        # canonical packs (4096 → 161, 8192 → 193, 16384 → 257) none is a
+        # multiple of FlashMLA's 128-alignment, and there is no static way to
+        # know pack here anyway. So ratio=128 layers ALWAYS use native end-to-
+        # end regardless of ``dsa_cfg.backend``; this was the path the
+        # original runtime ``cudnn_sparse_attn`` fallback took, and we
+        # preserve that decision statically.
         if self.compress_ratio == 0:
             topk_max = dsa_cfg.sliding_window
-        else:
+            flashmla_compatible = _flash_mla_topk_ok(topk_max)
+        elif self.compress_ratio == 4:
             topk_max = dsa_cfg.sliding_window + dsa_cfg.index_topk
+            flashmla_compatible = _flash_mla_topk_ok(topk_max)
+        else:
+            # compress_ratio == 128 (HCA)
+            topk_max = -1  # not statically known; structurally incompatible
+            flashmla_compatible = False
 
-        # ``flash_mla`` / ``cudnn`` both need FlashMLA's forward kernel, which
-        # asserts ``topk % 128 == 0`` at the kernel level. If a per-layer
-        # config violates that, the layer must use native end-to-end (cudnn
-        # can't consume what FlashMLA can't produce). Surface the decision
-        # to the user instead of silently falling back inside the forward.
-        if dsa_cfg.backend in ("flash_mla", "cudnn") and not _flash_mla_topk_ok(topk_max):
+        # Pick the function. When the user asked for flash_mla / cudnn but
+        # this specific layer can't run it, warn explicitly so the user
+        # knows which layer fell back and why — silent fallback inside the
+        # forward (the previous design) hid this.
+        if dsa_cfg.backend in ("flash_mla", "cudnn") and not flashmla_compatible:
+            if self.compress_ratio == 128:
+                reason = (
+                    "compress_ratio=128 uses deterministic positional top-K "
+                    "(pack-dependent width, never 128-aligned)"
+                )
+            else:
+                reason = (
+                    f"topk_max={topk_max} is not a multiple of FlashMLA's 128-alignment"
+                )
             logger.warning(
-                "DSA layer %d (compress_ratio=%d) has topk_max=%d which is not a multiple "
-                "of FlashMLA's 128-alignment; backend=%r will fall back to native end-to-end "
-                "for this layer. Set sliding_window / index_topk to multiples of 128 to keep "
-                "FlashMLA / cudnn on the fast path.",
+                "DSA layer %d: backend=%r requested but %s — falling back to native "
+                "for this layer.",
                 self.layer_idx,
-                self.compress_ratio,
-                topk_max,
                 dsa_cfg.backend,
+                reason,
             )
             return _native_sparse_attn
 
