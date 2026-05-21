@@ -185,27 +185,37 @@ runner = dict(
             "lagent_src_dir": os.getenv("LAGENT_SRC_DIR", "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent"),
         },
         pre=[
+            # ── Stage 1: workspace setup ──────────────────────────────────
+            # Create the workspace dir, upload bench-level setup scripts,
+            # then run pre_entry.sh for any per-bench bootstrap.
             dict(type=ExecHook, cmd=f"mkdir -p {DEFAULT_WORKSPACE}"),
-            dict(
-                type=ExecHook,
-                cmd=f"bash {PATHS.setup_dir}/pre_entry.sh",
-                env={"TASK_WORKSPACE": DEFAULT_WORKSPACE},
-                timeout=300,
-            ),
             dict(
                 type=UploadHook,
                 mappings=[
                     dict(base=str(SETUP_DIR), source="*", target=PATHS.setup_dir + "/", flatten=True),
                 ],
             ),
+            dict(
+                type=ExecHook,
+                cmd=f"bash {PATHS.setup_dir}/pre_entry.sh",
+                env={"TASK_WORKSPACE": DEFAULT_WORKSPACE},
+                timeout=300,
+            ),
+
+            # ── Stage 2: task data ────────────────────────────────────────
+            # Place per-task files (instruction + environment/files/*) under
+            # the workspace so the agent sees them.
             dict(type=UploadHook, mappings=[dict(source="instruction.md", target=f"{DEFAULT_WORKSPACE}/instruction.md")]),
-            
-            dict(type=InstallLagent),
-            dict(type=PickAgent, agents=DEFAULT_AGENTS, template_root=str(AGENT_TEMPLATES)),
             dict(
                 type=UploadHook,
                 mappings=[dict(base="environment/files", source="**/*", target=f"{DEFAULT_WORKSPACE}/")],
             ),
+
+            # ── Stage 3: agent harness ────────────────────────────────────
+            # Install lagent runtime, pick an agent variant, upload its
+            # harness + config, run its install-deps.
+            dict(type=InstallLagent),
+            dict(type=PickAgent, agents=DEFAULT_AGENTS, template_root=str(AGENT_TEMPLATES)),
             dict(type=UploadChosenAgent, target_dir=f"{DEFAULT_WORKSPACE}/agent/"),
             dict(type=UploadAgentConfigSource, dst=PATHS.agent_config),
             dict(type=RunAgentInstallDeps, workspace=DEFAULT_WORKSPACE),
@@ -298,7 +308,7 @@ runner = dict(
                             type=ShellEntry,
                             name="run_tests",
                             cmd=f"bash {PATHS.judger_dir}/run.sh",
-                            timeout=900,
+                            timeout=10,
                         )
                     ],
                     env={
