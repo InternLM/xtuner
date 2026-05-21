@@ -77,7 +77,7 @@ def sparse_attn(
         raise ValueError(f"cu_seq_lens must be 1D with at least 2 entries; got shape {tuple(cu_seq_lens.shape)}")
 
     out_dtype = q.dtype
-    total_tokens, num_heads, head_dim = q.size(1), q.size(2), q.size(3)
+    total_tokens, num_heads = q.size(1), q.size(2)
     k = topk_idxs.size(-1)
 
     # why: numerical stability requires fp32 inside the softmax; we cast back
@@ -101,12 +101,18 @@ def sparse_attn(
     valid_mask = valid_mask & horizon_mask
 
     # Gather: kv has shape [1, T, D]; we need rows [1, S, k, D].
-    gather_idx = safe_idxs.unsqueeze(-1).expand(-1, -1, -1, head_dim)
-    kv_gathered = torch.gather(
-        kv_f.unsqueeze(1).expand(-1, total_tokens, -1, -1),
-        2,
-        gather_idx,
-    )  # [1, S, k, D]
+    #
+    # NOTE: do NOT rewrite this as
+    #   torch.gather(kv_f.unsqueeze(1).expand(-1, S, -1, -1), 2, idx_expanded)
+    # under ``torch.compile``. Eager handles the expand-then-gather as a sparse
+    # read with zero allocation for the expanded view, but inductor's codegen
+    # cannot fuse the expand into the gather and materialises the full
+    # ``[1, S, T, D]`` fp32 expanded tensor before gathering — at V4 production
+    # dims (pack=8192, T≈2048, D=512) that is a ~32 GiB allocation per
+    # ``sparse_attn`` call (forward and backward each), pinned for the duration
+    # of the autograd graph. The plain ``kv[i]`` advanced-index below compiles
+    # to a single indexed-load kernel with no intermediate buffer.
+    kv_gathered = kv_f.squeeze(0)[safe_idxs.squeeze(0)].unsqueeze(0)  # [1, S, k, D]
 
     # Logits: q · K^T per head, scaled. q is [1, S, H, D]; gathered KV is the
     # same for all heads (MQA-style).
