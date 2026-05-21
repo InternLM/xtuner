@@ -91,7 +91,11 @@ _HEAVY_INDUCTOR_OPTIONS: dict[str, int | bool | str] = {
 _HEAVY = TorchCompileOption(fullgraph=False, dynamic=True, options=_HEAVY_INDUCTOR_OPTIONS)
 _LITE = TorchCompileOption(fullgraph=False, dynamic=True)
 
-V4_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = MOE_NON_EP_COMPILE_CFG | {
+# V4-specific compile targets that are safe under both EP and non-EP. Every
+# entry here is a pure-Tensor sub-graph: no MoE dispatcher (all2all) callbacks,
+# no DTensor unshard inside the traced region, no data-dependent control flow.
+# These get layered on top of the parent's MoE compile cfgs.
+_V4_LAYER_TARGETS: dict[str, TorchCompileOption] = {
     "xtuner.v1.module.decoder_layer.hc_block.hc_pre": _HEAVY,
     "xtuner.v1.module.decoder_layer.hc_block.hc_post": _HEAVY,
     "xtuner.v1.model.moe.deepseek_v4._V4InnerBlock.attn_block": _HEAVY,
@@ -99,15 +103,33 @@ V4_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = MOE_NON_EP_COMPILE_CFG | 
     "xtuner.v1.model.moe.deepseek_v4._V4InnerBlock._ffn_post_compute": _LITE,
     "xtuner.v1.model.moe.deepseek_v4.DeepSeekV4._hc_head_reduce_compute": _LITE,
     "xtuner.v1.module.attention.dsa.DeepSeekSparseAttention.forward": _HEAVY,
+    # The compressor's scatter + softmax + sum + RMSNorm chain is exactly the
+    # ~50-elementwise-op storm that showed up in the rank0 trace under EP. The
+    # ``int(cu_seq_lens_out[-1].item())`` sync at the head of forward breaks
+    # the graph once; ``fullgraph=False`` (in ``_LITE``) accepts that break
+    # and still fuses the two halves on either side of it.
+    "xtuner.v1.module.attention.kv_compressor.KVCompressor.forward": _LITE,
 }
 
-# Empty EP compile cfg: under pack=8192 + intra_layer_micro_batch=1 +
-# recompute_ratio=1.0, any inductor-compiled backward inside an activation
-# checkpoint recompute trips a 130 GiB fp32 dense allocation (observed across
-# DSA, hc_pre/post, and shared/expert paths). Keep the V4 EP path entirely
-# eager until we isolate which fused op's codegen materialises that dense
-# intermediate. The non-EP path is unaffected.
-V4_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {}
+V4_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = MOE_NON_EP_COMPILE_CFG | _V4_LAYER_TARGETS
+
+# EP-safe variant: identical V4 layer-internal targets, but built on top of
+# ``MOE_EP_COMPILE_CFG`` which already drops ``MoEDecoderLayer.forward``
+# (since the full layer forward enters the all2all dispatcher under EP, and
+# inductor can't trace the deepep ``moe::permute/unpermute`` fakes).
+#
+# History: V4_EP_COMPILE_CFG was previously ``{}`` because of a recompute-time
+# 130 GiB fp32 allocation that hit "across DSA, hc_pre/post, and shared/expert
+# paths". The shared upstream cause was the native Indexer materialising a
+# ``[1, S_i, n_heads, T_i]`` fp32 score tensor inside the autograd graph;
+# under varlen + dynamic-shape compile + activation-checkpoint recompute, that
+# 4-5 GB-per-layer tensor multiplied across shape-variant retraces until it
+# evicted everything else. The Indexer is now invoked under
+# ``torch.no_grad()`` from a Triton-backed top-k path
+# (:mod:`xtuner.v1.module.attention._indexer_topk_triton`), so the fp32 score
+# tensor never enters autograd. ``DSAConfig.indexer_backend`` defaults to
+# ``"triton"`` to ensure this code path is the one taken.
+V4_EP_COMPILE_CFG: dict[str, TorchCompileOption] = MOE_EP_COMPILE_CFG | _V4_LAYER_TARGETS
 
 
 # V4-Flash ships its `compress_ratios` as a vector of length `num_hidden_layers + 1`

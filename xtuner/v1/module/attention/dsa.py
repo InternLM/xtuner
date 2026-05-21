@@ -101,6 +101,16 @@ class DSAConfig(BaseModel):
     #     ``sparse_attention_backward_wrapper`` (DSA bwd, FlashMLA-shape,
     #     SM90/SM100). Requires ``pip install nvidia-cudnn-frontend>=1.24.0``.
     backend: Annotated[Literal["native", "flash_mla", "cudnn"], Parameter(group="attention")] = "native"
+    # Backend for the Indexer's top-k score-and-select path. ``"triton"`` runs
+    # the varlen tensor-core kernel in :mod:`._indexer_topk_triton` under
+    # ``torch.no_grad()`` (the indexer's output indices have no gradient anyway
+    # because the downstream ``gather`` blocks it). At V4 production dims this
+    # is ~1.6× faster than the native einsum loop AND avoids materialising the
+    # ``[1, S_i, n_heads, T_i]`` fp32 score tensor (~4.5 GB per layer at
+    # pack=4096) that is the root cause of the recompute-time 130 GB OOM that
+    # forced :data:`V4_EP_COMPILE_CFG` to be empty. ``"native"`` keeps the
+    # pure-PyTorch reference for parity testing.
+    indexer_backend: Annotated[Literal["native", "triton"], Parameter(group="attention")] = "triton"
 
     def build(
         self,
@@ -244,7 +254,7 @@ class DeepSeekSparseAttention(nn.Module):
                     index_topk=dsa_cfg.index_topk,
                     compress_ratio=4,
                     rms_norm_eps=dsa_cfg.rms_norm_eps,
-                    backend="native"
+                    backend=dsa_cfg.indexer_backend,
                 )
             )
         else:

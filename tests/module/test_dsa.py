@@ -23,6 +23,13 @@ def _make_dsa(
     seed: int = 1234,
 ) -> DeepSeekSparseAttention:
     torch.manual_seed(seed)
+    # ``DSAConfig.indexer_backend`` now defaults to ``"triton"`` so production
+    # V4 (``index_n_heads=64``) picks up the fast tensor-core kernel without
+    # any config edit. The small-dim test fixture here uses
+    # ``index_n_heads=4``, which is below the triton kernel's tensor-core tile
+    # floor (16); pin it back to ``"native"`` so the DSA correctness checks
+    # exercise the pure-PyTorch reference path that handles arbitrary head
+    # counts.
     cfg = DSAConfig(
         num_attention_heads=num_attention_heads,
         num_key_value_heads=1,
@@ -36,6 +43,7 @@ def _make_dsa(
         index_head_dim=index_head_dim,
         index_n_heads=index_n_heads,
         index_topk=index_topk,
+        indexer_backend="native",
     )
     module = cfg.build(hidden_size=hidden_size, layer_idx=0, compress_ratio=compress_ratio)
     # Non-trivial APE to keep the Compressor / Indexer non-degenerate; default
