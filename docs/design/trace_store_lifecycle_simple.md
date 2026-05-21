@@ -101,16 +101,16 @@ flowchart TD
 | `RolloutState.status` | Trace Store 状态转移 | 说明 |
 | --- | --- | --- |
 | `COMPLETED` 且未被过滤 | `RolloutRunning -> RolloutFinished` | completed rollout 可以进入训练读取阶段。 |
-| `COMPLETED` 后被过滤 | `RolloutRunning -> ToBeReleased` | `producer.put_generated_group` 会对 completed group 做 `is_valid_sample_fn`，不通过时会置为 `FILTERED`；Trace Store 不需要继续保留历史轨迹。 |
+| `FILTERED` | `RolloutRunning -> ToBeReleased` | `producer.put_generated_group` 会对 completed group 做 `is_valid_sample_fn`，不通过时会置为 `FILTERED`；Trace Store 不需要继续保留历史轨迹。 |
 | `ABORTED` 且 `enable_partial_rollout=True` | 保持 `RolloutRunning` | 复用老 `session_id`，基于已有历史轨迹继续 partial rollout。 |
 | `ABORTED` 且 `enable_partial_rollout=False` | `RolloutRunning -> ToBeReleased` | 不做 partial resume；Trace Store 历史轨迹不再复用，可以释放。 |
 | `EXPIRED` | `RolloutRunning -> ToBeReleased` | 过期样本不应继续复用旧 Trace Store 历史轨迹；采样侧是否重跑由 ReplayBuffer / producer 决定。 |
 | `FAILED` | `RolloutRunning -> ToBeReleased` | failed rollout 不形成可训练 trace，全部进入释放等待。 |
 | `FILTERED` | `RolloutRunning -> ToBeReleased` | 样本业务上不可训练。 |
 | `INIT` | 保持 `RolloutRunning` | 尚未形成有效 rollout 返回，不触发释放。 |
-| `ARCHIVED` | 不作为 rollout 生产阶段的正常返回 | 如果作为历史状态出现，不应该推动进入 `RolloutFinished`；是否保留由外部归档策略决定。 |
+| `ARCHIVED` | 第一版暂不处理 | 如果传入 Trace Store rollout 状态 API，直接报错。 |
 
-因此，`COMPLETED` 需要再经过过滤判断：未被过滤进入 `RolloutFinished`，被过滤进入 `ToBeReleased`。`FAILED` 和 `EXPIRED` 对 Trace Store 来说都直接进入 `ToBeReleased`。
+因此，`COMPLETED` 表示未被过滤的可训练结果，进入 `RolloutFinished`；过滤后的样本应以 `FILTERED` 上报，进入 `ToBeReleased`。`FAILED` 和 `EXPIRED` 对 Trace Store 来说也直接进入 `ToBeReleased`。
 
 多轮 LLM call 的失败规则如下。
 

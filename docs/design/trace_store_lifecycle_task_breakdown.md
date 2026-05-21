@@ -93,11 +93,10 @@
 
 开发内容：
 
-1. 实现模块级合法状态转换表。
-2. 实现 `_set_state(session_id, next_state)`。
-3. 实现 `_maybe_release(session_id)`。
-4. 实现内部 `_release_session(session_id, trie)`。
-5. 删除 public actor method `release(session_id)`，或改成内部不可外部调用的私有方法。
+1. 实现 `_set_state(session_id, next_state)`。
+2. 实现 `_maybe_release(session_id)`。
+3. 实现内部 `_release_session(session_id, trie)`。
+4. 删除 public actor method `release(session_id)`，或改成内部不可外部调用的私有方法。
 
 不做：
 
@@ -107,19 +106,17 @@
 代码 review 关注点：
 
 1. `_set_state` 不能调用 `get_or_create`。
-2. `_set_state` 必须从模块级合法状态转换表读取允许来源状态，调用方不能传入来源状态白名单。
-3. 非法来源状态必须抛 `RuntimeError`。
-4. missing session 在 `_set_state` 中必须抛 `KeyError`。
-5. `_set_state` 每次状态更新后调用 `_maybe_release`。
-6. `_release_session` 必须释放 trie tree 和该 session 记录的 object ref，再删除 `self.sessions[session_id]`。
+2. missing session 在 `_set_state` 中必须抛 `KeyError`。
+3. `_set_state` 每次状态更新后调用 `_maybe_release`。
+4. `_release_session` 必须释放 trie tree 和该 session 记录的 object ref，再删除 `self.sessions[session_id]`。
+5. 第一版不实现模块级目标状态转换表；语义 API 自己校验允许的入口状态。
 
 测试范围：
 
-1. 合法转换成功。
-2. 非法转换抛 `RuntimeError`。
-3. missing session 抛 `KeyError`。
-4. `_maybe_release` 对 missing session 幂等 no-op。
-5. `ToBeReleased` 触发物理删除 session。
+1. `_set_state` 更新状态成功。
+2. missing session 抛 `KeyError`。
+3. `_maybe_release` 对 missing session 幂等 no-op。
+4. `ToBeReleased` 触发物理删除 session。
 
 ### 2.4 Rollout 侧语义 API
 
@@ -137,16 +134,16 @@
 代码 review 关注点：
 
 1. `mark_rollout_status` 不创建 session。
-2. `COMPLETED + filtered=False` 只能从 `RolloutRunning` 到 `RolloutFinished`。
+2. `COMPLETED` 只能从 `RolloutRunning` 到 `RolloutFinished`。
 3. `ABORTED + enable_partial_rollout=True` 保持 `RolloutRunning`。
 4. failed / filtered / expired / aborted without partial 进入 `ToBeReleased` 并释放。
 5. release-like missing session 返回 `Released`。
 
 测试范围：
 
-1. `COMPLETED + filtered=False` 进入 `RolloutFinished`。
-2. `COMPLETED + filtered=True` 释放。
-3. `FAILED` / `FILTERED` / `EXPIRED` 释放。
+1. `COMPLETED` 进入 `RolloutFinished`。
+2. `FILTERED` 释放。
+3. `FAILED` / `EXPIRED` 释放。
 4. `ABORTED + enable_partial_rollout=True` 保持 `RolloutRunning`。
 5. `ABORTED + enable_partial_rollout=False` 释放。
 6. 非 `RolloutRunning` 收到 rollout status 报错。

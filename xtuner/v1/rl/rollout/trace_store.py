@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import ray
 from pydantic import BaseModel, Field, StrictStr
 
+from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.utils import get_logger
 
 
@@ -22,16 +23,10 @@ class TraceState(str, Enum):
     RELEASED = "Released"
 
 
-_ALLOWED_PREVIOUS_STATES: dict[TraceState, tuple[TraceState, ...]] = {
-    TraceState.ROLLOUT_FINISHED: (TraceState.ROLLOUT_RUNNING,),
-    TraceState.TRAIN_RUNNING: (TraceState.ROLLOUT_FINISHED,),
-    TraceState.TRAIN_FINISHED: (TraceState.TRAIN_RUNNING,),
-    TraceState.TO_BE_RELEASED: (
-        TraceState.ROLLOUT_RUNNING,
-        TraceState.ROLLOUT_FINISHED,
-        TraceState.TRAIN_RUNNING,
-        TraceState.TRAIN_FINISHED,
-    ),
+_ROLLOUT_RELEASE_STATUSES = {Status.FAILED, Status.FILTERED, Status.EXPIRED}
+_ROLLOUT_KEEP_RUNNING_STATUSES = {
+    Status.ABORTED,
+    Status.INIT,
 }
 
 
@@ -288,19 +283,10 @@ class RolloutTraceStore:
         session_id: str,
         next_state: TraceState,
     ) -> TraceState:
-        """Set a session state after validating the current state."""
+        """Set a session state and trigger release when needed."""
         trie = self.sessions.get(session_id)
         if trie is None:
             raise KeyError(f"Trace session {session_id!r} does not exist.")
-        allowed_previous_states = _ALLOWED_PREVIOUS_STATES.get(next_state)
-        if allowed_previous_states is None:
-            raise RuntimeError(f"Unsupported trace session target state: {next_state.value}.")
-        if trie.state not in allowed_previous_states:
-            allowed_values = ", ".join(state.value for state in allowed_previous_states)
-            raise RuntimeError(
-                f"Cannot transition trace session {session_id!r} from {trie.state.value} "
-                f"to {next_state.value}; allowed from: {allowed_values}."
-            )
 
         trie.state = next_state
         trie.touch()
@@ -324,6 +310,62 @@ class RolloutTraceStore:
                 _free_ray_refs(obj_ref)
         trie.release()
         self.sessions.pop(session_id, None)
+
+    def mark_rollout_status(
+        self,
+        session_id: str,
+        status: Status,
+        *,
+        enable_partial_rollout: bool = False,
+    ) -> str:
+        """Apply a rollout-side status event to one trace session."""
+        release_like = status in _ROLLOUT_RELEASE_STATUSES or (
+            status == Status.ABORTED and not enable_partial_rollout
+        )
+
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            if release_like:
+                return TraceState.RELEASED.value
+            raise KeyError(f"Trace session {session_id!r} does not exist.")
+        if trie.state != TraceState.ROLLOUT_RUNNING:
+            raise RuntimeError(
+                f"Cannot handle mark_rollout_status for trace session {session_id!r} "
+                f"in state {trie.state.value}."
+            )
+
+        if release_like:
+            return self._set_state(session_id, TraceState.TO_BE_RELEASED).value
+        if status == Status.COMPLETED:
+            return self._set_state(session_id, TraceState.ROLLOUT_FINISHED).value
+        if status in _ROLLOUT_KEEP_RUNNING_STATUSES:
+            trie.touch()
+            return TraceState.ROLLOUT_RUNNING.value
+        raise AssertionError(f"Unhandled rollout status: {status!r}")
+
+    def mark_commit_failed(self, session_id: str) -> str:
+        """Release a rollout session whose response commit failed."""
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            return TraceState.RELEASED.value
+        if trie.state != TraceState.ROLLOUT_RUNNING:
+            raise RuntimeError(
+                f"Cannot handle mark_commit_failed for trace session {session_id!r} "
+                f"in state {trie.state.value}."
+            )
+        return self._set_state(session_id, TraceState.TO_BE_RELEASED).value
+
+    def mark_rollout_discarded(self, session_id: str) -> str:
+        """Release a rollout session that external scheduling has discarded."""
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            return TraceState.RELEASED.value
+        if trie.state not in (TraceState.ROLLOUT_RUNNING, TraceState.ROLLOUT_FINISHED):
+            raise RuntimeError(
+                f"Cannot handle mark_rollout_discarded for trace session {session_id!r} "
+                f"in state {trie.state.value}."
+            )
+        return self._set_state(session_id, TraceState.TO_BE_RELEASED).value
 
     def keys(self, session_id: str) -> List[str]:
         """Get all keys (i.e., strings) stored in a session's Trie.
