@@ -291,7 +291,6 @@ class SessionServer:
                                 pass
 
                         await response.write(line)
-                    await response.write_eof()
                     raw_response = b"".join(response_chunks)  # Original raw response for exact tracing
                 else:
                     raw_response = await resp.read()
@@ -338,6 +337,9 @@ class SessionServer:
                 response_data["messages"] = messages
                 response_data["tools"] = tools
                 await self.on_response(response_data)
+
+        if is_stream:
+            await response.write_eof()
 
         return response
 
