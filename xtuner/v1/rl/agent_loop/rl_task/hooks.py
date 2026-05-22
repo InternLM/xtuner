@@ -19,7 +19,6 @@ import io
 import json
 import re
 import tarfile
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -296,39 +295,43 @@ _MINIMAL_HOOKS_INIT = "from .hook import Hook, RemovableHandle\n"
 class InstallLagent(Hook):
     """Ship the lagent library into the sandbox.
 
-    Reads ``record.runtime["lagent_src_dir"]`` — if set, uploads the local
-    ``lagent/`` tree to ``/tmp/lagent/`` and replaces the eager-import
-    ``__init__.py`` files with minimal ones.
+    If ``lagent_src_dir`` is configured, uploads the local ``lagent/`` tree
+    to ``/tmp/lagent/`` and replaces the eager-import ``__init__.py`` files
+    with minimal ones.  Pass ``None`` to skip (sandbox is expected to have
+    lagent installed already).
     """
 
     name = "install_lagent"
 
+    def __init__(self, lagent_src_dir: str | None = None):
+        self.lagent_src_dir = lagent_src_dir
+
     async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
-        lagent_src = record.runtime.get("lagent_src_dir")
-        if lagent_src is not None:
-            blob = await asyncio.to_thread(
-                self._tar_lagent_source,
-                Path(lagent_src) / "lagent",
-            )
-            await http_upload(
-                client,
-                "/tmp/_lagent.tar.gz",
-                base64.b64encode(blob).decode(),
-            )
-            await exec_in(
-                client,
-                "cd /tmp && tar xzf /tmp/_lagent.tar.gz && rm /tmp/_lagent.tar.gz",
-            )
-            await http_upload(
-                client,
-                "/tmp/lagent/actions/__init__.py",
-                base64.b64encode(_MINIMAL_ACTIONS_INIT.encode()).decode(),
-            )
-            await http_upload(
-                client,
-                "/tmp/lagent/hooks/__init__.py",
-                base64.b64encode(_MINIMAL_HOOKS_INIT.encode()).decode(),
-            )
+        if self.lagent_src_dir is None:
+            return
+        blob = await asyncio.to_thread(
+            self._tar_lagent_source,
+            Path(self.lagent_src_dir) / "lagent",
+        )
+        await http_upload(
+            client,
+            "/tmp/_lagent.tar.gz",
+            base64.b64encode(blob).decode(),
+        )
+        await exec_in(
+            client,
+            "cd /tmp && tar xzf /tmp/_lagent.tar.gz && rm /tmp/_lagent.tar.gz",
+        )
+        await http_upload(
+            client,
+            "/tmp/lagent/actions/__init__.py",
+            base64.b64encode(_MINIMAL_ACTIONS_INIT.encode()).decode(),
+        )
+        await http_upload(
+            client,
+            "/tmp/lagent/hooks/__init__.py",
+            base64.b64encode(_MINIMAL_HOOKS_INIT.encode()).decode(),
+        )
 
     def _tar_lagent_source(self, src: Path) -> bytes:
         buf = io.BytesIO()
@@ -351,66 +354,6 @@ class InstallLagent(Hook):
 
 
 # ─────────────────────────────────────────────────────────────────
-# Instruction render: bench-specific string rewrites, in place
-# ─────────────────────────────────────────────────────────────────
-
-
-class RenderInstruction(Hook):
-    """Rewrite the instruction file + upload the rendered version.
-
-    Works via a /tmp scratch file and an UploadHook.  Two substitution
-    passes:
-      1. ``rewrites`` (bench-supplied literal map, with ``$TASK_WORKSPACE``
-         in values pre-resolved to the absolute path).
-      2. ``{{KEY}}`` → the corresponding env var (from
-         ``record.env_vars``, if set).
-
-    Writes the rendered path back into ``record.metadata["instruction_rendered_path"]``
-    so a following :class:`UploadHook` can ship it.
-    """
-
-    name = "render_instruction"
-
-    def __init__(self, rewrites: dict[str, str] | None = None):
-        self.rewrites = dict(rewrites or {})
-
-    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
-        workspace = record.workspace
-        if not workspace:
-            raise ValueError("StageRecord.workspace is required by RenderInstruction")
-        task_root = item.task_root
-        if task_root is None:
-            raise ValueError("AgentRolloutItem.task_root is required by RenderInstruction")
-
-        src = task_root / item.instruction
-        if not src.exists():
-            return
-
-        text = src.read_text(encoding="utf-8")
-        resolved = {
-            needle: self._rewrite_text(repl, {"$TASK_WORKSPACE": workspace}) for needle, repl in self.rewrites.items()
-        }
-        text = self._rewrite_text(text, resolved)
-        env_for_placeholders = record.env_vars
-        text = self._rewrite_text(
-            text,
-            {"{{" + k + "}}": v for k, v in env_for_placeholders.items()},
-        )
-
-        tmp = Path("/tmp") / f".rendered_{src.name}"
-        tmp.write_text(text, encoding="utf-8")
-        # Upload the rendered file over the mirror-version.
-        sandbox_path = f"{workspace}/{item.instruction}"
-        await upload_tar_and_extract(client, {sandbox_path: tmp}, "/")
-        record.metadata["instruction_rendered_path"] = sandbox_path
-
-    def _rewrite_text(self, text: str, substitutions: dict[str, str]) -> str:
-        for needle, replacement in substitutions.items():
-            text = text.replace(needle, replacement)
-        return text
-
-
-# ─────────────────────────────────────────────────────────────────
 # Agent config: upload config.py source (daemon execs it in-sandbox)
 # ─────────────────────────────────────────────────────────────────
 
@@ -420,7 +363,8 @@ class UploadAgentConfigSource(Hook):
 
     The lagent daemon exec's this file in the sandbox to build the agent
     dict — so ``os.environ`` lookups inside ``config.py`` resolve against
-    the sandbox's own env (populated by :class:`BenchEnv`), not the host's.
+    the sandbox's own env (populated by the entry's ``env`` field), not the
+    host's.
 
     Agent template lives at ``record.agent.template_root / record.agent.name /``
     (populated by :class:`PickAgent`).
@@ -509,98 +453,6 @@ class RunAgentInstallDeps(Hook):
             timeout_sec=self.timeout,
             raise_on_error=True,
         )
-
-
-# ─────────────────────────────────────────────────────────────────
-# Validate workspace setup
-# ─────────────────────────────────────────────────────────────────
-
-
-class CopyInferWorkspace(Hook):
-    """Validator hook: copy the infer workspace into an isolated judger sandbox.
-
-    ``JudgerValidator`` exposes the source client/path to isolated judger
-    hooks through runtime-only fields on ``StageRecord``.  Putting the copy in
-    a hook keeps the validate data dependency visible in config:
-
-        on_isolated_pre=[dict(type=CopyInferWorkspace)]
-    """
-
-    name = "copy_infer_workspace"
-
-    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
-        infer_client = record.runtime.get("infer_client")
-        infer_workspace = record.runtime.get("infer_workspace")
-        target_workspace = record.runtime.get("target_workspace") or record.workspace
-        if infer_client is None:
-            raise RuntimeError("CopyInferWorkspace requires record.runtime['infer_client']")
-        if not infer_workspace:
-            raise RuntimeError("CopyInferWorkspace requires record.runtime['infer_workspace']")
-        if not target_workspace:
-            raise RuntimeError("CopyInferWorkspace requires record.workspace or record.runtime['target_workspace']")
-
-        suffix = uuid.uuid4().hex[:12]
-        infer_tmp = f"/tmp/_infer_ws_{suffix}.tar.gz"
-        target_tmp = f"/tmp/_target_ws_{suffix}.tar.gz"
-        await exec_in(client, f'mkdir -p "{target_workspace}"')
-        try:
-            await exec_in(infer_client, f'cd "{infer_workspace}" && tar czf {infer_tmp} .')
-            blob = await infer_client.download_file(infer_tmp)
-            await http_upload(client, target_tmp, base64.b64encode(blob).decode())
-            await exec_in(
-                client,
-                f'cd "{target_workspace}" && tar xzf {target_tmp} && rm -f {target_tmp}',
-                raise_on_error=False,
-            )
-        finally:
-            try:
-                await exec_in(infer_client, f"rm -f {infer_tmp}", raise_on_error=False)
-            except Exception:
-                pass
-
-
-# ─────────────────────────────────────────────────────────────────
-# Env-var builder
-# ─────────────────────────────────────────────────────────────────
-
-
-class BenchEnv:
-    """Build infer stage env vars from an item/record.
-
-    Exports only what wrappers + agent config actually read — no
-    speculative vars.  ``extras`` lets a bench-specific pipeline inject
-    additional literal vars (e.g. upstream-convention aliases like
-    ``WORKSPACE``, ``CLAW_WORKSPACE``) without subclassing.
-
-    Also stores the map in ``record.env_vars`` so
-    :class:`RenderInstruction` can substitute ``{{KEY}}`` placeholders.
-
-    Pass an instance to ``SandboxStage(env=BenchEnv(...))``.  The explicit
-    interface is ``build(item, record)``; arbitrary callable stage fields are
-    intentionally not supported.
-    """
-
-    def __init__(self, *, workspace: str, extras: dict[str, str] | None = None):
-        self.workspace = workspace
-        self.extras = dict(extras or {})
-
-    def build(self, item: AgentRolloutItem, record: StageRecord) -> dict[str, str]:
-        runtime = record.runtime
-        env = {
-            "TASK_WORKSPACE": self.workspace,
-            "TASK_INSTRUCTION": f"{self.workspace}/{item.instruction}",
-        }
-        for env_key, runtime_key in (
-            ("RL_LLM_MODEL", "llm_model"),
-            ("RL_LLM_BASE_URL", "llm_base_url"),
-            ("RL_LLM_API_KEY", "llm_api_key"),
-        ):
-            val = runtime.get(runtime_key)
-            if val:
-                env[env_key] = val
-        env.update(self.extras)
-        record.env_vars = env
-        return env
 
 
 # ─────────────────────────────────────────────────────────────────

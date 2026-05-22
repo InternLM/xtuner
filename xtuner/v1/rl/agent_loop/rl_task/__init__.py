@@ -8,15 +8,12 @@ This module keeps project configs readable:
 """
 
 from xtuner.v1.rl.agent_loop.rl_task.hooks import (
-    BenchEnv,
-    CopyInferWorkspace,
     DownloadHook,
     ExecHook,
     InstallLagent,
     ParseJudgerStdout,
     PickAgent,
     ReadFileHook,
-    RenderInstruction,
     RunAgentInstallDeps,
     UploadAgentConfigSource,
     UploadChosenAgent,
@@ -55,8 +52,6 @@ from xtuner.v1.rl.agent_loop.rl_task.validator import Judger, JudgerValidator
 __all__ = [
     "AgentSpec",
     "AgentRolloutItem",
-    "BenchEnv",
-    "CopyInferWorkspace",
     "DiagnosticFile",
     "DetachedShellEntry",
     "DownloadHook",
@@ -74,7 +69,6 @@ __all__ = [
     "ParseJudgerStdout",
     "PickAgent",
     "ReadFileHook",
-    "RenderInstruction",
     "RolloutError",
     "RolloutStatus",
     "RunAgentInstallDeps",

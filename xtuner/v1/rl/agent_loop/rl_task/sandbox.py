@@ -437,11 +437,13 @@ class ShellEntry:
         *,
         name: str = "entry",
         timeout: int = 600,
+        env: dict[str, str] | None = None,
         failure: EntryFailurePolicy | dict[str, Any] | None = None,
     ):
         self.cmd = cmd
         self.name = name
         self.timeout = timeout
+        self.env = dict(env or {})
         self.failure = create_object(failure) if failure is not None else None
 
     async def run(
@@ -449,18 +451,15 @@ class ShellEntry:
         client: Any,
         item: AgentRolloutItem,
         record: StageRecord,
-        *,
-        env: dict[str, str],
     ) -> EntryOutcome:
         entry = self._new_record()
         record.entries.append(entry)
-        record.entry_cmd = self.cmd
         entry.status = StageStatus.RUNNING
         entry.started_at = time.monotonic()
         uid_obs = str(item.uid) if item.uid is not None else ""
         with span(uid_obs, f"entry:{self.name}", entry_kind="ShellEntry"):
             try:
-                outcome = await self._execute(client, env)
+                outcome = await self._execute(client, self.env)
                 if not outcome.ok and self.failure is not None:
                     outcome = await self.failure.handle(client, item, record, entry, outcome)
                 self._finish_record(entry, outcome)
@@ -511,7 +510,6 @@ class ShellEntry:
 
     def _finish_record(self, entry: EntryRecord, outcome: EntryOutcome, *, exc: Exception | None = None) -> None:
         entry.finished_at = time.monotonic()
-        entry.return_code = outcome.result.return_code
         entry.result = outcome.result
         entry.outcome = outcome
         entry.status = StageStatus.COMPLETED if outcome.ok else StageStatus.FAILED
@@ -542,6 +540,7 @@ class DetachedShellEntry:
         *,
         name: str = "entry",
         timeout: int = 600,
+        env: dict[str, str] | None = None,
         capture: EntryCapture | dict[str, Any],
         monitor: EntryMonitor | dict[str, Any],
         failure: EntryFailurePolicy | dict[str, Any] | None = None,
@@ -550,6 +549,7 @@ class DetachedShellEntry:
         self.cmd = cmd
         self.name = name
         self.timeout = timeout
+        self.env = dict(env or {})
         self.failure = create_object(failure) if failure is not None else None
         self.capture = create_object(capture)
         self.monitor = create_object(monitor)
@@ -560,19 +560,16 @@ class DetachedShellEntry:
         client: Any,
         item: AgentRolloutItem,
         record: StageRecord,
-        *,
-        env: dict[str, str],
     ) -> EntryOutcome:
         entry = self._new_record()
         self.capture.bind(entry)
         record.entries.append(entry)
-        record.entry_cmd = self.cmd
         entry.status = StageStatus.RUNNING
         entry.started_at = time.monotonic()
         uid_obs = str(item.uid) if item.uid is not None else ""
         with span(uid_obs, f"entry:{self.name}", entry_kind="DetachedShellEntry"):
             try:
-                outcome = await self._run_detached(client, item, entry, env)
+                outcome = await self._run_detached(client, item, entry, self.env)
                 await self._fill_output_files(client, entry, outcome.result)
                 if not outcome.ok and self.failure is not None:
                     outcome = await self.failure.handle(client, item, record, entry, outcome)
@@ -649,7 +646,6 @@ class DetachedShellEntry:
 
     def _finish_record(self, entry: EntryRecord, outcome: EntryOutcome, *, exc: Exception | None = None) -> None:
         entry.finished_at = time.monotonic()
-        entry.return_code = outcome.result.return_code
         entry.result = outcome.result
         entry.outcome = outcome
         entry.status = StageStatus.COMPLETED if outcome.ok else StageStatus.FAILED
@@ -692,8 +688,6 @@ class SandboxStage:
         sandbox: str = "main",
         pre: list[Hook] = [],
         entries: list[ShellEntry | DetachedShellEntry | dict[str, Any]] | None = None,
-        env: dict[str, str] | Any | None = None,
-        runtime: dict[str, Any] | None = None,
         post: list[Hook] = [],
         hook_stuck_warn_sec: float = 30.0,
     ):
@@ -707,31 +701,20 @@ class SandboxStage:
                     "SandboxStage.entries must contain ShellEntry or DetachedShellEntry configs, "
                     f"got {type(stage_entry).__name__}"
                 )
-        # ``env`` accepts three shapes (see ``_build_env``):
-        #   * None
-        #   * plain ``dict[str, str]`` of env vars (no ``type`` key)
-        #   * a builder (lagent dict-config with ``type=...`` or an already-built object)
-        if isinstance(env, dict) and "type" not in env:
-            self._env = dict(env)
-        else:
-            self._env = create_object(env) if env is not None else None
-        self.runtime = dict(runtime or {})
         self.post = [create_object(hook) for hook in post]
         self.hook_stuck_warn_sec = hook_stuck_warn_sec
 
     async def run(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> StageResult:
         record.status = StageStatus.RUNNING
         record.started_at = record.started_at or time.monotonic()
-        record.runtime.update(self.runtime)
         stage_label = record.judger_name or "infer"
 
         try:
             await self._run_phase("pre", self.pre, client, item, record, stage_label)
 
-            env = self._build_env(item, record)
             result = StageResult()
             for entry in self.entries:
-                outcome = await entry.run(client, item, record, env=env)
+                outcome = await entry.run(client, item, record)
                 result = outcome.result
                 self._apply_result(record, result, stage_label)
                 if not outcome.ok:
@@ -782,27 +765,8 @@ class SandboxStage:
             )
             raise
 
-    def _build_env(self, item: AgentRolloutItem, record: StageRecord) -> dict[str, str]:
-        env_spec = self._env
-        if env_spec is None:
-            return {}
-        if isinstance(env_spec, dict):
-            return dict(env_spec)
-        build = getattr(env_spec, "build", None)
-        if build is None:
-            raise TypeError(
-                f"SandboxStage.env must be a dict or env builder with build(item, record), got {type(env_spec)}"
-            )
-        env = build(item, record)
-        if env is None:
-            return {}
-        if not isinstance(env, dict):
-            raise TypeError(f"SandboxStage.env builder must return dict[str, str], got {type(env)}")
-        return dict(env)
-
     def _apply_result(self, record: StageRecord, result: StageResult, stage_label: str) -> None:
         record.entry_result = result
-        record.return_code = result.return_code
         if result.ok:
             record.status = StageStatus.COMPLETED
             record.error = None
@@ -850,16 +814,6 @@ class SandboxStage:
         warn_task = asyncio.create_task(warn_if_stuck()) if stuck_warn_sec > 0 else None
         try:
             await hook(client, item, record)
-        except Exception as exc:
-            record.hook_errors.append(
-                {
-                    "phase": phase,
-                    "hook": hook_name,
-                    "type": type(exc).__name__,
-                    "message": str(exc),
-                }
-            )
-            raise
         finally:
             done = True
             if warn_task is not None:

@@ -41,10 +41,7 @@ skills_root = f"{workspace}/skills"
 model = dict(
     type="lagent.llms.model.AsyncAPIClient",
     model=dict(
-        model=os.environ.get(
-            "RL_LLM_MODEL",
-            "",
-        ),
+        model=os.environ["RL_LLM_MODEL"],
         base_url=os.environ.get(
             "RL_LLM_BASE_URL",
             "http://s-20260104203038-22bhb.ailab-evalservice.pjh-service.org.cn/v1",

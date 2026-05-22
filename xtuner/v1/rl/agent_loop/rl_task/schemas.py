@@ -121,7 +121,6 @@ class EntryRecord(BaseModel):
 
     started_at: float | None = None
     finished_at: float | None = None
-    return_code: int | None = None
     result: StageResult | None = None
     outcome: EntryOutcome | None = None
     error: RolloutError | None = None
@@ -147,9 +146,6 @@ class StageRecord(BaseModel):
     sandbox_url: str | None = None
     workspace: str | None = None
 
-    entry_cmd: str | None = None
-    return_code: int | None = None
-
     entries: list[EntryRecord] = Field(default_factory=list)
     entry_result: StageResult | None = None
     score: float | None = None
@@ -161,10 +157,6 @@ class StageRecord(BaseModel):
     agent: SelectedAgentRecord | None = None
     judger_name: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
-    hook_errors: list[dict[str, str]] = Field(default_factory=list)
-
-    runtime: dict[str, Any] = Field(default_factory=dict, exclude=True)
-    env_vars: dict[str, str] = Field(default_factory=dict, exclude=True)
 
 
 class AgentRolloutItem(BaseModel):
@@ -210,7 +202,6 @@ class AgentRolloutItem(BaseModel):
     # Output and observation.
     status: RolloutStatus = RolloutStatus.PENDING
     reward: float | None = None
-    trajectory: Any | None = None
     infer: StageRecord = Field(default_factory=StageRecord)
     judgers: dict[str, StageRecord] = Field(default_factory=dict)
     artifacts: dict[str, Any] = Field(default_factory=dict)

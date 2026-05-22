@@ -31,7 +31,6 @@ from lagent.serving.sandbox.providers.gateway import GatewayProvider
 
 from xtuner.v1.rl.agent_loop.rl_task import (
     AgentSpec,
-    BenchEnv,
     DetachedShellEntry,
     DownloadHook,
     EntryCapture,
@@ -86,7 +85,7 @@ SHARED_LAGENT_PYTHON = os.getenv(
     "LAGENT_PYTHON",
     "/mnt/llm-ai-infra/miniconda3/envs/train/bin/python",
 )
-LAGENT_PYTHONPATH = "${TASK_WORKSPACE:-/workspace}:/tmp:${PYTHONPATH:-}"
+LAGENT_PYTHONPATH = "/app:/tmp:${PYTHONPATH:-}"
 
 START_AGENT_DAEMON = (
     f'PYTHONPATH="{LAGENT_PYTHONPATH}" "{SHARED_LAGENT_PYTHON}" '
@@ -103,7 +102,7 @@ WAIT_AGENT_DAEMON = (
 AGENT_CHAT = (
     f'PYTHONPATH="{LAGENT_PYTHONPATH}" "{SHARED_LAGENT_PYTHON}" '
     f"-m lagent.serving.sandbox.client_cli chat "
-    f"--sock {PATHS.agent_sock} --instruction-file \"$TASK_INSTRUCTION\" "
+    f"--sock {PATHS.agent_sock} --instruction-file \"/app/instruction.md\" "
     f"--response-out {PATHS.agent_response} --log {PATHS.agent_daemon_log}"
 )
 AGENT_STATE_DICT = (
@@ -181,9 +180,6 @@ runner = dict(
     infer=dict(
         type=SandboxStage,
         sandbox="main",
-        runtime={
-            "lagent_src_dir": os.getenv("LAGENT_SRC_DIR", "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent"),
-        },
         pre=[
             # ── Stage 1: workspace setup ──────────────────────────────────
             # Create the workspace dir, upload bench-level setup scripts,
@@ -214,7 +210,7 @@ runner = dict(
             # ── Stage 3: agent harness ────────────────────────────────────
             # Install lagent runtime, pick an agent variant, upload its
             # harness + config, run its install-deps.
-            dict(type=InstallLagent),
+            dict(type=InstallLagent, lagent_src_dir=os.getenv("LAGENT_SRC_DIR", "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent")),
             dict(type=PickAgent, agents=DEFAULT_AGENTS, template_root=str(AGENT_TEMPLATES)),
             dict(type=UploadChosenAgent, target_dir=f"{DEFAULT_WORKSPACE}/agent/"),
             dict(type=UploadAgentConfigSource, dst=PATHS.agent_config),
@@ -227,6 +223,10 @@ runner = dict(
                 cmd=START_AGENT_DAEMON,
                 timeout=60,
                 failure=entry_failure(),
+                env={
+                    "RL_LLM_MODEL": os.environ.get('RL_LLM_MODEL', 'agentic_rl_qwen35a3b_service'),
+                    "XTUNER_SESSION_ID": None
+                }
             ),
             dict(
                 type=ShellEntry,
@@ -275,7 +275,6 @@ runner = dict(
                 timeout=30,
             ),
         ],
-        env=dict(type=BenchEnv, workspace=DEFAULT_WORKSPACE, extras={"WORKSPACE": DEFAULT_WORKSPACE}),
         post=[
             dict(type=ReadFileHook, path=PATHS.message, key="message"),
             dict(type=ReadFileHook, path=PATHS.agent_response, key="agent_response"),
@@ -308,15 +307,15 @@ runner = dict(
                             type=ShellEntry,
                             name="run_tests",
                             cmd=f"bash {PATHS.judger_dir}/run.sh",
-                            timeout=10,
+                            env={
+                                "JUDGER_NAME": "rule_grader",
+                                "TASK_WORKSPACE": DEFAULT_WORKSPACE,
+                                "TESTS_DIR": PATHS.tests,
+                                "JUDGER_DIR": PATHS.judger_dir,
+                            },
+                            timeout=900,
                         )
                     ],
-                    env={
-                        "JUDGER_NAME": "rule_grader",
-                        "TASK_WORKSPACE": DEFAULT_WORKSPACE,
-                        "TESTS_DIR": PATHS.tests,
-                        "JUDGER_DIR": PATHS.judger_dir,
-                    },
                     post=[dict(type=ParseJudgerStdout, judger_name="rule_grader")],
                 ),
             )
