@@ -6,11 +6,22 @@ import os
 import pickle
 import sys
 import time
+from concurrent.futures import Future, TimeoutError
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from shutil import rmtree
-from typing import Annotated, Callable, Literal, Protocol, Sequence, Sized, cast, overload, runtime_checkable
+from typing import (
+    Annotated,
+    Callable,
+    Literal,
+    Protocol,
+    Sequence,
+    Sized,
+    cast,
+    overload,
+    runtime_checkable,
+)
 
 import torch
 import torch.distributed as dist
@@ -400,6 +411,7 @@ class TrainerConfig(BaseModel):
     async_hf_export: bool = False
     skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
     patch_for_dcp_finish: bool = False
+    async_checkpoint: bool = False
     snapshot_interval: int | None = None
     check_health_interval: int | None = None
     hf_interval: int | None = None
@@ -491,8 +503,7 @@ class Trainer:
     _EXP_TRACKING_PATH = "exp_tracking"
     _CHECKPOINT_DIR = "checkpoints"
 
-    _SAVE_OPTIMIZER_DIR = "optimizer"
-    _SAVE_MODEL_DIR = "model"
+    _SAVE_WEIGHTS_DIR = "weights"
     _SAVE_DATALOADER_DIR = "dataloader"
     _SAVE_SCHEDULER_DIR = "lr_scheduler"
     _SAVE_TRAIN_STATE_PATH = "train_state.json"
@@ -525,6 +536,7 @@ class Trainer:
         async_hf_export: bool = False,
         skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
         patch_for_dcp_finish: bool = False,
+        async_checkpoint: bool = False,
         snapshot_interval: int | None = None,
         check_health_interval: int | None = None,
         hf_interval: int | None = None,
@@ -592,6 +604,8 @@ class Trainer:
         self._pending_async_hf_handle: AsyncHFSaveHandle | None = None
         self._pending_async_hf_step: int | None = None
         self._pending_async_hf_epoch: int | None = None
+        self._async_checkpoint = async_checkpoint
+        self._pending_checkpoint: Future | None = None
         self._snapshot_interval = snapshot_interval
         self._check_health_interval = check_health_interval
         self._hf_max_keep = hf_max_keep
@@ -765,6 +779,7 @@ class Trainer:
             async_hf_export=config.async_hf_export,
             skip_checkpoint_validation=config.skip_checkpoint_validation,
             patch_for_dcp_finish=config.patch_for_dcp_finish,
+            async_checkpoint=config.async_checkpoint,
             snapshot_interval=config.snapshot_interval,
             check_health_interval=config.check_health_interval,
             hf_interval=config.hf_interval,
@@ -866,10 +881,13 @@ class Trainer:
         self._wait_for_pending_async_hf()
 
         # TODO: Should use flush rather than close
+        self._wait_for_pending_checkpoint()
+        self._engine.destroy_async_checkpoint_pg()
         self._exp_tracker.close()
         if self._metrics_recorder:
             self._metrics_recorder.close()
         self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
+        dist.barrier()
 
     def _prepare_model_input(self, data_batch) -> list[ModelItem]:
         seq_ctx_list: list[SequenceContext] = []
@@ -1166,6 +1184,19 @@ class Trainer:
                 raise RuntimeError("Health check failed, exit training")
             logger.info(f"Health check passed at step {self.cur_step}")
 
+    def _wait_for_pending_checkpoint(self, timeout: int = 3000) -> None:
+        if self._pending_checkpoint is None:
+            return
+
+        future = self._pending_checkpoint
+        self._pending_checkpoint = None
+
+        try:
+            future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            raise TimeoutError(f"Async checkpoint timed out after {timeout}s")
+
     def _maybe_save(self, is_snapshot: bool = False) -> bool:
         ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
         if ckp_interval is None:
@@ -1183,26 +1214,29 @@ class Trainer:
         checkpoint_path = self._get_checkpoint_path(epoch=self._cur_epoch, step=self.cur_step, is_snapshot=is_snapshot)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
+        # Ensure at most one async checkpoint is in flight.
+        self._wait_for_pending_checkpoint()
+
         meta_path = self.work_dir / self._META_PATH
 
-        optimizer_path = checkpoint_path / self._SAVE_OPTIMIZER_DIR
-        model_path = checkpoint_path / self._SAVE_MODEL_DIR
+        weights_path = checkpoint_path / self._SAVE_WEIGHTS_DIR
         dataloader_path = checkpoint_path / self._SAVE_DATALOADER_DIR
         scheduler_path = checkpoint_path / self._SAVE_SCHEDULER_DIR
         train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
+
+        total_consumed_tokens = (
+            self._reduce_number_across_rank(self._local_total_consumed_tokens) + self._init_total_tokens
+        )
 
         if self.cur_step % ckp_interval == 0:
             DEVICE_MODULE.empty_cache()
 
         # Save model and optimizer
-        self._engine.save_dcp(
-            model_dir=model_path,
-            optimizer_dir=optimizer_path,
-        )
-
-        total_consumed_tokens = (
-            self._reduce_number_across_rank(self._local_total_consumed_tokens) + self._init_total_tokens
-        )
+        future: Future | None = None
+        if self._async_checkpoint and not is_snapshot:
+            future = self._engine.async_save_dcp(weights_dir=weights_path)
+        else:
+            self._engine.save_dcp(weights_dir=weights_path)
 
         # Save dataloader
         self._save_dataloader(dataloader_path)
@@ -1224,6 +1258,9 @@ class Trainer:
 
             with config_bin.open("wb") as f:
                 pickle.dump(self._trainer_cfg, f)
+
+        if future is not None:
+            self._pending_checkpoint = future
 
         dist.barrier()
 
@@ -1898,16 +1935,12 @@ class Trainer:
         if not resume_from.exists():
             raise FileNotFoundError(f"Checkpoint path {resume_from} does not exist.")
 
-        model_path = resume_from / self._SAVE_MODEL_DIR
-        optimizer_path = (
-            resume_from / self._SAVE_OPTIMIZER_DIR
-            if load_checkpoint_cfg.load_optimizer_states or load_checkpoint_cfg.load_optimizer_args
-            else None
-        )
+        weights_path = resume_from / self._SAVE_WEIGHTS_DIR
+        if not weights_path.exists():
+            raise FileNotFoundError(f"Checkpoint at {resume_from} has no '{self._SAVE_WEIGHTS_DIR}/' directory.")
 
         self._engine.load_dcp(
-            model_dir=model_path,
-            optimizer_dir=optimizer_path,
+            weights_dir=weights_path,
             load_states=load_checkpoint_cfg.load_optimizer_states,
             load_args=load_checkpoint_cfg.load_optimizer_args,
         )

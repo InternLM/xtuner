@@ -148,7 +148,12 @@ def _start_rollout_controller_and_gateway(
 
     from xtuner.v1.rl.gateway.config import GatewayConfig
     from xtuner.v1.rl.rollout.worker import RolloutConfig
-    from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+    from xtuner.v1.rl.utils import (
+        AcceleratorResourcesConfig,
+        AutoAcceleratorWorkers,
+        CPUResourceManager,
+        set_cpu_resource_manager,
+    )
 
     accelerator = RESOURCE_MAP[torch.accelerator.current_accelerator().type]
     tensor_parallel_size = int(os.environ.get("XTUNER_CLAUDECODE_TOOL_TP", "1"))
@@ -163,6 +168,7 @@ def _start_rollout_controller_and_gateway(
         resource_config,
         name=f"claudecode_tool_pg_{uuid4().hex[:8]}",
     )
+    set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=placement_group))
     rollout_config = RolloutConfig(
         env=f"claudecode_tool_{uuid4().hex[:8]}",
         model_path=model_path,
@@ -217,6 +223,7 @@ def _redact_rollout_state_for_dump(state: RolloutState) -> dict:
 
 def _cleanup_ray(*, controller: Any, placement_group: Any) -> None:
     import ray
+    from xtuner.v1.rl.utils import clear_cpu_resource_manager
 
     if controller is not None:
         try:
@@ -229,6 +236,7 @@ def _cleanup_ray(*, controller: Any, placement_group: Any) -> None:
             pass
     if placement_group is not None:
         ray.util.remove_placement_group(placement_group)
+    clear_cpu_resource_manager()
     if ray.is_initialized():
         ray.shutdown()
 

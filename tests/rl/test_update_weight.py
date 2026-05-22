@@ -3,7 +3,6 @@ import unittest
 import tempfile
 import ray
 
-from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.data_proto.rl_data import SampleParams, RolloutState
 from xtuner.v1.config import (
     AdamWConfig,
@@ -11,7 +10,13 @@ from xtuner.v1.config import (
     LRConfig,
 )
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.rl.utils import (
+    AcceleratorResourcesConfig,
+    AutoAcceleratorWorkers,
+    CPUResourceManager,
+    clear_cpu_resource_manager,
+    set_cpu_resource_manager,
+)
 from xtuner.v1.rl.trainer import WorkerConfig, TrainingController, TrainingWorker as BaseTrainingWorker
 from xtuner.v1.rl.loss import GRPOLossConfig as LossConfig
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLDense4BConfig
@@ -36,8 +41,10 @@ class TestUpdateWeight(unittest.TestCase):
         self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
         self.init_config()
         self.pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
+        set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=self.pg))
 
     def tearDown(self):
+        clear_cpu_resource_manager()
         ray.shutdown()
         self.temp_dir.cleanup()
 
@@ -115,10 +122,7 @@ class TestUpdateWeight(unittest.TestCase):
 
         # init rollout_controller and rollout baseline
         self.rollout_cfg.skip_load_weights = False
-        rollout_controller = ray.remote(RolloutController).remote(
-            self.rollout_cfg,
-            self.pg,
-        )
+        rollout_controller = self.rollout_cfg.build(self.pg)
 
         input_state = RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params)
         res_baseline = ray.get(rollout_controller.generate.remote(rollout_state=input_state)) 
