@@ -7,6 +7,7 @@ import torch
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.compose.base import BaseComposeConfig
+from xtuner.v1.rl.weight_update import TrainRolloutMode
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import get_logger
 
@@ -292,7 +293,7 @@ class TrainingController:
     def update_rollout_info(self, info_dict):
         ray.get([worker.update_rollout_info.remote(**info_dict) for worker in self.workers])  # type: ignore[attr-defined]
 
-    def set_train_rollout_mode(self, train_rollout_mode: str):
+    def set_train_rollout_mode(self, train_rollout_mode: TrainRolloutMode):
         ray.get([worker.set_train_rollout_mode.remote(train_rollout_mode) for worker in self.workers])
 
     def update_weights(self):

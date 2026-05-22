@@ -1533,6 +1533,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         if self._enable_initial_evaluate:
             await self._run_initial_evaluate()
+            # _run_initial_evaluate() 在最后会执行 rollout controller 的 pause_generation()
+            # SGLang 下会把生成暂停/abort，导致下面的正式生产卡住。
+            # 而共卡会在每次生产前先continue_produce。
+            await self.agent_loop_manager.continue_produce(model_step=self._cur_step)
 
         self._benchmark_start_time_s = time.perf_counter()
         self._benchmark_training_samples = 0
