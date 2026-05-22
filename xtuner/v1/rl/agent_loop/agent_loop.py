@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from abc import ABC, abstractmethod
 from typing import TypeAlias, cast
 
@@ -40,6 +41,13 @@ class AgentLoopConfig(ABC, BaseModel):
                 logger=logger,
             )
 
+        get_generate_concurrency = rollout_controller.get_generate_concurrency
+        if hasattr(get_generate_concurrency, "remote"):
+            total_generate_concurrency = ray.get(get_generate_concurrency.remote())
+        else:
+            total_generate_concurrency = get_generate_concurrency()
+        concurrency = max(1, math.ceil(total_generate_concurrency / self.cpu_resources.num_workers))
+
         register_cpu_resources(
             name=f"agent_loop:{self.__class__.__name__}",
             cpu_resources=self.cpu_resources,
@@ -49,12 +57,14 @@ class AgentLoopConfig(ABC, BaseModel):
             return self._build_router(
                 rollout_controller=rollout_controller,
                 cpu_resources=self.cpu_resources,
+                concurrency=concurrency,
                 judger=judger,
                 logger=logger,
             )
         return self._build_ray_actor(
             rollout_controller=rollout_controller,
             cpu_resources=self.cpu_resources,
+            concurrency=concurrency,
             judger=judger,
             logger=logger,
         )
@@ -71,14 +81,20 @@ class AgentLoopConfig(ABC, BaseModel):
         self,
         rollout_controller: RolloutController,
         cpu_resources: CPUResourcesConfig,
+        concurrency: int,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
     ) -> RayAgentLoopProxy:
+        ray_agent_loop = ray.remote(
+            concurrency_groups={
+                AGENT_LOOP_CONCURRENCY_GROUP_GENERATE: concurrency,
+            },
+        )(AgentLoopActor)
         return cast(
             "RayAgentLoopProxy",
             CPUActorLauncher.build_actor(
-                RayAgentLoop,
+                ray_agent_loop,
                 self,
                 rollout_controller,
                 judger,
@@ -94,15 +110,21 @@ class AgentLoopConfig(ABC, BaseModel):
         self,
         rollout_controller: RolloutController,
         cpu_resources: CPUResourcesConfig,
+        concurrency: int,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
         start_bundle_idx: int = 0,
     ) -> list[RayAgentLoopProxy]:
+        ray_agent_loop = ray.remote(
+            concurrency_groups={
+                AGENT_LOOP_CONCURRENCY_GROUP_GENERATE: concurrency,
+            },
+        )(AgentLoopActor)
         return cast(
             list["RayAgentLoopProxy"],
             CPUActorLauncher.build_actors(
-                RayAgentLoop,
+                ray_agent_loop,
                 self,
                 rollout_controller,
                 judger,
@@ -119,6 +141,7 @@ class AgentLoopConfig(ABC, BaseModel):
         self,
         rollout_controller: RolloutController,
         cpu_resources: CPUResourcesConfig,
+        concurrency: int,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
@@ -128,6 +151,7 @@ class AgentLoopConfig(ABC, BaseModel):
             workers=self._build_ray_actors(
                 rollout_controller=rollout_controller,
                 cpu_resources=cpu_resources,
+                concurrency=concurrency,
                 pg=pg,
                 judger=judger,
                 logger=logger,

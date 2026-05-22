@@ -193,17 +193,6 @@ class LMDeployWorker(RolloutWorker):
             return ray.put(np.asarray(routed_experts_data))
         return np.asarray(routed_experts)
 
-    async def cleanup_after_pause(self) -> None:
-        if not self.enable_return_routed_experts:
-            return
-        try:
-            lmdeploy_actor = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
-            await lmdeploy_actor.clear.remote()
-        except ValueError:
-            self.logger.debug("LMDeploy shared_store actor is not available, skip cleanup after pause.")
-        except Exception as e:
-            self.logger.warning(f"Failed to clear LMDeploy shared_store after pause: {e}")
-
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
         """Transform the RolloutConfig into a Namespace suitable for the
         LMDeploy server.
