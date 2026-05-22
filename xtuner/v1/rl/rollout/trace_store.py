@@ -278,6 +278,18 @@ class RolloutTraceStore:
             "has_object_ref": trie.expert_key in self.objects if trie.expert_key is not None else False,
         }
 
+    def list_sessions(self, state: str | None = None) -> list[dict]:
+        """List current session metadata snapshots, optionally filtered by state."""
+        snapshots = []
+        for session_id in sorted(self.sessions):
+            snapshot = self.get_state(session_id)
+            if snapshot is None:
+                continue
+            if state is not None and snapshot["state"] != state:
+                continue
+            snapshots.append(snapshot)
+        return snapshots
+
     def _set_state(
         self,
         session_id: str,
@@ -480,6 +492,18 @@ class RolloutTraceStore:
                 f"in state {trie.state.value}."
             )
         return self._set_state(session_id, TraceState.TO_BE_RELEASED).value
+
+    def gc_stale_sessions(self, ttl_seconds: float) -> list[str]:
+        """Release stale RolloutRunning sessions older than the given TTL."""
+        now = time.time()
+        stale_session_ids = [
+            session_id
+            for session_id, trie in self.sessions.items()
+            if trie.state == TraceState.ROLLOUT_RUNNING and (now - trie.updated_at) > ttl_seconds
+        ]
+        for session_id in stale_session_ids:
+            self._set_state(session_id, TraceState.TO_BE_RELEASED)
+        return stale_session_ids
 
     def get_objects(self, keys: list[str]) -> list[ray.ObjectRef]:
         """Fetch ray.ObjectRef elements by their keys.
