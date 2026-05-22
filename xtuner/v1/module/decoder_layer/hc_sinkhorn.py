@@ -79,12 +79,21 @@ def hc_split_sinkhorn(
     comb_shape = comb_flat.shape[:-1] + (hc_mult, hc_mult)
     comb = comb_flat.reshape(comb_shape)
 
-    # First iteration is special in the reference: row softmax (with `amax`
-    # subtraction for stability) followed by a single column-sum normalization.
-    comb = comb - comb.amax(dim=-1, keepdim=True).detach()
-    comb = comb.exp()
-    comb = comb / comb.sum(dim=-1, keepdim=True)
-    comb = comb + eps
+    # First iteration matches HF ``DeepseekV4HyperConnection.forward`` exactly
+    # (modeling_deepseek_v4.py:931-932)::
+    #
+    #     comb = torch.softmax(comb_logits, dim=-1) + self.hc_eps
+    #     comb = comb / (comb.sum(dim=-2, keepdim=True) + self.hc_eps)
+    #
+    # An earlier manual ``comb - amax(-1).detach() + exp + / sum`` chain
+    # produced the same softmax mathematically but in a different
+    # reduction order — measured as ~6e-8 fp32 ULP diff vs HF's
+    # ``torch.softmax`` in ``test_subcomponent_probe``'s ``hc_pre.comb``
+    # step, which is enough to flip the rounding direction on a few bf16
+    # cast boundaries downstream and break the
+    # ``_full_hf_anchor`` (attention+MoE delegated to HF) test's
+    # ``atol=0`` goal.
+    comb = torch.softmax(comb, dim=-1) + eps
     comb = comb / (comb.sum(dim=-2, keepdim=True) + eps)
 
     # Remaining (iters - 1) rounds: alternating row then column normalization,
