@@ -99,6 +99,7 @@ class SessionServer:
         else:
             output_logprobs = [0.0] * len(output_token_ids)
         raw_routed_expert = choice.get("routed_experts")  # 本次 call 的 raw routed_expert，可为 None
+        response_expert_ref = None
 
         # 2. Store 把 input_delta / assistant_output 两个节点补齐字段。
         old_prompt = self.tokenizer.apply_chat_template(
@@ -133,13 +134,14 @@ class SessionServer:
                 response_expert = raw_routed_expert[prefix_len + delta_len :]
 
                 if delta_len > 0:
-                    delta_node_val.expert_key = ray.put(delta_expert)
                     # update delta node in store
-                    await self.store.insert.remote(session_id, old_prompt, delta_node_val)
+                    await self.store.insert.remote(
+                        session_id, old_prompt, delta_node_val, routed_experts=ray.put(delta_expert)
+                    )
 
-                raw_routed_expert = ray.put(response_expert)
-            else:
-                raw_routed_expert = ray.put(raw_routed_expert)
+                raw_routed_expert = response_expert
+
+            response_expert_ref = ray.put(raw_routed_expert)
 
         await self.store.insert.remote(
             session_id,
@@ -149,9 +151,9 @@ class SessionServer:
                 token_ids=output_token_ids,
                 logprobs=output_logprobs,
                 labels=output_token_ids,
-                expert_key=raw_routed_expert,
                 length=len(output_token_ids),
             ),
+            routed_experts=response_expert_ref,
         )
 
         # 3. 返回标准 OpenAI response，session_id 由 SessionClient 层再剥
