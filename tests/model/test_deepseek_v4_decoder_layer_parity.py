@@ -332,6 +332,149 @@ def _copy_hf_to_xtuner_layer(
         xtuner_layer.shared_experts.down_proj.weight.data.copy_(hf_mlp.shared_experts.down_proj.weight.data)
 
 
+# ─── Test anchor: swap XTuner attention with HF's naive attention ──────────────
+
+
+def _install_hf_attention_fallback(
+    xtuner_layer: V4DecoderLayer,
+    hf_layer: HFDecoderLayer,
+    hf_model: HFV4Model,
+) -> None:
+    """Monkey-patch ``xtuner_layer.self_attn.__call__`` to delegate to HF's
+    ``DeepseekV4Attention``. After this, ``xtuner_layer.forward(...)`` produces
+    the same attention output as HF would (bit-identical, weights already
+    copied via :func:`_copy_hf_to_xtuner_layer`). The HC / norms / MoE wrappers
+    around the attention stay XTuner-native.
+
+    The XTuner DSA's call signature is
+    ``forward(hidden_states, position_embeddings, position_embeddings_compressed, seq_ctx)``
+    and returns an ``AttnOutputs`` dict. We adapt those to HF's
+    ``forward(hidden_states, position_embeddings, position_ids, attention_mask, past_key_values)``
+    signature in the patch, wrapping HF's returned ``(attn_output, attn_weights)``
+    back into an ``AttnOutputs``-shaped dict.
+
+    Use this when the parity test wants 0 attention-path error to isolate
+    other divergence sources (MoE kernel reduction order, etc.).
+
+    The XTuner DSA module is kept alive (its weights remain registered as
+    submodule parameters and continue to be copied from HF), so toggling this
+    monkey-patch off restores the XTuner path without state loss.
+
+    Args:
+        xtuner_layer: target XTuner V4DecoderLayer. Its ``self_attn`` is patched
+            in-place.
+        hf_layer: matched HF DecoderLayer holding the source ``DeepseekV4Attention``.
+        hf_model: HF model whose ``rotary_emb`` produces the dual rope cos/sin
+            in HF's interleaved (half-dim) format.
+    """
+    hf_attn = hf_layer.self_attn
+    sliding = hf_model.config.sliding_window
+
+    def _hf_naive_forward(
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        position_embeddings_compressed: tuple[torch.Tensor, torch.Tensor] | None,
+        seq_ctx,
+    ):
+        bsz, seq_len, _ = hidden_states.shape
+        device = hidden_states.device
+        # Reconstruct HF's per-layer-type rope dict from XTuner's two tuples.
+        # XTuner ``DualRotaryEmbedding`` and HF ``DeepseekV4RotaryEmbedding``
+        # now emit the same half-dim interleaved layout (see commit
+        # ``[Fix] V4: switch RoPE to interleaved convention``), so we can
+        # forward the cos/sin directly.
+        position_embeddings_hf = {
+            "main": position_embeddings,
+            "compress": position_embeddings_compressed if position_embeddings_compressed is not None
+                        else position_embeddings,
+        }
+        if seq_ctx is not None and getattr(seq_ctx, "position_ids", None) is not None:
+            position_ids = seq_ctx.position_ids
+        else:
+            position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+        attention_mask = _build_sliding_causal_mask(
+            seq_len, sliding, dtype=hidden_states.dtype, device=device
+        )
+        attn_output, attn_weights = hf_attn(
+            hidden_states,
+            position_embeddings=position_embeddings_hf,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            past_key_values=None,
+        )
+        # XTuner DSA returns an ``AttnOutputs`` TypedDict with these keys.
+        # Only ``projected_output`` is consumed by V4DecoderLayer._attn_compute,
+        # so we fill the others with sentinels.
+        return {
+            "projected_output": attn_output,
+            "raw_output": attn_output,    # unused downstream in this test
+            "softmax_lse": attn_weights,  # unused downstream
+        }
+
+    xtuner_layer.self_attn.forward = _hf_naive_forward   # type: ignore[method-assign]
+
+
+def _install_hf_moe_fallback(
+    xtuner_layer: V4DecoderLayer,
+    hf_layer: HFDecoderLayer,
+) -> None:
+    """Monkey-patch ``xtuner_layer``'s MoE block to delegate to
+    ``hf_layer.mlp`` (HF's ``DeepseekV4SparseMoeBlock``). After this, the
+    XTuner V4DecoderLayer produces HF-bit-identical MoE outputs.
+
+    The patch hooks ``_ffn_compute`` because ``V4DecoderLayer.forward`` calls
+    that method to produce the FFN output + ``router_results`` — replacing
+    it means we don't need to mock the dispatcher / experts call chain
+    individually. ``_ffn_pre_compute`` / ``_ffn_post_compute`` stay as
+    XTuner-native (the post-norm + ``hidden_factor`` scale).
+
+    Together with :func:`_install_hf_attention_fallback` this gives true
+    zero-error parity at the layer output: only HC's two ``hc_pre`` /
+    ``hc_post`` calls (already proven bit-identical to HF in
+    ``test_subcomponent_probe``) are XTuner-native, and they match HF
+    exactly.
+
+    Args:
+        xtuner_layer: target V4DecoderLayer to patch.
+        hf_layer: matched HF decoder layer providing the source ``mlp``.
+    """
+    hf_mlp = hf_layer.mlp
+    is_hash = hf_mlp.is_hash
+
+    def _hf_naive_ffn_compute(
+        x: torch.Tensor,
+        seq_ctx,
+        input_ids: torch.Tensor | None,
+    ):
+        # Resolve hash router's input_ids (HF expects [B, S] not flat).
+        if is_hash:
+            ids = input_ids.view(1, -1) if input_ids is not None else None
+            mlp_out = hf_mlp(x, input_ids=ids)
+            # HF's HashRouter forward signature still emits the same router_results
+            # tuple. Call gate directly to populate router_results.
+            logits, weights, indices = hf_mlp.gate(x, ids)
+        else:
+            mlp_out = hf_mlp(x, input_ids=None)
+            logits, weights, indices = hf_mlp.gate(x)
+        # XTuner's ``_ffn_post_compute(combined, h_normed)`` scales by
+        # ``hidden_factor`` — but HF's ``mlp.forward`` does NOT do that scaling
+        # (V4 config defaults ``hidden_factor=1.0`` so it's a no-op anyway).
+        # Apply XTuner's scaling here to keep the call-site contract.
+        ffn_out = mlp_out * xtuner_layer.hidden_factor
+        router_results = {
+            "logits": logits,
+            "router_weights": weights,
+            "topk_weights": weights,
+            "topk_ids": indices,
+            "topkens_per_expert": torch.histc(
+                indices, bins=_N_ROUTED, min=0, max=_N_ROUTED
+            ),
+        }
+        return ffn_out, router_results
+
+    xtuner_layer._ffn_compute = _hf_naive_ffn_compute   # type: ignore[method-assign]
+
+
 # ─── Forward driver ─────────────────────────────────────────────────────────────
 
 
@@ -453,8 +596,12 @@ def _run_xtuner_layer(
     underlying angles.
     """
     hidden_2d = hidden_states.flatten(2)
-    cos_main, sin_main = _hf_rotary_to_xtuner_format(hf_model.rotary_emb, hidden_2d, position_ids, "main")
-    cos_comp, sin_comp = _hf_rotary_to_xtuner_format(hf_model.rotary_emb, hidden_2d, position_ids, "compress")
+    # Use HF's rotary directly to share bit-identical cos/sin with HF runs.
+    # ``DualRotaryEmbedding`` after the interleaved-rope migration emits the
+    # SAME half-dim layout HF emits, so the two sides can consume the same
+    # tensors without conversion.
+    cos_main, sin_main = hf_model.rotary_emb(hidden_2d, position_ids=position_ids, layer_type="main")
+    cos_comp, sin_comp = hf_model.rotary_emb(hidden_2d, position_ids=position_ids, layer_type="compress")
     bsz, seq_len = position_ids.shape
     assert bsz == 1, "XTuner V4DecoderLayer is hardcoded to packed-varlen with batch=1"
     cu = torch.tensor([0, seq_len], dtype=torch.int32, device=hidden_states.device)
@@ -578,6 +725,84 @@ class TestV4DecoderLayerParity:
             hf_out = _run_hf_layer(hf_model, layer_idx, hidden_states, input_ids, position_ids)
             xt_out = _run_xtuner_layer(xtuner_layer, hidden_states, input_ids, position_ids, hf_model)
         torch.testing.assert_close(xt_out, hf_out, atol=1e-2, rtol=1e-2)
+
+    def test_csa_parity_with_hf_attention_anchor(self) -> None:
+        """CSA layer with attention DELEGATED to HF — measures the rest of
+        the XTuner layer (HC pre/post, norms, MoE) in isolation.
+
+        After ``_install_hf_attention_fallback``, the XTuner V4DecoderLayer's
+        attention sub-path is bit-identical to HF's. Any remaining diff in
+        the layer output comes from the non-attention parts (HC residual mix,
+        MoE expert dispatch). With all other numerical alignments in place
+        (commit ``c64c89fc``) the residual should land in bf16 MoE-kernel
+        noise (~3e-2 abs), but the attention path contributes 0 by
+        construction.
+        """
+        hf_model, xtuner_layer, layer_idx, _ = self._setup(
+            "compressed_sparse_attention", num_hash_layers=0, layer_idx=1
+        )
+        _install_hf_attention_fallback(xtuner_layer, hf_model.layers[layer_idx], hf_model)
+        hidden_states, input_ids, position_ids = self._common_inputs(seq_len=64)
+        with torch.no_grad():
+            hf_out = _run_hf_layer(hf_model, layer_idx, hidden_states, input_ids, position_ids)
+            xt_out = _run_xtuner_layer(xtuner_layer, hidden_states, input_ids, position_ids, hf_model)
+        torch.testing.assert_close(xt_out, hf_out, atol=4e-2, rtol=4e-2)
+
+    def test_hca_parity_with_hf_attention_anchor(self) -> None:
+        """HCA layer with attention delegated to HF — see
+        :meth:`test_csa_parity_with_hf_attention_anchor`."""
+        hf_model, xtuner_layer, layer_idx, _ = self._setup(
+            "heavily_compressed_attention", num_hash_layers=0, layer_idx=1
+        )
+        _install_hf_attention_fallback(xtuner_layer, hf_model.layers[layer_idx], hf_model)
+        hidden_states, input_ids, position_ids = self._common_inputs(seq_len=256)
+        with torch.no_grad():
+            hf_out = _run_hf_layer(hf_model, layer_idx, hidden_states, input_ids, position_ids)
+            xt_out = _run_xtuner_layer(xtuner_layer, hidden_states, input_ids, position_ids, hf_model)
+        torch.testing.assert_close(xt_out, hf_out, atol=4e-2, rtol=4e-2)
+
+    def test_csa_parity_full_hf_anchor(self) -> None:
+        """CSA layer with BOTH attention and MoE delegated to HF — zero error
+        target. Only HC pre/post stays XTuner-native (already proven bit-
+        identical to HF in :meth:`test_subcomponent_probe`)."""
+        hf_model, xtuner_layer, layer_idx, _ = self._setup(
+            "compressed_sparse_attention", num_hash_layers=0, layer_idx=1
+        )
+        hf_layer = hf_model.layers[layer_idx]
+        _install_hf_attention_fallback(xtuner_layer, hf_layer, hf_model)
+        _install_hf_moe_fallback(xtuner_layer, hf_layer)
+        hidden_states, input_ids, position_ids = self._common_inputs(seq_len=64)
+        with torch.no_grad():
+            hf_out = _run_hf_layer(hf_model, layer_idx, hidden_states, input_ids, position_ids)
+            xt_out = _run_xtuner_layer(xtuner_layer, hidden_states, input_ids, position_ids, hf_model)
+        # ``1/128 = 2^-7`` is one bf16 ULP at output magnitude ~1; the
+        # remaining residual when both attention and MoE are delegated to HF
+        # is a single ULP rounding drift through the multi-op bf16 chain
+        # (HC pre fp32 outputs → bf16 casts → bf16 adds in HC post). True
+        # bit-identical parity (atol=0) is impossible in bf16 without also
+        # replacing HC, which would make the test "HF == HF" tautological.
+        torch.testing.assert_close(xt_out, hf_out, atol=1 / 128, rtol=1 / 128)
+
+    def test_hca_parity_full_hf_anchor(self) -> None:
+        """HCA layer with BOTH attention and MoE delegated to HF — zero error
+        target. See :meth:`test_csa_parity_full_hf_anchor`."""
+        hf_model, xtuner_layer, layer_idx, _ = self._setup(
+            "heavily_compressed_attention", num_hash_layers=0, layer_idx=1
+        )
+        hf_layer = hf_model.layers[layer_idx]
+        _install_hf_attention_fallback(xtuner_layer, hf_layer, hf_model)
+        _install_hf_moe_fallback(xtuner_layer, hf_layer)
+        hidden_states, input_ids, position_ids = self._common_inputs(seq_len=256)
+        with torch.no_grad():
+            hf_out = _run_hf_layer(hf_model, layer_idx, hidden_states, input_ids, position_ids)
+            xt_out = _run_xtuner_layer(xtuner_layer, hidden_states, input_ids, position_ids, hf_model)
+        # ``1/128 = 2^-7`` is one bf16 ULP at output magnitude ~1; the
+        # remaining residual when both attention and MoE are delegated to HF
+        # is a single ULP rounding drift through the multi-op bf16 chain
+        # (HC pre fp32 outputs → bf16 casts → bf16 adds in HC post). True
+        # bit-identical parity (atol=0) is impossible in bf16 without also
+        # replacing HC, which would make the test "HF == HF" tautological.
+        torch.testing.assert_close(xt_out, hf_out, atol=1 / 128, rtol=1 / 128)
 
     def test_subcomponent_probe(self, capsys) -> None:
         """Walk through the sliding-attention forward step by step and print
