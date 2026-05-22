@@ -248,6 +248,14 @@ RUN pip install .[all] -v --no-cache-dir -i ${DEFAULT_PYPI_URL}
 
 WORKDIR ${CODESPACE}
 
+# use custom fla
+ARG FLA_URL
+RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+    if [ -n "${FLA_URL}" ]; then \
+        pip uninstall -y fla-core flash-linear-attention && \
+        pip install --no-cache-dir --no-deps --no-build-isolation "git+${FLA_URL}" -i ${DEFAULT_PYPI_URL}; \
+    fi
+
 # nccl update for torch 2.6.0
 # RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 RUN if [ "x${TORCH_VERSION}" = "x2.6.0" ]; then \
