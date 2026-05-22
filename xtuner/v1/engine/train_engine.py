@@ -518,6 +518,14 @@ class TrainEngine:
         If the checkpoint does not contain optimizer states, only model weights will be loaded regardless of
         load_states/load_args settings.
         """
+        # Float8Handler.__init__ calls torch.serialization.add_safe_globals for
+        # WeightWithDynamic*Float8CastTensor, but the handler is lazily initialized
+        # on the first training step. We must register the safe globals before
+        # dcp.load attempts to unpickle those custom tensor types.
+        for mod in self.model.modules():
+            if isinstance(mod, BaseModel):
+                _ = mod.float8_handler
+
         load_optimizer = load_states or load_args
         state_dict = self._get_dcp_state_dict(cpu_offload=True, save_optimizer=load_optimizer)
 

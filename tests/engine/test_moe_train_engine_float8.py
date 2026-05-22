@@ -2,6 +2,7 @@ import os
 import tempfile
 import shutil
 import time
+from pathlib import Path
 
 import parametrize
 import torch
@@ -286,6 +287,101 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         try:
             dist.destroy_process_group(pg)
         except:
+            pass
+
+    @parametrize.parametrize(
+        "device,ep_size",
+        [
+            ("cuda", 1),
+        ],
+    )
+    def test_float8_dcp_resume(self, device, ep_size):
+        """Regression test for float8 DCP resume bug.
+
+        Float8Handler lazily registers safe globals on first train step. Before
+        the fix, load_dcp() would raise _pickle.UnpicklingError when called on
+        a fresh engine (before any train step) because the float8 tensor types
+        had not been registered as safe globals yet.
+        """
+        pg = self.create_pg(device)
+        temp_dir = tempfile.mkdtemp()
+        if dist.get_rank() == 0:
+            temp_dir = [temp_dir]
+        else:
+            temp_dir = [None]
+        dist.broadcast_object_list(temp_dir, src=0)
+        temp_dir = temp_dir[0]
+
+        float8_cfg = Float8Config(
+            scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+            scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+        )
+        model_cfg = Qwen3MoE30BA3Config(
+            num_hidden_layers=1,
+            balancing_loss_cfg=BalancingLossConfig(),
+        )
+        model_cfg.float8_cfg = float8_cfg
+
+        optim_cfg: AdamWConfig = AdamWConfig()
+        fsdp_cfg: FSDPConfig = FSDPConfig(cpu_offload=False, ep_size=ep_size)
+        loss_cfg = CELossConfig()
+
+        engine = TrainEngine(model_cfg=model_cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg)
+        engine.from_hf(hf_path=QWEN3_MOE_PATH, strict=False)
+
+        tok = AutoTokenizer.from_pretrained(QWEN3_MOE_PATH)
+        txt = (
+            "리팩토링하면서 Float8Handler 생성을 eager 에서 lazy 로 바꾸는 과정에서 add_safe_globals"
+            "의 호출 타이밍이 dcp.load 이후로 밀려난 것이 이 버그의 원인입니다."
+        )
+        input_ids = tok.encode(txt, return_tensors="pt").view(1, -1)
+        labels = input_ids.clone()
+        input_ids = input_ids[:, :-1]
+        labels = labels[:, 1:]
+        seq_len = 128
+        input_ids = pad_to_max_length(input_ids, 0, max_length=seq_len)
+        labels = pad_to_max_length(labels, -100, max_length=seq_len)
+        pack_len = seq_len - input_ids.shape[1]
+
+        def make_engine_input():
+            seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
+            seq_ctx.num_padding = pack_len
+            lbl = labels.to(DEVICE)
+            LossContext = loss_cfg.loss_ctx_cls
+            loss_ctx = loss_cfg.build(data={"shifted_labels": lbl}, sp_mesh=None)
+            loss_ctx_list = LossContext.build_batches([loss_ctx])
+            return [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx_list[0]})]
+
+        # Run one training step so float8 tensors are materialized in the checkpoint.
+        engine.train_step(make_engine_input())
+        grad_norm = engine.clip_grad_norm()
+        engine.step_optimizer(grad_norm)
+
+        dcp_dir = os.path.join(temp_dir, "step_1")
+        engine.save_dcp(Path(dcp_dir))
+
+        # engine1's train_step triggered Float8Handler.__init__ which called
+        # add_safe_globals globally. Clear those globals now to simulate a fresh
+        # process that has never run a training step, which is exactly the
+        # scenario that occurs during a real DCP resume.
+        saved_safe_globals = torch.serialization.get_safe_globals()
+        torch.serialization.clear_safe_globals()
+        try:
+            # Create a fresh engine that has never run a training step, then call
+            # load_dcp.
+            engine2 = TrainEngine(model_cfg=model_cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg)
+            engine2.model.set_hf(QWEN3_MOE_PATH)
+            engine2.load_dcp(Path(dcp_dir))
+        finally:
+            torch.serialization.add_safe_globals(saved_safe_globals)
+
+        if dist.get_rank() == 0:
+            shutil.rmtree(temp_dir)
+
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except Exception:
             pass
 
     @property
