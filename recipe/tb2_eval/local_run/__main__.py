@@ -31,9 +31,20 @@ def _load_config(path: Path) -> Any:
     return mod
 
 
+def _inject_session_id(runner_cfg: dict[str, Any], session_id: str) -> None:
+    for entry in runner_cfg.get("infer", {}).get("entries", []):
+        if isinstance(entry, dict) and entry.get("name") == "start_agent_daemon":
+            entry.setdefault("env", {})["XTUNER_SESSION_ID"] = session_id
+
+
 async def _run_one(dataset: Any, item: AgentRolloutItem) -> dict[str, Any]:
     runner_cfg = item.pipeline or dataset.pipeline
-    runner = create_object(deepcopy(runner_cfg)) if isinstance(runner_cfg, dict) else runner_cfg
+    if isinstance(runner_cfg, dict):
+        runner_cfg = deepcopy(runner_cfg)
+        _inject_session_id(runner_cfg, str(item.uid))
+        runner = create_object(runner_cfg)
+    else:
+        runner = runner_cfg
     result = await runner.run(item)
     dumped = result.model_dump(mode="json", exclude={"artifacts", "pipeline"})
     dumped["artifacts"] = _serialize_artifacts(result.artifacts)
