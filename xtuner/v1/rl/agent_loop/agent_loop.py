@@ -4,6 +4,7 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import TypeAlias, cast
 
+import ray
 from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
@@ -19,6 +20,10 @@ from xtuner.v1.rl.utils import (
 )
 from xtuner.v1.utils import get_logger, ray_method
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
+
+
+AGENT_LOOP_CONCURRENCY_GROUP_GENERATE = "generate"
+DEFAULT_JUDGER_CANCEL_TIMEOUT_S = 5.0
 
 
 class AgentLoopConfig(ABC, BaseModel):
@@ -73,7 +78,7 @@ class AgentLoopConfig(ABC, BaseModel):
         return cast(
             "RayAgentLoopProxy",
             CPUActorLauncher.build_actor(
-                AgentLoopActor,
+                RayAgentLoop,
                 self,
                 rollout_controller,
                 judger,
@@ -97,7 +102,7 @@ class AgentLoopConfig(ABC, BaseModel):
         return cast(
             list["RayAgentLoopProxy"],
             CPUActorLauncher.build_actors(
-                AgentLoopActor,
+                RayAgentLoop,
                 self,
                 rollout_controller,
                 judger,
@@ -165,6 +170,20 @@ class AgentLoop(ABC):
         group_samples = await generated_samples
         return group_samples
 
+    async def pause(self) -> None:
+        # Base AgentLoop only pauses rollout generation.
+        #
+        # We intentionally do not define generic judger pause behavior in the
+        # Judger base class. Judger subclasses can implement judge() in very
+        # different ways, and one base pause implementation cannot cover all of
+        # them. Requiring users to follow a base-class pause protocol would also
+        # increase the mental overhead of writing a new judge() implementation.
+        #
+        # For now, only SingleTurnAgentLoop defines how to pause an in-flight
+        # judger call. Other AgentLoop subclasses should override pause() if
+        # they need their own judger pause semantics.
+        await self.rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
+
 
 class RouterAgentLoop:
     def __init__(self, workers: list[RayAgentLoopProxy], rollout_ctl: RolloutController):
@@ -204,6 +223,11 @@ class RouterAgentLoop:
     def get_worker_status(self) -> dict[str, int]:
         return {str(worker): load for worker, load in self._worker_loads.items()}
 
+    async def pause(self) -> None:
+        await asyncio.gather(
+            *(worker.pause.remote() for worker in self.workers),
+        )
+
 
 async def get_agent_loop_rollout_ctl(agent_loop: AgentLoopSpec) -> RolloutController:
     rollout_ctl = getattr(agent_loop, "rollout_ctl", None)
@@ -230,11 +254,11 @@ class AgentLoopActor:
             logger=logger,
         )
 
-    @ray_method
+    @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         return await self.agent_loop.generate_sample(rollout_state, **kwargs)
 
-    @ray_method
+    @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         return await self.agent_loop.generate_group(rollout_state, **kwargs)
 
@@ -242,7 +266,18 @@ class AgentLoopActor:
     async def get_rollout_ctl(self):
         return self.agent_loop.rollout_ctl
 
+    @ray_method
+    async def pause(self) -> None:
+        return await self.agent_loop.pause()
 
-RayAgentLoop = cast(ActorClass[AgentLoopActor], CPUActorLauncher.to_actor_class(AgentLoopActor))
+
+RayAgentLoop = cast(
+    ActorClass[AgentLoopActor],
+    ray.remote(
+        concurrency_groups={
+            AGENT_LOOP_CONCURRENCY_GROUP_GENERATE: 1000,
+        },
+    )(AgentLoopActor),
+)
 RayAgentLoopProxy: TypeAlias = ActorProxy[AgentLoopActor]
 AgentLoopSpec: TypeAlias = AgentLoop | RayAgentLoopProxy | RouterAgentLoop
