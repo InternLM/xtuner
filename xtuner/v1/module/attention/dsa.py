@@ -397,20 +397,21 @@ class DeepSeekSparseAttention(nn.Module):
                 "position_embeddings must carry one (cos, sin) row per token; "
                 f"got cos {tuple(cos.shape)}, sin {tuple(sin.shape)}, expected token dim {total_tokens}"
             )
-        # XTuner's RotaryEmbedding emits cos/sin at the full head_dim (rotate-half
-        # convention), but DSA only applies rope to the qk_rope_head_dim suffix of
-        # each head. Accept either shape: caller-sliced qk_rope_head_dim, or
-        # full-head-dim cos/sin which we slice to the first qk_rope_head_dim entries.
-        # The first half of XTuner's `cat((freqs, freqs), dim=-1)` layout matches
-        # the V4 reference's qk_rope_head_dim-sized cos/sin bit-identically.
-        if cos.size(-1) < self.qk_rope_head_dim:
+        # ``DualRotaryEmbedding`` emits half-dim cos/sin (interleaved RoPE
+        # convention — one θ per adjacent dim-pair). DSA's ``_apply_rope`` does
+        # the ``repeat_interleave(2, dim=-1)`` internally to match the
+        # qk_rope_head_dim slice. We accept ``cos.size(-1) == qk_rope_head_dim // 2``
+        # as the canonical input and tolerate older callers that still pass
+        # ``qk_rope_head_dim`` (sliced to the first half).
+        expected_half = self.qk_rope_head_dim // 2
+        if cos.size(-1) < expected_half:
             raise ValueError(
-                "position_embeddings last dim must be at least qk_rope_head_dim "
-                f"({self.qk_rope_head_dim}); got {cos.size(-1)}"
+                "position_embeddings last dim must be at least qk_rope_head_dim // 2 "
+                f"({expected_half}); got {cos.size(-1)}"
             )
-        if cos.size(-1) > self.qk_rope_head_dim:
-            cos = cos[..., : self.qk_rope_head_dim]
-            sin = sin[..., : self.qk_rope_head_dim]
+        if cos.size(-1) > expected_half:
+            cos = cos[..., :expected_half]
+            sin = sin[..., :expected_half]
 
         # 1. Q-LoRA path. `q_lowrank` is reused by the Indexer (V4 reuses
         # the same low-rank Q stream for the score path).
@@ -460,16 +461,9 @@ class DeepSeekSparseAttention(nn.Module):
             assert self.compressor is not None  # compress_ratio > 0 always materialises it
             kv_compressed, cu_c = self.compressor(hidden_states, cu_q)  # [1, total_c, D], [B+1]
             if self.compress_ratio == 4:
-                half = self.qk_rope_head_dim // 2
-                cos_c_full, sin_c_full = position_embeddings_compressed  # type: ignore[misc]
-                # why: the Indexer's internal RoPE uses the complex-pair
-                # (``view_as_complex``) convention from the V4 reference and
-                # therefore expects half-dim cos/sin. XTuner's dual-rope
-                # module emits full-dim rotate-half cos/sin which carries the
-                # same frequency vector duplicated as ``cat((freqs, freqs), dim=-1)``;
-                # the first half is exactly the half-dim cos/sin the Indexer needs.
-                cos_c = cos_c_full[..., :half]
-                sin_c = sin_c_full[..., :half]
+                # ``DualRotaryEmbedding`` already emits half-dim cos/sin in the
+                # interleaved convention the Indexer expects; pass through.
+                cos_c, sin_c = position_embeddings_compressed  # type: ignore[misc]
                 assert self.indexer is not None  # compress_ratio == 4 always materialises it
                 # ``self.indexer`` emits the top-k *indices* that feed into
                 # sparse_attn's ``gather``; ``gather`` propagates no gradient
@@ -596,28 +590,34 @@ def _apply_rope_inverse_split(
 
 
 def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    # x: [..., S, *, rope_head_dim]; cos/sin: [B, S, rope_head_dim].
-    # The cos/sin tensors from XTuner's RotaryEmbedding are already
-    # `cat((freqs, freqs))` — i.e. each half spans the full rope dim — so the
-    # rotate-half formula `x * cos + rotate_half(x) * sin` applies directly.
+    # V4's interleaved RoPE: pairs (x[2i], x[2i+1]) get rotated by angle θ_i.
+    # cos/sin from ``DualRotaryEmbedding`` are half-dim ``[B, S, D/2]`` (one
+    # θ_i per pair); we ``repeat_interleave`` them to full ``D`` so each
+    # adjacent pair sees its own angle in the broadcast multiply. Matches HF
+    # ``DeepseekV4RotaryEmbedding`` + ``apply_rotary_pos_emb`` and the V4
+    # reference's complex-pair ``apply_rotary_emb``.
+    cos = cos.repeat_interleave(2, dim=-1)
+    sin = sin.repeat_interleave(2, dim=-1)
     cos_b, sin_b = _broadcast_cos_sin(cos, sin, x)
     return x * cos_b + _rotate_half(x) * sin_b
 
 
 def _apply_rope_inverse(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    # The inverse of rotate-half rope is `x * cos - rotate_half(x) * sin`,
-    # derived by inverting the 2-D rotation per dim-pair (sin → -sin).
+    # Inverse rotation: same pairing as :func:`_apply_rope`, flip sin's sign.
+    cos = cos.repeat_interleave(2, dim=-1)
+    sin = sin.repeat_interleave(2, dim=-1)
     cos_b, sin_b = _broadcast_cos_sin(cos, sin, x)
     return x * cos_b - _rotate_half(x) * sin_b
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-    # Standard rotate-half: split last dim in two halves, rotate by 90 deg
-    # in the (x1, x2) plane.
-    half = x.size(-1) // 2
-    x1 = x[..., :half]
-    x2 = x[..., half:]
-    return torch.cat([-x2, x1], dim=-1)
+    # Interleaved rotate-half: pair (x[2i], x[2i+1]) rotates 90° → (-x[2i+1], x[2i]).
+    # NOT the cat-style "first half / second half" pairing that
+    # ``torch.cat([-x2, x1], dim=-1)`` over halves would give — V4 uses
+    # adjacent pairs (same convention as HF / V4-ref complex rotation).
+    x_even = x[..., 0::2]
+    x_odd = x[..., 1::2]
+    return torch.stack([-x_odd, x_even], dim=-1).flatten(-2)
 
 
 def _broadcast_cos_sin(

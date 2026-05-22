@@ -64,18 +64,13 @@ _HIDDEN = 64
 _MOE_INTER = 32             # used as ``intermediate_size`` on HF, ``moe_intermediate_size`` on XTuner
 _N_HEADS = 8
 _HEAD_DIM = 32              # MLA full head_dim
-# NOTE on rope. HF V4 uses the "complex-pair / interleaved" rotate-half
-# convention (cos/sin shape = qk_rope_head_dim / 2, applied to adjacent dim
-# pairs `(x[2i], x[2i+1])`). XTuner's DSA uses the "cat-style" rotate-half
-# convention (cos/sin shape = qk_rope_head_dim with halves repeated, applied
-# to dim pairs `(x[i], x[i + D/2])`). These two are mathematically inequivalent
-# rotations on the same input for ``qk_rope_head_dim >= 4`` (different
-# element pairings). For ``qk_rope_head_dim == 2`` they degenerate to the same
-# single ``(x[0], x[1])`` pair, so we set rope dim = 2 here to sidestep the
-# convention mismatch and still exercise the rope code paths on both sides.
-# Production V4-Flash uses qk_rope_head_dim=64; a follow-up is needed to
-# reconcile the conventions in XTuner against the HF / V4-reference path.
-_QK_ROPE = 2
+# XTuner V4 now uses HF's interleaved RoPE convention (DualRotaryEmbedding
+# emits half-dim cos/sin; DSA's ``_apply_rope`` applies adjacent-pair
+# rotation matching HF's ``DeepseekV4RotaryEmbedding`` +
+# ``apply_rotary_pos_emb``). This means we can exercise rope at production-
+# like dims here without weight permutation. We pick 16 (not the V4-Flash
+# default 64) just to keep this test fixture small.
+_QK_ROPE = 16
 _SLIDING = 32               # sliding window length (multiple of 8 keeps FlashAttention happy if ever enabled)
 _INDEX_TOPK = 8
 _INDEX_HEAD_DIM = 16

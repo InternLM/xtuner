@@ -500,7 +500,19 @@ class DualRotaryEmbedding(nn.Module):
                 otherwise use `rope_theta` freqs.
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor]: `(cos, sin)` of shape `[B, S, H]`.
+            tuple[torch.Tensor, torch.Tensor]: `(cos, sin)` of shape
+            `[B, S, qk_rope_head_dim/2]` — half-dim, in the *interleaved*
+            (adjacent-pair) RoPE convention matching HF's
+            ``DeepseekV4RotaryEmbedding`` and the DeepSeek-V4-Flash reference
+            (``inference/kernel.py``). See :func:`_apply_rope` in
+            :mod:`xtuner.v1.module.attention.dsa` for the matching rotation.
+
+            We do NOT do the legacy ``torch.cat((freqs, freqs), dim=-1)`` doubling
+            that the cat-style ``rotate_half`` would consume: V4's RoPE pairs
+            adjacent dims (``(x[2i], x[2i+1])``), not first/second-half dims
+            (``(x[i], x[i+D/2])``). Doubling here and then doing a cat-style
+            rotation produces a *different* rotation than V4 reference does on
+            the same input — see the parity-test commit message for the math.
         """
         inv_freq = self.inv_freq_compressed if use_compressed else self.inv_freq_dense
 
@@ -510,9 +522,8 @@ class DualRotaryEmbedding(nn.Module):
         device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float().to(x.device) @ position_ids_expanded.float()).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
+            cos = freqs.cos()
+            sin = freqs.sin()
 
         cos = cos * self.attention_scaling
         sin = sin * self.attention_scaling

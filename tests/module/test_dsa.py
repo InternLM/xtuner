@@ -58,16 +58,14 @@ def _make_dsa(
 
 
 def _make_position_embeddings(seq_len: int, rope_head_dim: int, base: float = 10000.0) -> tuple[torch.Tensor, torch.Tensor]:
-    # XTuner's RotaryEmbedding emits full-dim cos/sin built as
-    # `cat((freqs, freqs), dim=-1)`. Mirror that layout so DSA's rotate-half
-    # path sees the same input shape it would at runtime.
+    # ``DualRotaryEmbedding`` emits half-dim cos/sin (one θ per adjacent
+    # rope-dim pair) for V4's interleaved RoPE convention. Mirror that here.
     half = rope_head_dim // 2
     freqs = 1.0 / (base ** (torch.arange(0, half, dtype=torch.float32) / half))
     positions = torch.arange(seq_len, dtype=torch.float32)
     angles = torch.outer(positions, freqs)  # [seq_len, half]
-    full = torch.cat([angles, angles], dim=-1)  # [seq_len, rope_head_dim]
-    cos = full.cos().unsqueeze(0)
-    sin = full.sin().unsqueeze(0)
+    cos = angles.cos().unsqueeze(0)
+    sin = angles.sin().unsqueeze(0)
     return cos, sin
 
 
