@@ -239,9 +239,9 @@
 
 1. 确认并收口 `insert` / `search` / `keys` 行为。
 2. missing session 的 `insert` / `search` / `keys` 自动创建空 `RolloutRunning` session。
-3. 非 `RolloutRunning` 的 `insert` 抛 `RuntimeError`。
+3. 非 `RolloutRunning` 的 `insert` 记录 error 日志并跳过写入。
 4. `RolloutRunning` / `RolloutFinished` / `TrainRunning` 允许 `search` / `keys`。
-5. `ToBeReleased` 的 `search` / `keys` 防御性抛 `RuntimeError`。
+5. `ToBeReleased` 的 `search` / `keys` 记录 error 日志并返回空结果。
 
 不做：
 
@@ -259,8 +259,8 @@
 1. missing `search` 创建空 `RolloutRunning` session。
 2. missing `keys` 创建空 `RolloutRunning` session。
 3. `RolloutFinished` / `TrainRunning` 允许 `search` / `keys`。
-4. 非 `RolloutRunning` 的 `insert` 抛 `RuntimeError`。
-5. `ToBeReleased` 的 `search` / `keys` 抛 `RuntimeError`。
+4. 非 `RolloutRunning` 的 `insert` 记录 error 日志并跳过写入。
+5. `ToBeReleased` 的 `search` / `keys` 记录 error 日志并返回空结果。
 
 ## 3. 建议执行顺序
 

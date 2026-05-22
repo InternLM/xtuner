@@ -389,6 +389,9 @@ class RolloutTraceStore:
             List[str]: A list of all keys in the session's Trie.
         """
         trie = self.get_or_create(session_id)
+        if trie.state == TraceState.TO_BE_RELEASED:
+            get_logger().error(f"Trace session {session_id!r} is pending release; skip keys.")
+            return []
         return trie.keys()
 
     def insert(
@@ -408,6 +411,11 @@ class RolloutTraceStore:
                 object for this session.
         """
         trie = self.get_or_create(session_id)
+        if trie.state != TraceState.ROLLOUT_RUNNING:
+            get_logger().error(
+                f"Cannot insert into trace session {session_id!r} in state {trie.state.value}; skip insert."
+            )
+            return
         if routed_experts is not None:
             expert_key = make_expert_key(session_id)
             self.objects[expert_key] = routed_experts
@@ -427,6 +435,9 @@ class RolloutTraceStore:
             Tuple[str, List["TreeNode"]]: The matched prefix and matched nodes.
         """
         trie = self.get_or_create(session_id)
+        if trie.state == TraceState.TO_BE_RELEASED:
+            get_logger().error(f"Trace session {session_id!r} is pending release; skip search.")
+            return "", []
         return trie.search(text, filter_none)
 
     def export_training_trace(self, session_id: str, prompt_text: str) -> dict:

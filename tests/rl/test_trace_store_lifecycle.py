@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
 
@@ -12,9 +13,11 @@ class RolloutTraceStoreLifecycleTest(unittest.TestCase):
         store_cls = RolloutTraceStore.__ray_metadata__.modified_class
         self.store = store_cls()
 
+    def _segment(self, key: str = "prompt"):
+        return TokenizedSegment(text=key, token_ids=[1], labels=[1], logprobs=[0.0])
+
     def _insert_segment(self, session_id: str, key: str = "prompt"):
-        segment = TokenizedSegment(text=key, token_ids=[1], labels=[1], logprobs=[0.0])
-        self.store.insert(session_id, key, segment)
+        self.store.insert(session_id, key, self._segment(key))
 
     def _state(self, session_id: str):
         state = self.store.get_state(session_id)
@@ -128,6 +131,50 @@ class RolloutTraceStoreLifecycleTest(unittest.TestCase):
         self.assertEqual(self._state("fresh-running"), TraceState.ROLLOUT_RUNNING.value)
         self.assertEqual(self._state("finished"), TraceState.ROLLOUT_FINISHED.value)
         self.assertEqual(self._state("train-running"), TraceState.TRAIN_RUNNING.value)
+
+    def test_missing_search_and_keys_create_rollout_running_sessions(self):
+        matched_key, nodes = self.store.search("missing-search", "prompt", True)
+        keys = self.store.keys("missing-keys")
+
+        self.assertEqual(matched_key, "")
+        self.assertEqual(nodes, [])
+        self.assertEqual(keys, [])
+        self.assertEqual(self._state("missing-search"), TraceState.ROLLOUT_RUNNING.value)
+        self.assertEqual(self._state("missing-keys"), TraceState.ROLLOUT_RUNNING.value)
+
+    def test_finished_and_train_running_sessions_remain_readable(self):
+        self._insert_segment("finished-readable")
+        self.store.mark_rollout_status("finished-readable", Status.COMPLETED)
+        self._move_to_train_running("train-readable")
+
+        for session_id in ("finished-readable", "train-readable"):
+            self.assertEqual(self.store.keys(session_id), ["prompt"])
+            matched_key, nodes = self.store.search(session_id, "prompt", True)
+            self.assertEqual(matched_key, "prompt")
+            self.assertEqual(len(nodes), 1)
+
+    def test_non_running_insert_logs_and_skips_write(self):
+        self._insert_segment("finished-insert")
+        self.store.mark_rollout_status("finished-insert", Status.COMPLETED)
+
+        with patch("xtuner.v1.rl.rollout.trace_store.get_logger") as get_logger:
+            self.store.insert("finished-insert", "after-finish", self._segment("after-finish"))
+
+        get_logger.return_value.error.assert_called_once()
+        self.assertEqual(self.store.keys("finished-insert"), ["prompt"])
+        matched_key, nodes = self.store.search("finished-insert", "after-finish", True)
+        self.assertEqual(matched_key, "")
+        self.assertEqual(nodes, [])
+
+    def test_to_be_released_search_and_keys_log_and_return_empty(self):
+        self._insert_segment("pending-release")
+        self.store.sessions["pending-release"].state = TraceState.TO_BE_RELEASED
+
+        with patch("xtuner.v1.rl.rollout.trace_store.get_logger") as get_logger:
+            self.assertEqual(self.store.keys("pending-release"), [])
+            self.assertEqual(self.store.search("pending-release", "prompt", True), ("", []))
+
+        self.assertEqual(get_logger.return_value.error.call_count, 2)
 
 
 if __name__ == "__main__":
