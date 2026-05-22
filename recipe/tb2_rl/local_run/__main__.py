@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import importlib.util
 import json
+import os
 import sys
 import traceback
 from copy import deepcopy
@@ -18,7 +19,8 @@ from typing import Any
 
 from lagent.utils import create_object
 
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import AgentRolloutItem
+from xtuner.v1.data_proto.rl_data import RolloutState
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop import AgentInSandboxLoop, AgentRolloutItem
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.trace import init_writer
 
 
@@ -51,6 +53,38 @@ async def _run_one(dataset: Any, item: AgentRolloutItem) -> dict[str, Any]:
     return dumped
 
 
+async def _run_agentloop(dataset: Any, item: AgentRolloutItem, agent_loop: AgentInSandboxLoop) -> dict[str, Any]:
+    item = item.model_copy(update={"pipeline": item.pipeline or dataset.pipeline}, deep=True)
+    if item.task_root is None:
+        raise ValueError("AgentRolloutItem.task_root is required.")
+    instruction_path = Path(item.task_root) / item.instruction
+    content = instruction_path.read_text(encoding="utf-8")
+    prompt_ids = agent_loop.tokenizer.encode(content, add_special_tokens=False)
+
+    rollout_state = RolloutState(
+        message=[{"role": "user", "content": content}],
+        prompt_ids=prompt_ids,
+        num_tokens=len(prompt_ids),
+        data_source={item.data_source: 1.0},
+        reward_model={"style": item.data_source},
+        uid=item.uid,
+        message_uid=item.group_id,
+        extra_fields={"rollout_item": item},
+    )
+    result = await agent_loop.generate_sample(rollout_state)
+    return {
+        "id": item.id,
+        "status": result.status.value,
+        "reward": result.reward["score"] if result.reward and "score" in result.reward else None,
+        "error": result.error_msg,
+        "finish_reason": result.finish_reason,
+        "response": result.response,
+        "response_ids_len": len(result.response_ids or []),
+        "prompt_ids_len": len(result.prompt_ids or []),
+        "agent_artifacts": _serialize_artifacts(result.extra_fields.get("agent_artifacts", {})),
+    }
+
+
 def _serialize_artifacts(artifacts: dict[str, Any]) -> dict[str, Any]:
     """Keep text artifacts as-is; collapse bytes blobs to a size placeholder."""
     out: dict[str, Any] = {}
@@ -81,11 +115,19 @@ async def main_async(args: argparse.Namespace) -> int:
 
     print(f"running {len(pairs)} task(s) (concurrency={args.concurrency})", file=sys.stderr)
     sem = asyncio.Semaphore(max(1, args.concurrency))
+    agent_loop = None
+    if args.mode == "agentloop":
+        if not args.hf_checkpoint:
+            raise ValueError("--hf-checkpoint is required in agentloop mode.")
+        agent_loop = AgentInSandboxLoop(hf_checkpoint=args.hf_checkpoint)
 
     async def guarded(idx: int, td: Path, item: AgentRolloutItem) -> dict[str, Any]:
         async with sem:
             item = item.model_copy(update={"group_id": 0, "uid": idx})
             try:
+                if args.mode == "agentloop":
+                    assert agent_loop is not None
+                    return await _run_agentloop(dataset, item, agent_loop)
                 return await _run_one(dataset, item)
             except Exception as exc:
                 tb = traceback.format_exc()
@@ -97,6 +139,7 @@ async def main_async(args: argparse.Namespace) -> int:
         coros = [guarded(i, td, item) for i, (td, item) in enumerate(pairs)]
         for coro in asyncio.as_completed(coros):
             result = await coro
+            print(result)
             line = json.dumps(result, ensure_ascii=False)
             if out_fp is not None:
                 out_fp.write(line + "\n")
@@ -115,6 +158,12 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="Limit total tasks (0=all)")
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--output", help="Optional JSONL path to dump full per-sample results")
+    parser.add_argument("--mode", choices=("runner", "agentloop"), default="runner")
+    parser.add_argument(
+        "--hf-checkpoint",
+        default=os.environ.get("HF_CHECKPOINT") or os.environ.get("QWEN3P5_VL_MODEL_PATH"),
+        help="Tokenizer/processor checkpoint used by agentloop mode.",
+    )
     return asyncio.run(main_async(parser.parse_args()))
 
 
