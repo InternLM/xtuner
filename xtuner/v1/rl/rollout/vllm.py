@@ -212,6 +212,9 @@ class vLLMWorker(RolloutWorker):
             payload["input_ids"] = extra_info["train_prompt_ids"]
 
         vllm_sample_params = self._transform_sample_params(sample_params, extra_params)
+        vllm_sample_params["return_routed_experts"] = self.enable_return_routed_experts and sample_params.get(
+            "return_routed_experts", False
+        )
         payload.update(vllm_sample_params)
 
         return await self._safe_post_request(url, headers, payload)
@@ -376,6 +379,7 @@ class vLLMWorker(RolloutWorker):
         last_token_ids: list[int] = []
         last_logprobs: list[float] = []
         routed_experts = None
+        should_return_routed_experts = self.enable_return_routed_experts and sample_params.return_routed_experts
 
         response_json = response.json()
         response_choice = response_json["choices"][0]
@@ -395,7 +399,7 @@ class vLLMWorker(RolloutWorker):
             self.receive_abort_request.set()
             self.logger.info(f"Setting receive_abort_request to True for rank {self.rank}")
 
-        if self.enable_return_routed_experts:
+        if should_return_routed_experts:
             routed_experts = response_choice.get("routed_experts", response_json.get("routed_experts"))
             if routed_experts is not None:
                 if isinstance(routed_experts, str):
@@ -416,7 +420,7 @@ class vLLMWorker(RolloutWorker):
                 validation_errors.append("missing logprobs")
             if not last_trajectory:
                 validation_errors.append("empty response text")
-            if self.enable_return_routed_experts and routed_experts is None:
+            if should_return_routed_experts and routed_experts is None:
                 validation_errors.append("missing routed_experts")
 
             if validation_errors:

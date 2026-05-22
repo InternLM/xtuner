@@ -961,6 +961,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             logprobs: list[float] = []
             routed_experts = None
             returned_response = ""
+            should_return_routed_experts = self.enable_return_routed_experts and sample_params.return_routed_experts
             try:
                 meta_info = response.get("meta_info") or {}
                 finish_reason_info = meta_info.get("finish_reason") or {}
@@ -991,9 +992,8 @@ class RolloutWorker(SingleAcceleratorWorker):
                 else:
                     num_return_tokens = response["meta_info"].get("completion_tokens", 0)
                     response_ids = response["output_ids"][-num_return_tokens:] if num_return_tokens > 0 else []
-
                 # 获取 routed_experts
-                if self.enable_return_routed_experts:
+                if should_return_routed_experts:
                     assert "routed_experts" in response["meta_info"], (
                         "enable_return_routed_experts is True, but routed_experts is not in meta_info"
                     )
@@ -1019,7 +1019,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     if sample_params.return_logprob and not logprobs:
                         validation_errors.append("missing logprobs")
 
-                    if self.enable_return_routed_experts and routed_experts is None:
+                    if should_return_routed_experts and routed_experts is None:
                         validation_errors.append("missing routed_experts")
 
                     if validation_errors:

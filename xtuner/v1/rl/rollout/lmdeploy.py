@@ -118,8 +118,15 @@ class LMDeployWorker(RolloutWorker):
                 text_prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
                 prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
                 payload["input_ids"] = prompt_token_ids
-            sample_params.return_routed_experts = True if self.enable_return_routed_experts else False
-            lmdeploy_sample_params = self._transform_sample_params(sample_params)
+            lmdeploy_sample_params = self._transform_sample_params(
+                sample_params.model_copy(
+                    update={
+                        "return_routed_experts": (
+                            self.enable_return_routed_experts and sample_params.return_routed_experts
+                        )
+                    }
+                )
+            )
             payload.update(lmdeploy_sample_params)
         else:
             payload = {
