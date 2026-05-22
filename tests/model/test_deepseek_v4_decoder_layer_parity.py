@@ -51,7 +51,7 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.model.moe.deepseek_v4 import DeepSeekV4Config, V4DecoderLayer
 from xtuner.v1.module.attention.dsa import DSAConfig
-from xtuner.v1.module.decoder_layer.hc_block import HCWrapperConfig
+from xtuner.v1.module.decoder_layer.hc_block import HCWrapperConfig, hc_post, hc_pre
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig
 from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.module.router.hash_router import HashRouterConfig
@@ -404,23 +404,21 @@ def _hf_rotary_to_xtuner_format(
     position_ids: torch.Tensor,
     layer_type: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute cos/sin in XTuner's cat-style layout, sharing inv_freq with HF.
+    """Compute half-dim cos/sin sharing inv_freq with HF.
 
-    HF emits ``cos = freqs.cos()`` with shape ``[B, S, qk_rope_head_dim/2]``;
-    XTuner expects ``cos = cat(freqs, freqs, dim=-1).cos()`` with shape
-    ``[B, S, qk_rope_head_dim]``. We pull HF's per-layer-type ``inv_freq``
-    directly so both sides see the *same* underlying angles; the only
-    difference is the cat-vs-half layout (and, when ``qk_rope_head_dim ≤ 2``,
-    the rotation convention degenerates to the same single ``(x[0], x[1])``
-    pair on both sides — see the ``_QK_ROPE`` comment at the top of this
-    module).
+    Both XTuner's ``DualRotaryEmbedding`` and HF's
+    ``DeepseekV4RotaryEmbedding`` now emit half-dim cos/sin
+    (``[B, S, qk_rope_head_dim/2]``) in the interleaved RoPE convention —
+    after the ``[Fix] V4: switch RoPE to interleaved convention`` commit,
+    the two are layout- and convention-equivalent. We still build cos/sin
+    via this helper rather than calling HF's rotary directly so we can pass
+    them straight into XTuner's DSA, sharing HF's ``inv_freq`` for
+    bit-identical angles.
     """
     inv_freq = getattr(hf_rotary, f"{layer_type}_inv_freq")  # [qk_rope_head_dim/2]
     scaling = getattr(hf_rotary, f"{layer_type}_attention_scaling", 1.0)
-    # freqs: [B, S, half]
     freqs = position_ids.float().unsqueeze(-1) * inv_freq.float()
-    emb = torch.cat([freqs, freqs], dim=-1)
-    return (emb.cos() * scaling).to(hidden_states_2d.dtype), (emb.sin() * scaling).to(hidden_states_2d.dtype)
+    return (freqs.cos() * scaling).to(hidden_states_2d.dtype), (freqs.sin() * scaling).to(hidden_states_2d.dtype)
 
 
 def _run_xtuner_layer(
@@ -571,3 +569,125 @@ class TestV4DecoderLayerParity:
             hf_out = _run_hf_layer(hf_model, layer_idx, hidden_states, input_ids, position_ids)
             xt_out = _run_xtuner_layer(xtuner_layer, hidden_states, input_ids, position_ids, hf_model)
         torch.testing.assert_close(xt_out, hf_out, atol=1e-2, rtol=1e-2)
+
+    def test_subcomponent_probe(self, capsys) -> None:
+        """Walk through the sliding-attention forward step by step and print
+        the first sub-component where HF and XTuner diverge.
+
+        Both sides share weights (copied via ``_copy_hf_to_xtuner_layer``) so
+        every step should match to within bf16 reduction-order tolerance
+        (~1e-4 abs). The first step that exceeds that bound is the bug site.
+
+        We instrument the *sliding-only* case (no compressor, no Indexer) to
+        keep the surface small — once that path matches we can extend the
+        probe to CSA / HCA.
+        """
+        hf_model, xtuner_layer, layer_idx, _ = self._setup(
+            "sliding_attention", num_hash_layers=0, layer_idx=0
+        )
+        hidden_states, input_ids, position_ids = self._common_inputs(seq_len=32)
+
+        bsz, seq_len = position_ids.shape
+        device = hidden_states.device
+        n_heads = _N_HEADS
+        head_dim = _HEAD_DIM
+        qk_rope_head_dim = _QK_ROPE
+        hidden_dim = _HIDDEN
+
+        hf_layer = hf_model.layers[layer_idx]
+        ha = hf_layer.self_attn
+        xa = xtuner_layer.self_attn
+
+        steps: list[tuple[str, torch.Tensor, torch.Tensor]] = []  # (name, hf_t, xt_t)
+
+        with torch.no_grad():
+            # ─── Step 1: HC pre on attention ─────────────────────────────────
+            # HF: attn_hc(hidden_states) -> (post, comb, collapsed)
+            # XTuner: hc_pre(hidden_states, hc_attn_fn, hc_attn_scale, hc_attn_base, ...)
+            #         -> (collapsed, post, comb)  (different return order!)
+            hf_post, hf_comb, hf_collapsed = hf_layer.attn_hc(hidden_states)
+            xt_collapsed, xt_post, xt_comb = hc_pre(
+                hidden_states,
+                xtuner_layer.hc_attn_fn,
+                xtuner_layer.hc_attn_scale,
+                xtuner_layer.hc_attn_base,
+                xtuner_layer.hc_mult,
+                xtuner_layer.hc_sinkhorn_iters,
+                xtuner_layer.hc_eps,
+            )
+            steps.append(("hc_pre.collapsed", hf_collapsed, xt_collapsed))
+            steps.append(("hc_pre.post", hf_post, xt_post))
+            steps.append(("hc_pre.comb", hf_comb, xt_comb))
+
+            # Use HF's collapsed for both sides downstream so divergence is
+            # attributed to the SUB-STEP, not to upstream cascade.
+            x = hf_collapsed
+
+            # ─── Step 2: input_layernorm ─────────────────────────────────────
+            hf_norm = hf_layer.input_layernorm(x)
+            xt_norm = xtuner_layer.input_layernorm(x)
+            steps.append(("input_layernorm", hf_norm, xt_norm))
+            x = hf_norm   # reuse downstream
+
+            # ─── Step 3: Q-LoRA chain ────────────────────────────────────────
+            hf_q_a = ha.q_a_proj(x)
+            xt_q_a = xa.wq_a(x)
+            steps.append(("q_a_proj", hf_q_a, xt_q_a))
+
+            hf_q_a_n = ha.q_a_norm(hf_q_a)
+            xt_q_a_n = xa.q_norm(hf_q_a)
+            steps.append(("q_a_norm", hf_q_a_n, xt_q_a_n))
+
+            q_lowrank = hf_q_a_n
+
+            hf_q_b = ha.q_b_proj(q_lowrank).view(bsz, seq_len, n_heads, head_dim).transpose(1, 2)
+            xt_q_b = xa.wq_b(q_lowrank).unflatten(-1, (n_heads, head_dim))
+            # Compare in matching layout: HF [B, H, S, D], XTuner [B, S, H, D]
+            steps.append(("q_b_proj", hf_q_b.transpose(1, 2), xt_q_b))
+
+            # ─── Step 4: per-head RMSNorm on Q ───────────────────────────────
+            # HF uses ``DeepseekV4UnweightedRMSNorm`` (no weight); XTuner inlines
+            # ``rsqrt(q_sq.mean) + multiply`` directly. Same math.
+            q_for_norm = hf_q_b   # [B, H, S, D] layout from HF
+            hf_q_normed = ha.q_b_norm(q_for_norm)
+            # Inline XTuner version, applied to the same layout.
+            q_sq = q_for_norm * q_for_norm
+            q_inv = torch.rsqrt(q_sq.mean(-1, keepdim=True, dtype=torch.float32) + _RMS_EPS).to(q_for_norm.dtype)
+            xt_q_normed = q_for_norm * q_inv
+            steps.append(("q_b_norm (per-head)", hf_q_normed, xt_q_normed))
+
+            # ─── Step 5: KV path ─────────────────────────────────────────────
+            hf_kv = ha.kv_norm(ha.kv_proj(x)).view(bsz, seq_len, 1, head_dim).transpose(1, 2)
+            xt_kv = xa.kv_norm(xa.wkv(x)).unflatten(-1, (1, head_dim))
+            steps.append(("kv_proj+norm", hf_kv.transpose(1, 2), xt_kv))
+
+        # Print first 3 mismatches above 1e-4 (bf16 noise floor) so we can see
+        # how far down the chain the agreement holds.
+        printed = 0
+        for name, hf_t, xt_t in steps:
+            if hf_t.shape != xt_t.shape:
+                print(f"[FAIL] {name}: shape mismatch hf={tuple(hf_t.shape)} xt={tuple(xt_t.shape)}")
+                printed += 1
+                continue
+            diff = (hf_t.float() - xt_t.float()).abs()
+            max_diff = diff.max().item()
+            mean_diff = diff.mean().item()
+            tag = "OK" if max_diff < 1e-4 else "DIFF"
+            print(f"[{tag}] {name:30s} max={max_diff:.4e}  mean={mean_diff:.4e}  shape={tuple(hf_t.shape)}")
+            if max_diff > 1e-4:
+                printed += 1
+            if printed >= 5:
+                break
+
+        # Force capsys to flush
+        captured = capsys.readouterr()
+        # Re-print so pytest -s users see it; also fail if any step is off
+        print(captured.out)
+        any_diff = any(
+            (hf_t.shape == xt_t.shape and (hf_t.float() - xt_t.float()).abs().max().item() > 1e-4)
+            or hf_t.shape != xt_t.shape
+            for _, hf_t, xt_t in steps
+        )
+        assert not any_diff, (
+            "Sub-component probe found divergence — see printed output above for first offending step."
+        )
