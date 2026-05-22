@@ -16,9 +16,17 @@ from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 
 
 class MockRolloutState:
-    def __init__(self, id, seq_staleness=1, status=Status.COMPLETED, reward_score=None):
+    def __init__(
+        self,
+        id,
+        seq_staleness=1,
+        status=Status.COMPLETED,
+        reward_score=None,
+        session_uid=None,
+    ):
         self.id = id
         self.uid = id
+        self.session_uid = session_uid
         self.status = status
         self.seq_staleness = seq_staleness
         self.response_ids = []
@@ -114,6 +122,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             progress=progress,
             is_valid_sample_fn=strategy.is_valid_sample_fn,
             stale_threshold=getattr(strategy, "stale_threshold", None),
+            enable_partial_rollout=getattr(strategy, "enable_partial_rollout", False),
         )
 
     def test_produce_progress_methods_keep_absolute_window(self):
@@ -827,12 +836,13 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         stale_item.response_model_steps = [3]
         await self.replay_buffer.put([stale_item], task_name)
 
-        expired_counts = await self.replay_buffer.refresh_staleness(
+        refresh_results = await self.replay_buffer.refresh_staleness(
             task_stale_thresholds={task_name: 2},
             current_train_step=6,
         )
         expired_groups = await self.replay_buffer.get(10, task_name, Status.EXPIRED)
 
-        self.assertEqual(expired_counts, {task_name: 1})
+        self.assertEqual(refresh_results[task_name].expired_count, 1)
+        self.assertEqual(refresh_results[task_name].expired_session_ids, [])
         self.assertEqual(len(expired_groups), 1)
         self.assertEqual(expired_groups[0][0].seq_staleness, 2)

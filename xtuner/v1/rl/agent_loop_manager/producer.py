@@ -22,6 +22,7 @@ from xtuner.v1.data_proto.rl_data import (
 )
 from xtuner.v1.rl.agent_loop import AgentLoopSpec, get_agent_loop_rollout_ctl
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
+from xtuner.v1.rl.rollout.trace_store import get_store
 from xtuner.v1.rl.utils import calculate_seq_staleness, create_task
 from xtuner.v1.utils import get_logger
 
@@ -307,6 +308,7 @@ class ProduceContext:
     progress: ProduceProgress
     is_valid_sample_fn: IsValidSampleFn = default_is_valid_sample_fn
     stale_threshold: int | None = None
+    enable_partial_rollout: bool = False
 
     @property
     def consumer_step(self) -> int:
@@ -383,6 +385,16 @@ class ProduceContext:
             current_train_step=self.consumer_step,
             stale_threshold=self.stale_threshold,
         )
+        trace_events = [(item.session_uid, item.status) for item in group if item.session_uid is not None]
+        if trace_events:
+            try:
+                store = get_store()
+                await store.mark_rollout_statuses.remote(
+                    trace_events,
+                    enable_partial_rollout=self.enable_partial_rollout,
+                )
+            except Exception as exc:
+                logger.error(f"Failed to report trace store rollout status events: {exc}")
         produced_tokens = 0
         for item in group:
             response_ids = getattr(item, "response_ids", None)

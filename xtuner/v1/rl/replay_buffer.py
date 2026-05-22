@@ -60,6 +60,12 @@ class StorageItem:
 
 
 @dataclass
+class RefreshStalenessResult:
+    expired_count: int
+    expired_session_ids: list[int | str]
+
+
+@dataclass
 class SerializedRayObjectRef:
     value: Any
 
@@ -502,14 +508,14 @@ class ReplayBuffer:
         task_stale_thresholds: dict[str, int],
         current_train_step: int,
         statuses: list[Status] | None = None,
-    ) -> dict[str, int]:
+    ) -> dict[str, RefreshStalenessResult]:
         # 刷新可复用样本的 staleness；completed / aborted 都可能来自旧权重，需要按 train_step 淘汰。
         for task_name, stale_threshold in task_stale_thresholds.items():
             if stale_threshold <= 0:
                 raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
         if statuses is None:
             statuses = [Status.COMPLETED, Status.ABORTED]
-        expired_counts: dict[str, int] = {}
+        results: dict[str, RefreshStalenessResult] = {}
         async with self._lock:
             updated_records: list[StorageItem] = []
             for task_name, stale_threshold in task_stale_thresholds.items():
@@ -521,6 +527,7 @@ class ReplayBuffer:
                 }
                 records = await self._storage.get(query_dsl)
                 expired_count = 0
+                expired_session_ids: list[int | str] = []
                 for record in records:
                     refresh_seq_staleness(record.item, current_train_step)
                     staleness = max((getattr(item, "seq_staleness", 0) for item in record.item), default=0)
@@ -532,12 +539,18 @@ class ReplayBuffer:
                             item.status = Status.EXPIRED
                         status = Status.EXPIRED
                         expired_count += 1
+                        for item in record.item:
+                            if item.session_uid is not None:
+                                expired_session_ids.append(item.session_uid)
                     else:
                         status = get_group_status(record.item)
                     updated_records.append(replace(record, status=status, staleness=staleness))
-                expired_counts[task_name] = expired_count
+                results[task_name] = RefreshStalenessResult(
+                    expired_count=expired_count,
+                    expired_session_ids=expired_session_ids,
+                )
             await self._storage.update(updated_records)
-        return expired_counts
+        return results
 
     async def is_ready(
         self,

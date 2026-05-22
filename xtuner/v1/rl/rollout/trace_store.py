@@ -355,6 +355,34 @@ class RolloutTraceStore:
             return TraceState.ROLLOUT_RUNNING.value
         raise AssertionError(f"Unhandled rollout status: {status!r}")
 
+    def mark_rollout_statuses(
+        self,
+        events: list[tuple[Any, Status]],
+        *,
+        enable_partial_rollout: bool = False,
+    ) -> dict[Any, str]:
+        """Apply final rollout status events reported by the producer."""
+        results: dict[Any, str] = {}
+        for session_id, status in events:
+            try:
+                trie = self.sessions.get(session_id)
+                if trie is None:
+                    continue
+                if status == Status.EXPIRED and trie.state == TraceState.ROLLOUT_FINISHED:
+                    results[session_id] = self.mark_rollout_discarded(session_id)
+                else:
+                    results[session_id] = self.mark_rollout_status(
+                        session_id,
+                        status,
+                        enable_partial_rollout=enable_partial_rollout,
+                    )
+            except Exception as exc:
+                get_logger().error(
+                    f"Failed to mark trace store rollout status for session {session_id!r} "
+                    f"with status {status}: {exc}"
+                )
+        return results
+
     def mark_commit_failed(self, session_id: str) -> str:
         """Release a rollout session whose response commit failed."""
         trie = self.sessions.get(session_id)

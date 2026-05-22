@@ -14,6 +14,7 @@ from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
     _TaskRunner,
 )
 from xtuner.v1.rl.agent_loop_manager.producer import GROUP_GENERATE_TIME_KEY, ProduceBatchStatus
+from xtuner.v1.rl.replay_buffer import RefreshStalenessResult
 from xtuner.v1.rl.utils import calculate_seq_staleness
 
 
@@ -144,7 +145,11 @@ class _SequencedProduceStrategy(_FakeProduceStrategy):
 
 
 class _FakeReplayBuffer:
-    def __init__(self, rollout_states_by_task: dict[str, list[list[str]]], leftover_counts: dict[tuple[str, Status], int]):
+    def __init__(
+        self,
+        rollout_states_by_task: dict[str, list[list[str]]],
+        leftover_counts: dict[tuple[str, Status], int],
+    ):
         self._rollout_states_by_task = rollout_states_by_task
         self._leftover_counts = leftover_counts
         self.saved_paths: list[Path] = []
@@ -168,7 +173,7 @@ class _FakeReplayBuffer:
         current_train_step: int,
         statuses: list[Status] | None = None,
     ):
-        expired_counts = {}
+        refresh_results = {}
         for task_name, stale_threshold in task_stale_thresholds.items():
             self.refresh_staleness_calls.append(
                 (task_name, current_train_step, stale_threshold, tuple(statuses or ()))
@@ -180,8 +185,11 @@ class _FakeReplayBuffer:
                         state.seq_staleness = calculate_seq_staleness(
                             min(response_model_steps), current_train_step
                         )
-            expired_counts[task_name] = 0
-        return expired_counts
+            refresh_results[task_name] = RefreshStalenessResult(
+                expired_count=0,
+                expired_session_ids=[],
+            )
+        return refresh_results
 
     async def is_ready(self, task_batch_sizes: dict[str, int], *, group_status: Status = Status.COMPLETED):
         for task_name, batch_size in task_batch_sizes.items():

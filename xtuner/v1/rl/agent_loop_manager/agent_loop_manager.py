@@ -14,6 +14,7 @@ from xtuner.v1.rl.agent_loop import AgentLoopConfig, AgentLoopSpec, get_agent_lo
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.rollout.trace_store import get_store
 from xtuner.v1.rl.utils import asyncio_run
 from xtuner.v1.utils import get_logger
 
@@ -209,6 +210,7 @@ def _build_produce_context(
         progress=progress,
         is_valid_sample_fn=getattr(task_runner.produce_strategy, "is_valid_sample_fn", default_is_valid_sample_fn),
         stale_threshold=getattr(task_runner.produce_strategy, "stale_threshold", None),
+        enable_partial_rollout=getattr(task_runner.produce_strategy, "enable_partial_rollout", False),
     )
 
 
@@ -461,15 +463,28 @@ class AgentLoopManager:
             stale_threshold = getattr(task.produce_strategy, "stale_threshold", 1)
             task_stale_thresholds[task.task_name] = stale_threshold
 
-        expired_counts = await self.replay_buffer.refresh_staleness(
+        refresh_results = await self.replay_buffer.refresh_staleness(
             task_stale_thresholds=task_stale_thresholds,
             current_train_step=train_step,
             statuses=statuses,
         )
-        for task_name, expired_count in expired_counts.items():
+        for task in self.task_runners:
+            task_name = task.task_name
+            refresh_result = refresh_results[task_name]
             self.logger.info(
-                f"[AgentLoopManager][{self.name}] Refresh staleness for task {task_name}: expired_count={expired_count}"
+                f"[AgentLoopManager][{self.name}] Refresh staleness for task {task_name}: "
+                f"expired_count={refresh_result.expired_count}"
             )
+            if refresh_result.expired_session_ids:
+                trace_events = [(session_id, Status.EXPIRED) for session_id in refresh_result.expired_session_ids]
+                try:
+                    store = get_store()
+                    await store.mark_rollout_statuses.remote(
+                        trace_events,
+                        enable_partial_rollout=getattr(task.produce_strategy, "enable_partial_rollout", False),
+                    )
+                except Exception as exc:
+                    self.logger.error(f"Failed to report trace store expired rollout status events: {exc}")
 
     def _get_task_batch_sizes_for_step(self, batch_size: int, train_step: int) -> dict[str, int]:
         if len(self.task_runners) == 1:
