@@ -2,12 +2,12 @@
 
 This module keeps project configs readable:
 
-    from xtuner.v1.rl.agent_loop.rl_task import Runner, SandboxStage
+    from xtuner.v1.rl.agent_loop.sandbox_agent_loop import Runner, SandboxStage
 
     runner = dict(type=Runner, infer=dict(type=SandboxStage, ...))
 """
 
-from xtuner.v1.rl.agent_loop.rl_task.hooks import (
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.hooks import (
     DownloadHook,
     ExecHook,
     InstallLagent,
@@ -19,8 +19,8 @@ from xtuner.v1.rl.agent_loop.rl_task.hooks import (
     UploadChosenAgent,
     UploadHook,
 )
-from xtuner.v1.rl.agent_loop.rl_task.runner import Runner
-from xtuner.v1.rl.agent_loop.rl_task.sandbox import (
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.runner import Runner
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import (
     DetachedShellEntry,
     DiagnosticFile,
     EntryCapture,
@@ -36,7 +36,7 @@ from xtuner.v1.rl.agent_loop.rl_task.sandbox import (
     SandboxStage,
     ShellEntry,
 )
-from xtuner.v1.rl.agent_loop.rl_task.schemas import (
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
     AgentSpec,
     RolloutError,
@@ -46,7 +46,7 @@ from xtuner.v1.rl.agent_loop.rl_task.schemas import (
     StageResult,
     StageStatus,
 )
-from xtuner.v1.rl.agent_loop.rl_task.validator import Judger, JudgerValidator
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.validator import Judger, JudgerValidator
 
 
 __all__ = [

@@ -18,8 +18,8 @@ from typing import Any
 
 from lagent.utils import create_object
 
-from xtuner.v1.rl.agent_loop.rl_task.schemas import AgentRolloutItem
-from xtuner.v1.rl.agent_loop.rl_task.trace import init_writer
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import AgentRolloutItem
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.trace import init_writer
 
 
 def _load_config(path: Path) -> Any:

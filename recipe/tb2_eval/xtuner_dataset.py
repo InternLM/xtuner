@@ -16,7 +16,7 @@ from transformers import PreTrainedTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.datasets.data_item import CacheItem
 from xtuner.v1.datasets.utils import CachableTokenizeFunction
-from xtuner.v1.rl.agent_loop.rl_task.schemas import AgentRolloutItem
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import AgentRolloutItem
 from xtuner.v1.utils import get_logger
 
 logger = get_logger()

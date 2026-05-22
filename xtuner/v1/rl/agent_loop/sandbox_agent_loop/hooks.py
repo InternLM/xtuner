@@ -25,13 +25,13 @@ from typing import Any
 
 from lagent.utils import create_object
 
-from xtuner.v1.rl.agent_loop.rl_task.sandbox import (
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import (
     Hook,
     exec_in,
     http_upload,
     upload_tar_and_extract,
 )
-from xtuner.v1.rl.agent_loop.rl_task.schemas import (
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
     AgentSpec,
     RolloutError,

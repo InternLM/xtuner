@@ -26,7 +26,7 @@ from typing import Any
 
 from lagent.serving.sandbox.providers.gateway import GatewayProvider
 
-from xtuner.v1.rl.agent_loop.rl_task import (
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop import (
     AgentSpec,
     DetachedShellEntry,
     DownloadHook,

@@ -33,7 +33,7 @@ from typing import Any, Mapping
 
 from lagent.utils import create_object
 
-from xtuner.v1.rl.agent_loop.rl_task.schemas import (
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
     EntryOutcome,
     EntryRecord,
@@ -43,7 +43,7 @@ from xtuner.v1.rl.agent_loop.rl_task.schemas import (
     StageResult,
     StageStatus,
 )
-from xtuner.v1.rl.agent_loop.rl_task.trace import span
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.trace import span
 from xtuner.v1.utils import get_logger
 
 

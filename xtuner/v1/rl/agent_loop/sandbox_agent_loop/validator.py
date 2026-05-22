@@ -12,8 +12,8 @@ from typing import Any, Literal
 
 from lagent.utils import create_object
 
-from xtuner.v1.rl.agent_loop.rl_task.sandbox import SandboxPool, SandboxStage
-from xtuner.v1.rl.agent_loop.rl_task.schemas import (
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import SandboxPool, SandboxStage
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
     RolloutError,
     StageRecord,
