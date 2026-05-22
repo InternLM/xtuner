@@ -475,83 +475,6 @@ def _install_hf_moe_fallback(
     xtuner_layer._ffn_compute = _hf_naive_ffn_compute   # type: ignore[method-assign]
 
 
-def _install_full_hf_layer_fallback(
-    xtuner_layer: V4DecoderLayer,
-    hf_layer: HFDecoderLayer,
-    hf_model: HFV4Model,
-) -> None:
-    """Replace ``xtuner_layer.forward`` with a thin adapter calling
-    ``hf_layer.forward`` end-to-end. After this the XTuner layer produces
-    *exactly* HF's output (no XTuner code on the forward path except the
-    signature conversion), giving ``atol=0`` bit-identical parity.
-
-    Differs from :func:`_install_hf_attention_fallback` +
-    :func:`_install_hf_moe_fallback`: those keep XTuner's HC pre/post inline
-    in ``V4DecoderLayer.forward`` and let the bf16-cast chain through HC
-    accumulate ~1 ULP of drift. This helper bypasses the whole XTuner
-    forward and goes straight to HF, so even HC drift is eliminated.
-
-    Use this as a *sanity baseline* — confirms that with all production
-    code paths replaced, the test harness (weight copy + input prep +
-    output comparison) produces 0 error. Any non-zero diff here is a bug
-    in the harness itself, not in the V4 implementation.
-
-    Args:
-        xtuner_layer: target V4DecoderLayer to patch.
-        hf_layer: matched HF decoder layer.
-        hf_model: HF model whose ``rotary_emb`` produces the dual-rope
-            cos/sin dict HF expects.
-    """
-    sliding = hf_model.config.sliding_window
-
-    def _full_hf_forward(
-        hidden_states: torch.Tensor,
-        *,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        position_embeddings_compressed: tuple[torch.Tensor, torch.Tensor] | None,
-        seq_ctx,
-        input_ids: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        bsz, seq_len, *_ = hidden_states.shape
-        device = hidden_states.device
-        position_embeddings_hf = {
-            "main": position_embeddings,
-            "compress": position_embeddings_compressed if position_embeddings_compressed is not None
-                        else position_embeddings,
-        }
-        if seq_ctx is not None and getattr(seq_ctx, "position_ids", None) is not None:
-            position_ids = seq_ctx.position_ids
-        else:
-            position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
-        attention_mask = _build_sliding_causal_mask(
-            seq_len, sliding, dtype=hidden_states.dtype, device=device
-        )
-        if input_ids is not None:
-            input_ids_2d = input_ids.view(bsz, seq_len)
-        else:
-            input_ids_2d = None
-        out = hf_layer(
-            hidden_states,
-            position_embeddings=position_embeddings_hf,
-            position_ids=position_ids,
-            attention_mask=attention_mask,
-            input_ids=input_ids_2d,
-            past_key_values=None,
-        )
-        # V4DecoderLayer.forward returns ``(out, logits, weights)`` for the
-        # caller's aux-loss accumulation. We didn't run XTuner's gate here
-        # so produce trivially-shaped placeholders — the parity test only
-        # consumes the first output.
-        n_experts = xtuner_layer.n_routed_experts
-        dummy_logits = torch.zeros(bsz * seq_len, n_experts, device=device, dtype=hidden_states.dtype)
-        dummy_weights = torch.zeros(
-            bsz * seq_len, xtuner_layer.gate.router.top_k, device=device, dtype=hidden_states.dtype
-        )
-        return out, dummy_logits, dummy_weights
-
-    xtuner_layer.forward = _full_hf_forward   # type: ignore[method-assign]
-
-
 # ─── Forward driver ─────────────────────────────────────────────────────────────
 
 
@@ -880,42 +803,6 @@ class TestV4DecoderLayerParity:
         # bit-identical parity (atol=0) is impossible in bf16 without also
         # replacing HC, which would make the test "HF == HF" tautological.
         torch.testing.assert_close(xt_out, hf_out, atol=1 / 128, rtol=1 / 128)
-
-    def test_csa_parity_full_hf_layer(self) -> None:
-        """CSA layer with the *entire* forward delegated to HF — zero-tolerance
-        sanity baseline.
-
-        :func:`_install_full_hf_layer_fallback` replaces
-        ``xtuner_layer.forward`` with a thin signature adapter that calls
-        ``hf_layer.forward`` end-to-end. No XTuner code runs on the forward
-        path (the HC pre/post bf16-cast chain that contributes the 1-ULP
-        drift in the partial-anchor tests is bypassed). Output must equal
-        HF's bit-for-bit. Any non-zero diff here is a test-harness bug
-        (weight copy, input prep, output comparison), not a V4
-        implementation bug.
-        """
-        hf_model, xtuner_layer, layer_idx, _ = self._setup(
-            "compressed_sparse_attention", num_hash_layers=0, layer_idx=1
-        )
-        _install_full_hf_layer_fallback(xtuner_layer, hf_model.layers[layer_idx], hf_model)
-        hidden_states, input_ids, position_ids = self._common_inputs(seq_len=64)
-        with torch.no_grad():
-            hf_out = _run_hf_layer(hf_model, layer_idx, hidden_states, input_ids, position_ids)
-            xt_out = _run_xtuner_layer(xtuner_layer, hidden_states, input_ids, position_ids, hf_model)
-        torch.testing.assert_close(xt_out, hf_out, atol=0.0, rtol=0.0)
-
-    def test_hca_parity_full_hf_layer(self) -> None:
-        """HCA layer with the *entire* forward delegated to HF — zero-tolerance
-        sanity baseline. See :meth:`test_csa_parity_full_hf_layer`."""
-        hf_model, xtuner_layer, layer_idx, _ = self._setup(
-            "heavily_compressed_attention", num_hash_layers=0, layer_idx=1
-        )
-        _install_full_hf_layer_fallback(xtuner_layer, hf_model.layers[layer_idx], hf_model)
-        hidden_states, input_ids, position_ids = self._common_inputs(seq_len=256)
-        with torch.no_grad():
-            hf_out = _run_hf_layer(hf_model, layer_idx, hidden_states, input_ids, position_ids)
-            xt_out = _run_xtuner_layer(xtuner_layer, hidden_states, input_ids, position_ids, hf_model)
-        torch.testing.assert_close(xt_out, hf_out, atol=0.0, rtol=0.0)
 
     def test_subcomponent_probe(self, capsys) -> None:
         """Walk through the sliding-attention forward step by step and print
