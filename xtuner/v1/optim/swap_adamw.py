@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 
 import torch
+from torch.optim.adam import adam as torch_adam
 
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
@@ -91,81 +92,21 @@ class SwapAdamW(torch.optim.AdamW):
                         cpu_state_dtensor[key] = cpu_tensor
                         cpu_state[key] = cpu_tensor
 
+                # Keep per-parameter step semantics consistent with torch.optim.AdamW.
+                cpu_state_dtensor["step"] = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+
                 self._param_to_cpu_states_map[param] = cpu_state
 
         DEVICE_MODULE.synchronize()
 
-    @staticmethod
-    def _next_step(group: dict) -> int:
-        step = group.get("step", 0)
-        if isinstance(step, torch.Tensor):
-            next_step = int(step.item()) + 1
-        else:
-            next_step = int(step) + 1
-        group["step"] = next_step
-        return next_step
-
     @torch.no_grad()
     def step(self, closure=None):
-        def adamw_step(
-            param,
-            grad,
-            exp_avg,
-            exp_avg_sq,
-            max_exp_avg_sq,
-            step,
-            lr,
-            beta1,
-            beta2,
-            eps,
-            weight_decay,
-            amsgrad,
-            maximize,
-        ):
-            with torch.no_grad():
-                """完全等价的非融合实现."""
-                bias_correction1 = 1 - beta1**step
-                bias_correction2 = 1 - beta2**step
-
-                # 更新一阶动量
-                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-
-                # 更新二阶动量
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
-
-                if amsgrad:
-                    # AMSGrad: 取历史最大值
-                    if max_exp_avg_sq is None:
-                        max_exp_avg_sq = exp_avg_sq.clone()
-                    torch.maximum(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
-                    denom = (max_exp_avg_sq.sqrt() / (bias_correction2**0.5)) + eps
-                else:
-                    denom = (exp_avg_sq.sqrt() / (bias_correction2**0.5)) + eps
-
-                step_size = lr / bias_correction1
-
-                # 参数更新
-                if maximize:
-                    param.addcdiv_(exp_avg, denom, value=step_size)
-                else:
-                    param.addcdiv_(exp_avg, denom, value=-step_size)
-
-                # 权重衰减（解耦）
-                if weight_decay != 0:
-                    param.mul_(1 - lr * weight_decay)
-
         loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
 
         params_list = list(self._param_to_group_map.keys())
-        step_tensors: dict[int, torch.Tensor] = {}
-        for group in self.param_groups:
-            step_value = self._next_step(group)
-            step_tensors[id(group)] = torch.tensor(
-                step_value, dtype=torch.int64, device=DEVICE_MODULE.current_device()
-            )
 
         for param in params_list:
             if param.grad is None:
@@ -174,6 +115,13 @@ class SwapAdamW(torch.optim.AdamW):
                 raise RuntimeError("AdamW does not support sparse gradients")
 
             group = self._param_to_group_map[param]
+            param_state = self.state[param]
+            step_tensor = param_state.get("step")
+            if step_tensor is None:
+                step_tensor = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+                param_state["step"] = step_tensor
+            assert isinstance(step_tensor, torch.Tensor)
+
             amsgrad = bool(group["amsgrad"])
             beta1, beta2 = group["betas"]
             cpu_state = self._param_to_cpu_states_map[param]
@@ -191,20 +139,34 @@ class SwapAdamW(torch.optim.AdamW):
                 assert isinstance(cpu_max_exp_avg_sq, torch.Tensor)
                 max_exp_avg_sq = cpu_max_exp_avg_sq.to(device=DEVICE, non_blocking=True)
 
-            adamw_step(
-                self._to_local_tensor(param),
-                self._to_local_tensor(param.grad),
-                self._to_local_tensor(exp_avg),
-                self._to_local_tensor(exp_avg_sq),
-                self._to_local_tensor(max_exp_avg_sq),
-                step_tensors[id(group)],
+            local_param = self._to_local_tensor(param)
+            local_grad = self._to_local_tensor(param.grad)
+            local_exp_avg = self._to_local_tensor(exp_avg)
+            local_exp_avg_sq = self._to_local_tensor(exp_avg_sq)
+            local_max_exp_avg_sq = self._to_local_tensor(max_exp_avg_sq) if max_exp_avg_sq is not None else None
+
+            torch_adam(
+                [local_param],
+                [local_grad],
+                [local_exp_avg],
+                [local_exp_avg_sq],
+                [local_max_exp_avg_sq] if local_max_exp_avg_sq is not None else [],
+                [step_tensor],
                 amsgrad=amsgrad,
+                has_complex=torch.is_complex(local_param),
                 lr=group["lr"],
                 beta1=beta1,
                 beta2=beta2,
                 weight_decay=group["weight_decay"],
                 eps=group["eps"],
                 maximize=group["maximize"],
+                foreach=group["foreach"],
+                capturable=group["capturable"],
+                differentiable=group["differentiable"],
+                fused=group["fused"],
+                grad_scale=getattr(self, "grad_scale", None),
+                found_inf=getattr(self, "found_inf", None),
+                decoupled_weight_decay=group["decoupled_weight_decay"],
             )
 
             cpu_exp_avg.copy_(exp_avg, non_blocking=True)
