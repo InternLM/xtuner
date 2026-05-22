@@ -127,8 +127,15 @@ class NoAuxRouter(nn.Module, RouterProtocol):
             scores_for_choice = scores_for_choice.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
 
         # select top-k experts
+        # ``sorted=False`` matches HF's ``DeepseekV4TopKRouter`` exactly
+        # (transformers/models/deepseek_v4/modeling_deepseek_v4.py:1034). The
+        # downstream ``scores.gather(1, indices)`` doesn't care about index
+        # order, but tied-score expert sets can pick *different* orderings
+        # between ``sorted=True`` and ``sorted=False`` on CUDA, which
+        # propagates into different routed-expert dispatches and breaks
+        # bit-equivalence with HF. ``sorted=False`` is also marginally faster.
         # (only applicable when ep_size >= 64. when ep_size=32 (4 nodes), there is no need to employ this strategy)
-        _, topk_idx = torch.topk(scores_for_choice, k=self.top_k, dim=-1)
+        _, topk_idx = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)
 
         if rollout_routed_experts is not None:
             # seq_l, expert

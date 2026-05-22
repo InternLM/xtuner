@@ -417,17 +417,21 @@ class DeepSeekSparseAttention(nn.Module):
         # the same low-rank Q stream for the score path).
         q_lowrank = self.q_norm(self.wq_a(hidden_states))
         q = self.wq_b(q_lowrank).unflatten(-1, (self.num_attention_heads, self.head_dim))
-        # why: V4 applies a second per-head RMSNorm to q (model.py L498),
-        # separate from `q_norm` which acted on the low-rank stream. This
-        # stabilises the dot-product scale across heads.
-        # Per-head RMS norm. ``q.float()`` would allocate a fp32 copy of the
-        # full [1, total_q, n_heads, head_dim] q (128 MB at pack=4096) and save
-        # it for the multiplication's backward. Instead, square in bf16 and let
-        # the mean's ``dtype=fp32`` accumulator promote on reduction — peak
-        # transient drops to one bf16 square (half the size, freed before the
-        # multiply runs) plus a tiny ``[B, S, H, 1]`` fp32 scalar.
-        q_sq = q * q
-        q_inv_norm = torch.rsqrt(q_sq.mean(-1, keepdim=True, dtype=torch.float32) + self.rms_norm_eps).to(q.dtype)
+        # V4 applies a second per-head RMSNorm to q (model.py L498), separate
+        # from ``q_norm`` which acted on the low-rank stream. HF's
+        # ``DeepseekV4UnweightedRMSNorm`` (modeling_deepseek_v4.py:66) computes
+        # the square in fp32 — ``x.float().square().mean(-1) + eps`` — and only
+        # casts the rsqrt back to bf16 before the multiply. We match that here.
+        #
+        # Under ``torch.compile`` the fp32 ``q.float().square()`` does not
+        # materialise to HBM (inductor fuses square + mean + rsqrt + multiply
+        # into one kernel, the fp32 intermediate stays in registers). In eager
+        # this is ~128 MB transient at pack=4096 (one fp32 copy of q), short-
+        # lived (freed after the rsqrt). The earlier bf16-square shortcut here
+        # introduced a ~3% absolute divergence vs HF on this op alone — see
+        # ``test_subcomponent_probe`` in
+        # ``tests/model/test_deepseek_v4_decoder_layer_parity.py``.
+        q_inv_norm = torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.rms_norm_eps).to(q.dtype)
         q = q * q_inv_norm
         q = _apply_rope_split(q, cos, sin, self.qk_rope_head_dim)
 

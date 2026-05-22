@@ -105,25 +105,28 @@ def hc_pre(
             - ``comb`` (``[B, S, hc_mult, hc_mult]``): combination weights used by :func:`hc_post`.
     """
     shape, dtype = x.size(), x.dtype
-    # V4 reference does the RMS rescale + linear mix in fp32 to keep the
-    # downstream Sinkhorn iterations stable under bf16. Naive: ``x.float()``
-    # allocates a 256 MB transient at pack=4096/D=4096/hc_mult=4 and saves it
-    # for the linear's backward, costing ~5 GB cumulatively across 4 layers ×
-    # 2 (attn+ffn) × 2 (forward + recompute backward).
+    # HF's ``DeepseekV4HyperConnection.forward`` does the RMS rescale and the
+    # ``hc_fn`` linear *entirely in fp32* (modeling_deepseek_v4.py:923-924):
     #
-    # We keep the *output* in fp32 (Sinkhorn input) but skip materialising the
-    # full upcasted activation:
-    #   * mean-of-squares reduces with ``dtype=fp32`` accumulator, so the only
-    #     allocations are the bf16 squared tensor (transient, half the size)
-    #     and a tiny ``[B, S, 1]`` fp32 scalar
-    #   * the gate linear runs in bf16 (cuBLAS internally accumulates in fp32
-    #     anyway), then the tiny ``[B, S, mix_dim]`` output is upcast to fp32
-    #     before Sinkhorn — mix_dim is ``(2 + hc_mult) * hc_mult`` which is 24
-    #     for hc_mult=4, so the upcast is <1 MB.
+    #     flat = self.input_norm(hidden_streams.flatten(2).float())
+    #     pre_w, post_w, comb_w = F.linear(flat, self.fn.float()).split(...)
+    #
+    # An earlier optimisation here squared in bf16 (``sq = x_flat * x_flat``)
+    # and ran the gate linear in bf16 to dodge a 256 MB fp32 transient × 8
+    # callsites per step. Under ``torch.compile`` (V4 production setting)
+    # inductor fuses the square + mean + rsqrt + multiply chain into one
+    # triton kernel and the fp32 intermediate never materialises to HBM, so
+    # the memory savings of the bf16 shortcut are zero under compile. The
+    # precision cost is real though — the bf16 linear here was responsible
+    # for ~8e-3 abs divergence vs HF in
+    # ``test_subcomponent_probe`` (the ``hc_pre.collapsed`` step). We match
+    # HF exactly by upcasting once at the top and staying in fp32 through
+    # the linear and Sinkhorn input.
     x_flat = x.flatten(2)
-    sq = x_flat * x_flat
-    rsqrt = torch.rsqrt(sq.mean(-1, keepdim=True, dtype=torch.float32) + norm_eps)
-    mixes = torch.nn.functional.linear(x_flat, hc_fn.to(x_flat.dtype)).float() * rsqrt
+    x_flat_f32 = x_flat.float()
+    rsqrt = torch.rsqrt(x_flat_f32.square().mean(-1, keepdim=True) + norm_eps)
+    flat_normed = x_flat_f32 * rsqrt
+    mixes = torch.nn.functional.linear(flat_normed, hc_fn.float())
 
     pre, post, comb = hc_split_sinkhorn(mixes, hc_scale, hc_base, hc_mult, iters, eps)
 
@@ -221,9 +224,41 @@ def hc_post(x: Tensor, residual: Tensor, post: Tensor, comb: Tensor) -> Tensor:
     # hc_mult=4, hidden=4096. The compile cfg covers it by default; the
     # ``hc_mult=1`` degenerate path in ``V4DecoderLayer.forward`` skips
     # ``hc_post`` entirely so unit tests with that setting don't hit this.
-    mixed = (
-        comb.to(residual.dtype).unsqueeze(-1)   # [B, S, H_out, H_in, 1]
-        * residual.unsqueeze(-3)                # [B, S, 1,     H_in, D]
-    ).sum(dim=-2)                                # → [B, S, H_out, D]
-    expanded = post.unsqueeze(-1) * x.unsqueeze(-2) + mixed
-    return expanded.type_as(x)
+    #
+    # ``comb`` is consumed *transposed* — HF / V4-ref compute
+    # ``out[h_out, d] = sum_{h_in} comb[h_in, h_out] * residual[h_in, d]``
+    # (i.e. the FIRST hc axis is the reduction axis, equivalent to
+    # ``comb.T @ residual``). ``comb`` is doubly-stochastic from the
+    # Sinkhorn projection but NOT symmetric, so the direction matters.
+    # HF's matching expression in ``DeepseekV4DecoderLayer.forward``::
+    #
+    #     torch.matmul(comb.to(dtype).transpose(-1, -2), hidden_states)
+    #
+    # We use exactly that ``torch.matmul`` here so cuBLAS' fp32-accumulator
+    # bf16 GEMM gives the same precision as HF.
+    #
+    # Compile-speed note. At K = ``hc_mult`` = 4 this is below Hopper's
+    # tensor-core tile floor; cuBLAS falls back to a CUDA-core CUDA gemm
+    # which is bandwidth-bound and slow under heavy training schedules. An
+    # earlier version of this code expanded ``comb`` over the inner dim and
+    # summed in bf16 (``(comb_t.unsqueeze(-1) * residual.unsqueeze(-3)).sum(-2)``)
+    # to dodge cuBLAS — that compiled to a fused triton kernel inductor was
+    # happy with, *but* its bf16 reduction over the H_in axis lost ~1.2e-2
+    # absolute precision vs HF (see ``test_subcomponent_probe``). The
+    # parity contract was deemed more important than the K=4 speed
+    # workaround; if the compile-speed regression becomes painful we'll
+    # need an explicit fp32-accumulator broadcast+sum or a custom triton
+    # kernel, not a precision compromise.
+    # Cast ``post`` to residual's dtype BEFORE the broadcast multiply, matching
+    # HF's exact statement: ``post.to(dtype).unsqueeze(-1) * attn_output.unsqueeze(-2)``.
+    # XTuner used to leave ``post`` in fp32 (Sinkhorn output is fp32) and run
+    # ``fp32 × bf16`` which auto-upcasts to fp32; the final ``+ mixed`` (bf16)
+    # then needed a ``.type_as(x)`` cast. That extra-precision detour was
+    # ~ULP-correct in isolation but accumulated differently than HF's all-bf16
+    # path, giving a residual ~7e-3 abs diff at ``test_subcomponent_probe``'s
+    # ``hc_post (attn)`` step. Casting up-front makes the whole expression
+    # match HF bit-for-bit.
+    post_dt = post.to(residual.dtype)
+    comb_dt = comb.to(residual.dtype)
+    mixed = torch.matmul(comb_dt.transpose(-1, -2), residual)
+    return post_dt.unsqueeze(-1) * x.unsqueeze(-2) + mixed
