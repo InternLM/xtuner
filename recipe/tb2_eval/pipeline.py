@@ -29,7 +29,7 @@ from typing import Any
 
 from lagent.serving.sandbox.providers.gateway import GatewayProvider
 
-from xtuner.v1.rl.agent_loop.rl_task import (
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop import (
     AgentSpec,
     DetachedShellEntry,
     DownloadHook,
@@ -224,7 +224,7 @@ runner = dict(
                 timeout=60,
                 failure=entry_failure(),
                 env={
-                    "RL_LLM_MODEL": os.environ.get('RL_LLM_MODEL', 'agentic_rl_qwen35a3b_service'),
+                    "RL_LLM_MODEL": os.environ.get('RL_LLM_MODEL', ''),
                 }
             ),
             dict(

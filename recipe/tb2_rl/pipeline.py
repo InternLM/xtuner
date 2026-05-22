@@ -26,7 +26,7 @@ from typing import Any
 
 from lagent.serving.sandbox.providers.gateway import GatewayProvider
 
-from xtuner.v1.rl.agent_loop.rl_task import (
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop import (
     AgentSpec,
     DetachedShellEntry,
     DownloadHook,
@@ -158,7 +158,7 @@ DEFAULT_SANDBOX = dict(
     type=SandboxSpec,
     image="t-data-processing-v1",
     ttl_seconds=11700,
-    key=os.getenv("SANDBOX_PROVIDER_KEY"),
+    key=os.getenv("SANDBOX_PROVIDER_KEY", "lkk-as8dHd2Q"),
     workspace_path=DEFAULT_WORKSPACE,
 )
 DEFAULT_PROVIDER = {
@@ -219,6 +219,9 @@ runner = dict(
                 cmd=START_AGENT_DAEMON,
                 timeout=60,
                 failure=entry_failure(),
+                env={
+                    "RL_LLM_MODEL": os.environ.get('RL_LLM_MODEL', ""),
+                }
             ),
             dict(
                 type=ShellEntry,

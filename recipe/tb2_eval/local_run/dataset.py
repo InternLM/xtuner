@@ -13,8 +13,8 @@ import logging
 from pathlib import Path
 from typing import Iterator
 
-from xtuner.v1.rl.agent_loop.rl_task.runner import Runner
-from xtuner.v1.rl.agent_loop.rl_task.schemas import AgentRolloutItem
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.runner import Runner
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import AgentRolloutItem
 
 
 logger = logging.getLogger(__name__)
