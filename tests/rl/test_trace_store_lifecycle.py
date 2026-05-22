@@ -20,6 +20,11 @@ class RolloutTraceStoreLifecycleTest(unittest.TestCase):
         state = self.store.get_state(session_id)
         return None if state is None else state["state"]
 
+    def _move_to_train_running(self, session_id: str, key: str = "prompt"):
+        self._insert_segment(session_id, key)
+        self.store.mark_rollout_status(session_id, Status.COMPLETED)
+        self.store.export_training_trace(session_id, key)
+
     def test_completed_marks_rollout_finished(self):
         self._insert_segment("completed")
 
@@ -71,6 +76,28 @@ class RolloutTraceStoreLifecycleTest(unittest.TestCase):
         self.assertIsNone(self.store.get_state("commit-failed"))
         self.assertEqual(discarded_state, TraceState.RELEASED.value)
         self.assertIsNone(self.store.get_state("discarded"))
+
+    def test_mark_train_finished_and_abandoned_release_train_running_sessions(self):
+        self._move_to_train_running("train-finished")
+        self._move_to_train_running("train-abandoned")
+
+        finished_state = self.store.mark_train_finished("train-finished")
+        abandoned_state = self.store.mark_train_abandoned("train-abandoned")
+
+        self.assertEqual(finished_state, TraceState.RELEASED.value)
+        self.assertIsNone(self.store.get_state("train-finished"))
+        self.assertEqual(abandoned_state, TraceState.RELEASED.value)
+        self.assertIsNone(self.store.get_state("train-abandoned"))
+
+    def test_train_lifecycle_missing_and_invalid_state_behavior(self):
+        self.assertEqual(self.store.mark_train_finished("missing-finished"), TraceState.RELEASED.value)
+        self.assertEqual(self.store.mark_train_abandoned("missing-abandoned"), TraceState.RELEASED.value)
+
+        self._insert_segment("rollout-running")
+        with self.assertRaisesRegex(RuntimeError, "mark_train_finished"):
+            self.store.mark_train_finished("rollout-running")
+        with self.assertRaisesRegex(RuntimeError, "mark_train_abandoned"):
+            self.store.mark_train_abandoned("rollout-running")
 
 
 if __name__ == "__main__":
