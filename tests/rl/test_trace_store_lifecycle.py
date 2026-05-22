@@ -99,6 +99,36 @@ class RolloutTraceStoreLifecycleTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "mark_train_abandoned"):
             self.store.mark_train_abandoned("rollout-running")
 
+    def test_list_sessions_returns_and_filters_state_snapshots(self):
+        self._insert_segment("running")
+        self._insert_segment("finished")
+        self.store.mark_rollout_status("finished", Status.COMPLETED)
+
+        all_sessions = self.store.list_sessions()
+        running_sessions = self.store.list_sessions(TraceState.ROLLOUT_RUNNING.value)
+
+        self.assertEqual([item["session_id"] for item in all_sessions], ["finished", "running"])
+        self.assertEqual([item["session_id"] for item in running_sessions], ["running"])
+
+    def test_gc_stale_sessions_only_releases_stale_rollout_running(self):
+        self._insert_segment("stale-running")
+        self._insert_segment("fresh-running")
+        self._insert_segment("finished")
+        self._move_to_train_running("train-running")
+        self.store.mark_rollout_status("finished", Status.COMPLETED)
+
+        self.store.sessions["stale-running"].updated_at = 0
+        self.store.sessions["finished"].updated_at = 0
+        self.store.sessions["train-running"].updated_at = 0
+
+        released = self.store.gc_stale_sessions(ttl_seconds=1)
+
+        self.assertEqual(released, ["stale-running"])
+        self.assertIsNone(self.store.get_state("stale-running"))
+        self.assertEqual(self._state("fresh-running"), TraceState.ROLLOUT_RUNNING.value)
+        self.assertEqual(self._state("finished"), TraceState.ROLLOUT_FINISHED.value)
+        self.assertEqual(self._state("train-running"), TraceState.TRAIN_RUNNING.value)
+
 
 if __name__ == "__main__":
     unittest.main()
