@@ -313,6 +313,11 @@ def _event_overlap_after_torch_event(event: torch.cuda.Event) -> EventOverlap:
     return buffer_capture()
 
 
+def _raise_if_decoding(decoding: bool) -> None:
+    if decoding:
+        raise NotImplementedError("DeepEPDispatcher does not support decoding=True.")
+
+
 class DeepEPDispatcher(
     GenericDispatcher[
         DeepEPPreDispatchResult,
@@ -348,6 +353,9 @@ class DeepEPDispatcher(
             "If you are training a MoE model, it means that `expert parallel` is not enabled in the config."
         )
         self._expert_tp = ExpertTP(tp_group) if tp_group is not None and tp_group.size() > 1 else None
+        if self._expert_tp is not None and (training_dtype == "fp8" or generate_dtype == "fp8"):
+            # TODO: 待测试 fp8
+            raise NotImplementedError("FP8 DeepEP communication is not supported for DeepEP + ExpertTP.")
         if self._expert_tp is not None and DeepEPDispatcher._comm_stream is None:
             DeepEPDispatcher._comm_stream = torch.cuda.Stream(device=DEVICE)
 
@@ -390,6 +398,7 @@ class DeepEPDispatcher(
         async_op: bool = False,
         decoding: bool = False,
     ) -> DeepEPDispatchResult:
+        _raise_if_decoding(decoding)
         hidden_backward_previous_event = None
         hidden_backward_finished_event = None
         topk_weights_backward_previous_event = None
@@ -528,6 +537,7 @@ class DeepEPDispatcher(
         async_op: bool = False,
         decoding: bool = False,
     ) -> DeepEPPostDispatchResult:
+        _raise_if_decoding(decoding)
         if async_op:
             assert dispatched["forward_finished_event"] is not None, "Please use `async_op=True` for dispatch!"
             dispatched["forward_finished_event"].current_stream_wait()
@@ -564,14 +574,11 @@ class DeepEPDispatcher(
                     )
                 )
 
-        if decoding:
-            raise NotImplementedError
-        else:
-            return DeepEPPostDispatchResult(
-                hidden_states=permuted_hidden_states,
-                row_ids_map=row_ids_map,
-                tokens_per_expert=tokens_per_expert,
-            )
+        return DeepEPPostDispatchResult(
+            hidden_states=permuted_hidden_states,
+            row_ids_map=row_ids_map,
+            tokens_per_expert=tokens_per_expert,
+        )
 
     @override
     def combine_preprocess(
@@ -584,6 +591,7 @@ class DeepEPDispatcher(
         async_op: bool = False,
         decoding: bool = False,
     ) -> DeepEPPreCombineResult:
+        _raise_if_decoding(decoding)
         hidden_states = unpermute(
             hidden_states,
             post_dispatched["row_ids_map"],
@@ -629,15 +637,12 @@ class DeepEPDispatcher(
             forward_finished_event = None
             tp_backward_finished_event = None
 
-        if decoding:
-            raise NotImplementedError
-        else:
-            return DeepEPPreCombineResult(
-                hidden_states=hidden_states,
-                forward_finished_event=forward_finished_event,
-                backward_previous_event=backward_previous_event,
-                tp_backward_finished_event=tp_backward_finished_event,
-            )
+        return DeepEPPreCombineResult(
+            hidden_states=hidden_states,
+            forward_finished_event=forward_finished_event,
+            backward_previous_event=backward_previous_event,
+            tp_backward_finished_event=tp_backward_finished_event,
+        )
 
     @override
     def combine(
@@ -650,6 +655,7 @@ class DeepEPDispatcher(
         async_op: bool = False,
         decoding: bool = False,
     ) -> CombineResult:
+        _raise_if_decoding(decoding)
         if async_op:
             backward_previous_event = EventOverlap(None)
             assert pre_combined["forward_finished_event"] is not None, "Please use `async_op=True` for combine!"
@@ -708,14 +714,11 @@ class DeepEPDispatcher(
         if not async_op:
             event.current_stream_wait()
 
-        if not decoding:
-            return DeepEPCombineResult(
-                hidden_states=combined_hidden_states,
-                forward_finished_event=event,
-                backward_previous_event=backward_previous_event,
-            )
-        else:
-            raise NotImplementedError
+        return DeepEPCombineResult(
+            hidden_states=combined_hidden_states,
+            forward_finished_event=event,
+            backward_previous_event=backward_previous_event,
+        )
 
     @override
     def combine_postprocess(
