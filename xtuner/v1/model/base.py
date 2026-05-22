@@ -1,14 +1,18 @@
 import importlib
 import json
 import math
+import multiprocessing as py_mp
+import os
 import pydoc
 import re
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from functools import reduce
 from importlib import import_module
 from itertools import chain
 from pathlib import Path
-from shutil import copy, copytree
+from shutil import copy, copytree, rmtree
 from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, Sequence, cast
 
 import torch
@@ -53,6 +57,7 @@ from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_co
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
 from xtuner.v1.utils.misc import FunctionEnum, FunctionType, get_function_full_qualname, get_function_type
+from xtuner.v1.utils.process import get_async_save_file_lock_slots, set_async_save_process_qos
 
 from .utils import ModelForwardExtraLogInfo
 
@@ -81,6 +86,20 @@ class BatchForwardInfo(TypedDict):
     extra_info: ModelForwardExtraLogInfo
 
 
+class _HFSavePlan(TypedDict):
+    hf_dir: Path
+    save_tasks: list[tuple[str, dict[str, torch.Tensor]]]
+
+
+@dataclass
+class AsyncHFSaveHandle:
+    process: Any
+    hf_dir: Path
+    tmp_hf_dir: Path
+    status_path: Path
+    cleanup_done_path: Path
+
+
 class TorchCompileOption(TypedDict):
     fullgraph: NotRequired[bool]
     dynamic: NotRequired[bool | None]
@@ -92,6 +111,7 @@ class HFSaveCfg(PydanticBaseModel):
     model_config = ConfigDict(extra="forbid")
     worker_per_rank: Annotated[int, Parameter(group="model")] = 16
     max_save_rank: Annotated[int, Parameter(group="model")] = 16
+    # Max bytes per generated safetensors shard.
     bucket_size: Annotated[int, Parameter(group="model")] = 1024**3 * 4
     # TODO: `XTunerBaseModel` should also be able to specify which parameters to be trained in fp32,
     # currently it could only be specified in HFSaveCfg
@@ -524,6 +544,8 @@ class BaseModel(nn.Module):
         self.config = config
 
         self._hf_path: Path | None = None  # type: ignore
+        self._async_hf_tensor_cache: dict[tuple[Any, ...], torch.Tensor] = {}
+        self._pending_async_hf: AsyncHFSaveHandle | None = None
 
         self._compile_cfg = self._resolve_compile_cfg(self.config)
         self._float8_handler: Float8Handler | None = None
@@ -661,6 +683,239 @@ class BaseModel(nn.Module):
     def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, safetensors_prefix: str = "model"):
         with profile_time_and_memory(f"[Saving HF to [{safetensors_prefix}]{hf_dir} cost]"):
             self._save_hf(hf_dir=hf_dir, save_dtype=save_dtype, safetensors_prefix=safetensors_prefix)
+
+    def async_save_hf(
+        self,
+        hf_dir: Path | str,
+        save_dtype: torch.dtype = torch.bfloat16,
+        safetensors_prefix: str = "model",
+        cleanup_hf_dirs: Sequence[str | Path] = (),
+    ) -> AsyncHFSaveHandle:
+        if self._hf_path is None and self.config.hf_config is None:
+            raise NotImplementedError(
+                "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
+            )
+        if self._pending_async_hf is not None:
+            raise RuntimeError(
+                "Previous async HF save is still pending. Call wait_async_hf before launching a new one."
+            )
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+
+        if isinstance(hf_dir, str):
+            hf_dir = Path(hf_dir)
+        tmp_hf_dir = hf_dir.with_name(f"{hf_dir.name}.incomplete")
+        if rank == 0:
+            if tmp_hf_dir.exists():
+                rmtree(tmp_hf_dir)
+            tmp_hf_dir.mkdir(parents=True, exist_ok=True)
+
+        status_path = (
+            tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{self._async_hf_writer_status_filename(rank, world_size)}"
+        )
+        cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
+        if rank == 0:
+            cleanup_done_path.unlink(missing_ok=True)
+
+        file_to_names, weight_map = self._prepare_async_hf_snapshot(
+            save_dtype=save_dtype,
+            safetensors_prefix=safetensors_prefix,
+            device=DEVICE,
+        )
+
+        if hasattr(DEVICE_MODULE, "synchronize"):
+            DEVICE_MODULE.synchronize()
+
+        mp_ctx = py_mp.get_context("fork")
+        process = mp_ctx.Process(
+            target=self._run_async_hf_writer,
+            args=(
+                tmp_hf_dir,
+                file_to_names,
+                weight_map,
+                status_path,
+                cleanup_hf_dirs,
+                cleanup_done_path,
+                rank,
+            ),
+            daemon=False,
+        )
+        process.start()
+
+        handle = AsyncHFSaveHandle(
+            process=process,
+            hf_dir=hf_dir,
+            tmp_hf_dir=tmp_hf_dir,
+            status_path=status_path,
+            cleanup_done_path=cleanup_done_path,
+        )
+        self._pending_async_hf = handle
+        return handle
+
+    def _run_async_hf_writer(
+        self,
+        tmp_hf_dir: Path,
+        file_to_names: list[tuple[str, list[str]]],
+        weight_map: dict[str, str],
+        status_path: Path,
+        cleanup_hf_dirs: Sequence[str | Path],
+        cleanup_done_path: Path,
+        rank: int,
+    ) -> None:
+        try:
+            set_async_save_process_qos()
+            self._cleanup_async_hf_dirs_before_write(
+                cleanup_hf_dirs=cleanup_hf_dirs,
+                cleanup_done_path=cleanup_done_path,
+                rank=rank,
+            )
+            self._write_async_hf_snapshot(
+                hf_dir=tmp_hf_dir,
+                file_to_names=file_to_names,
+                weight_map=weight_map,
+                status_path=status_path,
+            )
+        except Exception as exc:
+            status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
+            with status_path.open("w") as f:
+                f.write(json.dumps(status, indent=2))
+            raise
+
+    def _prepare_async_hf_snapshot(
+        self,
+        save_dtype: torch.dtype = torch.bfloat16,
+        safetensors_prefix: str = "model",
+        device: torch.device | str = DEVICE,
+    ) -> tuple[list[tuple[str, list[str]]], dict[str, str]]:
+        file_to_names: list[tuple[str, list[str]]] = []
+        weight_map: dict[str, str] = {}
+        for safetensor_name, name_list, hf_tensor_list in self._iter_hf_save_chunks(
+            save_dtype=save_dtype,
+            safetensors_prefix=safetensors_prefix,
+            device=device,
+        ):
+            cached_names: list[str] = []
+            for name, hf_tensor in zip(name_list, hf_tensor_list):
+                cache_key = (("root", "hf"), ("name", name))
+                self._get_or_update_async_hf_cpu_tensor(
+                    hf_tensor,
+                    cache=self._async_hf_tensor_cache,
+                    path=cache_key,
+                )
+                cached_names.append(name)
+                weight_map[name] = safetensor_name
+            if cached_names:
+                file_to_names.append((safetensor_name, cached_names))
+            del hf_tensor_list
+        return file_to_names, weight_map
+
+    def wait_async_hf(self, handle: AsyncHFSaveHandle | None = None) -> Path | None:
+        if handle is None:
+            handle = self._pending_async_hf
+        if handle is None:
+            return None
+
+        process = handle.process
+        hf_dir = handle.hf_dir
+        tmp_hf_dir = handle.tmp_hf_dir
+        status_path = handle.status_path
+        cleanup_done_path = handle.cleanup_done_path
+
+        local_ok = True
+        local_error = ""
+        local_weight_map: dict[str, str] = {}
+
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        process.join()
+        exit_code = process.exitcode
+        if exit_code is None:
+            local_ok = False
+            local_error = "async_hf_writer_exitcode_missing"
+        elif exit_code != 0:
+            local_ok = False
+            local_error = f"child_exit_code={exit_code}"
+        elif not status_path.exists():
+            local_ok = False
+            local_error = f"missing_async_hf_writer_status={status_path}"
+        else:
+            try:
+                with status_path.open("r") as f:
+                    writer_status = json.load(f)
+            except Exception as exc:
+                local_ok = False
+                local_error = f"invalid_async_hf_writer_status={status_path}, error={exc}"
+            else:
+                local_ok = bool(writer_status.get("ok", False))
+                local_error = str(writer_status.get("error", ""))
+                weight_map_obj = writer_status.get("weight_map", {})
+                if isinstance(weight_map_obj, dict):
+                    local_weight_map = {str(k): str(v) for k, v in weight_map_obj.items()}
+
+        local_status = {"rank": rank, "ok": local_ok, "error": local_error, "weight_map": local_weight_map}
+        if dist.is_initialized():
+            gathered_status: list[Any] = [None for _ in range(world_size)]
+            dist.all_gather_object(gathered_status, local_status)
+            all_status = cast(list[dict[str, Any]], gathered_status)
+        else:
+            all_status = [local_status]
+
+        if not all(status["ok"] for status in all_status):
+            failed = ", ".join(
+                f"rank={status['rank']}({status['error']})" for status in all_status if not status["ok"]
+            )
+            if self._pending_async_hf is handle:
+                self._pending_async_hf = None
+            raise RuntimeError(f"Async HF save global consistency check failed: {failed}")
+
+        merged_weight_map: dict[str, str] = {}
+        for status in all_status:
+            merged_weight_map.update(status["weight_map"])
+
+        if rank == 0:
+            self._write_hf_index_and_config(hf_dir=tmp_hf_dir, weight_map=merged_weight_map)
+        if dist.is_initialized():
+            dist.barrier()
+        status_path.unlink(missing_ok=True)
+        cleanup_done_path.unlink(missing_ok=True)
+        if rank == 0:
+            if hf_dir.exists():
+                rmtree(hf_dir)
+            tmp_hf_dir.rename(hf_dir)
+        if dist.is_initialized():
+            dist.barrier()
+        if self._pending_async_hf is handle:
+            self._pending_async_hf = None
+        return hf_dir
+
+    def _cleanup_async_hf_dirs_before_write(
+        self,
+        cleanup_hf_dirs: Sequence[str | Path],
+        cleanup_done_path: Path,
+        rank: int,
+    ) -> None:
+        if not cleanup_hf_dirs:
+            return
+
+        if rank == 0:
+            errors: list[str] = []
+            for hf_dir in cleanup_hf_dirs:
+                hf_path = Path(hf_dir)
+                try:
+                    if hf_path.exists():
+                        rmtree(hf_path)
+                except Exception as exc:
+                    errors.append(f"{hf_path}: {exc}")
+            if errors:
+                logger.warning("Failed to cleanup old HF directories before async HF write: %s", "; ".join(errors))
+            cleanup_done_path.write_text(json.dumps({"ok": True}, indent=2))
+            return
+
+        deadline = time.monotonic() + 3600
+        while not cleanup_done_path.exists():
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"Timed out waiting for async HF cleanup marker: {cleanup_done_path}")
+            time.sleep(0.2)
 
     def safetensors_to_params(
         self,
@@ -1476,6 +1731,196 @@ class BaseModel(nn.Module):
             + math.ceil(same_size / bucket_size)
             + math.ceil(fused_size / bucket_size)
         )
+
+    def _iter_hf_save_chunks(
+        self,
+        save_dtype: torch.dtype = torch.bfloat16,
+        safetensors_prefix: str = "model",
+        device: torch.device | str = "cpu",
+    ) -> Generator[tuple[str, list[str], list[torch.Tensor]], None, None]:
+        assert save_dtype in [torch.float8_e4m3fn, torch.bfloat16], f"save_dtype {save_dtype} is not supported"
+
+        shard_gen = self._get_shard_hf_param(
+            self._group_param_by_load_spec(LoadEnum.SHARD),
+            dtype=save_dtype,
+            device=device,
+        )
+        same_gen = self._get_same_hf_param(
+            self._group_param_by_load_spec(LoadEnum.SAME),
+            dtype=save_dtype,
+            device=device,
+        )
+        fused_gen = self._get_fused_hf_param(
+            self._group_param_by_load_spec(LoadEnum.FUSED),
+            dtype=save_dtype,
+            device=device,
+        )
+
+        is_others_save_rank = not dist.is_initialized() or dist.get_rank() == 0
+        save_rank = dist.get_rank() if dist.is_initialized() else 0
+
+        saved_names: set[str] = set()
+        safetensor_index = 0
+
+        for name_list, hf_tensor_list in fused_gen:
+            if not name_list:
+                continue
+            safetensor_index += 1
+            safetensor_name = f"{safetensors_prefix}-{safetensor_index:04d}-fused-save_rank{save_rank}.safetensors"
+            saved_names.update(name_list)
+            yield safetensor_name, name_list, hf_tensor_list
+
+        safetensor_index = 0
+        for name_list, hf_tensor_list in chain(same_gen, shard_gen):
+            safetensor_index += 1
+            safetensor_name = f"{safetensors_prefix}-{safetensor_index:04d}-others-save_rank{save_rank}.safetensors"
+            if not is_others_save_rank:
+                continue
+
+            unique_name_list: list[str] = []
+            unique_hf_tensor_list: list[torch.Tensor] = []
+            for name, hf_tensor in zip(name_list, hf_tensor_list):
+                if name in saved_names:
+                    continue
+                saved_names.add(name)
+                unique_name_list.append(name)
+                unique_hf_tensor_list.append(hf_tensor)
+            if unique_name_list:
+                yield safetensor_name, unique_name_list, unique_hf_tensor_list
+
+    def _write_hf_save_plan(self, save_plan: _HFSavePlan) -> list[str]:
+        written_files: list[str] = []
+        for safetensor_name, tensors in save_plan["save_tasks"]:
+            self._save_hf_safetensors_file(
+                tensors=tensors,
+                filename=save_plan["hf_dir"] / safetensor_name,
+                hf_dir=save_plan["hf_dir"],
+            )
+            if tensors:
+                written_files.append(safetensor_name)
+        return written_files
+
+    def _save_hf_safetensors_file(self, tensors: dict[str, torch.Tensor], filename: Path, hf_dir: Path) -> None:
+        if not tensors:
+            return
+
+        lock_slots = get_async_save_file_lock_slots()
+        if lock_slots <= 0:
+            _save_file(tensors, filename)
+            return
+
+        import fcntl
+
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        lock_slot = rank % lock_slots
+        lock_path = self._hf_save_file_lock_path(hf_dir, lock_slot)
+        with lock_path.open("a") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                _save_file(tensors, filename)
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _hf_save_file_lock_path(self, hf_dir: Path, lock_slot: int) -> Path:
+        lock_dir = hf_dir.parent / ".async-hf-save-file-locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        hostname = re.sub(r"[^A-Za-z0-9_.-]", "_", os.uname().nodename)
+        return lock_dir / f"async-hf-save-file-{hostname}-slot-{lock_slot:03d}.lock"
+
+    @staticmethod
+    def _async_hf_writer_status_filename(rank: int, world_size: int) -> str:
+        return f"async-hf-writer-status-rank-{rank:05d}-of-{world_size:05d}.json"
+
+    @staticmethod
+    def _allocate_async_hf_cpu_buffer_like(tensor: torch.Tensor) -> torch.Tensor:
+        cpu_tensor = torch.empty_like(tensor, device="cpu")
+        if tensor.is_cuda:
+            cpu_tensor = cpu_tensor.pin_memory()
+        return cpu_tensor
+
+    def _get_or_update_async_hf_cpu_tensor(
+        self,
+        tensor: torch.Tensor,
+        cache: dict[tuple[Any, ...], torch.Tensor],
+        path: tuple[Any, ...],
+    ) -> torch.Tensor:
+        detached = tensor.detach()
+
+        cached = cache.get(path)
+        if cached is None or (
+            cached.shape != detached.shape
+            or cached.dtype != detached.dtype
+            or cached.layout != detached.layout
+            or cached.stride() != detached.stride()
+        ):
+            cached = self._allocate_async_hf_cpu_buffer_like(detached)
+            cache[path] = cached
+
+        cached.copy_(detached, non_blocking=detached.is_cuda)
+        return cached
+
+    def _write_async_hf_snapshot(
+        self,
+        hf_dir: Path,
+        file_to_names: list[tuple[str, list[str]]],
+        weight_map: dict[str, str],
+        status_path: Path,
+    ) -> None:
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        local_status: dict[str, Any] = {
+            "rank": rank,
+            "ok": True,
+            "error": "",
+            "weight_map": {},
+        }
+
+        try:
+            for filename, names in file_to_names:
+                tensors: dict[str, torch.Tensor] = {}
+                for name in names:
+                    cache_key = (("root", "hf"), ("name", name))
+                    cached_tensor = cast(torch.Tensor | None, self._async_hf_tensor_cache.get(cache_key))
+                    if cached_tensor is None:
+                        raise RuntimeError(f"Missing cached async HF tensor for key: {name}")
+                    tensors[name] = cached_tensor
+                self._write_hf_save_plan({"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]})
+            local_status["weight_map"] = weight_map
+        except Exception as exc:
+            local_status["ok"] = False
+            local_status["error"] = str(exc)
+            with status_path.open("w") as f:
+                f.write(json.dumps(local_status, indent=2))
+            raise
+
+        with status_path.open("w") as f:
+            f.write(json.dumps(local_status, indent=2))
+
+    def _write_hf_non_weight_files(self, hf_dir: Path) -> None:
+        if self._hf_path is not None:
+            for file in cast(Path, self._hf_path).iterdir():
+                if file.suffix != ".safetensors":
+                    target_path = hf_dir / file.name
+                    if file.is_file():
+                        copy(file, target_path)
+                    else:
+                        copytree(file, target_path, ignore_dangling_symlinks=True, dirs_exist_ok=True)
+            return
+
+        if self.config.hf_config is not None:
+            self.config.save_hf(hf_dir)
+            return
+
+        raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
+
+    def _write_hf_index_and_config(self, hf_dir: Path | str, weight_map: Mapping[str, str]) -> None:
+        if isinstance(hf_dir, str):
+            hf_dir = Path(hf_dir)
+
+        self._write_hf_non_weight_files(hf_dir)
+
+        with open(hf_dir / "model.safetensors.index.json", "w") as f:
+            index = {"weight_map": dict(weight_map), "metadata": {}}
+            json.dump(index, f, indent=2, ensure_ascii=False)
 
     def _save_hf(
         self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, safetensors_prefix: str = "model"

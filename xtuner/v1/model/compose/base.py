@@ -1,5 +1,7 @@
 import json
+import multiprocessing as py_mp
 from pathlib import Path
+from shutil import rmtree
 from typing import Callable, Self, Sequence
 
 import torch
@@ -16,8 +18,15 @@ from typing_extensions import override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model import BaseModel
-from xtuner.v1.model.base import BatchForwardInfo, ModelOutputs, XTunerBaseModelConfig
+from xtuner.v1.model.base import (
+    DEVICE_MODULE,
+    AsyncHFSaveHandle,
+    BatchForwardInfo,
+    ModelOutputs,
+    XTunerBaseModelConfig,
+)
 from xtuner.v1.utils import get_device, get_logger
+from xtuner.v1.utils.process import set_async_save_process_qos
 
 from ..utils.misc import update_weight_map_from_safetensors_index
 
@@ -160,6 +169,127 @@ class BaseComposeModel(BaseModel):
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
                 json.dump({"weight_map": weight_map_dict, "metadata": {}}, f, indent=4)
         dist.barrier()
+
+    def async_save_hf(
+        self,
+        hf_dir: Path | str,
+        save_dtype: torch.dtype = torch.bfloat16,
+        safetensors_prefix: str = "model",
+        cleanup_hf_dirs: Sequence[str | Path] = (),
+    ) -> AsyncHFSaveHandle:
+        if self._hf_path is None and self.config.hf_config is None:
+            raise NotImplementedError(
+                "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
+            )
+        if self._pending_async_hf is not None:
+            raise RuntimeError(
+                "Previous async HF save is still pending. Call wait_async_hf before launching a new one."
+            )
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+
+        if isinstance(hf_dir, str):
+            hf_dir = Path(hf_dir)
+        tmp_hf_dir = hf_dir.with_name(f"{hf_dir.name}.incomplete")
+        if rank == 0:
+            if tmp_hf_dir.exists():
+                rmtree(tmp_hf_dir)
+            tmp_hf_dir.mkdir(parents=True, exist_ok=True)
+
+        status_path = (
+            tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{self._async_hf_writer_status_filename(rank, world_size)}"
+        )
+        cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
+        if rank == 0:
+            cleanup_done_path.unlink(missing_ok=True)
+
+        module_file_to_names: list[tuple[BaseModel, list[tuple[str, list[str]]]]] = []
+        merged_weight_map: dict[str, str] = {}
+        for module, prefix in (
+            (self.language_model, "model-language"),
+            (self.vision_tower, "model-vision"),
+            (self.multi_modal_projector, "model-projector"),
+        ):
+            file_to_names, weight_map = module._prepare_async_hf_snapshot(
+                save_dtype=save_dtype,
+                safetensors_prefix=prefix,
+                device=DEVICE,
+            )
+            module_file_to_names.append((module, file_to_names))
+            merged_weight_map.update(weight_map)
+
+        if hasattr(DEVICE_MODULE, "synchronize"):
+            DEVICE_MODULE.synchronize()
+
+        mp_ctx = py_mp.get_context("fork")
+        process = mp_ctx.Process(
+            target=self._run_async_hf_compose_writer,
+            args=(
+                tmp_hf_dir,
+                module_file_to_names,
+                merged_weight_map,
+                status_path,
+                cleanup_hf_dirs,
+                cleanup_done_path,
+                rank,
+            ),
+            daemon=False,
+        )
+        process.start()
+
+        handle = AsyncHFSaveHandle(
+            process=process,
+            hf_dir=hf_dir,
+            tmp_hf_dir=tmp_hf_dir,
+            status_path=status_path,
+            cleanup_done_path=cleanup_done_path,
+        )
+        self._pending_async_hf = handle
+        return handle
+
+    def _run_async_hf_compose_writer(
+        self,
+        tmp_hf_dir: Path,
+        module_file_to_names: list[tuple[BaseModel, list[tuple[str, list[str]]]]],
+        merged_weight_map: dict[str, str],
+        status_path: Path,
+        cleanup_hf_dirs: Sequence[str | Path],
+        cleanup_done_path: Path,
+        rank: int,
+    ) -> None:
+        try:
+            set_async_save_process_qos()
+            self._cleanup_async_hf_dirs_before_write(
+                cleanup_hf_dirs=cleanup_hf_dirs,
+                cleanup_done_path=cleanup_done_path,
+                rank=rank,
+            )
+            for module, file_to_names in module_file_to_names:
+                self._write_async_hf_module_snapshot(hf_dir=tmp_hf_dir, module=module, file_to_names=file_to_names)
+            status = {"rank": rank, "ok": True, "error": "", "weight_map": merged_weight_map}
+            with status_path.open("w") as f:
+                f.write(json.dumps(status, indent=2))
+        except Exception as exc:
+            status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
+            with status_path.open("w") as f:
+                f.write(json.dumps(status, indent=2))
+            raise
+
+    def _write_async_hf_module_snapshot(
+        self,
+        hf_dir: Path,
+        module: BaseModel,
+        file_to_names: list[tuple[str, list[str]]],
+    ) -> None:
+        for filename, names in file_to_names:
+            tensors: dict[str, torch.Tensor] = {}
+            for name in names:
+                cache_key = (("root", "hf"), ("name", name))
+                cached_tensor = module._async_hf_tensor_cache.get(cache_key)
+                if cached_tensor is None:
+                    raise RuntimeError(f"Missing cached async HF tensor for key: {name}")
+                tensors[name] = cached_tensor
+            module._write_hf_save_plan({"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]})
 
     def post_micro_batch_forward(self, batch_outputs: Sequence[ModelOutputs]) -> BatchForwardInfo:
         return self.language_model.post_micro_batch_forward(batch_outputs)

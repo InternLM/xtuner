@@ -9,7 +9,7 @@ import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any, Dict, List, cast
+from typing import Any, Dict, List, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -31,6 +31,7 @@ from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.loss import LogProbContext
 from xtuner.v1.model.base import (
+    AsyncHFSaveHandle,
     BaseModel,
     BatchForwardInfo,
     DataBatchInfo,
@@ -146,6 +147,7 @@ class TrainEngine:
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig,
         intra_layer_micro_batch: int = 1,
+        async_hf_export: bool = False,
     ) -> None:
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
@@ -155,6 +157,7 @@ class TrainEngine:
         self.intra_layer_micro_batch = intra_layer_micro_batch
         self._count = 0
         self.has_freeze_params = self.__has_freeze_params()
+        self._async_hf_export = async_hf_export
         self._async_checkpoint_pg: dist.ProcessGroup | None = None
         self._async_state_dict_cache: dict[str, Any] | None = None
 
@@ -307,6 +310,21 @@ class TrainEngine:
             save_dtype (torch.dtype): The dtype to save the model parameters, bfloat16 or float8.
         """
         self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
+
+    def async_save_hf(
+        self,
+        hf_dir: str,
+        save_dtype: torch.dtype = torch.bfloat16,
+        cleanup_hf_dirs: Sequence[str | Path] = (),
+    ) -> AsyncHFSaveHandle:
+        return self.model.async_save_hf(
+            hf_dir=hf_dir,
+            save_dtype=save_dtype,
+            cleanup_hf_dirs=cleanup_hf_dirs,
+        )
+
+    def wait_async_hf(self, handle: AsyncHFSaveHandle | None = None) -> Path | None:
+        return self.model.wait_async_hf(handle)
 
     def _get_dcp_state_dict(
         self,
