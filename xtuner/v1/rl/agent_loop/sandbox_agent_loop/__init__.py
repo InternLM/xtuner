@@ -19,6 +19,10 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.hooks import (
     UploadChosenAgent,
     UploadHook,
 )
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import (
+    AgentInSandboxLoop,
+    AgentInSandboxLoopConfig,
+)
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.runner import Runner
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import (
     DetachedShellEntry,
@@ -50,6 +54,8 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.validator import Judger, JudgerV
 
 
 __all__ = [
+    "AgentInSandboxLoop",
+    "AgentInSandboxLoopConfig",
     "AgentSpec",
     "AgentRolloutItem",
     "DiagnosticFile",

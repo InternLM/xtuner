@@ -135,8 +135,8 @@ class AgentLoopConfig(ABC, BaseModel):
 class AgentLoop(ABC):
     def __init__(
         self,
-        rollout_ctl: RolloutController,
-        sample_params: SampleParams,
+        rollout_ctl: RolloutController | None,
+        sample_params: SampleParams | None,
         hf_checkpoint: str,
         judger: Judger | None = None,
         logger=None,

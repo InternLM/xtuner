@@ -226,6 +226,10 @@ class RolloutTraceStore:
             self.sessions[session_id] = Trie()
         return self.sessions[session_id]
 
+    def list_sessions(self) -> List[str]:
+        """List all session ids currently stored in the actor."""
+        return list(self.sessions.keys())
+        
     def keys(self, session_id: str) -> List[str]:
         """Get all keys (i.e., strings) stored in a session's Trie.
 
