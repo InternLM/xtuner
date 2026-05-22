@@ -224,7 +224,7 @@ runner = dict(
                 timeout=60,
                 failure=entry_failure(),
                 env={
-                    "RL_LLM_MODEL": os.environ.get('RL_LLM_MODEL', 'agentic_rl_qwen35a3b_service'),
+                    "RL_LLM_MODEL": os.environ.get('RL_LLM_MODEL', ''),
                 }
             ),
             dict(
