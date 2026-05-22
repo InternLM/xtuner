@@ -24,7 +24,7 @@ from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 class AgentLoopConfig(ABC, BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     hf_checkpoint: str
-    sample_params: SampleParams
+    sample_params: SampleParams | None = None
     cpu_resources: CPUResourcesConfig | None = None
 
     def build(self, rollout_controller, judger: Judger | None = None, logger=None) -> AgentLoopSpec:

@@ -53,7 +53,7 @@ from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 from xtuner.v1.utils.env_check import get_rollout_engine_version
-
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import get_store
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 PG_READY_TIMEOUT = 30
@@ -200,6 +200,17 @@ def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
         )
         return False
     for item in group_data_items:
+        if item.input_ids is not None:
+            input_ids_valid = len(item.input_ids) > 1
+            labels_valid = item.labels is not None and len(item.labels) == len(item.input_ids)
+            logprobs_valid = item.logprobs is None or len(item.logprobs) == len(item.input_ids)
+            if not input_ids_valid or not labels_valid or not logprobs_valid:
+                logger.warning(
+                    "Invalid dataflow item found during training: input_ids, labels, and logprobs lengths mismatch."
+                )
+                return False
+            continue
+
         response_valid = item.response is not None and len(item.response) > 0
         ids_valid = item.response_ids is not None and len(item.response_ids) > 0
         if not ids_valid:
@@ -790,7 +801,7 @@ class BaseRLTrainer:
         train_trajectory_dir = self.exp_dir / "train_rollout"
         train_trajectory_dir.mkdir(parents=True, exist_ok=True)
         train_trajectory_path = train_trajectory_dir / f"train_rollout_{train_step}.jsonl"
-        self._save_trajectories(train_batch, train_trajectory_path)
+        # self._save_trajectories(train_batch, train_trajectory_path)
         self.logger.info(f"Train step {train_step} train trajectories saved to {train_trajectory_path}")
 
         # 共卡需要先释放 rollout，再把训练 worker onload；非共卡不走这两个动作。
@@ -816,6 +827,10 @@ class BaseRLTrainer:
                 pack_max_length=self._train_worker_cfg.pack_max_length,
                 rollout_idx=train_step,
             )
+        # del
+        self.logger.info("Release all sessions and free associated resources")
+        ray.get(get_store().release_all.remote())
+
         return {
             "data_info": data_info,
             "workers_log_item": workers_log_item,
@@ -888,20 +903,25 @@ class BaseRLTrainer:
 
         data_batches = []
 
+        import debugpy
+        # debugpy.connect(('10.102.250.69', 5680))
+
         for j, group in enumerate(data_groups):
             if not is_valid_for_training(group, self.logger):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
 
-            is_vlm_model = "train_prompt_ids" in group[0].extra_fields
-            if is_vlm_model:
-                # TODO(hha): VLM, 不好的设计，后续要去掉
-                prompt_ids = group[0].extra_fields["train_prompt_ids"]
-            else:
-                prompt_ids = group[0].prompt_ids
-            assert prompt_ids is not None and len(prompt_ids) > 0, (
-                f"Prompt ids cannot be None or empty in data: {group[0]}"
-            )
+            prompt_ids = None
+            if any(data.input_ids is None for data in group):
+                is_vlm_model = "train_prompt_ids" in group[0].extra_fields
+                if is_vlm_model:
+                    # TODO(hha): VLM, 不好的设计，后续要去掉
+                    prompt_ids = group[0].extra_fields["train_prompt_ids"]
+                else:
+                    prompt_ids = group[0].prompt_ids
+                assert prompt_ids is not None and len(prompt_ids) > 0, (
+                    f"Prompt ids cannot be None or empty in data: {group[0]}"
+                )
             rewards = []
             for data in group:
                 assert data.reward is not None and "score" in data.reward, (
@@ -915,10 +935,65 @@ class BaseRLTrainer:
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
+                if group[i].input_ids is not None:
+                    raw_input_ids = group[i].input_ids
+                    labels = group[i].labels
+                    assert labels is not None, f"Labels cannot be None when input_ids is provided: {group[i]}"
+                    assert len(raw_input_ids) == len(labels), (
+                        f"{len(raw_input_ids)} vs {len(labels)}, data: {group[i]}"
+                    )
+
+                    logprobs = group[i].logprobs
+                    if logprobs is not None:
+                        assert len(logprobs) == len(raw_input_ids), (
+                            f"{len(logprobs)} vs {len(raw_input_ids)}, data: {group[i]}"
+                        )
+                        rollout_logprobs = torch.tensor(logprobs[1:], dtype=torch.float32).unsqueeze(0)
+                    else:
+                        raise ValueError(f"Logprobs cannot be None when input_ids is provided: {group[i]}")
+
+                    input_ids = raw_input_ids[:-1]
+                    shifted_labels = labels[1:]
+                    prompt_len = sum(label == -100 for label in shifted_labels)
+                    response_len = len(shifted_labels) - prompt_len
+                    prompt_len_list.append(prompt_len)
+                    response_len_list.append(response_len)
+
+                    advatnages_val = advantages[i].item()
+                    actual_advantages = [0.0 if label == -100 else advatnages_val for label in shifted_labels]
+                    advantages_list.extend(actual_advantages)
+
+                    assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
+                    training_tokens += len(input_ids)
+                    input_ids_t = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
+                    shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
+
+                    if rollout_logprobs is not None:
+                        assert rollout_logprobs.size() == shifted_labels_t.size(), (
+                            f"{rollout_logprobs.size()} vs {shifted_labels_t.size()}"
+                        )
+
+                    position_ids = group[i].position_ids
+                    multimodal_train_info = group[i].mm_info
+                    multi_info_cast = cast(dict | None, multimodal_train_info)
+                    seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multi_info_cast)
+
+                    data_dict = {
+                        "seq_ctx": seq_ctx,
+                        "shifted_labels": shifted_labels_t,
+                        "advantage": actual_advantages,
+                        "rollout_logprobs": rollout_logprobs,
+                    }
+
+                    seq_ctx.rollout_routed_experts = group[i].routed_experts
+                    data_batches.append(data_dict)
+                    continue
+
                 item = group[i].response
                 logprobs: list[float] | None = None
 
                 response_ids: List[int] = []
+                assert prompt_ids is not None
                 if group[i].response_ids is not None:
                     resp_ids_raw = group[i].response_ids
                     if isinstance(resp_ids_raw, torch.Tensor):

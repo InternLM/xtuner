@@ -277,6 +277,14 @@ class RolloutTraceStore:
         assert session_id in self.sessions, f"Session ID '{session_id}' not found for release."
         trie = self.sessions.pop(session_id)
         trie.release()
+    
+    def release_all(self):
+        """Release all sessions and free associated resources."""
+        for session_id in list(self.sessions):
+            self.release(session_id)
+        self.sessions.clear()
+        self.objects.clear()
+        self.updated_at.clear()
 
     def export_training_trace(self, session_id: str, prompt_text: str) -> dict:
         """Export the stored training trace given a complete prompt text.

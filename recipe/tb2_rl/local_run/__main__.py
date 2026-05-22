@@ -101,6 +101,10 @@ async def main_async(args: argparse.Namespace) -> int:
     cfg = _load_config(Path(args.config))
     dataset = cfg.dataset
 
+    if args.mode == "agentloop":
+        import ray
+        ray.init(address="auto")
+
     pairs: list[tuple[Path, AgentRolloutItem]]
     if args.tasks:
         wanted = {str(Path(p).resolve()) for p in args.tasks}
