@@ -1,15 +1,33 @@
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 import ray
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictStr
 
+from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.utils import get_logger
 
 
 _STORE_NAME = "rollout_trace_store"
 _handle_cache: Any = None
+
+
+class TraceState(str, Enum):
+    ROLLOUT_RUNNING = "RolloutRunning"
+    ROLLOUT_FINISHED = "RolloutFinished"
+    TRAIN_RUNNING = "TrainRunning"
+    TRAIN_FINISHED = "TrainFinished"
+    TO_BE_RELEASED = "ToBeReleased"
+    RELEASED = "Released"
+
+
+_ROLLOUT_RELEASE_STATUSES = {Status.FAILED, Status.FILTERED, Status.EXPIRED}
+_ROLLOUT_KEEP_RUNNING_STATUSES = {
+    Status.ABORTED,
+    Status.INIT,
+}
 
 
 def _free_ray_refs(obj: Any):
@@ -40,12 +58,17 @@ def _free_ray_refs(obj: Any):
             _free_ray_refs(v)
 
 
+def make_expert_key(session_id: str) -> str:
+    """Build a stable key for a routed experts object."""
+    return f"{session_id}:routed_experts"
+
+
 class TokenizedSegment(BaseModel):
     text: str
     token_ids: List[int]
     labels: List[int] | None = Field(default=None, repr=False)
     logprobs: List[float] | None = Field(default=None, repr=False)
-    expert_key: Any = Field(default=None, repr=False)
+    expert_key: StrictStr | None = Field(default=None, repr=False)
     length: int | None = None
 
     def model_post_init(self, _):
@@ -79,6 +102,13 @@ class Trie:
     def __init__(self):
         """Initialize the prefix tree (Trie)."""
         self.root = TreeNode(value=None, parent=None)
+        self.state = TraceState.ROLLOUT_RUNNING
+        self.expert_key: str | None = None
+        self.updated_at = time.time()
+
+    def touch(self) -> None:
+        """Record that this session was updated."""
+        self.updated_at = time.time()
 
     def keys(self) -> List[str]:
         """Get all keys (i.e., strings) stored in the Trie."""
@@ -117,6 +147,7 @@ class Trie:
                 break
 
         node.value = value
+        self.touch()
 
     def search(self, text: str, filter_none: bool = False) -> Tuple[str, List["TreeNode"]]:
         """Search for the longest prefix matching the input text.
@@ -173,6 +204,7 @@ class Trie:
 
         if key is None:
             _free_subtree(self.root)
+            self.touch()
             return
 
         node = self.root
@@ -193,6 +225,7 @@ class Trie:
         if node.value is not None:
             _free_ray_refs(node.value)
             node.value = None
+            self.touch()
 
         for parent, token in reversed(path):
             child_node = parent.children[token]
@@ -211,7 +244,6 @@ class RolloutTraceStore:
         """Initialize the rollout trace store actor."""
         self.sessions: Dict[str, Trie] = {}
         self.objects: Dict[str, ray.ObjectRef] = {}
-        self.updated_at: Dict[str, float] = {}
 
     def get_or_create(self, session_id: str) -> Trie:
         """Get the Trie for a session, or create one if it doesn't exist.
@@ -226,6 +258,127 @@ class RolloutTraceStore:
             self.sessions[session_id] = Trie()
         return self.sessions[session_id]
 
+    def get_state(self, session_id: str) -> dict | None:
+        """Get lifecycle metadata for a session.
+
+        Args:
+            session_id (str): The session identifier.
+
+        Returns:
+            dict | None: A snapshot of session metadata, or None when the
+                session does not exist.
+        """
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            return None
+        return {
+            "session_id": session_id,
+            "state": trie.state.value,
+            "updated_at": trie.updated_at,
+            "has_object_ref": trie.expert_key in self.objects if trie.expert_key is not None else False,
+        }
+
+    def list_sessions(self, state: str | None = None) -> list[dict]:
+        """List current session metadata snapshots, optionally filtered by state."""
+        snapshots = []
+        for session_id in sorted(self.sessions):
+            snapshot = self.get_state(session_id)
+            if snapshot is None:
+                continue
+            if state is not None and snapshot["state"] != state:
+                continue
+            snapshots.append(snapshot)
+        return snapshots
+
+    def _set_state(
+        self,
+        session_id: str,
+        next_state: TraceState,
+    ) -> TraceState:
+        """Set a session state and trigger release when needed."""
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            raise KeyError(f"Trace session {session_id!r} does not exist.")
+
+        trie.state = next_state
+        trie.touch()
+        self._maybe_release(session_id)
+
+        released = session_id not in self.sessions
+        return TraceState.RELEASED if released else next_state
+
+    def _maybe_release(self, session_id: str) -> None:
+        """Physically release a session once it reaches ToBeReleased."""
+        trie = self.sessions.get(session_id)
+        if trie is None or trie.state != TraceState.TO_BE_RELEASED:
+            return
+        self._release_session(session_id, trie)
+
+    def _release_session(self, session_id: str, trie: Trie) -> None:
+        """Release trie data and routed expert refs for one session."""
+        if trie.expert_key is not None:
+            obj_ref = self.objects.pop(trie.expert_key, None)
+            if obj_ref is not None:
+                _free_ray_refs(obj_ref)
+        trie.release()
+        self.sessions.pop(session_id, None)
+
+    def mark_rollout_status(
+        self,
+        session_id: str,
+        status: Status,
+        *,
+        enable_partial_rollout: bool = False,
+    ) -> str:
+        """Apply a rollout-side status event to one trace session."""
+        release_like = status in _ROLLOUT_RELEASE_STATUSES or (
+            status == Status.ABORTED and not enable_partial_rollout
+        )
+
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            if release_like:
+                return TraceState.RELEASED.value
+            raise KeyError(f"Trace session {session_id!r} does not exist.")
+        if trie.state != TraceState.ROLLOUT_RUNNING:
+            raise RuntimeError(
+                f"Cannot handle mark_rollout_status for trace session {session_id!r} "
+                f"in state {trie.state.value}."
+            )
+
+        if release_like:
+            return self._set_state(session_id, TraceState.TO_BE_RELEASED).value
+        if status == Status.COMPLETED:
+            return self._set_state(session_id, TraceState.ROLLOUT_FINISHED).value
+        if status in _ROLLOUT_KEEP_RUNNING_STATUSES:
+            trie.touch()
+            return TraceState.ROLLOUT_RUNNING.value
+        raise AssertionError(f"Unhandled rollout status: {status!r}")
+
+    def mark_commit_failed(self, session_id: str) -> str:
+        """Release a rollout session whose response commit failed."""
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            return TraceState.RELEASED.value
+        if trie.state != TraceState.ROLLOUT_RUNNING:
+            raise RuntimeError(
+                f"Cannot handle mark_commit_failed for trace session {session_id!r} "
+                f"in state {trie.state.value}."
+            )
+        return self._set_state(session_id, TraceState.TO_BE_RELEASED).value
+
+    def mark_rollout_discarded(self, session_id: str) -> str:
+        """Release a rollout session that external scheduling has discarded."""
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            return TraceState.RELEASED.value
+        if trie.state not in (TraceState.ROLLOUT_RUNNING, TraceState.ROLLOUT_FINISHED):
+            raise RuntimeError(
+                f"Cannot handle mark_rollout_discarded for trace session {session_id!r} "
+                f"in state {trie.state.value}."
+            )
+        return self._set_state(session_id, TraceState.TO_BE_RELEASED).value
+
     def keys(self, session_id: str) -> List[str]:
         """Get all keys (i.e., strings) stored in a session's Trie.
 
@@ -236,18 +389,39 @@ class RolloutTraceStore:
             List[str]: A list of all keys in the session's Trie.
         """
         trie = self.get_or_create(session_id)
+        if trie.state == TraceState.TO_BE_RELEASED:
+            get_logger().error(f"Trace session {session_id!r} is pending release; skip keys.")
+            return []
         return trie.keys()
 
-    def insert(self, session_id: str, key: str, value: Any):
+    def insert(
+        self,
+        session_id: str,
+        key: str,
+        value: TokenizedSegment,
+        routed_experts: ray.ObjectRef | None = None,
+    ):
         """Insert a (key, value) pair into a session's Trie.
 
         Args:
             session_id (str): The session identifier.
             key (str): The key string.
-            value (Any): The trace segment/value to store.
+            value (TokenizedSegment): The trace segment to store.
+            routed_experts (ray.ObjectRef | None): Optional routed experts
+                object for this session.
         """
         trie = self.get_or_create(session_id)
-        return trie.insert(key, value)
+        if trie.state != TraceState.ROLLOUT_RUNNING:
+            get_logger().error(
+                f"Cannot insert into trace session {session_id!r} in state {trie.state.value}; skip insert."
+            )
+            return
+        if routed_experts is not None:
+            expert_key = make_expert_key(session_id)
+            self.objects[expert_key] = routed_experts
+            value.expert_key = expert_key
+            trie.expert_key = expert_key
+        trie.insert(key, value)
 
     def search(self, session_id: str, text: str, filter_none: bool = False):
         """Search the longest prefix in a session's Trie.
@@ -261,18 +435,10 @@ class RolloutTraceStore:
             Tuple[str, List["TreeNode"]]: The matched prefix and matched nodes.
         """
         trie = self.get_or_create(session_id)
+        if trie.state == TraceState.TO_BE_RELEASED:
+            get_logger().error(f"Trace session {session_id!r} is pending release; skip search.")
+            return "", []
         return trie.search(text, filter_none)
-
-    def release(self, session_id: str):
-        """Release the Trie and free associated resources for a specific
-        session.
-
-        Args:
-            session_id (str): The session identifier.
-        """
-        assert session_id in self.sessions, f"Session ID '{session_id}' not found for release."
-        trie = self.sessions.pop(session_id)
-        trie.release()
 
     def export_training_trace(self, session_id: str, prompt_text: str) -> dict:
         """Export the stored training trace given a complete prompt text.
@@ -283,25 +449,72 @@ class RolloutTraceStore:
 
         Returns:
             dict: The trace dictionary containing `input_ids`, `labels`, `logprobs`,
-                and `routed_experts`.
+                and the session-level `routed_experts` object key.
 
         Raises:
+            KeyError: If the session does not exist.
+            RuntimeError: If the session is not ready for training export.
             ValueError: If the prompt_text does not completely match the trace keys in the session.
         """
-        trie = self.get_or_create(session_id)
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            raise KeyError(f"Trace session {session_id!r} does not exist.")
+        if trie.state != TraceState.ROLLOUT_FINISHED:
+            raise RuntimeError(
+                f"Cannot export training trace for session {session_id!r} in state {trie.state.value}."
+            )
+
         key, nodes = trie.search(prompt_text, filter_none=True)
         if prompt_text != key:
+            self._set_state(session_id, TraceState.TO_BE_RELEASED)
             raise ValueError(
                 f"Prompt text '{prompt_text}' does not match any trace key '{key}' in session '{session_id}'."
             )
-        trace = {"input_ids": [], "labels": [], "logprobs": [], "routed_experts": []}
+        trace = {"input_ids": [], "labels": [], "logprobs": [], "routed_experts": trie.expert_key}
         for node in nodes:
             node_val: TokenizedSegment = node.value
             trace["input_ids"].extend(node_val.token_ids)
             trace["labels"].extend(node_val.labels)
             trace["logprobs"].extend(node_val.logprobs)
-            trace["routed_experts"].append(node_val.expert_key)
+        self._set_state(session_id, TraceState.TRAIN_RUNNING)
         return trace
+
+    def mark_train_finished(self, session_id: str) -> str:
+        """Release a session after trainer consumers have finished using it."""
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            return TraceState.RELEASED.value
+        if trie.state != TraceState.TRAIN_RUNNING:
+            raise RuntimeError(
+                f"Cannot handle mark_train_finished for trace session {session_id!r} "
+                f"in state {trie.state.value}."
+            )
+        self._set_state(session_id, TraceState.TRAIN_FINISHED)
+        return self._set_state(session_id, TraceState.TO_BE_RELEASED).value
+
+    def mark_train_abandoned(self, session_id: str) -> str:
+        """Release a training session that trainer will no longer consume."""
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            return TraceState.RELEASED.value
+        if trie.state != TraceState.TRAIN_RUNNING:
+            raise RuntimeError(
+                f"Cannot handle mark_train_abandoned for trace session {session_id!r} "
+                f"in state {trie.state.value}."
+            )
+        return self._set_state(session_id, TraceState.TO_BE_RELEASED).value
+
+    def gc_stale_sessions(self, ttl_seconds: float) -> list[str]:
+        """Release stale RolloutRunning sessions older than the given TTL."""
+        now = time.time()
+        stale_session_ids = [
+            session_id
+            for session_id, trie in self.sessions.items()
+            if trie.state == TraceState.ROLLOUT_RUNNING and (now - trie.updated_at) > ttl_seconds
+        ]
+        for session_id in stale_session_ids:
+            self._set_state(session_id, TraceState.TO_BE_RELEASED)
+        return stale_session_ids
 
     def get_objects(self, keys: list[str]) -> list[ray.ObjectRef]:
         """Fetch ray.ObjectRef elements by their keys.
@@ -312,7 +525,14 @@ class RolloutTraceStore:
         Returns:
             list[ray.ObjectRef]: The mapped ray.ObjectRefs.
         """
-        return [self.objects[key] for key in keys if key in self.objects]
+        object_refs: list[ray.ObjectRef] = []
+        for key in keys:
+            if not isinstance(key, str) or not key:
+                raise KeyError(f"Invalid trace object key: {key!r}")
+            if key not in self.objects:
+                raise KeyError(f"Trace object key {key!r} does not exist.")
+            object_refs.append(self.objects[key])
+        return object_refs
 
 
 def get_store():
