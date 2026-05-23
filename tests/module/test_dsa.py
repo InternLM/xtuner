@@ -20,6 +20,8 @@ def _make_dsa(
     index_head_dim: int = 32,
     index_n_heads: int = 4,
     index_topk: int = 8,
+    pack_max_length: int | None = None,
+    backend: str = "native",
     seed: int = 1234,
 ) -> DeepSeekSparseAttention:
     torch.manual_seed(seed)
@@ -44,6 +46,8 @@ def _make_dsa(
         index_n_heads=index_n_heads,
         index_topk=index_topk,
         indexer_backend="native",
+        pack_max_length=pack_max_length,
+        backend=backend,  # type: ignore[arg-type]
     )
     module = cfg.build(hidden_size=hidden_size, layer_idx=0, compress_ratio=compress_ratio)
     # Non-trivial APE to keep the Compressor / Indexer non-degenerate; default
@@ -134,6 +138,10 @@ class TestDeepSeekSparseAttention:
         seq_len = 256
         dsa = _make_dsa(compress_ratio=128, hidden_size=hidden_size, sliding_window=16)
         assert dsa.indexer is None
+        # ``pack_max_length`` not set ⇒ padded path off, no buffer allocated,
+        # forward runs the dynamic-width native build.
+        assert dsa._hca_uses_padded_path is False
+        assert "_compress_topk_pad" not in dict(dsa.named_buffers())
 
         torch.manual_seed(2)
         hidden = torch.randn(1, seq_len, hidden_size, dtype=torch.float32)
@@ -144,6 +152,48 @@ class TestDeepSeekSparseAttention:
         projected = out["projected_output"]
         assert projected.shape == (1, seq_len, hidden_size)
         assert torch.isfinite(projected).all()
+
+    def test_hca_pad_buffer_static_shape(self) -> None:
+        # When ``pack_max_length`` is set AND backend resolves to flash_mla/
+        # cudnn, ``_hca_uses_padded_path`` flips on at __init__ and the static
+        # ``-1`` buffer is registered with the expected shape. CI box may not
+        # have FlashMLA, so we tolerate the native-fallback case.
+        sliding_window = 16
+        pack_max_length = 256
+        ratio = 128
+        try:
+            dsa = _make_dsa(
+                compress_ratio=ratio,
+                sliding_window=sliding_window,
+                pack_max_length=pack_max_length,
+                backend="cudnn",
+            )
+        except (RuntimeError, ImportError):
+            pytest.skip("flash_mla / cudnn backend unavailable in this env")
+        if not dsa._hca_uses_padded_path:
+            pytest.skip("backend resolved to native; pad buffer intentionally not allocated")
+        max_w = pack_max_length // ratio + 1
+        assert dsa._hca_max_compress_w == max_w
+        natural_topk = sliding_window + max_w
+        padded_topk = ((natural_topk + 128 - 1) // 128) * 128
+        assert dsa._hca_pad_cols == padded_topk - natural_topk
+        buf = dsa._compress_topk_pad
+        assert buf.shape == (1, pack_max_length, dsa._hca_pad_cols)
+        assert buf.dtype == torch.int32
+        assert (buf == -1).all()
+
+    def test_hca_pack_max_length_without_flash_backend_falls_back(self) -> None:
+        # Native backend doesn't need 128-alignment, so even with
+        # ``pack_max_length`` set the padded path is intentionally OFF (saves
+        # the 8 MB pad buffer when it'd be unused).
+        dsa = _make_dsa(
+            compress_ratio=128,
+            sliding_window=16,
+            pack_max_length=256,
+            backend="native",
+        )
+        assert dsa._hca_uses_padded_path is False
+        assert "_compress_topk_pad" not in dict(dsa.named_buffers())
 
     def test_two_samples_varlen(self) -> None:
         # Per-sample loop must produce bit-identical output for sample B

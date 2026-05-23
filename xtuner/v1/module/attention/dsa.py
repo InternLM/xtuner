@@ -29,6 +29,7 @@ from xtuner.v1.utils import get_logger
 
 from ..rms_norm import RMSNorm
 from ._flash_mla_sparse_attn import (
+    _FLASH_MLA_TOPK_ALIGN,
     _flash_mla_topk_ok,
     cudnn_sparse_attn_apply as _cudnn_sparse_attn_apply,
     flash_mla_sparse_attn_apply as _flash_mla_sparse_attn_apply,
@@ -110,6 +111,16 @@ class DSAConfig(BaseModel):
     #     ``sparse_attention_backward_wrapper`` (DSA bwd, FlashMLA-shape,
     #     SM90/SM100). Requires ``pip install nvidia-cudnn-frontend>=1.24.0``.
     backend: Annotated[Literal["native", "flash_mla", "cudnn"], Parameter(group="attention")] = "native"
+    # Static upper bound on the packed query length (``DataloaderConfig.pack_max_length``).
+    # HCA (``compress_ratio=128``) needs it to pre-allocate the constant ``-1``
+    # pad buffer that brings the per-layer ``topk`` width to a multiple of
+    # FlashMLA's 128 alignment — HCA's natural width
+    # ``sliding_window + pack // 128 + 1`` is never aligned. When ``None``,
+    # HCA layers on a flash_mla/cudnn backend fall back to native sparse_attn
+    # (slower; see :meth:`DeepSeekSparseAttention._resolve_sparse_attn_fn`).
+    # CSA (``compress_ratio=4``) and sliding-only (``compress_ratio=0``)
+    # layers do not consult this field.
+    pack_max_length: Annotated[int | None, Parameter(group="attention")] = None
     # Backend for the Indexer's top-k score-and-select path. ``"triton"`` runs
     # the varlen tensor-core kernel in :mod:`._indexer_topk_triton` under
     # ``torch.no_grad()`` (the indexer's output indices have no gradient anyway
@@ -288,6 +299,49 @@ class DeepSeekSparseAttention(nn.Module):
         # function-pointer call with no branch.
         self._sparse_attn_fn = self._resolve_sparse_attn_fn(dsa_cfg)
 
+        # HCA pad buffer: sized once from ``pack_max_length`` so the forward
+        # path is one slice + cat — no Python-side cache check, no
+        # ``torch.compiler.disable`` helper, no graph break. The
+        # ``_hca_uses_padded_path`` flag is purely a const at trace time, so
+        # compile sees a straight tensor-op pipeline. Pad cols (and the
+        # static-max compress-topk width that pairs with it) are computed
+        # here so forward can use Python ints — see below.
+        self._hca_uses_padded_path = (
+            compress_ratio == 128
+            and dsa_cfg.pack_max_length is not None
+            and self._sparse_attn_fn is not _native_sparse_attn
+        )
+        if self._hca_uses_padded_path:
+            assert dsa_cfg.pack_max_length is not None  # narrow for mypy
+            pack_max_length = dsa_cfg.pack_max_length
+            # Build ``compress_topk`` at this static width every forward,
+            # regardless of actual ``total_tokens`` ≤ pack_max_length. Tokens
+            # short of the natural horizon already get ``-1`` from
+            # ``_build_compress_topk_idxs_varlen``'s clamp, so the only
+            # consequence is some extra -1 entries inside the valid block,
+            # which sparse_attn masks the same way as the trailing pad.
+            self._hca_max_compress_w = pack_max_length // compress_ratio + 1
+            natural_topk = dsa_cfg.sliding_window + self._hca_max_compress_w
+            padded_topk = (
+                (natural_topk + _FLASH_MLA_TOPK_ALIGN - 1) // _FLASH_MLA_TOPK_ALIGN
+            ) * _FLASH_MLA_TOPK_ALIGN
+            self._hca_pad_cols = padded_topk - natural_topk
+            # ``_shift_topk_to_global(...).int()`` is int32, so the cat partner
+            # must also be int32. At V4 prod dims (pack=16384, pad_cols≈127)
+            # this is ~8 MB per HCA layer.
+            self.register_buffer(
+                "_compress_topk_pad",
+                torch.full(
+                    (1, pack_max_length, self._hca_pad_cols),
+                    -1,
+                    dtype=torch.int32,
+                ),
+                persistent=False,
+            )
+        else:
+            self._hca_max_compress_w = 0
+            self._hca_pad_cols = 0
+
     def _resolve_sparse_attn_fn(self, dsa_cfg: "DSAConfig"):
         # Per-layer topk_max for the FlashMLA-alignment decision:
         #   compress_ratio == 0   : window_topk only
@@ -295,18 +349,15 @@ class DeepSeekSparseAttention(nn.Module):
         #   compress_ratio == 4   : window + Indexer top-K (CSA, content-adaptive)
         #                           → topk_max = sliding_window + index_topk
         #   compress_ratio == 128 : window + deterministic positional top-K (HCA)
-        #                           → topk_max = sliding_window + (pack // 128 + 1)
-        #                                        which depends on the runtime pack length.
-        #
-        # HCA is structurally FlashMLA-incompatible. The deterministic
-        # positional path pads to ``total_tokens // compress_ratio + 1`` so the
-        # combined topk is ``sliding_window + pack/128 + 1`` — at V4's
-        # canonical packs (4096 → 161, 8192 → 193, 16384 → 257) none is a
-        # multiple of FlashMLA's 128-alignment, and there is no static way to
-        # know pack here anyway. So ratio=128 layers ALWAYS use native end-to-
-        # end regardless of ``dsa_cfg.backend``; this was the path the
-        # original runtime ``cudnn_sparse_attn`` fallback took, and we
-        # preserve that decision statically.
+        #                           → natural width sliding_window + pack/128 + 1
+        #                             is never 128-aligned. With
+        #                             ``pack_max_length`` known at config time
+        #                             we ceil-round to the next multiple of 128
+        #                             and pad the extra compress-topk columns
+        #                             with ``-1`` (mask slot). Without
+        #                             ``pack_max_length`` we cannot size the
+        #                             static pad buffer, so HCA falls back to
+        #                             native.
         if self.compress_ratio == 0:
             topk_max = dsa_cfg.sliding_window
             flashmla_compatible = _flash_mla_topk_ok(topk_max)
@@ -315,18 +366,29 @@ class DeepSeekSparseAttention(nn.Module):
             flashmla_compatible = _flash_mla_topk_ok(topk_max)
         else:
             # compress_ratio == 128 (HCA)
-            topk_max = -1  # not statically known; structurally incompatible
-            flashmla_compatible = False
+            if dsa_cfg.pack_max_length is None:
+                topk_max = -1
+                flashmla_compatible = False
+            else:
+                natural = dsa_cfg.sliding_window + dsa_cfg.pack_max_length // self.compress_ratio + 1
+                topk_max = (
+                    (natural + _FLASH_MLA_TOPK_ALIGN - 1) // _FLASH_MLA_TOPK_ALIGN
+                ) * _FLASH_MLA_TOPK_ALIGN
+                flashmla_compatible = _flash_mla_topk_ok(topk_max)
 
         # Pick the function. When the user asked for flash_mla / cudnn but
         # this specific layer can't run it, warn explicitly so the user
         # knows which layer fell back and why — silent fallback inside the
         # forward (the previous design) hid this.
         if dsa_cfg.backend in ("flash_mla", "cudnn") and not flashmla_compatible:
-            if self.compress_ratio == 128:
+            if self.compress_ratio == 128 and dsa_cfg.pack_max_length is None:
                 reason = (
-                    "compress_ratio=128 uses deterministic positional top-K "
-                    "(pack-dependent width, never 128-aligned)"
+                    "compress_ratio=128 (HCA) needs DSAConfig.pack_max_length set "
+                    "to size the static -1 pad buffer; without it the topk width is "
+                    "pack-dependent and never 128-aligned. Set "
+                    "``moe_cfg.attention.pack_max_length = "
+                    "dataloader_cfg.pack_max_length`` in your training config to "
+                    "enable the HCA padded path"
                 )
             else:
                 reason = (
@@ -479,12 +541,25 @@ class DeepSeekSparseAttention(nn.Module):
                 with torch.no_grad():
                     compress_topk = self.indexer(hidden_states, q_lowrank, (cos_c, sin_c), cu_q)
             else:
-                # compress_ratio == 128: deterministic positional top-k. The K
-                # dim is bounded by the longest sample's compressed length;
-                # ``total_tokens // ratio + 1`` is a static upper bound that
-                # dynamo can specialise. Per-token rows fewer than this width
-                # are -1-padded.
-                max_compressed_width = total_tokens // self.compress_ratio + 1
+                # compress_ratio == 128: deterministic positional top-k.
+                #
+                # On the HCA padded path (``pack_max_length`` set + flash_mla/
+                # cudnn backend), pin the build width to the static
+                # ``_hca_max_compress_w`` so the trailing pad slice is also
+                # static and ``torch.cat`` lowers cleanly. Tokens below the
+                # natural horizon already get ``-1`` from
+                # ``_build_compress_topk_idxs_varlen``'s clamp; the only
+                # consequence of the larger build is extra -1 entries inside
+                # the valid block, which sparse_attn masks identically to the
+                # trailing pad.
+                #
+                # On the native path, use the historic dynamic width — native
+                # has no alignment constraint and a smaller build saves a few
+                # KB on short batches.
+                if self._hca_uses_padded_path:
+                    max_compressed_width = self._hca_max_compress_w
+                else:
+                    max_compressed_width = total_tokens // self.compress_ratio + 1
                 compress_topk = _build_compress_topk_idxs_varlen(
                     self.compress_ratio, cu_q, cu_c, total_tokens, max_compressed_width
                 )
@@ -503,6 +578,17 @@ class DeepSeekSparseAttention(nn.Module):
 
         kv_full = _interleave_window_compressed_kv(kv, kv_compressed, cu_q, cu_c, cu_packed)
         topk_idxs = _shift_topk_to_global(window_topk, compress_topk, cu_q, cu_packed).int()
+
+        # HCA padded path: slice the pre-allocated ``[1, pack_max_length, _hca_pad_cols]``
+        # ``-1`` buffer down to the current ``total_tokens`` and cat it onto
+        # ``topk_idxs`` to lift the trailing dim to a multiple of FlashMLA's
+        # 128 alignment. The buffer is registered at ``__init__`` so this is a
+        # view + a single ``torch.cat`` — no Python-side check, no graph break.
+        # ``self._hca_uses_padded_path`` is a constant attribute; dynamo folds
+        # the ``if`` away at trace time.
+        if self._hca_uses_padded_path:
+            pad_slice = self._compress_topk_pad[:, :total_tokens, :]
+            topk_idxs = torch.cat([topk_idxs, pad_slice], dim=-1)
 
         # Under ep_size > 1, ``_replicate_other_params`` wraps ``self.attn_sink``
         # as a Replicate-on-ep DTensor. ``sparse_attn`` cats it with plain-tensor
