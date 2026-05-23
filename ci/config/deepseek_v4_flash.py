@@ -74,6 +74,15 @@ moe_cfg.dispatcher = "deepep"
 #   * "flash_mla" — Phase-1: FlashMLA forward + native-recompute backward
 #   * "cudnn"     — Phase-2: FlashMLA forward + cudnn SparseAttentionBackward
 moe_cfg.attention.backend = "cudnn"
+# Tell DSA the static upper bound on packed query length. HCA
+# (compress_ratio=128) layers use it to size a pre-allocated ``-1`` pad
+# buffer that brings ``topk_idxs.size(-1)`` up to a multiple of FlashMLA's
+# 128-alignment so HCA can dispatch to flash_mla/cudnn instead of falling
+# back to native sparse_attn (slower; see DSA._resolve_sparse_attn_fn).
+# Keep this in sync with ``DataloaderConfig.pack_max_length`` below; the
+# DSA value must be ≥ the dataloader value (any tighter bound also works
+# but the buffer must cover the worst-case pack the model ever sees).
+moe_cfg.attention.pack_max_length = 4096
 # Compile is now safe — cutlass group_gemm is annotated with @torch.library.custom_op
 # (compile-friendly), and HC + DSA helpers are pure-Tensor.
 # Temporarily disabled: under pack=8192 + intra_layer_micro_batch=1 +
