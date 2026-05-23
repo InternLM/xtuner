@@ -258,7 +258,48 @@ def hc_post(x: Tensor, residual: Tensor, post: Tensor, comb: Tensor) -> Tensor:
     # path, giving a residual ~7e-3 abs diff at ``test_subcomponent_probe``'s
     # ``hc_post (attn)`` step. Casting up-front makes the whole expression
     # match HF bit-for-bit.
+    #
+    # Use broadcast-multiply + ``.sum(-2)`` (NOT ``torch.matmul``) so inductor
+    # codegens one fused triton kernel for the whole hc_post body. At K=hc_mult=4
+    # cuBLAS ``aten.bmm`` falls back to the CUDA-core path (below Hopper's
+    # wgmma tile floor) and is bandwidth-bound — ~3 ms/call × 86 calls/step
+    # ≈ 250 ms/step at pack=16384. The ``[B, S, H, H, D]`` 5D intermediate
+    # the unsqueeze + multiply implies in eager mode does NOT materialise
+    # under compile: inductor fuses the multiply with the trailing reduction
+    # in registers and writes only the ``[B, S, H, D]`` output.
+    #
+    # The ``.transpose(-1, -2)`` is semantically required, NOT a perf
+    # rearrangement — HF / V4-ref reduce over the FIRST hc axis of ``comb``
+    # (``out[h_out, d] = sum_h_in comb[h_in, h_out] * residual[h_in, d]``,
+    # i.e. ``comb.T @ residual``). Sinkhorn output is doubly stochastic but
+    # asymmetric, so the un-transposed broadcast+sum was a different operation
+    # entirely (~4.0 elementwise diff vs HF; not a precision drift).
+    #
+    # Reduction is in fp32 to match cuBLAS' bf16-input / fp32-accumulator bmm
+    # bit-for-bit (within bf16 ULP). bf16 broadcast+sum here lost ~1.2e-2 vs
+    # HF — see ``test_subcomponent_probe``'s ``hc_post (attn)`` step on the
+    # earlier all-bf16 commit. The upcast costs ~1.5× HBM read on
+    # comb/residual but inductor still fuses the whole hc_post body into one
+    # triton kernel (the ``[B, S, H, H, D]`` 5D intermediate stays in
+    # registers, never materialises), so the K=4 bandwidth-bound regime is
+    # essentially unchanged in wall-clock — strictly better than the
+    # ``torch.matmul`` path which falls back to cuBLAS' CUDA-core small-K
+    # gemm (~250 ms/step at pack=16384).
+    #
+    # WARNING: this function MUST be in the active compile cfg (see
+    # ``_V4_LAYER_TARGETS`` in ``deepseek_v4.py``). Running it eagerly would
+    # materialise the 8 GB ``[B, S, H, H, D]`` 5D tensor at pack=16384,
+    # hc_mult=4, hidden=4096.
     post_dt = post.to(residual.dtype)
-    comb_dt = comb.to(residual.dtype)
-    mixed = torch.matmul(comb_dt.transpose(-1, -2), residual)
+    # ``comb`` arrives in fp32 (Sinkhorn output). HF first casts it to
+    # ``residual.dtype`` (bf16) and then runs ``torch.matmul`` whose cuBLAS
+    # backend uses an fp32 accumulator internally. To bit-match HF we
+    # reproduce both halves: bf16 round on the input (one rounding boundary
+    # that HF has and our fp32-throughout path would otherwise skip), then
+    # promote to fp32 for the multiply + reduction.
+    comb_b = comb.to(residual.dtype)
+    mixed = (
+        comb_b.float().transpose(-1, -2).unsqueeze(-1)  # [B, S, H_out, H_in, 1]
+        * residual.float().unsqueeze(-3)                # [B, S, 1,     H_in, D]
+    ).sum(dim=-2).to(residual.dtype)                     # → [B, S, H_out, D]  (sum over H_in)
     return post_dt.unsqueeze(-1) * x.unsqueeze(-2) + mixed
