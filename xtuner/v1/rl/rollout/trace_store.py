@@ -9,6 +9,7 @@ from xtuner.v1.utils import get_logger
 
 
 _STORE_NAME = "rollout_trace_store"
+_STORE_NAMESPACE = "xtuner_rollout"
 _handle_cache: Any = None
 
 
@@ -330,10 +331,10 @@ class RolloutTraceStore:
 def get_store():
     """Process-local cached handle to the singleton store actor.
 
-    Fast path: ``ray.get_actor`` if another caller has already created it.
-    Slow path: create the actor under the reserved name; race with concurrent
-    creators is handled by catching the "name already taken" ValueError and
-    re-looking-up.
+    Fast path: ``ray.get_actor`` from the fixed XTuner rollout namespace if
+    another caller has already created it. Slow path: create the actor under
+    the reserved ``(namespace, name)`` pair; race with concurrent creators is
+    handled by catching the "name already taken" ValueError and re-looking-up.
 
     Returns:
         ActorHandle: Handle to the ``RolloutTraceStore`` actor.
@@ -343,7 +344,7 @@ def get_store():
         return _handle_cache
 
     try:
-        _handle_cache = ray.get_actor(_STORE_NAME)
+        _handle_cache = ray.get_actor(_STORE_NAME, namespace=_STORE_NAMESPACE)
         return _handle_cache
     except ValueError:
         pass
@@ -352,18 +353,24 @@ def get_store():
 
     for attempt in range(10):
         try:
-            _handle_cache = RolloutTraceStore.options(name=_STORE_NAME).remote()
+            _handle_cache = RolloutTraceStore.options(
+                name=_STORE_NAME,
+                namespace=_STORE_NAMESPACE,
+            ).remote()
             return _handle_cache
         except ValueError as exc:
             try:
-                _handle_cache = ray.get_actor(_STORE_NAME)
+                _handle_cache = ray.get_actor(_STORE_NAME, namespace=_STORE_NAMESPACE)
                 return _handle_cache
             except ValueError:
                 get_logger().debug(f"RolloutTraceStore bootstrap retry {attempt}: {exc}")
                 _time.sleep(0.2 * (attempt + 1))
                 continue
 
-    raise RuntimeError(f"RolloutTraceStore: failed to acquire named actor {_STORE_NAME!r} after retries")
+    raise RuntimeError(
+        f"RolloutTraceStore: failed to acquire named actor "
+        f"{_STORE_NAME!r} in namespace {_STORE_NAMESPACE!r} after retries"
+    )
 
 
 if __name__ == "__main__":

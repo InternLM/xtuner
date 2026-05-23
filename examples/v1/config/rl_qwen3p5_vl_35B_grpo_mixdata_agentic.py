@@ -161,7 +161,8 @@ train_worker_cfg = WorkerConfig(
 
 # 6. agent loop managers
 agent_loop_config = AgentInSandboxLoopConfig(
-    hf_checkpoint=model_path
+    hf_checkpoint=model_path,
+    max_concurrent_samples=512,
 )
 agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=TaskSpecConfig(

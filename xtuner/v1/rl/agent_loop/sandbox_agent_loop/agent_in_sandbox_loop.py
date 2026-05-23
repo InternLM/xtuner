@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import asyncio
 import importlib
 import json
 import traceback
@@ -11,31 +12,11 @@ from lagent.utils import create_object
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.utils import create_task
 
 from ..agent_loop import AgentLoop, AgentLoopConfig
 from .schemas import AgentRolloutItem, RolloutStatus
 from ...rollout.trace_store import get_store
-
-import ray
-
-_STORE_NAME = "rollout_trace_store"
-
-def get_store1():
-    try:
-        return ray.get_actor(_STORE_NAME)
-    except ValueError:
-        pass
-
-    from ray.util.state import list_actors
-
-    actors = list_actors(filters=[("name", "=", _STORE_NAME)], detail=True)
-    if not actors:
-        raise RuntimeError(f"cannot find ray actor: {_STORE_NAME}")
-
-    actor = actors[0]
-    namespace = actor.get("ray_namespace") if isinstance(actor, dict) else actor.ray_namespace
-    print(f"found {_STORE_NAME} in namespace={namespace}")
-    return ray.get_actor(_STORE_NAME, namespace=namespace)
 
 
 def _import_from_path(path: str) -> Any:
@@ -71,12 +52,15 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     transcript back into the standard ``RolloutState`` fields consumed by the
     replay buffer/trainer.
     """
+    max_concurrent_samples: int | None = None
+
     def build_local(self, rollout_controller: RolloutController | None = None, judger: Judger | None = None, logger=None) -> "AgentInSandboxLoop":
         return AgentInSandboxLoop(
             rollout_ctl=rollout_controller,
             hf_checkpoint=self.hf_checkpoint,
             judger=judger,
             logger=logger,
+            max_concurrent_samples=self.max_concurrent_samples,
         )
 
 
@@ -86,9 +70,28 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_ctl: RolloutController | None = None,
         hf_checkpoint: str = None,
         judger: Judger | None = None,
-        logger=None
+        logger=None,
+        max_concurrent_samples: int | None = None,
     ):
         super().__init__(rollout_ctl, None, hf_checkpoint, judger, logger)
+        self.max_concurrent_samples = max_concurrent_samples
+        self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
+
+    async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
+        async def generate_one(state: RolloutState) -> RolloutState:
+            if self._sample_semaphore is None:
+                return await self.generate_sample(state, **kwargs)
+            async with self._sample_semaphore:
+                return await self.generate_sample(state, **kwargs)
+
+        pending_tasks = []
+        for state in rollout_state:
+            state.sample_params = self.sample_params
+            task = create_task(generate_one(state))
+            pending_tasks.append(task)
+        generated_samples = asyncio.gather(*pending_tasks)
+        group_samples = await generated_samples
+        return group_samples
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         try:
