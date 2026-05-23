@@ -84,21 +84,37 @@ class ModelForwardExtraLogInfo(dict):
             else:
                 self[key] = tensor
 
+    @staticmethod
+    def _reduce_tensor(value: torch.Tensor, op: str) -> torch.Tensor:
+        while value.dim() >= 1:
+            if op == "sum":
+                value = torch.sum(value, dim=-1)
+            elif op == "max":
+                value = torch.max(value, dim=-1).values
+            elif op == "min":
+                value = torch.min(value, dim=-1).values
+            else:
+                raise ValueError(f"Unsupported reduce op: {op}")
+        return value
+
     def get(self):
         return_dict = {}
         # 当增加新的字段时，需要在这里添加相应的处理逻辑
-        if "max_ratio" in self:
-            while self["max_ratio"].dim() >= 1:
-                self["max_ratio"] = torch.max(self["max_ratio"], dim=-1).values
-            max_ratio_value = self["max_ratio"].item()
-            return_dict["max_ratio"] = max_ratio_value
-        if "local_base_loss" in self:
-            while self["local_base_loss"].dim() >= 1:
-                self["local_base_loss"] = torch.sum(self["local_base_loss"], dim=-1)
-            local_base_loss_value = self["local_base_loss"].item()
-            # vague keys such as `loss` should be avoided in extra_log_info,
-            # otherwise it may cause confusion in exp-track logs.
-            return_dict["local_base_loss"] = local_base_loss_value
+        sum_keys = (
+            "local_base_loss",
+            "reduced_train_policy_ratio_abs_dev_sum",
+            "reduced_train_policy_clip_low_count",
+            "reduced_train_policy_clip_high_count",
+            "reduced_train_policy_kl1_sum",
+            "reduced_train_policy_kl3_sum",
+            "reduced_train_policy_valid_count",
+        )
+        max_keys = ("max_ratio", "reduced_train_policy_ratio_max")
+        min_keys = ("reduced_train_policy_ratio_min",)
+        for keys, op in ((sum_keys, "sum"), (max_keys, "max"), (min_keys, "min")):
+            for key in keys:
+                if key in self:
+                    return_dict[key] = self._reduce_tensor(self[key], op).item()
         return return_dict
 
 
