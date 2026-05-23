@@ -21,7 +21,7 @@ import os
 import re
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import torch
 import torch.nn as nn
@@ -167,6 +167,41 @@ def _build_compressed_position_embeddings(
     if hasattr(rotary_emb, "inv_freq_compressed"):
         return rotary_emb(hidden_states, position_ids, use_compressed=True)
     return None
+
+
+class V4FFNState(NamedTuple):
+    """State threaded across the FFN-dispatch boundary in V4 Domino EP.
+
+    Captured by :meth:`V4DecoderLayer._forward_pre_ffn_dispatch` and consumed by
+    :meth:`V4DecoderLayer._forward_post_ffn_combine`. Holds every tensor / shape /
+    Sinkhorn weight needed to finish the HC-wrapped FFN block after the MoE
+    dispatcher returns. Defined as a ``NamedTuple`` (not a dataclass) so it stays
+    immutable and structurally hashable for downstream tracing.
+
+    Args:
+        residual (torch.Tensor): HC streams entering ``hc_pre_ffn``, consumed by
+            ``hc_post_ffn`` as the additive residual after the FFN block.
+        post_f (torch.Tensor): Per-stream ``post`` weights from the FFN-side
+            ``hc_pre`` Sinkhorn (shape ``[1, S, hc_mult]``).
+        comb_f (torch.Tensor): Doubly-stochastic ``comb`` matrix from the
+            FFN-side ``hc_pre`` Sinkhorn (shape ``[1, S, hc_mult, hc_mult]``).
+        h_normed (torch.Tensor): Output of ``post_attention_layernorm`` (the
+            ``h`` that the dispatcher flattens for transport), fed back into
+            ``_ffn_post_compute`` so shared experts see the same activations the
+            routed experts did.
+        origin_shape (torch.Size): Shape of ``h_normed`` before flatten, used to
+            ``.view()`` the dispatcher's combined output back into rank order.
+        router_results (RouterResults): Output of the gate; carries ``topk_ids``
+            / ``topk_weights`` for the dispatcher and ``logits`` / ``router_weights``
+            for aux-loss accumulation.
+    """
+
+    residual: torch.Tensor
+    post_f: torch.Tensor
+    comb_f: torch.Tensor
+    h_normed: torch.Tensor
+    origin_shape: torch.Size
+    router_results: RouterResults
 
 
 class V4DecoderLayer(nn.Module):
@@ -355,6 +390,100 @@ class V4DecoderLayer(nn.Module):
 
     def forward(
         self,
+        *hidden_states: torch.Tensor,
+        seq_ctx: SequenceContext | list[SequenceContext],
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
+        position_embeddings_compressed: tuple[torch.Tensor, torch.Tensor]
+        | None
+        | list[tuple[torch.Tensor, torch.Tensor] | None],
+        input_ids: torch.Tensor | list[torch.Tensor] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[torch.Tensor, ...]:
+        """One V4-Flash decoder pass — single-MB or Domino-EP multi-MB.
+
+        Dispatches on the variadic ``hidden_states`` count: a single tensor
+        runs the sequential :meth:`_forward`, ``N >= 2`` tensors plus aligned
+        list-typed sibling args run :meth:`_micro_batch_forward`'s wave
+        pipeline. Variadic positional ``*hidden_states`` mirrors
+        :meth:`MoEDecoderLayer.forward` and is required for FSDP2 correctness:
+        the multi-MB wave pipeline must execute **inside** a single
+        ``forward()`` call so the pre/post forward hooks ``fully_shard``
+        registers bracket the whole multi-MB pass exactly once.
+
+        Args:
+            hidden_states (torch.Tensor): One or more HC-expanded packed
+                varlen activations, each shape ``[1, total_tokens, hc_mult, hidden_size]``.
+                A single tensor selects the sequential path; ``>= 2`` select
+                the Domino multi-MB path.
+            seq_ctx (SequenceContext | list[SequenceContext]): Single
+                ``SequenceContext`` for sequential, aligned list for multi-MB.
+                Carries ``cu_seq_lens`` for varlen and
+                ``rollout_routed_experts`` for the gate fast-path.
+            position_embeddings (tuple[torch.Tensor, torch.Tensor] | list[...]):
+                Dense rope basis ``(cos, sin)`` for DSA sliding-window heads,
+                single tuple for sequential, aligned list for multi-MB.
+            position_embeddings_compressed (tuple[torch.Tensor, torch.Tensor] | None | list[...]):
+                Compressed rope basis ``(cos, sin)`` for the Indexer; ``None``
+                when this layer's ``compress_ratio != 4``. Aligned list for
+                multi-MB.
+            input_ids (torch.Tensor | list[torch.Tensor] | None): Per-token
+                ids consumed by :class:`HashRouter` in the first
+                ``num_hash_layers`` layers; ignored by ``NoAuxRouter``.
+                Aligned list for multi-MB or single tensor for sequential.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[torch.Tensor, ...]:
+                Sequential: ``(hidden_states, router_logits, router_weights)``.
+                Multi-MB: a flat tuple of length ``3 * N`` —
+                ``(h0, ..., h_{N-1}, rl0, ..., rl_{N-1}, rw0, ..., rw_{N-1})``,
+                mirroring :meth:`MoEDecoderLayer._micro_batch_forward`'s
+                return contract so callers unpack identically across the two
+                layer flavours.
+        """
+        if len(hidden_states) == 1:
+            assert isinstance(seq_ctx, SequenceContext), (
+                f"Single-MB forward expects `seq_ctx` as a SequenceContext, got {type(seq_ctx).__name__}"
+            )
+            assert isinstance(position_embeddings, tuple) and len(position_embeddings) == 2, (
+                "Single-MB forward expects `position_embeddings` as a (cos, sin) tuple"
+            )
+            assert position_embeddings_compressed is None or (
+                isinstance(position_embeddings_compressed, tuple) and len(position_embeddings_compressed) == 2
+            ), "Single-MB forward expects `position_embeddings_compressed` as a (cos, sin) tuple or None"
+            assert input_ids is None or isinstance(input_ids, torch.Tensor), (
+                "Single-MB forward expects `input_ids` as a torch.Tensor or None"
+            )
+            return self._forward(
+                hidden_states[0],
+                position_embeddings=position_embeddings,
+                position_embeddings_compressed=position_embeddings_compressed,
+                seq_ctx=seq_ctx,
+                input_ids=input_ids,
+            )
+
+        n = len(hidden_states)
+        assert isinstance(seq_ctx, list) and len(seq_ctx) == n, (
+            f"Multi-MB forward expects `seq_ctx` as a list of length {n}"
+        )
+        assert isinstance(position_embeddings, list) and len(position_embeddings) == n, (
+            f"Multi-MB forward expects `position_embeddings` as a list of length {n}"
+        )
+        assert isinstance(position_embeddings_compressed, list) and len(position_embeddings_compressed) == n, (
+            f"Multi-MB forward expects `position_embeddings_compressed` as a list of length {n}"
+        )
+        if input_ids is not None:
+            assert isinstance(input_ids, list) and len(input_ids) == n, (
+                f"Multi-MB forward expects `input_ids` as a list of length {n} (or None)"
+            )
+        return self._micro_batch_forward(
+            hidden_states_list=list(hidden_states),
+            seq_ctx_list=seq_ctx,
+            position_embeddings_list=position_embeddings,
+            position_embeddings_compressed_list=position_embeddings_compressed,
+            input_ids_list=input_ids,
+        )
+
+    def _forward(
+        self,
         hidden_states: torch.Tensor,
         *,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
@@ -362,23 +491,11 @@ class V4DecoderLayer(nn.Module):
         seq_ctx: SequenceContext,
         input_ids: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """One V4-Flash decoder pass: HC-wrapped attn then HC-wrapped ffn.
+        """Sequential single-MB layer pass — HC-wrapped attn then HC-wrapped ffn.
 
-        Args:
-            hidden_states (torch.Tensor): HC-expanded packed varlen activations,
-                shape ``[1, total_tokens, hc_mult, hidden_size]``.
-            position_embeddings (tuple[torch.Tensor, torch.Tensor]):
-                ``(cos, sin)`` for the dense rope basis; consumed by the DSA
-                sliding-window heads.
-            position_embeddings_compressed (tuple[torch.Tensor, torch.Tensor] | None):
-                ``(cos, sin)`` for the yarn'd ``compress_rope_theta`` basis;
-                required when this layer's ``compress_ratio == 4`` (the
-                Indexer consumes it), ignored otherwise.
-            seq_ctx (SequenceContext): Carries ``cu_seq_lens`` for varlen and
-                ``rollout_routed_experts`` for the gate fast-path.
-            input_ids (torch.Tensor | None): Per-token ids consumed by
-                :class:`HashRouter` in the first ``num_hash_layers`` layers;
-                ignored by ``NoAuxRouter``.
+        Body of the pre-Domino ``forward()`` — preserved bit-for-bit so the
+        single-MB code path stays unchanged when ``forward()`` dispatches a
+        single-tensor call here.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -439,6 +556,329 @@ class V4DecoderLayer(nn.Module):
         hidden_states = hc_post(ffn_out, residual, post_f, comb_f)
 
         return hidden_states, router_results["logits"], router_results["router_weights"]
+
+    # ───────── Domino-EP staged forward halves ─────────
+    #
+    # ``forward()`` is the single-MB entry point and runs the full layer end-to-end.
+    # For Domino EP we need to split that forward at the FFN-dispatch boundary so
+    # the outer micro-batch driver in :meth:`DeepSeekV4._domino_micro_batch_forward`
+    # can interleave dispatcher async ops across MBs. The two halves below carry
+    # exactly the same compute as ``forward()``; only the dispatcher chain
+    # (``dispatch_preprocess`` → ``combine_postprocess``) is lifted out into the
+    # outer driver. ``hc_mult == 1`` (the degenerate ``_plain_residual_forward``
+    # path) is intentionally not supported here — V4 production runs all use
+    # ``hc_mult == 4`` and the degenerate path has no FFN dispatch overlap to win.
+
+    def _forward_pre_ffn_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        position_embeddings_compressed: tuple[torch.Tensor, torch.Tensor] | None,
+        seq_ctx: SequenceContext,
+        input_ids: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, V4FFNState]:
+        """First half of a Domino-EP layer pass: everything before FFN dispatch.
+
+        Runs HC-wrapped attention end-to-end, then HC-pre for the FFN side, then
+        ``_ffn_pre_compute`` (post-attn LN + gate). Returns the flattened hidden
+        states ready for :meth:`GenericDispatcher.dispatch_preprocess` and a
+        :class:`V4FFNState` carrying the state the outer driver must thread back
+        into :meth:`_forward_post_ffn_combine` once the dispatcher finishes.
+
+        Args:
+            hidden_states (torch.Tensor): HC-expanded streams, shape
+                ``[1, total_tokens, hc_mult, hidden_size]``.
+            position_embeddings (tuple[torch.Tensor, torch.Tensor]): Dense rope
+                basis ``(cos, sin)`` for DSA sliding-window heads.
+            position_embeddings_compressed (tuple[torch.Tensor, torch.Tensor] | None):
+                Compressed rope basis ``(cos, sin)`` for the Indexer; ``None``
+                when this layer's ``compress_ratio != 4``.
+            seq_ctx (SequenceContext): Carries ``cu_seq_lens`` /
+                ``rollout_routed_experts`` (the latter is sliced per layer here
+                so the dispatcher sees a single layer's pre-routed expert ids).
+            input_ids (torch.Tensor | None): Per-token ids consumed by the hash
+                router in the first ``num_hash_layers`` layers.
+
+        Returns:
+            tuple[torch.Tensor, V4FFNState]:
+                - Flattened, dispatch-ready hidden states with shape
+                  ``[total_tokens, hidden_size]``.
+                - Carry-state for :meth:`_forward_post_ffn_combine`.
+        """
+        assert self.hc_mult > 1, (
+            "Domino-EP staged forward only supports hc_mult > 1; hc_mult == 1 "
+            "must use the synchronous forward() / _plain_residual_forward path."
+        )
+
+        # ─── HC-wrapped attention (identical to forward()) ───
+        attn_fn, attn_scale, attn_base = _unshard_hc_params(
+            self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+        )
+        residual = hidden_states
+        x_reduced, post_a, comb_a = hc_pre(
+            hidden_states,
+            attn_fn,
+            attn_scale,
+            attn_base,
+            self.hc_mult,
+            self.hc_sinkhorn_iters,
+            self.hc_eps,
+        )
+        attn_out = self._attn_compute(
+            x_reduced, position_embeddings, position_embeddings_compressed, seq_ctx
+        )
+        hidden_states = hc_post(attn_out, residual, post_a, comb_a)
+
+        # ─── HC-pre for FFN (mirrors forward()) ───
+        ffn_fn, ffn_scale, ffn_base = _unshard_hc_params(
+            self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+        )
+        residual_ffn = hidden_states
+        x_reduced, post_f, comb_f = hc_pre(
+            hidden_states,
+            ffn_fn,
+            ffn_scale,
+            ffn_base,
+            self.hc_mult,
+            self.hc_sinkhorn_iters,
+            self.hc_eps,
+        )
+
+        # ─── FFN pre-compute (gate + post-attn LN), same slicing as _ffn_compute ───
+        if (
+            seq_ctx.rollout_routed_experts is not None
+            and self.layer_idx < seq_ctx.rollout_routed_experts.shape[1]
+        ):
+            rollout_routed_experts = seq_ctx.rollout_routed_experts[:, self.layer_idx, :]
+        else:
+            rollout_routed_experts = None
+        h, router_results = self._ffn_pre_compute(x_reduced, rollout_routed_experts, input_ids)
+
+        state = V4FFNState(
+            residual=residual_ffn,
+            post_f=post_f,
+            comb_f=comb_f,
+            h_normed=h,
+            origin_shape=h.shape,
+            router_results=router_results,
+        )
+        return h.view(-1, h.shape[-1]), state
+
+    def _forward_post_ffn_combine(
+        self,
+        post_combined_hidden_states: torch.Tensor,
+        state: V4FFNState,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Second half of a Domino-EP layer pass: everything after FFN combine.
+
+        Takes the dispatcher's ``combine_postprocess`` output plus the state
+        captured by :meth:`_forward_pre_ffn_dispatch` and finishes the layer:
+        ``_ffn_post_compute`` (shared experts + scalar scale) and HC-post for
+        the FFN side. Returns the same triple as :meth:`forward`.
+
+        Args:
+            post_combined_hidden_states (torch.Tensor): Output of
+                :meth:`GenericDispatcher.combine_postprocess`'s ``hidden_states``
+                field, shape ``[total_tokens, hidden_size]``.
+            state (V4FFNState): Carry-state from
+                :meth:`_forward_pre_ffn_dispatch`.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Same contract as
+                :meth:`forward` — ``(hidden_states_out, router_logits, router_weights)``.
+        """
+        combined_hidden_states = post_combined_hidden_states.view(*state.origin_shape)
+        ffn_out = self._ffn_post_compute(combined_hidden_states, state.h_normed)
+        hidden_states = hc_post(ffn_out, state.residual, state.post_f, state.comb_f)
+        return (
+            hidden_states,
+            state.router_results["logits"],
+            state.router_results["router_weights"],
+        )
+
+    def _micro_batch_forward(
+        self,
+        hidden_states_list: list[torch.Tensor],
+        seq_ctx_list: list[SequenceContext],
+        position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
+        position_embeddings_compressed_list: list[tuple[torch.Tensor, torch.Tensor] | None],
+        input_ids_list: list[torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, ...]:
+        """Domino-EP wave pipeline across micro-batches for one V4 decoder layer.
+
+        Runs inside :meth:`forward` (via the variadic ``*hidden_states``
+        dispatch) so the single ``fully_shard`` pre/post-forward hook pair
+        brackets the entire multi-MB pass — required for correct parameter
+        all-gather, resharding and gradient accumulation under FSDP2. The
+        schedule mirrors :meth:`MoEDecoderLayer._micro_batch_forward`:
+
+            Phase A — for each MB sequentially:
+                HC-attn + HC-pre-FFN + ffn_pre_compute (via
+                :meth:`_forward_pre_ffn_dispatch`), then async
+                ``dispatch_preprocess``. Queues the MB-side compute on the
+                main stream and the dispatch op on ``_comm_stream``.
+            Phase B1 — for each MB sequentially:
+                ``dispatch`` → ``dispatch_postprocess`` → ``experts`` →
+                ``combine_preprocess``, all with ``async_op=True``. Combine
+                is **not** issued here so the comm stream sees
+                ``D0, D1, ..., DN-1`` back-to-back, which is essential for
+                backward overlap (see below).
+            Phase B2 — for each MB sequentially:
+                ``combine`` with ``async_op=True``. Comm stream now sees
+                ``C0, C1, ..., CN-1`` back-to-back.
+            Phase C — for each MB sequentially:
+                ``combine_postprocess`` → ``_forward_post_ffn_combine``
+                (FFN-post + HC-post-FFN).
+
+        Why split combine into its own phase: interleaving dispatch and
+        combine per-MB (``D0, C0, D1, C1, ...``) leaves the comm stream in
+        a state where, in backward, ``C0.bwd`` is queued **behind**
+        ``D1.bwd`` — but ``D1.bwd`` itself has to wait for the main-stream
+        backward chain (``E1.bwd → DP1.bwd``) to complete before it can
+        fire. That stalls ``C0.bwd`` even though its grad from
+        ``CPo0.bwd`` has been ready for a while. Splitting into
+        ``D0, ..., DN-1, C0, ..., CN-1`` matches :class:`MoEDecoderLayer`'s
+        layout and puts ``C.bwd`` ops back-to-back in the backward queue,
+        so they can stream through comm while the main-stream PMF/CPo
+        backwards run in parallel.
+
+        Output is bit-identical to issuing the same MBs through :meth:`forward`
+        sequentially — the schedule reorder is a CUDA-stream issue order only.
+
+        Args:
+            hidden_states_list (list[torch.Tensor]): Per-MB HC-expanded
+                streams, each shape ``[1, total_tokens, hc_mult, hidden_size]``.
+            seq_ctx_list (list[SequenceContext]): Aligned per-MB sequence contexts.
+            position_embeddings_list (list[tuple[torch.Tensor, torch.Tensor]]):
+                Aligned per-MB dense rope ``(cos, sin)`` for DSA sliding-window heads.
+            position_embeddings_compressed_list (list[tuple[torch.Tensor, torch.Tensor] | None]):
+                Aligned per-MB compressed rope ``(cos, sin)`` for the
+                Indexer; ``None`` slots when this layer's ``compress_ratio != 4``.
+            input_ids_list (list[torch.Tensor] | None): Aligned per-MB
+                ``input_ids`` for :class:`HashRouter`; ``None`` for score-routed layers.
+
+        Returns:
+            tuple[torch.Tensor, ...]: Flat ``3 * N``-tuple
+                ``(h0, ..., h_{N-1}, rl0, ..., rl_{N-1}, rw0, ..., rw_{N-1})``,
+                same layout as :meth:`MoEDecoderLayer._micro_batch_forward`.
+        """
+        n = len(hidden_states_list)
+        # Pad input_ids alignment so the zip below stays straight when the
+        # caller (score-routed model) doesn't pass any. Mirrors
+        # :meth:`MoEDecoderLayer._micro_batch_forward`'s input_ids_iter pattern.
+        if input_ids_list is None:
+            input_ids_iter: list[torch.Tensor | None] = [None] * n
+        else:
+            input_ids_iter = list(input_ids_list)
+
+        # Phase A — per-MB attn block + HC-pre-FFN + ffn_pre_compute + async dispatch_preprocess.
+        state_list: list[V4FFNState] = []
+        pre_dispatched_list: list[Any] = []
+        for hs, sc, pe, pec, ids in zip(
+            hidden_states_list,
+            seq_ctx_list,
+            position_embeddings_list,
+            position_embeddings_compressed_list,
+            input_ids_iter,
+        ):
+            collapsed, state = self._forward_pre_ffn_dispatch(
+                hs,
+                position_embeddings=pe,
+                position_embeddings_compressed=pec,
+                seq_ctx=sc,
+                input_ids=ids,
+            )
+            pre_dispatched = self.dispatcher.dispatch_preprocess(
+                hidden_states=collapsed,
+                topk_ids=state.router_results["topk_ids"],
+                async_op=True,
+            )
+            state_list.append(state)
+            pre_dispatched_list.append(pre_dispatched)
+
+        # Phase B1 — per-MB dispatch + dispatch_post + experts + combine_pre (all async).
+        # Combine is deliberately deferred to Phase B2 so the comm stream
+        # sees all dispatches back-to-back; mirrors :class:`MoEDecoderLayer`
+        # at ``moe_decoder_layer.py:570-603``. The dispatcher's
+        # forward_finished_event chain lets ``_comm_stream`` overlap across
+        # MBs without CPU sync (modulo the TorchAll2AllDispatcher
+        # ``.tolist()`` block in ``_dispatch`` — a PyTorch NCCL-binding
+        # constraint; DeepEP backend is fully CPU-non-blocking and wins the
+        # actual overlap here).
+        dispatched_list: list[Any] = []
+        post_dispatched_list: list[Any] = []
+        pre_combined_list: list[Any] = []
+        for i in range(n):
+            state = state_list[i]
+            dispatched = self.dispatcher.dispatch(
+                pre_dispatched=pre_dispatched_list[i],
+                topk_weights=state.router_results["topk_weights"],
+                decoding=False,
+                async_op=True,
+            )
+            post_dispatched = self.dispatcher.dispatch_postprocess(
+                pre_dispatched=pre_dispatched_list[i],
+                dispatched=dispatched,
+                async_op=True,
+            )
+            experts_out = self.experts(
+                post_dispatched["hidden_states"],
+                post_dispatched["tokens_per_expert"],
+                decoding=False,
+            )
+            pre_combined = self.dispatcher.combine_preprocess(
+                hidden_states=experts_out,
+                pre_dispatched=pre_dispatched_list[i],
+                dispatched=dispatched,
+                post_dispatched=post_dispatched,
+                decoding=False,
+                async_op=True,
+            )
+            dispatched_list.append(dispatched)
+            post_dispatched_list.append(post_dispatched)
+            pre_combined_list.append(pre_combined)
+
+        # Phase B2 — per-MB combine (async). Issued back-to-back on the comm
+        # stream after every MB's experts + combine_pre is in flight, so the
+        # backward queue has ``C.bwd`` ops contiguous (see docstring).
+        combined_list: list[Any] = []
+        for i in range(n):
+            combined = self.dispatcher.combine(
+                pre_dispatched=pre_dispatched_list[i],
+                dispatched=dispatched_list[i],
+                post_dispatched=post_dispatched_list[i],
+                pre_combined=pre_combined_list[i],
+                decoding=False,
+                async_op=True,
+            )
+            combined_list.append(combined)
+
+        # Phase C — per-MB combine_postprocess + FFN-post + HC-post-FFN.
+        hidden_states_out_list: list[torch.Tensor] = []
+        router_logits_list: list[torch.Tensor] = []
+        router_weights_list: list[torch.Tensor] = []
+        for i in range(n):
+            post_combined = self.dispatcher.combine_postprocess(
+                pre_dispatched=pre_dispatched_list[i],
+                dispatched=dispatched_list[i],
+                post_dispatched=post_dispatched_list[i],
+                pre_combined=pre_combined_list[i],
+                combined=combined_list[i],
+                async_op=True,
+            )
+            h_out, r_logits, r_weights = self._forward_post_ffn_combine(
+                post_combined["hidden_states"],
+                state_list[i],
+            )
+            hidden_states_out_list.append(h_out)
+            router_logits_list.append(r_logits)
+            router_weights_list.append(r_weights)
+
+        # Flat tuple matches MoEDecoderLayer._micro_batch_forward return contract
+        # so callers can unpack ``result[:n] / result[n:2n] / result[2n:3n]``
+        # uniformly across layer flavours.
+        return tuple(hidden_states_out_list + router_logits_list + router_weights_list)
 
     # ───────── compile-target sub-graphs ─────────
 
@@ -1148,11 +1588,12 @@ class DeepSeekV4(MoE):
         #   1) `[B, S, hc_mult, D]` HC-expanded activations
         #   2) dual rope (`position_embeddings` + `position_embeddings_compressed`)
         #   3) `_hc_head_reduce` before the final norm
-        # Plus `V4DecoderLayer.forward` takes a single seq_ctx / position_embeddings
-        # (not a list like `MoEDecoderLayer.forward` does), so MBs are looped per
-        # layer here rather than batched into one layer call. That loses parent's
-        # cross-MB domino-EP overlap; recovering it would require widening the
-        # HC + DSA call signatures, which is out of scope.
+        # When ``config.domino`` is set (and ep_size > 1, no offload), the layer
+        # loop below calls ``v4_layer(*hidden_states_list, seq_ctx=ctx_list, ...)``
+        # once per layer; ``V4DecoderLayer.forward`` dispatches on the variadic
+        # ``*hidden_states`` length to :meth:`V4DecoderLayer._micro_batch_forward`,
+        # running the 3-phase Domino wave INSIDE the layer's forward so FSDP2's
+        # pre/post-forward hooks bracket the whole pass exactly once.
         from xtuner.v1.loss import LMHeadLossContext
         from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 
@@ -1195,50 +1636,69 @@ class DeepSeekV4(MoE):
         router_logits_per_mb: list[dict[str, torch.Tensor]] = [{} for _ in range(n_mb)] if keep_router else []
 
         offload_active = int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1
+        # ``_micro_batch_forward`` is reached only when the caller passed a list of
+        # SequenceContexts (i.e. ``intra_layer_micro_batch >= 2``). That flag exists
+        # solely to trigger the layer-internal Domino wave pipeline, which needs
+        # an all2all to overlap with expert compute — so ep_size > 1 is implied.
+        # ep_size == 1 + intra_layer_micro_batch >= 2 is a user-error config:
+        # ``NaiveDispatcher`` at ep=1 doesn't support ``async_op=True`` and will
+        # raise inside the dispatcher; we don't paper over that with a sequential
+        # fallback because the parent :class:`MoE` doesn't, and the dead branch
+        # only adds maintenance surface.
+        #
+        # Offload composes orthogonally: when active, wrap the whole multi-MB
+        # layer call in one ``async_save_on_cpu`` context (matching
+        # :class:`MoE`'s parent pattern at ``moe.py:542-552``). The layer is
+        # called exactly once per layer, so the offload buffer ring only needs
+        # a per-layer ``block_idx``; ``custom_check_fn`` skips the n_mb input
+        # tensors via ``data_ptr in [...]``.
 
         for idx, decoder_layer in self.layers.items():
             v4_layer = cast(V4DecoderLayer, decoder_layer)
-            layer_router_logits: list[torch.Tensor] = []
-            layer_router_weights: list[torch.Tensor] = []
 
+            # One layer call per layer carrying all MBs. The variadic
+            # ``*hidden_states`` signature routes to
+            # :meth:`V4DecoderLayer._micro_batch_forward`, whose 3-phase wave
+            # pipeline runs entirely INSIDE the layer's ``forward`` — so FSDP2's
+            # pre/post-forward hooks bracket the whole multi-MB pass exactly once
+            # (one all-gather, one reshard). Calling the staged halves from out
+            # here would bypass those hooks and break param management; see the
+            # :meth:`V4DecoderLayer._micro_batch_forward` docstring.
+            layer_call_kwargs = dict(
+                seq_ctx=seq_ctx_list,
+                position_embeddings=position_embeddings_list,
+                position_embeddings_compressed=position_embeddings_compressed_list,
+                input_ids=[sc.input_ids for sc in seq_ctx_list],
+            )
+            if offload_active:
+                from xtuner.v1.utils.activation_offload import async_save_on_cpu
+
+                with async_save_on_cpu(
+                    h2d_stream=self.offload_stream,
+                    d2h_stream=self.offload_stream,
+                    block_idx=int(idx),
+                    group="text",
+                    custom_check_fn=lambda x, _hs=hidden_states_list: x.data_ptr()
+                    in [h.data_ptr() for h in _hs],
+                    prefetch=True,
+                    reserve_pin_memory=True,
+                ):
+                    layer_out = v4_layer(*hidden_states_list, **layer_call_kwargs)
+            else:
+                layer_out = v4_layer(*hidden_states_list, **layer_call_kwargs)
+
+            # Layer returns flat ``3 * n_mb`` tuple: hidden_states ... router_logits ... router_weights.
+            new_hidden_states_list = list(layer_out[:n_mb])
+            layer_router_logits = list(layer_out[n_mb : 2 * n_mb])
+            layer_router_weights = list(layer_out[2 * n_mb : 3 * n_mb])
             for mb_idx in range(n_mb):
-                h_mb = hidden_states_list[mb_idx]
-                seq_ctx = seq_ctx_list[mb_idx]
-                pos_emb = position_embeddings_list[mb_idx]
-                pos_emb_compressed = position_embeddings_compressed_list[mb_idx]
+                hidden_states_list[mb_idx] = new_hidden_states_list[mb_idx]
 
-                if offload_active:
-                    from xtuner.v1.utils.activation_offload import async_save_on_cpu
-
-                    # `block_idx` must be globally unique per (layer, mb) so the offload
-                    # buffer ring doesn't alias across MBs at the same layer.
-                    with async_save_on_cpu(
-                        h2d_stream=self.offload_stream,
-                        d2h_stream=self.offload_stream,
-                        block_idx=int(idx) * n_mb + mb_idx,
-                        group="text",
-                        custom_check_fn=lambda x, _h=h_mb: x.data_ptr() == _h.data_ptr(),
-                    ):
-                        h_out, r_logits, r_weights = v4_layer(
-                            h_mb,
-                            position_embeddings=pos_emb,
-                            position_embeddings_compressed=pos_emb_compressed,
-                            seq_ctx=seq_ctx,
-                            input_ids=seq_ctx.input_ids,
-                        )
-                else:
-                    h_out, r_logits, r_weights = v4_layer(
-                        h_mb,
-                        position_embeddings=pos_emb,
-                        position_embeddings_compressed=pos_emb_compressed,
-                        seq_ctx=seq_ctx,
-                        input_ids=seq_ctx.input_ids,
+            if keep_router:
+                for mb_idx in range(n_mb):
+                    router_logits_per_mb[mb_idx][f"layer{idx}"] = self._maybe_offload_router(
+                        layer_router_logits[mb_idx]
                     )
-                hidden_states_list[mb_idx] = h_out
-                layer_router_logits.append(r_logits)
-                layer_router_weights.append(r_weights)
-                if keep_router:
-                    router_logits_per_mb[mb_idx][f"layer{idx}"] = self._maybe_offload_router(r_logits)
 
             if self._should_compute_aux_loss(int(idx)):
                 # Concatenate router stats across MBs so aux_loss sees the same global
