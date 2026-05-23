@@ -32,6 +32,8 @@ math is now consumed directly as functions, which is also more compile-
 friendly (no nested ``nn.Module`` for dynamo to trace into).
 """
 
+import os
+
 import torch
 from pydantic import BaseModel, ConfigDict
 from torch import Tensor
@@ -39,6 +41,18 @@ from torch import Tensor
 from xtuner.v1.utils.compile import maybe_compile
 
 from .hc_sinkhorn import hc_split_sinkhorn
+
+
+# Opt-in switch for the HF-bit-parity ``hc_pre`` path. Setting
+# ``XTUNER_V4_HF_PARITY=1`` in the environment reverts ``hc_pre`` to the
+# all-fp32 RMS + fp32 Linear chain that matches HF's
+# ``DeepseekV4HyperConnection.forward`` bitwise (used by the ``atol=0``
+# parity tests). Default off → bf16 Linear with cuBLAS fp32 accumulator
+# (~10-20× faster on H100 at K=16384/N=24, ~1.5e-2 max abs drift on the
+# layer output, which is below the already-accepted MoE cutlass GEMM
+# diff of 2.7e-2). The env var is read once at module import time —
+# changing it mid-process has no effect; restart the worker.
+_HC_HF_PARITY = os.getenv("XTUNER_V4_HF_PARITY", "0") == "1"
 
 
 class HCWrapperConfig(BaseModel):
@@ -111,22 +125,34 @@ def hc_pre(
     #     flat = self.input_norm(hidden_streams.flatten(2).float())
     #     pre_w, post_w, comb_w = F.linear(flat, self.fn.float()).split(...)
     #
-    # We keep the RMS rescale in fp32 internally (square + mean of a
-    # 16384-wide reduction is bf16-overflow-prone) but use
-    # ``F.rms_norm`` so the fp32 accumulator stays inside one fused ATen op
-    # — no explicit ``x.float()`` materialising a full-tensor fp32 copy and
-    # no explicit ``.to(dtype)`` cast back. ``flat_normed`` is bf16 same as
-    # the input. The Linear is bf16 input × bf16 weight (with cuBLAS' fp32
-    # accumulator across the K=16384 reduction), which on H100 is ~10-20×
-    # faster than the all-fp32 GEMM that the explicit ``hc_fn.float()`` path
-    # used to force (cuBLAS' ``sm80_xmma_gemm_f32f32_*`` has no tensor-core
-    # acceleration for fp32 inputs). The downstream ``hc_split_sinkhorn``
-    # runs in fp32 again, so the sinkhorn iterations stay numerically stable.
+    # Two precision paths gated by ``XTUNER_V4_HF_PARITY``:
+    #   * Default (env unset / "0"): bf16 Linear with cuBLAS' fp32 accumulator.
+    #     ~10-20× faster than the fp32 GEMM at K=16384/N=24 on H100
+    #     (``sm80_xmma_gemm_f32f32_*`` has no tensor-core acceleration). Cost
+    #     is one bf16 rounding of the GEMM inputs, propagating to ~1.5e-2 max
+    #     abs diff at the layer output (below the already-accepted MoE
+    #     cutlass GEMM diff of 2.7e-2). ``F.rms_norm`` keeps the fp32
+    #     variance accumulator inside one fused ATen op so we never
+    #     materialise a full-tensor fp32 copy.
+    #   * ``XTUNER_V4_HF_PARITY=1``: keep both the RMS rescale and the Linear
+    #     in fp32 to reproduce HF bitwise. This is the path the ``atol=0``
+    #     parity tests exercise (``test_csa_parity_full_hf_anchor`` and
+    #     friends, run with ``XTUNER_V4_HF_PARITY=1`` in the env).
+    #
+    # The downstream ``hc_split_sinkhorn`` runs in fp32 in both paths
+    # (Sinkhorn 20-iter loop is bf16-NaN-prone), so the sinkhorn input is
+    # ``mixes`` cast to fp32 explicitly here.
     x_flat = x.flatten(2)
-    flat_normed = torch.nn.functional.rms_norm(
-        x_flat, normalized_shape=(x_flat.size(-1),), weight=None, eps=norm_eps
-    )
-    mixes = torch.nn.functional.linear(flat_normed, hc_fn.to(dtype)).float()
+    if _HC_HF_PARITY:
+        x_flat_f32 = x_flat.float()
+        rsqrt = torch.rsqrt(x_flat_f32.square().mean(-1, keepdim=True) + norm_eps)
+        flat_normed = x_flat_f32 * rsqrt
+        mixes = torch.nn.functional.linear(flat_normed, hc_fn.float())
+    else:
+        flat_normed = torch.nn.functional.rms_norm(
+            x_flat, normalized_shape=(x_flat.size(-1),), weight=None, eps=norm_eps
+        )
+        mixes = torch.nn.functional.linear(flat_normed, hc_fn.to(dtype)).float()
 
     pre, post, comb = hc_split_sinkhorn(mixes, hc_scale, hc_base, hc_mult, iters, eps)
 
