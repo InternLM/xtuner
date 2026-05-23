@@ -727,6 +727,24 @@ class DeepSeekV4Config(MoEConfig):
         rope_parameters_cfg = RopeParametersConfig.from_hf_config(cfg, default_rope_params)
         assert rope_parameters_cfg is not None, "DeepSeek-V4 HF config must define rope parameters"
 
+        # ``num_hash_layers`` field handling. transformers <5.9 stored it directly
+        # on the config. transformers >=5.9.0 ``DeepseekV4Config.__post_init__``
+        # consumes the legacy ``num_hash_layers`` kwarg from ``config.json`` and
+        # converts it into the per-layer ``mlp_layer_types`` list
+        # (``["hash_moe"] * num_hash_layers + ["moe"] * rest``), then drops the
+        # scalar attribute. We recover the count by counting the leading
+        # ``"hash_moe"`` entries — V4 always puts hash-routed layers at the
+        # front so this matches ``DeepSeekV4._should_compute_aux_loss``'s
+        # ``layer_idx < num_hash_layers`` semantics.
+        num_hash_layers = getattr(cfg, "num_hash_layers", None)
+        if num_hash_layers is None:
+            mlp_layer_types = getattr(cfg, "mlp_layer_types", None) or []
+            num_hash_layers = 0
+            for t in mlp_layer_types:
+                if t != "hash_moe":
+                    break
+                num_hash_layers += 1
+
         attention = DSAConfig(
             num_attention_heads=cfg.num_attention_heads,
             num_key_value_heads=cfg.num_key_value_heads,
@@ -777,7 +795,7 @@ class DeepSeekV4Config(MoEConfig):
             eos_token_id=cfg.eos_token_id,
             bos_token_id=getattr(cfg, "bos_token_id", 0),
             num_hidden_layers=cfg.num_hidden_layers,
-            num_hash_layers=cfg.num_hash_layers,
+            num_hash_layers=num_hash_layers,
             hidden_size=cfg.hidden_size,
             moe_intermediate_size=cfg.moe_intermediate_size,
             rms_norm_eps=cfg.rms_norm_eps,
