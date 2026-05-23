@@ -801,7 +801,7 @@ class BaseRLTrainer:
         train_trajectory_dir = self.exp_dir / "train_rollout"
         train_trajectory_dir.mkdir(parents=True, exist_ok=True)
         train_trajectory_path = train_trajectory_dir / f"train_rollout_{train_step}.jsonl"
-        # self._save_trajectories(train_batch, train_trajectory_path)
+        self._save_trajectories(train_batch, train_trajectory_path)
         self.logger.info(f"Train step {train_step} train trajectories saved to {train_trajectory_path}")
 
         # 共卡需要先释放 rollout，再把训练 worker onload；非共卡不走这两个动作。
@@ -827,9 +827,11 @@ class BaseRLTrainer:
                 pack_max_length=self._train_worker_cfg.pack_max_length,
                 rollout_idx=train_step,
             )
-        # del
+
         self.logger.info("Release all sessions and free associated resources")
         ray.get(get_store().release_all.remote())
+        keys = ray.get(get_store().list_sessions.remote())
+        assert len(keys) == 0, f"Store Keys not released: {keys}"
 
         return {
             "data_info": data_info,
@@ -902,9 +904,6 @@ class BaseRLTrainer:
         training_tokens = 0
 
         data_batches = []
-
-        import debugpy
-        # debugpy.connect(('10.102.250.69', 5680))
 
         for j, group in enumerate(data_groups):
             if not is_valid_for_training(group, self.logger):
@@ -1245,7 +1244,7 @@ class BaseRLTrainer:
 
     def _save_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
         rewards = []
-        response_len_list = []
+        trajectory_items = []
 
         for group in data_groups:
             if not is_valid_for_training(group, self.logger):
@@ -1253,20 +1252,29 @@ class BaseRLTrainer:
             for data in group:
                 assert data.reward is not None
                 rewards.append(data.reward["score"])
-                if data.response_ids is not None:
-                    if isinstance(data.response_ids, torch.Tensor):
-                        response_ids = data.response_ids.flatten().tolist()
-                    else:
-                        response_ids = data.response_ids
-                    response_len_list.append(len(response_ids))
-                elif data.response is not None:
-                    response_ids = self.tokenizer.encode(data.response, add_special_tokens=False)
-                    response_len_list.append(len(response_ids))
+                response_ids = self._get_trajectory_response_ids(data)
+                response = data.response
+                if response is None and response_ids:
+                    response = self.tokenizer.decode(response_ids)
+                ground_truth = None
+                if data.reward_model is not None:
+                    ground_truth = data.reward_model.get("ground_truth")
+                trajectory_items.append(
+                    {
+                        "prompt": data.message,
+                        "raw_prompt": data.extra_fields.get("raw_prompt", None),
+                        "response": response,
+                        "response_len": len(response_ids),
+                        "label": ground_truth,
+                        "reward": data.reward["score"],
+                        "finish_reason": data.finish_reason,
+                    }
+                )
 
         rewards_tensor = torch.tensor(rewards).float() if rewards else torch.tensor([0.0]).float()
+        response_len_list = [item["response_len"] for item in trajectory_items]
         response_lens = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
 
-        _count = 0
         with open(save_path, "w", encoding="utf-8") as f:
             summary = {
                 "reward_mean": rewards_tensor.mean().item(),
@@ -1281,26 +1289,20 @@ class BaseRLTrainer:
             }
             json.dump(summary, f, ensure_ascii=False, indent=2)
             f.write("\n")
-            for group in data_groups:
-                if not is_valid_for_training(group, self.logger):
-                    continue
-                for data in group:
-                    assert data.reward is not None
-                    ground_truth = None
-                    if data.reward_model is not None:
-                        ground_truth = data.reward_model.get("ground_truth")
-                    item = {
-                        "prompt": data.message,
-                        "raw_prompt": data.extra_fields.get("raw_prompt", None),
-                        "response": data.response,
-                        "response_len": response_len_list[_count],
-                        "label": ground_truth,
-                        "reward": data.reward["score"],
-                        "finish_reason": data.finish_reason,
-                    }
-                    json.dump(item, f, ensure_ascii=False, indent=2)
-                    f.write("\n")
-                    _count += 1
+            for item in trajectory_items:
+                json.dump(item, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+
+    def _get_trajectory_response_ids(self, data: RolloutState) -> list[int]:
+        if data.response_ids is not None:
+            if isinstance(data.response_ids, torch.Tensor):
+                return data.response_ids.flatten().tolist()
+            return data.response_ids
+        if data.input_ids is not None and data.labels is not None:
+            return [label for label in data.labels[1:] if label != -100]
+        if data.response is not None:
+            return self.tokenizer.encode(data.response, add_special_tokens=False)
+        return []
 
     def _log_mini_batch_metrics(self, workers_log_item: List[WorkerLogItem]):
         train_start_step = self._global_train_step + 1

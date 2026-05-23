@@ -35,13 +35,13 @@ enable_evaluate = eval_data_path is not None and eval_data_path != ""
 # basic settings
 experimental_name = "grpo_mix_data"
 total_epochs = 15
-global_batch_size = 4
-prompt_repeat_k = 2
+global_batch_size = 256
+prompt_repeat_k = 8
 rollout_tp_size = 2
 rollout_ep_size = 1
 max_prompt_length = 2048
-max_response_length = 32768
-pack_max_length = 32768+2048
+max_response_length = 65536
+pack_max_length = 65536+2048
 train_optimizer_steps = 8
 hf_interval = 15
 
@@ -154,7 +154,7 @@ train_worker_cfg = WorkerConfig(
     loss_cfg=loss_cfg,
     lr_cfg=lr_cfg,
     fsdp_cfg=fsdp_cfg,
-    sp_size=1,
+    sp_size=2,
     optimizer_steps=train_optimizer_steps,
     pack_max_length=pack_max_length,
 )

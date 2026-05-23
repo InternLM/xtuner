@@ -121,16 +121,19 @@ class AgentInSandboxLoop(AgentLoop):
         tools = message.get("tools", None)
         session_id = rollout_state.uid
         
-        # import debugpy
-        # debugpy.connect(('10.102.250.69', 5680))
-
-        # 获取数据
         trace_store = get_store()
         text = self.tokenizer.apply_chat_template(messages, tools=tools, tokenize=False, add_generation_prompt=False)
         data = await trace_store.export_training_trace.remote(str(session_id), text[:-1]) # '\n'
         
         rollout_state.input_ids = data['input_ids']
         rollout_state.labels = data['labels']
+        # Agentic training consumes input_ids/labels directly. response_ids is
+        # filled here only so rollout throughput logging can print rollout_tgs.
+        rollout_state.response_ids = [
+            token_id
+            for token_id, label in zip(data["input_ids"][1:], data["labels"][1:])
+            if label != -100
+        ]
         rollout_state.logprobs = data['logprobs']
         rollout_state.routed_experts = data['routed_experts']
         rollout_state.finish_reason = 'stop' if item.status == RolloutStatus.COMPLETED else 'error'
