@@ -48,7 +48,7 @@ from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.utils import get_logger
 
-from xtuner.v1.model.base import TorchCompileOption
+from xtuner.v1.model.base import HFSaveCfg, TorchCompileOption
 
 from .moe import MOE_EP_COMPILE_CFG, MOE_NON_EP_COMPILE_CFG, BalancingLossConfig, MoE, MoEConfig, ZLossConfig
 
@@ -689,6 +689,23 @@ class DeepSeekV4Config(MoEConfig):
             # `native_clipped_swiglu(limit=...)` clamp range.
             clip_alpha=1.0,
             clip_limit=10.0,
+        )
+    )
+    # HC mixing parameters live in fp32 (the 20-iter Sinkhorn is bf16-unstable).
+    # We mark their HF keys here so :meth:`XTunerBaseModel._fully_shard` keeps
+    # them as Replicate-on-world DTensors (added to FSDP's ``ignored_params``)
+    # instead of sharding them like every other parameter. Without this the
+    # per-forward ``_unshard_hc_params`` ``.full_tensor()`` call does an
+    # allgather every forward (~100 KB × 86 calls/step, plus syncs); the
+    # ignored path turns the call into a no-op on the replicated DTensor.
+    #
+    # Pattern covers all 9 HC parameters: per-layer
+    # ``layers.<L>.hc_(attn|ffn)_(fn|base|scale)`` and model-top-level
+    # ``hc_head_(fn|base|scale)``. The trailing ``$`` keeps the match precise
+    # (re.search is substring by default).
+    hf_save_cfg: HFSaveCfg = Field(
+        default_factory=lambda: HFSaveCfg(
+            fp32_keys_pattern=[r"hc_(attn|ffn|head)_(fn|base|scale)$"],
         )
     )
 
