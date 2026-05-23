@@ -1,3 +1,4 @@
+import functools
 from types import FunctionType
 from typing import Callable, Generic, cast
 
@@ -5,7 +6,7 @@ import torch
 
 from .device import get_device
 from .logger import get_logger
-from .misc import FunctionEnum, get_function_type
+from .misc import FunctionEnum, get_function_full_qualname, get_function_type
 from .type_helper import P, T
 
 
@@ -162,7 +163,12 @@ class MaybeCompile(Generic[P, T]):
     def enable_compile(self, **compile_options) -> None:
         """Enable torch.compile with the given arguments."""
         if not is_compiled_function(self.func):
-            self.func = torch.compile(self.origin_func, **compile_options)
+            compiled = torch.compile(self.origin_func, **compile_options)
+            # Wrap with a profiler range so the timeline shows kernels
+            # grouped under the source function name — see
+            # :func:`wrap_with_profile_range` for the rationale.
+            qualname = get_function_full_qualname(self.origin_func)
+            self.func = wrap_with_profile_range(compiled, qualname)
 
     def disable_compile(self) -> None:
         """Disable torch.compile, reverting to the original function."""
@@ -173,6 +179,56 @@ class MaybeCompile(Generic[P, T]):
 def is_compiled_function(func: Callable) -> bool:
     """Check if a function has been compiled using torch.compile."""
     return hasattr(func, "get_compiler_config")
+
+
+def wrap_with_profile_range(fn: Callable[P, T], qualname: str) -> Callable[P, T]:
+    """Wrap a compiled function with a profiler ``record_function`` range.
+
+    Inductor names generated triton kernels by op signature plus a monotonic
+    id (e.g. ``triton_poi_fused_add_mul_..._47``); there is no native way to
+    encode the source function name into the kernel itself. Wrapping the
+    compiled callable with :func:`torch.profiler.record_function` adds a
+    named range in the captured timeline that the kernels run under, so any
+    profiler view (Chrome trace, TensorBoard, perfetto) groups the kernels
+    by source compile target.
+
+    The wrapper is an eager Python shim around the compiled function — the
+    ``record_function`` call does not enter the compiled region, never
+    causes a graph break, and adds zero overhead when no profiler is
+    active.
+
+    The wrapped function still passes :func:`is_compiled_function` because
+    we propagate the ``get_compiler_config`` attribute that
+    ``torch.compile`` attaches to the output callable; this lets repeated
+    ``_resolve_compile_cfg`` passes recognise the function as already
+    compiled and skip re-wrapping.
+
+    Args:
+        fn (Callable): Compiled function returned by ``torch.compile``.
+        qualname (str): Fully-qualified source name to use as the range
+            label (typically ``module.Class.method`` or ``module.func``).
+
+    Returns:
+        Callable: ``fn`` wrapped in a ``record_function`` range named
+        ``"compile:<qualname>"``.
+    """
+    range_name = f"compile:{qualname}"
+
+    @functools.wraps(fn)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+        with torch.profiler.record_function(range_name):
+            return fn(*args, **kwargs)
+
+    # Forward the compile-marker attrs so ``is_compiled_function`` still
+    # recognises this wrapper. ``get_compiler_config`` is the canonical one;
+    # ``_torchdynamo_inline`` exists on some PyTorch versions.
+    for attr in ("get_compiler_config", "_torchdynamo_inline"):
+        if hasattr(fn, attr):
+            try:
+                setattr(wrapper, attr, getattr(fn, attr))
+            except (AttributeError, TypeError):
+                pass
+    return wrapper
 
 
 # Create a singleton instance
