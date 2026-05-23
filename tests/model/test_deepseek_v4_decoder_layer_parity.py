@@ -783,11 +783,16 @@ class TestV4DecoderLayerParity:
 
     def test_csa_parity_full_hf_anchor(self) -> None:
         """CSA layer with BOTH attention and MoE delegated to HF — XTuner HC
-        pre/post + V4DecoderLayer wrapping stay live. After aligning
-        ``hc_split_sinkhorn`` to use ``torch.softmax`` (matching HF's
-        ``DeepseekV4HyperConnection.forward``), the XTuner forward is
-        bit-identical to HF at this anchor (every fp32 + bf16 step has
-        the same reduction order). Tolerance is ``atol=0.0``.
+        pre/post + V4DecoderLayer wrapping stay live.
+
+        After the ``[Perf] hc_pre: bf16 Linear`` commit, ``hc_pre`` runs the
+        ``F.linear`` step in bf16 (cuBLAS bf16 GEMM with fp32 accumulator) to
+        skip the cuBLAS ``sm80_xmma_gemm_f32f32_*`` slow path at K=16384 /
+        N=24 on H100. The trade-off is one bf16 rounding on the GEMM inputs,
+        which propagates to ~1.5e-2 max abs diff at the layer output (smaller
+        than the MoE cutlass grouped-GEMM diff of ~2.7e-2 already accepted
+        elsewhere). We assert at ``atol=2e-2`` to track this drift without
+        bouncing on bf16 ULP-scale noise.
         """
         hf_model, xtuner_layer, layer_idx, _ = self._setup(
             "compressed_sparse_attention", num_hash_layers=0, layer_idx=1
@@ -799,11 +804,12 @@ class TestV4DecoderLayerParity:
         with torch.no_grad():
             hf_out = _run_hf_layer(hf_model, layer_idx, hidden_states, input_ids, position_ids)
             xt_out = _run_xtuner_layer(xtuner_layer, hidden_states, input_ids, position_ids, hf_model)
-        torch.testing.assert_close(xt_out, hf_out, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(xt_out, hf_out, atol=2e-2, rtol=2e-2)
 
     def test_hca_parity_full_hf_anchor(self) -> None:
         """HCA layer with BOTH attention and MoE delegated to HF — see
-        :meth:`test_csa_parity_full_hf_anchor`. ``atol=0.0``."""
+        :meth:`test_csa_parity_full_hf_anchor`. Same bf16-Linear trade-off,
+        same ``atol=2e-2``."""
         hf_model, xtuner_layer, layer_idx, _ = self._setup(
             "heavily_compressed_attention", num_hash_layers=0, layer_idx=1
         )
@@ -814,7 +820,7 @@ class TestV4DecoderLayerParity:
         with torch.no_grad():
             hf_out = _run_hf_layer(hf_model, layer_idx, hidden_states, input_ids, position_ids)
             xt_out = _run_xtuner_layer(xtuner_layer, hidden_states, input_ids, position_ids, hf_model)
-        torch.testing.assert_close(xt_out, hf_out, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(xt_out, hf_out, atol=2e-2, rtol=2e-2)
 
     def test_subcomponent_probe(self, capsys) -> None:
         """Walk through the sliding-attention forward step by step and print

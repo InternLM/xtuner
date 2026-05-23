@@ -63,19 +63,23 @@ def hc_split_sinkhorn(
               ``eps``-stabilized).
     """
     orig_dtype = mixes.dtype
-    # Sinkhorn is run in fp32 to mirror the TileLang reference and avoid bf16 NaNs
-    # from low-precision softmax + repeated divisions.
-    mixes_f = mixes.float()
-    scale_f = hc_scale.float()
-    base_f = hc_base.float()
+    # Sinkhorn runs in fp32 to mirror the TileLang reference and avoid bf16 NaNs
+    # from low-precision softmax + repeated divisions. Inputs are expected to
+    # already be fp32: ``mixes`` comes from ``hc_block.hc_pre`` which casts the
+    # Linear output to fp32 before passing here; ``hc_scale`` / ``hc_base`` are
+    # fp32 ``nn.Parameter``s (the HC params are stored in fp32, see
+    # :class:`V4DecoderLayer.__init__`). Older revisions called ``.float()`` on
+    # each defensively; those calls were no-ops on the V4 path and only added
+    # identity casts to the compile graph.
+    assert mixes.dtype == torch.float32, f"hc_split_sinkhorn expects fp32 mixes; got {mixes.dtype}"
 
-    pre_logits = mixes_f[..., :hc_mult] * scale_f[0] + base_f[:hc_mult]
+    pre_logits = mixes[..., :hc_mult] * hc_scale[0] + hc_base[:hc_mult]
     pre = torch.sigmoid(pre_logits) + eps
 
-    post_logits = mixes_f[..., hc_mult : 2 * hc_mult] * scale_f[1] + base_f[hc_mult : 2 * hc_mult]
+    post_logits = mixes[..., hc_mult : 2 * hc_mult] * hc_scale[1] + hc_base[hc_mult : 2 * hc_mult]
     post = 2.0 * torch.sigmoid(post_logits)
 
-    comb_flat = mixes_f[..., 2 * hc_mult :] * scale_f[2] + base_f[2 * hc_mult :]
+    comb_flat = mixes[..., 2 * hc_mult :] * hc_scale[2] + hc_base[2 * hc_mult :]
     comb_shape = comb_flat.shape[:-1] + (hc_mult, hc_mult)
     comb = comb_flat.reshape(comb_shape)
 

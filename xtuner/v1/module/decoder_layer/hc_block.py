@@ -111,22 +111,22 @@ def hc_pre(
     #     flat = self.input_norm(hidden_streams.flatten(2).float())
     #     pre_w, post_w, comb_w = F.linear(flat, self.fn.float()).split(...)
     #
-    # An earlier optimisation here squared in bf16 (``sq = x_flat * x_flat``)
-    # and ran the gate linear in bf16 to dodge a 256 MB fp32 transient × 8
-    # callsites per step. Under ``torch.compile`` (V4 production setting)
-    # inductor fuses the square + mean + rsqrt + multiply chain into one
-    # triton kernel and the fp32 intermediate never materialises to HBM, so
-    # the memory savings of the bf16 shortcut are zero under compile. The
-    # precision cost is real though — the bf16 linear here was responsible
-    # for ~8e-3 abs divergence vs HF in
-    # ``test_subcomponent_probe`` (the ``hc_pre.collapsed`` step). We match
-    # HF exactly by upcasting once at the top and staying in fp32 through
-    # the linear and Sinkhorn input.
+    # We keep the RMS rescale in fp32 internally (square + mean of a
+    # 16384-wide reduction is bf16-overflow-prone) but use
+    # ``F.rms_norm`` so the fp32 accumulator stays inside one fused ATen op
+    # — no explicit ``x.float()`` materialising a full-tensor fp32 copy and
+    # no explicit ``.to(dtype)`` cast back. ``flat_normed`` is bf16 same as
+    # the input. The Linear is bf16 input × bf16 weight (with cuBLAS' fp32
+    # accumulator across the K=16384 reduction), which on H100 is ~10-20×
+    # faster than the all-fp32 GEMM that the explicit ``hc_fn.float()`` path
+    # used to force (cuBLAS' ``sm80_xmma_gemm_f32f32_*`` has no tensor-core
+    # acceleration for fp32 inputs). The downstream ``hc_split_sinkhorn``
+    # runs in fp32 again, so the sinkhorn iterations stay numerically stable.
     x_flat = x.flatten(2)
-    x_flat_f32 = x_flat.float()
-    rsqrt = torch.rsqrt(x_flat_f32.square().mean(-1, keepdim=True) + norm_eps)
-    flat_normed = x_flat_f32 * rsqrt
-    mixes = torch.nn.functional.linear(flat_normed, hc_fn.float())
+    flat_normed = torch.nn.functional.rms_norm(
+        x_flat, normalized_shape=(x_flat.size(-1),), weight=None, eps=norm_eps
+    )
+    mixes = torch.nn.functional.linear(flat_normed, hc_fn.to(dtype)).float()
 
     pre, post, comb = hc_split_sinkhorn(mixes, hc_scale, hc_base, hc_mult, iters, eps)
 
