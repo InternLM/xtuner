@@ -235,10 +235,10 @@ class Indexer(nn.Module):
                 "position_embeddings_compressed must carry one (cos, sin) row per query token; "
                 f"got cos {tuple(cos.shape)}, sin {tuple(sin.shape)}, expected token dim {total_tokens}"
             )
-        if cos.size(-1) != self.rope_head_dim // 2:
+        if cos.size(-1) != self.rope_head_dim:
             raise ValueError(
-                "position_embeddings_compressed last dim must equal rope_head_dim // 2 "
-                f"({self.rope_head_dim // 2}); got {cos.size(-1)}"
+                "position_embeddings_compressed last dim must equal rope_head_dim "
+                f"({self.rope_head_dim}); got {cos.size(-1)}"
             )
 
         # Step 1-2: expand qr to (n_heads, head_dim) and rotate the rope tail.
@@ -349,25 +349,26 @@ class Indexer(nn.Module):
         self.compressor.init_weights()
 
 
-def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    # x: [1, S, H, rope_head_dim]; cos/sin: [1, S, rope_head_dim // 2].
-    # Mirrors the V4 reference's `view_as_complex` rotation (model.py L235-
-    # 243): consecutive pairs along the last dim of x are treated as the real
-    # and imaginary parts of a complex number, and (cos[k], sin[k]) carry the
-    # k-th frequency's rotation angle.
-    if cos.dim() != 3 or sin.dim() != 3:
-        raise ValueError(f"_apply_rope expects cos/sin of rank 3; got cos {tuple(cos.shape)}, sin {tuple(sin.shape)}")
-    if cos.shape != sin.shape:
-        raise ValueError(f"cos and sin must share shape; got {tuple(cos.shape)} vs {tuple(sin.shape)}")
-    if x.size(-1) != 2 * cos.size(-1):
-        raise ValueError(f"rope dim mismatch: x last dim {x.size(-1)} != 2 * cos last dim {2 * cos.size(-1)}")
+def _apply_rope(x: torch.Tensor, cos_full: torch.Tensor, sin_full: torch.Tensor) -> torch.Tensor:
+    # x: [1, S, H, rope_head_dim]; cos_full / sin_full: [1, S, rope_head_dim],
+    # pre-arranged by :class:`xtuner.v1.module.rope.DualRotaryEmbedding` so
+    # ``sin_full[..., 2i] = -sin``, ``sin_full[..., 2i+1] = +sin`` and
+    # ``cos_full[..., 2i] = cos_full[..., 2i+1] = cos``. Same maths as DSA's
+    # ``_apply_rope`` — see that helper's docstring for the derivation.
+    if cos_full.dim() != 3 or sin_full.dim() != 3:
+        raise ValueError(
+            "_apply_rope expects cos/sin of rank 3; got "
+            f"cos {tuple(cos_full.shape)}, sin {tuple(sin_full.shape)}"
+        )
+    if cos_full.shape != sin_full.shape:
+        raise ValueError(f"cos and sin must share shape; got {tuple(cos_full.shape)} vs {tuple(sin_full.shape)}")
+    if x.size(-1) != cos_full.size(-1):
+        raise ValueError(
+            f"rope dim mismatch: x last dim {x.size(-1)} != cos last dim {cos_full.size(-1)}"
+        )
 
-    cos_b = cos.unsqueeze(2)  # [1, S, 1, rope_head_dim // 2]
-    sin_b = sin.unsqueeze(2)
-    x_pairs = x.float().unflatten(-1, (-1, 2))
-    x_even = x_pairs[..., 0]
-    x_odd = x_pairs[..., 1]
-    rot_even = x_even * cos_b - x_odd * sin_b
-    rot_odd = x_even * sin_b + x_odd * cos_b
-    rotated = torch.stack([rot_even, rot_odd], dim=-1).flatten(-2)
-    return rotated.to(x.dtype)
+    cos_b = cos_full.unsqueeze(2).float()  # [1, S, 1, rope_head_dim], promote to fp32 for the rotation
+    sin_b = sin_full.unsqueeze(2).float()
+    x_f = x.float()
+    x_swap = x_f.unflatten(-1, (-1, 2)).flip(-1).flatten(-2)
+    return (x_f * cos_b + x_swap * sin_b).to(x.dtype)

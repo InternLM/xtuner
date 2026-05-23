@@ -58,15 +58,21 @@ def _make_dsa(
 
 
 def _make_position_embeddings(seq_len: int, rope_head_dim: int, base: float = 10000.0) -> tuple[torch.Tensor, torch.Tensor]:
-    # ``DualRotaryEmbedding`` emits half-dim cos/sin (one θ per adjacent
-    # rope-dim pair) for V4's interleaved RoPE convention. Mirror that here.
+    # ``DualRotaryEmbedding`` emits D-dim ``(cos_full, sin_full_signed)``
+    # pre-arranged for the per-layer ``x * cos_full + flip_pairs(x) * sin_full_signed``
+    # kernel. Mirror the same layout here:
+    #   ``cos_full[..., 2i] == cos_full[..., 2i+1] == cos[i]``
+    #   ``sin_full_signed[..., 2i]   = -sin[i]``
+    #   ``sin_full_signed[..., 2i+1] = +sin[i]``
     half = rope_head_dim // 2
     freqs = 1.0 / (base ** (torch.arange(0, half, dtype=torch.float32) / half))
     positions = torch.arange(seq_len, dtype=torch.float32)
     angles = torch.outer(positions, freqs)  # [seq_len, half]
-    cos = angles.cos().unsqueeze(0)
-    sin = angles.sin().unsqueeze(0)
-    return cos, sin
+    cos_half = angles.cos()
+    sin_half = angles.sin()
+    cos_full = cos_half.repeat_interleave(2, dim=-1)
+    sin_full_signed = torch.stack([-sin_half, sin_half], dim=-1).flatten(-2)
+    return cos_full.unsqueeze(0), sin_full_signed.unsqueeze(0)
 
 
 def _make_seq_ctx(cu: list[int]) -> SequenceContext:

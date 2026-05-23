@@ -414,6 +414,31 @@ class RotaryEmbedding(nn.Module):
     __call__ = nn.Module.__call__
 
 
+class _RopeHeadDimProxy:
+    """Lightweight ``TransformerConfig`` proxy that overrides ``head_dim``.
+
+    HF's rope_init_fns (default / yarn / llama3 / longrope) read
+    ``getattr(config, "head_dim", ...)`` to size ``inv_freq`` and to compute
+    the yarn extrapolation boundaries. DeepSeek-V3 and V4 want those derived
+    from ``qk_rope_head_dim`` (the rope-carrying suffix), not from the full
+    per-head dim. HF's own ``DeepseekV3Config.__init__`` does
+    ``self.head_dim = qk_rope_head_dim`` for the same reason
+    (transformers/models/deepseek_v3/configuration_deepseek_v3.py:204).
+    XTuner's ``TransformerConfig.head_dim`` is a ``@computed_field`` returning
+    ``attention.head_dim`` (= 512 for V4 MLA), so the same in-place override
+    isn't available; we wrap the cfg at rope-init time instead.
+    """
+
+    __slots__ = ("_wrapped", "head_dim")
+
+    def __init__(self, wrapped, head_dim: int) -> None:
+        object.__setattr__(self, "_wrapped", wrapped)
+        object.__setattr__(self, "head_dim", head_dim)
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+
 class DualRotaryEmbedding(nn.Module):
     """Rotary embedding with two `inv_freq` sets driven by two distinct bases.
 
@@ -455,6 +480,19 @@ class DualRotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
         self.rope_type = config.rope_parameters_cfg.rope_type
         self.config = config
+
+        # ``DualRotaryEmbedding`` is V4-specific (predicated on
+        # ``compress_rope_theta`` above), and V4 attention is always DSA which
+        # exposes ``qk_rope_head_dim`` — the rope-carrying suffix length.
+        # We pass this through to the rope_init_fn as the "head dim" so
+        # ``inv_freq`` is sized to ``qk_rope_head_dim/2``, matching the
+        # ``DualRotaryEmbedding.forward`` shape contract (and HF V3/V4 which
+        # also derive rope from ``qk_rope_head_dim``).
+        assert hasattr(config.attention, "qk_rope_head_dim"), (
+            "DualRotaryEmbedding requires attention config to expose qk_rope_head_dim; "
+            f"got {type(config.attention).__name__}"
+        )
+        self._qk_rope_head_dim: int = config.attention.qk_rope_head_dim
 
         assert self.rope_type in ["default", "linear", "yarn", "llama3"], (
             f"Unsupported rope_type: {self.rope_type}. Supported types are: 'default', 'linear', 'yarn', 'llama3'."
@@ -500,19 +538,31 @@ class DualRotaryEmbedding(nn.Module):
                 otherwise use `rope_theta` freqs.
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor]: `(cos, sin)` of shape
-            `[B, S, qk_rope_head_dim/2]` — half-dim, in the *interleaved*
-            (adjacent-pair) RoPE convention matching HF's
-            ``DeepseekV4RotaryEmbedding`` and the DeepSeek-V4-Flash reference
-            (``inference/kernel.py``). See :func:`_apply_rope` in
-            :mod:`xtuner.v1.module.attention.dsa` for the matching rotation.
+            tuple[torch.Tensor, torch.Tensor]: ``(cos_full, sin_full_signed)``
+            of shape ``[B, S, qk_rope_head_dim]`` — full per-head RoPE dim,
+            laid out so the per-layer rotation in
+            :func:`xtuner.v1.module.attention.dsa._apply_rope` reduces to one
+            ``x * cos_full + flip_pairs(x) * sin_full_signed``. The pair-
+            broadcast and sign pattern that the interleaved
+            ``[[cos, -sin], [sin, cos]]`` rotation needs are folded into
+            ``cos_full`` and ``sin_full_signed`` here (once per MB) so 43
+            ``_apply_rope`` calls do not each ``repeat_interleave``,
+            ``unbind`` and ``stack`` to recover the same layout — that chain
+            compiles to a stride-2 read / stride-2 write kernel in inductor.
 
-            We do NOT do the legacy ``torch.cat((freqs, freqs), dim=-1)`` doubling
-            that the cat-style ``rotate_half`` would consume: V4's RoPE pairs
-            adjacent dims (``(x[2i], x[2i+1])``), not first/second-half dims
-            (``(x[i], x[i+D/2])``). Doubling here and then doing a cat-style
-            rotation produces a *different* rotation than V4 reference does on
-            the same input — see the parity-test commit message for the math.
+            Specifically::
+
+                cos_full[..., 2i]   = cos_full[..., 2i+1] = cos_half[..., i]
+                sin_full_signed[..., 2i]   = -sin_half[..., i]
+                sin_full_signed[..., 2i+1] = +sin_half[..., i]
+
+            so each output position ``2i`` reads ``x[2i]`` and the flipped
+            pair-neighbour ``x[2i+1]`` against the right ``(cos, -sin)``
+            factors, and position ``2i+1`` reads ``x[2i+1]`` and ``x[2i]``
+            against ``(cos, sin)`` — the standard interleaved RoPE rotation,
+            mathematically identical to HF's ``DeepseekV4RotaryEmbedding`` +
+            ``apply_rotary_pos_emb_interleave`` and the V4-Flash reference
+            (``inference/kernel.py``).
         """
         inv_freq = self.inv_freq_compressed if use_compressed else self.inv_freq_dense
 
@@ -522,13 +572,24 @@ class DualRotaryEmbedding(nn.Module):
         device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float().to(x.device) @ position_ids_expanded.float()).transpose(1, 2)
-            cos = freqs.cos()
-            sin = freqs.sin()
+            cos_half = freqs.cos()
+            sin_half = freqs.sin()
 
-        cos = cos * self.attention_scaling
-        sin = sin * self.attention_scaling
+        cos_half = cos_half * self.attention_scaling
+        sin_half = sin_half * self.attention_scaling
 
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+        # Materialise the D-dim cos / signed-sin layout the per-layer kernel
+        # consumes. ``repeat_interleave(2, -1)`` and ``stack(... , -1).flatten(-2)``
+        # are inductor-unfriendly when they appear inside a compiled training
+        # graph (their backward path mis-lowers to NaN-producing strided
+        # kernels — see the dsa.py ``_apply_rope`` notes), but here they live
+        # inside ``@torch.no_grad()`` and run once per micro-batch in eager
+        # mode, so the cost is one-shot and the autograd-graph hazard never
+        # materialises.
+        cos_full = cos_half.repeat_interleave(2, dim=-1)
+        sin_full_signed = torch.stack([-sin_half, sin_half], dim=-1).flatten(-2)
+
+        return cos_full.to(dtype=x.dtype), sin_full_signed.to(dtype=x.dtype)
 
     @overload  # type: ignore
     def __call__(  # type: ignore
@@ -552,7 +613,11 @@ class DualRotaryEmbedding(nn.Module):
         else:
             patched_rope_cfg = original_cfg.model_copy(update={"rope_theta": base})
             shim_cfg = self.config.model_copy(update={"rope_parameters_cfg": patched_rope_cfg})
-        inv_freq, attention_scaling = self.rope_init_fn(shim_cfg, device)
+        # Override ``head_dim`` for the rope_init_fn so ``inv_freq`` and yarn's
+        # extrapolation boundaries are sized to ``qk_rope_head_dim`` rather
+        # than the full attention head_dim. See ``_RopeHeadDimProxy``.
+        proxy_cfg = _RopeHeadDimProxy(shim_cfg, self._qk_rope_head_dim)
+        inv_freq, attention_scaling = self.rope_init_fn(proxy_cfg, device)
         return inv_freq, attention_scaling
 
 

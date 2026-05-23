@@ -378,15 +378,20 @@ def _install_hf_attention_fallback(
     ):
         bsz, seq_len, _ = hidden_states.shape
         device = hidden_states.device
-        # Reconstruct HF's per-layer-type rope dict from XTuner's two tuples.
-        # XTuner ``DualRotaryEmbedding`` and HF ``DeepseekV4RotaryEmbedding``
-        # now emit the same half-dim interleaved layout (see commit
-        # ``[Fix] V4: switch RoPE to interleaved convention``), so we can
-        # forward the cos/sin directly.
+        # XTuner's ``DualRotaryEmbedding`` now emits D-dim pre-arranged
+        # ``(cos_full, sin_full_signed)`` so the per-layer ``_apply_rope`` is
+        # one fused ``x * cos + flip_pairs(x) * sin``. HF still consumes the
+        # half-dim layout, so undo the precompute here for the fallback:
+        #   ``cos_half[..., i]  = cos_full[..., 2i]``        (even positions; odd dup)
+        #   ``sin_half[..., i]  = sin_full_signed[..., 2i+1]`` (odd positions; even = -sin)
+        def _to_hf_half(pe: tuple[torch.Tensor, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+            cos_full, sin_full_signed = pe
+            return cos_full[..., 0::2].contiguous(), sin_full_signed[..., 1::2].contiguous()
+
         position_embeddings_hf = {
-            "main": position_embeddings,
-            "compress": position_embeddings_compressed if position_embeddings_compressed is not None
-                        else position_embeddings,
+            "main": _to_hf_half(position_embeddings),
+            "compress": _to_hf_half(position_embeddings_compressed) if position_embeddings_compressed is not None
+                        else _to_hf_half(position_embeddings),
         }
         if seq_ctx is not None and getattr(seq_ctx, "position_ids", None) is not None:
             position_ids = seq_ctx.position_ids
@@ -565,21 +570,22 @@ def _hf_rotary_to_xtuner_format(
     position_ids: torch.Tensor,
     layer_type: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute half-dim cos/sin sharing inv_freq with HF.
+    """Compute D-dim ``(cos_full, sin_full_signed)`` sharing inv_freq with HF.
 
-    Both XTuner's ``DualRotaryEmbedding`` and HF's
-    ``DeepseekV4RotaryEmbedding`` now emit half-dim cos/sin
-    (``[B, S, qk_rope_head_dim/2]``) in the interleaved RoPE convention —
-    after the ``[Fix] V4: switch RoPE to interleaved convention`` commit,
-    the two are layout- and convention-equivalent. We still build cos/sin
-    via this helper rather than calling HF's rotary directly so we can pass
-    them straight into XTuner's DSA, sharing HF's ``inv_freq`` for
-    bit-identical angles.
+    XTuner's ``DualRotaryEmbedding`` pre-arranges cos/sin into the layout
+    the per-layer ``_apply_rope`` consumes directly: D-dim ``cos_full`` and
+    ``sin_full_signed`` (sign pattern ``[-, +, -, +, ...]`` folded in). This
+    helper reproduces that precompute from HF's half-dim ``inv_freq`` so the
+    two sides see bit-identical angles AND identical input layout to DSA.
     """
     inv_freq = getattr(hf_rotary, f"{layer_type}_inv_freq")  # [qk_rope_head_dim/2]
     scaling = getattr(hf_rotary, f"{layer_type}_attention_scaling", 1.0)
     freqs = position_ids.float().unsqueeze(-1) * inv_freq.float()
-    return (freqs.cos() * scaling).to(hidden_states_2d.dtype), (freqs.sin() * scaling).to(hidden_states_2d.dtype)
+    cos_half = freqs.cos() * scaling
+    sin_half = freqs.sin() * scaling
+    cos_full = cos_half.repeat_interleave(2, dim=-1)
+    sin_full_signed = torch.stack([-sin_half, sin_half], dim=-1).flatten(-2)
+    return cos_full.to(hidden_states_2d.dtype), sin_full_signed.to(hidden_states_2d.dtype)
 
 
 def _run_xtuner_layer(
@@ -605,12 +611,17 @@ def _run_xtuner_layer(
     underlying angles.
     """
     hidden_2d = hidden_states.flatten(2)
-    # Use HF's rotary directly to share bit-identical cos/sin with HF runs.
-    # ``DualRotaryEmbedding`` after the interleaved-rope migration emits the
-    # SAME half-dim layout HF emits, so the two sides can consume the same
-    # tensors without conversion.
-    cos_main, sin_main = hf_model.rotary_emb(hidden_2d, position_ids=position_ids, layer_type="main")
-    cos_comp, sin_comp = hf_model.rotary_emb(hidden_2d, position_ids=position_ids, layer_type="compress")
+    # HF's rotary emits half-dim ``(cos, sin)``. XTuner's ``DualRotaryEmbedding``
+    # now emits the pre-arranged D-dim ``(cos_full, sin_full_signed)`` layout
+    # the per-layer ``_apply_rope`` consumes directly — convert HF's output to
+    # match. The conversion is bit-identical to the precompute step in
+    # ``DualRotaryEmbedding.forward`` (no extra precision loss).
+    cos_main_half, sin_main_half = hf_model.rotary_emb(hidden_2d, position_ids=position_ids, layer_type="main")
+    cos_comp_half, sin_comp_half = hf_model.rotary_emb(hidden_2d, position_ids=position_ids, layer_type="compress")
+    cos_main = cos_main_half.repeat_interleave(2, dim=-1)
+    sin_main = torch.stack([-sin_main_half, sin_main_half], dim=-1).flatten(-2)
+    cos_comp = cos_comp_half.repeat_interleave(2, dim=-1)
+    sin_comp = torch.stack([-sin_comp_half, sin_comp_half], dim=-1).flatten(-2)
     bsz, seq_len = position_ids.shape
     assert bsz == 1, "XTuner V4DecoderLayer is hardcoded to packed-varlen with batch=1"
     cu = torch.tensor([0, seq_len], dtype=torch.int32, device=hidden_states.device)

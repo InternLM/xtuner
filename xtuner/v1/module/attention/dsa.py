@@ -397,21 +397,15 @@ class DeepSeekSparseAttention(nn.Module):
                 "position_embeddings must carry one (cos, sin) row per token; "
                 f"got cos {tuple(cos.shape)}, sin {tuple(sin.shape)}, expected token dim {total_tokens}"
             )
-        # ``DualRotaryEmbedding`` emits half-dim cos/sin (interleaved RoPE
-        # convention — one θ per adjacent dim-pair). DSA's ``_apply_rope`` does
-        # the ``repeat_interleave(2, dim=-1)`` internally to match the
-        # qk_rope_head_dim slice. We accept ``cos.size(-1) == qk_rope_head_dim // 2``
-        # as the canonical input and tolerate older callers that still pass
-        # ``qk_rope_head_dim`` (sliced to the first half).
-        expected_half = self.qk_rope_head_dim // 2
-        if cos.size(-1) < expected_half:
+        # ``DualRotaryEmbedding`` now emits D-dim cos/sin pre-arranged so the
+        # per-layer ``_apply_rope`` is one ``x * cos + flip_pairs(x) * sin``
+        # (sign pattern is folded into ``sin``). See the rope module's
+        # ``DualRotaryEmbedding.forward`` docstring for the layout.
+        if cos.size(-1) != self.qk_rope_head_dim:
             raise ValueError(
-                "position_embeddings last dim must be at least qk_rope_head_dim // 2 "
-                f"({expected_half}); got {cos.size(-1)}"
+                "position_embeddings last dim must equal qk_rope_head_dim "
+                f"({self.qk_rope_head_dim}); got {cos.size(-1)}"
             )
-        if cos.size(-1) > expected_half:
-            cos = cos[..., :expected_half]
-            sin = sin[..., :expected_half]
 
         # 1. Q-LoRA path. `q_lowrank` is reused by the Indexer (V4 reuses
         # the same low-rank Q stream for the score path).
@@ -566,6 +560,7 @@ class DeepSeekSparseAttention(nn.Module):
             self.indexer.init_weights()
 
 
+@torch.compiler.disable
 def _apply_rope_split(
     x: torch.Tensor,
     cos: torch.Tensor,
@@ -581,6 +576,7 @@ def _apply_rope_split(
     return torch.cat([nope, rope_tail], dim=-1)
 
 
+@torch.compiler.disable
 def _apply_rope_inverse_split(
     x: torch.Tensor,
     cos: torch.Tensor,
@@ -593,35 +589,36 @@ def _apply_rope_inverse_split(
     return torch.cat([nope, rope_tail], dim=-1)
 
 
-def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    # V4's interleaved RoPE: pairs (x[2i], x[2i+1]) get rotated by angle θ_i.
-    # cos/sin from ``DualRotaryEmbedding`` are half-dim ``[B, S, D/2]`` (one
-    # θ_i per pair); we ``repeat_interleave`` them to full ``D`` so each
-    # adjacent pair sees its own angle in the broadcast multiply. Matches HF
-    # ``DeepseekV4RotaryEmbedding`` + ``apply_rotary_pos_emb`` and the V4
-    # reference's complex-pair ``apply_rotary_emb``.
-    cos = cos.repeat_interleave(2, dim=-1)
-    sin = sin.repeat_interleave(2, dim=-1)
-    cos_b, sin_b = _broadcast_cos_sin(cos, sin, x)
-    return x * cos_b + _rotate_half(x) * sin_b
+def _apply_rope(x: torch.Tensor, cos_full: torch.Tensor, sin_full: torch.Tensor) -> torch.Tensor:
+    # Interleaved RoPE rotation, pair-wise: ``(x[2i], x[2i+1])`` →
+    # ``(x[2i]·cos_i − x[2i+1]·sin_i, x[2i]·sin_i + x[2i+1]·cos_i)``.
+    # Mathematically identical to HF ``apply_rotary_pos_emb_interleave`` and
+    # the V4-Flash reference's complex-pair ``apply_rotary_emb``.
+    #
+    # ``cos_full`` / ``sin_full`` are D-dim and pre-arranged by
+    # :class:`xtuner.v1.module.rope.DualRotaryEmbedding`:
+    #   ``cos_full[..., 2i] == cos_full[..., 2i+1] == cos_half[..., i]``
+    #   ``sin_full[..., 2i]   = -sin_half[..., i]``
+    #   ``sin_full[..., 2i+1] = +sin_half[..., i]``
+    # so the rotation reduces to ``x * cos_full + flip_pairs(x) * sin_full``
+    # with no ``unbind`` on ``x`` and no per-call ``repeat_interleave`` /
+    # ``stack``. ``flip_pairs`` swaps the two elements of each adjacent pair:
+    # ``(x[2i], x[2i+1]) → (x[2i+1], x[2i])``. Read off position 2i:
+    #   ``x[2i]·cos_half[i] + x[2i+1]·(-sin_half[i])  =  x[2i]·cos − x[2i+1]·sin``  ✓
+    # And 2i+1:
+    #   ``x[2i+1]·cos_half[i] + x[2i]·(+sin_half[i])  =  x[2i+1]·cos + x[2i]·sin``  ✓
+    cos_b, sin_b = _broadcast_cos_sin(cos_full, sin_full, x)
+    x_swap = x.unflatten(-1, (-1, 2)).flip(-1).flatten(-2)
+    return x * cos_b + x_swap * sin_b
 
 
-def _apply_rope_inverse(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    # Inverse rotation: same pairing as :func:`_apply_rope`, flip sin's sign.
-    cos = cos.repeat_interleave(2, dim=-1)
-    sin = sin.repeat_interleave(2, dim=-1)
-    cos_b, sin_b = _broadcast_cos_sin(cos, sin, x)
-    return x * cos_b - _rotate_half(x) * sin_b
-
-
-def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-    # Interleaved rotate-half: pair (x[2i], x[2i+1]) rotates 90° → (-x[2i+1], x[2i]).
-    # NOT the cat-style "first half / second half" pairing that
-    # ``torch.cat([-x2, x1], dim=-1)`` over halves would give — V4 uses
-    # adjacent pairs (same convention as HF / V4-ref complex rotation).
-    x_even = x[..., 0::2]
-    x_odd = x[..., 1::2]
-    return torch.stack([-x_odd, x_even], dim=-1).flatten(-2)
+def _apply_rope_inverse(x: torch.Tensor, cos_full: torch.Tensor, sin_full: torch.Tensor) -> torch.Tensor:
+    # Inverse of :func:`_apply_rope` — same layout assumptions on ``cos_full``
+    # / ``sin_full``; the rotation angle flips sign, which here is just
+    # ``+ x_swap * sin_full`` → ``- x_swap * sin_full``.
+    cos_b, sin_b = _broadcast_cos_sin(cos_full, sin_full, x)
+    x_swap = x.unflatten(-1, (-1, 2)).flip(-1).flatten(-2)
+    return x * cos_b - x_swap * sin_b
 
 
 def _broadcast_cos_sin(
