@@ -200,12 +200,22 @@ def _unshard_hc_params(
     return hc_fn, hc_scale, hc_base
 
 
-@maybe_compile
 def hc_post(x: Tensor, residual: Tensor, post: Tensor, comb: Tensor) -> Tensor:
     """Expand the single-stream block output back into ``hc_mult`` streams.
 
     Port of ``Block.hc_post`` in DeepSeek-V4-Flash ``inference/model.py`` (L683-686):
     ``out[..., h, d] = post[..., h] * x[..., d] + sum_{h'} comb[..., h, h'] * residual[..., h', d]``.
+
+    Dispatches to a fused Triton kernel
+    (:func:`xtuner.v1.ops.hc_post.hc_post_fused`) on the default bf16 path: the
+    eager broadcast-multiply + reduce-sum below re-reads ``residual`` once per
+    ``h_out`` (the inductor fusion makes each output element its own reduction
+    thread), which is HBM-bound at pack=16384; the Triton kernel reads
+    ``residual`` once per token and does the 4×4 mix in registers (~7× fwd+bwd).
+    The Triton path differs from this eager body by ~1 bf16 ULP (different
+    reduction order, marginally closer to the fp32 truth), so it is gated off
+    when ``_HC_HF_PARITY`` is set — the bit-exact HF-parity tests keep the eager
+    fp32 path. Non-CUDA / non-bf16 inputs also fall back here.
 
     Args:
         x (Tensor): Inner-block output, shape ``[B, S, hidden_size]``.
@@ -218,6 +228,27 @@ def hc_post(x: Tensor, residual: Tensor, post: Tensor, comb: Tensor) -> Tensor:
         Tensor: Updated HC-expanded streams, shape ``[B, S, hc_mult, hidden_size]``,
             cast back to ``x.dtype``.
     """
+    if not _HC_HF_PARITY and residual.is_cuda and residual.dtype == torch.bfloat16 and _hc_post_fused_available():
+        from xtuner.v1.ops.hc_post import hc_post_fused
+
+        return hc_post_fused(x, residual, post, comb)
+    return _hc_post_eager(x, residual, post, comb)
+
+
+def _hc_post_fused_available() -> bool:
+    # Imported lazily so a Triton-less build (CPU-only unit tests) can still
+    # import this module; the fast path is simply never taken there.
+    try:
+        from xtuner.v1.ops.hc_post import is_available
+
+        return is_available()
+    except ImportError:
+        return False
+
+
+@maybe_compile
+def _hc_post_eager(x: Tensor, residual: Tensor, post: Tensor, comb: Tensor) -> Tensor:
+    """Eager fp32-accumulate ``hc_post`` (HF-bit-parity path; see :func:`hc_post`)."""
     # post * x is broadcast across hidden dim; comb mixes across the residual stream axis.
     #
     # Implementation note. The natural form is::

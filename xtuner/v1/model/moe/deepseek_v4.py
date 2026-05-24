@@ -111,7 +111,12 @@ _LITE = TorchCompileOption(fullgraph=False, dynamic=True)
 # These get layered on top of the parent's MoE compile cfgs.
 _V4_LAYER_TARGETS: dict[str, TorchCompileOption] = {
     "xtuner.v1.module.decoder_layer.hc_block.hc_pre": _HEAVY,
-    "xtuner.v1.module.decoder_layer.hc_block.hc_post": _HEAVY,
+    # ``hc_post`` is now an eager dispatcher: the default bf16 path calls the
+    # ``xtuner::hc_post_fwd`` Triton custom op (self-optimized, opaque to
+    # compile), and only the ``_HC_HF_PARITY`` fp32 fallback
+    # (``_hc_post_eager``) benefits from inductor fusion — so we compile that
+    # one instead of the dispatcher.
+    "xtuner.v1.module.decoder_layer.hc_block._hc_post_eager": _HEAVY,
     "xtuner.v1.model.moe.deepseek_v4.V4DecoderLayer._attn_compute": _HEAVY,
     "xtuner.v1.model.moe.deepseek_v4.V4DecoderLayer._ffn_pre_compute": _LITE,
     "xtuner.v1.model.moe.deepseek_v4.V4DecoderLayer._ffn_post_compute": _LITE,
