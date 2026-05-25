@@ -1688,8 +1688,26 @@ class Trainer:
 
         save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
         if self._async_hf_export:
+            wait_previous_start = time.monotonic()
             self._wait_for_pending_async_hf()
+            wait_previous_duration_sec = time.monotonic() - wait_previous_start
             self._pending_async_hf_handle = self._engine.async_save_hf(str(save_hf_path))
+            if hasattr(self._pending_async_hf_handle, "diagnostics"):
+                self._pending_async_hf_handle.diagnostics.update(
+                    {
+                        "step": self.cur_step,
+                        "epoch": self._cur_epoch,
+                        "wait_previous_async_hf_duration_sec": wait_previous_duration_sec,
+                    }
+                )
+            elif isinstance(self._pending_async_hf_handle, dict):
+                self._pending_async_hf_handle.setdefault("diagnostics", {}).update(
+                    {
+                        "step": self.cur_step,
+                        "epoch": self._cur_epoch,
+                        "wait_previous_async_hf_duration_sec": wait_previous_duration_sec,
+                    }
+                )
             self._pending_async_hf_step = self.cur_step
             self._pending_async_hf_epoch = self._cur_epoch
             return

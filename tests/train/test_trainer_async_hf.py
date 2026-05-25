@@ -43,6 +43,7 @@ class FakeHFModel(nn.Module):
 class FakeAsyncHFEngine:
     def __init__(self):
         self.save_hf_calls = []
+        self.async_hf_handles = []
         self.wait_async_hf_calls = []
         self.train_step_calls = 0
         self.grad_norm_calls = 0
@@ -109,7 +110,9 @@ class FakeAsyncHFEngine:
             "ok": self.async_hf_status_ok,
             "error": self.async_hf_status_error,
             "weight_map": weight_map,
+            "diagnostics": {},
         }
+        self.async_hf_handles.append(handle)
         self._pending_async_hf = handle
         return handle
 
@@ -228,6 +231,16 @@ class TestTrainerAsyncSaveHF(DistributedTestBase):
         dist.barrier()
 
         self.assertEqual(len(trainer._engine.save_hf_calls), 4)
+        self.assertEqual(
+            [handle["diagnostics"]["step"] for handle in trainer._engine.async_hf_handles],
+            [3, 6, 9, 10],
+        )
+        self.assertTrue(
+            all(
+                "wait_previous_async_hf_duration_sec" in handle["diagnostics"]
+                for handle in trainer._engine.async_hf_handles
+            )
+        )
         if dist.get_rank() == 0:
             self.assertEqual(len(trainer._engine.model.hf_index_calls), 4)
 

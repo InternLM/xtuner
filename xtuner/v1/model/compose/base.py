@@ -1,8 +1,11 @@
 import json
 import multiprocessing as py_mp
+import os
+import time
+import traceback
 from pathlib import Path
 from shutil import rmtree
-from typing import Callable, Self, Sequence
+from typing import Any, Callable, Self, Sequence
 
 import torch
 import torch.distributed as dist
@@ -20,6 +23,7 @@ from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model import BaseModel
 from xtuner.v1.model.base import (
     DEVICE_MODULE,
+    _async_hf_now,
     AsyncHFSaveHandle,
     BatchForwardInfo,
     ModelOutputs,
@@ -177,6 +181,8 @@ class BaseComposeModel(BaseModel):
         safetensors_prefix: str = "model",
         cleanup_hf_dirs: Sequence[str | Path] = (),
     ) -> AsyncHFSaveHandle:
+        api_start = time.monotonic()
+        api_start_wall_time = _async_hf_now()
         if self._hf_path is None and self.config.hf_config is None:
             raise NotImplementedError(
                 "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
@@ -205,21 +211,28 @@ class BaseComposeModel(BaseModel):
 
         module_file_to_names: list[tuple[BaseModel, list[tuple[str, list[str]]]]] = []
         merged_weight_map: dict[str, str] = {}
+        prepare_start = time.monotonic()
+        total_tensor_bytes = 0
         for module, prefix in (
             (self.language_model, "model-language"),
             (self.vision_tower, "model-vision"),
             (self.multi_modal_projector, "model-projector"),
         ):
-            file_to_names, weight_map = module._prepare_async_hf_snapshot(
+            file_to_names, weight_map, module_tensor_bytes = module._prepare_async_hf_snapshot(
                 save_dtype=save_dtype,
                 safetensors_prefix=prefix,
                 device=DEVICE,
             )
             module_file_to_names.append((module, file_to_names))
             merged_weight_map.update(weight_map)
+            total_tensor_bytes += module_tensor_bytes
+        prepare_snapshot_duration_sec = time.monotonic() - prepare_start
 
+        device_synchronize_duration_sec = 0.0
         if hasattr(DEVICE_MODULE, "synchronize"):
+            device_sync_start = time.monotonic()
             DEVICE_MODULE.synchronize()
+            device_synchronize_duration_sec = time.monotonic() - device_sync_start
 
         mp_ctx = py_mp.get_context("fork")
         process = mp_ctx.Process(
@@ -235,7 +248,27 @@ class BaseComposeModel(BaseModel):
             ),
             daemon=False,
         )
+        process_start_start = time.monotonic()
         process.start()
+        process_start_duration_sec = time.monotonic() - process_start_start
+        api_duration_sec = time.monotonic() - api_start
+        api_return_wall_time = _async_hf_now()
+
+        diagnostics = {
+            "launch_event": "async_hf_launch",
+            "rank": rank,
+            "world_size": world_size,
+            "hf_dir": str(hf_dir),
+            "tmp_hf_dir": str(tmp_hf_dir),
+            "status_path": str(status_path),
+            "api_start_wall_time": api_start_wall_time,
+            "api_return_wall_time": api_return_wall_time,
+            "async_save_hf_api_duration_sec": api_duration_sec,
+            "prepare_snapshot_duration_sec": prepare_snapshot_duration_sec,
+            "device_synchronize_duration_sec": device_synchronize_duration_sec,
+            "process_start_duration_sec": process_start_duration_sec,
+            "total_tensor_bytes": total_tensor_bytes,
+        }
 
         handle = AsyncHFSaveHandle(
             process=process,
@@ -243,6 +276,7 @@ class BaseComposeModel(BaseModel):
             tmp_hf_dir=tmp_hf_dir,
             status_path=status_path,
             cleanup_done_path=cleanup_done_path,
+            diagnostics=diagnostics,
         )
         self._pending_async_hf = handle
         return handle
@@ -257,20 +291,50 @@ class BaseComposeModel(BaseModel):
         cleanup_done_path: Path,
         rank: int,
     ) -> None:
+        writer_start = time.monotonic()
+        writer_diag: dict[str, Any] = {
+            "writer_event": "async_hf_writer",
+            "rank": rank,
+            "writer_start_wall_time": _async_hf_now(),
+        }
         try:
             set_async_save_process_qos()
+            cleanup_start = time.monotonic()
             self._cleanup_async_hf_dirs_before_write(
                 cleanup_hf_dirs=cleanup_hf_dirs,
                 cleanup_done_path=cleanup_done_path,
                 rank=rank,
             )
+            writer_diag["cleanup_duration_sec"] = time.monotonic() - cleanup_start
+            write_start = time.monotonic()
             for module, file_to_names in module_file_to_names:
                 self._write_async_hf_module_snapshot(hf_dir=tmp_hf_dir, module=module, file_to_names=file_to_names)
-            status = {"rank": rank, "ok": True, "error": "", "weight_map": merged_weight_map}
+            writer_diag.update(
+                {
+                    "writer_end_wall_time": _async_hf_now(),
+                    "writer_duration_sec": time.monotonic() - writer_start,
+                    "write_duration_sec": time.monotonic() - write_start,
+                }
+            )
+            status = {"rank": rank, "ok": True, "error": "", "weight_map": merged_weight_map, "diag": writer_diag}
             with status_path.open("w") as f:
                 f.write(json.dumps(status, indent=2))
         except Exception as exc:
-            status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
+            writer_diag.update(
+                {
+                    "writer_end_wall_time": _async_hf_now(),
+                    "writer_duration_sec": time.monotonic() - writer_start,
+                }
+            )
+            status = {
+                "rank": rank,
+                "ok": False,
+                "error": str(exc),
+                "exception_type": type(exc).__name__,
+                "traceback": traceback.format_exc(),
+                "weight_map": {},
+                "diag": writer_diag,
+            }
             with status_path.open("w") as f:
                 f.write(json.dumps(status, indent=2))
             raise
