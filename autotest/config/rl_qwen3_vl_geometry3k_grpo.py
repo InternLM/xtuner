@@ -225,4 +225,5 @@ trainer = RLColocateTrainerConfig(
     work_dir=work_dir,
     seed=123,
     debug_rollout=False,
+    exp_tracker="jsonl",
 )

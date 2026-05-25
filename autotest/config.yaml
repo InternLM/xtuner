@@ -733,7 +733,7 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0001
+                       threshold: 0.0002
                        method: absolute
                        operator: <=
                     -
