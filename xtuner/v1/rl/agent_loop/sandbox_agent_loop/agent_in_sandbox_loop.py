@@ -11,7 +11,7 @@ from lagent.utils import create_object
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.judger import Judger
-from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.rollout import RolloutController, RolloutGenerateHandle
 from xtuner.v1.rl.utils import create_task
 
 from ..agent_loop import AgentLoop, AgentLoopConfig
@@ -54,9 +54,16 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     """
     max_concurrent_samples: int | None = None
 
-    def build_local(self, rollout_controller: RolloutController | None = None, judger: Judger | None = None, logger=None) -> "AgentInSandboxLoop":
+    def build_local(
+        self,
+        rollout_controller: RolloutController | None = None,
+        rollout_generator: RolloutGenerateHandle | None = None,
+        judger: Judger | None = None,
+        logger=None,
+    ) -> "AgentInSandboxLoop":
         return AgentInSandboxLoop(
             rollout_ctl=rollout_controller,
+            rollout_generator=rollout_generator,
             hf_checkpoint=self.hf_checkpoint,
             judger=judger,
             logger=logger,
@@ -68,12 +75,13 @@ class AgentInSandboxLoop(AgentLoop):
     def __init__(
         self,
         rollout_ctl: RolloutController | None = None,
+        rollout_generator: RolloutGenerateHandle | None = None,
         hf_checkpoint: str = None,
         judger: Judger | None = None,
         logger=None,
         max_concurrent_samples: int | None = None,
     ):
-        super().__init__(rollout_ctl, None, hf_checkpoint, judger, logger)
+        super().__init__(rollout_ctl, rollout_generator, None, hf_checkpoint, judger, logger)
         self.max_concurrent_samples = max_concurrent_samples
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
 

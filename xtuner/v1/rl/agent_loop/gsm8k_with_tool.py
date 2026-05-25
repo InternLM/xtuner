@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 from xtuner.v1.rl.agent_loop import AgentLoop, AgentLoopConfig
 from xtuner.v1.rl.judger import Judger
-from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.rollout import RolloutController, RolloutGenerateHandle
 from xtuner.v1.utils import get_logger
 
 
@@ -18,10 +18,17 @@ logger = get_logger()
 class GSM8KToolAgentLoopConfig(AgentLoopConfig):
     max_turns: int
 
-    def build_local(self, rollout_controller, judger: Judger | None = None, logger=None) -> "GSM8KToolAgentLoop":
+    def build_local(
+        self,
+        rollout_controller,
+        rollout_generator: RolloutGenerateHandle | None = None,
+        judger: Judger | None = None,
+        logger=None,
+    ) -> "GSM8KToolAgentLoop":
         return GSM8KToolAgentLoop(
             max_turns=self.max_turns,
             rollout_ctl=rollout_controller,
+            rollout_generator=rollout_generator,
             hf_checkpoint=self.hf_checkpoint,
             sample_params=self.sample_params,
             judger=judger,
@@ -40,12 +47,17 @@ class GSM8KToolAgentLoop(AgentLoop):
         self,
         max_turns: int,
         rollout_ctl: RolloutController,
+        rollout_generator: RolloutGenerateHandle | None,
         hf_checkpoint: str,
         sample_params: SampleParams,
         judger: Judger | None = None,
     ):
         super().__init__(
-            rollout_ctl=rollout_ctl, hf_checkpoint=hf_checkpoint, sample_params=sample_params, judger=judger
+            rollout_ctl=rollout_ctl,
+            rollout_generator=rollout_generator,
+            hf_checkpoint=hf_checkpoint,
+            sample_params=sample_params,
+            judger=judger,
         )
         self.max_turns = max_turns
         self.tool_call_pattern = re.compile(r"\n*<tool_call>(.*?)</tool_call>", re.DOTALL)
@@ -99,7 +111,10 @@ class GSM8KToolAgentLoop(AgentLoop):
             rollout_state.sample_params = copy.deepcopy(base_sample_params)
             rollout_state.sample_params.max_tokens = remaining_max_tokens
 
-            rollout_state = await self.rollout_ctl.generate.remote(rollout_state)  # type: ignore[attr-defined]
+            rollout_state = await self.rollout_generate(
+                rollout_state,
+                enable_partial_rollout=kwargs.get("enable_partial_rollout", False),
+            )
             cur_turn += 1
             response_ids = cast(list[int], rollout_state.response_ids)
             cur_turn_tokens.extend(response_ids)

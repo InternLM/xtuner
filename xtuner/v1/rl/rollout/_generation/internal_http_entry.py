@@ -4,51 +4,47 @@ import json
 import hashlib
 import socket
 import threading
-import time
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
 import httpx
-import ray
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 from xtuner.v1.utils import get_logger
 
-from .health_manager import RolloutHealthManagerProxy, RolloutWorkerRouteInfo
-from .worker import RolloutConfig
+from .session_worker_selector import RolloutWorkerHandle, RolloutWorkerUrlSource, SessionWorkerSelector
+from ..worker import RolloutConfig
 
 
 @dataclass
-class WorkerHttpRouterConfig:
+class InternalRolloutHttpEntryConfig:
     port: int
     host: str = "0.0.0.0"
-    title: str = "XTuner Worker Router"
+    title: str = "XTuner Internal Rollout Router"
     version: str = "0.1.0"
     log_level: str = "warning"
     request_timeout: float | None = None
     stream_timeout: float | None = None
+    worker_url_source: RolloutWorkerUrlSource = "backend"
 
 
-class WorkerHttpRouter:
+class InternalRolloutHttpEntry:
     def __init__(
         self,
-        health_manager: RolloutHealthManagerProxy,
+        worker_handles: list[RolloutWorkerHandle],
         rollout_config: RolloutConfig,
-        config: WorkerHttpRouterConfig,
+        config: InternalRolloutHttpEntryConfig,
     ) -> None:
-        self.health_manager = health_manager
+        self.worker_selector = SessionWorkerSelector(worker_handles)
         self.rollout_config = rollout_config
         self.config = config
         timeout = config.request_timeout or rollout_config.rollout_timeout
         self.client = httpx.AsyncClient(timeout=timeout)
         self.stream_timeout = config.stream_timeout or rollout_config.rollout_timeout
-        self.logger = get_logger(log_dir=rollout_config.worker_log_dir, tag="WorkerHttpRouter")
-
-    async def health(self) -> tuple[bool, dict[str, Any]]:
-        return await self.health_manager.get_ready_status.remote()
+        self.logger = get_logger(log_dir=rollout_config.worker_log_dir, tag="InternalRolloutHttpEntry")
 
     async def models(self) -> dict[str, Any]:
         model_id = self.rollout_config.model_name or "xtuner-rollout"
@@ -67,15 +63,21 @@ class WorkerHttpRouter:
     async def chat_completions(self, request: Request) -> Response:
         payload = await request.json()
         session_id = self._extract_session_id(payload, request)
-        route_info = await self.health_manager.get_worker_route_info.remote(session_id)
-        if route_info is None:
+        worker = await self.worker_selector.select(session_id)
+        if worker is None:
             raise HTTPException(status_code=503, detail={"error": "No active rollout worker available."})
 
-        url = f"{route_info.url.rstrip('/')}/v1/chat/completions"
+        if self.config.worker_url_source == "session":
+            payload.setdefault("session_id", session_id)
+        try:
+            worker_base_url = worker.get_generate_url(self.config.worker_url_source)
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail={"error": str(exc)}) from exc
+        url = f"{worker_base_url.rstrip('/')}/v1/chat/completions"
         headers = self._forward_headers(request)
         if payload.get("stream") is True:
-            return await self._stream_chat_completions(url, payload, headers, route_info)
-        return await self._post_chat_completions(url, payload, headers, route_info)
+            return await self._stream_chat_completions(url, payload, headers, worker)
+        return await self._post_chat_completions(url, payload, headers, worker)
 
     def _extract_session_id(self, payload: dict[str, Any], request: Request) -> int:
         for header_name in ("x-session-uid", "x-session-id", "x-request-id"):
@@ -131,16 +133,13 @@ class WorkerHttpRouter:
         url: str,
         payload: dict[str, Any],
         headers: dict[str, str],
-        route_info: RolloutWorkerRouteInfo,
+        worker: RolloutWorkerHandle,
     ) -> Response:
         try:
             response = await self.client.post(url, json=payload, headers=headers)
         except Exception as exc:
-            await self.health_manager.report_worker_failure.remote(route_info.rank, str(exc))
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
-        if response.status_code >= 500:
-            await self.health_manager.report_worker_failure.remote(route_info.rank, response.text)
         return Response(
             content=response.content,
             status_code=response.status_code,
@@ -152,92 +151,65 @@ class WorkerHttpRouter:
         url: str,
         payload: dict[str, Any],
         headers: dict[str, str],
-        route_info: RolloutWorkerRouteInfo,
+        worker: RolloutWorkerHandle,
     ) -> StreamingResponse:
         async def stream_response():
             try:
                 async with self.client.stream("POST", url, json=payload, headers=headers, timeout=self.stream_timeout) as response:
                     if response.status_code >= 500:
                         body = await response.aread()
-                        await self.health_manager.report_worker_failure.remote(route_info.rank, body.decode(errors="replace"))
                         yield body
                         return
                     async for chunk in response.aiter_bytes():
                         yield chunk
             except Exception as exc:
-                await self.health_manager.report_worker_failure.remote(route_info.rank, str(exc))
-                self.logger.error(f"Streaming chat completion failed for worker {route_info.rank}: {exc}")
+                self.logger.error(f"Streaming chat completion failed for worker {worker.rank}: {exc}")
                 yield f'data: {{"error": {json.dumps(str(exc))}}}\n\n'.encode()
 
         return StreamingResponse(stream_response(), media_type="text/event-stream")
 
 
-def build_worker_http_router_app(
-    health_manager: RolloutHealthManagerProxy,
+def build_internal_rollout_http_entry_app(
+    worker_handles: list[RolloutWorkerHandle],
     rollout_config: RolloutConfig,
-    config: WorkerHttpRouterConfig,
+    config: InternalRolloutHttpEntryConfig,
 ) -> FastAPI:
-    router = WorkerHttpRouter(health_manager=health_manager, rollout_config=rollout_config, config=config)
+    entry = InternalRolloutHttpEntry(worker_handles=worker_handles, rollout_config=rollout_config, config=config)
     app = FastAPI(title=config.title, version=config.version)
-    app.state.worker_router = router
-
-    @app.get("/livez")
-    async def livez() -> dict[str, str]:
-        return {"status": "ok"}
-
-    @app.get("/readyz")
-    async def readyz():
-        ready, details = await router.health()
-        payload = {"ready": ready, "status": "ready" if ready else "unavailable", "details": details}
-        if ready:
-            return payload
-        raise HTTPException(status_code=503, detail=payload)
+    app.state.internal_rollout_http_entry = entry
 
     @app.get("/v1/models")
     async def models():
-        return await router.models()
+        return await entry.models()
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
-        return await router.chat_completions(request)
+        return await entry.chat_completions(request)
 
     return app
 
 
-def serve_worker_http_router(app: FastAPI, config: WorkerHttpRouterConfig) -> None:
+def serve_internal_rollout_http_entry(app: FastAPI, config: InternalRolloutHttpEntryConfig) -> None:
     _ensure_port_available(config)
     uvicorn.run(app, host=config.host, port=config.port, log_level=config.log_level)
 
 
-def serve_worker_http_router_in_thread(app: FastAPI, config: WorkerHttpRouterConfig) -> threading.Thread:
+def serve_internal_rollout_http_entry_in_thread(
+    app: FastAPI, config: InternalRolloutHttpEntryConfig
+) -> threading.Thread:
     thread = threading.Thread(
-        target=serve_worker_http_router,
+        target=serve_internal_rollout_http_entry,
         args=(app, config),
         daemon=True,
-        name="worker-http-router",
+        name="internal-rollout-http-entry",
     )
     thread.start()
     return thread
 
 
-def wait_for_worker_http_router_ready(base_url: str, *, timeout_seconds: float = 180.0) -> None:
-    deadline = time.time() + timeout_seconds
-    last_error = None
-    while time.time() < deadline:
-        try:
-            response = httpx.get(f"{base_url}/livez", timeout=5.0)
-            if response.status_code == 200:
-                return
-            last_error = response.text
-        except Exception as exc:
-            last_error = exc
-        time.sleep(1)
-    raise TimeoutError(f"Worker router did not become ready at {base_url}: {last_error}")
-
-
-def _ensure_port_available(config: WorkerHttpRouterConfig) -> None:
+def _ensure_port_available(config: InternalRolloutHttpEntryConfig) -> None:
     host = "127.0.0.1" if config.host in ("", "0.0.0.0") else config.host
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(1.0)
         if sock.connect_ex((host, config.port)) == 0:
-            raise OSError(f"Worker router port already in use: {config.host}:{config.port}")
+            raise OSError(f"Internal rollout HTTP entry port already in use: {config.host}:{config.port}")

@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from xtuner.v1.data_proto.rl_data import Status
+from xtuner.v1.rl.rollout.generation import RolloutGenerationService
 from xtuner.v1.rl.rollout.lmdeploy import LMDeployWorker
 from xtuner.v1.rl.rollout.sglang import SGLangWorker
 from xtuner.v1.rl.rollout.worker import RolloutWorker
@@ -37,18 +38,21 @@ class TestSGLangWorker(unittest.TestCase):
         worker._make_request.assert_called_once_with("continue_generation")
 
 
-class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
+class TestRolloutGenerationService(unittest.IsolatedAsyncioTestCase):
     async def test_generate_returns_aborted_when_abort_flag_is_set(self):
-        worker = RolloutWorker.__new__(RolloutWorker)
-        worker.receive_abort_request = threading.Event()
-        worker.receive_abort_request.set()
+        service = RolloutGenerationService.__new__(RolloutGenerationService)
+        service.receive_abort_request = threading.Event()
+        service.receive_abort_request.set()
         rollout_state = MagicMock()
 
-        result = await worker.generate(rollout_state)
+        result = await service.generate(rollout_state)
 
         self.assertIs(result, rollout_state)
         self.assertEqual(rollout_state.finish_reason, "abort")
         self.assertEqual(rollout_state.status, Status.ABORTED)
+
+
+class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
 
     async def test_pause_generation_sets_abort_flag(self):
         worker = RolloutWorker.__new__(RolloutWorker)
@@ -115,9 +119,9 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
         get_actor.assert_not_called()
 
     async def test_safe_post_request_returns_aborted_on_cancellation(self):
-        worker = RolloutWorker.__new__(RolloutWorker)
-        worker.receive_abort_request = threading.Event()
-        worker.logger = MagicMock()
+        service = RolloutGenerationService.__new__(RolloutGenerationService)
+        service.receive_abort_request = threading.Event()
+        service.logger = MagicMock()
         send_started = asyncio.Event()
         send_cancelled = asyncio.Event()
 
@@ -133,23 +137,23 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
                     send_cancelled.set()
                     raise
 
-        worker.client = _Client()
+        service.client = _Client()
 
-        task = asyncio.create_task(worker._safe_post_request("http://test", headers={}, payload={"input_ids": [1]}))
+        task = asyncio.create_task(service._safe_post_request("http://test", headers={}, payload={"input_ids": [1]}))
         await send_started.wait()
         task.cancel()
 
         result = await task
 
         self.assertEqual(result.error_type, HttpRequestErrorType.REQUEST_ABORTED)
-        self.assertTrue(worker.receive_abort_request.is_set())
+        self.assertTrue(service.receive_abort_request.is_set())
         self.assertTrue(send_cancelled.is_set())
 
     async def test_safe_post_request_cancels_inflight_request_after_abort_timeout(self):
-        worker = RolloutWorker.__new__(RolloutWorker)
-        worker.receive_abort_request = threading.Event()
-        worker.abort_timeout = 0.01
-        worker.logger = MagicMock()
+        service = RolloutGenerationService.__new__(RolloutGenerationService)
+        service.receive_abort_request = threading.Event()
+        service.abort_timeout = 0.01
+        service.logger = MagicMock()
         send_started = asyncio.Event()
         send_cancelled = asyncio.Event()
 
@@ -165,11 +169,11 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
                     send_cancelled.set()
                     raise
 
-        worker.client = _Client()
+        service.client = _Client()
 
-        task = asyncio.create_task(worker._safe_post_request("http://test", headers={}, payload={"input_ids": [1]}))
+        task = asyncio.create_task(service._safe_post_request("http://test", headers={}, payload={"input_ids": [1]}))
         await send_started.wait()
-        worker.receive_abort_request.set()
+        service.receive_abort_request.set()
 
         result = await task
 
@@ -177,10 +181,10 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(send_cancelled.is_set())
 
     async def test_safe_post_request_keeps_abort_response_within_timeout(self):
-        worker = RolloutWorker.__new__(RolloutWorker)
-        worker.receive_abort_request = threading.Event()
-        worker.abort_timeout = 1.0
-        worker.logger = MagicMock()
+        service = RolloutGenerationService.__new__(RolloutGenerationService)
+        service.receive_abort_request = threading.Event()
+        service.abort_timeout = 1.0
+        service.logger = MagicMock()
         send_started = asyncio.Event()
         finish_send = asyncio.Event()
 
@@ -199,11 +203,11 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
                 await finish_send.wait()
                 return response
 
-        worker.client = _Client()
+        service.client = _Client()
 
-        task = asyncio.create_task(worker._safe_post_request("http://test", headers={}, payload={"input_ids": [1]}))
+        task = asyncio.create_task(service._safe_post_request("http://test", headers={}, payload={"input_ids": [1]}))
         await send_started.wait()
-        worker.receive_abort_request.set()
+        service.receive_abort_request.set()
         finish_send.set()
 
         result = await task

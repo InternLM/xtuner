@@ -121,13 +121,13 @@ class VllmServerWrapper:
             print(stack_trace)
             raise  # Re-raise the exception to prevent silent failure
 
-    def actor_health(self):
-        return "healthy"
+    def started(self):
+        return "started"
 
 
 # Add a dummy task.
 def run_lmdeploy_server_wrapper(server_namespace: Namespace):
-    return ray.get(VllmServerWrapper.remote(server_namespace).actor_health.remote())  # type: ignore
+    return ray.get(VllmServerWrapper.remote(server_namespace).started.remote())  # type: ignore
 
 
 class vLLMWorker(RolloutWorker):
@@ -143,7 +143,6 @@ class vLLMWorker(RolloutWorker):
         super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
         self.router_func = ""
         self.server_func = run_lmdeploy_server_wrapper
-        self.endpoints["health_generate"] = "health"
         self.endpoints["v1/chat/completions"] = "v1/chat/completions"
         self.endpoints["generate"] = "v1/chat/completions"
         self.endpoints["sleep"] = "sleep"

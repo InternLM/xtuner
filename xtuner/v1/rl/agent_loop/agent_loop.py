@@ -10,7 +10,7 @@ from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 from xtuner.v1.rl.judger import Judger
-from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.rollout import RolloutController, RolloutGenerateHandle, RolloutGenerateHandleConfig
 from xtuner.v1.rl.utils import (
     CPUActorLauncher,
     CPUResourcesConfig,
@@ -27,10 +27,21 @@ class AgentLoopConfig(ABC, BaseModel):
     sample_params: SampleParams | None = None
     cpu_resources: CPUResourcesConfig | None = None
 
-    def build(self, rollout_controller, judger: Judger | None = None, logger=None) -> AgentLoopSpec:
+    def build(
+        self,
+        rollout_controller=None,
+        rollout_generator: RolloutGenerateHandle | None = None,
+        judger: Judger | None = None,
+        logger=None,
+    ) -> AgentLoopSpec:
+        if rollout_generator is None:
+            if rollout_controller is None:
+                raise ValueError("Either rollout_controller or rollout_generator must be provided.")
+            rollout_generator = RolloutGenerateHandleConfig().build(rollout_controller)
         if self.cpu_resources is None:
             return self.build_local(
                 rollout_controller=rollout_controller,
+                rollout_generator=rollout_generator,
                 judger=judger,
                 logger=logger,
             )
@@ -43,12 +54,14 @@ class AgentLoopConfig(ABC, BaseModel):
         if self.cpu_resources.num_workers > 1:
             return self._build_router(
                 rollout_controller=rollout_controller,
+                rollout_generator=rollout_generator,
                 cpu_resources=self.cpu_resources,
                 judger=judger,
                 logger=logger,
             )
         return self._build_ray_actor(
             rollout_controller=rollout_controller,
+            rollout_generator=rollout_generator,
             cpu_resources=self.cpu_resources,
             judger=judger,
             logger=logger,
@@ -58,6 +71,7 @@ class AgentLoopConfig(ABC, BaseModel):
     def build_local(
         self,
         rollout_controller,
+        rollout_generator: RolloutGenerateHandle | None = None,
         judger: Judger | None = None,
         logger=None,
     ) -> AgentLoop: ...
@@ -65,6 +79,7 @@ class AgentLoopConfig(ABC, BaseModel):
     def _build_ray_actor(
         self,
         rollout_controller: RolloutController,
+        rollout_generator: RolloutGenerateHandle,
         cpu_resources: CPUResourcesConfig,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
@@ -76,6 +91,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 AgentLoopActor,
                 self,
                 rollout_controller,
+                rollout_generator,
                 judger,
                 pg=pg,
                 bundle_idx=0,
@@ -88,6 +104,7 @@ class AgentLoopConfig(ABC, BaseModel):
     def _build_ray_actors(
         self,
         rollout_controller: RolloutController,
+        rollout_generator: RolloutGenerateHandle,
         cpu_resources: CPUResourcesConfig,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
@@ -100,6 +117,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 AgentLoopActor,
                 self,
                 rollout_controller,
+                rollout_generator,
                 judger,
                 pg=pg,
                 start_bundle_idx=start_bundle_idx,
@@ -113,6 +131,7 @@ class AgentLoopConfig(ABC, BaseModel):
     def _build_router(
         self,
         rollout_controller: RolloutController,
+        rollout_generator: RolloutGenerateHandle,
         cpu_resources: CPUResourcesConfig,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
@@ -122,6 +141,7 @@ class AgentLoopConfig(ABC, BaseModel):
         return RouterAgentLoop(
             workers=self._build_ray_actors(
                 rollout_controller=rollout_controller,
+                rollout_generator=rollout_generator,
                 cpu_resources=cpu_resources,
                 pg=pg,
                 judger=judger,
@@ -136,12 +156,14 @@ class AgentLoop(ABC):
     def __init__(
         self,
         rollout_ctl: RolloutController | None,
+        rollout_generator: RolloutGenerateHandle | None,
         sample_params: SampleParams | None,
         hf_checkpoint: str,
         judger: Judger | None = None,
         logger=None,
-    ) -> None:
+        ) -> None:
         self.rollout_ctl = rollout_ctl
+        self.rollout_generator = rollout_generator
         self.hf_checkpoint = hf_checkpoint
         self.tokenizer = load_tokenizer(hf_checkpoint, trust_remote_code=True)
         self.processor = load_processor(hf_checkpoint, trust_remote_code=True)
@@ -154,6 +176,24 @@ class AgentLoop(ABC):
 
     @abstractmethod
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
+
+    async def rollout_generate(self, rollout_state: RolloutState, *, enable_partial_rollout: bool = False) -> RolloutState:
+        if self.rollout_generator is None:
+            raise RuntimeError("AgentLoop requires rollout_generator; RolloutController.generate has been removed.")
+        if self.rollout_generator.kind == "local":
+            return await self.rollout_generator.require_local_generator().generate(
+                rollout_state,
+                enable_partial_rollout=enable_partial_rollout,
+            )
+        return await self.rollout_generate_from_url(
+            rollout_state=rollout_state,
+            base_url=self.rollout_generator.require_base_url(),
+        )
+
+    async def rollout_generate_from_url(self, rollout_state: RolloutState, base_url: str) -> RolloutState:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement URL rollout generation for endpoint at {base_url!r}."
+        )
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         pending_tasks = []
@@ -221,11 +261,13 @@ class AgentLoopActor:
         self,
         agent_loop_config: AgentLoopConfig,
         rollout_controller: RolloutController,
+        rollout_generator: RolloutGenerateHandle,
         judger: Judger | None = None,
         logger=None,
     ):
         self.agent_loop = agent_loop_config.build_local(
             rollout_controller=rollout_controller,
+            rollout_generator=rollout_generator,
             judger=judger,
             logger=logger,
         )
