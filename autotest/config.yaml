@@ -752,8 +752,7 @@ case:
         -
             type: rl
             parameters:
-                config: examples/v1/config/rl_grpo_geo3k_judge.py
-              #config: autotest/config/rl_qwen3_vl_geometry3k_grpo.py
+                config: autotest/config/rl_qwen3_vl_geometry3k_grpo.py
                 infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
