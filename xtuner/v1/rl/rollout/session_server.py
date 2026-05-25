@@ -6,8 +6,8 @@ from typing import Any, Optional
 import numpy as np
 import ray
 from aiohttp import ClientSession, web
-
 from transformers import AutoTokenizer
+
 from xtuner.v1.utils import get_logger
 
 from .trace_store import TokenizedSegment, get_store
@@ -290,7 +290,10 @@ class SessionServer:
                             except Exception:
                                 pass
 
-                        await response.write(line)
+                        # Delay writing the [DONE] line until after on_response
+                        if line.strip() != b"data: [DONE]":
+                            await response.write(line)
+
                     raw_response = b"".join(response_chunks)  # Original raw response for exact tracing
                 else:
                     raw_response = await resp.read()
@@ -339,6 +342,8 @@ class SessionServer:
                 await self.on_response(response_data)
 
         if is_stream:
+            # write the delayed [DONE] line
+            await response.write(b"data: [DONE]\n\n")
             await response.write_eof()
 
         return response
