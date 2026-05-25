@@ -31,7 +31,7 @@ AGENT_LOOP_CONCURRENCY_GROUP_GENERATE = "generate"
 class AgentLoopConfig(ABC, BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     hf_checkpoint: str
-    sample_params: SampleParams
+    sample_params: SampleParams | None = None
     cpu_resources: CPUResourcesConfig | None = None
     enable_batch_judge: bool = False
 
@@ -166,8 +166,8 @@ class AgentLoopConfig(ABC, BaseModel):
 class AgentLoop(ABC):
     def __init__(
         self,
-        rollout_ctl: RolloutController,
-        sample_params: SampleParams,
+        rollout_ctl: RolloutController | None,
+        sample_params: SampleParams | None,
         hf_checkpoint: str,
         judger: Judger | None = None,
         logger=None,

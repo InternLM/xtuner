@@ -106,7 +106,7 @@ class RolloutState(BaseModel):
     tool_calls: list[RolloutToolCall] | None = None
     response_ids: list[int] | None = None
     logprobs: list[float] | None = None
-    routed_experts: np.ndarray | RayObjectRef | None = None
+    routed_experts: np.ndarray | RayObjectRef | list[RayObjectRef] | None = None
     finish_reason: str | None = None
     # response_mask: 记录response_ids中哪个token算loss, 与response_ids长度相同，每轮rollout在 agent_loop.generate 中覆盖写
     response_mask: list[int] | None = None
@@ -115,6 +115,9 @@ class RolloutState(BaseModel):
     # 记录该样本过期程度，即最早生成 token 的模型版本与当前训练步数的差值，数值越大表示越过期。
     seq_staleness: int = 0
 
+    input_ids: list[int] | None = None
+    labels: list[int] | None = None
+    
     #  --- Judger 输出 ---
     reward: dict[str, Any] | None = None
 
