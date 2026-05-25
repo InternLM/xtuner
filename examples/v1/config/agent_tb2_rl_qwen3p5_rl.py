@@ -22,6 +22,7 @@ def _as_list(value):
 
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
+model_name = os.environ["MODEL_NAME"]
 meta_data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ.get("EVAL_DATA_PATH", "")
 eval_media_root = os.environ.get("EVAL_MEDIA_ROOT", "")
@@ -33,7 +34,7 @@ debug_rollout = os.environ.get("DEBUG_ROLLOUT", False)
 enable_evaluate = eval_data_path is not None and eval_data_path != ""
 
 # basic settings
-experimental_name = "grpo_mix_data"
+experimental_name = "tb2_rl"
 total_epochs = 15
 global_batch_size = 256
 prompt_repeat_k = 8
@@ -41,7 +42,7 @@ rollout_tp_size = 2
 rollout_ep_size = 1
 max_prompt_length = 2048
 max_response_length = 65536
-pack_max_length = 65536+2048
+pack_max_length = max_response_length+max_prompt_length
 train_optimizer_steps = 8
 hf_interval = 15
 
@@ -55,7 +56,7 @@ resources = AcceleratorResourcesConfig(
 
 # 2. rollout
 rollout_config = RolloutConfig(
-    model_name='xtuner_qwen3p5_vl_35b',
+    model_name=model_name,
     fp32_lm_head=True,
     env=experimental_name,
     device=resources.accelerator,
