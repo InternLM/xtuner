@@ -34,8 +34,8 @@ media_root = os.environ["MEDIA_ROOT"]
 
 # basic settings
 experimental_name = "grpo_geo3k"
-total_train_steps = 30  # TODO: total_epoch
-evaluate_step = 30
+total_train_steps = 15  # TODO: total_epoch
+evaluate_step = 15
 train_optimizer_steps = 4
 train_batch_size = 1024
 prompt_repeat_k = 5
