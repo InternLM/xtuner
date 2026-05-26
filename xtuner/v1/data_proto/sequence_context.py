@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import cast
+from typing import Any, cast
 
 import torch
 from torch.distributed.device_mesh import DeviceMesh
@@ -48,7 +48,7 @@ class SequenceContext:
     num_img_tokens: list[list[int]] | None
 
     # moe routed_experts
-    rollout_routed_experts: torch.Tensor | None
+    rollout_routed_experts: Any
 
     # Private backing attributes for SP shard reconstruction
     _raw_input_ids: torch.LongTensor | None

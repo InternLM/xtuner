@@ -107,9 +107,10 @@ class _DatasetSampler:
             if XTUNER_DETERMINISTIC:
                 new_data.message_uid = message_uid
                 new_data.uid = uid_base + item_idx
-                new_data.session_uid = new_data.uid
             else:
                 new_data.uid = uuid4().int
+            if new_data.session_uid is None:
+                new_data.session_uid = new_data.uid
             group_data.append(new_data)
         self._consumed_samples += 1
         return cast(list[RolloutState], group_data)

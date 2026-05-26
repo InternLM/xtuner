@@ -406,7 +406,9 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
         return ref_logprobs_list
 
     def _add_rollout_routed_experts(
-        self, seq_ctx: SequenceContext, rollout_routed_experts: torch.Tensor | list[torch.Tensor | ray.ObjectRef]
+        self,
+        seq_ctx: SequenceContext,
+        rollout_routed_experts: torch.Tensor | list[torch.Tensor | ray.ObjectRef] | ray.ObjectRef,
     ):
         language_cfg = (
             self.config.model_cfg.text_config
@@ -415,6 +417,8 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
         )
 
         to_free_routed_expert_refs: list[ray.ObjectRef] = []
+        if isinstance(rollout_routed_experts, ray.ObjectRef):
+            rollout_routed_experts = ray.get(rollout_routed_experts)
         if isinstance(rollout_routed_experts, list):
             # list[n,l,e]
             out_rollout_routed_expert = []
@@ -433,6 +437,12 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
                 else:
                     rollout_routed_expert_refs = rollout_routed_expert
                     rollout_routed_expert = ray.get(rollout_routed_expert_refs)
+                    if isinstance(rollout_routed_expert, list):
+                        assert len(rollout_routed_expert) == 1, (
+                            f"Expected one routed experts ref, got {len(rollout_routed_expert)}"
+                        )
+                        rollout_routed_expert_refs = rollout_routed_expert[0]
+                        rollout_routed_expert = ray.get(rollout_routed_expert_refs)
                     # free obj store explicitly
                     if self.sp_mesh is None or self.sp_mesh.size() == 1:
                         ray.internal.free(rollout_routed_expert_refs, local_only=False)

@@ -17,7 +17,11 @@ from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import (
+    TRACE_STORE_PROMPT_TEXT_KEY,
+    RolloutState,
+    Status,
+)
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
@@ -36,6 +40,7 @@ from xtuner.v1.rl.replay_buffer import (
     _snapshot_nested_objectrefs,
 )
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
+from xtuner.v1.rl.rollout.trace_store import get_store
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
@@ -187,9 +192,8 @@ def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
     - 'aborted': These items represent rollouts that were stopped
       prematurely. Using such partial data could lead the model to learn
       undesirable behaviors (e.g., stopping generation too early).
-    - Empty response/response_ids: The model's generated response is the core
-      of the training data for RL algorithms like PPO. If the response is
-      missing, there is nothing to compute rewards on or to train the model with.
+    - Token-level training data lives in Trace Store. The trainer validates the
+      exported trace before building the training batch.
     """
     is_abort = any(item.status == Status.ABORTED for item in group_data_items)
     is_filtered = any(item.status == Status.FILTERED for item in group_data_items)
@@ -199,19 +203,6 @@ def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
             f"Invalid dataflow group found during training, rollout state filtered: {is_filtered}, failed: {is_failed}, aborted: {is_abort}."
         )
         return False
-    for item in group_data_items:
-        response_valid = item.response is not None and len(item.response) > 0
-        ids_valid = item.response_ids is not None and len(item.response_ids) > 0
-        if not ids_valid:
-            # NOTE: `response_ids` is the critical field for token-in-token-out mode, so we ensure it's not empty.
-            logger.warning(
-                "Invalid dataflow item found during training: no response or response_ids and skip this item."
-            )
-            return False
-        if not response_valid:
-            # NOTE: check valid response string for judger inputs
-            logger.warning("Invalid dataflow item found during training: empty response string and skip this item.")
-            return False
     return True
 
 
@@ -872,6 +863,118 @@ class BaseRLTrainer:
         self.logger.info(f"Loaded debug rollout batch for step {train_step} from {debug_file}")
         return cast(list[list[RolloutState]], train_batch)
 
+    def _render_trace_store_prompt_text(self, data: RolloutState) -> str | None:
+        """Build the exact Trace Store lookup key for a rollout item.
+
+        The preferred path is an explicit `trace_store_prompt_text` carried by
+        the producer. If it is absent, this reconstructs the final chat-template
+        text from the lightweight `RolloutState` fields.
+        """
+        extra_fields = data.extra_fields or {}
+        prompt_text = extra_fields.get(TRACE_STORE_PROMPT_TEXT_KEY)
+        if prompt_text is not None:
+            if isinstance(prompt_text, str) and prompt_text:
+                return prompt_text
+            self.logger.error(f"Invalid trace store prompt text for session {data.session_uid}: {prompt_text!r}")
+            return None
+
+        if data.response is None:
+            self.logger.error(f"Cannot render trace store prompt text for session {data.session_uid}: response is None.")
+            return None
+
+        messages = list(data.message)
+        assistant_message: dict[str, Any] = {"role": "assistant", "content": data.response}
+        if data.tool_calls:
+            assistant_message["tool_calls"] = [
+                tool_call.model_dump() if hasattr(tool_call, "model_dump") else tool_call
+                for tool_call in data.tool_calls
+            ]
+        messages.append(assistant_message)
+        try:
+            rendered = self.tokenizer.apply_chat_template(
+                messages,
+                tools=data.tools,
+                add_generation_prompt=False,
+                tokenize=False,
+            )
+        except Exception as exc:
+            self.logger.error(f"Failed to render trace store prompt text for session {data.session_uid}: {exc}")
+            return None
+        if not isinstance(rendered, str) or not rendered:
+            self.logger.error(f"Rendered empty trace store prompt text for session {data.session_uid}.")
+            return None
+        return rendered.rstrip()
+
+    def _mark_trace_store_train_abandoned(self, session_ids: list[Any]) -> None:
+        """Best-effort release for sessions exported from Trace Store but not consumed by training."""
+        if not session_ids:
+            return
+        store = get_store()
+        for session_id in session_ids:
+            try:
+                ray.get(store.mark_train_abandoned.remote(session_id))
+            except Exception as exc:
+                self.logger.error(f"Failed to mark trace store train abandoned for session {session_id}: {exc}")
+
+    def _materialize_trace_store_training_data(self, data: RolloutState) -> bool:
+        """Export token-level Trace Store data back into one RolloutState.
+
+        The trainer keeps using the existing `RolloutState` fields in
+        `_prepare_train_data`: `prompt_ids`, `response_ids`, `response_mask`,
+        `logprobs`, and `routed_experts`. Routed experts stay as Ray refs and
+        are dereferenced later inside `TrainingWorker`.
+        """
+        prompt_text = self._render_trace_store_prompt_text(data)
+        if prompt_text is None:
+            return False
+
+        store = get_store()
+        session_id = data.session_uid
+        exported = False
+        try:
+            trace = ray.get(store.export_training_trace.remote(session_id, prompt_text))
+            exported = True
+            routed_experts_key = trace.get("routed_experts")
+            rollout_routed_experts = None
+            if routed_experts_key is not None:
+                rollout_routed_experts = store.get_objects.remote([routed_experts_key])
+
+            input_ids = list(trace["input_ids"])
+            labels = list(trace["labels"])
+            logprobs = list(trace["logprobs"]) if trace.get("logprobs") is not None else None
+            if len(input_ids) < 2 or len(input_ids) != len(labels) or (
+                logprobs is not None and len(logprobs) != len(input_ids)
+            ):
+                raise ValueError(
+                    f"Invalid trace store training trace lengths: "
+                    f"input_ids={len(input_ids)}, labels={len(labels)}, "
+                    f"logprobs={None if logprobs is None else len(logprobs)}"
+                )
+
+            response_start = next((idx for idx, label in enumerate(labels) if label != -100), None)
+            if response_start is None or response_start == 0:
+                raise ValueError("Trace store training trace has no trainable response tokens.")
+
+            prompt_ids = input_ids[:response_start]
+            response_ids = input_ids[response_start:]
+            response_labels = labels[response_start:]
+            response_mask = [0 if label == -100 else 1 for label in response_labels]
+            if not response_ids or not any(response_mask):
+                raise ValueError("Trace store training trace has no valid response ids.")
+
+            data.prompt_ids = prompt_ids
+            data.tokens = list(prompt_ids)
+            data.response_ids = response_ids
+            data.response_mask = response_mask
+            data.logprobs = logprobs[response_start:] if logprobs is not None else None
+            data.routed_experts = rollout_routed_experts
+            return True
+        except Exception as exc:
+            self.logger.error(f"Failed to materialize trace store training data for session {session_id}: {exc}")
+            if exported:
+                self._mark_trace_store_train_abandoned([session_id])
+            return False
+
     # TODO: simplify with Packer.pack_pad_dispatch()
     def _prepare_train_data(
         self,
@@ -890,18 +993,29 @@ class BaseRLTrainer:
 
         for j, group in enumerate(data_groups):
             if not is_valid_for_training(group, self.logger):
-                self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
+                self.logger.error(f"Skip one data group {group} due to invalid rollout status.")
                 continue
 
-            is_vlm_model = "train_prompt_ids" in group[0].extra_fields
-            if is_vlm_model:
-                # TODO(hha): VLM, 不好的设计，后续要去掉
-                prompt_ids = group[0].extra_fields["train_prompt_ids"]
-            else:
-                prompt_ids = group[0].prompt_ids
-            assert prompt_ids is not None and len(prompt_ids) > 0, (
-                f"Prompt ids cannot be None or empty in data: {group[0]}"
-            )
+            session_ids = [data.session_uid for data in group]
+            if any(session_id is None for session_id in session_ids):
+                self.logger.error(f"Skip one data group {group} due to missing trace store session id.")
+                continue
+            if len(set(session_ids)) != len(session_ids):
+                self.logger.error(f"Skip one data group {group} due to duplicated trace store session ids: {session_ids}.")
+                continue
+
+            exported_trace_store_session_ids: list[Any] = []
+            trace_store_failed = False
+            for data in group:
+                if not self._materialize_trace_store_training_data(data):
+                    trace_store_failed = True
+                    break
+                exported_trace_store_session_ids.append(data.session_uid)
+            if trace_store_failed:
+                self._mark_trace_store_train_abandoned(exported_trace_store_session_ids)
+                self.logger.error(f"Skip one data group {group} due to trace store materialization failure.")
+                continue
+
             rewards = []
             for data in group:
                 assert data.reward is not None and "score" in data.reward, (
@@ -915,36 +1029,25 @@ class BaseRLTrainer:
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
-                item = group[i].response
-                logprobs: list[float] | None = None
+                prompt_ids = group[i].prompt_ids
+                response_ids = group[i].response_ids
+                assert prompt_ids is not None and len(prompt_ids) > 0, (
+                    f"Prompt ids cannot be None or empty in data: {group[i]}"
+                )
+                assert response_ids is not None and len(response_ids) > 0, (
+                    f"Response ids cannot be None or empty in data: {group[i]}"
+                )
 
-                response_ids: List[int] = []
-                if group[i].response_ids is not None:
-                    resp_ids_raw = group[i].response_ids
-                    if isinstance(resp_ids_raw, torch.Tensor):
-                        response_ids = resp_ids_raw.flatten().tolist()
-                    else:
-                        response_ids = cast(List[int], resp_ids_raw)
+                logprobs = group[i].logprobs
+                if logprobs is not None:
+                    assert len(logprobs) == len(response_ids), (
+                        f"{len(logprobs)} vs {len(response_ids)}, data: {group[i]}"
+                    )
+                    logprobs = [0.0] * (len(prompt_ids) - 1) + logprobs
 
-                    logprobs = group[i].logprobs
-                    if logprobs is not None:
-                        assert len(logprobs) == len(response_ids), (
-                            f"{len(logprobs)} vs {len(response_ids)}, data: {group[i]}"
-                        )
-                        # 只有 response 部分有 logprobs, 需要前面追加
-                        logprobs = [0.0] * (len(prompt_ids) - 1) + logprobs  # type: ignore[arg-type]
-                else:
-                    assert item is not None, "response item cannot be None"
-                    response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
-
-                # 返回的 routed_experts 不包括 eos 的值，实际上也不需要，需要减一
-                # TODO: verl tool agent loop 是否需要？
                 input_ids = prompt_ids + response_ids[:-1]
-
-                prompt_len_list.append(len(prompt_ids))
-                response_len_list.append(len(response_ids))
-
-                # 根据 response_mask 计算 response_ids 对应的shifted_labels
+                prompt_len = len(prompt_ids)
+                response_len = len(response_ids)
                 if not group[i].response_mask:
                     response_mask = [1] * len(response_ids)
                     response_labels = response_ids
@@ -958,9 +1061,11 @@ class BaseRLTrainer:
                         for response_id, mask_id in zip(response_ids, response_mask)
                     ]
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_labels
+
+                prompt_len_list.append(prompt_len)
+                response_len_list.append(response_len)
                 shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
-                # 根据 response_mask 计算新的 advantages
                 advatnages_val = advantages[i].item()
                 actual_advantages = [advatnages_val] * len(prompt_ids) + [
                     0.0 if mask == 0 else advatnages_val for mask in response_mask
@@ -982,7 +1087,7 @@ class BaseRLTrainer:
                 position_ids = group[i].position_ids
                 multimodal_train_info = group[i].mm_info
                 multi_info_cast = cast(dict | None, multimodal_train_info)
-                seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multi_info_cast, len(response_ids) - 1)  # type: ignore[arg-type]
+                seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multi_info_cast, response_len - 1)  # type: ignore[arg-type]
 
                 data_dict = {
                     "seq_ctx": seq_ctx,

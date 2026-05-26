@@ -15,7 +15,7 @@ from typing import Any, List, Literal, Union
 import requests
 import torch.nn.functional as F
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import TRACE_STORE_PROMPT_TEXT_KEY, USE_TRACE_STORE_KEY, RolloutState, Status
 from xtuner.v1.data_proto.utils import calculate_seq_staleness as calculate_seq_staleness
 from xtuner.v1.utils.logger import get_logger
 
@@ -283,13 +283,26 @@ def chat_trace_records_to_rollout_states(
 
     states: list[RolloutState] = []
     for index, record in enumerate(normalized_records):
+        combined_extra_fields = {
+            **deepcopy(rollout_state.extra_fields),
+            "gateway_trace_index": index,
+            "gateway_trace_count": trace_count,
+            "gateway_trace_records": deepcopy(trace_summary),
+            "gateway_request_id": record.get("request_id"),
+            "gateway_request_snapshot": record.get("request_snapshot"),
+            "gateway_response_snapshot": record.get("response_snapshot"),
+            **deepcopy(extra_fields or {}),
+        }
+        use_trace_store = bool(combined_extra_fields.get(USE_TRACE_STORE_KEY, True))
+
         prompt_ids = record.get("prompt_ids")
         response_ids = record.get("response_ids")
-        if not prompt_ids or not response_ids:
+        if not use_trace_store and (not prompt_ids or not response_ids):
             raise RuntimeError(f"Gateway trace record {index} is missing prompt_ids or response_ids.")
+        response_ids_list = response_ids if isinstance(response_ids, list) else []
 
         logprobs = record.get("logprobs")
-        if not isinstance(logprobs, list) or len(logprobs) != len(response_ids):
+        if not isinstance(logprobs, list) or len(logprobs) != len(response_ids_list):
             logprobs = None
 
         status_value = record.get("status")
@@ -310,34 +323,37 @@ def chat_trace_records_to_rollout_states(
             uid = None
 
         response = record.get("output_text")
-        if response is None and tokenizer is not None:
+        if response is None and tokenizer is not None and response_ids_list:
             try:
-                response = tokenizer.decode(response_ids)
+                response = tokenizer.decode(response_ids_list)
             except Exception:
                 response = None
 
         normalized = rollout_state.model_copy(deep=True)
         normalized.uid = uid
-        normalized.prompt_ids = list(prompt_ids)
-        normalized.tokens = list(prompt_ids)
-        normalized.response_ids = list(response_ids)
-        normalized.response_mask = [1] * len(response_ids)
-        normalized.logprobs = logprobs
+        if record.get("session_uid") is not None:
+            normalized.session_uid = record.get("session_uid")
+        normalized.prompt_ids = list(prompt_ids or [])
+        normalized.tokens = list(prompt_ids or [])
+        if use_trace_store:
+            if isinstance(record.get("internal_messages"), list):
+                normalized.message = deepcopy(record["internal_messages"])
+            normalized.response_ids = None
+            normalized.response_mask = None
+            normalized.logprobs = None
+            normalized.routed_experts = None
+            if record.get("trace_store_prompt_text") is not None:
+                combined_extra_fields[TRACE_STORE_PROMPT_TEXT_KEY] = record.get("trace_store_prompt_text")
+        else:
+            normalized.response_ids = list(response_ids_list)
+            normalized.response_mask = [1] * len(response_ids_list)
+            normalized.logprobs = logprobs
         normalized.response = response
         normalized.finish_reason = record.get("finish_reason")
         normalized.status = status
         normalized.error_msg = None if status == Status.COMPLETED else f"Gateway trace status={status.value}"
         normalized.reward = None
-        normalized.extra_fields = {
-            **deepcopy(rollout_state.extra_fields),
-            "gateway_trace_index": index,
-            "gateway_trace_count": trace_count,
-            "gateway_trace_records": deepcopy(trace_summary),
-            "gateway_request_id": record.get("request_id"),
-            "gateway_request_snapshot": record.get("request_snapshot"),
-            "gateway_response_snapshot": record.get("response_snapshot"),
-            **deepcopy(extra_fields or {}),
-        }
+        normalized.extra_fields = combined_extra_fields
         states.append(normalized)
     return states
 

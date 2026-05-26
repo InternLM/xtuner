@@ -22,6 +22,9 @@ else:
 
 logger = get_logger()
 
+USE_TRACE_STORE_KEY = "use_trace_store"
+TRACE_STORE_PROMPT_TEXT_KEY = "trace_store_prompt_text"
+
 
 class SampleParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
