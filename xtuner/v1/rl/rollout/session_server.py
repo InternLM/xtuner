@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import numpy as np
 import ray
-from aiohttp import ClientSession, web
+from aiohttp import ClientSession, ClientTimeout, web
 from transformers import AutoTokenizer
 
 from xtuner.v1.utils import get_logger
@@ -187,6 +187,18 @@ class SessionServer:
         get_logger().info("SessionServer stopped.")
 
     async def _handle_request(self, request: web.Request) -> web.Response:
+        try:
+            return await self._handle_request_impl(request)
+        except BaseException:
+            get_logger().exception(
+                "SessionServer request failed: remote=%s method=%s path=%s",
+                request.remote,
+                request.method,
+                request.path_qs,
+            )
+            raise
+
+    async def _handle_request_impl(self, request: web.Request) -> web.Response:
         """Proxy handler for the worker API."""
 
         # Read the request body
@@ -210,8 +222,9 @@ class SessionServer:
                 request_data = await self.on_request(request_data)
                 # Re-serialize the modified payload back to bytes
                 request_body = json.dumps(request_data).encode("utf-8")
-            except json.JSONDecodeError:
-                pass
+            except json.JSONDecodeError as e:
+                get_logger().error(f"Failed to parse request body: {request_body} error: {e}")
+                raise e
 
         # Build forwarding headers, dropping original Host
         forward_headers = dict(request.headers)
@@ -260,7 +273,8 @@ class SessionServer:
         # read_bufsize controls StreamReader's line buffer limit; SSE events with large
         # tool_calls/reasoning_content payloads can exceed the 64KB default and trigger
         # "Chunk too big" from readuntil(b"\n").
-        async with ClientSession(read_bufsize=self.read_bufsize) as client:
+        timeout = ClientTimeout(total=None, sock_connect=30)
+        async with ClientSession(read_bufsize=self.read_bufsize, timeout=timeout) as client:
             async with client.request(
                 method=request.method, url=target_url, headers=forward_headers, data=request_body
             ) as resp:
@@ -325,8 +339,9 @@ class SessionServer:
             else:
                 try:
                     response_data = json.loads(raw_response)
-                except json.JSONDecodeError:
-                    pass
+                except json.JSONDecodeError as e:
+                    get_logger().error(f"Failed to parse response body: {raw_response} error: {e}")
+                    raise e
 
             if response_data is not None:
                 for c in response_data.get("choices", []):
@@ -367,8 +382,9 @@ class SessionServer:
             if line.startswith("data: ") and line != "data: [DONE]":
                 try:
                     events.append(json.loads(line[6:]))
-                except json.JSONDecodeError:
-                    pass
+                except json.JSONDecodeError as e:
+                    get_logger().error(f"Failed to parse stream response body: {line} error: {e}")
+                    raise e
 
         if not events:
             return None
