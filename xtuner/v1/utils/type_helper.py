@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Generic, ParamSpec, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Generic, ParamSpec, Protocol, TypeVar, overload
 
 from typing_extensions import Concatenate
 
@@ -32,12 +32,24 @@ class RemoteMethod(Generic[P, T]):
     def bind(self, *args: P.args, **kwargs: P.kwargs) -> Any: ...
 
 
+class RayMethodDecorator(Protocol):
+    @overload
+    def __call__(self, f: Callable[Concatenate[C, P], Awaitable[T]]) -> RemoteMethod[P, T]: ...
+
+    @overload
+    def __call__(self, f: Callable[Concatenate[C, P], T]) -> RemoteMethod[P, T]: ...
+
+
 @overload
 def ray_method(f: Callable[Concatenate[C, P], Awaitable[T]]) -> RemoteMethod[P, T]: ...
 
 
 @overload
 def ray_method(f: Callable[Concatenate[C, P], T]) -> RemoteMethod[P, T]: ...
+
+
+@overload
+def ray_method(*, num_returns: int = 1, concurrency_group: str | None = None) -> RayMethodDecorator: ...
 
 
 def ray_method(f=None, *, num_returns=1, concurrency_group=None):

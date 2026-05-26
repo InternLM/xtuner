@@ -37,7 +37,10 @@ class MockRolloutState:
     def __init__(self, id, seq_staleness=1, status=Status.COMPLETED, reward_score=None):
         self.id = id
         self.uid = id
+        self.message_uid = None
+        self.session_uid = None
         self.status = status
+        self.finish_reason = "abort" if status == Status.ABORTED else "stop"
         self.seq_staleness = seq_staleness
         self.response_ids = []
         self.extra_fields = {}
@@ -87,8 +90,12 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         mock_agent_loop = MagicMock()
         mock_agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
         mock_agent_loop.rollout_ctl.pause_generation.remote = AsyncMock(return_value=None)
-        mock_agent_loop.rollout_ctl.cleanup_after_pause.remote = AsyncMock(return_value=None)
         mock_agent_loop.rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+
+        async def mock_pause():
+            await mock_agent_loop.rollout_ctl.pause_generation.remote()
+
+        mock_agent_loop.pause = mock_pause
 
         sleep_by_id = sleep_by_id or {}
 
@@ -626,7 +633,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         expired = await self.replay_buffer.count(task_name, Status.EXPIRED)
         self.assertEqual(completed + aborted + expired, 3)
         self.assertEqual(mock_agent_loop.rollout_ctl.pause_generation.remote.await_count, 1)
-        self.assertEqual(mock_agent_loop.rollout_ctl.cleanup_after_pause.remote.await_count, 1)
 
     async def test_async_produce_strategy_pause_produce_collects_without_cancelling(self):
         # 验证 pending task 在 pause 等待窗口内完成时会被收集，而不是直接取消丢失结果。
@@ -657,7 +663,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         expired = await self.replay_buffer.count(task_name, Status.EXPIRED)
         self.assertEqual(completed + aborted + expired, 3)
         self.assertEqual(mock_agent_loop.rollout_ctl.pause_generation.remote.await_count, 1)
-        self.assertEqual(mock_agent_loop.rollout_ctl.cleanup_after_pause.remote.await_count, 1)
 
     async def test_async_produce_strategy_returns_update_abort_without_sampling(self):
         # 验证 update_event 已设置时策略立即返回 UPDATE_WEIGHT_AND_ABORT，不再采样新 rollout。

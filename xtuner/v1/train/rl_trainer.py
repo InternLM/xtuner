@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import random
 import re
@@ -513,6 +514,7 @@ class BaseRLTrainer:
         self._init_train_state(cfg)
         self._init_train_worker_config(cfg, log_dir)
         self._init_rollout_config(cfg, log_dir)
+        self._ensure_rollout_http_concurrency(cfg)
         self._init_runtime_flags(cfg)
         self._advantage_estimator = cfg.advantage_estimator_config.build()
         self._cpu_resource_manager: CPUResourceManager | None = None
@@ -595,6 +597,49 @@ class BaseRLTrainer:
                 f"Skip load rollout weights due to resume from checkpoint {self._load_checkpoint_cfg.checkpoint_path}"
             )
         self._rollout_config = cfg.rollout_config
+
+    def _ensure_rollout_http_concurrency(self, cfg: BaseRLTrainerConfig) -> None:
+        rollout_max_batch_size = cfg.rollout_config.rollout_max_batch_size_per_instance
+        if rollout_max_batch_size is None or rollout_max_batch_size <= 0:
+            return
+
+        if isinstance(cfg, RLDisaggregatedTrainerConfig):
+            rollout_worker_count = cfg.rollout_resources.num_workers
+        elif isinstance(cfg, RLColocateTrainerConfig):
+            rollout_worker_count = cfg.resources.num_workers
+        else:
+            rollout_worker_count = 1
+        active_rollout_worker_count, _ = cfg.rollout_config.get_active_servers_count(rollout_worker_count)
+        if active_rollout_worker_count <= 0:
+            return
+
+        tasks = cfg.agent_loop_manager_cfg.tasks
+        task_cfgs = tasks if isinstance(tasks, list) else [tasks]
+        total_weight = sum(task.weight for task in task_cfgs)
+        if total_weight <= 0:
+            return
+
+        scheduled_http_requests = 0.0
+        for task in task_cfgs:
+            task_batch_size = cfg.train_batch_size * task.weight / total_weight
+            over_sample_threshold = float(getattr(task.produce_strategy_config, "over_sample_threshold", 0.0))
+            scheduled_http_requests += (
+                task_batch_size * task.sampler_config.prompt_repeat_k * (1 + over_sample_threshold)
+            )
+
+        required_http_concurrency = math.ceil(scheduled_http_requests / active_rollout_worker_count)
+        current_http_concurrency = math.ceil(rollout_max_batch_size * cfg.rollout_config.allow_over_concurrency_ratio)
+        if current_http_concurrency >= required_http_concurrency:
+            return
+
+        new_ratio = required_http_concurrency / rollout_max_batch_size
+        cfg.rollout_config.allow_over_concurrency_ratio = new_ratio
+        self.logger.warning(
+            "Increasing rollout_config.allow_over_concurrency_ratio because httpx max_connections is smaller "
+            "than the expected per-worker rollout request concurrency: "
+            f"max_connections={current_http_concurrency}, "
+            f"required_connections={required_http_concurrency}"
+        )
 
     def _init_runtime_flags(self, cfg: BaseRLTrainerConfig) -> None:
         self._enable_evaluate = cfg.enable_evaluate

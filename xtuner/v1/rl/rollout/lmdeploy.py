@@ -118,8 +118,15 @@ class LMDeployWorker(RolloutWorker):
                 text_prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
                 prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
                 payload["input_ids"] = prompt_token_ids
-            sample_params.return_routed_experts = True if self.enable_return_routed_experts else False
-            lmdeploy_sample_params = self._transform_sample_params(sample_params)
+            lmdeploy_sample_params = self._transform_sample_params(
+                sample_params.model_copy(
+                    update={
+                        "return_routed_experts": (
+                            self.enable_return_routed_experts and sample_params.return_routed_experts
+                        )
+                    }
+                )
+            )
             payload.update(lmdeploy_sample_params)
         else:
             payload = {
@@ -185,17 +192,6 @@ class LMDeployWorker(RolloutWorker):
             routed_experts_data = await self.lmdeploy_actor.get.remote(routed_experts)
             return ray.put(np.asarray(routed_experts_data))
         return np.asarray(routed_experts)
-
-    async def cleanup_after_pause(self) -> None:
-        if not self.enable_return_routed_experts:
-            return
-        try:
-            lmdeploy_actor = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
-            await lmdeploy_actor.clear.remote()
-        except ValueError:
-            self.logger.debug("LMDeploy shared_store actor is not available, skip cleanup after pause.")
-        except Exception as e:
-            self.logger.warning(f"Failed to clear LMDeploy shared_store after pause: {e}")
 
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
         """Transform the RolloutConfig into a Namespace suitable for the
