@@ -39,6 +39,7 @@ from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.utils import (
     get_device,
     get_logger,
+    log_rank0,
 )
 
 
@@ -197,7 +198,7 @@ class Dense(BaseModel):
         checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
         if not checkpoint_preserve_rng_state and self.config.attention.dropout > 0.0:
             checkpoint_preserve_rng_state = True
-            logger.warning("When using dropout, checkpoint_preserve_rng_state is set to True to avoid issues.")
+            log_rank0.warning("When using dropout, checkpoint_preserve_rng_state is set to True to avoid issues.")
 
         # Just for narrowing the type of self.fsdp_mesh and self.ep_mesh
         assert self.fsdp_mesh is not None

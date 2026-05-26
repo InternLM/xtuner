@@ -1,7 +1,9 @@
+import os
 from typing import List, Callable
 from xtuner.v1.ops.act_fn import get_act_fn
 import torch.nn as nn
 import torch
+from xtuner.v1.utils.activation_offload import async_save_on_cpu
 from typing_extensions import override
 from .qwen3_vl_config import Qwen3VLVisionConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module, init_params
@@ -16,6 +18,7 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
+from math import ceil
 from transformers.models.llama.modeling_llama import repeat_kv
 from xtuner.v1.float8.float8_handler import Float8Handler
 from torch.distributed.device_mesh import init_device_mesh
@@ -27,7 +30,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import Checkpoi
 from torch.distributed.device_mesh import DeviceMesh
 from tqdm import tqdm
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
-from xtuner.v1.data_proto.utils import pad_to_multiple_of, split_for_sequence_parallel
+from xtuner.v1.data_proto.utils import pad_to_max_length, split_for_sequence_parallel
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
@@ -248,6 +251,7 @@ class Qwen3VLVisionModel(BaseModel):
         self.rotary_pos_emb = self.build_rotary_embedding(config)
 
         self.blocks = nn.ModuleList([Qwen3VLVisionLayer(config) for _ in range(config.depth)])
+        self.offload_stream = torch.cuda.Stream()
 
         self.deepstack_visual_indexes = config.deepstack_visual_indexes
 
@@ -309,9 +313,6 @@ class Qwen3VLVisionModel(BaseModel):
         self.fsdp_config = fsdp_config
 
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
-        )
-        decoder_layer_mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype, cast_forward_inputs=False
         )
 
@@ -343,23 +344,25 @@ class Qwen3VLVisionModel(BaseModel):
 
             self.blocks[layer_idx] = layer
 
+            if self.config.fully_shard:
+                self._fully_shard(
+                    mesh=self.fsdp_mesh,
+                    mp_policy=mp_policy,
+                    reshard_after_forward=True,
+                    offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+                    module=layer,
+                )
+
+        if self.config.fully_shard:
+            for layer_cur, layer_next in zip(self.blocks[:-1],  self.blocks[1:]):
+                layer_cur.set_modules_to_forward_prefetch([layer_next])
+
             self._fully_shard(
                 mesh=self.fsdp_mesh,
-                mp_policy=decoder_layer_mp_policy,
+                mp_policy=mp_policy,
                 reshard_after_forward=True,
                 offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
-                module=layer,
             )
-
-        for layer_cur, layer_next in zip(self.blocks[:-1],  self.blocks[1:]):
-            layer_cur.set_modules_to_forward_prefetch([layer_next])
-
-        self._fully_shard(
-            mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
-            reshard_after_forward=True,
-            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
-        )
         return self
 
     # copy from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/qwen3_vl.py#L474
@@ -471,11 +474,23 @@ class Qwen3VLVisionModel(BaseModel):
                 assert pad_num % 2 == 0, f"pad_num {pad_num} must be divisible by 2."
                 pad_grid_thw = torch.tensor([[1, 2, pad_num//2]], device=grid_thw.device, dtype=grid_thw.dtype)
                 grid_thw = torch.cat((grid_thw, pad_grid_thw), dim=0)  # b, 3
+            split_size = ceil(hidden_states.shape[0] / div_num) * div_num // sequence_parallel_mesh.size()
             total_pixels = torch.prod(grid_thw, dim=1).sum()
-            hidden_states = pad_to_multiple_of(hidden_states, 0, div_num, 0)
-            assert total_pixels == hidden_states.size(0), f"total_pixels {total_pixels} must be equal to " \
-                                                          f"hidden_states seqlen {hidden_states.size(0)}. "
-            hidden_states = split_for_sequence_parallel(hidden_states, dim=0, sp_mesh=sequence_parallel_mesh)
+            assert split_size * sequence_parallel_mesh.size() == total_pixels, \
+                f"total_pixels {total_pixels} must be equal to hidden_states seqlen {hidden_states.size(0)}. "
+
+            hidden_states = split_for_sequence_parallel(
+                hidden_states,
+                dim=0,
+                sp_mesh=sequence_parallel_mesh,
+                split_size=split_size,
+            )
+            hidden_states = hidden_states.to(DEVICE)
+            hidden_states = pad_to_max_length(hidden_states, 0, split_size, 0)
+        else:
+            hidden_states = hidden_states.to(DEVICE)
+        hidden_states = hidden_states.to(torch.bfloat16)
+
 
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
@@ -504,13 +519,29 @@ class Qwen3VLVisionModel(BaseModel):
 
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
-            hidden_states = blk(
-                hidden_states,
-                cu_seqlens,
-                max_seqlen,
-                position_embeddings,
-                sequence_parallel_mesh
-            )
+            if int(os.getenv("VL_XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
+                with async_save_on_cpu(
+                    h2d_stream=self.offload_stream,
+                    d2h_stream=self.offload_stream,
+                    block_idx=int(layer_num),
+                    group="vision",
+                    custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
+                ):
+                    hidden_states = blk(
+                        hidden_states,
+                        cu_seqlens,
+                        max_seqlen,
+                        position_embeddings,
+                        sequence_parallel_mesh,
+                    )
+            else:
+                hidden_states = blk(
+                    hidden_states,
+                    cu_seqlens,
+                    max_seqlen,
+                    position_embeddings,
+                    sequence_parallel_mesh,
+                )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_feature = hidden_states
                 deepstack_feature_lists.append(deepstack_feature)

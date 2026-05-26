@@ -19,7 +19,7 @@ import transformers
 from transformers import AutoConfig
 
 from .enum_helper import StrEnum
-from .logger import get_logger
+from .logger import get_logger, log_rank0
 
 
 HF_PATCH_MODULES_CACHE_PREFIX = "modules_cache"
@@ -236,7 +236,6 @@ def trim_memory() -> bool:
         return libc.malloc_trim(0)
     except Exception as e:
         if not _TRIM_MEMORY_WARNED:
-            _logger = get_logger()
-            _logger.warning(f" >>>>>>>>> [trim_memory] Failed to trim memory: {e} <<<<<<<<")
+            log_rank0.warning(f" >>>>>>>>> [trim_memory] Failed to trim memory: {e} <<<<<<<<")
             _TRIM_MEMORY_WARNED = True
         return False

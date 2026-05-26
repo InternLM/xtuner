@@ -18,7 +18,7 @@ from xtuner.v1.module.attention.gated_deltanet import FusedRMSNormGated
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayer
 from xtuner.v1.utils.device import get_device
-from xtuner.v1.utils.grad_norm import cal_total_norm, group_tensors_by_device_mesh_and_placements
+from xtuner.v1.utils.dtensor import cal_total_norm, group_tensors_by_device_mesh_and_placements
 
 
 DEVICE = get_device()

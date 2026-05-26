@@ -15,7 +15,7 @@ try:
 except:
     has_timm = False
 from tqdm import tqdm
-from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module, init_params
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module, init_params, log_rank0
 from xtuner.v1.model import BaseModel
 from xtuner.v1.config import FSDPConfig
 from .intern_s1_config import InternS1VisionConfig
@@ -360,13 +360,13 @@ class InternS1VisionModel(BaseModel):
         checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
         if not checkpoint_preserve_rng_state and self.config.drop_path_rate > 0.0:
             checkpoint_preserve_rng_state = True
-            logger.warning("When using drop_path, checkpoint_preserve_rng_state is set to True to avoid issues.")
+            log_rank0.warning("When using drop_path, checkpoint_preserve_rng_state is set to True to avoid issues.")
         if not checkpoint_preserve_rng_state and self.config.dropout > 0.0:
             checkpoint_preserve_rng_state = True
-            logger.warning(f"When using dropout[{self.config.dropout}], checkpoint_preserve_rng_state is set to True to avoid issues.")
+            log_rank0.warning(f"When using dropout[{self.config.dropout}], checkpoint_preserve_rng_state is set to True to avoid issues.")
         if not checkpoint_preserve_rng_state and self.config.attention_dropout > 0.0:
             checkpoint_preserve_rng_state = True
-            logger.warning(f"When using dropout[{self.config.attention_dropout}], checkpoint_preserve_rng_state is set to True to avoid issues.")
+            log_rank0.warning(f"When using dropout[{self.config.attention_dropout}], checkpoint_preserve_rng_state is set to True to avoid issues.")
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype

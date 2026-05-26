@@ -27,7 +27,7 @@ from xtuner.v1.model.base import (
     XTunerBaseModelConfig,
     get_async_hf_log_dir,
 )
-from xtuner.v1.utils import get_device, get_iso_timestamp, get_logger
+from xtuner.v1.utils import get_device, get_iso_timestamp, get_logger, log_rank0
 from xtuner.v1.utils.process import (
     get_async_save_cpu_priority,
     get_async_save_file_lock_slots,
@@ -89,17 +89,17 @@ class BaseComposeModel(BaseModel):
         if freeze_vision:
             self.vision_tower.requires_grad_(False)
             self.vision_tower.eval()
-            logger.info("Freeze vision tower")
+            log_rank0.info("Freeze vision tower")
         freeze_projector = self.config.freeze_projector
         if freeze_projector:
             self.multi_modal_projector.requires_grad_(False)
             self.multi_modal_projector.eval()
-            logger.info("Freeze multi modal projector")
+            log_rank0.info("Freeze multi modal projector")
         freeze_language = self.config.freeze_language
         if freeze_language:
             self.language_model.requires_grad_(False)
             self.language_model.eval()
-            logger.info("Freeze language model")
+            log_rank0.info("Freeze language model")
 
     @override
     def init_weights(self) -> None:
@@ -138,7 +138,8 @@ class BaseComposeModel(BaseModel):
             self.vision_tower.blocks[-1].set_modules_to_forward_prefetch(  # type: ignore
                 [self.multi_modal_projector]
             )
-        self.multi_modal_projector.set_modules_to_forward_prefetch([self.language_model])  # type: ignore
+        if isinstance(self.multi_modal_projector, FSDPModule):
+            self.multi_modal_projector.set_modules_to_forward_prefetch([self.language_model])  # type: ignore
         self.language_model.set_modules_to_forward_prefetch([self.language_model.layers["0"]])  # type: ignore
 
         self._to_empty_meta()

@@ -14,7 +14,7 @@ from transformers import PreTrainedTokenizer
 from xtuner.v1.data_proto.messages import ChatMessages
 from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP, HybridChatTemplate
 from xtuner.v1.model import InternS1BaseConfig, InternVLBaseConfig
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, log_rank0
 
 from ..data_item import CacheItem, InternS1DataItem
 from ..utils import apply_exif_orientation, generate_random_int_from_dict
@@ -127,7 +127,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         self.use_thumbnail = model_cfg.use_thumbnail
         self.data_name = os.path.basename(anno_name)
         self.data_augment = data_augment
-        logger.info(
+        log_rank0.info(
             f"[{self.data_name}] Using dynamic image size: {self.dynamic_image_size} and "
             f"max_dynamic_patch: {max_num} and min_dynamic_patch: {min_num} and "
             f"use_thumbnail: {self.use_thumbnail} data_aug: {self.data_augment} for training."
@@ -156,7 +156,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         self.add_bos_token = add_bos_token
         self.bos_token_id = None
         if self.add_bos_token and tokenizer.bos_token is None:
-            logger.warning("tokenizer has no bos_token, set add_bos_token=False")
+            log_rank0.warning("tokenizer has no bos_token, set add_bos_token=False")
             self.add_bos_token = False
         if self.add_bos_token:
             self.bos_token_id = tokenizer.convert_tokens_to_ids(tokenizer.bos_token)
