@@ -317,11 +317,12 @@ class TrainEngine:
         save_dtype: torch.dtype = torch.bfloat16,
         cleanup_hf_dirs: Sequence[str | Path] = (),
     ) -> AsyncHFSaveHandle:
-        return self.model.async_save_hf(
-            hf_dir=hf_dir,
-            save_dtype=save_dtype,
-            cleanup_hf_dirs=cleanup_hf_dirs,
-        )
+        with profile_time_and_memory(f"[Async saving HF to {hf_dir} launch cost]"):
+            return self.model.async_save_hf(
+                hf_dir=hf_dir,
+                save_dtype=save_dtype,
+                cleanup_hf_dirs=cleanup_hf_dirs,
+            )
 
     def wait_async_hf(self, handle: AsyncHFSaveHandle | None = None) -> Path | None:
         return self.model.wait_async_hf(handle)

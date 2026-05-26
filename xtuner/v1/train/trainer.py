@@ -44,7 +44,7 @@ from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, Da
 from xtuner.v1.engine import TrainEngine
 from xtuner.v1.engine.train_engine import TrainStepInfo
 from xtuner.v1.loss import CELossConfig
-from xtuner.v1.model.base import AsyncHFSaveHandle, ModelItem, XTunerBaseModelConfig
+from xtuner.v1.model.base import AsyncHFSaveHandle, ModelItem, XTunerBaseModelConfig, get_async_hf_log_dir
 from xtuner.v1.model.moe.moe import MoEConfig
 from xtuner.v1.patch import patch_dcp_save_state_dict, patch_dcp_save_with_cache_storage, patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
@@ -1692,22 +1692,8 @@ class Trainer:
             self._wait_for_pending_async_hf()
             wait_previous_duration_sec = time.monotonic() - wait_previous_start
             self._pending_async_hf_handle = self._engine.async_save_hf(str(save_hf_path))
-            if hasattr(self._pending_async_hf_handle, "diagnostics"):
-                self._pending_async_hf_handle.diagnostics.update(
-                    {
-                        "step": self.cur_step,
-                        "epoch": self._cur_epoch,
-                        "wait_previous_async_hf_duration_sec": wait_previous_duration_sec,
-                    }
-                )
-            elif isinstance(self._pending_async_hf_handle, dict):
-                self._pending_async_hf_handle.setdefault("diagnostics", {}).update(
-                    {
-                        "step": self.cur_step,
-                        "epoch": self._cur_epoch,
-                        "wait_previous_async_hf_duration_sec": wait_previous_duration_sec,
-                    }
-                )
+            handle = self._pending_async_hf_handle
+            handle.log_info["wait_previous_async_hf_duration_sec"] = wait_previous_duration_sec
             self._pending_async_hf_step = self.cur_step
             self._pending_async_hf_epoch = self._cur_epoch
             return
@@ -1755,6 +1741,9 @@ class Trainer:
             for hf_dir in deleted_hf_checkpoints:
                 if delete_hf_dirs and self.rank == 0 and Path(hf_dir).exists():
                     rmtree(hf_dir)
+                hf_log_dir = get_async_hf_log_dir(hf_dir)
+                if delete_hf_dirs and self.rank == 0 and hf_log_dir.exists():
+                    rmtree(hf_log_dir)
 
         if self.rank == 0:
             if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):

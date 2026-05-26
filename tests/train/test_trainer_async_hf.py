@@ -40,6 +40,15 @@ class FakeHFModel(nn.Module):
             json.dump({"metadata": {"total_size": len(weight_map)}, "weight_map": weight_map}, f)
 
 
+class FakeAsyncHFHandle:
+    def __init__(self, hf_dir: Path, ok: bool, error: str, weight_map: dict[str, str]):
+        self.hf_dir = hf_dir
+        self.ok = ok
+        self.error = error
+        self.weight_map = weight_map
+        self.log_info = {}
+
+
 class FakeAsyncHFEngine:
     def __init__(self):
         self.save_hf_calls = []
@@ -105,13 +114,12 @@ class FakeAsyncHFEngine:
         shard_name = f"model-rank{rank}-of-{world_size}.safetensors"
         (hf_dir / shard_name).write_text(f"fake async model weights for rank {rank}")
         weight_map = {f"layers.rank{rank}.weight": shard_name} if self.async_hf_status_ok else {}
-        handle = {
-            "hf_dir": hf_dir,
-            "ok": self.async_hf_status_ok,
-            "error": self.async_hf_status_error,
-            "weight_map": weight_map,
-            "diagnostics": {},
-        }
+        handle = FakeAsyncHFHandle(
+            hf_dir=hf_dir,
+            ok=self.async_hf_status_ok,
+            error=self.async_hf_status_error,
+            weight_map=weight_map,
+        )
         self.async_hf_handles.append(handle)
         self._pending_async_hf = handle
         return handle
@@ -126,9 +134,9 @@ class FakeAsyncHFEngine:
         pending = handle
         local_status = {
             "rank": dist.get_rank(),
-            "ok": bool(pending["ok"]),
-            "error": str(pending["error"]),
-            "weight_map": pending["weight_map"],
+            "ok": bool(pending.ok),
+            "error": str(pending.error),
+            "weight_map": pending.weight_map,
         }
         all_status = [None for _ in range(dist.get_world_size())]
         dist.all_gather_object(all_status, local_status)
@@ -146,12 +154,12 @@ class FakeAsyncHFEngine:
 
         if dist.get_rank() == 0:
             self.model._write_hf_index_and_config(
-                hf_dir=Path(pending["hf_dir"]),
+                hf_dir=Path(pending.hf_dir),
                 weight_map=merged_weight_map,
             )
         if self._pending_async_hf is handle:
             self._pending_async_hf = None
-        return Path(pending["hf_dir"])
+        return Path(pending.hf_dir)
 
 
 def prepare(fn):
@@ -231,13 +239,9 @@ class TestTrainerAsyncSaveHF(DistributedTestBase):
         dist.barrier()
 
         self.assertEqual(len(trainer._engine.save_hf_calls), 4)
-        self.assertEqual(
-            [handle["diagnostics"]["step"] for handle in trainer._engine.async_hf_handles],
-            [3, 6, 9, 10],
-        )
         self.assertTrue(
             all(
-                "wait_previous_async_hf_duration_sec" in handle["diagnostics"]
+                "wait_previous_async_hf_duration_sec" in handle.log_info
                 for handle in trainer._engine.async_hf_handles
             )
         )

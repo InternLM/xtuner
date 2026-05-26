@@ -2,6 +2,7 @@ import os
 import socket
 import sys
 import threading
+import time
 from functools import reduce
 from math import lcm
 from multiprocessing import resource_tracker as _mprt
@@ -25,6 +26,10 @@ HF_PATCH_MODULES_CACHE_PREFIX = "modules_cache"
 
 logger = get_logger()
 XTUNER_DETERMINISTIC = os.getenv("XTUNER_DETERMINISTIC") == "true"
+
+
+def get_iso_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
 
 
 def set_deterministic():

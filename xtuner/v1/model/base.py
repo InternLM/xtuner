@@ -6,7 +6,6 @@ import os
 import pydoc
 import re
 import time
-import traceback
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from functools import reduce
@@ -53,7 +52,7 @@ from xtuner.v1.loss import BaseLossConfig, BaseLossContext, CELossConfig
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeParametersConfig, RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
-from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
+from xtuner.v1.utils import get_device, get_iso_timestamp, get_logger, get_torch_device_module, profile_time_and_memory
 from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_compile
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
@@ -67,7 +66,13 @@ logger = get_logger()
 
 DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
-_ASYNC_HF_SUMMARY_FILENAME = "async-hf-summary.json"
+_ASYNC_HF_LOG_DIR_SUFFIX = "async-hf-logs"
+_ASYNC_HF_SUMMARY_FILENAME = "summary.json"
+
+
+def get_async_hf_log_dir(hf_dir: Path | str) -> Path:
+    hf_path = Path(hf_dir)
+    return hf_path.parent / f"{hf_path.name}.{_ASYNC_HF_LOG_DIR_SUFFIX}"
 
 
 def compute_local_shape_and_global_offset(*args, **kwargs):
@@ -76,44 +81,26 @@ def compute_local_shape_and_global_offset(*args, **kwargs):
         return _compute_local_shape_and_global_offset(*args, **kwargs)
 
 
-def _async_hf_now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
-
-
-def _async_hf_diag_level() -> str:
-    return os.environ.get("XTUNER_ASYNC_HF_DIAG_LEVEL", "summary").lower()
-
-
-def _keep_async_hf_rank_status() -> bool:
-    if os.environ.get("XTUNER_ASYNC_HF_KEEP_RANK_STATUS") == "1":
-        return True
-    return _async_hf_diag_level() in {"rank", "file"}
-
-
-def _async_hf_tensor_bytes(tensor: torch.Tensor) -> int:
-    return int(tensor.numel() * tensor.element_size())
-
-
 def _async_hf_summarize_status(all_status: list[dict[str, Any]], hf_dir: Path) -> dict[str, Any]:
-    def diag_value(status: dict[str, Any], key: str) -> float:
-        diag = status.get("diag", {})
-        if not isinstance(diag, dict):
+    def log_value(status: dict[str, Any], key: str) -> float:
+        log_info = status.get("log", {})
+        if not isinstance(log_info, dict):
             return 0.0
-        value = diag.get(key, 0.0)
+        value = log_info.get(key, 0.0)
         return float(value) if isinstance(value, (int, float)) else 0.0
 
     def max_with_rank(key: str) -> tuple[float, int | None]:
         if not all_status:
             return 0.0, None
-        status = max(all_status, key=lambda item: diag_value(item, key))
-        return diag_value(status, key), cast(int | None, status.get("rank"))
+        status = max(all_status, key=lambda item: log_value(item, key))
+        return log_value(status, key), cast(int | None, status.get("rank"))
 
     failed_ranks = [status.get("rank") for status in all_status if not status.get("ok", False)]
-    tensor_bytes = [diag_value(status, "total_tensor_bytes") for status in all_status]
-    writer_duration, slowest_writer_rank = max_with_rank("writer_duration_sec")
+    tensor_bytes = [log_value(status, "total_tensor_bytes") for status in all_status]
+    write_duration, slowest_writer_rank = max_with_rank("write_duration_sec")
     summary: dict[str, Any] = {
         "event": "async_hf_summary",
-        "summary_created_wall_time": _async_hf_now(),
+        "summary_created_wall_time": get_iso_timestamp(),
         "hf_dir": str(hf_dir),
         "world_size": len(all_status),
         "ok": not failed_ranks,
@@ -121,12 +108,12 @@ def _async_hf_summarize_status(all_status: list[dict[str, Any]], hf_dir: Path) -
         "total_tensor_bytes_all_ranks": int(sum(tensor_bytes)),
         "max_total_tensor_bytes_per_rank": int(max(tensor_bytes)) if tensor_bytes else 0,
         "min_total_tensor_bytes_per_rank": int(min(tensor_bytes)) if tensor_bytes else 0,
-        "max_writer_duration_sec": writer_duration,
+        "max_write_duration_sec": write_duration,
         "slowest_writer_rank": slowest_writer_rank,
         "slowest_writer_total_tensor_bytes": int(
             next(
                 (
-                    diag_value(status, "total_tensor_bytes")
+                    log_value(status, "total_tensor_bytes")
                     for status in all_status
                     if status.get("rank") == slowest_writer_rank
                 ),
@@ -142,8 +129,6 @@ def _async_hf_summarize_status(all_status: list[dict[str, Any]], hf_dir: Path) -
             "slowest_wait_previous_rank",
         ),
         ("prepare_snapshot_duration_sec", "max_prepare_snapshot_duration_sec", "slowest_prepare_rank"),
-        ("device_synchronize_duration_sec", "max_device_synchronize_duration_sec", "slowest_device_sync_rank"),
-        ("process_start_duration_sec", "max_process_start_duration_sec", "slowest_process_start_rank"),
         ("wait_join_duration_sec", "max_wait_join_duration_sec", "slowest_wait_join_rank"),
     ):
         value, rank = max_with_rank(key)
@@ -176,7 +161,7 @@ class AsyncHFSaveHandle:
     tmp_hf_dir: Path
     status_path: Path
     cleanup_done_path: Path
-    diagnostics: dict[str, Any]
+    log_info: dict[str, Any]
 
 
 class TorchCompileOption(TypedDict):
@@ -771,7 +756,7 @@ class BaseModel(nn.Module):
         cleanup_hf_dirs: Sequence[str | Path] = (),
     ) -> AsyncHFSaveHandle:
         api_start = time.monotonic()
-        api_start_wall_time = _async_hf_now()
+        api_start_wall_time = get_iso_timestamp()
         if self._hf_path is None and self.config.hf_config is None:
             raise NotImplementedError(
                 "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
@@ -791,9 +776,9 @@ class BaseModel(nn.Module):
                 rmtree(tmp_hf_dir)
             tmp_hf_dir.mkdir(parents=True, exist_ok=True)
 
-        status_path = (
-            tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{self._async_hf_writer_status_filename(rank, world_size)}"
-        )
+        log_dir = get_async_hf_log_dir(hf_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        status_path = log_dir / self._async_hf_writer_status_filename(rank, world_size)
         cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
         if rank == 0:
             cleanup_done_path.unlink(missing_ok=True)
@@ -806,11 +791,8 @@ class BaseModel(nn.Module):
         )
         prepare_snapshot_duration_sec = time.monotonic() - prepare_start
 
-        device_synchronize_duration_sec = 0.0
         if hasattr(DEVICE_MODULE, "synchronize"):
-            device_sync_start = time.monotonic()
             DEVICE_MODULE.synchronize()
-            device_synchronize_duration_sec = time.monotonic() - device_sync_start
 
         mp_ctx = py_mp.get_context("fork")
         process = mp_ctx.Process(
@@ -826,13 +808,11 @@ class BaseModel(nn.Module):
             ),
             daemon=False,
         )
-        process_start_start = time.monotonic()
         process.start()
-        process_start_duration_sec = time.monotonic() - process_start_start
         api_duration_sec = time.monotonic() - api_start
-        api_return_wall_time = _async_hf_now()
+        api_return_wall_time = get_iso_timestamp()
 
-        diagnostics = {
+        log_info = {
             "launch_event": "async_hf_launch",
             "rank": rank,
             "world_size": world_size,
@@ -843,18 +823,15 @@ class BaseModel(nn.Module):
             "api_return_wall_time": api_return_wall_time,
             "async_save_hf_api_duration_sec": api_duration_sec,
             "prepare_snapshot_duration_sec": prepare_snapshot_duration_sec,
-            "device_synchronize_duration_sec": device_synchronize_duration_sec,
-            "process_start_duration_sec": process_start_duration_sec,
             "total_tensor_bytes": total_tensor_bytes,
         }
-
         handle = AsyncHFSaveHandle(
             process=process,
             hf_dir=hf_dir,
             tmp_hf_dir=tmp_hf_dir,
             status_path=status_path,
             cleanup_done_path=cleanup_done_path,
-            diagnostics=diagnostics,
+            log_info=log_info,
         )
         self._pending_async_hf = handle
         return handle
@@ -869,47 +846,44 @@ class BaseModel(nn.Module):
         cleanup_done_path: Path,
         rank: int,
     ) -> None:
-        writer_start = time.monotonic()
-        writer_diag: dict[str, Any] = {
+        writer_log: dict[str, Any] = {
             "writer_event": "async_hf_writer",
             "rank": rank,
-            "writer_start_wall_time": _async_hf_now(),
+            "writer_start_wall_time": get_iso_timestamp(),
         }
-        writer_diag["_writer_start_monotonic"] = writer_start
         try:
             set_async_save_process_qos()
-            cleanup_start = time.monotonic()
             self._cleanup_async_hf_dirs_before_write(
                 cleanup_hf_dirs=cleanup_hf_dirs,
                 cleanup_done_path=cleanup_done_path,
                 rank=rank,
             )
-            writer_diag["cleanup_duration_sec"] = time.monotonic() - cleanup_start
-            writer_diag["_write_start_monotonic"] = time.monotonic()
+            write_start = time.monotonic()
             self._write_async_hf_snapshot(
                 hf_dir=tmp_hf_dir,
                 file_to_names=file_to_names,
-                weight_map=weight_map,
-                status_path=status_path,
-                writer_diag=writer_diag,
             )
-        except Exception as exc:
-            writer_diag.pop("_writer_start_monotonic", None)
-            writer_diag.pop("_write_start_monotonic", None)
-            writer_diag.update(
+            writer_log.update(
                 {
-                    "writer_end_wall_time": _async_hf_now(),
-                    "writer_duration_sec": time.monotonic() - writer_start,
+                    "writer_end_wall_time": get_iso_timestamp(),
+                    "write_duration_sec": time.monotonic() - write_start,
+                }
+            )
+            status = {"rank": rank, "ok": True, "error": "", "weight_map": weight_map, "log": writer_log}
+            with status_path.open("w") as f:
+                f.write(json.dumps(status, indent=2))
+        except Exception as exc:
+            writer_log.update(
+                {
+                    "writer_end_wall_time": get_iso_timestamp(),
                 }
             )
             status = {
                 "rank": rank,
                 "ok": False,
                 "error": str(exc),
-                "exception_type": type(exc).__name__,
-                "traceback": traceback.format_exc(),
                 "weight_map": {},
-                "diag": writer_diag,
+                "log": writer_log,
             }
             with status_path.open("w") as f:
                 f.write(json.dumps(status, indent=2))
@@ -939,7 +913,7 @@ class BaseModel(nn.Module):
                 )
                 cached_names.append(name)
                 weight_map[name] = safetensor_name
-                total_tensor_bytes += _async_hf_tensor_bytes(hf_tensor)
+                total_tensor_bytes += int(hf_tensor.numel() * hf_tensor.element_size())
             if cached_names:
                 file_to_names.append((safetensor_name, cached_names))
             del hf_tensor_list
@@ -960,17 +934,17 @@ class BaseModel(nn.Module):
         local_ok = True
         local_error = ""
         local_weight_map: dict[str, str] = {}
-        local_diag = dict(handle.diagnostics)
+        local_log = dict(handle.log_info)
 
         rank = dist.get_rank() if dist.is_initialized() else 0
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         join_start = time.monotonic()
-        local_diag["wait_start_wall_time"] = _async_hf_now()
+        local_log["wait_start_wall_time"] = get_iso_timestamp()
         process.join()
-        local_diag["wait_join_duration_sec"] = time.monotonic() - join_start
-        local_diag["wait_end_wall_time"] = _async_hf_now()
+        local_log["wait_join_duration_sec"] = time.monotonic() - join_start
+        local_log["wait_end_wall_time"] = get_iso_timestamp()
         exit_code = process.exitcode
-        local_diag["writer_exit_code"] = exit_code
+        local_log["writer_exit_code"] = exit_code
         if exit_code is None:
             local_ok = False
             local_error = "async_hf_writer_exitcode_missing"
@@ -993,16 +967,16 @@ class BaseModel(nn.Module):
                 weight_map_obj = writer_status.get("weight_map", {})
                 if isinstance(weight_map_obj, dict):
                     local_weight_map = {str(k): str(v) for k, v in weight_map_obj.items()}
-                writer_diag = writer_status.get("diag", {})
-                if isinstance(writer_diag, dict):
-                    local_diag.update(writer_diag)
+                writer_log = writer_status.get("log", {})
+                if isinstance(writer_log, dict):
+                    local_log.update(writer_log)
 
         local_status = {
             "rank": rank,
             "ok": local_ok,
             "error": local_error,
             "weight_map": local_weight_map,
-            "diag": local_diag,
+            "log": local_log,
         }
         if dist.is_initialized():
             gathered_status: list[Any] = [None for _ in range(world_size)]
@@ -1015,7 +989,7 @@ class BaseModel(nn.Module):
             if rank == 0:
                 summary = _async_hf_summarize_status(all_status, hf_dir=hf_dir)
                 summary["error"] = "async_hf_global_consistency_check_failed"
-                summary_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{_ASYNC_HF_SUMMARY_FILENAME}"
+                summary_path = status_path.parent / _ASYNC_HF_SUMMARY_FILENAME
                 with summary_path.open("w") as f:
                     f.write(json.dumps(summary, indent=2))
             failed = ", ".join(
@@ -1029,13 +1003,10 @@ class BaseModel(nn.Module):
         for status in all_status:
             merged_weight_map.update(status["weight_map"])
 
-        finalize_start = time.monotonic()
         if rank == 0:
             self._write_hf_index_and_config(hf_dir=tmp_hf_dir, weight_map=merged_weight_map)
         if dist.is_initialized():
             dist.barrier()
-        if not _keep_async_hf_rank_status():
-            status_path.unlink(missing_ok=True)
         if rank == 0:
             cleanup_done_path.unlink(missing_ok=True)
         if rank == 0:
@@ -1046,8 +1017,7 @@ class BaseModel(nn.Module):
             dist.barrier()
         if rank == 0:
             summary = _async_hf_summarize_status(all_status, hf_dir=hf_dir)
-            summary["rank0_finalize_duration_sec"] = time.monotonic() - finalize_start
-            summary_path = hf_dir / _ASYNC_HF_SUMMARY_FILENAME
+            summary_path = status_path.parent / _ASYNC_HF_SUMMARY_FILENAME
             with summary_path.open("w") as f:
                 f.write(json.dumps(summary, indent=2))
         if self._pending_async_hf is handle:
@@ -2029,66 +1999,16 @@ class BaseModel(nn.Module):
         self,
         hf_dir: Path,
         file_to_names: list[tuple[str, list[str]]],
-        weight_map: dict[str, str],
-        status_path: Path,
-        writer_diag: dict[str, Any] | None = None,
     ) -> None:
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        if writer_diag is None:
-            writer_start = time.monotonic()
-            writer_diag = {
-                "writer_event": "async_hf_writer",
-                "rank": rank,
-                "writer_start_wall_time": _async_hf_now(),
-            }
-            write_start = writer_start
-        else:
-            writer_start = cast(float, writer_diag.pop("_writer_start_monotonic", time.monotonic()))
-            write_start = cast(float, writer_diag.pop("_write_start_monotonic", writer_start))
-        local_status: dict[str, Any] = {
-            "rank": rank,
-            "ok": True,
-            "error": "",
-            "weight_map": {},
-            "diag": writer_diag,
-        }
-
-        try:
-            for filename, names in file_to_names:
-                tensors: dict[str, torch.Tensor] = {}
-                for name in names:
-                    cache_key = (("root", "hf"), ("name", name))
-                    cached_tensor = cast(torch.Tensor | None, self._async_hf_tensor_cache.get(cache_key))
-                    if cached_tensor is None:
-                        raise RuntimeError(f"Missing cached async HF tensor for key: {name}")
-                    tensors[name] = cached_tensor
-                self._write_hf_save_plan({"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]})
-            local_status["weight_map"] = weight_map
-        except Exception as exc:
-            writer_diag.update(
-                {
-                    "writer_end_wall_time": _async_hf_now(),
-                    "writer_duration_sec": time.monotonic() - writer_start,
-                    "write_duration_sec": time.monotonic() - write_start,
-                }
-            )
-            local_status["ok"] = False
-            local_status["error"] = str(exc)
-            local_status["exception_type"] = type(exc).__name__
-            local_status["traceback"] = traceback.format_exc()
-            with status_path.open("w") as f:
-                f.write(json.dumps(local_status, indent=2))
-            raise
-
-        writer_diag.update(
-            {
-                "writer_end_wall_time": _async_hf_now(),
-                "writer_duration_sec": time.monotonic() - writer_start,
-                "write_duration_sec": time.monotonic() - write_start,
-            }
-        )
-        with status_path.open("w") as f:
-            f.write(json.dumps(local_status, indent=2))
+        for filename, names in file_to_names:
+            tensors: dict[str, torch.Tensor] = {}
+            for name in names:
+                cache_key = (("root", "hf"), ("name", name))
+                cached_tensor = cast(torch.Tensor | None, self._async_hf_tensor_cache.get(cache_key))
+                if cached_tensor is None:
+                    raise RuntimeError(f"Missing cached async HF tensor for key: {name}")
+                tensors[name] = cached_tensor
+            self._write_hf_save_plan({"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]})
 
     def _write_hf_non_weight_files(self, hf_dir: Path) -> None:
         if self._hf_path is not None:
