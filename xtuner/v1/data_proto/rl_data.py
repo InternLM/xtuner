@@ -173,7 +173,7 @@ def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
         from ray import ObjectRef as RayObjectRef
 
         if isinstance(routed_experts, RayObjectRef):
-            ray.internal.free([routed_experts])
+            ray.internal.free([routed_experts], local_only=False)
         rollout_state.routed_experts = None
     prompt_ids = getattr(rollout_state, "prompt_ids", None)
     rollout_state.tokens = list(prompt_ids) if prompt_ids is not None else None

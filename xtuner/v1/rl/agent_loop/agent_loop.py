@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from abc import ABC, abstractmethod
 from typing import TypeAlias, cast
 
+import ray
 from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
@@ -21,6 +23,10 @@ from xtuner.v1.utils import get_logger, ray_method
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 
 
+AGENT_LOOP_CONCURRENCY_GROUP_GENERATE = "generate"
+DEFAULT_JUDGER_CANCEL_TIMEOUT_S = 5.0
+
+
 class AgentLoopConfig(ABC, BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     hf_checkpoint: str
@@ -35,6 +41,13 @@ class AgentLoopConfig(ABC, BaseModel):
                 logger=logger,
             )
 
+        get_generate_concurrency = rollout_controller.get_generate_concurrency
+        if hasattr(get_generate_concurrency, "remote"):
+            total_generate_concurrency = ray.get(get_generate_concurrency.remote())
+        else:
+            total_generate_concurrency = get_generate_concurrency()
+        concurrency = max(1, math.ceil(total_generate_concurrency / self.cpu_resources.num_workers))
+
         register_cpu_resources(
             name=f"agent_loop:{self.__class__.__name__}",
             cpu_resources=self.cpu_resources,
@@ -44,12 +57,14 @@ class AgentLoopConfig(ABC, BaseModel):
             return self._build_router(
                 rollout_controller=rollout_controller,
                 cpu_resources=self.cpu_resources,
+                concurrency=concurrency,
                 judger=judger,
                 logger=logger,
             )
         return self._build_ray_actor(
             rollout_controller=rollout_controller,
             cpu_resources=self.cpu_resources,
+            concurrency=concurrency,
             judger=judger,
             logger=logger,
         )
@@ -66,14 +81,20 @@ class AgentLoopConfig(ABC, BaseModel):
         self,
         rollout_controller: RolloutController,
         cpu_resources: CPUResourcesConfig,
+        concurrency: int,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
     ) -> RayAgentLoopProxy:
+        ray_agent_loop = ray.remote(
+            concurrency_groups={
+                AGENT_LOOP_CONCURRENCY_GROUP_GENERATE: concurrency,
+            },
+        )(AgentLoopActor)
         return cast(
             "RayAgentLoopProxy",
             CPUActorLauncher.build_actor(
-                AgentLoopActor,
+                ray_agent_loop,
                 self,
                 rollout_controller,
                 judger,
@@ -89,15 +110,21 @@ class AgentLoopConfig(ABC, BaseModel):
         self,
         rollout_controller: RolloutController,
         cpu_resources: CPUResourcesConfig,
+        concurrency: int,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
         start_bundle_idx: int = 0,
     ) -> list[RayAgentLoopProxy]:
+        ray_agent_loop = ray.remote(
+            concurrency_groups={
+                AGENT_LOOP_CONCURRENCY_GROUP_GENERATE: concurrency,
+            },
+        )(AgentLoopActor)
         return cast(
             list["RayAgentLoopProxy"],
             CPUActorLauncher.build_actors(
-                AgentLoopActor,
+                ray_agent_loop,
                 self,
                 rollout_controller,
                 judger,
@@ -114,6 +141,7 @@ class AgentLoopConfig(ABC, BaseModel):
         self,
         rollout_controller: RolloutController,
         cpu_resources: CPUResourcesConfig,
+        concurrency: int,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
@@ -123,6 +151,7 @@ class AgentLoopConfig(ABC, BaseModel):
             workers=self._build_ray_actors(
                 rollout_controller=rollout_controller,
                 cpu_resources=cpu_resources,
+                concurrency=concurrency,
                 pg=pg,
                 judger=judger,
                 logger=logger,
@@ -165,6 +194,20 @@ class AgentLoop(ABC):
         group_samples = await generated_samples
         return group_samples
 
+    async def pause(self) -> None:
+        # Base AgentLoop only pauses rollout generation.
+        #
+        # We intentionally do not define generic judger pause behavior in the
+        # Judger base class. Judger subclasses can implement judge() in very
+        # different ways, and one base pause implementation cannot cover all of
+        # them. Requiring users to follow a base-class pause protocol would also
+        # increase the mental overhead of writing a new judge() implementation.
+        #
+        # For now, only SingleTurnAgentLoop defines how to pause an in-flight
+        # judger call. Other AgentLoop subclasses should override pause() if
+        # they need their own judger pause semantics.
+        await self.rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
+
 
 class RouterAgentLoop:
     def __init__(self, workers: list[RayAgentLoopProxy], rollout_ctl: RolloutController):
@@ -204,6 +247,11 @@ class RouterAgentLoop:
     def get_worker_status(self) -> dict[str, int]:
         return {str(worker): load for worker, load in self._worker_loads.items()}
 
+    async def pause(self) -> None:
+        await asyncio.gather(
+            *(worker.pause.remote() for worker in self.workers),
+        )
+
 
 async def get_agent_loop_rollout_ctl(agent_loop: AgentLoopSpec) -> RolloutController:
     rollout_ctl = getattr(agent_loop, "rollout_ctl", None)
@@ -230,11 +278,11 @@ class AgentLoopActor:
             logger=logger,
         )
 
-    @ray_method
+    @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         return await self.agent_loop.generate_sample(rollout_state, **kwargs)
 
-    @ray_method
+    @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         return await self.agent_loop.generate_group(rollout_state, **kwargs)
 
@@ -242,7 +290,18 @@ class AgentLoopActor:
     async def get_rollout_ctl(self):
         return self.agent_loop.rollout_ctl
 
+    @ray_method
+    async def pause(self) -> None:
+        return await self.agent_loop.pause()
 
-RayAgentLoop = cast(ActorClass[AgentLoopActor], CPUActorLauncher.to_actor_class(AgentLoopActor))
+
+RayAgentLoop = cast(
+    ActorClass[AgentLoopActor],
+    ray.remote(
+        concurrency_groups={
+            AGENT_LOOP_CONCURRENCY_GROUP_GENERATE: 1000,
+        },
+    )(AgentLoopActor),
+)
 RayAgentLoopProxy: TypeAlias = ActorProxy[AgentLoopActor]
 AgentLoopSpec: TypeAlias = AgentLoop | RayAgentLoopProxy | RouterAgentLoop

@@ -227,7 +227,6 @@ def _fake_agent_loop():
     rollout_ctl = MagicMock()
     rollout_ctl.continue_generation.remote = AsyncMock()
     rollout_ctl.pause_generation.remote = AsyncMock()
-    rollout_ctl.cleanup_after_pause.remote = AsyncMock()
     rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
     agent_loop = MagicMock()
     agent_loop.rollout_ctl = rollout_ctl

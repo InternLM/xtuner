@@ -20,7 +20,11 @@ from .parser.factory import build_reasoning_parser, build_tool_call_parser
 from .parser.reasoning_parser import ReasoningParser
 from .parser.tool_parser import ToolCallParser
 from .utils import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthChecker, SessionRouter
-from .worker import ROLLOUT_CONCURRENCY_GROUP_GENERATE, RolloutConfig, RolloutWorker
+from .worker import (
+    ROLLOUT_CONCURRENCY_GROUP_GENERATE,
+    RolloutConfig,
+    RolloutWorker,
+)
 
 
 if TYPE_CHECKING:
@@ -183,6 +187,17 @@ class RolloutController:
             "total_workers": total_workers,
         }
 
+    def get_generate_concurrency(self) -> int:
+        assert self.config.rollout_max_batch_size_per_instance is not None, (
+            "rollout_max_batch_size_per_instance must be set before building AgentLoop."
+        )
+        concurrency_per_worker = math.ceil(
+            self.config.rollout_max_batch_size_per_instance * self.config.allow_over_concurrency_ratio
+        )
+        with self.worker_info_lock:
+            active_workers = sum(1 for info in self.rank2info.values() if info.is_active)
+        return active_workers * concurrency_per_worker
+
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         if XTUNER_DETERMINISTIC:
@@ -208,7 +223,10 @@ class RolloutController:
             self._apply_output_parsers(response_rollout_state)
             return response_rollout_state
         except asyncio.TimeoutError:
-            self.logger.error(f"Rollout timeout for worker {worker}. Skipping sample.")
+            self.logger.error(
+                f"RolloutController.generate timed out waiting for worker: session_id={session_id}, "
+                f"timeout={self.config.rollout_timeout * self.timeout_multiplier}"
+            )
             rollout_state.status = Status.FAILED
             rollout_state.error_msg = (
                 f"Rollout request timed out after {self.config.rollout_timeout * self.timeout_multiplier} seconds."
@@ -238,10 +256,22 @@ class RolloutController:
 
     def pause_generation(self):
         self.health_checker.pause()
-        self._broadcast_to_active_workers("pause_generation")
-
-    def cleanup_after_pause(self):
-        self._broadcast_to_active_workers("cleanup_after_pause")
+        with self.worker_info_lock:
+            active_workers = [info for info in self.rank2info.values() if info.is_active]
+        futures = [info.actor.pause_generation.remote() for info in active_workers]  # type: ignore[attr-defined]
+        try:
+            results = ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
+        except Exception:
+            self.logger.exception(
+                f"RolloutController pause_generation failed for {len(active_workers)} active workers."
+            )
+            raise
+        succeeded_worker_urls = [info.url for info, result in zip(active_workers, results) if result is not False]
+        failed_worker_urls = [info.url for info, result in zip(active_workers, results) if result is False]
+        if succeeded_worker_urls:
+            self.logger.info(f"Abort request sent successfully: count={len(succeeded_worker_urls)}")
+        if failed_worker_urls:
+            self.logger.warning(f"Abort request failed: worker_urls={failed_worker_urls}")
 
     def continue_generation(self):
         self.health_checker.resume()
