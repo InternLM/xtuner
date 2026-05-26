@@ -207,6 +207,9 @@ class AgentRolloutItem(BaseModel):
     artifacts: dict[str, Any] = Field(default_factory=dict)
     # Opaque dataset/business metadata. Runner core does not branch on keys here.
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Judger input prepared by the dataset. Host/sandbox runner core should
+    # pass it through instead of inferring task-specific keys from metadata.
+    reward_model: dict[str, Any] = Field(default_factory=dict)
     error: RolloutError | None = None
 
 
