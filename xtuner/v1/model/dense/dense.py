@@ -149,6 +149,7 @@ class Dense(BaseModel):
                 mlp_bias=config.mlp_bias,
                 hidden_act=config.hidden_act,
                 rms_norm_eps=config.rms_norm_eps,
+                rms_norm_type=config.rms_norm_type,
                 attention_config=attention_config,
                 generate_config=config.generate_config,
                 rope_scaling_cfg=config.rope_scaling_cfg,
