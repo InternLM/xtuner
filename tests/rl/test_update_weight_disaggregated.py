@@ -39,8 +39,8 @@ def _is_sglang_update_weight_sha256_test_enabled():
 
     This test-only switch controls whether the unit test expects SGLang to
     compute and return received bucket hashes for sent/received hash
-    comparison. 
-    
+    comparison.
+
     ! Note that upstream SGLang does not provide this SHA256 check
     by default.
     """
@@ -82,7 +82,7 @@ class HashingTrainingWorker(BaseTrainingWorker):
             train_enable_ep=train_enable_ep,
             finished=finished,
         )
-    
+
     def _hook_compare_test_sent_and_received_weight_hash(
         self,
         result: dict,
@@ -119,7 +119,7 @@ class TestUpdateWeight(unittest.TestCase):
         del os.environ["XTUNER_USE_FA3"]
 
     def setUp(self):
-        ray.init(num_cpus=80, ignore_reinit_error=True)
+        ray.init(num_cpus=128, ignore_reinit_error=True)
         self.model_path = MODEL_PATH
         self.temp_dir = tempfile.TemporaryDirectory()
         self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
@@ -185,7 +185,7 @@ class TestUpdateWeight(unittest.TestCase):
                 ),
                 ignore_idx=-100,
                 use_kl_loss=False,
-                kl_loss_coef=0.001, 
+                kl_loss_coef=0.001,
                 kl_loss_type="low_var_kl",
                 mode="eager"),
             lr_cfg=lr_cfg,
@@ -209,7 +209,6 @@ class TestUpdateWeight(unittest.TestCase):
         )
         ray.get([worker.test_all_reduce.remote() for worker in train_workers])
         train_controller = TrainingController(workers=train_workers)
-        train_controller.set_train_rollout_mode("disaggregated")
         return train_controller
 
     def _build_sglang_rollout_controller(self):
@@ -238,7 +237,6 @@ class TestUpdateWeight(unittest.TestCase):
         futures = [worker.test_all_reduce.remote() for worker in train_workers]
         ray.get(futures)
         train_controller = TrainingController(workers=train_workers)
-        train_controller.set_train_rollout_mode("disaggregated")
 
         # init rollout on a separate placement group
         rollout_pg = AutoAcceleratorWorkers.build_placement_group(
@@ -255,6 +253,7 @@ class TestUpdateWeight(unittest.TestCase):
 
         info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
         train_controller.update_rollout_info(info_dict)
+        train_controller.set_train_rollout_mode("disaggregated")
 
         train_controller.update_weights()
 
@@ -273,6 +272,7 @@ class TestUpdateWeight(unittest.TestCase):
 
         info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
         train_controller.update_rollout_info(info_dict)
+        train_controller.set_train_rollout_mode("disaggregated")
 
         ray.get(rollout_controller.pause_generation.remote())
         time.sleep(float(os.environ.get("XTUNER_UPDATE_WEIGHT_PAUSE_SLEEP", "2")))
@@ -290,6 +290,7 @@ class TestUpdateWeight(unittest.TestCase):
 
         info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
         train_controller.update_rollout_info(info_dict)
+        train_controller.set_train_rollout_mode("disaggregated")
 
         ray.get([worker.reset_update_weight_sha256.remote() for worker in train_controller.workers])
         train_controller.update_weights()
