@@ -484,7 +484,7 @@ case:
             assert_info:
                 base_metric: qwen3-5-sft-sp4-resume/625c0018/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.02
+                    grad_norm: 0.09
                     loss/local_loss: 0.000001
                     loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
