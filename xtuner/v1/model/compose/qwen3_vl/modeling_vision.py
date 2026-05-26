@@ -83,6 +83,11 @@ class Qwen3VLVisionRotaryEmbedding(nn.Module):
 
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
+        # Mirror HF's Qwen3_5VisionRotaryEmbedding: keep `dim` and `theta` so the buffer can be
+        # rebuilt after a meta-build → `to_empty` round-trip (the init-computed `inv_freq` would
+        # otherwise be left garbage). See `DeterministicDDPTestCase.materialize_submodule`.
+        self.dim = dim
+        self.theta = theta
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
