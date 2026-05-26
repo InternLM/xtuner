@@ -1,3 +1,4 @@
+import asyncio
 import json
 import math
 import os
@@ -1623,7 +1624,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             "RLDisaggregatedTrainer expects get_batch() to return non-empty rollout_states "
                             "unless status is empty EXPIRED_BATCH."
                         )
-                        train_log_info = self._train_one_batch(
+                        # 非共卡训练要求后台 producer 在训练当前 batch 时继续推进；
+                        # 同步训练路径放到线程里执行，避免 ray.get / 文件写入阻塞事件循环。
+                        train_log_info = await asyncio.to_thread(
+                            self._train_one_batch,
                             train_batch,
                             train_step,
                             step_timer_dict,
