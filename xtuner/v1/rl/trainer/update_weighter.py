@@ -104,12 +104,6 @@ class UpdateWeighter:
         tp = rollout_config.tensor_parallel_size
         ep = rollout_config.expert_parallel_size
         assert tp == 1 or ep == 1, "Either tensor parallel size or engine parallel size must be 1."
-        if self.rollout_device_mesh is None:
-            self.rollout_device_mesh = DeviceMesh(
-                "cpu",
-                mesh=engine_rank_mesh_array,
-                mesh_dim_names=("engine_instance", "engine_parallel"),
-            )
         rollout_server_url = server_url_dict.get(self.rank, "")
         if worker_server_urls_status.get(rollout_server_url, "False") is False:
             self.logger.error(f"Rollout server url {rollout_server_url} is not available.")
@@ -132,6 +126,17 @@ class UpdateWeighter:
             self.rollout_cfg_info["backend"] = (rollout_config.extra_rollout_config or dict()).get(
                 "lmdeploy_backend", "pytorch"
             )
+
+    def _ensure_rollout_device_mesh(self) -> DeviceMesh:
+        if self.rollout_device_mesh is None:
+            # 非共卡 SGLang 不使用这个 mesh；只有共卡/旧权重同步路径需要
+            # 用 rollout rank 构造 torch DeviceMesh。
+            self.rollout_device_mesh = DeviceMesh(
+                "cpu",
+                mesh=self.rollout_engine_rank_mesh_array,
+                mesh_dim_names=("engine_instance", "engine_parallel"),
+            )
+        return self.rollout_device_mesh
 
     @ray_method
     def set_train_rollout_mode(self, train_rollout_mode: str):
@@ -309,7 +314,6 @@ class UpdateWeighter:
     def _update_weights_hf_generator(self, submodule=None, final_update=False):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
-        assert self.rollout_device_mesh is not None
 
         model = self._engine.model
         if submodule:
@@ -325,12 +329,16 @@ class UpdateWeighter:
         )
 
         train_enable_ep = model.fsdp_config is not None and model.fsdp_config.ep_size > 1
+        if train_enable_ep and not self.is_train_rollout_colocated:
+            raise NotImplementedError("Disaggregated update_weights with train expert parallelism is not supported.")
+
         if train_enable_ep:
             if self.rollout_cfg_info["ep"] > 1:
+                rollout_device_mesh = self._ensure_rollout_device_mesh()
                 fused_gen = self._rl_get_fused_ep_hf_param(
                     model,
-                    target_ep_rank=self.rollout_device_mesh["engine_parallel"].get_coordinate()[0],
-                    target_ep_size=self.rollout_device_mesh["engine_parallel"].size(),
+                    target_ep_rank=rollout_device_mesh["engine_parallel"].get_coordinate()[0],
+                    target_ep_size=rollout_device_mesh["engine_parallel"].size(),
                     bucket_size=bucket_size,
                 )
             else:
@@ -763,7 +771,7 @@ class UpdateWeighter:
             self._request_update_params_sglang_disaggregated(state_dict)
             return
 
-        cpu_mesh = self.rollout_device_mesh["engine_parallel"]
+        cpu_mesh = self._ensure_rollout_device_mesh()["engine_parallel"]
         cpu_group = cpu_mesh.get_group()
         head_rank = cpu_mesh.mesh[0].item()
         if self.rollout_url is None:
