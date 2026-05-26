@@ -28,7 +28,12 @@ from xtuner.v1.model.base import (
     get_async_hf_log_dir,
 )
 from xtuner.v1.utils import get_device, get_iso_timestamp, get_logger
-from xtuner.v1.utils.process import set_async_save_process_qos
+from xtuner.v1.utils.process import (
+    get_async_save_cpu_priority,
+    get_async_save_file_lock_slots,
+    get_async_save_io_priority,
+    set_async_save_process_qos,
+)
 
 from ..utils.misc import update_weight_map_from_safetensors_index
 
@@ -260,6 +265,16 @@ class BaseComposeModel(BaseModel):
             "prepare_snapshot_duration_sec": prepare_snapshot_duration_sec,
             "total_tensor_bytes": total_tensor_bytes,
         }
+        async_hf_config = {
+            "hf_save_bucket_size": {
+                "language_model": self.language_model.config.hf_save_cfg.bucket_size,
+                "vision_tower": self.vision_tower.config.hf_save_cfg.bucket_size,
+                "multi_modal_projector": self.multi_modal_projector.config.hf_save_cfg.bucket_size,
+            },
+            "async_save_cpu_priority": get_async_save_cpu_priority(),
+            "async_save_io_priority": get_async_save_io_priority(),
+            "async_save_file_write_lock_slots": get_async_save_file_lock_slots(),
+        }
         handle = AsyncHFSaveHandle(
             process=process,
             hf_dir=hf_dir,
@@ -267,6 +282,7 @@ class BaseComposeModel(BaseModel):
             status_path=status_path,
             cleanup_done_path=cleanup_done_path,
             log_info=log_info,
+            async_hf_config=async_hf_config,
         )
         self._pending_async_hf = handle
         return handle

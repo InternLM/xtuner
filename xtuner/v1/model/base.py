@@ -57,7 +57,12 @@ from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_co
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
 from xtuner.v1.utils.misc import FunctionEnum, FunctionType, get_function_full_qualname, get_function_type
-from xtuner.v1.utils.process import get_async_save_file_lock_slots, set_async_save_process_qos
+from xtuner.v1.utils.process import (
+    get_async_save_cpu_priority,
+    get_async_save_file_lock_slots,
+    get_async_save_io_priority,
+    set_async_save_process_qos,
+)
 
 from .utils import ModelForwardExtraLogInfo
 
@@ -81,7 +86,11 @@ def compute_local_shape_and_global_offset(*args, **kwargs):
         return _compute_local_shape_and_global_offset(*args, **kwargs)
 
 
-def _async_hf_summarize_status(all_status: list[dict[str, Any]], hf_dir: Path) -> dict[str, Any]:
+def _async_hf_summarize_status(
+    all_status: list[dict[str, Any]],
+    hf_dir: Path,
+    async_hf_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     def log_value(status: dict[str, Any], key: str) -> float:
         log_info = status.get("log", {})
         if not isinstance(log_info, dict):
@@ -105,6 +114,7 @@ def _async_hf_summarize_status(all_status: list[dict[str, Any]], hf_dir: Path) -
         "world_size": len(all_status),
         "ok": not failed_ranks,
         "failed_ranks": failed_ranks,
+        "async_hf_config": async_hf_config or {},
         "total_tensor_bytes_all_ranks": int(sum(tensor_bytes)),
         "max_total_tensor_bytes_per_rank": int(max(tensor_bytes)) if tensor_bytes else 0,
         "min_total_tensor_bytes_per_rank": int(min(tensor_bytes)) if tensor_bytes else 0,
@@ -162,6 +172,7 @@ class AsyncHFSaveHandle:
     status_path: Path
     cleanup_done_path: Path
     log_info: dict[str, Any]
+    async_hf_config: dict[str, Any] | None = None
 
 
 class TorchCompileOption(TypedDict):
@@ -825,6 +836,12 @@ class BaseModel(nn.Module):
             "prepare_snapshot_duration_sec": prepare_snapshot_duration_sec,
             "total_tensor_bytes": total_tensor_bytes,
         }
+        async_hf_config = {
+            "hf_save_bucket_size": self.config.hf_save_cfg.bucket_size,
+            "async_save_cpu_priority": get_async_save_cpu_priority(),
+            "async_save_io_priority": get_async_save_io_priority(),
+            "async_save_file_write_lock_slots": get_async_save_file_lock_slots(),
+        }
         handle = AsyncHFSaveHandle(
             process=process,
             hf_dir=hf_dir,
@@ -832,6 +849,7 @@ class BaseModel(nn.Module):
             status_path=status_path,
             cleanup_done_path=cleanup_done_path,
             log_info=log_info,
+            async_hf_config=async_hf_config,
         )
         self._pending_async_hf = handle
         return handle
@@ -987,7 +1005,11 @@ class BaseModel(nn.Module):
 
         if not all(status["ok"] for status in all_status):
             if rank == 0:
-                summary = _async_hf_summarize_status(all_status, hf_dir=hf_dir)
+                summary = _async_hf_summarize_status(
+                    all_status,
+                    hf_dir=hf_dir,
+                    async_hf_config=handle.async_hf_config,
+                )
                 summary["error"] = "async_hf_global_consistency_check_failed"
                 summary_path = status_path.parent / _ASYNC_HF_SUMMARY_FILENAME
                 with summary_path.open("w") as f:
@@ -1016,7 +1038,11 @@ class BaseModel(nn.Module):
         if dist.is_initialized():
             dist.barrier()
         if rank == 0:
-            summary = _async_hf_summarize_status(all_status, hf_dir=hf_dir)
+            summary = _async_hf_summarize_status(
+                all_status,
+                hf_dir=hf_dir,
+                async_hf_config=handle.async_hf_config,
+            )
             summary_path = status_path.parent / _ASYNC_HF_SUMMARY_FILENAME
             with summary_path.open("w") as f:
                 f.write(json.dumps(summary, indent=2))
