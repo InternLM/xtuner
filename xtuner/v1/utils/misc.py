@@ -27,10 +27,19 @@ logger = get_logger()
 XTUNER_DETERMINISTIC = os.getenv("XTUNER_DETERMINISTIC") == "true"
 
 
-def set_deterministic():
-    if XTUNER_DETERMINISTIC:
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-        torch.use_deterministic_algorithms(True, warn_only=True)
+def set_deterministic(deterministic: bool | None = None):
+    if deterministic is None:
+        deterministic = XTUNER_DETERMINISTIC
+    if not deterministic:
+        return
+
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+    # Inductor 会在 torch.compile 前读取 dynamic_scale_rblock；确定性模式必须尽早关闭。
+    os.environ["TORCHINDUCTOR_DYNAMIC_SCALE_RBLOCK"] = "0"
+    from torch._inductor import config as inductor_config
+
+    inductor_config.dynamic_scale_rblock = False
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
 
 # https://github.com/python/cpython/issues/82300#issuecomment-2169035092

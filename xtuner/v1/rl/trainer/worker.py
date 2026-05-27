@@ -56,6 +56,7 @@ from xtuner.v1.utils import (
     get_logger,
     get_torch_device_module,
     ray_method,
+    set_deterministic,
 )
 
 from ..rollout_is import merge_rollout_is_metrics
@@ -302,8 +303,7 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
     def _set_deterministic(self):
         if XTUNER_DETERMINISTIC:
             self.logger.info("Setting deterministic algorithms of TrainingWorker.")
-            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-            torch.use_deterministic_algorithms(True, warn_only=True)
+            set_deterministic()
 
     def _set_random_seed(self, seed: None | int):
         set_random_seed(seed)

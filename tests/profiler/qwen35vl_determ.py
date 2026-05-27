@@ -40,7 +40,7 @@ from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.profiler.prober_utils import setup_prober_list
-from xtuner.v1.utils import XTUNER_DETERMINISTIC
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, set_deterministic
 from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache
 
 
@@ -80,8 +80,7 @@ def _init_distributed(deterministic: bool) -> tuple[int, int, int]:
         os.environ.setdefault("NCCL_ALGO", "Ring")
         os.environ.setdefault("NCCL_PROTO", "Simple")
         os.environ.setdefault("NCCL_NUM_CHANNELS", "1")
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-        torch.use_deterministic_algorithms(True, warn_only=True)
+        set_deterministic(deterministic=True)
 
     dist.init_process_group(backend="cpu:gloo,cuda:nccl")
     rank = dist.get_rank()
