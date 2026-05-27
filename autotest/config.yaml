@@ -837,7 +837,7 @@ case:
                        operator: <
             timeout: 7200
 
-    qwen3-5-rl-lmdeploy-dapo:
+    qwen3-5-rl-vl-lmdeploy-dapo:
         -
             type: rl
             parameters:
@@ -853,7 +853,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-rl-lmdeploy-dapo/00f7e16/tracker.jsonl
+                base_metric: qwen3-5-rl-vl-lmdeploy-dapo/00f7e16/tracker.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy
@@ -973,7 +973,7 @@ case:
                        operator: <
             timeout: 7200
 
-   qwen3-5-rl-lmdeploy-dapo:
+    qwen3-5-rl-lmdeploy-dapo:
         -
             type: rl
             parameters:
