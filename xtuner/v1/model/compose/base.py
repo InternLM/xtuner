@@ -258,6 +258,14 @@ class BaseComposeModel(BaseModel):
         cleanup_done_path: Path,
         rank: int,
     ) -> None:
+        writer_start = time.time()
+        log_hf_dir = (
+            tmp_hf_dir.with_name(tmp_hf_dir.name[: -len(".incomplete")])
+            if tmp_hf_dir.name.endswith(".incomplete")
+            else tmp_hf_dir
+        )
+        if rank == 0:
+            logger.info(f"[Async saving HF to {log_hf_dir} writer] started")
         try:
             set_async_save_process_qos()
             self._cleanup_async_hf_dirs_before_write(
@@ -270,7 +278,13 @@ class BaseComposeModel(BaseModel):
             status = {"rank": rank, "ok": True, "error": "", "weight_map": merged_weight_map}
             with status_path.open("w") as f:
                 f.write(json.dumps(status, indent=2))
+            if rank == 0:
+                elapsed = time.time() - writer_start
+                logger.info(f"[Async saving HF to {log_hf_dir} writer] finished in {elapsed:.2f}s")
         except Exception as exc:
+            if rank == 0:
+                elapsed = time.time() - writer_start
+                logger.error(f"[Async saving HF to {log_hf_dir} writer] failed after {elapsed:.2f}s: {exc}")
             status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
             with status_path.open("w") as f:
                 f.write(json.dumps(status, indent=2))
