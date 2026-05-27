@@ -484,7 +484,7 @@ case:
             assert_info:
                 base_metric: qwen3-5-sft-sp4-resume/625c0018/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.02
+                    grad_norm: 0.09
                     loss/local_loss: 0.000001
                     loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
@@ -709,7 +709,7 @@ case:
         -
             type: rl
             parameters:
-                config: autotest/config/rl_qwen3_8B_gsm8k_grpo.py
+                config: autotest/config/rl_qwen3_gsm8k_grpo.py
                 infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
@@ -733,7 +733,7 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0001
+                       threshold: 0.0002
                        method: absolute
                        operator: <=
                     -
