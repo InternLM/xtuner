@@ -46,7 +46,7 @@ def main(
     cfg = Config.fromfile(config)
     if work_dir is not None:
         cfg.trainer.work_dir = work_dir
-    if num_workers is not None:
+    if num_workers is not None and hasattr(cfg.trainer, "resources"):
         cfg.trainer.resources.num_workers = num_workers
     trainer = cfg.trainer.build()
     trainer.fit()

@@ -91,6 +91,11 @@ class AcceleratorResourcesConfig(BaseModel):
             # NOTE: Ascend 910 has 16 NPUs per node
             self.num_accelerators_per_node = 16
 
+    def validate_available_resources(self) -> None:
+        """Validate resources against the current Ray cluster.
+
+        Keep this out of model_post_init so CLI overrides can adjust loaded config objects before resource checks run.
+        """
         assert ray.is_initialized(), "Ray must be initialized before creating AcceleratorResourcesConfig."
 
         available_resources = ray.available_resources()
@@ -283,6 +288,7 @@ class AutoAcceleratorWorkers:
         Returns:
             PlacementGroup: The created Ray PlacementGroup.
         """
+        resources_config.validate_available_resources()
         bundles = [
             {
                 "CPU": resources_config.num_cpus_per_worker,
