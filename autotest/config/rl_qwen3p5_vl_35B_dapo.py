@@ -173,7 +173,7 @@ model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
 optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(
-        cliprange_high=0.2,
+        cliprange_high=0.28,
         cliprange_low=0.2,
         loss_type="vanilla",
         clip_ratio_c=10.0,
@@ -181,7 +181,7 @@ loss_cfg = GRPOLossConfig(
         log_prob_diff_max=20.0,
     ),
     ignore_idx=-100,
-    use_kl_loss=True,
+    use_kl_loss=False,
     kl_loss_coef=0.0,
     kl_loss_type="low_var_kl",
     mode="chunk",
@@ -203,7 +203,7 @@ train_worker_cfg = WorkerConfig(
     loss_cfg=loss_cfg,
     lr_cfg=lr_cfg,
     fsdp_cfg=fsdp_cfg,
-    sp_size=1,
+    sp_size=2,
     optimizer_steps=train_optimizer_steps,
     pack_max_length=pack_max_length,
 )
