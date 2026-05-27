@@ -179,11 +179,11 @@ def _prepare_model_input(data_batch: list[dict[str, Any]], loss_cfg: CELossConfi
     for data in data_batch:
         seq_ctx = data["seq_ctx"].to("cuda")
         seq_ctx_list.append(seq_ctx)
-        loss_ctx_list.append(loss_cfg.build(shifted_labels=data["shifted_labels"], sp_mesh=None))
+        loss_ctx_list.append(loss_cfg.build(data={"shifted_labels": data["shifted_labels"]}, sp_mesh=None))
 
     cu_seq_lens_list = [seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list]
     loss_ctx_list = CELossContext.build_batches(loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=None)
-    return [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx) for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)]
+    return [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx}) for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)]
 
 
 def _total_loss(outputs: Any) -> torch.Tensor:

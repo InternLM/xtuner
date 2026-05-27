@@ -107,11 +107,11 @@ class TestAccProberForwardRecords(DeterministicDDPTestCase):
 
             loss_cfg = CELossConfig()
             LossCtx = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
             loss_ctx = LossCtx.build_batches([loss_ctx])[0]
 
             with torch.no_grad():
-                model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+                model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
 
             # Dump records to disk (requires dist.get_rank())
             AccProber.after_micro_iter_forward()
@@ -192,11 +192,11 @@ class TestAccProberForwardRecordsCompiled(DeterministicDDPTestCase):
             seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids,))
             loss_cfg = CELossConfig()
             LossCtx = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
             loss_ctx = LossCtx.build_batches([loss_ctx])[0]
 
             with torch.no_grad():
-                model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+                model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
 
             AccProber.after_micro_iter_forward()
 
@@ -276,11 +276,11 @@ class TestAccProberGatedDeltaNetInternalsCompiled(DeterministicDDPTestCase):
             seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids,))
             loss_cfg = CELossConfig()
             LossCtx = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
             loss_ctx = LossCtx.build_batches([loss_ctx])[0]
 
             with torch.no_grad():
-                model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+                model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
 
             AccProber.after_micro_iter_forward()
 
@@ -363,11 +363,11 @@ class TestAccProberMoEMLPCompiled(DeterministicDDPTestCase):
             seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids,))
             loss_cfg = CELossConfig()
             LossCtx = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
             loss_ctx = LossCtx.build_batches([loss_ctx])[0]
 
             with torch.no_grad():
-                model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+                model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
 
             AccProber.after_micro_iter_forward()
 
