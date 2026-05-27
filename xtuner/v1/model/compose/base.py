@@ -1,6 +1,5 @@
 import json
 import multiprocessing as py_mp
-import time
 from pathlib import Path
 from shutil import rmtree
 from typing import Callable, Self, Sequence
@@ -259,7 +258,6 @@ class BaseComposeModel(BaseModel):
         cleanup_done_path: Path,
         rank: int,
     ) -> None:
-        writer_start = time.time()
         if rank == 0:
             logger.info(f"[Async saving HF to {tmp_hf_dir} writer] started")
         try:
@@ -275,12 +273,10 @@ class BaseComposeModel(BaseModel):
             with status_path.open("w") as f:
                 f.write(json.dumps(status, indent=2))
             if rank == 0:
-                elapsed = time.time() - writer_start
-                logger.info(f"[Async saving HF to {tmp_hf_dir} writer] finished in {elapsed:.2f}s")
+                logger.info(f"[Async saving HF to {tmp_hf_dir} writer] finished")
         except Exception as exc:
             if rank == 0:
-                elapsed = time.time() - writer_start
-                logger.error(f"[Async saving HF to {tmp_hf_dir} writer] failed after {elapsed:.2f}s: {exc}")
+                logger.error(f"[Async saving HF to {tmp_hf_dir} writer] failed: {exc}")
             status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
             with status_path.open("w") as f:
                 f.write(json.dumps(status, indent=2))
