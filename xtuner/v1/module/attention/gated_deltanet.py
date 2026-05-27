@@ -42,6 +42,9 @@ def _all_to_all_out(x, scatter_dim, gather_dim, mesh):
 
 def _patch_triton_autotune_for_determinism() -> None:
     # 在导入 FLA 前改 Triton 装饰器，避免依赖 FLA 内部 kernel 名。
+    # Triton autotune 会按 benchmark/cache 在多个 kernel config 中选一个实现；
+    # 不同 cache 目录或计时抖动可能选到不同 tiling/num_warps/reduction 路径，
+    # 从而改变浮点累加顺序。确定性模式固定第一个 config，并禁用 cache 结果。
     import triton
 
     original_autotune = triton.autotune
