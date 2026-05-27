@@ -10,6 +10,7 @@ class Train:
         config_path = config.get("parameters").get("config")
         train_type = config.get("type")
         nproc_per_node = config.get("resource", {}).get("gpus_per_task", 8)
+        pip_package = config.get("resource", {}).get("pip_package", 'ls')
         if train_type in ["sft", "rl"]:
             model_config = config.get("parameters", {}).get("model", None)
             config_path = config.get("parameters", {}).get("config", None)
@@ -34,7 +35,7 @@ class Train:
 
             if train_type == "sft":
                 command = (
-                    f"cd {current_dir}; pwd; pip install -e .[all]; pip install more-itertools; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
+                    f"cd {current_dir}; pwd; {pip_package}; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + cudnn_patch
                     + f"torchrun --nproc-per-node {nproc_per_node} --master_addr=${{MASTER_ADDR}} --master_port=${{MASTER_PORT}} --nnodes=${{WORLD_SIZE}} --node_rank=${{RANK}} "
                     + f"xtuner/v1/train/cli/{train_type}.py"
@@ -57,10 +58,11 @@ class Train:
                 return command, config
             elif train_type == "rl":
                 infer_type = config.get("parameters", {}).get("infer_backend", "lmdeploy")
+                acceleator = config.get("parameters", {}).get("acceleator", "GPU")
                 command = (
-                    f"cd {current_dir}; pwd; pip install -e .[all]; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
+                    f"cd {current_dir}; pwd; {pip_package}; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + cudnn_patch
-                    + f"bash -x examples/v1/scripts/run_rl.sh {config_path} {infer_type} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
+                    + f"bash -x autotest/utils/ci_run_rl.sh {acceleator} {infer_type} {config_path} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
                 )
                 return command, config
         else:

@@ -1,0 +1,178 @@
+import os
+from copy import deepcopy
+from pathlib import Path
+
+from transformers import AutoTokenizer
+from xtuner.v1.config import (
+    AdamWConfig,
+    FSDPConfig,
+    LRConfig,
+)
+from xtuner.v1.data_proto.rl_data import SampleParams
+from xtuner.v1.datasets import RLTokenizeFnConfig
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
+from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
+from xtuner.v1.ray.base import AcceleratorResourcesConfig
+from xtuner.v1.ray.config.worker import RolloutConfig
+from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
+from xtuner.v1.ray.evaluator import EvaluatorConfig
+from xtuner.v1.ray.judger.controller import JudgerConfig
+from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
+from xtuner.v1.rl.base import WorkerConfig
+from xtuner.v1.rl.grpo import GRPOLossConfig
+from xtuner.v1.train.rl_trainer import RLTrainerConfig
+
+work_dir = os.environ["WORK_DIR"]
+model_path = os.environ["MODEL_PATH"]
+data_path = os.environ["DATA_PATH"]
+eval_data_path = os.environ.get("EVAL_DATA_PATH", "")
+enable_evaluate = eval_data_path != ""
+
+# basic settings
+experimental_name = "grpo_gsm8k_qwen3p5_text"
+total_epochs = 3
+global_batch_size = 64
+prompt_repeat_k = 5
+rollout_tp_size = 1
+rollout_ep_size = 1
+max_prompt_length = 512
+max_response_length = 1024
+pack_max_length = 32768
+train_optimizer_steps = 1
+hf_interval = 30
+enable_initial_evaluate = True
+evaluate_step = 10
+
+# 1. resources
+resources = AcceleratorResourcesConfig(
+    accelerator="GPU",
+    num_workers=8,
+    num_cpus_per_worker=12,
+    cpu_memory_per_worker=16 * 1024**3,  # 16 GB
+)
+
+# 2. rollout
+rollout_config = RolloutConfig(
+    fp32_lm_head=True,
+    env=experimental_name,
+    device=resources.accelerator,
+    model_path=model_path,
+    dtype="bfloat16",
+    tensor_parallel_size=rollout_tp_size,
+    expert_parallel_size=rollout_ep_size,
+    gpu_memory_utilization=0.8,
+    context_length=max_response_length + max_prompt_length,
+    rollout_max_batch_size_per_instance=512,
+)
+
+# sampling params
+training_sample_params = SampleParams(
+    max_tokens=max_response_length,
+    top_k=0,
+    top_p=1.0,
+    temperature=1.0,
+    min_tokens=0,
+)
+evaluation_sample_params = deepcopy(training_sample_params)
+evaluation_sample_params.top_k = 1
+evaluation_sample_params.top_p = 1.0
+evaluation_sample_params.temperature = 0.0
+
+# dataset
+train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
+eval_dataset = DatasetConfig(name=experimental_name, anno_path=eval_data_path) if enable_evaluate else None
+tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+tokenizer_config = RLTokenizeFnConfig(max_length=max_prompt_length)
+
+train_dataset_cfg = [{"dataset": train_dataset, "tokenize_fn": tokenizer_config}]
+eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}] if enable_evaluate else []
+
+dataloader_config = DataloaderConfig(
+    num_workers=8,
+    pack_max_length=pack_max_length,
+    collator="fake_collator",
+    pack_level="none",
+)
+
+# 3. judger
+gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
+judger_cfg = JudgerConfig(reward_judger_configs=[gsm8k_judger_config])
+
+# 4. dataflow and evaluator
+dataflow_config = DataFlowConfig(
+    env=experimental_name,
+    prompt_repeat_k=prompt_repeat_k,
+    global_batch_size=global_batch_size,
+    sample_params=training_sample_params,
+)
+
+evaluator_cfg = (
+    EvaluatorConfig(
+        enable_evaluate=enable_evaluate,
+        enable_initial_evaluate=enable_initial_evaluate,
+        dataset_cfg=eval_dataset_cfg,
+        tokenizer=tokenizer,
+        evaluate_step=evaluate_step,
+        compute_metric_func=None,
+        sample_params=evaluation_sample_params,
+    )
+    if enable_evaluate
+    else None
+)
+
+# replay buffer config
+replay_buffer_cfg = ReplayBufferConfig(
+    dataset_cfg=train_dataset_cfg, dataloader_cfg=dataloader_config, tokenizer=tokenizer
+)
+
+# 5. Train worker
+model_cfg = Qwen3_5_VLMoE35BA3Config()
+model_cfg.compile_cfg = False
+optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False)
+loss_cfg = GRPOLossConfig(
+    policy_loss_cfg=dict(
+        cliprange_high=0.2,
+        cliprange_low=0.2,
+        loss_type="vanilla",
+        clip_ratio_c=10.0,
+        log_prob_diff_min=-20.0,
+        log_prob_diff_max=20.0,
+    ),
+    ignore_idx=-100,
+    use_kl_loss=True,
+    kl_loss_coef=0.0,
+    kl_loss_type="low_var_kl",
+    mode="chunk",
+    chunk_size=512,
+)
+lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
+fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1, fp32_lm_head=True)
+train_worker_cfg: WorkerConfig = WorkerConfig(
+    model_cfg=model_cfg,
+    load_from=model_path,
+    optim_cfg=optim_cfg,
+    loss_cfg=loss_cfg,
+    lr_cfg=lr_cfg,
+    fsdp_cfg=fsdp_cfg,
+    sp_size=1,
+    optimizer_steps=train_optimizer_steps,
+    pack_max_length=pack_max_length,
+)
+
+# 6. RL Trainer
+trainer = RLTrainerConfig(
+    load_from=model_path,
+    resources=resources,
+    rollout_config=rollout_config,
+    dataflow_config=dataflow_config,
+    judger_config=judger_cfg,
+    replay_buffer_config=replay_buffer_cfg,
+    evaluator_config=evaluator_cfg,
+    train_worker_config=train_worker_cfg,
+    tokenizer_path=model_path,
+    work_dir=work_dir,
+    total_epochs=total_epochs,
+    hf_interval=hf_interval,
+    exp_tracker="jsonl",
+)
+
