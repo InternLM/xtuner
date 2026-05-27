@@ -11,7 +11,7 @@ import ray
 from ray import ObjectRef as RayObjectRef
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.utils import asyncio_run, free_object_refs
+from xtuner.v1.rl.utils import free_object_refs
 from xtuner.v1.utils import get_logger
 
 
@@ -179,7 +179,7 @@ class RolloutHealthChecker:
         async def _run_checks() -> list[bool]:
             return await asyncio.gather(*tasks)
 
-        check_results = asyncio_run(_run_checks())
+        check_results = asyncio.run(_run_checks())
         inactive_workers = []
         for (rank, _, _, _), is_healthy in zip(workers_to_check, check_results):
             if not is_healthy:
