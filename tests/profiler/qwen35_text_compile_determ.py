@@ -1,12 +1,13 @@
 """Text-only Qwen3.5 MoE gradient determinism recorder.
 
 Typical usage:
+    export QWEN35_MOE_PATH=/path/to/Qwen3.5-35B-A3B
 
-    XTUNER_DETERMINISTIC=true torchrun --nproc-per-node 4 tests/profiler/numerics_test.py \
-        --record-path /tmp/qwen35_text/run1 --hf-path /path/to/Qwen3.5-35B-A3B --deterministic
+    XTUNER_DETERMINISTIC=true torchrun --nproc-per-node 4 tests/profiler/qwen35_text_compile_determ.py \
+        --record-path /tmp/qwen35_text/run1 --deterministic
 
-    XTUNER_DETERMINISTIC=true torchrun --nproc-per-node 4 tests/profiler/numerics_test.py \
-        --record-path /tmp/qwen35_text/run2 --hf-path /path/to/Qwen3.5-35B-A3B --deterministic \
+    XTUNER_DETERMINISTIC=true torchrun --nproc-per-node 4 tests/profiler/qwen35_text_compile_determ.py \
+        --record-path /tmp/qwen35_text/run2 --deterministic \
         --compare /tmp/qwen35_text/run1
 
 Each rank writes ``<record-path>_rank<N>.json``. Comparison is bitwise on local
@@ -39,6 +40,7 @@ from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache
 
 
 GRAD_ACCUM_STEPS = 2
+QWEN35_MOE_PATH = os.environ["QWEN35_MOE_PATH"]
 
 
 def _print_rank0(message: str) -> None:
@@ -354,7 +356,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--record-path", required=True, help="Output base path; _rank<N>.json is appended")
     parser.add_argument("--compare", default=None, help="Previous output base path to compare against")
     parser.add_argument("--skip-train", action="store_true", help="Only load --record-path and compare")
-    parser.add_argument("--hf-path", default=os.environ.get("QWEN35_MOE_PATH"), help="HF path or QWEN35_MOE_PATH")
+    parser.add_argument("--hf-path", default=QWEN35_MOE_PATH, help="HF path or QWEN35_MOE_PATH")
     parser.add_argument("--num-layers", type=int, default=4)
     parser.add_argument("--seq-len", type=int, default=4096)
     parser.add_argument("--batch-style", choices=("simple", "realistic"), default="simple")

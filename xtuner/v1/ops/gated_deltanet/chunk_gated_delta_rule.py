@@ -1,13 +1,12 @@
-from __future__ import annotations
-
 # modified from
 # https://github.com/fla-org/flash-linear-attention/tree/v0.4.2/fla/ops/gated_delta_rule/chunk.py
 # to support torch.compile
+
 import warnings
-from typing import TYPE_CHECKING
 
 import torch
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.ops.cp import FLACPContext
 from fla.ops.gated_delta_rule.chunk import (
     chunk_gated_delta_rule_bwd as origin_chunk_gated_delta_rule_bwd,
 )
@@ -16,10 +15,6 @@ from fla.ops.gated_delta_rule.chunk import (
 )
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
-
-
-if TYPE_CHECKING:
-    from fla.ops.cp import FLACPContext
 
 
 @torch.library.custom_op(
@@ -45,47 +40,23 @@ def chunk_gated_delta_rule_fwd(
     transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     if cu_seqlens is not None and chunk_indices is None:
-        # 不同 FLA 版本的 prepare_chunk_indices 签名不同；旧版本不接受 cu_seqlens_cpu。
-        try:
-            chunk_indices = prepare_chunk_indices(cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu)
-        except TypeError as exc:
-            if "cu_seqlens_cpu" not in str(exc):
-                raise
-            chunk_indices = prepare_chunk_indices(cu_seqlens, 64)
-    # 不同 FLA 版本的 kernel 签名不同；优先使用新签名，旧环境回退到主干可用的参数集合。
-    try:
-        result = origin_chunk_gated_delta_rule_fwd(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            scale=scale,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            cu_seqlens=cu_seqlens,
-            cp_context=None,
-            chunk_indices=chunk_indices,
-            transpose_state_layout=transpose_state_layout,
-        )
-    except TypeError as exc:
-        if not any(key in str(exc) for key in ("cp_context", "chunk_indices", "transpose_state_layout")):
-            raise
-        result = origin_chunk_gated_delta_rule_fwd(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            scale=scale,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            cu_seqlens=cu_seqlens,
-        )
-    if len(result) == 4:
-        g, o, A, final_state = result
-    else:
-        g, o, A, final_state, initial_state = result
+        chunk_indices = prepare_chunk_indices(cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu)
+    # XTuner does not use FLA context parallelism; keep the custom op schema compile-friendly.
+    cp_context = None
+    g, o, A, final_state, initial_state = origin_chunk_gated_delta_rule_fwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        scale=scale,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+        cp_context=cp_context,
+        chunk_indices=chunk_indices,
+        transpose_state_layout=transpose_state_layout,
+    )
     # initial_state is None in current XTuner implementation,
     # if not None, clone it to ensure the output of this custom operator must not also be an input
     initial_state = initial_state.clone() if initial_state is not None else initial_state
@@ -172,40 +143,24 @@ def chunk_gated_delta_rule_bwd(
     chunk_indices: torch.Tensor | None = None,
     transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    # 不同 FLA 版本的 kernel 签名不同；优先使用新签名，旧环境回退到主干可用的参数集合。
-    try:
-        dq, dk, dv, db, dg, dh0 = origin_chunk_gated_delta_rule_bwd(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            A=A,
-            scale=scale,
-            initial_state=initial_state,
-            do=do,
-            dht=dht,
-            cu_seqlens=cu_seqlens,
-            cp_context=None,
-            chunk_indices=chunk_indices,
-            transpose_state_layout=transpose_state_layout,
-        )
-    except TypeError as exc:
-        if not any(key in str(exc) for key in ("cp_context", "chunk_indices", "transpose_state_layout")):
-            raise
-        dq, dk, dv, db, dg, dh0 = origin_chunk_gated_delta_rule_bwd(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            A=A,
-            scale=scale,
-            initial_state=initial_state,
-            do=do,
-            dht=dht,
-            cu_seqlens=cu_seqlens,
-        )
+    # XTuner does not use FLA context parallelism; keep the custom op schema compile-friendly.
+    cp_context = None
+    dq, dk, dv, db, dg, dh0 = origin_chunk_gated_delta_rule_bwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        A=A,
+        scale=scale,
+        initial_state=initial_state,
+        do=do,
+        dht=dht,
+        cu_seqlens=cu_seqlens,
+        cp_context=cp_context,
+        chunk_indices=chunk_indices,
+        transpose_state_layout=transpose_state_layout,
+    )
     return dq, dk, dv, db, dg, dh0
 
 

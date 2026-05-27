@@ -1,18 +1,22 @@
 """Qwen3.5-VL 在不同 TRITON_CACHE_DIR 下的最小确定性复现脚本。
 
-典型用法由 qwen35vl_determ.sh 负责：
+典型用法是给两次 torchrun 设置不同的 TRITON_CACHE_DIR，并比较第二次与第一次的记录：
 
-    bash tests/profiler/qwen35vl_determ.sh 8
-    bash tests/profiler/qwen35vl_determ.sh 4
+    export XTUNER_DETERMINISTIC=true
+    export CUDA_VISIBLE_DEVICES=4,5,6,7
+    export MODEL_PATH=/path/to/Qwen3.5-35B-A3B
+    export DATA_PATH=/path/to/data
+    export MEDIA_ROOT=/path/to/media
+    export NUM_LAYERS=8
 
-Python 脚本本身只负责一次 torchrun 进程内的记录/比较：
+    TRITON_CACHE_DIR=/tmp/torch_custom_triton_cache/qwen35vl_run1 \
+    torchrun --nproc-per-node 4 tests/profiler/qwen35_vl_determ.py \
+        --record-path /tmp/qwen35vl/run1/grads --num-layers 8 --deterministic
 
-    XTUNER_DETERMINISTIC=true torchrun --nproc-per-node 4 tests/profiler/qwen35vl_determ.py \
-        --record-path /tmp/qwen35vl/run1 --num-layers 8 --deterministic
-
-    XTUNER_DETERMINISTIC=true torchrun --nproc-per-node 4 tests/profiler/qwen35vl_determ.py \
-        --record-path /tmp/qwen35vl/run2 --num-layers 8 --deterministic \
-        --compare /tmp/qwen35vl/run1
+    TRITON_CACHE_DIR=/tmp/torch_custom_triton_cache/qwen35vl_run2 \
+    torchrun --nproc-per-node 4 tests/profiler/qwen35_vl_determ.py \
+        --record-path /tmp/qwen35vl/run2/grads --num-layers 8 --deterministic \
+        --compare /tmp/qwen35vl/run1/grads
 """
 
 from __future__ import annotations
@@ -44,12 +48,10 @@ from xtuner.v1.utils import XTUNER_DETERMINISTIC, set_deterministic
 from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache
 
 
-DEFAULT_MODEL_PATH = (
-    "/mnt/shared-storage-user/gpfs2-shared-public/huggingface/hub/"
-    "models--Qwen--Qwen3.5-35B-A3B/snapshots/"
-    "ec2d4ece1ffb563322cbee9a48fe0e3fcbce0307"
-)
-DEFAULT_DATA_PATH = "/mnt/shared-storage-user/llmrazor-share/data/ci_vl"
+MODEL_PATH = os.environ["MODEL_PATH"]
+DATA_PATH = os.environ["DATA_PATH"]
+MEDIA_ROOT = os.environ["MEDIA_ROOT"]
+NUM_LAYERS = int(os.environ.get("NUM_LAYERS", "8"))
 
 
 def _rank() -> int:
@@ -377,10 +379,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--record-path", required=True, help="Output base path; _rank<N>.json is appended")
     parser.add_argument("--compare", default=None, help="Previous output base path to compare against")
     parser.add_argument("--skip-train", action="store_true", help="Only load --record-path and compare")
-    parser.add_argument("--model-path", default=os.environ.get("MODEL_PATH", DEFAULT_MODEL_PATH))
-    parser.add_argument("--data-path", default=os.environ.get("DATA_PATH", DEFAULT_DATA_PATH))
-    parser.add_argument("--media-root", default=os.environ.get("MEDIA_ROOT", DEFAULT_DATA_PATH))
-    parser.add_argument("--num-layers", type=int, default=int(os.environ.get("NUM_LAYERS", "8")))
+    parser.add_argument("--model-path", default=MODEL_PATH)
+    parser.add_argument("--data-path", default=DATA_PATH)
+    parser.add_argument("--media-root", default=MEDIA_ROOT)
+    parser.add_argument("--num-layers", type=int, default=NUM_LAYERS)
     parser.add_argument("--max-len", type=int, default=4096)
     parser.add_argument("--global-batch-size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)
@@ -412,8 +414,8 @@ def main() -> None:
     if args.deterministic and not XTUNER_DETERMINISTIC:
         _print_rank0(
             "[qwen35vl_determ] WARNING: --deterministic only set torch/NCCL knobs here; "
-            "XTUNER_DETERMINISTIC was not true at import time. Prefer qwen35vl_determ.sh "
-            "or export XTUNER_DETERMINISTIC=true before torchrun."
+            "XTUNER_DETERMINISTIC was not true at import time. "
+            "Export XTUNER_DETERMINISTIC=true before torchrun."
         )
 
     total_loss = None
