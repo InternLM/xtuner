@@ -642,6 +642,10 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
         if self.rank == 0:
             self.logger.info(logger_msg)
 
+        only_calc_mismatch_ratio = os.environ.get("ONLY_CALC_MISMATCH_RATIO", "0") == "1"
+        if only_calc_mismatch_ratio:
+            return worker_log_item
+
         # compute reference logprobs
         ref_logprobs_list: list[torch.Tensor] | None = None
         if self._has_ref:

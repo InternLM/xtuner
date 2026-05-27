@@ -28,7 +28,7 @@ NNODE = int(os.environ.get("WORLD_SIZE", "1"))
 # basic settings
 experimental_name = "dapo_math"
 total_epochs = 1
-train_batch_size = 512
+train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", 512))
 prompt_repeat_k = 16
 rollout_tp_size = 1
 rollout_ep_size = 1

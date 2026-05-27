@@ -24,6 +24,16 @@ def _get_current_node_id() -> str:
     return str(node_id)
 
 
+def _get_current_node_ray_gpu_resources(current_node_id: str) -> float | None:
+    for node in ray.nodes():
+        node_id = _get_actor_value(node, "NodeID", "node_id", "NodeId")
+        if str(node_id) != current_node_id:
+            continue
+        resources = node.get("Resources") or node.get("resources") or {}
+        return float(resources.get("GPU", 0))
+    return None
+
+
 def _get_actor_value(actor_info, *keys):
     for key in keys:
         value = actor_info.get(key)
@@ -174,7 +184,10 @@ def monitor_actor_memory(work_dir: str, interval: int = 60):
     finally:
         pynvml.nvmlShutdown()
 
-    print(f"当前节点 GPU 数量: {local_gpus}")
+    local_ray_gpus = _get_current_node_ray_gpu_resources(current_node_id)
+    print(f"当前节点物理 GPU 数量(NVML): {local_gpus}")
+    if local_ray_gpus is not None:
+        print(f"当前节点 Ray 配置 GPU resource 数量: {local_ray_gpus:g}")
     tb_writer_list = [TensorboardWriter(log_dir=f"{work_dir}/tb/{rank}") for rank in range(max(local_gpus, 1))]
 
     count = 0

@@ -40,7 +40,7 @@ enable_evaluate = eval_data_path is not None and eval_data_path != ""
 # basic settings
 experimental_name = "grpo_mix_data"
 total_epochs = 15
-global_batch_size = 256
+train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", 256))
 prompt_repeat_k = 8
 rollout_tp_size = 2
 rollout_ep_size = 1
@@ -253,7 +253,7 @@ trainer = RLColocateTrainerConfig(
     evaluator_config=EvaluatorConfig(compute_metric_func=None),
     load_from=model_path,
     total_epochs=total_epochs,
-    train_batch_size=global_batch_size,
+    train_batch_size=train_batch_size,
     advantage_estimator_config=GRPOAdvantageConfig(eps=1e-8),
     enable_evaluate=enable_evaluate,
     enable_initial_evaluate=False,
