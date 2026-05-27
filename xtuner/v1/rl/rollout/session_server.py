@@ -73,6 +73,25 @@ def _extract_output_logprobs(choice: dict, output_token_ids: list[int]) -> list[
     return [item[0] for item in output_token_logprobs]
 
 
+_SESSION_SERVER_ONLY_KEYS = {"session_id", "xtuner_skip_trace_store", "xtuner_trace_enabled"}
+
+
+def _bool_request_value(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return bool(value)
+
+
+def _request_uses_trace_store(req_body: dict) -> bool:
+    if _bool_request_value(req_body.get("xtuner_skip_trace_store"), False):
+        return False
+    if "xtuner_trace_enabled" in req_body:
+        return _bool_request_value(req_body.get("xtuner_trace_enabled"), True)
+    return _bool_request_value(req_body.get("return_token_ids"), True)
+
+
 class SessionServer:
     """SessionServer intercepts and records requests sent to a remote LLM API
     worker.
@@ -117,8 +136,19 @@ class SessionServer:
         self._site: Optional[web.TCPSite] = None
         self._lmdeploy_actor: Optional[ray.actor.ActorHandle] = None
 
-    async def on_request(self, req_body: dict) -> dict:
+    async def on_request(self, req_body: dict, *, trace_enabled: bool = True) -> dict:
         """Hook for processing/modifying the request before forwarding."""
+
+        if not trace_enabled:
+            worker_req = {k: v for k, v in req_body.items() if k not in _SESSION_SERVER_ONLY_KEYS}
+            if "logprobs" in worker_req:
+                worker_req.setdefault("return_logprob", worker_req.pop("logprobs"))
+            if not _bool_request_value(worker_req.get("return_logprob"), False):
+                worker_req.pop("top_logprobs", None)
+                worker_req["return_logprob"] = False
+            worker_req["return_token_ids"] = False
+            worker_req.setdefault("return_routed_experts", True)
+            return worker_req
 
         session_id = req_body["session_id"]
         # 1. chat_template render 出完整 prompt string，不 tokenize 全量
@@ -141,7 +171,11 @@ class SessionServer:
 
         # 3. 组装 OpenAI chat completions 请求。
         worker_req = {
-            **{k: v for k, v in req_body.items() if k not in ["session_id", "messages", "logprobs", "top_logprobs"]},
+            **{
+                k: v
+                for k, v in req_body.items()
+                if k not in _SESSION_SERVER_ONLY_KEYS | {"messages", "logprobs", "top_logprobs"}
+            },
             "messages": [],
             "input_ids": input_ids,
             "return_token_ids": True,
@@ -151,8 +185,11 @@ class SessionServer:
         }
         return worker_req
 
-    async def on_response(self, worker_resp: dict) -> dict:
+    async def on_response(self, worker_resp: dict, *, trace_enabled: bool = True) -> dict:
         """Hook for processing the parsed response received from the worker."""
+
+        if not trace_enabled:
+            return {k: v for k, v in worker_resp.items() if k not in {"messages", "tools"}}
 
         session_id = worker_resp["session_id"]
         messages = worker_resp["messages"]
@@ -265,21 +302,25 @@ class SessionServer:
         # Read the request body
         request_body = await request.read()
         request_data = session_id = messages = None
+        trace_enabled = False
         orig_return_logprob = orig_return_token_ids = orig_return_routed_experts = False
         if request_body:
             try:
                 request_data = json.loads(request_body)
 
-                orig_return_logprob = request_data.get("return_logprob", False)
-                orig_return_token_ids = request_data.get("return_token_ids", False)
-                orig_return_routed_experts = request_data.get("return_routed_experts", False)
+                trace_enabled = _request_uses_trace_store(request_data)
+                orig_return_logprob = _bool_request_value(
+                    request_data.get("return_logprob", request_data.get("logprobs")), False
+                )
+                orig_return_token_ids = _bool_request_value(request_data.get("return_token_ids"), False)
+                orig_return_routed_experts = _bool_request_value(request_data.get("return_routed_experts"), True)
 
                 session_id = request_data.get("session_id")
                 messages = request_data.get("messages")
                 tools = request_data.get("tools", None)
 
                 # Apply purely abstract on_request processing
-                request_data = await self.on_request(request_data)
+                request_data = await self.on_request(request_data, trace_enabled=trace_enabled)
                 # Re-serialize the modified payload back to bytes
                 request_body = json.dumps(request_data).encode("utf-8")
             except json.JSONDecodeError:
@@ -366,7 +407,8 @@ class SessionServer:
                     client_alive = True
                     async for line in resp.content:
                         # Keep unmodified line for trace store parsing
-                        response_chunks.append(line)
+                        if trace_enabled:
+                            response_chunks.append(line)
 
                         # Dynamically prune added fields before writing to client
                         if request_data is not None and line.startswith(b"data: ") and line.strip() != b"data: [DONE]":
@@ -378,14 +420,14 @@ class SessionServer:
                             except Exception:
                                 pass
 
-                        # Delay writing the [DONE] line until after on_response
-                        if client_alive and line.strip() != b"data: [DONE]":
+                        # Delay [DONE] only while a training trace still needs to be exported.
+                        if client_alive and (not trace_enabled or line.strip() != b"data: [DONE]"):
                             try:
                                 await response.write(line)
                             except (ConnectionError, ClientConnectionResetError):
                                 client_alive = False
 
-                    raw_response = b"".join(response_chunks)  # Original raw response for exact tracing
+                    raw_response = b"".join(response_chunks) if trace_enabled else b""
                 else:
                     raw_response = await resp.read()
                     final_raw_response = raw_response
@@ -410,9 +452,9 @@ class SessionServer:
 
         # Apply abstract on_response processing
         response_data = None
-        skip_done = False
+        skip_done = bool(is_stream and not trace_enabled)
         session_error_msg = None
-        if request_data:
+        if request_data and trace_enabled:
             if is_stream:
                 skip_done = not _stream_has_traceable_choices(raw_response)
                 if not skip_done:
@@ -437,7 +479,7 @@ class SessionServer:
                     response_data["session_id"] = session_id
                     response_data["messages"] = messages
                     response_data["tools"] = tools
-                    await self.on_response(response_data)
+                    await self.on_response(response_data, trace_enabled=trace_enabled)
                 except Exception as exc:
                     session_error_msg = f"SessionServer response hook failed: {type(exc).__name__}: {exc}"
 

@@ -45,7 +45,7 @@ class SampleParams(BaseModel):
     include_stop_str_in_output: bool = True
     no_stop_trim: bool = True
     spaces_between_special_tokens: bool = False
-    return_routed_experts: bool = False
+    return_routed_experts: bool = True
 
 
 class Status(Enum):
@@ -118,7 +118,7 @@ class RolloutState(BaseModel):
 
     input_ids: list[int] | None = None
     labels: list[int] | None = None
-    
+
     #  --- Judger 输出 ---
     reward: dict[str, Any] | None = None
 

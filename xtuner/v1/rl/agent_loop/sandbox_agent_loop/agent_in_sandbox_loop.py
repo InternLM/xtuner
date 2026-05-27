@@ -6,11 +6,11 @@ import importlib
 import json
 import traceback
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from lagent.utils import create_object
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import create_task
@@ -19,6 +19,9 @@ from ...rollout.chat_template import canonicalize_messages_for_chat_template
 from ...rollout.trace_store import get_store
 from ..agent_loop import AgentLoop, AgentLoopConfig
 from .schemas import AgentRolloutItem, RolloutStatus
+
+
+_MISSING = object()
 
 
 def _import_from_path(path: str) -> Any:
@@ -45,6 +48,58 @@ def _resolve_runner(pipeline: Any, session_id: str) -> Any:
     return pipeline
 
 
+def _stringify_message_content(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                value = item.get("text") or item.get("content")
+                if value is not None:
+                    parts.append(str(value))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    return str(content)
+
+
+def _extract_final_assistant_response(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            return _stringify_message_content(message.get("content"))
+    return ""
+
+
+def _load_latest_trace_segment(
+    artifacts: dict[str, Any], *, require_tools: bool = False
+) -> tuple[list[dict[str, Any]], Any]:
+    raw_message = artifacts.get("message")
+    if raw_message is None:
+        return [], None
+    trace = json.loads(raw_message) if isinstance(raw_message, str) else raw_message
+    if isinstance(trace, list) and trace:
+        segment = trace[-1]
+        if not isinstance(segment, dict) or "messages" not in segment:
+            raise ValueError("Agent messages trace segment must contain messages.")
+        messages = segment["messages"]
+        tools = segment.get("tools", _MISSING)
+    elif isinstance(trace, dict):
+        messages = trace.get("messages") or trace.get("policy_agent.messages")
+        if messages is None and isinstance(trace.get("policy_agent"), dict):
+            messages = trace["policy_agent"].get("messages")
+        tools = trace.get("tools", _MISSING)
+    else:
+        raise ValueError("Agent artifacts must contain a messages trace.")
+    if not isinstance(messages, list):
+        raise TypeError("Agent messages trace must be a list.")
+    if require_tools and tools is _MISSING:
+        raise ValueError("Agent messages trace segment must contain tools.")
+    return messages, None if tools is _MISSING else tools
+
+
 class AgentInSandboxLoopConfig(AgentLoopConfig):
     """Run a sandbox agent runner from ``RolloutState.extra_fields``.
 
@@ -56,6 +111,7 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     """
 
     max_concurrent_samples: int | None = None
+    mode: Literal["train", "eval"] = "train"
 
     def build_local(
         self, rollout_controller: RolloutController | None = None, judger: Judger | None = None, logger=None
@@ -63,9 +119,11 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
         return AgentInSandboxLoop(
             rollout_ctl=rollout_controller,
             hf_checkpoint=self.hf_checkpoint,
+            sample_params=self.sample_params,
             judger=judger,
             logger=logger,
             max_concurrent_samples=self.max_concurrent_samples,
+            mode=self.mode,
         )
 
 
@@ -74,13 +132,16 @@ class AgentInSandboxLoop(AgentLoop):
         self,
         rollout_ctl: RolloutController | None = None,
         hf_checkpoint: str = None,
+        sample_params: SampleParams | None = None,
         judger: Judger | None = None,
         logger=None,
         max_concurrent_samples: int | None = None,
+        mode: Literal["train", "eval"] = "train",
     ):
-        super().__init__(rollout_ctl, None, hf_checkpoint, judger, logger)
+        super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
         self.max_concurrent_samples = max_concurrent_samples
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
+        self.mode = mode
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> RolloutState:
@@ -109,8 +170,13 @@ class AgentInSandboxLoop(AgentLoop):
             await self._fill_rollout_state(rollout_state, result)
             return rollout_state
         except Exception as exc:
-            rollout_state.status = Status.FAILED
+            rollout_state.status = Status.COMPLETED if self.mode == "eval" else Status.FAILED
             rollout_state.finish_reason = "error"
+            if self.mode == "eval":
+                rollout_state.reward = {"score": 0.0}
+                rollout_state.response = ""
+                rollout_state.extra_fields["xtuner_eval_mode"] = True
+                rollout_state.extra_fields["eval_error"] = True
             rollout_state.error_msg = f"{type(exc).__name__}: {exc}"
             self.logger.error(f"[AgentInSandboxLoop] failed: {exc}\n{traceback.format_exc()}")
             return rollout_state
@@ -122,6 +188,10 @@ class AgentInSandboxLoop(AgentLoop):
         return await runner.run(item)
 
     async def _fill_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
+        if self.mode == "eval":
+            self._fill_eval_rollout_state(rollout_state, item)
+            return
+
         rollout_state.status = Status.COMPLETED if item.status == RolloutStatus.COMPLETED else Status.FAILED
         rollout_state.finish_reason = "stop" if item.status == RolloutStatus.COMPLETED else "error"
         rollout_state.reward = {"score": item.reward} if item.reward is not None else None
@@ -130,22 +200,15 @@ class AgentInSandboxLoop(AgentLoop):
         if item.status != RolloutStatus.COMPLETED:
             return
 
-        artifacts = item.artifacts
-        trace = json.loads(artifacts["message"])
-        if not isinstance(trace, list) or not trace:
+        messages, tools = _load_latest_trace_segment(item.artifacts, require_tools=True)
+        if not messages:
             raise ValueError("Agent artifacts must contain at least one trainable messages trace.")
-        segment = trace[-1]
-        if not isinstance(segment, dict) or "messages" not in segment or "tools" not in segment:
-            raise ValueError("Agent messages trace segment must contain messages and tools.")
-        messages = segment["messages"]
-        if not isinstance(messages, list):
-            raise TypeError("Agent messages trace segment.messages must be a list.")
         session_id = rollout_state.uid
 
         trace_store = get_store()
         text = self.tokenizer.apply_chat_template(
             canonicalize_messages_for_chat_template(messages),
-            tools=segment["tools"],
+            tools=tools,
             tokenize=False,
             add_generation_prompt=False,
         )
@@ -161,3 +224,39 @@ class AgentInSandboxLoop(AgentLoop):
         ]
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
+
+    def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
+        rollout_state.status = Status.COMPLETED
+        rollout_state.finish_reason = "stop" if item.status == RolloutStatus.COMPLETED else "error"
+        rollout_state.reward = {"score": item.reward if item.reward is not None else 0.0}
+        rollout_state.input_ids = None
+        rollout_state.labels = None
+        rollout_state.response_ids = None
+        rollout_state.logprobs = None
+        rollout_state.routed_experts = None
+        rollout_state.response_mask = None
+        rollout_state.response_model_steps = None
+        rollout_state.extra_fields["xtuner_eval_mode"] = True
+        rollout_state.extra_fields["sandbox_status"] = item.status.value
+        if item.error is not None:
+            rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
+
+        try:
+            messages, tools = _load_latest_trace_segment(item.artifacts)
+        except Exception as exc:
+            rollout_state.response = ""
+            rollout_state.extra_fields["eval_error"] = True
+            rollout_state.error_msg = rollout_state.error_msg or f"{type(exc).__name__}: {exc}"
+            return
+
+        rollout_state.response = _extract_final_assistant_response(messages)
+        rollout_state.extra_fields["policy_agent_messages"] = messages
+        if tools is not None:
+            rollout_state.extra_fields["policy_agent_tools"] = tools
+        if messages:
+            rollout_state.extra_fields["agent_trajectory"] = self.tokenizer.apply_chat_template(
+                canonicalize_messages_for_chat_template(messages),
+                tools=tools,
+                tokenize=False,
+                add_generation_prompt=False,
+            )

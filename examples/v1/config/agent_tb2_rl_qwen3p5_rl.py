@@ -7,7 +7,12 @@ from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
 from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop import AgentInSandboxLoopConfig
-from xtuner.v1.rl.agent_loop_manager import AgentLoopManagerConfig, SamplerConfig, SyncProduceStrategyConfig, TaskSpecConfig
+from xtuner.v1.rl.agent_loop_manager import (
+    AgentLoopManagerConfig,
+    SamplerConfig,
+    SyncProduceStrategyConfig,
+    TaskSpecConfig,
+)
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
@@ -15,6 +20,7 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import RolloutImportanceSampling, WorkerConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
+from recipe.tb2_eval.xtuner_dataset import RLTB2EvalTokenizeFnConfig
 from recipe.tb2_rl.xtuner_dataset import RLTB2RLTokenizeFnConfig
 
 def _as_list(value):
@@ -77,6 +83,9 @@ training_sample_params = SampleParams(
     top_p=1.0,
     temperature=1.0,
     min_tokens=0,
+    return_routed_experts=True,
+    return_logprob=True,
+    return_token_ids=True,
 )
 evaluation_sample_params = SampleParams(
     max_tokens=max_response_length,
@@ -84,6 +93,9 @@ evaluation_sample_params = SampleParams(
     top_p=1.0,
     temperature=0.0,
     min_tokens=0,
+    return_routed_experts=False,
+    return_logprob=False,
+    return_token_ids=False,
 )
 
 # 3. datasets
@@ -110,7 +122,34 @@ for name, data in ds_collections.items():
         )
 
 if enable_evaluate:
-    pass
+    with open(eval_data_path, "r", encoding="utf-8") as f:
+        ds_collections = json.load(f)
+
+    eval_dataset_cfg = []
+    for name, data in ds_collections.items():
+        annotations = _as_list(data["annotation"])
+        for annotation in annotations:
+            eval_dataset_cfg.append(
+                {
+                    "dataset": DatasetConfig(
+                        name=f"{experimental_name}_eval",
+                        anno_path=annotation,
+                        media_root=data.get("eval_media_root", ""),
+                        sample_ratio=data.get("sample_ratio", 1.0),
+                        class_name="VLMJsonlDataset",
+                    ),
+                    "tokenize_fn": RLTB2EvalTokenizeFnConfig(
+                        max_length=max_prompt_length
+                    ),
+                }
+            )
+    eval_dataloader_cfg = DataloaderConfig(
+        dataset_config_list=eval_dataset_cfg,
+        num_workers=8,
+        collator="fake_collator",
+        pack_level="none",
+        pack_max_length=pack_max_length,
+    )
 
 dataloader_cfg = DataloaderConfig(
     dataset_config_list=train_dataset_cfg,
@@ -175,10 +214,24 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
 )
 
 if enable_evaluate:
-    pass
+    eval_agent_loop_config = AgentInSandboxLoopConfig(
+        hf_checkpoint=model_path,
+        max_concurrent_samples=512,
+        mode="eval",
+        sample_params=evaluation_sample_params,
+    )
+    eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
+        tasks=TaskSpecConfig(
+            task_name="eval_task",
+            agent_loop_config=eval_agent_loop_config,
+            produce_strategy_config=SyncProduceStrategyConfig(),
+            sampler_config=SamplerConfig(dataloader_cfg=eval_dataloader_cfg, prompt_repeat_k=1),
+        ),
+    )
+    enable_evaluate = True
 else:
     eval_agent_loop_manager_cfg = None
-    enable_evaluate=False
+    enable_evaluate = False
 
 # 7. trainer
 trainer = RLColocateTrainerConfig(
