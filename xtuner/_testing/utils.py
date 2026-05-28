@@ -13,13 +13,16 @@ def enable_full_determinism():
     """
     set_deterministic(True)
 
+    # already set in set_deterministic
     #  Enable PyTorch deterministic mode. This potentially requires either the environment
     #  variable 'CUDA_LAUNCH_BLOCKING' or 'CUBLAS_WORKSPACE_CONFIG' to be set,
     # depending on the CUDA version, so we set them both here
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+    # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"  # should be replaced by CUBLAS_WORKSPACE_CONFIG
+    # os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+
+    # already set in set_deterministic
     # torch.use_deterministic_algorithms(True, warn_only=True)
-    torch.set_deterministic_debug_mode(0)
+    # torch.set_deterministic_debug_mode(0)  # should be replaced by torch.use_deterministic_algorithms
 
 
 class _CaptureIO(io.TextIOWrapper):
