@@ -18,9 +18,19 @@ app = App(
 )
 
 
-def rl_monitor_actor_memory(work_dir, interval: int = 60):
+def rl_monitor_actor_memory(
+    work_dir,
+    interval: int = 60,
+    actor_distribution_stable_rounds: int = 5,
+    actor_distribution_interval_multiplier: int = 5,
+):
     try:
-        monitor_actor_memory(work_dir=work_dir, interval=interval)
+        monitor_actor_memory(
+            work_dir=work_dir,
+            interval=interval,
+            actor_distribution_stable_rounds=actor_distribution_stable_rounds,
+            actor_distribution_interval_multiplier=actor_distribution_interval_multiplier,
+        )
     except Exception as exc:
         print(f"Actor memory monitor stopped due to error: {exc}")
 
@@ -38,7 +48,13 @@ def main(
     if os.getenv("XTUNER_RL_MEM_DIR"):
         interval = int(os.getenv("XTUNER_RL_MEM_INTERVAL", "60"))
         track_thread = threading.Thread(
-            target=rl_monitor_actor_memory, args=(os.getenv("XTUNER_RL_MEM_DIR"), interval)
+            target=rl_monitor_actor_memory,
+            args=(
+                os.getenv("XTUNER_RL_MEM_DIR"),
+                interval,
+                5,
+                5,
+            ),
         )
         track_thread.daemon = True
         track_thread.start()
