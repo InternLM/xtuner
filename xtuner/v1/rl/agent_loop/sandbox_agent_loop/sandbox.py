@@ -609,19 +609,28 @@ class DetachedShellEntry:
         rc_file = shlex.quote(entry.rc_file)
         stdout_file = shlex.quote(entry.stdout_file)
         stderr_file = shlex.quote(entry.stderr_file)
-        wrapped = (
+        # Detachment is done with the same trailing ``&`` + ``nohup`` pattern
+        # that lagent's own ``SandboxAgent.connect`` uses to launch daemons in
+        # this sandbox backend (see ``lagent.serving.sandbox.agent:131``). We
+        # send this through the *sync* ``/exec`` path because that's the path
+        # the backend reliably shell-interprets — the JSON ``detach`` field
+        # appears to be a no-op on this backend, and our previous attempt
+        # routing the wrapper through ``detach=True`` never produced any of
+        # the pid/rc/stdout/stderr files.
+        inner = (
             f"rm -f {pid_file} {rc_file} {stdout_file} {stderr_file}; "
             f"echo $$ > {pid_file}; "
             f"({self.cmd}) > {stdout_file} 2> {stderr_file}; "
             f"echo $? > {rc_file}"
         )
+        wrapped = f"nohup bash -c {shlex.quote(inner)} </dev/null >/dev/null 2>&1 &"
         await exec_in(
             client,
             wrapped,
             env=env,
             timeout_sec=self.handshake_timeout_sec,
             raise_on_error=True,
-            detach=True,
+            detach=False,
         )
         return await self.monitor.wait(client, item, entry)
 
