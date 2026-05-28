@@ -13,7 +13,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop import AgentLoopConfig, AgentLoopSpec, get_agent_loop_rollout_ctl
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
-from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.rollout import RolloutController, RolloutGenerateHandle
 from xtuner.v1.rl.utils import asyncio_run
 from xtuner.v1.utils import get_logger
 
@@ -300,6 +300,7 @@ class AgentLoopManagerConfig(BaseModel):
         replay_buffer: ReplayBuffer,
         logger=None,
         sync_weights_interval: int = 1,
+        rollout_generator: RolloutGenerateHandle | None = None,
     ) -> "AgentLoopManager":
         tasks = self.tasks if isinstance(self.tasks, list) else [self.tasks]
         if not tasks:
@@ -314,6 +315,7 @@ class AgentLoopManagerConfig(BaseModel):
 
             agent_loop = task_cfg.agent_loop_config.build(
                 rollout_controller=rollout_controller,
+                rollout_generator=rollout_generator,
                 judger=build_judger(task_cfg.judger_config) if task_cfg.judger_config is not None else None,
                 logger=logger,
             )

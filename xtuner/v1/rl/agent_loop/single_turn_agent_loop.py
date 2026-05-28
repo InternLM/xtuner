@@ -2,7 +2,7 @@ import asyncio
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
-from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.rollout import RolloutController, RolloutGenerateHandle
 from xtuner.v1.rl.utils import create_task
 
 from .agent_loop import AgentLoop, AgentLoopConfig
@@ -39,9 +39,16 @@ class SingleTurnAgentLoopConfig(AgentLoopConfig):
 
     enable_batch_judge: bool = False
 
-    def build_local(self, rollout_controller, judger: Judger | None = None, logger=None) -> "SingleTurnAgentLoop":
+    def build_local(
+        self,
+        rollout_controller,
+        rollout_generator: RolloutGenerateHandle | None = None,
+        judger: Judger | None = None,
+        logger=None,
+    ) -> "SingleTurnAgentLoop":
         return SingleTurnAgentLoop(
             rollout_ctl=rollout_controller,
+            rollout_generator=rollout_generator,
             sample_params=self.sample_params,
             hf_checkpoint=self.hf_checkpoint,
             judger=judger,
@@ -54,13 +61,14 @@ class SingleTurnAgentLoop(AgentLoop):
     def __init__(
         self,
         rollout_ctl: RolloutController,
+        rollout_generator: RolloutGenerateHandle | None,
         sample_params: SampleParams,
         hf_checkpoint: str,
         judger: Judger | None = None,
         logger=None,
         enable_batch_judge: bool = False,
     ):
-        super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
+        super().__init__(rollout_ctl, rollout_generator, sample_params, hf_checkpoint, judger, logger)
         self.enable_batch_judge = enable_batch_judge
 
     async def generate_sample(
@@ -72,7 +80,10 @@ class SingleTurnAgentLoop(AgentLoop):
             rollout_state.tokens = rollout_state.prompt_ids
 
         # 推理引擎generate, 生成的结果会覆盖到 rollout_state.response_ids 上
-        rollout_state = await self.rollout_ctl.generate.remote(rollout_state)  # type: ignore[attr-defined]
+        rollout_state = await self.rollout_generate(
+            rollout_state,
+            enable_partial_rollout=kwargs.get("enable_partial_rollout", False),
+        )
         # 非 COMPLETED 状态（如被截断、放弃等）直接早退，不触发打分
         if rollout_state.status != Status.COMPLETED:
             return rollout_state

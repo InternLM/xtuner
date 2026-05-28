@@ -28,7 +28,6 @@ class SGLangWorker(RolloutWorker):
         from sglang.srt.entrypoints.http_server import launch_server
 
         self.server_func = launch_server
-        self.endpoints["health_generate"] = "health"
         self.endpoints["generate"] = "generate"
         self.endpoints["v1/chat/completions"] = "v1/chat/completions"
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_path, trust_remote_code=True)
@@ -135,14 +134,6 @@ class SGLangWorker(RolloutWorker):
         response = requests.post(url, json=payload or {})
         response.raise_for_status()
         return response.json()
-
-    def check_health(self) -> bool:
-        try:
-            response = requests.get(f"{self.server_url}/{self.endpoints['health_generate']}", timeout=5.0)
-            return response.status_code == 200
-        except requests.RequestException as e:
-            self.logger.error(f"Health check failed for server {self.server_url}: {e}")
-            return False
 
     def flush_cache(self):
         """Flush the cache of the server."""

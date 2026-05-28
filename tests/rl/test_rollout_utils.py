@@ -1,26 +1,26 @@
 import ray
 import torch
 import threading
-import time
 import unittest
 import os
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from xtuner.v1.data_proto.rl_data import Status, RolloutState, SampleParams
+from xtuner.v1.data_proto.rl_data import Status, RolloutState
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.rollout.controller import RolloutController, WorkerInfo
+from xtuner.v1.rl.rollout.controller import RolloutController
+from xtuner.v1.rl.rollout.health_manager import RolloutHealthManager, RolloutWorkerRouteInfo
+from xtuner.v1.rl.rollout.runtime import build_rollout_runtime
 from xtuner.v1.rl.rollout.utils import (
     PartialRolloutHandler,
-    RolloutHealthChecker,
     SessionRouter,
 )
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers, asyncio_run
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 
 MODEL_PATH = os.environ.get("ROLLOUT_MODEL_PATH", "")
 RESOURCE_MAP = {"npu": "NPU", "cuda": "GPU"}
-TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 
 
 class _FakeRemoteMethod:
@@ -40,55 +40,53 @@ class _FakeWorker:
         self.shutdown = _FakeRemoteMethod("shutdown", self.call_log)
 
 
-class TestRolloutHealthChecker(unittest.TestCase):
-    def _build_checker(self, workers_info):
-        config = SimpleNamespace(health_check_interval_seconds=10, health_check_failure_threshold=1)
-        return RolloutHealthChecker(config, workers_info)
+class _FakeGenerator:
+    def __init__(self):
+        self.call_log = []
+        self.ping = _FakeRemoteMethod("ping", self.call_log)
 
-    def test_shutdown_runs_when_offload_fails(self):
-        worker = _FakeWorker()
-        workers_info = {0: SimpleNamespace(actor=worker, url="http://worker-0", is_active=True)}
-        checker = self._build_checker(workers_info)
 
-        async def unhealthy_worker(*args, **kwargs):
-            return False
-
-        def ray_get(ref, timeout=None):
-            worker.call_log.append((ref, "get"))
-            if ref == "offload":
-                raise RuntimeError("offload failed")
-            return None
-
-        with (
-            patch("xtuner.v1.rl.rollout.utils.check_worker_health", side_effect=unhealthy_worker),
-            patch("xtuner.v1.rl.rollout.utils.ray.get", side_effect=ray_get),
-        ):
-            checker.run_once()
-
-        self.assertFalse(workers_info[0].is_active)
-        self.assertEqual(
-            worker.call_log,
+class TestRolloutHealthManager(unittest.TestCase):
+    def _build_manager(self, worker):
+        config = SimpleNamespace(
+            health_check_interval_seconds=10,
+            health_check_failure_threshold=1,
+            worker_log_dir=Path("."),
+        )
+        manager = RolloutHealthManager(
+            config,
             [
-                ("offload", "remote"),
-                ("offload", "get"),
-                ("shutdown", "remote"),
-                ("shutdown", "get"),
+                RolloutWorkerRouteInfo(
+                    rank=0,
+                    actor=worker,
+                    url="http://worker-0",
+                    generator=_FakeGenerator(),
+                    is_active=True,
+                )
             ],
         )
+        manager.stop()
+        return manager
 
-    def test_inactive_worker_is_not_cleaned_up_again(self):
+    def test_run_once_does_not_probe_or_deactivate_workers(self):
         worker = _FakeWorker()
-        workers_info = {0: SimpleNamespace(actor=worker, url="http://worker-0", is_active=False)}
-        checker = self._build_checker(workers_info)
+        manager = self._build_manager(worker)
 
-        with (
-            patch("xtuner.v1.rl.rollout.utils.check_worker_health") as check_worker_health_mock,
-            patch("xtuner.v1.rl.rollout.utils.ray.get") as ray_get_mock,
-        ):
-            checker.run_once()
+        with patch("xtuner.v1.rl.rollout.health_manager.ray.get", side_effect=ray_get):
+            manager.run_once()
 
-        check_worker_health_mock.assert_not_called()
+        self.assertTrue(manager.rank2info[0].is_active)
+        self.assertEqual(worker.call_log, [])
+
+    def test_report_worker_failure_is_registry_only_noop(self):
+        worker = _FakeWorker()
+        manager = self._build_manager(worker)
+
+        with patch("xtuner.v1.rl.rollout.health_manager.ray.get") as ray_get_mock:
+            manager.report_worker_failure(0, "request failed")
+
         ray_get_mock.assert_not_called()
+        self.assertTrue(manager.rank2info[0].is_active)
         self.assertEqual(worker.call_log, [])
 
 
@@ -179,39 +177,36 @@ class TestRolloutControllerRecover(unittest.TestCase):
             health_check_interval_seconds=10,
             health_check_failure_threshold=1,
         )
-        controller = RolloutController(rollout_cfg, pg)
+        runtime = build_rollout_runtime(rollout_cfg, pg)
+        controller = RolloutController(rollout_cfg, runtime)
         return controller
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_healthcheck_deactivate_and_recover(self):
+    def test_registry_does_not_deactivate_or_recover_workers(self):
         controller = self.init_rollout_controller()
         ranks = list(controller.rank2info.keys())
         rank0 = ranks[0]
         actor0 = controller.rank2info[rank0].actor
         ray.get(actor0.shutdown.remote())
-        time.sleep(3)  # wait for the actor to be fully killed
         health_before_recover = ray.get(actor0.check_health.remote())
         url = controller.rank2info[rank0].url
         self.assertFalse(health_before_recover)
 
-        controller.health_checker.run_once()
+        ray.get(controller.health_manager.run_once.remote())
 
-        self.assertFalse(controller.rank2info[rank0].is_active)
-        rollout_state = RolloutState(
-            message=TEST_TEXT_MESSAGES,
-            sample_params=SampleParams(return_token_ids=True),
-        )
-        out = asyncio_run(controller.generate(rollout_state))
-        self.assertEqual(out.status, Status.FAILED)
+        ready, details = ray.get(controller.health_manager.get_ready_status.remote())
+        self.assertTrue(details["worker_routes"][rank0]["is_active"])
+        self.assertTrue(ready)
 
         controller.recover_failed_workers()
 
-        self.assertTrue(controller.rank2info[rank0].is_active)
-        self.assertEqual(url, controller.rank2info[rank0].url)
+        ready, details = ray.get(controller.health_manager.get_ready_status.remote())
+        self.assertTrue(details["worker_routes"][rank0]["is_active"])
+        self.assertTrue(ready)
+        route_infos = ray.get(controller.health_manager.get_worker_route_infos.remote())
+        self.assertEqual(url, route_infos[0].url)
         health_after_recover = ray.get(actor0.check_health.remote())
-        self.assertTrue(health_after_recover)
-        out = asyncio_run(controller.generate(rollout_state))
-        self.assertNotEqual(out.status, Status.FAILED)
+        self.assertFalse(health_after_recover)
 
 
 if __name__ == "__main__":

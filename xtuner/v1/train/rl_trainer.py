@@ -36,6 +36,7 @@ from xtuner.v1.rl.replay_buffer import (
     _snapshot_nested_objectrefs,
 )
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
+from xtuner.v1.rl.rollout.rollout_generator import RolloutGenerateHandleConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
@@ -48,7 +49,6 @@ from xtuner.v1.rl.utils import (
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
-from xtuner.v1.rl.utils.misc import check_chat_completions, delete_from_routedapiproxy, register_to_routedapiproxy
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -283,6 +283,7 @@ class BaseRLTrainerConfig(BaseModel):
     advantage_estimator_config: BaseAdvantageConfig = Field(default_factory=GRPOAdvantageConfig)
     sync_weights_interval: int = 1
     gateway_config: GatewayConfig | None = None
+    rollout_generator_config: RolloutGenerateHandleConfig = Field(default_factory=RolloutGenerateHandleConfig)
 
     enable_evaluate: bool = True
     enable_initial_evaluate: bool = False
@@ -623,10 +624,23 @@ class BaseRLTrainer:
         # gateway 依赖 rollout controller，因此在 rollout controller 构建完成后统一启动。
         ray.get(self.rollout_controller.start_gateway.remote(cfg.gateway_config))
 
+    def _build_rollout_generate_handle(self, cfg: BaseRLTrainerConfig):
+        internal_http_config = cfg.rollout_generator_config.build_internal_http_entry_config()
+        if internal_http_config is not None:
+            ray.get(self.rollout_controller.start_internal_http_entry.remote(internal_http_config))
+
+        external_http_entry_config = cfg.rollout_generator_config.build_external_http_entry_config()
+        if external_http_entry_config is not None:
+            ray.get(self.rollout_controller.start_external_http_entry.remote(external_http_entry_config))
+
+        return cfg.rollout_generator_config.build(self.rollout_controller)
+
     def _build_agent_loop_components(self, cfg: BaseRLTrainerConfig, replay_buffer) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
+        rollout_generator = self._build_rollout_generate_handle(cfg)
         self.agent_loop_manager = cfg.agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
+            rollout_generator=rollout_generator,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
             logger=self.logger,
@@ -637,6 +651,7 @@ class BaseRLTrainer:
             assert cfg.eval_agent_loop_manager_cfg is not None
             self.eval_agent_loop_manager = cfg.eval_agent_loop_manager_cfg.build(
                 rollout_controller=self.rollout_controller,
+                rollout_generator=rollout_generator,
                 tokenizer=self.tokenizer,
                 replay_buffer=replay_buffer,
                 logger=self.logger,
@@ -1320,37 +1335,6 @@ class BaseRLTrainer:
                 )
         self._global_train_step += len(workers_log_item[0]["train_metrics"])
 
-
-def add_apiproxy(self):
-    info_dict = ray.get(self.rollout_controller.get_rollout_metadata.remote())
-    model_name = info_dict["rollout_config"].model_name
-
-    delete_from_routedapiproxy(model_name)
-    self.logger.info(f"deleted {model_name} from routedapiproxy")
-    self.logger.info("registering to routedapiproxy")
-
-    worker_session_url_dict = info_dict["worker_session_url_dict"]
-    worker_session_urls_status = info_dict["worker_session_urls_status"]
-    for _, worker_session_url in sorted(worker_session_url_dict.items()):
-        if not worker_session_urls_status.get(worker_session_url, False):
-            continue
-        register_to_routedapiproxy(model_name, worker_session_url)
-
-        # test server url
-        recheck_status_orig = check_chat_completions(worker_session_url, model_name)
-        if not recheck_status_orig:
-            raise ValueError(f"check chat completions failed for {worker_session_url}")
-
-    # test routed url
-    routed_url = "http://s-20260104203038-22bhb.ailab-evalservice.pjh-service.org.cn/v1"
-    recheck_status_routed = check_chat_completions(routed_url, model_name)
-    if not recheck_status_routed:
-        raise ValueError(f"check chat completions failed for {routed_url}")
-    self.logger.info("registered to routedapiproxy")
-    # import time
-    # time.sleep(1000000)
-
-
 class RLColocateTrainer(BaseRLTrainer):
     _META_PATH = ".xtuner_rl_colocate_trainer"
 
@@ -1373,7 +1357,6 @@ class RLColocateTrainer(BaseRLTrainer):
                 self._rollout_config.skip_load_weights = False
             self.rollout_controller = self._rollout_config.build(self._pg)
             # self._maybe_start_gateway(cfg)
-            add_apiproxy(self)
 
             replay_buffer = cfg.replay_buffer_config.build()
             self._build_agent_loop_components(cfg, replay_buffer)
@@ -1407,8 +1390,6 @@ class RLColocateTrainer(BaseRLTrainer):
         self.rollout_controller = self._rollout_config.build(self._pg)
         # self._maybe_start_gateway(cfg)
         bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
-
-        add_apiproxy(self)
 
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)
@@ -1540,7 +1521,6 @@ class RLColocateTrainer(BaseRLTrainer):
             self._maybe_save_checkpoint(train_step)
             self._maybe_save_hf(train_step)
 
-        ray.get(self.rollout_controller.recover_failed_workers.remote())
         timer_name = "sync_weight" if should_sync_weights else "switch_to_rollout"
         with timer(timer_name, step_timer_dict):
             if should_sync_weights:
@@ -1714,7 +1694,6 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             self._maybe_save_checkpoint(train_step)
             self._maybe_save_hf(train_step)
 
-        ray.get(self.rollout_controller.recover_failed_workers.remote())
         with timer("sync_weight", step_timer_dict):
             bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
             self.update_weights()

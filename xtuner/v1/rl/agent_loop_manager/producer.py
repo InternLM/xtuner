@@ -502,10 +502,6 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
         sync_weights_interval: int = 1,
         rollout_controller: "Optional[RolloutControllerProxy]" = None,
     ) -> "AsyncProduceStrategy":
-        if rollout_controller is not None:
-            import ray
-
-            ray.get(rollout_controller.set_enable_partial_rollout.remote(self.enable_partial_rollout))
         return AsyncProduceStrategy(
             over_sample_threshold=self.over_sample_threshold,
             enable_partial_rollout=self.enable_partial_rollout,

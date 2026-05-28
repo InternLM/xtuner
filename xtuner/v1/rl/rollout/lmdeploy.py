@@ -3,13 +3,9 @@ from argparse import Namespace
 from itertools import chain
 from typing import Any, Dict, List
 
-import numpy as np
 import ray
 import requests
 from ray.util.placement_group import placement_group_table
-
-from transformers import AutoTokenizer
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 
 from .worker import RolloutConfig, RolloutWorker
 
@@ -67,14 +63,12 @@ class LMDeployWorker(RolloutWorker):
         super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
         self.server_func = run_lmdeploy_server_wrapper
         self.router_func_str = "lmdeploy.serve.proxy.proxy.proxy"
-        self.endpoints["health_generate"] = "health"
         self.endpoints["generate"] = "generate"
         self.endpoints["v1/chat/completions"] = "v1/chat/completions"
         self.endpoints["output_ids"] = "output_ids"
         self.endpoints["response"] = "text"
         self.endpoints["sleep"] = "sleep"
         self.endpoints["wake_up"] = "wakeup"
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
@@ -91,58 +85,6 @@ class LMDeployWorker(RolloutWorker):
     def onload_kvcache(self):
         """Onloads the KV cache by waking up the model."""
         return self._wake_up(tags=["kv_cache"])
-
-    def _get_request_payload(self, rollout_state: RolloutState) -> dict:
-        tools = rollout_state.tools
-        tool_choice = rollout_state.tool_choice
-        sample_params = rollout_state.sample_params
-        message = rollout_state.message
-        input_tokens = rollout_state.tokens
-
-        optional_fields: dict[str, object] = {}
-        if tools is not None:
-            optional_fields["tools"] = tools
-        if tool_choice is not None:
-            optional_fields["tool_choice"] = tool_choice
-
-        if sample_params.return_token_ids:
-            payload = {"model": self.model_name, **optional_fields}
-
-            if "image_data" in rollout_state.extra_fields:
-                assert input_tokens is not None, "input_tokens is required when image_data is provided."
-                payload["image_data"] = rollout_state.extra_fields["image_data"]
-
-            if input_tokens is not None:
-                payload["input_ids"] = input_tokens
-            else:
-                text_prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
-                prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
-                payload["input_ids"] = prompt_token_ids
-            sample_params.return_routed_experts = True if self.enable_return_routed_experts else False
-            lmdeploy_sample_params = self._transform_sample_params(sample_params)
-            payload.update(lmdeploy_sample_params)
-        else:
-            payload = {
-                "model": self.model_name,
-                "messages": rollout_state.message,
-                **optional_fields,
-            }
-            lmdeploy_sample_params = {
-                "temperature": sample_params.temperature,
-                "top_p": sample_params.top_p,
-                "n": sample_params.n,
-                "stream": sample_params.stream,
-                "max_tokens": sample_params.max_tokens,
-                "repetition_penalty": sample_params.repetition_penalty,
-                "top_k": sample_params.top_k,
-                "skip_special_tokens": sample_params.skip_special_tokens,
-            }
-            if sample_params.stops:
-                lmdeploy_sample_params["stop"] = sample_params.stops
-            if sample_params.min_tokens > 0:
-                lmdeploy_sample_params["min_new_tokens"] = sample_params.min_tokens
-            payload.update(lmdeploy_sample_params)
-        return payload
 
     def _sleep(self, level: int = 1):
         """Put the model into a sleep state to save resources.
@@ -176,15 +118,6 @@ class LMDeployWorker(RolloutWorker):
         response = requests.post(url, headers=headers, params=data)
         assert response.status_code == 200, response.status_code
         return response.text
-
-    async def _decode_routed_experts(self, routed_experts: Any) -> Any:
-        if isinstance(routed_experts, str):
-            if self.lmdeploy_actor is None:
-                self.lmdeploy_actor = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
-            assert self.lmdeploy_actor is not None, "LMDeploy actor should be available in the shared store."
-            routed_experts_data = await self.lmdeploy_actor.get.remote(routed_experts)
-            return ray.put(np.asarray(routed_experts_data))
-        return np.asarray(routed_experts)
 
     async def cleanup_after_pause(self) -> None:
         if not self.enable_return_routed_experts:
@@ -385,6 +318,3 @@ class LMDeployWorker(RolloutWorker):
             speculative_config=speculative_config,
             **lmdeploy_config_kwargs,
         )
-
-    def _transform_sample_params(self, sample_params: SampleParams) -> dict:
-        return sample_params.model_dump(exclude_none=True)

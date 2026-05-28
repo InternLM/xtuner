@@ -1,6 +1,21 @@
 import os
 
+from ._generation.external_http_entry import ExternalRolloutHttpEntry, ExternalRolloutHttpEntryConfig
+from ._generation.internal_http_entry import (
+    InternalRolloutHttpEntry,
+    InternalRolloutHttpEntryConfig,
+    build_internal_rollout_http_entry_app,
+    serve_internal_rollout_http_entry_in_thread,
+)
+from ._generation.session_worker_selector import RolloutWorkerHandle, SessionWorkerSelector
 from .controller import RolloutController
+from .rollout_generator import (
+    LocalRolloutGenerator,
+    LocalRolloutGeneratorConfig,
+    RolloutGenerateHandle,
+    RolloutGenerateHandleConfig,
+)
+from .rollout_worker_build import RolloutRuntime, RolloutWorkerBuilder, RolloutWorkerRuntime, build_rollout_runtime
 from .worker import RolloutWorker
 
 

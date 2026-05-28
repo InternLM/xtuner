@@ -11,6 +11,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, RolloutToolCall, SampleParams, Status
 from xtuner.v1.rl.rollout.parser.factory import build_tool_call_parser
 from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.rollout.rollout_generator import LocalRolloutGenerator, LocalRolloutGeneratorConfig
 
 from ..adapters.base import coerce_content_to_text
 from ..adapters.trace import normalize_trace_payload
@@ -44,6 +45,7 @@ class LocalRolloutBackend:
     ):
         self._controller = controller
         self._config = rollout_config or self._resolve_rollout_config(controller)
+        self._generator: LocalRolloutGenerator = LocalRolloutGeneratorConfig().build(controller)
         if isinstance(tokenizer, str):
             tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
         resolved_tokenizer = tokenizer
@@ -57,12 +59,12 @@ class LocalRolloutBackend:
 
     async def generate(self, request: CanonicalGenerateRequest) -> CanonicalGenerateResponse:
         rollout_state = self._canonical_request_to_rollout_state(request)
-        rollout_state = await self._controller.generate.remote(rollout_state)
+        rollout_state = await self._generator.generate(rollout_state)
         self._raise_for_failed_rollout(rollout_state, request_id=str(rollout_state.uid))
         return self._rollout_state_to_canonical_response(rollout_state, request)
 
     async def health(self) -> BackendHealth:
-        ready, details = await self._controller.get_ready_status.remote()
+        ready, details = await self._controller.get_runtime_status.remote()
         return BackendHealth(
             ready=ready,
             status="ready" if ready else "unavailable",
