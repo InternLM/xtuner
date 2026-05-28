@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-from typing import Annotated, Any, cast
+from typing import Annotated, cast
 
 import torch
 import torch.nn.functional as F
@@ -13,7 +13,7 @@ from typing_extensions import overload
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
-from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
+from xtuner.v1.utils import get_logger
 
 from ...ops.gated_deltanet.causal_conv1d import causal_conv1d_fn
 from ...ops.gated_deltanet.chunk_gated_delta_rule import chunk_gated_delta_rule
@@ -38,33 +38,6 @@ def _all_to_all_gb(x, scatter_dim, gather_dim, mesh):
 
 def _all_to_all_out(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
-
-
-def _patch_triton_autotune_for_determinism() -> None:
-    # 在导入 FLA 前改 Triton 装饰器，避免依赖 FLA 内部 kernel 名。
-    # Triton autotune 会按 benchmark/cache 在多个 kernel config 中选一个实现；
-    # 不同 cache 目录或计时抖动可能选到不同 tiling/num_warps/reduction 路径，
-    # 从而改变浮点累加顺序。确定性模式固定第一个 config，并禁用 cache 结果。
-    import triton
-
-    original_autotune = triton.autotune
-    if getattr(original_autotune, "_xtuner_deterministic_patched", False):
-        return
-
-    def deterministic_autotune(configs, *args, **kwargs):
-        if configs:
-            configs = configs[:1]
-        kwargs["cache_results"] = False
-        return original_autotune(configs, *args, **kwargs)
-
-    patched = cast(Any, deterministic_autotune)
-    patched._xtuner_deterministic_patched = True
-    patched._xtuner_original_autotune = original_autotune
-    triton.autotune = deterministic_autotune
-
-
-if XTUNER_DETERMINISTIC:
-    _patch_triton_autotune_for_determinism()
 
 
 try:
