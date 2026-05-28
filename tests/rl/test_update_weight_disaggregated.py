@@ -158,7 +158,7 @@ class TestUpdateWeight(unittest.TestCase):
             model_path=MODEL_PATH,
             model_name=os.path.basename(MODEL_PATH).lower(),
             tokenizer_path=MODEL_PATH,
-            rollout_cross_node_comm=False,
+            rollout_cross_node_comm=os.environ.get("XTUNER_USE_SGLANG", "0") != "0",
             tensor_parallel_size=rollout_tp_size,
             expert_parallel_size=rollout_ep_size,
             gpus_per_node=int(os.environ.get("GPUS_PER_NODE", "8")),  # gpu: 8, npu: 16
@@ -311,6 +311,94 @@ class TestUpdateWeight(unittest.TestCase):
             self.assertEqual(second_rank0_hash["bucket_count"], len(second_rank0_hash["received_sha256_list"]))
             self.assertEqual(second_rank0_hash["sent_sha256_list"], second_rank0_hash["received_sha256_list"])
             self.assertEqual(first_rank0_hash["received_sha256_list"], second_rank0_hash["received_sha256_list"])
+
+        ray.get(rollout_controller.shutdown.remote(), timeout=60)
+
+    def _build_lmdeploy_rollout_controller(self):
+        rollout_pg = AutoAcceleratorWorkers.build_placement_group(
+            self.rollout_resources_cfg,
+            name=f"test_update_weight_rollout_{id(self)}",
+        )
+        set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=[self.pg, rollout_pg]))
+        self.rollout_cfg.skip_load_weights = False
+        return self.rollout_cfg.build(rollout_pg)
+
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    def test_lmdeploy_disaggregated_update_weight_and_generate(self):
+        train_controller = self._build_train_controller()
+        rollout_controller = self._build_lmdeploy_rollout_controller()
+
+        sample_params = SampleParams(temperature=0.0, max_tokens=128, top_k=1)
+        input_state = RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params)
+        res_baseline = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
+
+        info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
+        train_controller.update_rollout_info(info_dict)
+        train_controller.set_train_rollout_mode("disaggregated")
+
+        train_controller.update_weights()
+
+        res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
+        self.assertEqual(res_update_weight.response, res_baseline.response)
+        ray.get(rollout_controller.shutdown.remote(), timeout=60)
+
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    def test_lmdeploy_disaggregated_update_weight_after_pause_and_generate(self):
+        train_controller = self._build_train_controller()
+        rollout_controller = self._build_lmdeploy_rollout_controller()
+
+        sample_params = SampleParams(temperature=0.0, max_tokens=128, top_k=1)
+        input_state = RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params)
+        res_baseline = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
+
+        info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
+        train_controller.update_rollout_info(info_dict)
+        train_controller.set_train_rollout_mode("disaggregated")
+
+        ray.get(rollout_controller.pause_generation.remote())
+        time.sleep(float(os.environ.get("XTUNER_UPDATE_WEIGHT_PAUSE_SLEEP", "2")))
+        train_controller.update_weights()
+        ray.get(rollout_controller.continue_generation.remote())
+
+        res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
+        self.assertEqual(res_update_weight.response, res_baseline.response)
+        ray.get(rollout_controller.shutdown.remote(), timeout=60)
+
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    def test_lmdeploy_disaggregated_multi_update_and_generate(self):
+        """Drive N consecutive update_weights+generate cycles on a single rollout engine.
+
+        LMDeploy's PyTorch backend runs a per-FusedMoE ``update_weights()`` finalize that
+        REPLACES ``gate_up.weight`` / ``down.weight`` Parameter objects (see
+        ``lmdeploy/pytorch/nn/moe/default.py`` ``LinearWeights.update_weight``). The CUDA-graph
+        staleness this introduces is handled by ``reset_graph_runner()`` inside the finalize,
+        but the second-round behaviour of the transpose-contig-transpose layout transform is
+        untested. This test catches any regression in back-to-back updates without sleep/wakeup
+        between them. Same method also exercises ascend / NPU where the finalize is a no-op
+        and graph capture is disabled (eager mode), so it should be trivially safe there.
+        """
+        train_controller = self._build_train_controller()
+        rollout_controller = self._build_lmdeploy_rollout_controller()
+
+        sample_params = SampleParams(temperature=0.0, max_tokens=128, top_k=1)
+        input_state = RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params)
+        res_baseline = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
+
+        info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
+        train_controller.update_rollout_info(info_dict)
+        train_controller.set_train_rollout_mode("disaggregated")
+
+        # Trainer never actually steps, so each broadcast carries the same bytes;
+        # the rollout response should remain identical to baseline across all rounds.
+        num_iterations = int(os.environ.get("XTUNER_LMDEPLOY_MULTI_UPDATE_ITERS", "2"))
+        for i in range(num_iterations):
+            train_controller.update_weights()
+            res = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
+            self.assertEqual(
+                res.response,
+                res_baseline.response,
+                f"iteration {i}: response diverged from baseline after multi-update",
+            )
 
         ray.get(rollout_controller.shutdown.remote(), timeout=60)
 
