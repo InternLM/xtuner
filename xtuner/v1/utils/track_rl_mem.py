@@ -50,6 +50,12 @@ def _format_actor_distribution_name(actor_info) -> str:
     return str(class_name)
 
 
+def _format_actor_distribution_names(actor_counts: dict[str, int]) -> list[str]:
+    return [
+        actor_name if count == 1 else f"{actor_name} x{count}" for actor_name, count in sorted(actor_counts.items())
+    ]
+
+
 def _build_actor_distribution_records(
     actors,
     *,
@@ -103,10 +109,6 @@ def _build_actor_distribution_records(
         ),
     ):
         actor_count = sum(actor_counts.values())
-        actor_items = [{"name": actor_name, "count": count} for actor_name, count in sorted(actor_counts.items())]
-        actor_names = [
-            item["name"] if item["count"] == 1 else f"{item['name']} x{item['count']}" for item in actor_items
-        ]
         records.append(
             {
                 "time": current_time,
@@ -116,8 +118,7 @@ def _build_actor_distribution_records(
                 "stable_actor_count_rounds": stable_actor_count_rounds,
                 **node_metadata[node_id],
                 "actor_count": actor_count,
-                "actor_names": actor_names,
-                "actors": actor_items,
+                "actor_names": _format_actor_distribution_names(actor_counts),
             }
         )
     return records
