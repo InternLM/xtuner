@@ -45,7 +45,7 @@ class SampleParams(BaseModel):
     include_stop_str_in_output: bool = True
     no_stop_trim: bool = True
     spaces_between_special_tokens: bool = False
-    return_routed_experts: bool = False
+    return_routed_experts: bool = True
 
 
 class Status(Enum):
