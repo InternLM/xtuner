@@ -21,8 +21,8 @@ app = App(
 def rl_monitor_actor_memory(
     work_dir,
     interval: int = 60,
-    actor_distribution_stable_rounds: int = 5,
-    actor_distribution_interval_multiplier: int = 5,
+    actor_distribution_stable_rounds: int = 8,
+    actor_distribution_interval_multiplier: int = 3,
 ):
     try:
         monitor_actor_memory(
@@ -49,12 +49,7 @@ def main(
         interval = int(os.getenv("XTUNER_RL_MEM_INTERVAL", "60"))
         track_thread = threading.Thread(
             target=rl_monitor_actor_memory,
-            args=(
-                os.getenv("XTUNER_RL_MEM_DIR"),
-                interval,
-                5,
-                5,
-            ),
+            args=(os.getenv("XTUNER_RL_MEM_DIR"), interval),
         )
         track_thread.daemon = True
         track_thread.start()
