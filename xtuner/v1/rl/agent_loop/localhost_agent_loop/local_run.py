@@ -11,7 +11,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from lagent.utils import create_object
+from lagent.utils import create_object, ctx_session_id
 
 from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.rl.agent_loop.localhost_agent_loop import AgentInLocalhostLoop, AgentRolloutItem
@@ -29,7 +29,8 @@ def _load_config(path: Path) -> Any:
 async def _run_runner(dataset: Any, item: AgentRolloutItem) -> dict[str, Any]:
     runner_cfg = item.pipeline or dataset.pipeline
     runner = create_object(deepcopy(runner_cfg)) if isinstance(runner_cfg, dict) else runner_cfg
-    result = await runner.run(item)
+    with ctx_session_id.set(str(item.uid)):
+        result = await runner.run(item)
     dumped = result.model_dump(mode="json", exclude={"artifacts", "pipeline"})
     dumped["artifacts"] = _serialize_artifacts(result.artifacts)
     return dumped

@@ -7,7 +7,7 @@ import traceback
 import uuid
 from typing import Any
 
-from lagent.utils import create_object
+from lagent.utils import create_object, ctx_session_id
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
@@ -90,7 +90,7 @@ class AgentInLocalhostLoop(AgentLoop):
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         try:
-            item = self._rollout_item(rollout_state)
+            item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
             if rollout_state.uid is None:
                 rollout_state.uid = uuid.uuid4().int
             item.uid = rollout_state.uid
@@ -105,30 +105,17 @@ class AgentInLocalhostLoop(AgentLoop):
             self.logger.error(f"[AgentInLocalhostLoop] failed: {exc}\n{traceback.format_exc()}")
             return rollout_state
 
-    def _rollout_item(self, rollout_state: RolloutState) -> AgentRolloutItem:
-        raw_item = rollout_state.extra_fields["rollout_item"]
-        if isinstance(raw_item, AgentRolloutItem):
-            return raw_item.model_copy(deep=True)
-        return AgentRolloutItem.model_validate(raw_item).model_copy(deep=True)
-
     async def _run_item(self, item: AgentRolloutItem) -> AgentRolloutItem:
         runner = _resolve_runner(item.pipeline)
         if runner is None:
             raise ValueError("AgentRolloutItem.pipeline is required.")
-        return await runner.run(item)
+        with ctx_session_id.set(str(item.uid)):
+            return await runner.run(item)
 
     async def _fill_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
-        trace = item.artifacts.get("messages")
-        if not isinstance(trace, list) or not trace:
-            raise ValueError("Agent artifacts must contain at least one trainable messages trace.")
-        segment = trace[-1]
-        if not isinstance(segment, dict) or "messages" not in segment or "tools" not in segment:
-            raise ValueError("Agent messages trace segment must contain messages and tools.")
-        messages = segment["messages"]
-        if not isinstance(messages, list):
-            raise TypeError("Agent messages trace segment.messages must be a list.")
+        segment = item.artifacts["messages"][-1]
         text = self.tokenizer.apply_chat_template(
-            messages,
+            segment["messages"],
             tools=segment["tools"],
             tokenize=False,
             add_generation_prompt=False,

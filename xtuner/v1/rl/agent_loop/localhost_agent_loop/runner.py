@@ -38,8 +38,8 @@ class LocalhostRunner:
         t_validate: float | None = None
 
         try:
-            infer_result = await self.infer.run(item, item.infer)
-            if not infer_result.ok:
+            await self.infer.run(item, item.infer)
+            if item.infer.status != StageStatus.COMPLETED:
                 return self._fail(item, item.infer.error)
 
             if self.validate is not None:

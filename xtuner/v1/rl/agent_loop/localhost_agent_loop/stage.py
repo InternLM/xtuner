@@ -50,7 +50,15 @@ class LocalhostStage:
             output = await agent(item.instruction)
             content = output.content if hasattr(output, "content") else output
             item.artifacts["response"] = content if isinstance(content, str) else str(content)
-            item.artifacts["messages"] = agent.get_messages()
+            messages = agent.get_messages()
+            if not isinstance(messages, list) or not messages:
+                raise ValueError("Agent messages artifact must be a non-empty list.")
+            segment = messages[-1]
+            if not isinstance(segment, dict) or "messages" not in segment or "tools" not in segment:
+                raise ValueError("Agent messages trace segment must contain messages and tools.")
+            if not isinstance(segment["messages"], list):
+                raise TypeError("Agent messages trace segment.messages must be a list.")
+            item.artifacts["messages"] = messages
             result = StageResult(stdout=item.artifacts["response"], return_code=0)
             record.entry_result = result
             record.status = StageStatus.COMPLETED
