@@ -42,7 +42,6 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
 )
 from xtuner.v1.utils import get_logger
 
-
 # ─────────────────────────────────────────────────────────────────
 # Primitive hooks
 # ─────────────────────────────────────────────────────────────────
@@ -284,9 +283,7 @@ class PickAgent(Hook):
 # Minimal __init__ replacements so vendored lagent doesn't eager-import
 # optional deps (pandas, etc.) that sandbox images may lack.
 _MINIMAL_ACTIONS_INIT = (
-    "from .action_executor import ActionExecutor, AsyncActionExecutor\n"
     "from .base_action import AsyncActionMixin, BaseAction, tool_api\n"
-    "from .builtin_actions import FinishAction, InvalidAction, NoAction\n"
     "from .parser import BaseParser, JsonParser, TupleParser\n"
 )
 _MINIMAL_HOOKS_INIT = "from .hook import Hook, RemovableHandle\n"
