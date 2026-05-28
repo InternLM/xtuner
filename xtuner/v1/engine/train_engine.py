@@ -392,12 +392,20 @@ class TrainEngine:
         # temporary .incomplete directory and commit it only after every rank's
         # async_save future has completed.
         incomplete_dir = weights_dir.with_name(f"{weights_dir.name}.incomplete")
-        if weights_dir.exists():
+        # Check existence only on rank 0 and broadcast the result so all ranks
+        # raise (or continue) together. Without this, NFS cache inconsistencies
+        # could cause some ranks to raise while others proceed to the barrier,
+        # resulting in a deadlock.
+        dir_exists = torch.tensor(int(weights_dir.exists() if dist.get_rank() == 0 else 0), dtype=torch.int32)
+        dist.broadcast(dir_exists, src=0, group=async_checkpoint_pg)
+        if dir_exists.item():
             raise FileExistsError(f"Checkpoint directory already exists: {weights_dir}")
         if dist.get_rank() == 0:
             if incomplete_dir.exists():
                 shutil.rmtree(incomplete_dir)
             incomplete_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure rank 0 finishes rmtree+mkdir before any rank proceeds to write.
+        dist.barrier(group=async_checkpoint_pg)
 
         # XtunerCacheWriter.stage() creates its staging cache directly in POSIX
         # shared memory (/dev/shm). PyTorch's ForkingPickler detects
@@ -440,7 +448,20 @@ class TrainEngine:
                     dcp_future.result()
                     break
                 except BaseException as exc:
-                    if attempt == max_daemon_init_attempts or not self._is_async_checkpoint_daemon_init_error(exc):
+                    # Use all_reduce(MAX) so all ranks agree on whether this is
+                    # a retryable daemon-init error. Without this, ranks that
+                    # see a non-retryable error would raise (skipping the
+                    # barrier) while other ranks wait at the barrier, causing a
+                    # deadlock.
+                    is_retryable = attempt < max_daemon_init_attempts and self._is_async_checkpoint_daemon_init_error(
+                        exc
+                    )
+                    # 0 = retryable, 1 = fatal; MAX means any fatal rank wins.
+                    decision = torch.tensor(0 if is_retryable else 1, dtype=torch.int32)
+                    dist.all_reduce(decision, op=dist.ReduceOp.MAX, group=async_checkpoint_pg)
+                    is_fatal = bool(decision.item())
+
+                    if is_fatal:
                         elapsed = time.time() - t0
                         logger.error(f"[DCP async_save for {weights_dir}] failed after {elapsed:.2f}s: {exc}")
                         logger.error(traceback.format_exc())
