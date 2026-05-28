@@ -42,7 +42,6 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
 )
 from xtuner.v1.utils import get_logger
 
-
 # ─────────────────────────────────────────────────────────────────
 # Primitive hooks
 # ─────────────────────────────────────────────────────────────────
