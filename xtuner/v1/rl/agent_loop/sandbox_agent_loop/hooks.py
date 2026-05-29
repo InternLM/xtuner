@@ -351,6 +351,50 @@ class InstallLagent(Hook):
 
 
 # ─────────────────────────────────────────────────────────────────
+# Pre-built terminal-bench install tree upload
+# ─────────────────────────────────────────────────────────────────
+
+
+class InstallTerminalBenchPkg(Hook):
+    """Ship a pre-built terminal-bench install tree into the sandbox.
+
+    ``pkg_tar_path`` should point at a local ``.tar.gz`` whose contents are
+    the result of ``pip install --target=<dir> terminal-bench`` — i.e. the
+    package and all its dependencies, flat under one directory.  The tar is
+    extracted into ``dest`` inside the sandbox; downstream commands need to
+    add ``dest`` to ``PYTHONPATH``.  Pass ``None`` to skip.
+    """
+
+    name = "install_terminal_bench_pkg"
+
+    def __init__(self, pkg_tar_path: str | None = None, dest: str = "/tmp/tb_pkg"):
+        self.pkg_tar_path = pkg_tar_path
+        self.dest = dest
+
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        if self.pkg_tar_path is None:
+            return
+        src = Path(self.pkg_tar_path)
+        if not src.is_file():
+            get_logger().warning(
+                f"InstallTerminalBenchPkg: {src} not found; skipping upload. "
+                f"Run recipe/tb2_eval/infer/agents/terminus/tb_pkg_install.sh on the host first."
+            )
+            return
+        blob = await asyncio.to_thread(src.read_bytes)
+        await http_upload(
+            client,
+            "/tmp/_tb_pkg.tar.gz",
+            base64.b64encode(blob).decode(),
+        )
+        await exec_in(
+            client,
+            f"mkdir -p {self.dest} && cd {self.dest} && "
+            f"tar xzf /tmp/_tb_pkg.tar.gz && rm /tmp/_tb_pkg.tar.gz",
+        )
+
+
+# ─────────────────────────────────────────────────────────────────
 # Agent config: upload config.py source (daemon execs it in-sandbox)
 # ─────────────────────────────────────────────────────────────────
 
@@ -444,12 +488,18 @@ class RunAgentInstallDeps(Hook):
         if chosen is None:
             raise RuntimeError("PickAgent must run before RunAgentInstallDeps")
         script = f"{self.workspace}/agent/{chosen.name}/install-deps.sh"
-        await exec_in(
+        result = await exec_in(
             client,
             f'[ -f "{script}" ] && bash "{script}" || true',
             timeout_sec=self.timeout,
             raise_on_error=True,
         )
+        stdout = (result.get("stdout") or "").strip()
+        stderr = (result.get("stderr") or "").strip()
+        if stdout:
+            get_logger().info(f"install-deps[{chosen.name}] stdout:\n{stdout}")
+        if stderr:
+            get_logger().info(f"install-deps[{chosen.name}] stderr:\n{stderr}")
 
 
 # ─────────────────────────────────────────────────────────────────

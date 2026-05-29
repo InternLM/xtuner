@@ -551,7 +551,7 @@ class DetachedShellEntry:
         capture: EntryCapture | dict[str, Any],
         monitor: EntryMonitor | dict[str, Any],
         failure: EntryFailurePolicy | dict[str, Any] | None = None,
-        handshake_timeout_sec: float = 60.0,
+        handshake_timeout_sec: int = 60,
     ):
         self.cmd = cmd
         self.name = name
