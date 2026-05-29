@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import Callable, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.data_proto.rl_data import RolloutState
 
-from .native import Judger, JudgerConfig
+from .native import Judger, JudgerConfig, JudgerOutput
 
 
 SelectedJudgerKeys: TypeAlias = str | list[str] | None
 JudgerSelectFn: TypeAlias = Callable[[RolloutState, dict[str, Judger]], SelectedJudgerKeys]
 JudgerMergeFn: TypeAlias = Callable[
-    [RolloutState | list[RolloutState], dict[str, RolloutState | list[RolloutState]]],
+    [RolloutState | list[RolloutState], dict[str, JudgerOutput | list[JudgerOutput]]],
     RolloutState | list[RolloutState],
 ]
 
@@ -37,14 +36,14 @@ def default_select_fn(rollout_state: RolloutState, branches: dict[str, Judger]) 
 
 def default_merge_fn(
     original: RolloutState | list[RolloutState],
-    judged: dict[str, RolloutState | list[RolloutState]],
+    judged: dict[str, JudgerOutput | list[JudgerOutput]],
 ) -> RolloutState | list[RolloutState]:
     """Default merger for ``ComposedJudgerConfig``.
 
     This merger intentionally does not combine multiple judger scores into a single aggregated value.
     It writes the merged reward as ``{branch_name: score}``, where ``branch_name`` is the selected
     key from ``ComposedJudgerConfig.branches`` and ``score`` is taken from each child judger's
-    ``reward["score"]``.
+    output ``["score"]``.
 
     Supports both single ``RolloutState`` and batched ``list[RolloutState]`` inputs. In the batch
     case, each element in the list represents a different response to the same prompt, and each
@@ -54,42 +53,41 @@ def default_merge_fn(
     their own ``merge_fn``.
     """
     if isinstance(original, list):
-        for name, state in judged.items():
-            if not isinstance(state, list):
+        for name, output in judged.items():
+            if not isinstance(output, list):
                 raise TypeError(
-                    f"default_merge_fn: branch {name!r} returned a single RolloutState "
+                    f"default_merge_fn: branch {name!r} returned a single output "
                     "but original is a list. All branches must return lists when input is a list."
                 )
-            if len(state) != len(original):
+            if len(output) != len(original):
                 raise ValueError(
-                    f"default_merge_fn: branch {name!r} returned {len(state)} states "
+                    f"default_merge_fn: branch {name!r} returned {len(output)} outputs "
                     f"but original has {len(original)} states."
                 )
         results: list[RolloutState] = []
         for i, orig in enumerate(original):
-            merged = orig.model_copy(deep=True)
-            merged.reward = {}
-            for name, states in judged.items():
-                assert isinstance(states, list)
-                state_i: RolloutState = states[i]
-                reward = state_i.reward
-                if reward is None or "score" not in reward:
-                    raise KeyError(f"Default merge_fn requires reward['score'] for branch {name!r}.")
-                merged.reward[name] = reward["score"]
-            results.append(merged)
+            merged_reward = {}
+            for name, outputs in judged.items():
+                assert isinstance(outputs, list)
+                output_i = outputs[i]
+                if "score" not in output_i:
+                    raise KeyError(f"Default merge_fn requires output['score'] for branch {name!r}.")
+                merged_reward[name] = output_i["score"]
+            orig.reward = merged_reward
+            results.append(orig)
         return results
     else:
-        merged = original.model_copy(deep=True)
-        merged.reward = {}
-        for name, state in judged.items():
-            if isinstance(state, list):
+        merged_reward = {}
+        for name, output in judged.items():
+            if isinstance(output, list):
                 raise TypeError(
                     f"default_merge_fn: branch {name!r} returned a list but original is a single RolloutState."
                 )
-            if state.reward is None or "score" not in state.reward:
-                raise KeyError(f"Default merge_fn requires reward['score'] for branch {name!r}.")
-            merged.reward[name] = state.reward["score"]
-        return merged
+            if "score" not in output:
+                raise KeyError(f"Default merge_fn requires output['score'] for branch {name!r}.")
+            merged_reward[name] = output["score"]
+        original.reward = merged_reward
+        return original
 
 
 class ComposedJudger(Judger):
@@ -135,11 +133,16 @@ class ComposedJudger(Judger):
     async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:  # type: ignore[override]
         selected_keys = self._resolve_selected_keys(rollout_state)
 
-        judged: dict[str, RolloutState | list[RolloutState]] = {}
+        judged: dict[str, JudgerOutput | list[JudgerOutput]] = {}
         for key in selected_keys:
             if key not in self.branches:
                 raise KeyError(f"Unknown judger branch: {key}, available={sorted(self.branches)}")
-            judged[key] = await self.branches[key].judge(deepcopy(rollout_state))
+            if isinstance(rollout_state, list):
+                payloads = [self.branches[key].preprocess(state) for state in rollout_state]
+                judged[key] = await self.branches[key].judge_payload(payloads)
+            else:
+                payload = self.branches[key].preprocess(rollout_state)
+                judged[key] = await self.branches[key].judge_payload(payload)
         return self.merge_fn(rollout_state, judged)
 
 

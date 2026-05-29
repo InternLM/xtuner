@@ -53,8 +53,9 @@ Judger 体系关系图
 ------------------------------------
 AgentLoop
   └─► RemoteJudger.judge(state)
-        └─► JudgerActor.judge.remote(state)   ← Ray 跨进程/机器调用
-              └─► NativeJudger.judge(state)
+        ├─► preprocess(state)                 ← driver 侧提取轻量 payload
+        └─► JudgerActor.judge_payload.remote(payload)
+              └─► NativeJudger.judge_payload(payload)
                     └─► reward_handler(response, label)
 """
 
@@ -62,8 +63,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from abc import ABC, abstractmethod
-from typing import Callable, TypeAlias, cast, overload
+from abc import ABC
+from typing import Any, Callable, TypeAlias, cast, overload
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -77,14 +78,50 @@ from xtuner.v1.utils.type_helper import ray_method
 
 logger = get_logger()
 
+JudgerPayload: TypeAlias = dict[str, Any]
+JudgerPayloadBatch: TypeAlias = JudgerPayload | list[JudgerPayload]
+JudgerOutput: TypeAlias = dict[str, Any]
+JudgerOutputBatch: TypeAlias = JudgerOutput | list[JudgerOutput]
+
 
 class Judger(ABC):
+    def preprocess(self, rollout_state: RolloutState) -> JudgerPayload:
+        return {
+            "response": rollout_state.response,
+            "label": rollout_state.reward_model.get("ground_truth") if rollout_state.reward_model else None,
+            "message": rollout_state.message,
+            "status": rollout_state.status,
+            "data_source": rollout_state.data_source,
+            "task_name": rollout_state.task_name,
+        }
+
+    def postprocess(self, rollout_state: RolloutState, output: JudgerOutput) -> RolloutState:
+        rollout_state.reward = output
+        return rollout_state
+
     @overload
     async def judge(self, rollout_state: RolloutState) -> RolloutState: ...
     @overload
     async def judge(self, rollout_state: list[RolloutState]) -> list[RolloutState]: ...
-    @abstractmethod
-    async def judge(self, rollout_state): ...
+
+    async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:
+        if isinstance(rollout_state, list):
+            payloads = [self.preprocess(state) for state in rollout_state]
+            outputs = await self.judge_payload(payloads)
+            if not isinstance(outputs, list):
+                raise TypeError(f"Judger returned a single output for {len(rollout_state)} rollout states.")
+            if len(outputs) != len(rollout_state):
+                raise ValueError(f"Judger returned {len(outputs)} outputs for {len(rollout_state)} rollout states.")
+            return [self.postprocess(state, output) for state, output in zip(rollout_state, outputs)]
+
+        payload = self.preprocess(rollout_state)
+        output = await self.judge_payload(payload)
+        if isinstance(output, list):
+            raise TypeError("Judger returned a list output for a single rollout state.")
+        return self.postprocess(rollout_state, output)
+
+    async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
+        raise NotImplementedError(f"{self.__class__.__name__}.judge_payload() is not implemented.")
 
 
 class NativeJudger(Judger):
@@ -103,18 +140,19 @@ class NativeJudger(Judger):
         self.reward_handler = reward_handler
         self.request_timeout = request_timeout
 
-    @ray_method
-    async def judge(self, rollout_state: RolloutState) -> RolloutState:  # type: ignore[override]
-        assert rollout_state.response is not None, (
+    async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
+        if isinstance(payload, list):
+            raise NotImplementedError("NativeJudger does not support batch payloads.")
+        assert payload["response"] is not None, (
             "RolloutState must have a response for judging. You should detokenize the response_ids in AgentLoop"
         )
-        assert rollout_state.reward_model is not None and "ground_truth" in rollout_state.reward_model, (
-            "RolloutState must have reward_model with 'ground_truth' for judging. You should set reward_model in AgentLoop"
+        assert payload["label"] is not None, (
+            "RolloutState must have reward_model with 'ground_truth' for judging. You should set reward_model in "
+            "AgentLoop"
         )
-
         input_kwargs = {
-            "response": rollout_state.response,
-            "label": rollout_state.reward_model["ground_truth"],
+            "response": payload["response"],
+            "label": payload["label"],
             "extra_info": {**self.extra_info},
         }
 
@@ -134,8 +172,7 @@ class NativeJudger(Judger):
         assert isinstance(judger_response, dict), (
             f"Reward handler must return a dict, but got {type(judger_response)}."
         )
-        rollout_state.reward = judger_response
-        return rollout_state
+        return cast(JudgerOutput, judger_response)
 
     def get_judger_name(self) -> str:
         return self._judger_name
@@ -146,9 +183,8 @@ class RemoteJudger(Judger):
         self.actor = actor
         self._judger_name = judger_name
 
-    @ray_method
-    async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:  # type: ignore[override]
-        return await self.actor.judge.remote(rollout_state)
+    async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
+        return await self.actor.judge_payload.remote(payload)
 
     def get_judger_name(self) -> str:
         return self._judger_name
@@ -177,11 +213,10 @@ class JudgerPool(Judger):
         async with self._lock:
             self._worker_loads[replica_idx] -= 1
 
-    @ray_method
-    async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:  # type: ignore[override]
+    async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
         replica_idx, replica = await self._pick_replica()
         try:
-            return await replica.judge(rollout_state)
+            return await replica.judge_payload(payload)
         finally:
             await self._release_replica(replica_idx)
 
@@ -273,8 +308,8 @@ class JudgerActor:
         self.judger = judger_config.build_local()
 
     @ray_method
-    async def judge(self, rollout_state: RolloutState) -> RolloutState:
-        return await self.judger.judge(rollout_state)
+    async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
+        return await self.judger.judge_payload(payload)
 
 
 RayJudger = cast(ActorClass[JudgerActor], CPUActorLauncher.to_actor_class(JudgerActor))

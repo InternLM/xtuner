@@ -14,6 +14,10 @@ from .gsm8k import GSM8KJudgerConfig
 from .native import (
     Judger,
     JudgerConfig,
+    JudgerOutput,
+    JudgerOutputBatch,
+    JudgerPayload,
+    JudgerPayloadBatch,
     JudgerPool,
     NativeJudger,
     RayJudger,

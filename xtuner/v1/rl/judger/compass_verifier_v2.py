@@ -6,8 +6,7 @@ import requests  # type: ignore[import-untyped]
 from pydantic import ConfigDict
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.judger.native import Judger, JudgerConfig
-from xtuner.v1.utils.type_helper import ray_method
+from xtuner.v1.rl.judger.native import Judger, JudgerConfig, JudgerOutputBatch, JudgerPayload, JudgerPayloadBatch
 
 
 verify_prompt = """
@@ -58,14 +57,24 @@ class CompassVerifierV2(Judger):
         ).json()["data"][0]["id"]
         self.judger_name = "compass_verifier_v2"
 
-    @ray_method
-    async def judge(self, rollout_state: RolloutState) -> RolloutState:  # type: ignore[override]
+    def preprocess(self, rollout_state: RolloutState) -> JudgerPayload:
         if rollout_state.status != Status.COMPLETED or rollout_state.response is None:
-            rollout_state.reward = {"score": -1}
-            return rollout_state
+            return {
+                "response": rollout_state.response,
+                "label": None,
+                "message": rollout_state.message,
+                "status": rollout_state.status,
+            }
+        return super().preprocess(rollout_state)
 
-        question = rollout_state.message[-1]["content"]
-        model_answer = rollout_state.response.replace("<|im_end|>", "").strip()
+    async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
+        if isinstance(payload, list):
+            raise NotImplementedError("CompassVerifierV2 does not support batch payloads.")
+        if payload["status"] != Status.COMPLETED or payload["response"] is None:
+            return {"score": -1}
+
+        question = payload["message"][-1]["content"]
+        model_answer = payload["response"].replace("<|im_end|>", "").strip()
         for thinking_finish_word in self.thinking_finish_words:
             if thinking_finish_word in model_answer:
                 model_answer = model_answer.split(thinking_finish_word)[-1]
@@ -76,12 +85,9 @@ class CompassVerifierV2(Judger):
         if len(model_answer) > 1000:
             model_answer = model_answer[-1000:]
 
-        assert rollout_state.reward_model is not None and "ground_truth" in rollout_state.reward_model, (
-            "RolloutState must have reward_model with 'ground_truth' for CompassVerifierV2."
-        )
-        outcome_reward = await self._judge_with_llm(question, model_answer, rollout_state.reward_model["ground_truth"])
-        rollout_state.reward = {"score": outcome_reward}
-        return rollout_state
+        assert payload["label"] is not None, "Judger payload must contain label for CompassVerifierV2."
+        outcome_reward = await self._judge_with_llm(question, model_answer, payload["label"])
+        return {"score": outcome_reward}
 
     async def _judge_with_llm(self, question: str, model_response: str, label: str):
         headers = {"Content-Type": "application/json"}
