@@ -208,21 +208,6 @@ class UpdateWeighter:
         self._lmdeploy_disagg_engine_urls = []
         self._lmdeploy_disagg_executor = None
 
-    @staticmethod
-    def _raise_for_update_weight_status(response, backend: str, action: str):
-        try:
-            response.raise_for_status()
-        except requests.HTTPError as e:
-            message = response.text
-            try:
-                message = response.json()
-            except Exception:
-                pass
-            raise requests.HTTPError(
-                f"{backend} {action} failed with status {response.status_code}: {message}",
-                response=response,
-            ) from e
-
     def _get_train_update_sync_group(self) -> dist.ProcessGroup:
         if self._train_update_sync_group is None:
             ranks = list(range(dist.get_world_size()))
@@ -716,7 +701,7 @@ class UpdateWeighter:
 
         for init_future in init_futures:
             response = init_future.result()
-            self._raise_for_update_weight_status(response, "SGLang", "init_weights_update_group")
+            response.raise_for_status()
             result = response.json()
             assert result.get("success", True), (
                 f"SGLang init_weights_update_group failed: {result.get('message', result)}"
@@ -783,7 +768,7 @@ class UpdateWeighter:
 
         for init_future in init_futures:
             response = init_future.result()
-            self._raise_for_update_weight_status(response, "LMDeploy", "init_weights_update_group")
+            response.raise_for_status()
             result = response.json()
             assert result.get("success", True), (
                 f"LMDeploy init_weights_update_group failed: {result.get('message', result)}"
@@ -845,7 +830,7 @@ class UpdateWeighter:
             DEVICE_MODULE.synchronize()
             for update_future in update_futures:
                 response = update_future.result()
-                self._raise_for_update_weight_status(response, "SGLang", "update_weights_from_distributed")
+                response.raise_for_status()
                 result = response.json()
                 self._hook_compare_test_sent_and_received_weight_hash(
                     result,
@@ -910,7 +895,7 @@ class UpdateWeighter:
                 DEVICE_MODULE.synchronize()
                 for update_future in update_futures:
                     response = update_future.result()
-                    self._raise_for_update_weight_status(response, "LMDeploy", "update_weights_from_distributed")
+                    response.raise_for_status()
                     result = response.json()
                     self._hook_compare_test_sent_and_received_weight_hash(
                         result,
@@ -940,7 +925,7 @@ class UpdateWeighter:
                 ]
                 for update_future in update_futures:
                     response = update_future.result()
-                    self._raise_for_update_weight_status(response, "LMDeploy", "update_weights_from_distributed")
+                    response.raise_for_status()
                     result = response.json()
                     assert result.get("success", True), (
                         f"LMDeploy update_weights_from_distributed (finalize) failed: "
