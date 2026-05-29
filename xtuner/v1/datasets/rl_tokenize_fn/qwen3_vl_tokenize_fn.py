@@ -128,7 +128,7 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
                 num_tokens=data["num_tokens"],
                 proxy_attn_flops=data.get("proxy_attn_flops", float(data["num_tokens"])),
                 prompt_ids=prompt_token_ids,
-                position_ids=_tensor_to_numpy(data.get("position_ids")),
+                position_ids=_tensor_to_numpy(data["position_ids"]),
                 data_source=mapped_judger_name_and_weight,
                 reward_model=item.get("reward_model", {}),
                 mm_info=mm_info,
