@@ -42,6 +42,7 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
 )
 from xtuner.v1.utils import get_logger
 
+
 # ─────────────────────────────────────────────────────────────────
 # Primitive hooks
 # ─────────────────────────────────────────────────────────────────
@@ -507,7 +508,7 @@ class _ParseError(RuntimeError):
 def _parse_stage_stdout(result: StageResult) -> tuple[float, dict[str, dict[str, float]]]:
     """Returns ``(score, criteria)`` or raises :class:`_ParseError`."""
     if result.return_code != 0:
-        raise _ParseError(f"return_code={result.return_code}: {result.stderr[:500]}")
+        raise _ParseError(f"return_code={result.return_code}: {result.stderr}")
     stdout = result.stdout.strip()
     if not stdout:
         raise _ParseError("empty stdout")

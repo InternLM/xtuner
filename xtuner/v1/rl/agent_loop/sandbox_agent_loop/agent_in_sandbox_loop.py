@@ -121,6 +121,14 @@ class AgentInSandboxLoop(AgentLoop):
         return await runner.run(item)
 
     async def _fill_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
+        rollout_state.status = Status.COMPLETED if item.status == RolloutStatus.COMPLETED else Status.FAILED
+        rollout_state.finish_reason = "stop" if item.status == RolloutStatus.COMPLETED else "error"
+        rollout_state.reward = {"score": item.reward} if item.reward is not None else None
+        if item.error is not None:
+            rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
+        if item.status != RolloutStatus.COMPLETED:
+            return
+
         artifacts = item.artifacts
         trace = json.loads(artifacts["message"])
         if not isinstance(trace, list) or not trace:
@@ -152,8 +160,3 @@ class AgentInSandboxLoop(AgentLoop):
         ]
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
-        rollout_state.finish_reason = "stop" if item.status == RolloutStatus.COMPLETED else "error"
-        rollout_state.status = item.status
-        rollout_state.reward = {"score": item.reward}
-        if item.error is not None:
-            rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"

@@ -1032,7 +1032,7 @@ async def exec_in(
     result = await client.execute(command, cwd, timeout_sec, detach)
     rc = _result_code(result)
     if raise_on_error and rc != 0:
-        raise RuntimeError(f"command failed (return_code={rc}): {command}\nstderr: {result.get('stderr', '')[:1000]}")
+        raise RuntimeError(f"command failed (return_code={rc}): {command}\nstderr: {result.get('stderr', '')}")
     return result
 
 

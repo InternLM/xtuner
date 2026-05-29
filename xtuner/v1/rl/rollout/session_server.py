@@ -6,11 +6,40 @@ from typing import Any, Optional
 import numpy as np
 import ray
 from aiohttp import ClientSession, web
-from transformers import AutoTokenizer
 
+from transformers import AutoTokenizer
 from xtuner.v1.utils import get_logger
 
 from .trace_store import TokenizedSegment, get_store
+
+
+def _is_error_payload(payload: dict) -> bool:
+    return payload.get("error") is not None or payload.get("type") == "error" or payload.get("object") == "error"
+
+
+def _lmdeploy_error_payload(message: str, status: int = 500, error_type: str = "internal_server_error") -> dict:
+    return {
+        "message": message,
+        "type": error_type,
+        "code": status,
+        "object": "error",
+    }
+
+
+def _stream_has_traceable_choices(raw: bytes) -> bool:
+    text = raw.decode("utf-8", errors="replace")
+    for line in text.split("\n"):
+        line = line.strip()
+        if line.startswith("data: ") and line != "data: [DONE]":
+            try:
+                event = json.loads(line[6:])
+            except json.JSONDecodeError:
+                return False
+            if _is_error_payload(event):
+                return False
+            if event.get("choices"):
+                return True
+    return False
 
 
 class SessionServer:
@@ -123,7 +152,7 @@ class SessionServer:
             # last node in nodes corresponds to the delta inserted in on_request (if any)
             if nodes:
                 delta_node_val: TokenizedSegment = nodes[-1].value
-                delta_len = delta_node_val.length
+                delta_len = len(delta_node_val.token_ids)
                 prefix_len = sum(len(n.value.token_ids) for n in nodes[:-1])
                 assert prefix_len + delta_len + len(output_token_ids) == len(raw_routed_expert)
 
@@ -193,7 +222,6 @@ class SessionServer:
         request_body = await request.read()
         request_data = session_id = messages = None
         orig_logprobs = orig_return_token_ids = orig_return_routed_experts = False
-
         if request_body:
             try:
                 request_data = json.loads(request_body)
@@ -212,6 +240,10 @@ class SessionServer:
                 request_body = json.dumps(request_data).encode("utf-8")
             except json.JSONDecodeError:
                 pass
+            except Exception as exc:
+                message = f"SessionServer request hook failed: {type(exc).__name__}: {exc}"
+                get_logger().error(message)
+                return web.json_response(_lmdeploy_error_payload(message), status=500)
 
         # Build forwarding headers, dropping original Host
         forward_headers = dict(request.headers)
@@ -314,37 +346,60 @@ class SessionServer:
                             for k, v in resp.headers.items()
                             if k.lower() not in ("transfer-encoding", "content-length", "content-encoding")
                         },
-                        body=final_raw_response,  # Modifed raw response without our injected trace params
+                        body=final_raw_response,  # Modified raw response without our injected trace params
                     )
 
         # Apply abstract on_response processing
         response_data = None
+        skip_done = False
+        session_error_msg = None
         if request_data:
             if is_stream:
-                response_data = self._parse_stream_response(raw_response)
+                skip_done = not _stream_has_traceable_choices(raw_response)
+                if not skip_done:
+                    try:
+                        response_data = self._parse_stream_response(raw_response)
+                    except Exception as exc:
+                        session_error_msg = f"SessionServer stream trace failed: {type(exc).__name__}: {exc}"
             else:
                 try:
                     response_data = json.loads(raw_response)
                 except json.JSONDecodeError:
                     pass
+                if isinstance(response_data, dict) and _is_error_payload(response_data):
+                    response_data = None
 
             if response_data is not None:
-                for c in response_data.get("choices", []):
-                    if c.get("message") and isinstance(c["message"].get("content"), str):
-                        c["message"]["content"] = c["message"]["content"].replace(self.stop_word, "")
-                        for tc in c["message"].get("tool_calls") or []:
-                            if isinstance(tc.get("function", {}).get("arguments"), str):
-                                tc["function"]["arguments"] = json.loads(tc["function"]["arguments"])
+                try:
+                    for c in response_data.get("choices", []):
+                        if c.get("message") and isinstance(c["message"].get("content"), str):
+                            c["message"]["content"] = c["message"]["content"].replace(self.stop_word, "")
+                            for tc in c["message"].get("tool_calls") or []:
+                                if isinstance(tc.get("function", {}).get("arguments"), str):
+                                    tc["function"]["arguments"] = json.loads(tc["function"]["arguments"])
 
-                response_data["session_id"] = session_id
-                response_data["messages"] = messages
-                response_data["tools"] = tools
-                await self.on_response(response_data)
+                    response_data["session_id"] = session_id
+                    response_data["messages"] = messages
+                    response_data["tools"] = tools
+                    await self.on_response(response_data)
+                except Exception as exc:
+                    session_error_msg = f"SessionServer response hook failed: {type(exc).__name__}: {exc}"
+
+        if session_error_msg:
+            get_logger().error(session_error_msg)
 
         if is_stream:
-            # write the delayed [DONE] line
-            await response.write(b"data: [DONE]\n\n")
+            if session_error_msg:
+                error_payload = _lmdeploy_error_payload(session_error_msg)
+                await response.write(
+                    ("data: " + json.dumps(error_payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+                )
+                skip_done = True
+            if not skip_done:
+                await response.write(b"data: [DONE]\n\n")
             await response.write_eof()
+        elif session_error_msg:
+            return web.json_response(_lmdeploy_error_payload(session_error_msg), status=500)
 
         return response
 
@@ -365,19 +420,19 @@ class SessionServer:
         for line in text.split("\n"):
             line = line.strip()
             if line.startswith("data: ") and line != "data: [DONE]":
-                try:
-                    events.append(json.loads(line[6:]))
-                except json.JSONDecodeError:
-                    pass
+                event = json.loads(line[6:])
+                events.append(event)
 
         if not events:
             return None
+        if not any(event.get("choices") for event in events):
+            raise RuntimeError(f"Upstream SSE stream ended without choices: {json.dumps(events, ensure_ascii=False)}")
 
         # Reconstruct standard stream output (Assuming OpenAI format here)
-        message = {"choices": [{"message": {"role": "assistant", "content": ""}}]}
-        content_parts = []
-        tool_calls_map = {}
-        usage = {}
+        message: dict[str, Any] = {"choices": [{"message": {"role": "assistant", "content": ""}}]}
+        content_parts: list[str] = []
+        tool_calls_map: dict[int, dict[str, Any]] = {}
+        usage: dict[str, Any] = {}
 
         for event in events:
             if event.get("id") and "id" not in message:
@@ -400,12 +455,11 @@ class SessionServer:
                         assistant_choice["output_ids"] = []
                     assistant_choice["output_ids"].extend(choice["output_ids"])
 
-                # Check routed experts
-                if choice.get("routed_experts"):
+                # Check routed experts. LMDeploy only emits this in the final
+                # chunk, often as a Ray shared-store key string.
+                if choice.get("routed_experts") is not None:
                     assistant_choice = message["choices"][0]
-                    if "routed_experts" not in assistant_choice:
-                        assistant_choice["routed_experts"] = []
-                    assistant_choice["routed_experts"].extend(choice["routed_experts"])
+                    assistant_choice["routed_experts"] = choice["routed_experts"]
 
                 # Check logprobs
                 if choice.get("logprobs") and choice["logprobs"].get("content"):
