@@ -8,6 +8,12 @@ from ..data_item import CacheItem
 from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFnConfig, Qwen3VLTokenizeFunction, QwenVL3DataItem
 
 
+def _tensor_to_numpy(value):
+    if value is None:
+        return None
+    return value.detach().cpu().numpy()
+
+
 def remove_consecutive_img_context_tokens(tokens: list[int], img_context_id: int) -> list[int]:
     if not tokens:
         return tokens
@@ -104,9 +110,9 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
             if not self.ignore_multimodal_info:
                 mm_info = MultimodalInfo()
                 if "pixel_values" in data:
-                    mm_info["pixel_values"] = data["pixel_values"].numpy()  # for ray put into shared memory
+                    mm_info["pixel_values"] = _tensor_to_numpy(data["pixel_values"])  # for ray put into shared memory
                 if "image_grid_thw" in data:
-                    mm_info["image_grid_thw"] = data["image_grid_thw"]
+                    mm_info["image_grid_thw"] = _tensor_to_numpy(data["image_grid_thw"])
 
             data_source = item.get("data_source")
             assert data_source is not None, "data_source is required in item"
@@ -122,7 +128,7 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
                 num_tokens=data["num_tokens"],
                 proxy_attn_flops=data.get("proxy_attn_flops", float(data["num_tokens"])),
                 prompt_ids=prompt_token_ids,
-                position_ids=data["position_ids"],
+                position_ids=_tensor_to_numpy(data.get("position_ids")),
                 data_source=mapped_judger_name_and_weight,
                 reward_model=item.get("reward_model", {}),
                 mm_info=mm_info,
