@@ -1896,6 +1896,10 @@ class BaseModel(nn.Module):
             f.write(json.dumps(local_status, indent=2))
 
     def _write_hf_non_weight_files(self, hf_dir: Path) -> None:
+        if self.config.hf_config is not None:
+            self.config.save_hf(hf_dir)
+            return
+
         if self._hf_path is not None:
             for file in cast(Path, self._hf_path).iterdir():
                 if file.suffix != ".safetensors":
@@ -1904,10 +1908,6 @@ class BaseModel(nn.Module):
                         copy(file, target_path)
                     else:
                         copytree(file, target_path, ignore_dangling_symlinks=True, dirs_exist_ok=True)
-            return
-
-        if self.config.hf_config is not None:
-            self.config.save_hf(hf_dir)
             return
 
         raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
