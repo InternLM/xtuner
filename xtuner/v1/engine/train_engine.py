@@ -513,6 +513,51 @@ class TrainEngine:
         storage_writer.state_dict_cache = self._async_state_dict_cache
         return storage_writer
 
+    @classmethod
+    def warmup_async_save_dcp(cls, work_dir: Path) -> None:
+        """Warm up async DCP save infrastructure with a tiny dummy state dict.
+
+        This triggers the full async save path — including daemon subprocess
+        spawn and its internal init_process_group — so that errors like port
+        conflicts (EADDRINUSE) surface before any real training begins.
+
+        Args:
+            work_dir (Path): Working directory for temporary preflight files.
+        """
+        preflight_dir = work_dir / ".preflight_dcp"
+        weights_dir = preflight_dir / "weights"
+
+        if dist.get_rank() == 0:
+            if preflight_dir.exists():
+                shutil.rmtree(preflight_dir)
+            weights_dir.mkdir(parents=True, exist_ok=True)
+        dist.barrier()
+
+        dummy_state_dict = {"_preflight": torch.zeros(1)}
+
+        try:
+            async_save_kwargs: dict[str, Any] = {}
+            state_dict_saver = importlib.import_module("torch.distributed.checkpoint.state_dict_saver")
+            async_checkpointer_type = getattr(state_dict_saver, "AsyncCheckpointerType", None)
+            if async_checkpointer_type is not None:
+                async_save_kwargs["async_checkpointer_type"] = async_checkpointer_type.PROCESS
+
+            future = cast(Any, dcp.async_save)(
+                dummy_state_dict,
+                checkpoint_id=weights_dir,
+                **async_save_kwargs,
+            )
+            future.result(timeout=300)
+        except Exception as e:
+            raise RuntimeError(
+                f"DCP warmup save failed. This usually indicates a port conflict "
+                f"or process group initialization issue. Error: {e}"
+            ) from e
+        finally:
+            if dist.get_rank() == 0 and preflight_dir.exists():
+                shutil.rmtree(preflight_dir, ignore_errors=True)
+            dist.barrier()
+
     def destroy_async_checkpoint_pg(self) -> None:
         """Destroy the dedicated gloo process group used for async
         checkpoint."""
