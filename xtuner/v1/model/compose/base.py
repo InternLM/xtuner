@@ -192,14 +192,16 @@ class BaseComposeModel(BaseModel):
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
         tmp_hf_dir = hf_dir.with_name(f"{hf_dir.name}.incomplete")
+        status_dir = tmp_hf_dir.parent / f".{tmp_hf_dir.name}.async-hf-writer-status"
         if rank == 0:
             if tmp_hf_dir.exists():
                 rmtree(tmp_hf_dir)
+            if status_dir.exists():
+                rmtree(status_dir)
             tmp_hf_dir.mkdir(parents=True, exist_ok=True)
+            status_dir.mkdir(parents=True, exist_ok=True)
 
-        status_path = (
-            tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{self._async_hf_writer_status_filename(rank, world_size)}"
-        )
+        status_path = status_dir / self._async_hf_writer_status_filename(rank, world_size)
         cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
         if rank == 0:
             cleanup_done_path.unlink(missing_ok=True)
