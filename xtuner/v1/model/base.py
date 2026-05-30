@@ -762,6 +762,7 @@ class BaseModel(nn.Module):
         cleanup_done_path: Path,
         rank: int,
     ) -> None:
+        log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] started")
         try:
             set_async_save_process_qos()
             self._cleanup_async_hf_dirs_before_write(
@@ -775,7 +776,9 @@ class BaseModel(nn.Module):
                 weight_map=weight_map,
                 status_path=status_path,
             )
+            log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] finished")
         except Exception as exc:
+            log_rank0.error(f"[Async saving HF to {tmp_hf_dir} writer] failed: {exc}")
             status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
             with status_path.open("w") as f:
                 f.write(json.dumps(status, indent=2))
