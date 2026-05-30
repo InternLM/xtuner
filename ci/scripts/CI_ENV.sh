@@ -1,6 +1,7 @@
 #!/bin/bash
 export QWEN3_VL_MOE_PATH=${CI_SHARE_MODEL}/Qwen3-VL-30B-A3B-Instruct_MOE
 export QWEN3_VL_DENSE_PATH=${CI_SHARE_MODEL}/Qwen3-VL-4B-Instruct
+export QWEN3_5_DENSE_4B_PATH=${CI_SHARE_MODEL}/models--Qwen--Qwen3.5-4B
 export INTERN_VL_1B_PATH=${CI_SHARE_MODEL}/InternVL3_5-1B-HF
 export VIDEO_ROOT=${CI_SHARE_DATA}/images
 export QWEN3_4B_PATH=${CI_SHARE_MODEL}/Qwen3-4B-Instruct-2507
