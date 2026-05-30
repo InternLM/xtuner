@@ -2,7 +2,7 @@ import json
 import multiprocessing as py_mp
 from pathlib import Path
 from shutil import rmtree
-from typing import Callable, Self, Sequence
+from typing import Callable, Mapping, Self, Sequence
 
 import torch
 import torch.distributed as dist
@@ -170,6 +170,15 @@ class BaseComposeModel(BaseModel):
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
                 json.dump({"weight_map": weight_map_dict, "metadata": {}}, f, indent=4)
         dist.barrier()
+
+    def _write_hf_index_and_config(self, hf_dir: Path | str, weight_map: Mapping[str, str]) -> None:
+        if isinstance(hf_dir, str):
+            hf_dir = Path(hf_dir)
+
+        self._write_hf_non_weight_files(hf_dir)
+
+        with open(hf_dir / "model.safetensors.index.json", "w") as f:
+            json.dump({"weight_map": dict(weight_map), "metadata": {}}, f, indent=4)
 
     def async_save_hf(
         self,
