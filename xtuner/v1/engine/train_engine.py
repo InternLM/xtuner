@@ -373,15 +373,6 @@ class TrainEngine:
             self._async_checkpoint_pg = dist.new_group(backend="gloo")
         return self._async_checkpoint_pg
 
-    @staticmethod
-    def _is_async_checkpoint_daemon_init_error(exc: BaseException) -> bool:
-        message = str(exc)
-        return (
-            "EADDRINUSE" in message
-            or "address already in use" in message
-            or "Checkpoint background process is dead" in message
-        )
-
     def async_save_dcp(
         self,
         weights_dir: Path,
@@ -432,34 +423,13 @@ class TrainEngine:
         dcp_future = start_async_save()
 
         def commit_async_save() -> None:
-            nonlocal dcp_future
-            # Retry only PyTorch DCP daemon init port races, such as
-            # EADDRINUSE from TCPStore. Other checkpoint failures still raise.
-            max_daemon_init_attempts = 3
-            for attempt in range(1, max_daemon_init_attempts + 1):
-                try:
-                    dcp_future.result()
-                    break
-                except BaseException as exc:
-                    if attempt == max_daemon_init_attempts or not self._is_async_checkpoint_daemon_init_error(exc):
-                        elapsed = time.time() - t0
-                        logger.error(f"[DCP async_save for {weights_dir}] failed after {elapsed:.2f}s: {exc}")
-                        logger.error(traceback.format_exc())
-                        raise
-
-                    if dist.get_rank() == 0:
-                        logger.warning(
-                            "[DCP async_save for %s] checkpoint daemon init failed on attempt %s/%s, retrying: %s",
-                            weights_dir,
-                            attempt,
-                            max_daemon_init_attempts,
-                            exc,
-                        )
-                        if incomplete_dir.exists():
-                            shutil.rmtree(incomplete_dir)
-                        incomplete_dir.mkdir(parents=True, exist_ok=True)
-                    dist.barrier(group=async_checkpoint_pg)
-                    dcp_future = start_async_save()
+            try:
+                dcp_future.result()
+            except BaseException as exc:
+                elapsed = time.time() - t0
+                logger.error(f"[DCP async_save for {weights_dir}] failed after {elapsed:.2f}s: {exc}")
+                logger.error(traceback.format_exc())
+                raise
 
             dist.barrier(group=async_checkpoint_pg)
             if dist.get_rank() == 0:
@@ -492,6 +462,49 @@ class TrainEngine:
         storage_writer = XtunerCacheWriter(weights_dir, cache_staged_state_dict=True)
         storage_writer.state_dict_cache = self._async_state_dict_cache
         return storage_writer
+
+    def warmup_async_save_dcp(self, timeout: float = 1800.0) -> None:
+        """Pre-initialize the async DCP checkpoint daemon before training.
+
+        Runs one tiny dummy ``async_save`` so process-group creation / TCPStore binding happens now and errors like
+        EADDRINUSE surface before any training step is wasted. A rank that fails raises immediately; the launcher then
+        tears the job down -- the standard path for init-time failures.
+
+        Args:
+            timeout (float): Seconds to wait for the warmup save before declaring a hang. Defaults to 1800 to match
+                PyTorch's own daemon-init wait.
+        """
+        async_checkpoint_pg = self._get_async_checkpoint_pg()
+        # warmup_dir is per-rank and lives in node-local /dev/shm, so each rank
+        # prepares and cleans up its OWN directory (a rank0-only guard would
+        # leak every non-zero rank's directory).
+        warmup_dir = Path(f"/dev/shm/xtuner_dcp_warmup_{dist.get_rank()}")
+        if warmup_dir.exists():
+            shutil.rmtree(warmup_dir, ignore_errors=True)
+        warmup_dir.mkdir(parents=True, exist_ok=True)
+
+        async_save_kwargs: dict[str, Any] = {}
+        state_dict_saver = importlib.import_module("torch.distributed.checkpoint.state_dict_saver")
+        async_checkpointer_type = getattr(state_dict_saver, "AsyncCheckpointerType", None)
+        if async_checkpointer_type is not None:
+            async_save_kwargs["async_checkpointer_type"] = async_checkpointer_type.PROCESS
+
+        try:
+            future = cast(Any, dcp.async_save)(
+                {"_warmup": torch.zeros(1)},
+                checkpoint_id=warmup_dir,
+                process_group=async_checkpoint_pg,
+                **async_save_kwargs,
+            )
+            future.result(timeout=timeout)
+        finally:
+            shutil.rmtree(warmup_dir, ignore_errors=True)
+
+        # Ensure warmup does not leave stale state that could be mistakenly
+        # reused by the first real checkpoint (different state_dict structure).
+        self._async_state_dict_cache = None
+
+        log_rank0.info("[DCP] Async save warmup completed successfully")
 
     def destroy_async_checkpoint_pg(self) -> None:
         """Destroy the dedicated gloo process group used for async

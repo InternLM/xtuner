@@ -806,6 +806,10 @@ class Trainer:
         handles data loading, forward pass, backward pass, optimization, logging, and checkpointing.
         """
         train_begin = time.time()
+
+        if self._async_checkpoint:
+            self._engine.warmup_async_save_dcp()
+
         time_before_get_data = time.time()
         for data_batch in self._data_iter():
             time_before_train_step = time.time()
@@ -861,6 +865,7 @@ class Trainer:
 
             self._lr_scheduler.step()
             self._maybe_check_health()
+            self._check_async_save_health()
             self._maybe_save_hf()
             ckpt_saved = self._maybe_save(is_snapshot=False)
             if not ckpt_saved:
@@ -1177,6 +1182,18 @@ class Trainer:
                 raise RuntimeError("Health check failed, exit training")
             log_rank0.info(f"Health check passed at step {self.cur_step}")
 
+    def _check_async_save_health(self) -> None:
+        """Non-blocking check for async save failures.
+
+        Called every training step to detect async checkpoint or HF export failures as soon as they happen, rather than
+        waiting until the next save interval.
+        """
+        if self._pending_checkpoint is not None and self._pending_checkpoint.done():
+            exc = self._pending_checkpoint.exception()
+            if exc is not None:
+                self._pending_checkpoint = None
+                raise RuntimeError(f"Async DCP checkpoint failed: {exc}") from exc
+
     def _wait_for_pending_checkpoint(self, timeout: int = 3000) -> None:
         if self._pending_checkpoint is None:
             return
@@ -1226,7 +1243,7 @@ class Trainer:
 
         # Save model and optimizer
         future: Future | None = None
-        if self._async_checkpoint and not is_snapshot:
+        if self._async_checkpoint:
             future = self._engine.async_save_dcp(weights_dir=weights_path)
         else:
             self._engine.save_dcp(weights_dir=weights_path)
