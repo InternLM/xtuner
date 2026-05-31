@@ -805,6 +805,9 @@ class Trainer:
         This method executes the main training loop, iterating through the dataset and performing training steps. It
         handles data loading, forward pass, backward pass, optimization, logging, and checkpointing.
         """
+        if self._async_hf_export:
+            self._engine.init_async_hf_runtime()
+
         train_begin = time.time()
         time_before_get_data = time.time()
         for data_batch in self._data_iter():
@@ -872,6 +875,8 @@ class Trainer:
                 gc.collect()
 
         self._wait_for_pending_async_hf()
+        if self._async_hf_export:
+            self._engine.destroy_async_hf_runtime()
 
         # TODO: Should use flush rather than close
         self._wait_for_pending_checkpoint()
@@ -1675,6 +1680,8 @@ class Trainer:
             return
 
         assert self._can_save_hf, "Model does not support saving in Huggingface format."
+        if self._async_hf_export:
+            self._engine.check_async_hf_failure()
 
         if self.cur_step % self._hf_interval != 0 and self.cur_step != self.total_step:
             return
@@ -1696,7 +1703,9 @@ class Trainer:
             )
             return
 
-    def _wait_for_pending_async_hf(self) -> None:
+    def _wait_for_pending_async_hf(self, timeout: int = 3000) -> None:
+        if self._async_hf_export:
+            self._engine.check_async_hf_failure()
         if self._pending_async_hf_handle is None:
             return
 
@@ -1707,8 +1716,11 @@ class Trainer:
         self._pending_async_hf_step = None
         self._pending_async_hf_epoch = None
 
-        finalized_hf_path = self._engine.wait_async_hf(handle)
-        assert finalized_hf_path is not None
+        try:
+            finalized_hf_path = handle.result(timeout=timeout)
+        except TimeoutError:
+            handle.cancel()
+            raise TimeoutError(f"Async HF save timed out after {timeout}s")
         assert step is not None
         assert epoch is not None
         self._finalize_hf_save(

@@ -5,7 +5,9 @@ import multiprocessing as py_mp
 import os
 import pydoc
 import re
+import threading
 import time
+import traceback
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from functools import reduce
@@ -57,7 +59,7 @@ from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_co
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
 from xtuner.v1.utils.misc import FunctionEnum, FunctionType, get_function_full_qualname, get_function_type
-from xtuner.v1.utils.process import get_async_save_file_lock_slots, set_async_save_process_qos
+from xtuner.v1.utils.process import get_async_hf_save_file_lock_slots, set_async_save_process_qos
 
 from .utils import ModelForwardExtraLogInfo
 
@@ -94,10 +96,39 @@ class _HFSavePlan(TypedDict):
 @dataclass
 class AsyncHFSaveHandle:
     process: Any
+    finalize_future: Future | None
     hf_dir: Path
     tmp_hf_dir: Path
+    status_dir: Path
     status_path: Path
     cleanup_done_path: Path
+
+    def result(self, timeout: float | None = None) -> Path:
+        if self.finalize_future is None:
+            raise RuntimeError("Async HF finalize future is not initialized")
+        return cast(Path, self.finalize_future.result(timeout=timeout))
+
+    def cancel(self) -> bool:
+        if self.finalize_future is None:
+            return False
+        return self.finalize_future.cancel()
+
+    def done(self) -> bool:
+        return self.finalize_future is not None and self.finalize_future.done()
+
+    def exception(self, timeout: float | None = None) -> BaseException | None:
+        if self.finalize_future is None:
+            return None
+        return self.finalize_future.exception(timeout=timeout)
+
+
+@dataclass
+class AsyncHFRuntimeState:
+    finalize_pg: dist.ProcessGroup | None
+    finalize_executor: ThreadPoolExecutor
+    failure_event: threading.Event
+    failure_exception: BaseException | None = None
+    failure_traceback: str = ""
 
 
 class TorchCompileOption(TypedDict):
@@ -546,6 +577,7 @@ class BaseModel(nn.Module):
         self._hf_path: Path | None = None  # type: ignore
         self._async_hf_tensor_cache: dict[tuple[Any, ...], torch.Tensor] = {}
         self._pending_async_hf: AsyncHFSaveHandle | None = None
+        self._async_hf_runtime: AsyncHFRuntimeState | None = None
 
         self._compile_cfg = self._resolve_compile_cfg(self.config)
         self._float8_handler: Float8Handler | None = None
@@ -684,6 +716,106 @@ class BaseModel(nn.Module):
         with profile_time_and_memory(f"[Saving HF to [{safetensors_prefix}]{hf_dir} cost]"):
             self._save_hf(hf_dir=hf_dir, save_dtype=save_dtype, safetensors_prefix=safetensors_prefix)
 
+    def init_async_hf_runtime(self) -> None:
+        if self._async_hf_runtime is not None:
+            return
+
+        finalize_pg: dist.ProcessGroup | None = None
+        finalize_executor: ThreadPoolExecutor | None = None
+        try:
+            if dist.is_initialized():
+                finalize_pg = dist.new_group(backend="gloo")
+                dist.barrier(group=finalize_pg)
+                rank = dist.get_rank()
+                world_size = dist.get_world_size()
+                gathered: list[Any] = [None for _ in range(world_size)]
+                dist.all_gather_object(gathered, {"rank": rank, "ok": True}, group=finalize_pg)
+
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="async-hf-finalize-probe") as probe_executor:
+                probe_executor.submit(lambda: None).result()
+
+            # Keep the executor object resident, but do not start its worker
+            # before the async HF writer forks. Forking a process after a
+            # long-lived Python worker thread exists is unnecessarily risky.
+            finalize_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="async-hf-finalize")
+            self._async_hf_runtime = AsyncHFRuntimeState(
+                finalize_pg=finalize_pg,
+                finalize_executor=finalize_executor,
+                failure_event=threading.Event(),
+            )
+        except BaseException as exc:
+            if finalize_executor is not None:
+                finalize_executor.shutdown(wait=False)
+            if finalize_pg is not None and dist.is_available() and dist.is_initialized():
+                dist.destroy_process_group(finalize_pg)
+            raise RuntimeError("Failed to initialize async HF runtime") from exc
+
+    def destroy_async_hf_runtime(self) -> None:
+        runtime = self._async_hf_runtime
+        self._async_hf_runtime = None
+        self._async_hf_tensor_cache.clear()
+        if runtime is None:
+            return
+
+        runtime.finalize_executor.shutdown(wait=True)
+        if runtime.finalize_pg is not None and dist.is_available() and dist.is_initialized():
+            dist.destroy_process_group(runtime.finalize_pg)
+
+    def _get_async_hf_runtime(self) -> AsyncHFRuntimeState:
+        if self._async_hf_runtime is None:
+            self.init_async_hf_runtime()
+        assert self._async_hf_runtime is not None
+        return self._async_hf_runtime
+
+    def _get_async_hf_finalize_pg(self) -> dist.ProcessGroup | None:
+        return self._get_async_hf_runtime().finalize_pg
+
+    def check_async_hf_failure(self) -> None:
+        runtime = self._async_hf_runtime
+        if runtime is None or not runtime.failure_event.is_set():
+            return
+
+        message = "Async HF save failed in background"
+        if runtime.failure_traceback:
+            message = f"{message}:\n{runtime.failure_traceback}"
+        raise RuntimeError(message) from runtime.failure_exception
+
+    def _record_async_hf_finalize_result(self, future: Future) -> None:
+        try:
+            future.result()
+        except BaseException as exc:
+            runtime = self._async_hf_runtime
+            if runtime is None:
+                return
+            runtime.failure_exception = exc
+            runtime.failure_traceback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            runtime.failure_event.set()
+
+    def _all_gather_async_hf_object(self, local_obj: Any) -> list[Any]:
+        if not dist.is_initialized():
+            return [local_obj]
+
+        gathered: list[Any] = [None for _ in range(dist.get_world_size())]
+        dist.all_gather_object(gathered, local_obj, group=self._get_async_hf_finalize_pg())
+        return gathered
+
+    def _barrier_async_hf(self) -> None:
+        if dist.is_initialized():
+            dist.barrier(group=self._get_async_hf_finalize_pg())
+
+    def _merge_async_hf_weight_map(self, local_weight_map: Mapping[str, str]) -> dict[str, str]:
+        gathered_weight_map = self._all_gather_async_hf_object(dict(local_weight_map))
+        merged_weight_map: dict[str, str] = {}
+        for weight_map in gathered_weight_map:
+            merged_weight_map.update(cast(dict[str, str], weight_map))
+        return merged_weight_map
+
+    def _prewrite_async_hf_metadata(self, tmp_hf_dir: Path, weight_map: Mapping[str, str]) -> None:
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        if rank == 0:
+            self._write_hf_index_and_config(hf_dir=tmp_hf_dir, weight_map=weight_map)
+        self._barrier_async_hf()
+
     def async_save_hf(
         self,
         hf_dir: Path | str,
@@ -691,6 +823,8 @@ class BaseModel(nn.Module):
         safetensors_prefix: str = "model",
         cleanup_hf_dirs: Sequence[str | Path] = (),
     ) -> AsyncHFSaveHandle:
+        self.check_async_hf_failure()
+        runtime = self._get_async_hf_runtime()
         if self._hf_path is None and self.config.hf_config is None:
             raise NotImplementedError(
                 "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
@@ -704,8 +838,8 @@ class BaseModel(nn.Module):
 
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
-        tmp_hf_dir = hf_dir.with_name(f"{hf_dir.name}.incomplete")
-        status_dir = tmp_hf_dir.parent / f".{tmp_hf_dir.name}.async-hf-writer-status"
+        tmp_hf_dir = hf_dir.with_name(f".{hf_dir.name}.incomplete")
+        status_dir = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.async-hf-writer-status"
         if rank == 0:
             if tmp_hf_dir.exists():
                 rmtree(tmp_hf_dir)
@@ -718,12 +852,21 @@ class BaseModel(nn.Module):
         cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
         if rank == 0:
             cleanup_done_path.unlink(missing_ok=True)
+        self._barrier_async_hf()
+
+        self._cleanup_async_hf_dirs_before_write(
+            cleanup_hf_dirs=cleanup_hf_dirs,
+            cleanup_done_path=cleanup_done_path,
+            rank=rank,
+        )
 
         file_to_names, weight_map = self._prepare_async_hf_snapshot(
             save_dtype=save_dtype,
             safetensors_prefix=safetensors_prefix,
             device=DEVICE,
         )
+        merged_weight_map = self._merge_async_hf_weight_map(weight_map)
+        self._prewrite_async_hf_metadata(tmp_hf_dir=tmp_hf_dir, weight_map=merged_weight_map)
 
         if hasattr(DEVICE_MODULE, "synchronize"):
             DEVICE_MODULE.synchronize()
@@ -736,8 +879,6 @@ class BaseModel(nn.Module):
                 file_to_names,
                 weight_map,
                 status_path,
-                cleanup_hf_dirs,
-                cleanup_done_path,
                 rank,
             ),
             daemon=False,
@@ -746,11 +887,15 @@ class BaseModel(nn.Module):
 
         handle = AsyncHFSaveHandle(
             process=process,
+            finalize_future=None,
             hf_dir=hf_dir,
             tmp_hf_dir=tmp_hf_dir,
+            status_dir=status_dir,
             status_path=status_path,
             cleanup_done_path=cleanup_done_path,
         )
+        handle.finalize_future = runtime.finalize_executor.submit(self._finalize_async_hf_save, handle)
+        handle.finalize_future.add_done_callback(self._record_async_hf_finalize_result)
         self._pending_async_hf = handle
         return handle
 
@@ -760,18 +905,11 @@ class BaseModel(nn.Module):
         file_to_names: list[tuple[str, list[str]]],
         weight_map: dict[str, str],
         status_path: Path,
-        cleanup_hf_dirs: Sequence[str | Path],
-        cleanup_done_path: Path,
         rank: int,
     ) -> None:
         log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] started")
         try:
             set_async_save_process_qos()
-            self._cleanup_async_hf_dirs_before_write(
-                cleanup_hf_dirs=cleanup_hf_dirs,
-                cleanup_done_path=cleanup_done_path,
-                rank=rank,
-            )
             self._write_async_hf_snapshot(
                 hf_dir=tmp_hf_dir,
                 file_to_names=file_to_names,
@@ -820,18 +958,23 @@ class BaseModel(nn.Module):
         if handle is None:
             return None
 
+        try:
+            return handle.result()
+        finally:
+            if self._pending_async_hf is handle:
+                self._pending_async_hf = None
+
+    def _finalize_async_hf_save(self, handle: AsyncHFSaveHandle) -> Path:
+        self.check_async_hf_failure()
+
         process = handle.process
         hf_dir = handle.hf_dir
-        tmp_hf_dir = handle.tmp_hf_dir
         status_path = handle.status_path
-        cleanup_done_path = handle.cleanup_done_path
 
         local_ok = True
         local_error = ""
-        local_weight_map: dict[str, str] = {}
 
         rank = dist.get_rank() if dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
         process.join()
         exit_code = process.exitcode
         if exit_code is None:
@@ -853,45 +996,25 @@ class BaseModel(nn.Module):
             else:
                 local_ok = bool(writer_status.get("ok", False))
                 local_error = str(writer_status.get("error", ""))
-                weight_map_obj = writer_status.get("weight_map", {})
-                if isinstance(weight_map_obj, dict):
-                    local_weight_map = {str(k): str(v) for k, v in weight_map_obj.items()}
 
-        local_status = {"rank": rank, "ok": local_ok, "error": local_error, "weight_map": local_weight_map}
-        if dist.is_initialized():
-            gathered_status: list[Any] = [None for _ in range(world_size)]
-            dist.all_gather_object(gathered_status, local_status)
-            all_status = cast(list[dict[str, Any]], gathered_status)
-        else:
-            all_status = [local_status]
+        local_status = {"rank": rank, "ok": local_ok, "error": local_error}
+        all_status = cast(list[dict[str, Any]], self._all_gather_async_hf_object(local_status))
 
         if not all(status["ok"] for status in all_status):
             failed = ", ".join(
                 f"rank={status['rank']}({status['error']})" for status in all_status if not status["ok"]
             )
-            if self._pending_async_hf is handle:
-                self._pending_async_hf = None
             raise RuntimeError(f"Async HF save global consistency check failed: {failed}")
 
-        merged_weight_map: dict[str, str] = {}
-        for status in all_status:
-            merged_weight_map.update(status["weight_map"])
-
-        if rank == 0:
-            self._write_hf_index_and_config(hf_dir=tmp_hf_dir, weight_map=merged_weight_map)
         status_path.unlink(missing_ok=True)
-        cleanup_done_path.unlink(missing_ok=True)
-        if dist.is_initialized():
-            dist.barrier()
+        handle.cleanup_done_path.unlink(missing_ok=True)
+        self._barrier_async_hf()
         if rank == 0:
-            rmtree(status_path.parent, ignore_errors=True)
+            rmtree(handle.status_dir, ignore_errors=True)
             if hf_dir.exists():
                 rmtree(hf_dir)
-            tmp_hf_dir.rename(hf_dir)
-        if dist.is_initialized():
-            dist.barrier()
-        if self._pending_async_hf is handle:
-            self._pending_async_hf = None
+            handle.tmp_hf_dir.rename(hf_dir)
+        self._barrier_async_hf()
         return hf_dir
 
     def _cleanup_async_hf_dirs_before_write(
@@ -1810,7 +1933,7 @@ class BaseModel(nn.Module):
         if not tensors:
             return
 
-        lock_slots = get_async_save_file_lock_slots()
+        lock_slots = get_async_hf_save_file_lock_slots()
         if lock_slots <= 0:
             _save_file(tensors, filename)
             return
@@ -1902,6 +2025,10 @@ class BaseModel(nn.Module):
             f.write(json.dumps(local_status, indent=2))
 
     def _write_hf_non_weight_files(self, hf_dir: Path) -> None:
+        if self.config.hf_config is not None:
+            self.config.save_hf(hf_dir)
+            return
+
         if self._hf_path is not None:
             for file in cast(Path, self._hf_path).iterdir():
                 if file.suffix != ".safetensors":
@@ -1910,10 +2037,6 @@ class BaseModel(nn.Module):
                         copy(file, target_path)
                     else:
                         copytree(file, target_path, ignore_dangling_symlinks=True, dirs_exist_ok=True)
-            return
-
-        if self.config.hf_config is not None:
-            self.config.save_hf(hf_dir)
             return
 
         raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")

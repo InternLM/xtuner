@@ -40,6 +40,21 @@ class FakeHFModel(nn.Module):
             json.dump({"metadata": {"total_size": len(weight_map)}, "weight_map": weight_map}, f)
 
 
+class FakeAsyncHFHandle:
+    def __init__(self, engine: "FakeAsyncHFEngine", payload: dict):
+        self.engine = engine
+        self.payload = payload
+
+    def result(self, timeout=None):
+        return self.engine.wait_async_hf(self)
+
+    def cancel(self):
+        return False
+
+    def __getitem__(self, key):
+        return self.payload[key]
+
+
 class FakeAsyncHFEngine:
     def __init__(self):
         self.save_hf_calls = []
@@ -49,6 +64,7 @@ class FakeAsyncHFEngine:
         self.optimizer_step_calls = 0
         self.async_hf_status_ok = True
         self.async_hf_status_error = ""
+        self.async_hf_failure = None
 
         self.model = model = FakeHFModel()
         self.optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -82,6 +98,16 @@ class FakeAsyncHFEngine:
     def destroy_async_checkpoint_pg(self) -> None:
         pass
 
+    def init_async_hf_runtime(self) -> None:
+        pass
+
+    def check_async_hf_failure(self) -> None:
+        if self.async_hf_failure is not None:
+            raise self.async_hf_failure
+
+    def destroy_async_hf_runtime(self) -> None:
+        pass
+
     def _cleanup_hf_dirs(self, cleanup_hf_dirs):
         for cleanup_hf_dir in cleanup_hf_dirs:
             cleanup_hf_dir = Path(cleanup_hf_dir)
@@ -110,6 +136,7 @@ class FakeAsyncHFEngine:
             "error": self.async_hf_status_error,
             "weight_map": weight_map,
         }
+        handle = FakeAsyncHFHandle(self, handle)
         self._pending_async_hf = handle
         return handle
 
@@ -120,7 +147,7 @@ class FakeAsyncHFEngine:
         if handle is None:
             return None
 
-        pending = handle
+        pending = handle.payload if isinstance(handle, FakeAsyncHFHandle) else handle
         local_status = {
             "rank": dist.get_rank(),
             "ok": bool(pending["ok"]),

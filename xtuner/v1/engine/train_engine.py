@@ -312,6 +312,15 @@ class TrainEngine:
         """
         self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
 
+    def init_async_hf_runtime(self) -> None:
+        self.model.init_async_hf_runtime()
+
+    def check_async_hf_failure(self) -> None:
+        self.model.check_async_hf_failure()
+
+    def destroy_async_hf_runtime(self) -> None:
+        self.model.destroy_async_hf_runtime()
+
     def async_save_hf(
         self,
         hf_dir: str,
@@ -503,6 +512,10 @@ class TrainEngine:
             self._async_checkpoint_pg = None
 
     def __del__(self) -> None:
+        try:
+            self.destroy_async_hf_runtime()
+        except Exception:
+            pass
         try:
             self.destroy_async_checkpoint_pg()
         except Exception:
