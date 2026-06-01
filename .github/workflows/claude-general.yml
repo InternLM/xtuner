@@ -59,7 +59,22 @@ jobs:
             - Security implications
             - `.claude/CLAUDE.md` compliance
 
-            ### Review Process
+            ### Required Analysis Before Commenting
+            1. Read `.claude/CLAUDE.md` before reviewing. If it references `.claude/rules`, read the relevant files too.
+
+            2. Read the PR title, body, comments, and patch:
+              - `gh pr view <PR NUMBER> --comments`
+              - `gh pr diff <PR NUMBER> --patch`
+
+            3. For each changed contract, search the repository for constructors, readers, writers, fake implementations, and tests.
+
+            4. If the PR changes any code under `xtuner/v1/rl`, the review summary must include:
+              `ProduceBatchResult impact: <impact or "not affected">`
+
+            5. If the PR changes any code related to routed_experts, the review summary must include:
+              `RoutedExperts impact: <impact or "not affected">`
+
+            ### GitHub Commenting Process
 
             1. For every issue, rate how significant it is. Make sure you are confident in your diagnosis.
 
@@ -223,4 +238,3 @@ jobs:
             }
           allowed_non_write_users: "*"
           track_progress: false
-
