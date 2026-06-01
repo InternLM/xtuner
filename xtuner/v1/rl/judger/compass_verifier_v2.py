@@ -5,8 +5,8 @@ import aiohttp
 import requests  # type: ignore[import-untyped]
 from pydantic import ConfigDict
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.judger.native import Judger, JudgerConfig, JudgerOutputBatch, JudgerPayload, JudgerPayloadBatch
+from xtuner.v1.data_proto.rl_data import Status
+from xtuner.v1.rl.judger.native import Judger, JudgerConfig, JudgerOutputBatch, JudgerPayloadBatch
 
 
 verify_prompt = """
@@ -56,16 +56,6 @@ class CompassVerifierV2(Judger):
             headers={"Authorization": "Bearer "},
             timeout=request_timeout,
         ).json()["data"][0]["id"]
-
-    def preprocess(self, rollout_state: RolloutState) -> JudgerPayload:
-        if rollout_state.status != Status.COMPLETED or rollout_state.response is None:
-            return {
-                "response": rollout_state.response,
-                "label": None,
-                "message": rollout_state.message,
-                "status": rollout_state.status,
-            }
-        return super().preprocess(rollout_state)
 
     async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
         if isinstance(payload, list):
