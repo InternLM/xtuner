@@ -63,7 +63,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from abc import ABC
 from typing import Any, Callable, TypeAlias, cast, overload
 
 import httpx
@@ -84,7 +83,7 @@ JudgerOutput: TypeAlias = dict[str, Any]
 JudgerOutputBatch: TypeAlias = JudgerOutput | list[JudgerOutput]
 
 
-class Judger(ABC):
+class Judger:
     def __init__(self, judger_name: str | None = None):
         self._judger_name = judger_name or self.__class__.__name__
 
@@ -147,9 +146,13 @@ class NativeJudger(Judger):
         self.reward_handler = reward_handler
         self.request_timeout = request_timeout
 
+    async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState:
+        if isinstance(rollout_state, list):
+            raise NotImplementedError("NativeJudger does not support batch RolloutState input.")
+        return await super().judge(rollout_state)
+
     async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
-        if isinstance(payload, list):
-            raise NotImplementedError("NativeJudger does not support batch payloads.")
+        assert not isinstance(payload, list), "NativeJudger does not support batch payloads."
         assert payload["response"] is not None, (
             "RolloutState must have a response for judging. You should detokenize the response_ids in AgentLoop"
         )

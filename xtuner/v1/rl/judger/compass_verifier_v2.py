@@ -5,7 +5,7 @@ import aiohttp
 import requests  # type: ignore[import-untyped]
 from pydantic import ConfigDict
 
-from xtuner.v1.data_proto.rl_data import Status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.judger.native import Judger, JudgerConfig, JudgerOutputBatch, JudgerPayloadBatch
 
 
@@ -56,6 +56,11 @@ class CompassVerifierV2(Judger):
             headers={"Authorization": "Bearer "},
             timeout=request_timeout,
         ).json()["data"][0]["id"]
+
+    async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState:
+        if isinstance(rollout_state, list):
+            raise NotImplementedError("CompassVerifierV2 does not support batch RolloutState input.")
+        return await super().judge(rollout_state)
 
     async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
         if isinstance(payload, list):

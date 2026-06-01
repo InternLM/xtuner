@@ -64,7 +64,7 @@ class ComposedJudger(Judger):
             return selected_keys
 
         raise TypeError(
-            "ComposedJudger data_source must be a branch name string or a dict of branch names to weights, "
+            "ComposedJudger data_source must be a branch name string or a dict of branch names "
             f"got {type(data_source).__name__}: {data_source!r}. "
             f"task_name={rollout_state.task_name!r}, available={sorted(self.branches)}"
         )
