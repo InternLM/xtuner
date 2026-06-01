@@ -1026,7 +1026,7 @@ case:
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 memory_per_task: 1200
-                pip_package: pip install sglang==0.5.10.post1;pip install transformers==5.2.0 apache-tvm-ffi==0.1.9 nvidia-cudnn-cu12==9.15.1.9;pip uninstall -y nvidia-cutlass-dsl;rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl
+                pip_package: pip install sglang==0.5.10.post1 --timeout 600 --retries 5;pip install transformers==5.2.0 apache-tvm-ffi==0.1.9 nvidia-cudnn-cu12==9.15.1.9;pip uninstall -y nvidia-cutlass-dsl;rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
