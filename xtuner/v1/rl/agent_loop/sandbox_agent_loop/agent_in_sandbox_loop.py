@@ -15,6 +15,7 @@ from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import create_task
 
+from ...rollout.chat_template import canonicalize_messages_for_chat_template
 from ...rollout.trace_store import get_store
 from ..agent_loop import AgentLoop, AgentLoopConfig
 from .schemas import AgentRolloutItem, RolloutStatus
@@ -143,7 +144,7 @@ class AgentInSandboxLoop(AgentLoop):
 
         trace_store = get_store()
         text = self.tokenizer.apply_chat_template(
-            messages,
+            canonicalize_messages_for_chat_template(messages),
             tools=segment["tools"],
             tokenize=False,
             add_generation_prompt=False,

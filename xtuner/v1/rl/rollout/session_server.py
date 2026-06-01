@@ -10,6 +10,7 @@ from aiohttp import ClientSession, web
 from transformers import AutoTokenizer
 from xtuner.v1.utils import get_logger
 
+from .chat_template import canonicalize_messages_for_chat_template
 from .trace_store import TokenizedSegment, get_store
 
 
@@ -28,9 +29,15 @@ def _lmdeploy_error_payload(message: str, status: int = 500, error_type: str = "
 
 def _stream_has_traceable_choices(raw: bytes) -> bool:
     text = raw.decode("utf-8", errors="replace")
+    has_choices = False
+    saw_done = False
+    saw_terminal_finish = False
     for line in text.split("\n"):
         line = line.strip()
-        if line.startswith("data: ") and line != "data: [DONE]":
+        if line == "data: [DONE]":
+            saw_done = True
+            continue
+        if line.startswith("data: "):
             try:
                 event = json.loads(line[6:])
             except json.JSONDecodeError:
@@ -38,8 +45,12 @@ def _stream_has_traceable_choices(raw: bytes) -> bool:
             if _is_error_payload(event):
                 return False
             if event.get("choices"):
-                return True
-    return False
+                if any(choice.get("finish_reason") == "error" for choice in event.get("choices", [])):
+                    return False
+                if any(choice.get("finish_reason") for choice in event.get("choices", [])):
+                    saw_terminal_finish = True
+                has_choices = True
+    return has_choices and saw_done and saw_terminal_finish
 
 
 class SessionServer:
@@ -89,7 +100,10 @@ class SessionServer:
         session_id = req_body["session_id"]
         # 1. chat_template render 出完整 prompt string，不 tokenize 全量
         prompt_text = self.tokenizer.apply_chat_template(
-            req_body["messages"], tools=req_body.get("tools", None), add_generation_prompt=True, tokenize=False
+            canonicalize_messages_for_chat_template(req_body["messages"]),
+            tools=req_body.get("tools", None),
+            add_generation_prompt=True,
+            tokenize=False,
         )
 
         # 2. Store 做 string prefix match。
@@ -122,7 +136,12 @@ class SessionServer:
         tools = worker_resp["tools"]
         choice = worker_resp["choices"][0]
 
-        output_token_ids = choice["output_ids"]  # len = N_out
+        output_token_ids = choice.get("output_ids")  # len = N_out
+        if output_token_ids is None:
+            raise RuntimeError(
+                "SessionServer response choice has no output_ids; "
+                "cannot export a training trace for this assistant turn."
+            )
         if choice.get("logprobs") and choice["logprobs"].get("content"):
             output_logprobs = [item.get("logprob", 0.0) for item in choice["logprobs"]["content"]]
         else:
@@ -131,11 +150,16 @@ class SessionServer:
 
         # 2. Store 把 input_delta / assistant_output 两个节点补齐字段。
         old_prompt = self.tokenizer.apply_chat_template(
-            messages, tools=tools, add_generation_prompt=True, tokenize=False
+            canonicalize_messages_for_chat_template(messages), tools=tools, add_generation_prompt=True, tokenize=False
         )
-        messages.append(choice["message"])
+        messages = [*messages, choice["message"]]
         new_prompt = (
-            self.tokenizer.apply_chat_template(messages, tools=tools, add_generation_prompt=False, tokenize=False)
+            self.tokenizer.apply_chat_template(
+                canonicalize_messages_for_chat_template(messages),
+                tools=tools,
+                add_generation_prompt=False,
+                tokenize=False,
+            )
         ).rstrip()
         assert new_prompt.startswith(old_prompt) and new_prompt.endswith(self.stop_word)
 
@@ -374,9 +398,6 @@ class SessionServer:
                     for c in response_data.get("choices", []):
                         if c.get("message") and isinstance(c["message"].get("content"), str):
                             c["message"]["content"] = c["message"]["content"].replace(self.stop_word, "")
-                            for tc in c["message"].get("tool_calls") or []:
-                                if isinstance(tc.get("function", {}).get("arguments"), str):
-                                    tc["function"]["arguments"] = json.loads(tc["function"]["arguments"])
 
                     response_data["session_id"] = session_id
                     response_data["messages"] = messages
@@ -417,10 +438,16 @@ class SessionServer:
         """Parse SSE stream to reconstruct the complete final message state."""
         text = raw.decode("utf-8", errors="replace")
         events = []
+        saw_done = False
         for line in text.split("\n"):
             line = line.strip()
-            if line.startswith("data: ") and line != "data: [DONE]":
+            if line == "data: [DONE]":
+                saw_done = True
+                continue
+            if line.startswith("data: "):
                 event = json.loads(line[6:])
+                if _is_error_payload(event):
+                    raise RuntimeError(f"Upstream SSE stream returned error: {json.dumps(event, ensure_ascii=False)}")
                 events.append(event)
 
         if not events:
@@ -442,6 +469,10 @@ class SessionServer:
 
             choices = event.get("choices", [])
             for choice in choices:
+                if choice.get("finish_reason") == "error":
+                    raise RuntimeError(
+                        f"Upstream SSE choice finished with error: {json.dumps(event, ensure_ascii=False)}"
+                    )
                 delta = choice.get("delta", {})
 
                 # Check text content
@@ -449,7 +480,7 @@ class SessionServer:
                     content_parts.append(delta["content"])
 
                 # Check output ids
-                if choice.get("output_ids"):
+                if choice.get("output_ids") is not None:
                     assistant_choice = message["choices"][0]
                     if "output_ids" not in assistant_choice:
                         assistant_choice["output_ids"] = []
@@ -503,6 +534,14 @@ class SessionServer:
             msg["tool_calls"] = [tool_calls_map[i] for i in sorted(tool_calls_map)]
         if usage:
             message["usage"] = usage
+
+        assistant_choice = message["choices"][0]
+        if not saw_done:
+            raise RuntimeError("Upstream SSE stream ended without [DONE].")
+        if not assistant_choice.get("finish_reason"):
+            raise RuntimeError("Upstream SSE stream ended without terminal finish_reason.")
+        if assistant_choice.get("output_ids") is None:
+            raise RuntimeError("Upstream SSE stream ended without output_ids.")
 
         return message
 

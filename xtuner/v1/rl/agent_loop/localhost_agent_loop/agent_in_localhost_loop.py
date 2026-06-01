@@ -16,6 +16,7 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
 )
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.rollout.chat_template import canonicalize_messages_for_chat_template
 from xtuner.v1.rl.rollout.trace_store import get_store
 from xtuner.v1.rl.utils import create_task
 
@@ -36,6 +37,10 @@ def _resolve_runner(pipeline: Any) -> Any:
     if isinstance(pipeline, dict):
         return create_object(copy.deepcopy(pipeline))
     return pipeline
+
+
+def _is_trace_key_mismatch(exc: Exception) -> bool:
+    return "does not match any trace key" in str(exc)
 
 
 class AgentInLocalhostLoopConfig(AgentLoopConfig):
@@ -99,6 +104,8 @@ class AgentInLocalhostLoop(AgentLoop):
             await self._fill_rollout_state(rollout_state, result)
             return rollout_state
         except Exception as exc:
+            if _is_trace_key_mismatch(exc):
+                raise
             rollout_state.status = Status.FAILED
             rollout_state.finish_reason = "error"
             rollout_state.error_msg = f"{type(exc).__name__}: {exc}"
@@ -113,9 +120,18 @@ class AgentInLocalhostLoop(AgentLoop):
             return await runner.run(item)
 
     async def _fill_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
+        rollout_state.status = Status.COMPLETED if item.status == RolloutStatus.COMPLETED else Status.FAILED
+        rollout_state.finish_reason = "stop" if item.status == RolloutStatus.COMPLETED else "error"
+        rollout_state.reward = {"score": item.reward} if item.reward is not None else None
+        rollout_state.extra_fields["agent_artifacts"] = item.artifacts
+        if item.error is not None:
+            rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
+        if item.status != RolloutStatus.COMPLETED:
+            return
+
         segment = item.artifacts["messages"][-1]
         text = self.tokenizer.apply_chat_template(
-            segment["messages"],
+            canonicalize_messages_for_chat_template(segment["messages"]),
             tools=segment["tools"],
             tokenize=False,
             add_generation_prompt=False,
@@ -131,13 +147,7 @@ class AgentInLocalhostLoop(AgentLoop):
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
         rollout_state.response = str(item.artifacts.get("response") or "")
-        rollout_state.finish_reason = "stop" if item.status == RolloutStatus.COMPLETED else "error"
-        rollout_state.status = Status.COMPLETED if item.status == RolloutStatus.COMPLETED else Status.FAILED
-        rollout_state.reward = {"score": item.reward}
         rollout_state.extra_fields["raw_prompt"] = prompt_text
-        rollout_state.extra_fields["agent_artifacts"] = item.artifacts
-        if item.error is not None:
-            rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
 
 
 __all__ = ["AgentInLocalhostLoop", "AgentInLocalhostLoopConfig"]
