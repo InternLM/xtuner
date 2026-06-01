@@ -4,9 +4,9 @@ from typing import overload
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
-from xtuner.v1.rl.utils import cancel_and_drain, create_task
+from xtuner.v1.rl.utils import JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S, cancel_and_drain, create_task
 
-from .agent_loop import DEFAULT_JUDGER_CANCEL_TIMEOUT_S, AgentLoop, AgentLoopConfig
+from .agent_loop import AgentLoop, AgentLoopConfig
 
 
 class SingleTurnAgentLoopConfig(AgentLoopConfig):
@@ -82,7 +82,7 @@ class SingleTurnAgentLoop(AgentLoop):
             try:
                 return await asyncio.wait_for(
                     asyncio.shield(judge_task),
-                    timeout=DEFAULT_JUDGER_CANCEL_TIMEOUT_S,
+                    timeout=JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S,
                 )
             except asyncio.TimeoutError:
                 await cancel_and_drain([judge_task])

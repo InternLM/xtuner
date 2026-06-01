@@ -24,7 +24,6 @@ from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 
 
 AGENT_LOOP_CONCURRENCY_GROUP_GENERATE = "generate"
-DEFAULT_JUDGER_CANCEL_TIMEOUT_S = 5.0
 
 
 class AgentLoopConfig(ABC, BaseModel):

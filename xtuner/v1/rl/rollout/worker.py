@@ -33,7 +33,6 @@ from xtuner.v1.rl.utils import (
     AutoAcceleratorWorkers,
     CPUResourcesConfig,
     SingleAcceleratorWorker,
-    cancel_and_drain,
     find_master_addr_and_port,
     get_eos_token,
     register_cpu_resources,
@@ -525,9 +524,6 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.logger.info(f"Using eos_token: {eos_token} for model at {self.config.model_path}")
         self.eos_token: List[int] = [eos_token] if isinstance(eos_token, int) else eos_token
         self.receive_abort_request = threading.Event()
-        # After an abort signal, wait this long for an in-flight rollout request to return before cancelling the
-        # client-side request task.
-        self.abort_timeout = 10.0
         self.dist_init_addr: str = ""
         self.serverl_url: str = ""
         self.partial_rollout_handler = PartialRolloutHandler()
@@ -616,16 +612,12 @@ class RolloutWorker(SingleAcceleratorWorker):
     async def _send_abort_request(self) -> bool:
         url = f"{self.server_url}/abort_request"
         try:
-            async with httpx.AsyncClient(timeout=self.abort_timeout) as client:
+            async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(url, json={"abort_all": True})
             response.raise_for_status()
             return True
         except Exception:
             return False
-
-    async def _wait_abort_request(self) -> None:
-        while not self.receive_abort_request.is_set():
-            await asyncio.sleep(1)
 
     def continue_generation(self):
         """Resume the worker's generation process."""
@@ -899,9 +891,6 @@ class RolloutWorker(SingleAcceleratorWorker):
             raise TimeoutError("Server failed to start within the timeout period.")
 
     async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
-        send_task = None
-        abort_task = None
-
         try:
             if self.receive_abort_request.is_set():
                 return HttpRequestResult(error_type=HttpRequestErrorType.REQUEST_ABORTED, url=url, payload=payload)
@@ -911,37 +900,13 @@ class RolloutWorker(SingleAcceleratorWorker):
                 headers=headers,
                 json=payload,
             )
-            send_task = asyncio.create_task(self.client.send(req))
-            abort_task = asyncio.create_task(self._wait_abort_request())
-            done, _ = await asyncio.wait(
-                {send_task, abort_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if send_task in done:
-                r = await send_task
-            else:
-                try:
-                    r = await asyncio.wait_for(asyncio.shield(send_task), timeout=self.abort_timeout)
-                except asyncio.TimeoutError:
-                    await cancel_and_drain([send_task])
-                    return HttpRequestResult(
-                        error_type=HttpRequestErrorType.REQUEST_ABORTED,
-                        url=url,
-                        payload=payload,
-                    )
+            r = await self.client.send(req)
             r.raise_for_status()
             return HttpRequestResult(response=r)
-
-        except asyncio.CancelledError:
-            await cancel_and_drain([send_task, abort_task])
-            self.receive_abort_request.set()
-            return HttpRequestResult(error_type=HttpRequestErrorType.REQUEST_ABORTED, url=url, payload=payload)
         except Exception as e:
             error_type = HttpRequestErrorType.from_exception(e)
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
             return result
-        finally:
-            await cancel_and_drain([abort_task])
 
     async def _safe_handle_response(self, rollout_state: RolloutState, http_response: httpx.Response) -> RolloutState:
         uid = rollout_state.message_uid

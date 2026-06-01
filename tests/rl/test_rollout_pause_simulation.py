@@ -27,6 +27,8 @@ os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
 
 import ray
 
+from xtuner.v1.rl.utils import PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S
+
 
 GENERATE_GROUP = "generate"
 
@@ -59,8 +61,12 @@ class PauseSimulationConfig:
             oversend_ratio=oversend_ratio,
             pending_per_worker=pending_per_worker,
             total_pending=worker_count * pending_per_worker,
-            abort_timeout_s=float(os.environ.get("XTUNER_PAUSE_SIM_ABORT_TIMEOUT_S", "10.0")),
-            collect_timeout_s=float(os.environ.get("XTUNER_PAUSE_SIM_COLLECT_TIMEOUT_S", "10.0")),
+            abort_timeout_s=float(
+                os.environ.get("XTUNER_PAUSE_SIM_ABORT_TIMEOUT_S", str(PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S))
+            ),
+            collect_timeout_s=float(
+                os.environ.get("XTUNER_PAUSE_SIM_COLLECT_TIMEOUT_S", str(PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S))
+            ),
             abort_ack_delay_s=float(os.environ.get("XTUNER_PAUSE_SIM_ABORT_ACK_DELAY_S", "0.0")),
             fast_return_ratio=float(os.environ.get("XTUNER_PAUSE_SIM_FAST_RETURN_RATIO", "0.95")),
             fast_return_max_s=float(os.environ.get("XTUNER_PAUSE_SIM_FAST_RETURN_MAX_S", "2.0")),

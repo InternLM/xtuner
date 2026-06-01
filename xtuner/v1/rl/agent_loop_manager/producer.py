@@ -23,7 +23,13 @@ from xtuner.v1.data_proto.rl_data import (
 )
 from xtuner.v1.rl.agent_loop import AgentLoopSpec
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
-from xtuner.v1.rl.utils import calculate_seq_staleness, cancel_and_drain, create_task
+from xtuner.v1.rl.utils import (
+    AGENT_LOOP_PAUSE_REQUEST_TIMEOUT_S,
+    PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S,
+    calculate_seq_staleness,
+    cancel_and_drain,
+    create_task,
+)
 from xtuner.v1.utils import get_logger
 
 from .sampler import Sampler
@@ -654,7 +660,7 @@ class SyncProduceStrategy(ProduceStrategy):
 
 
 class AsyncProduceStrategy(ProduceStrategy):
-    PENDING_TASK_COLLECT_TIMEOUT_S = 60.0
+    # Local retry interval for re-sending pause/abort while pending tasks drain.
     PERIODIC_ABORT_INTERVAL_S = 5.0
 
     def __init__(
@@ -719,10 +725,10 @@ class AsyncProduceStrategy(ProduceStrategy):
         else:
             pause_future = ctx.agent_loop.pause()
         try:
-            await asyncio.wait_for(pause_future, timeout=10.0)
+            await asyncio.wait_for(pause_future, timeout=AGENT_LOOP_PAUSE_REQUEST_TIMEOUT_S)
         except asyncio.TimeoutError:
             logger.warning(
-                f"Agent loop pause timed out: task={ctx.task_name}, timeout_s=10.0, "
+                f"Agent loop pause timed out: task={ctx.task_name}, timeout_s={AGENT_LOOP_PAUSE_REQUEST_TIMEOUT_S}, "
                 f"elapsed={time.perf_counter() - pause_request_start:.2f}s, "
                 f"pending={self._pending_tasks.count()}"
             )
@@ -745,17 +751,17 @@ class AsyncProduceStrategy(ProduceStrategy):
             f"Pause signal loop started for task {ctx.task_name}. "
             f"Waiting for {initial_pending_count} pending tasks to complete. "
             f"periodic_abort_interval_s={self.PERIODIC_ABORT_INTERVAL_S}, "
-            f"pending_collect_timeout_s={self.PENDING_TASK_COLLECT_TIMEOUT_S}"
+            f"producer_pause_pending_task_timeout_s={PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S}"
         )
         cleanup_start_time = time.perf_counter()
         next_periodic_abort_time = cleanup_start_time + self.PERIODIC_ABORT_INTERVAL_S
         while True:
             elapsed_time = time.perf_counter() - cleanup_start_time
-            if elapsed_time > self.PENDING_TASK_COLLECT_TIMEOUT_S:
+            if elapsed_time > PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S:
                 # 超时强制取消所有pending的任务
                 cancelled_count = await self._pending_tasks.cancel_all()
                 logger.warning(
-                    f"Cleanup timeout of {self.PENDING_TASK_COLLECT_TIMEOUT_S}s reached. "
+                    f"Cleanup timeout of {PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S}s reached. "
                     f"Forcefully cancelling {cancelled_count} remaining tasks. "
                     f"task={ctx.task_name}"
                 )
