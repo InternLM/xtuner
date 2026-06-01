@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.rl.rollout.controller import RolloutController
 from xtuner.v1.rl.rollout.sglang import SGLangWorker
 from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, RolloutHealthChecker
 from xtuner.v1.rl.rollout.worker import RolloutWorker
@@ -38,6 +39,88 @@ class _FakeWorker:
         self.call_log = []
         self.offload = _FakeRemoteMethod("offload", self.call_log)
         self.shutdown = _FakeRemoteMethod("shutdown", self.call_log)
+
+
+class _FakeRolloutRouter:
+    def __init__(self, worker):
+        self.worker = worker
+        self.session_ids = []
+
+    async def get_worker(self, session_id):
+        self.session_ids.append(session_id)
+        return self.worker
+
+
+class _FakeRolloutWorkerGenerate:
+    def __init__(self, returned_state):
+        self.returned_state = returned_state
+        self.calls = []
+
+    def remote(self, *, rollout_state):
+        self.calls.append(rollout_state)
+        return self._generate()
+
+    async def _generate(self):
+        return self.returned_state
+
+
+class _FakeRolloutWorker:
+    def __init__(self, returned_state):
+        self.generate = _FakeRolloutWorkerGenerate(returned_state)
+
+
+class TestRolloutController(unittest.IsolatedAsyncioTestCase):
+    def _state(self, uid: int, session_uid: int) -> RolloutState:
+        return RolloutState(
+            uid=uid,
+            message_uid=uid,
+            session_uid=session_uid,
+            message=[{"role": "user", "content": f"prompt {uid}"}],
+            prompt_ids=[uid],
+            status=Status.INIT,
+            extra_fields={},
+        )
+
+    def _build_controller(self, router):
+        controller = RolloutController.__new__(RolloutController)
+        controller.config = SimpleNamespace(rollout_timeout=1.0, random_seed=0)
+        controller.timeout_multiplier = 1.0
+        controller.router = router
+        controller._tool_call_parser = None
+        controller._reasoning_parser = None
+        controller.logger = MagicMock()
+        return controller
+
+    async def test_generate_fails_fast_when_no_active_worker(self):
+        # router 找不到 active worker 时，controller 应直接把原样本标成 FAILED，避免请求悬挂。
+        state = self._state(uid=1, session_uid=123)
+        router = _FakeRolloutRouter(worker=None)
+        controller = self._build_controller(router)
+
+        with patch("xtuner.v1.rl.rollout.controller.XTUNER_DETERMINISTIC", False):
+            result = await controller.generate(state)
+
+        self.assertIs(result, state)
+        self.assertEqual(router.session_ids, [123])
+        self.assertEqual(result.status, Status.FAILED)
+        self.assertEqual(result.error_msg, "No active rollout worker available.")
+
+    async def test_generate_routes_to_active_worker(self):
+        # 有 active worker 时，controller 要按 session_uid 路由，并返回 worker 的 rollout 结果。
+        request_state = self._state(uid=1, session_uid=456)
+        returned_state = self._state(uid=1, session_uid=456)
+        returned_state.status = Status.COMPLETED
+        worker = _FakeRolloutWorker(returned_state)
+        router = _FakeRolloutRouter(worker=worker)
+        controller = self._build_controller(router)
+
+        with patch("xtuner.v1.rl.rollout.controller.XTUNER_DETERMINISTIC", False):
+            result = await controller.generate(request_state)
+
+        self.assertIs(result, returned_state)
+        self.assertEqual(router.session_ids, [456])
+        self.assertEqual(worker.generate.calls, [request_state])
+        self.assertEqual(result.status, Status.COMPLETED)
 
 
 class TestSGLangWorker(unittest.TestCase):

@@ -6,7 +6,10 @@ from typing import Dict
 import httpx
 import ray
 
-from xtuner.v1.rl.utils import AutoCPUWorkers, CPUResourcesConfig
+from xtuner.v1.rl.utils import AutoCPUWorkers, CPUResourceManager, CPUResourcesConfig
+
+
+GIB = 1024**3
 
 
 @ray.remote(num_cpus=1)
@@ -168,6 +171,115 @@ class TestAutoCPUWorkers(unittest.TestCase):
         
         # Cleanup
         ray.util.remove_placement_group(pg)
+
+
+class TestCPUResourceManager(unittest.TestCase):
+    def _install_resource_summary(
+        self,
+        manager: CPUResourceManager,
+        *,
+        external_cpus: float = 8,
+        external_memory: int = 16 * GIB,
+        max_node_external_cpus: float = 4,
+    ):
+        state = {
+            "external_cpus": external_cpus,
+            "external_memory": external_memory,
+            "max_node_external_cpus": max_node_external_cpus,
+        }
+
+        def build_summary():
+            registered_cpus = sum(
+                pool.num_workers * pool.num_cpus_per_worker for pool in manager.pools.values()
+            )
+            registered_memory = sum(
+                pool.num_workers * pool.cpu_memory_per_worker for pool in manager.pools.values()
+            )
+            return {
+                "cluster_cpus": state["external_cpus"],
+                "available_cpus": state["external_cpus"],
+                "accelerator_cpus": 0.0,
+                "external_capacity_cpus": state["external_cpus"],
+                "ray_external_in_use_cpus": 0.0,
+                "registered_external_cpus": registered_cpus,
+                "remaining_after_registered_cpus": state["external_cpus"] - registered_cpus,
+                "cluster_memory": state["external_memory"],
+                "available_memory": state["external_memory"],
+                "accelerator_memory": 0.0,
+                "external_capacity_memory": state["external_memory"],
+                "ray_external_in_use_memory": 0.0,
+                "registered_external_memory": registered_memory,
+                "remaining_after_registered_memory": state["external_memory"] - registered_memory,
+                "max_node_external_cpus": state["max_node_external_cpus"],
+            }
+
+        manager._build_resource_summary = build_summary
+        return state
+
+    def test_register_success_and_duplicate_names(self):
+        # register 会立即校验资源；同名 pool 再注册时应生成稳定的唯一名字。
+        manager = CPUResourceManager()
+        self._install_resource_summary(manager, external_cpus=8, external_memory=16 * GIB)
+        config = CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1, cpu_memory_per_worker=GIB)
+
+        manager.register("judger", config)
+        manager.register("judger", config)
+
+        self.assertEqual(list(manager.pools), ["judger", "judger#2"])
+        self.assertIs(manager.pools["judger"], config)
+        self.assertIs(manager.pools["judger#2"], config)
+
+    def test_register_rolls_back_when_total_cpu_is_insufficient(self):
+        # 总 external CPU 不足时，失败的注册项不能残留在 manager.pools 中。
+        manager = CPUResourceManager()
+        self._install_resource_summary(manager, external_cpus=1, external_memory=16 * GIB)
+        config = CPUResourcesConfig(num_workers=2, num_cpus_per_worker=1, cpu_memory_per_worker=GIB)
+
+        with self.assertRaisesRegex(RuntimeError, "available_outside_accelerator_pg"):
+            manager.register("judger", config)
+
+        self.assertNotIn("judger", manager.pools)
+
+    def test_register_rolls_back_when_memory_is_insufficient(self):
+        # external memory 不足时，失败的注册项同样需要回滚。
+        manager = CPUResourceManager()
+        self._install_resource_summary(manager, external_cpus=8, external_memory=GIB)
+        config = CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1, cpu_memory_per_worker=2 * GIB)
+
+        with self.assertRaisesRegex(RuntimeError, "memory requested"):
+            manager.register("judger", config)
+
+        self.assertNotIn("judger", manager.pools)
+
+    def test_register_rolls_back_when_worker_cpu_exceeds_largest_node(self):
+        # 单个 worker 请求的 CPU 不能超过任一节点可提供的 external CPU。
+        manager = CPUResourceManager()
+        self._install_resource_summary(
+            manager,
+            external_cpus=8,
+            external_memory=16 * GIB,
+            max_node_external_cpus=1,
+        )
+        config = CPUResourcesConfig(num_workers=1, num_cpus_per_worker=2, cpu_memory_per_worker=GIB)
+
+        with self.assertRaisesRegex(RuntimeError, "largest node"):
+            manager.register("judger", config)
+
+        self.assertNotIn("judger", manager.pools)
+
+    def test_validate_or_raise_checks_existing_pools_without_mutating_them(self):
+        # validate_or_raise 会重新校验已有 pools；失败时不能清空已注册状态，便于调用方诊断。
+        manager = CPUResourceManager()
+        summary_state = self._install_resource_summary(manager, external_cpus=8, external_memory=16 * GIB)
+        config = CPUResourcesConfig(num_workers=2, num_cpus_per_worker=1, cpu_memory_per_worker=GIB)
+        manager.register("judger", config)
+
+        summary_state["external_cpus"] = 1
+        with self.assertRaisesRegex(RuntimeError, "available_outside_accelerator_pg"):
+            manager.validate_or_raise()
+
+        self.assertEqual(list(manager.pools), ["judger"])
+        self.assertIs(manager.pools["judger"], config)
 
 
 if __name__ == '__main__':
