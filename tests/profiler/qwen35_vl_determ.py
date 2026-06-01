@@ -82,7 +82,7 @@ def _init_distributed(deterministic: bool) -> tuple[int, int, int]:
         os.environ.setdefault("NCCL_ALGO", "Ring")
         os.environ.setdefault("NCCL_PROTO", "Simple")
         os.environ.setdefault("NCCL_NUM_CHANNELS", "1")
-        set_deterministic(deterministic=True)
+        set_deterministic()
 
     dist.init_process_group(backend="cpu:gloo,cuda:nccl")
     rank = dist.get_rank()

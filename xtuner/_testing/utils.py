@@ -11,7 +11,7 @@ def enable_full_determinism():
     Helper function for reproducible behavior during distributed training. See
     - https://pytorch.org/docs/stable/notes/randomness.html for pytorch
     """
-    set_deterministic(True)
+    set_deterministic()
 
     # already set in set_deterministic
     #  Enable PyTorch deterministic mode. This potentially requires either the environment

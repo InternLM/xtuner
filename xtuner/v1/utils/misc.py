@@ -27,12 +27,7 @@ logger = get_logger()
 XTUNER_DETERMINISTIC = os.getenv("XTUNER_DETERMINISTIC") == "true"
 
 
-def set_deterministic(deterministic: bool | None = None):
-    if deterministic is None:
-        deterministic = XTUNER_DETERMINISTIC
-    if not deterministic:
-        return
-
+def set_deterministic():
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
     # Inductor 会在 torch.compile 前读取 dynamic_scale_rblock；确定性模式必须尽早关闭。
     # torch.use_deterministic_algorithms(True) 只会让 reduction 的初始候选收敛成一个 config；
