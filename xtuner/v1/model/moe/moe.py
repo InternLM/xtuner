@@ -177,6 +177,7 @@ class MoEConfig(TransformerConfig):
     freeze_routers: bool = False
     router_async_offload: bool = False
     aux_loss_cfg: AuxLossConfig = AuxLossConfig()
+    skip_dispatch_pad_tokens: Annotated[bool, Parameter(group="moe")] = False
     # TODO: `FSDPConfig` should be model-specific; temporarily keep
     # `embed_reshard_after_forward` here until per-submodule FSDP config is supported.
     # Compose models call `self.embed_tokens` multiple times per step, so default to
@@ -988,9 +989,9 @@ class MoE(BaseModel):
         balancing_ctx = cast(BalancingLossContext | None, balancing_ctx)
         z_ctx = cast(ZLossContext | None, z_ctx)
         # Hoisted out of the per-layer accumulate path: mask is constant across layers.
-        nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
+        nonpad_indices = seq_ctx.nonpad_indices
         non_pad_token = nonpad_indices.numel()
-        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
+        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, nonpad_indices.device)
 
         hidden_states = self._decoder_stack(
             hidden_states=hidden_states,
@@ -1022,10 +1023,10 @@ class MoE(BaseModel):
                 inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
             )
             # MTP uses its own mask; main mask's non-pad indices do not apply.
-            mtp_nonpad_indices = torch.nonzero(mtp_seq_ctx.mask, as_tuple=True)[1]
+            mtp_nonpad_indices = mtp_seq_ctx.nonpad_indices
             mtp_non_pad_token = mtp_nonpad_indices.numel()
             mtp_num_tokens_global, mtp_z_world_size = self._z_loss_dist_token_count(
-                z_ctx, mtp_non_pad_token, mtp_seq_ctx.mask.device
+                z_ctx, mtp_non_pad_token, mtp_nonpad_indices.device
             )
 
             # Forward through MTP block
@@ -1287,6 +1288,7 @@ class MoE(BaseModel):
                     ep_mesh=self.ep_mesh,
                     expert_tp_mesh=self.expert_tp_mesh,
                     ep_tp_mesh=self.ep_tp_mesh,
+                    skip_dispatch_pad_tokens=config.skip_dispatch_pad_tokens,
                 )
                 if self.config.freeze_routers:
                     layers[str(layer_idx)].gate.requires_grad_(False)
@@ -1354,6 +1356,7 @@ class MoE(BaseModel):
                 ep_mesh=self.ep_mesh,
                 expert_tp_mesh=self.expert_tp_mesh,
                 ep_tp_mesh=self.ep_tp_mesh,
+                skip_dispatch_pad_tokens=config.skip_dispatch_pad_tokens,
             )
 
             # Wrap decoder layer in MTPLayer
