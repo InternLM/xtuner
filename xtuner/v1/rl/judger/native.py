@@ -29,7 +29,7 @@ Judger 体系关系图
      ┌──────────────────────────────────────┐
      │         ComposedJudger               │
      │                                      │
-     │  select_fn → 选 branch → judge       │
+     │  data_source → 选 branch → judge     │
      │  merge_fn  → 合并多个 branch 的结果  │
      │                                      │
      │  branches: dict[str, Judger]         │
@@ -85,6 +85,9 @@ JudgerOutputBatch: TypeAlias = JudgerOutput | list[JudgerOutput]
 
 
 class Judger(ABC):
+    def __init__(self, judger_name: str | None = None):
+        self._judger_name = judger_name or self.__class__.__name__
+
     def preprocess(self, rollout_state: RolloutState) -> JudgerPayload:
         return {
             "response": rollout_state.response,
@@ -105,6 +108,7 @@ class Judger(ABC):
     async def judge(self, rollout_state: list[RolloutState]) -> list[RolloutState]: ...
 
     async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:
+        # batch samples judge
         if isinstance(rollout_state, list):
             payloads = [self.preprocess(state) for state in rollout_state]
             outputs = await self.judge_payload(payloads)
@@ -113,7 +117,7 @@ class Judger(ABC):
             if len(outputs) != len(rollout_state):
                 raise ValueError(f"Judger returned {len(outputs)} outputs for {len(rollout_state)} rollout states.")
             return [self.postprocess(state, output) for state, output in zip(rollout_state, outputs)]
-
+        # single sample judge
         payload = self.preprocess(rollout_state)
         output = await self.judge_payload(payload)
         if isinstance(output, list):
@@ -122,6 +126,9 @@ class Judger(ABC):
 
     async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
         raise NotImplementedError(f"{self.__class__.__name__}.judge_payload() is not implemented.")
+
+    def get_judger_name(self) -> str:
+        return self._judger_name
 
 
 class NativeJudger(Judger):
@@ -135,7 +142,7 @@ class NativeJudger(Judger):
         extra_info: dict | None = None,
         request_timeout: float = 30.0,
     ):
-        self._judger_name = judger_name
+        super().__init__(judger_name=judger_name)
         self.extra_info = extra_info or {}
         self.reward_handler = reward_handler
         self.request_timeout = request_timeout
@@ -158,6 +165,8 @@ class NativeJudger(Judger):
 
         judger_response = None
         if isinstance(self.reward_handler, str):
+            # TODO: 如果超时或者返回状态错误，会如何？
+            # TODO: 这里不好 try 的原因是在异常情况下，我们应该给 -1 还是 0 分呢？
             async with httpx.AsyncClient(timeout=self.request_timeout) as client:
                 response = await client.post(self.reward_handler, json=input_kwargs)
                 response.raise_for_status()
@@ -174,30 +183,34 @@ class NativeJudger(Judger):
         )
         return cast(JudgerOutput, judger_response)
 
-    def get_judger_name(self) -> str:
-        return self._judger_name
-
 
 class RemoteJudger(Judger):
+    """Driver-side proxy for a Ray-hosted judger.
+
+    ``RemoteJudger`` keeps the same ``Judger`` interface as local judgers, so
+    callers still pass ``RolloutState`` to ``judge``. The base ``Judger`` logic
+    converts that state to a lightweight payload on the driver, then this proxy
+    sends only the payload to ``JudgerActor``. ``JudgerActor`` lives in the Ray
+    worker process and owns the real local judger instance that executes
+    ``judge_payload``.
+    """
+
     def __init__(self, actor: RayJudgerProxy, judger_name: str):
+        super().__init__(judger_name=judger_name)
         self.actor = actor
-        self._judger_name = judger_name
 
     async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
         return await self.actor.judge_payload.remote(payload)
-
-    def get_judger_name(self) -> str:
-        return self._judger_name
 
 
 class JudgerPool(Judger):
     """Round-robin dispatch across replicas of the same judger type."""
 
     def __init__(self, replicas: list[Judger], judger_name: str):
+        super().__init__(judger_name=judger_name)
         if not replicas:
             raise ValueError("JudgerPool requires at least one replica.")
         self.replicas = replicas
-        self._judger_name = judger_name
         self._rr_index = 0
         self._lock = asyncio.Lock()
         self._worker_loads = dict.fromkeys(range(len(replicas)), 0)
@@ -222,9 +235,6 @@ class JudgerPool(Judger):
 
     def get_worker_status(self) -> dict[str, int]:
         return {f"{self._judger_name}[{idx}]": load for idx, load in self._worker_loads.items()}
-
-    def get_judger_name(self) -> str:
-        return self._judger_name
 
 
 class JudgerConfig(BaseModel):
@@ -271,31 +281,6 @@ class JudgerConfig(BaseModel):
             request_timeout=self.request_timeout,
             extra_info=self.extra_info,
         )
-
-    def _build_remote_actor(self, cpu_resources: CPUResourcesConfig) -> RayJudgerProxy:
-        return CPUActorLauncher.build_actor(
-            JudgerActor,
-            self,
-            actor_num_cpus=cpu_resources.num_cpus_per_worker,
-            actor_memory=cpu_resources.cpu_memory_per_worker,
-        )
-
-    def _build_remote_actors(
-        self,
-        cpu_resources: CPUResourcesConfig,
-    ) -> list[RayJudgerProxy]:
-        return [self._build_remote_actor(cpu_resources) for _ in range(cpu_resources.num_workers)]
-
-    def _build_remote_judger(self, cpu_resources: CPUResourcesConfig) -> Judger:
-        return RemoteJudger(self._build_remote_actor(cpu_resources), judger_name=self.judger_name)
-
-    def _build_remote_judgers(
-        self,
-        cpu_resources: CPUResourcesConfig,
-    ) -> list[Judger]:
-        return [
-            RemoteJudger(actor, judger_name=self.judger_name) for actor in self._build_remote_actors(cpu_resources)
-        ]
 
     def build(self) -> Judger:
         from .factory import build_judger

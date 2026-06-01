@@ -44,6 +44,7 @@ class CompassVerifierV2(Judger):
         max_retries: int = 3,
         thinking_finish_words: list[str] | None = None,
     ):
+        super().__init__(judger_name="compass_verifier_v2")
         if not hosts:
             raise ValueError("CompassVerifierV2 requires at least one host.")
         self.hosts = hosts
@@ -55,7 +56,6 @@ class CompassVerifierV2(Judger):
             headers={"Authorization": "Bearer "},
             timeout=request_timeout,
         ).json()["data"][0]["id"]
-        self.judger_name = "compass_verifier_v2"
 
     def preprocess(self, rollout_state: RolloutState) -> JudgerPayload:
         if rollout_state.status != Status.COMPLETED or rollout_state.response is None:
@@ -116,9 +116,6 @@ class CompassVerifierV2(Judger):
                     await asyncio.sleep(1)
                     print(f"[Judger]: Error try {i}: {str(e)}")
         raise RuntimeError(f"Cannot connect to judger service for {self.max_retries} times.")
-
-    def get_judger_name(self) -> str:
-        return self.judger_name
 
 
 class CompassVerifierV2Config(JudgerConfig):
