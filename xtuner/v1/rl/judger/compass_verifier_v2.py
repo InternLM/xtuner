@@ -37,6 +37,12 @@ Judging the correctness of the candidate's answer:
 
 
 class CompassVerifierV2(Judger):
+    """LLM-based verifier for single rollout samples.
+
+    ``CompassVerifierV2`` does not implement batch judging. Passing
+    ``list[RolloutState]`` to ``judge`` raises before payload construction.
+    """
+
     def __init__(
         self,
         hosts: list[str],

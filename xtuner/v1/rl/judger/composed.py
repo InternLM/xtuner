@@ -123,24 +123,29 @@ class ComposedJudger(Judger):
                 f"selected_keys={selected_keys!r}"
             )
 
-        judged = dict(await asyncio.gather(*(self._judge_branch(key, rollout_state) for key in selected_keys)))
+        judged = dict[str, JudgerOutput | list[JudgerOutput]](
+            await asyncio.gather(*(self._judge_branch(key, rollout_state) for key in selected_keys))
+        )
         return self.merge_fn(rollout_state, judged)
 
 
 class ComposedJudgerConfig(BaseModel):
     """Configuration for composing multiple judgers.
 
-    ``ComposedJudgerConfig`` routes each rollout to one or more branch judgers
-    and merges the branch outputs back into a single ``RolloutState``. It is
-    useful when different samples in the same task require different reward
-    functions or when multiple rewards must be computed together.
+    ``ComposedJudgerConfig`` routes rollout states through
+    ``RolloutState.data_source``. A string value selects one branch and passes
+    that branch output through as ``RolloutState.reward``. A dict value selects
+    multiple branches by key and requires ``merge_fn`` to define the final
+    reward shape.
 
     Args:
         branches (dict[str, JudgerConfig | ComposedJudgerConfig]): Mapping from
-            branch name to judger configuration.
+            branch name to judger configuration. Branch names must match
+            ``RolloutState.data_source`` string values or dict keys.
         merge_fn (JudgerMergeFn | None): Function that merges multiple branch
             outputs into the returned rollout state. Required when ``data_source``
-            may select more than one branch.
+            may select more than one branch. Leave as ``None`` only when every
+            sample selects exactly one branch.
 
     **Examples:**
 
@@ -151,6 +156,7 @@ class ComposedJudgerConfig(BaseModel):
                 "math": GSM8KJudgerConfig(),
                 "format": JudgerConfig(judger_name="format", reward_handler=format_reward),
             },
+            merge_fn=merge_rewards,
         )
     """
 

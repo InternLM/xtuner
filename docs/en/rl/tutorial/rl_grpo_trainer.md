@@ -122,11 +122,11 @@ judger_config = GSM8KJudgerConfig(
 ```
 
 **Usage Instructions**:
-- `"openai/gsm8k"`: Dataset identifier, needs to match the `data_source` field in your dataset
+- `"openai/gsm8k"`: Logical judge name. With a single `JudgerConfig`, samples are sent directly to this judge. With `ComposedJudgerConfig`, `RolloutState.data_source` routes samples to branches, and string values or dict keys must match `branches`.
 - `GSM8KJudgerConfig()`: Judge specifically for GSM8K math problems, will check if the numerical answer is correct
 - `cpu_resources`: Runs the judge in PG-external Ray CPU actor(s). If omitted, the judge runs locally.
 
-💡 **Extended Functionality**: XTuner also supports multiple judgment methods (functional, API service) and custom Judgers, related tutorials coming soon.
+💡 **Extended Functionality**: XTuner supports functional reward handlers, API-service reward handlers, custom Judgers, and composed Judgers for routing or multi-judge scoring.
 
 ## 2. Trainer Config (Training Configuration)
 

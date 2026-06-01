@@ -3,7 +3,7 @@ Judger 体系关系图
 =================
 
                         ┌─────────────────┐
-                        │   Judger (ABC)  │  ← 所有 judger 的统一接口
+                        │     Judger      │  ← 所有 judger 的统一接口
                         │   judge(state)  │
                         └────────┬────────┘
                                  │ 继承
@@ -57,6 +57,12 @@ AgentLoop
         └─► JudgerActor.judge_payload.remote(payload)
               └─► NativeJudger.judge_payload(payload)
                     └─► reward_handler(response, label)
+
+批量打分语义
+------------
+Judger.judge 支持单条 RolloutState 或 list[RolloutState] 两种输入形态。
+但不是所有具体 judger 都支持 batch。比如 NativeJudger 和 CompassVerifierV2
+只支持单条输入，会在 judge(list[RolloutState]) 入口直接报错。
 """
 
 from __future__ import annotations
@@ -132,7 +138,13 @@ class Judger:
 
 class NativeJudger(Judger):
     """Local judger implementation backed by a Python callable or HTTP
-    endpoint."""
+    endpoint.
+
+    ``NativeJudger`` calls one reward handler for one rollout sample. It does
+    not support ``judge(list[RolloutState])``; callers that need grouped
+    routing should use ``ComposedJudger`` or a judger implementation that
+    explicitly supports batch payloads.
+    """
 
     def __init__(
         self,
@@ -195,7 +207,7 @@ class RemoteJudger(Judger):
     converts that state to a lightweight payload on the driver, then this proxy
     sends only the payload to ``JudgerActor``. ``JudgerActor`` lives in the Ray
     worker process and owns the real local judger instance that executes
-    ``judge_payload``.
+    ``judge_payload``. Batch support is determined by that actor-side judger.
     """
 
     def __init__(self, actor: RayJudgerProxy, judger_name: str):

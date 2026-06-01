@@ -5,12 +5,12 @@ from .native import Judger, JudgerActor, JudgerConfig, JudgerPool, RayJudgerProx
 
 
 #
-# Use ``JudgerConfig`` when one sample only needs one concrete judger implementation:
-# one reward handler, one judger_name, and one execution mode (local or Ray actors).
+# Use ``JudgerConfig`` for one concrete reward handler. The built-in
+# ``NativeJudger`` path scores one rollout sample at a time.
 #
 # Use ``ComposedJudgerConfig`` when one sample may need to be routed to child
-# judgers by ``RolloutState.data_source``, or when you want to run multiple
-# child judgers and merge their outputs with ``merge_fn``.
+# judgers by ``RolloutState.data_source``. A data_source string selects one
+# branch; a data_source dict selects multiple branches and requires ``merge_fn``.
 #
 def build_judger(config: JudgerConfigLike) -> Judger:
     if isinstance(config, ComposedJudgerConfig):
