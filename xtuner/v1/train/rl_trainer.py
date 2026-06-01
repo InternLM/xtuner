@@ -588,7 +588,8 @@ class BaseRLTrainer:
         self._seed = cfg.seed
         self.train_batch_size = cfg.train_batch_size
         self._sync_weights_interval = cfg.sync_weights_interval
-        set_deterministic()
+        if XTUNER_DETERMINISTIC:
+            set_deterministic()
         set_random_seed(cfg.seed)
 
     def _init_train_worker_config(self, cfg: BaseRLTrainerConfig, log_dir: Path) -> None:
