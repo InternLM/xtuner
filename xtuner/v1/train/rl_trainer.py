@@ -10,6 +10,7 @@ from pathlib import Path
 from shutil import rmtree
 from typing import Any, List, cast
 
+import numpy as np
 import ray
 import torch
 from mmengine.dist import get_rank
@@ -60,6 +61,13 @@ from xtuner.v1.utils.env_check import get_rollout_engine_version
 PG_READY_TIMEOUT = 30
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
+
+
+def _to_cpu_tensor(value: np.ndarray | None, *, dtype: torch.dtype | None = None) -> torch.Tensor | None:
+    if value is None:
+        return None
+    assert isinstance(value, np.ndarray), f"Expected np.ndarray, got {type(value)}"
+    return torch.as_tensor(value, dtype=dtype, device="cpu")
 
 
 def check_fa3():
@@ -150,11 +158,12 @@ class RLThroughputBenchmark:
 
 def get_train_seq_ctx(
     input_ids: torch.LongTensor,
-    position_ids: torch.Tensor | None = None,
+    position_ids: np.ndarray | None = None,
     multimodal_train_info: dict | None = None,
     len_response_ids: int = 0,
 ):
     seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
+    position_ids = _to_cpu_tensor(position_ids, dtype=torch.long)
     if position_ids is not None and len(position_ids.shape) == 3:
         # qwen3vl 需要特殊处理，其余的不需要额外处理
         max_value = position_ids.max(dim=-1).values  # (3,1)
@@ -167,7 +176,7 @@ def get_train_seq_ctx(
 
     if multimodal_train_info:
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
-        seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
+        seq_ctx.image_grid_thw = _to_cpu_tensor(multimodal_train_info.get("image_grid_thw"), dtype=torch.long)
     return seq_ctx
 
 
