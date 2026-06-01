@@ -8,7 +8,7 @@
 Sampler -> list[RolloutState]
   -> AgentLoop.generate_group()
   -> RolloutController.generate()
-  -> Judger.judge()
+  -> Judger.judge() / Judger.batch_judge()
   -> ReplayBuffer
   -> RLTrainer._prepare_train_data()
 ```
@@ -58,7 +58,7 @@ async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> l
     ...
 ```
 
-`generate_sample()` 处理单条样本；默认 `generate_group()` 会并发调用多次 `generate_sample()`，并在调用前把 `self.sample_params` 写到组内每条样本上。需要组级逻辑时，例如批量打分、组内共享环境、组内排序过滤，可以覆盖 `generate_group()`。
+`generate_sample()` 处理单条样本；默认 `generate_group()` 会并发调用多次 `generate_sample()`，并在调用前把 `self.sample_params` 写到组内每条样本上。若配置了 `enable_batch_judge=True`，默认 `generate_group()` 会在组内样本生成完成后调用一次 `self.run_judger(group_samples)`。需要其他组级逻辑时，例如组内共享环境、组内排序过滤，可以覆盖 `generate_group()`。
 
 ## 输入输出约定
 
@@ -108,7 +108,7 @@ generate_sample(state)
   -> await rollout_ctl.generate.remote(state)
   -> PartialRolloutHandler.postprocess(state)
   -> 如果 state.status != COMPLETED，直接返回，不触发 Judger
-  -> 如果配置了 judger，调用 judger.judge(state)
+  -> 如果配置了 judger，调用 self.run_judger(state)
 ```
 
 典型配置：
@@ -129,7 +129,7 @@ agent_loop_config = SingleTurnAgentLoopConfig(
 )
 ```
 
-`SingleTurnAgentLoop` 还支持批量打分：
+`AgentLoopConfig` 还支持批量打分：
 
 ```python
 agent_loop_config = SingleTurnAgentLoopConfig(
@@ -139,7 +139,7 @@ agent_loop_config = SingleTurnAgentLoopConfig(
 )
 ```
 
-开启后，`generate_sample()` 不会逐条调用 Judger；`generate_group()` 会在组内样本全部生成完成后调用一次 `judger.judge(group_samples)`。只有当前 Judger 明确支持 `list[RolloutState]` 输入时才应开启。
+开启后，`generate_sample()` 不会逐条调用 Judger；`generate_group()` 会在组内样本全部生成完成后调用一次 `self.run_judger(group_samples)`，内部会转到 `judger.batch_judge(group_samples)`。只有当前 Judger 明确实现 `batch_judge()` 时才应开启。
 
 ## 自定义 AgentLoop
 
@@ -147,8 +147,10 @@ agent_loop_config = SingleTurnAgentLoopConfig(
 
 1. 继承 `AgentLoop`，实现 `generate_sample()`。
 2. 在 `generate_sample()` 中维护 `tokens`、`sample_params`、`response_ids`、`response`、`logprobs`、`response_mask`、`status`。
-3. 需要打分时，在 response 可用后调用 `self.judger.judge(...)`。
+3. 需要打分时，在 response 可用后调用 `self.run_judger(...)`。
 4. 继承 `AgentLoopConfig`，实现 `build_local()`，这样才能接入 `TaskSpecConfig.agent_loop_config`，并复用 Ray actor 构建逻辑。
+
+`self.run_judger(...)` 会根据输入形态调用 `judger.judge()` 或 `judger.batch_judge()`，并统一处理 pause/cancel。若自定义 AgentLoop 支持 `enable_batch_judge=True`，`generate_sample()` 中的单条打分需要用 `not self.enable_batch_judge` 保护，避免默认 `generate_group()` 再次批量打分。若自定义 AgentLoop 需要覆盖 `pause()`，应在实现中调用 `await super().pause()`，否则正在执行的 Judger 任务无法复用基类的中断逻辑。
 
 ### 最小单轮实现
 
@@ -170,8 +172,8 @@ class CustomAgentLoop(AgentLoop):
         if rollout_state.status != Status.COMPLETED:
             return rollout_state
 
-        if self.judger is not None:
-            rollout_state = await self.judger.judge(rollout_state)
+        if self.judger is not None and not self.enable_batch_judge:
+            rollout_state = await self.run_judger(rollout_state)
         return rollout_state
 
 
@@ -242,8 +244,8 @@ class ToolAgentLoop(AgentLoop):
         assert len(rollout_state.response_ids) == len(rollout_state.logprobs)
         assert len(rollout_state.response_ids) == len(rollout_state.response_mask)
 
-        if rollout_state.status == Status.COMPLETED and self.judger is not None:
-            rollout_state = await self.judger.judge(rollout_state)
+        if rollout_state.status == Status.COMPLETED and self.judger is not None and not self.enable_batch_judge:
+            rollout_state = await self.run_judger(rollout_state)
         return rollout_state
 ```
 
@@ -260,9 +262,8 @@ class ToolAgentLoop(AgentLoop):
 async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
     samples = await super().generate_group(rollout_state, **kwargs)
 
-    # 例：Judger 支持批量输入时，在组级统一打分。
-    if self.judger is not None:
-        samples = await self.judger.judge(samples)
+    # 例：在默认并发生成和可选 batch judge 之后，继续执行组级过滤或排序。
+    samples = self.filter_or_sort_group(samples)
     return samples
 ```
 
@@ -341,6 +342,6 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
 - 每次调用 `rollout_ctl.generate.remote()` 前是否设置了本轮 `sample_params`。
 - 返回训练前，`response_ids`、`response`、`logprobs`、`response_mask` 是否完整且长度一致。
 - 非模型生成 token 是否在 `response_mask` 中置为 `0`。
-- 需要 Judger 时，是否只对可评分的样本调用 `judger.judge()`。
+- 需要 Judger 时，是否通过 `self.run_judger(...)` 调用打分，以复用 pause/cancel 处理。
 - 若使用 `_prepare_train_data()`，是否保证最终有 `reward["score"]`。
 - 若使用 async partial rollout，是否正确处理 `enable_partial_rollout` 和历史 response 合并。

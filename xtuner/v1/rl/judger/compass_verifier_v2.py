@@ -40,7 +40,7 @@ class CompassVerifierV2(Judger):
     """LLM-based verifier for single rollout samples.
 
     ``CompassVerifierV2`` does not implement batch judging. Passing
-    ``list[RolloutState]`` to ``judge`` raises before payload construction.
+    ``list[RolloutState]`` to ``batch_judge`` raises before payload construction.
     """
 
     def __init__(
@@ -63,10 +63,8 @@ class CompassVerifierV2(Judger):
             timeout=request_timeout,
         ).json()["data"][0]["id"]
 
-    async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState:
-        if isinstance(rollout_state, list):
-            raise NotImplementedError("CompassVerifierV2 does not support batch RolloutState input.")
-        return await super().judge(rollout_state)
+    async def batch_judge(self, rollout_states: list[RolloutState]) -> list[RolloutState]:
+        raise NotImplementedError("CompassVerifierV2 does not support batch_judge.")
 
     async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
         if isinstance(payload, list):

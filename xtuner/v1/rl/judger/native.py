@@ -5,6 +5,7 @@ Judger 体系关系图
                         ┌─────────────────┐
                         │     Judger      │  ← 所有 judger 的统一接口
                         │   judge(state)  │
+                        │ batch_judge(list)│
                         └────────┬────────┘
                                  │ 继承
               ┌──────────────────┼───────────────────┐
@@ -60,16 +61,16 @@ AgentLoop
 
 批量打分语义
 ------------
-Judger.judge 支持单条 RolloutState 或 list[RolloutState] 两种输入形态。
-但不是所有具体 judger 都支持 batch。比如 NativeJudger 和 CompassVerifierV2
-只支持单条输入，会在 judge(list[RolloutState]) 入口直接报错。
+Judger.judge 只处理单条 RolloutState。需要批量打分时调用
+Judger.batch_judge(list[RolloutState])。不是所有具体 judger 都支持 batch；
+比如 NativeJudger 和 CompassVerifierV2 会在 batch_judge 入口直接报错。
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import Any, Callable, TypeAlias, cast, overload
+from typing import Any, Callable, TypeAlias, cast
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -107,27 +108,21 @@ class Judger:
         rollout_state.reward = output
         return rollout_state
 
-    @overload
-    async def judge(self, rollout_state: RolloutState) -> RolloutState: ...
-    @overload
-    async def judge(self, rollout_state: list[RolloutState]) -> list[RolloutState]: ...
-
-    async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:
-        # batch samples judge
-        if isinstance(rollout_state, list):
-            payloads = [self.preprocess(state) for state in rollout_state]
-            outputs = await self.judge_payload(payloads)
-            if not isinstance(outputs, list):
-                raise TypeError(f"Judger returned a single output for {len(rollout_state)} rollout states.")
-            if len(outputs) != len(rollout_state):
-                raise ValueError(f"Judger returned {len(outputs)} outputs for {len(rollout_state)} rollout states.")
-            return [self.postprocess(state, output) for state, output in zip(rollout_state, outputs)]
-        # single sample judge
+    async def judge(self, rollout_state: RolloutState) -> RolloutState:
         payload = self.preprocess(rollout_state)
         output = await self.judge_payload(payload)
         if isinstance(output, list):
             raise TypeError("Judger returned a list output for a single rollout state.")
         return self.postprocess(rollout_state, output)
+
+    async def batch_judge(self, rollout_states: list[RolloutState]) -> list[RolloutState]:
+        payloads = [self.preprocess(state) for state in rollout_states]
+        outputs = await self.judge_payload(payloads)
+        if not isinstance(outputs, list):
+            raise TypeError(f"Judger returned a single output for {len(rollout_states)} rollout states.")
+        if len(outputs) != len(rollout_states):
+            raise ValueError(f"Judger returned {len(outputs)} outputs for {len(rollout_states)} rollout states.")
+        return [self.postprocess(state, output) for state, output in zip(rollout_states, outputs)]
 
     async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
         raise NotImplementedError(f"{self.__class__.__name__}.judge_payload() is not implemented.")
@@ -141,7 +136,7 @@ class NativeJudger(Judger):
     endpoint.
 
     ``NativeJudger`` calls one reward handler for one rollout sample. It does
-    not support ``judge(list[RolloutState])``; callers that need grouped
+    not support ``batch_judge(list[RolloutState])``; callers that need grouped
     routing should use ``ComposedJudger`` or a judger implementation that
     explicitly supports batch payloads.
     """
@@ -158,10 +153,8 @@ class NativeJudger(Judger):
         self.reward_handler = reward_handler
         self.request_timeout = request_timeout
 
-    async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState:
-        if isinstance(rollout_state, list):
-            raise NotImplementedError("NativeJudger does not support batch RolloutState input.")
-        return await super().judge(rollout_state)
+    async def batch_judge(self, rollout_states: list[RolloutState]) -> list[RolloutState]:
+        raise NotImplementedError("NativeJudger does not support batch_judge.")
 
     async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
         assert not isinstance(payload, list), "NativeJudger does not support batch payloads."

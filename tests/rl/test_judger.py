@@ -102,6 +102,34 @@ class TestComposedJudgerUnit(unittest.TestCase):
         self.assertEqual(rollout_state.reward["score"], 1.0)
         self.assertEqual(rollout_state.reward["source"], "a")
 
+    def test_composed_judger_batch_single_branch_from_data_source(self):
+        from xtuner.v1.rl.judger import ComposedJudger, Judger
+
+        class BatchJudger(Judger):
+            async def judge_payload(self, payload):
+                if isinstance(payload, list):
+                    return [{"score": 1.0, "source": "a"} for _ in payload]
+                return {"score": 1.0, "source": "a"}
+
+        judger = ComposedJudger(branches={"correctness": BatchJudger()})
+        rollout_states = [
+            self._make_rollout_state("correctness"),
+            self._make_rollout_state("correctness"),
+        ]
+
+        rollout_states = asyncio.run(judger.batch_judge(rollout_states))
+
+        self.assertEqual([state.reward["score"] for state in rollout_states], [1.0, 1.0])
+        self.assertEqual([state.reward["source"] for state in rollout_states], ["a", "a"])
+
+    def test_native_judger_batch_judge_not_supported(self):
+        from xtuner.v1.rl.judger import JudgerConfig
+
+        judger = JudgerConfig(judger_name="native", reward_handler=lambda **kwargs: {"score": 1.0}).build()
+
+        with self.assertRaisesRegex(NotImplementedError, "does not support batch_judge"):
+            asyncio.run(judger.batch_judge([self._make_rollout_state("correctness")]))
+
     def test_composed_judger_config(self):
         def merge_fn(original, judged):
             original.reward = {

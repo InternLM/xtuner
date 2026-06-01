@@ -3,19 +3,20 @@ from __future__ import annotations
 import asyncio
 import math
 from abc import ABC, abstractmethod
-from typing import TypeAlias, cast
+from typing import TypeAlias, cast, overload
 
 import ray
 from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import (
     CPUActorLauncher,
     CPUResourcesConfig,
+    cancel_and_drain,
     create_task,
     register_cpu_resources,
 )
@@ -32,6 +33,7 @@ class AgentLoopConfig(ABC, BaseModel):
     hf_checkpoint: str
     sample_params: SampleParams
     cpu_resources: CPUResourcesConfig | None = None
+    enable_batch_judge: bool = False
 
     def build(self, rollout_controller, judger: Judger | None = None, logger=None) -> AgentLoopSpec:
         if self.cpu_resources is None:
@@ -169,6 +171,7 @@ class AgentLoop(ABC):
         hf_checkpoint: str,
         judger: Judger | None = None,
         logger=None,
+        enable_batch_judge: bool = False,
     ) -> None:
         self.rollout_ctl = rollout_ctl
         self.hf_checkpoint = hf_checkpoint
@@ -176,10 +179,12 @@ class AgentLoop(ABC):
         self.processor = load_processor(hf_checkpoint, trust_remote_code=True)
         self.sample_params = sample_params
         self.judger = judger
+        self.enable_batch_judge = enable_batch_judge
         if logger is None:
             self.logger = get_logger()
         else:
             self.logger = logger
+        self._judger_pause_event = asyncio.Event()
 
     @abstractmethod
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
@@ -192,21 +197,56 @@ class AgentLoop(ABC):
             pending_tasks.append(task)
         generated_samples = asyncio.gather(*pending_tasks)
         group_samples = await generated_samples
+        if self.judger is not None and self.enable_batch_judge:
+            if group_samples and all(sample.status == Status.COMPLETED for sample in group_samples):
+                group_samples = await self.run_judger(group_samples)
         return group_samples
 
+    @overload
+    async def run_judger(self, rollout_state: RolloutState) -> RolloutState: ...
+
+    @overload
+    async def run_judger(self, rollout_state: list[RolloutState]) -> list[RolloutState]: ...
+
+    async def run_judger(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:
+        assert self.judger is not None
+        if isinstance(rollout_state, list):
+            judge_task = create_task(self.judger.batch_judge(rollout_state))
+        else:
+            judge_task = create_task(self.judger.judge(rollout_state))
+        pause_task = create_task(self._judger_pause_event.wait())
+        try:
+            done, _ = await asyncio.wait({judge_task, pause_task}, return_when=asyncio.FIRST_COMPLETED)
+            if judge_task in done:
+                return await judge_task
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(judge_task),
+                    timeout=DEFAULT_JUDGER_CANCEL_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                await cancel_and_drain([judge_task])
+                for sample in rollout_state if isinstance(rollout_state, list) else [rollout_state]:
+                    sample.status = Status.ABORTED
+                    sample.finish_reason = "abort"
+                    sample.reward = None
+                return rollout_state
+        except asyncio.CancelledError:
+            await cancel_and_drain([judge_task])
+            for sample in rollout_state if isinstance(rollout_state, list) else [rollout_state]:
+                sample.status = Status.ABORTED
+                sample.finish_reason = "abort"
+                sample.reward = None
+            return rollout_state
+        finally:
+            await cancel_and_drain([pause_task])
+
     async def pause(self) -> None:
-        # Base AgentLoop only pauses rollout generation.
-        #
-        # We intentionally do not define generic judger pause behavior in the
-        # Judger base class. Judger subclasses can implement judge() in very
-        # different ways, and one base pause implementation cannot cover all of
-        # them. Requiring users to follow a base-class pause protocol would also
-        # increase the mental overhead of writing a new judge() implementation.
-        #
-        # For now, only SingleTurnAgentLoop defines how to pause an in-flight
-        # judger call. Other AgentLoop subclasses should override pause() if
-        # they need their own judger pause semantics.
-        await self.rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
+        self._judger_pause_event.set()
+        try:
+            await self.rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
+        finally:
+            self._judger_pause_event.clear()
 
 
 class RouterAgentLoop:

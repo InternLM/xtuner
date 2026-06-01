@@ -69,53 +69,47 @@ class ComposedJudger(Judger):
             f"task_name={rollout_state.task_name!r}, available={sorted(self.branches)}"
         )
 
-    def _resolve_selected_keys(self, rollout_state: RolloutState | list[RolloutState]) -> list[str]:
-        if isinstance(rollout_state, list):
-            if not rollout_state:
-                raise ValueError("ComposedJudger requires at least one RolloutState when input is a list.")
-            return self._select_keys_from_data_source(rollout_state[0])
-        return self._select_keys_from_data_source(rollout_state)
-
     async def _judge_branch(
         self,
         key: str,
-        rollout_state: RolloutState | list[RolloutState],
-    ) -> tuple[str, JudgerOutput | list[JudgerOutput]]:
+        rollout_state: RolloutState,
+    ) -> tuple[str, JudgerOutput]:
         branch = self.branches[key]
-        if isinstance(rollout_state, list):  # batch samples judge
-            payloads = [branch.preprocess(state) for state in rollout_state]
-            return key, await branch.judge_payload(payloads)
-        # single sample judge
         payload = branch.preprocess(rollout_state)
-        return key, await branch.judge_payload(payload)
+        output = await branch.judge_payload(payload)
+        if isinstance(output, list):
+            raise TypeError(f"Branch {key!r} returned a list output for one RolloutState.")
+        return key, output
 
-    def _postprocess_single_branch(
+    async def _batch_judge_branch(
+        self,
+        key: str,
+        rollout_states: list[RolloutState],
+    ) -> tuple[str, list[JudgerOutput]]:
+        branch = self.branches[key]
+        payloads = [branch.preprocess(state) for state in rollout_states]
+        outputs = await branch.judge_payload(payloads)
+        if not isinstance(outputs, list):
+            raise TypeError(f"Branch {key!r} returned a single output for a rollout state list.")
+        if len(outputs) != len(rollout_states):
+            raise ValueError(f"Branch {key!r} returned {len(outputs)} outputs for {len(rollout_states)} states.")
+        return key, outputs
+
+    def _postprocess_branch_batch(
         self,
         branch: Judger,
-        rollout_state: RolloutState | list[RolloutState],
-        output: JudgerOutput | list[JudgerOutput],
-    ) -> RolloutState | list[RolloutState]:
-        if isinstance(rollout_state, list):
-            if not isinstance(output, list):
-                raise TypeError("Single selected branch returned a single output for a rollout state list.")
-            if len(output) != len(rollout_state):
-                raise ValueError(
-                    f"Single selected branch returned {len(output)} outputs for {len(rollout_state)} states."
-                )
-            return [branch.postprocess(state, output_i) for state, output_i in zip(rollout_state, output)]
+        rollout_states: list[RolloutState],
+        outputs: list[JudgerOutput],
+    ) -> list[RolloutState]:
+        return [branch.postprocess(state, output) for state, output in zip(rollout_states, outputs)]
 
-        if isinstance(output, list):
-            raise TypeError("Single selected branch returned a list output for one RolloutState.")
-        return branch.postprocess(rollout_state, output)
-
-    async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:  # type: ignore[override]
-        selected_keys = self._resolve_selected_keys(rollout_state)
+    async def judge(self, rollout_state: RolloutState) -> RolloutState:
+        selected_keys = self._select_keys_from_data_source(rollout_state)
 
         if len(selected_keys) == 1:
-            # 处理每次只选择其中一个 branch 的情况
             key = selected_keys[0]
             _, output = await self._judge_branch(key, rollout_state)
-            return self._postprocess_single_branch(self.branches[key], rollout_state, output)
+            return self.branches[key].postprocess(rollout_state, output)
 
         if self.merge_fn is None:
             raise ValueError(
@@ -126,7 +120,34 @@ class ComposedJudger(Judger):
         judged = dict[str, JudgerOutput | list[JudgerOutput]](
             await asyncio.gather(*(self._judge_branch(key, rollout_state) for key in selected_keys))
         )
-        return self.merge_fn(rollout_state, judged)
+        merged = self.merge_fn(rollout_state, judged)
+        if isinstance(merged, list):
+            raise TypeError("ComposedJudger merge_fn returned a list for judge.")
+        return merged
+
+    async def batch_judge(self, rollout_states: list[RolloutState]) -> list[RolloutState]:
+        if not rollout_states:
+            raise ValueError("ComposedJudger requires at least one RolloutState when input is a list.")
+        selected_keys = self._select_keys_from_data_source(rollout_states[0])
+
+        if len(selected_keys) == 1:
+            key = selected_keys[0]
+            _, outputs = await self._batch_judge_branch(key, rollout_states)
+            return self._postprocess_branch_batch(self.branches[key], rollout_states, outputs)
+
+        if self.merge_fn is None:
+            raise ValueError(
+                "ComposedJudger selected multiple branches but merge_fn is not provided. "
+                f"selected_keys={selected_keys!r}"
+            )
+
+        judged = dict[str, JudgerOutput | list[JudgerOutput]](
+            await asyncio.gather(*(self._batch_judge_branch(key, rollout_states) for key in selected_keys))
+        )
+        merged = self.merge_fn(rollout_states, judged)
+        if not isinstance(merged, list):
+            raise TypeError("ComposedJudger merge_fn returned a single RolloutState for batch_judge.")
+        return merged
 
 
 class ComposedJudgerConfig(BaseModel):
