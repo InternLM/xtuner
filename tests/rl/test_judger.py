@@ -130,6 +130,39 @@ class TestComposedJudgerUnit(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "does not support batch_judge"):
             asyncio.run(judger.batch_judge([self._make_rollout_state("correctness")]))
 
+    def test_remote_judger_uses_driver_side_preprocess_judger(self):
+        from xtuner.v1.rl.judger import Judger, RemoteJudger
+
+        class CustomPreprocessJudger(Judger):
+            def preprocess(self, rollout_state):
+                return {"custom_value": rollout_state.extra_fields["custom_value"]}
+
+        class RemoteMethod:
+            def __init__(self):
+                self.payload = None
+
+            async def remote(self, payload):
+                self.payload = payload
+                return {"score": payload["custom_value"]}
+
+        class FakeActor:
+            def __init__(self):
+                self.judge_payload = RemoteMethod()
+
+        actor = FakeActor()
+        judger = RemoteJudger(
+            actor=actor,
+            judger_name="remote_custom_preprocess",
+            preprocess_judger=CustomPreprocessJudger(),
+        )
+        rollout_state = self._make_rollout_state("correctness")
+        rollout_state.extra_fields["custom_value"] = 7
+
+        judged_state = asyncio.run(judger.judge(rollout_state))
+
+        self.assertEqual(actor.judge_payload.payload, {"custom_value": 7})
+        self.assertEqual(judged_state.reward, {"score": 7})
+
     def test_composed_judger_config(self):
         def merge_fn(original, judged):
             original.reward = {

@@ -196,16 +196,26 @@ class RemoteJudger(Judger):
     """Driver-side proxy for a Ray-hosted judger.
 
     ``RemoteJudger`` keeps the same ``Judger`` interface as local judgers, so
-    callers still pass ``RolloutState`` to ``judge``. The base ``Judger`` logic
-    converts that state to a lightweight payload on the driver, then this proxy
-    sends only the payload to ``JudgerActor``. ``JudgerActor`` lives in the Ray
-    worker process and owns the real local judger instance that executes
-    ``judge_payload``. Batch support is determined by that actor-side judger.
+    callers still pass ``RolloutState`` to ``judge``. This proxy runs the same
+    ``preprocess`` implementation as the actor-side judger on the driver, then
+    sends only the lightweight payload to ``JudgerActor``. ``JudgerActor`` lives
+    in the Ray worker process and owns the real local judger instance that
+    executes ``judge_payload``. Batch support is determined by that actor-side
+    judger.
     """
 
-    def __init__(self, actor: RayJudgerProxy, judger_name: str):
+    def __init__(self, actor: RayJudgerProxy, judger_name: str, preprocess_judger: Judger | None = None):
         super().__init__(judger_name=judger_name)
         self.actor = actor
+        self.preprocess_judger = preprocess_judger
+
+    # Preprocess must run on the driver before the Ray call. Otherwise the full
+    # RolloutState would be serialized to the actor, and remote branches with
+    # custom preprocess logic would lose the payload fields they require.
+    def preprocess(self, rollout_state: RolloutState) -> JudgerPayload:
+        if self.preprocess_judger is None:
+            return super().preprocess(rollout_state)
+        return self.preprocess_judger.preprocess(rollout_state)
 
     async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
         return await self.actor.judge_payload.remote(payload)

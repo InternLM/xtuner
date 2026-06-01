@@ -46,7 +46,11 @@ def _build_remote_actor(config: JudgerConfig) -> RayJudgerProxy:
 
 
 def _build_remote_judger(config: JudgerConfig) -> Judger:
-    return RemoteJudger(_build_remote_actor(config), judger_name=config.judger_name)
+    return RemoteJudger(
+        _build_remote_actor(config),
+        judger_name=config.judger_name,
+        preprocess_judger=config.build_local(),
+    )
 
 
 def _build_remote_judgers(config: JudgerConfig) -> list[Judger]:
