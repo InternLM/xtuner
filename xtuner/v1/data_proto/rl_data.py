@@ -4,7 +4,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 import numpy as np
-import torch
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import NotRequired, TypedDict
 
@@ -62,7 +61,7 @@ class Status(Enum):
 class MultimodalInfo(TypedDict):
     # 使用TypedDict给出pixel_values的类型提示
     pixel_values: NotRequired[np.ndarray | RayObjectRef | None]
-    image_grid_thw: NotRequired[torch.Tensor]
+    image_grid_thw: NotRequired[np.ndarray | None]
 
 
 class RolloutFunctionCall(BaseModel):
@@ -124,7 +123,7 @@ class RolloutState(BaseModel):
     task_name: str | None = None
     status: Status = Status.INIT
     error_msg: str | None = None
-    position_ids: torch.Tensor | None = None
+    position_ids: np.ndarray | None = None
     extra_fields: dict[str, Any] = {}
 
 
