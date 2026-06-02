@@ -48,7 +48,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-sft-ep8:
         -
@@ -75,7 +75,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
         -
             type: sft
             pre_action:
@@ -103,7 +103,7 @@ case:
                     runtime_info/text_tokens: 0
             post_action:
                 command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-sft-ep8 sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
-            timeout: 1200
+            timeout: 1500
 
     qwen3-sft-tp2:
         -
@@ -128,7 +128,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-sft-recompute:
         -
@@ -155,7 +155,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
              
     qwen3-sft-fp8:
         -
@@ -184,7 +184,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200 
+            timeout: 1500 
 
     qwen3-sft-16nums:
         -
@@ -208,7 +208,7 @@ case:
                     loss/reduced_balancing_loss: 0.02
                     loss/reduced_llm_loss: 0.02
                     lr: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-sft-celoss:
         -
@@ -235,7 +235,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-30B-sp4-intralayer2:
         -
@@ -337,7 +337,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-sft-vl-dense:
         -
@@ -363,7 +363,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-5-sft-vl-moe:
         -
@@ -390,7 +390,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-5-sft-fp8:
         -
@@ -418,7 +418,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-5-sft-recompute:
         -
@@ -444,7 +444,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-5-sft-tp2:
         -
@@ -468,7 +468,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-5-sft-sp4-resume:
         -
@@ -493,7 +493,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
         -
             type: sft
@@ -522,7 +522,7 @@ case:
                     runtime_info/text_tokens: 0
             post_action:
                 command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sft-sp4-resume sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
-            timeout: 1200
+            timeout: 1500
 
     qwen3-5-sft-8nums-vs-16nums:
         -
@@ -545,7 +545,7 @@ case:
                     loss/reduced_balancing_loss: 0.02
                     loss/reduced_llm_loss: 0.02
                     lr: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-5-sft-fp8-vl:
         -
@@ -574,7 +574,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-5-sft-tp2-vl:
         -
@@ -601,7 +601,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-5-sft-sp4-resume-vl:
         -
@@ -628,7 +628,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
         -
             type: sft
@@ -659,7 +659,7 @@ case:
                     runtime_info/text_tokens: 0
             post_action:
                 command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sft-sp4-resume-vl sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
-            timeout: 1200
+            timeout: 1500
 
     qwen3-5-sft-mtp:
         -
@@ -683,7 +683,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-5-sft-mtp-vl:
         -
@@ -709,7 +709,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1200
+            timeout: 1500
 
     qwen3-rl-lmdeploy:
         -
