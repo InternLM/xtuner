@@ -1,5 +1,5 @@
 name: ete_test_npu
-
+run-name: e2e_test_npu-${{ github.event.inputs.run_case || 'all' }}
 permissions:
   contents: write
   pages: write
@@ -23,7 +23,7 @@ on:
         type: string
         default: 'all'
   schedule:
-    - cron:  '00 21 * * 0-4'
+    - cron:  '00 16 * * 0-5'
 env:
   CI_NPU_IMAGE_REGISTRY: ${{ secrets.CI_NPU_IMAGE_REGISTRY }}
 
