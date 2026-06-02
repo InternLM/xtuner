@@ -79,6 +79,9 @@ class FakeAsyncHFEngine:
         self.grad_norm_calls += 1
         return torch.tensor(1.0)
 
+    def destroy_async_checkpoint_pg(self) -> None:
+        pass
+
     def _cleanup_hf_dirs(self, cleanup_hf_dirs):
         for cleanup_hf_dir in cleanup_hf_dirs:
             cleanup_hf_dir = Path(cleanup_hf_dir)

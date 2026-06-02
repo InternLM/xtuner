@@ -19,10 +19,17 @@ from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
     get_group_status,
+    reset_rollout_response,
 )
-from xtuner.v1.rl.agent_loop import AgentLoopSpec, get_agent_loop_rollout_ctl
+from xtuner.v1.rl.agent_loop import AgentLoopSpec
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
-from xtuner.v1.rl.utils import calculate_seq_staleness, create_task
+from xtuner.v1.rl.utils import (
+    AGENT_LOOP_PAUSE_REQUEST_TIMEOUT_S,
+    PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S,
+    calculate_seq_staleness,
+    cancel_and_drain,
+    create_task,
+)
 from xtuner.v1.utils import get_logger
 
 from .sampler import Sampler
@@ -360,6 +367,7 @@ class ProduceContext:
     async def put_generated_group(self, group: list[RolloutState]) -> bool:
         # 只有完整生成的 group 才需要业务有效性过滤；ABORTED / EXPIRED 保留原状态供重试或统计。
         is_completed = get_group_status(group) == Status.COMPLETED
+        produced_tokens = sum(len(item.response_ids) for item in group if item.response_ids is not None)
         if is_completed:
             rewards_sum = 0.0
             rewards_count = 0
@@ -376,6 +384,7 @@ class ProduceContext:
             if not is_valid:
                 for item in group:
                     item.status = Status.FILTERED
+                    reset_rollout_response(item)
         await self.replay_buffer.put(
             group,
             self.task_name,
@@ -383,12 +392,6 @@ class ProduceContext:
             current_train_step=self.consumer_step,
             stale_threshold=self.stale_threshold,
         )
-        produced_tokens = 0
-        for item in group:
-            response_ids = getattr(item, "response_ids", None)
-            if response_ids is None:
-                continue
-            produced_tokens += int(response_ids.numel()) if hasattr(response_ids, "numel") else len(response_ids)
         self.progress.add_produced(self.task_name, samples=len(group), tokens=produced_tokens)
         # replay_buffer.put 可能把 stale group 转为 EXPIRED，返回前重新判断是否仍可训练。
         is_completed = get_group_status(group) == Status.COMPLETED
@@ -597,9 +600,10 @@ class _PendingTasks:
 
     async def cancel_all(self) -> int:
         tasks = await self._claim_all()
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if not tasks:
+            return 0
+        logger.warning(f"Cancelling {len(tasks)} pending rollout tasks.")
+        await cancel_and_drain(list(tasks))
         return len(tasks)
 
 
@@ -656,7 +660,8 @@ class SyncProduceStrategy(ProduceStrategy):
 
 
 class AsyncProduceStrategy(ProduceStrategy):
-    PENDING_TASK_COLLECT_TIMEOUT_S = 300.0
+    # Local retry interval for re-sending pause/abort while pending tasks drain.
+    PERIODIC_ABORT_INTERVAL_S = 5.0
 
     def __init__(
         self,
@@ -706,64 +711,79 @@ class AsyncProduceStrategy(ProduceStrategy):
     ) -> None:
         completed_count = 0
         for task in claimed_tasks:
-            is_completed = await ctx.put_generated_group(task.result())
+            items = task.result()
+            is_completed = await ctx.put_generated_group(items)
             if is_completed:
                 completed_count += 1
             if is_completed and available_base is not None and progress_displayer is not None:
                 progress_displayer.update(available_base + completed_count)
+
+    async def _pause_agent_loop(self, ctx: ProduceContext) -> None:
+        pause_request_start = time.perf_counter()
+        if isinstance(ctx.agent_loop, ray.actor.ActorHandle):
+            pause_future = ctx.agent_loop.pause.remote()
+        else:
+            pause_future = ctx.agent_loop.pause()
+        try:
+            await asyncio.wait_for(pause_future, timeout=AGENT_LOOP_PAUSE_REQUEST_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Agent loop pause timed out: task={ctx.task_name}, timeout_s={AGENT_LOOP_PAUSE_REQUEST_TIMEOUT_S}, "
+                f"elapsed={time.perf_counter() - pause_request_start:.2f}s, "
+                f"pending={self._pending_tasks.count()}"
+            )
+        except Exception:
+            logger.exception(
+                f"Agent loop pause failed: task={ctx.task_name}, "
+                f"elapsed={time.perf_counter() - pause_request_start:.2f}s, "
+                f"pending={self._pending_tasks.count()}"
+            )
 
     async def pause_produce(self, ctx: ProduceContext) -> float:
         pause_start = time.perf_counter()
         if self._pending_tasks.count() == 0:
             return 0.0
 
-        rollout_ctl = await get_agent_loop_rollout_ctl(ctx.agent_loop)
-        await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
+        pending_pause_tasks = {create_task(self._pause_agent_loop(ctx))}
+        initial_pending_count = self._pending_tasks.count()
 
         logger.info(
-            f"Pause signal sent for task {ctx.task_name}. Waiting for {self._pending_tasks.count()} pending tasks to complete..."
+            f"Pause signal loop started for task {ctx.task_name}. "
+            f"Waiting for {initial_pending_count} pending tasks to complete. "
+            f"periodic_abort_interval_s={self.PERIODIC_ABORT_INTERVAL_S}, "
+            f"producer_pause_pending_task_timeout_s={PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S}"
         )
         cleanup_start_time = time.perf_counter()
-        aborted_count = 0
-        aborted_tokens_sum = 0
-        aborted_zero_token_count = 0
+        next_periodic_abort_time = cleanup_start_time + self.PERIODIC_ABORT_INTERVAL_S
         while True:
             elapsed_time = time.perf_counter() - cleanup_start_time
-            if elapsed_time > self.PENDING_TASK_COLLECT_TIMEOUT_S:
+            if elapsed_time > PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S:
+                # 超时强制取消所有pending的任务
                 cancelled_count = await self._pending_tasks.cancel_all()
                 logger.warning(
-                    f"Cleanup timeout of {self.PENDING_TASK_COLLECT_TIMEOUT_S}s reached. "
-                    f"Forcefully cancelling {cancelled_count} remaining tasks."
+                    f"Cleanup timeout of {PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S}s reached. "
+                    f"Forcefully cancelling {cancelled_count} remaining tasks. "
+                    f"task={ctx.task_name}"
                 )
                 break
 
             if self._pending_tasks.count() == 0:
                 break
+            current_time = time.perf_counter()
+            pending_pause_tasks = {task for task in pending_pause_tasks if not task.done()}
+
+            # 定时发送 pause 信号
+            if self.PERIODIC_ABORT_INTERVAL_S > 0 and current_time >= next_periodic_abort_time:
+                pending_pause_tasks.add(create_task(self._pause_agent_loop(ctx)))
+                next_periodic_abort_time += self.PERIODIC_ABORT_INTERVAL_S
 
             claimed_done = await self._pending_tasks.wait_and_claim(timeout_s=1)
             for task in claimed_done:
                 paused_items = task.result()
-                for item in paused_items:
-                    if item.status == Status.ABORTED:
-                        token_count = len(item.response_ids or [])
-                        aborted_count += 1
-                        aborted_tokens_sum += token_count
-                        if token_count == 0:
-                            aborted_zero_token_count += 1
-                    logger.debug(
-                        f"[{self.__class__.__name__}] Task {ctx.task_name} | "
-                        f"Collecting paused sample (uid: {item.uid}, status: {item.status}, "
-                        f"length: {len(item.response_ids or [])}) after pausing generation."
-                    )
                 await ctx.put_generated_group(paused_items)
-        await rollout_ctl.cleanup_after_pause.remote()  # type: ignore[attr-defined]
+        await cancel_and_drain(list(pending_pause_tasks))
         pause_time = time.perf_counter() - pause_start
-        aborted_tokens_mean = aborted_tokens_sum / aborted_count if aborted_count > 0 else 0.0
-        logger.info(
-            f"pause_produce completed for task {ctx.task_name} within {pause_time}s. "
-            f"aborted_count={aborted_count}, aborted_tokens_mean={aborted_tokens_mean:.1f}, "
-            f"aborted_zero_token_count={aborted_zero_token_count}."
-        )
+        logger.info(f"pause_produce completed for task {ctx.task_name} within {pause_time}s.")
         return pause_time
 
     async def produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:

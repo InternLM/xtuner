@@ -46,7 +46,7 @@ from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.profiler import profiling_memory, profiling_time
-from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, kl_penalty
+from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, finalize_train_policy_metrics, kl_penalty
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
 from xtuner.v1.rl.weight_update import TrainRolloutMode, UpdateWeighter
 from xtuner.v1.train.trainer import LoadCheckpointConfig
@@ -57,6 +57,7 @@ from xtuner.v1.utils import (
     get_logger,
     get_torch_device_module,
     ray_method,
+    set_deterministic,
 )
 
 from ..rollout_is import merge_rollout_is_metrics
@@ -319,8 +320,7 @@ class TrainingWorker(SingleAcceleratorWorker):
     def _set_deterministic(self):
         if XTUNER_DETERMINISTIC:
             self.logger.info("Setting deterministic algorithms of TrainingWorker.")
-            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-            torch.use_deterministic_algorithms(True, warn_only=True)
+            set_deterministic()
 
     def _set_random_seed(self, seed: None | int):
         set_random_seed(seed)
@@ -659,6 +659,10 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self.rank == 0:
             self.logger.info(logger_msg)
 
+        only_calc_mismatch_ratio = os.environ.get("ONLY_CALC_MISMATCH_RATIO", "0") == "1"
+        if only_calc_mismatch_ratio:
+            return worker_log_item
+
         # compute reference logprobs
         ref_logprobs_list: list[torch.Tensor] | None = None
         if self._has_ref:
@@ -765,7 +769,12 @@ class TrainingWorker(SingleAcceleratorWorker):
             else:
                 extra_info_dict = cast(dict, engine_extra_info)
 
-            extra_info_dict = {k: v.item() for k, v in extra_info_dict.items() if isinstance(v, torch.Tensor)}
+            extra_info_dict = {
+                k: v.item() if isinstance(v, torch.Tensor) else v
+                for k, v in extra_info_dict.items()
+                if isinstance(v, (torch.Tensor, int, float))
+            }
+            extra_info_dict = finalize_train_policy_metrics(extra_info_dict, DEVICE)
             train_step_info.pop("total_loss")  # type: ignore[misc]
 
             train_log_item = WorkerTrainLogItem(
@@ -780,6 +789,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             log_str = ", ".join(
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
                 for key, value in train_log_item.items()
+                if not key.startswith("reduced_train_policy_") and key != "max_ratio"
             )
             log_str = f"Rank{self.rank} Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)

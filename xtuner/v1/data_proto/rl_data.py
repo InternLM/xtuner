@@ -4,7 +4,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 import numpy as np
-import torch
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import NotRequired, TypedDict
 
@@ -45,7 +44,7 @@ class SampleParams(BaseModel):
     include_stop_str_in_output: bool = True
     no_stop_trim: bool = True
     spaces_between_special_tokens: bool = False
-    return_routed_experts: bool = False
+    return_routed_experts: bool = True
 
 
 class Status(Enum):
@@ -62,7 +61,7 @@ class Status(Enum):
 class MultimodalInfo(TypedDict):
     # 使用TypedDict给出pixel_values的类型提示
     pixel_values: NotRequired[np.ndarray | RayObjectRef | None]
-    image_grid_thw: NotRequired[torch.Tensor]
+    image_grid_thw: NotRequired[np.ndarray | None]
 
 
 class RolloutFunctionCall(BaseModel):
@@ -124,7 +123,7 @@ class RolloutState(BaseModel):
     task_name: str | None = None
     status: Status = Status.INIT
     error_msg: str | None = None
-    position_ids: torch.Tensor | None = None
+    position_ids: np.ndarray | None = None
     extra_fields: dict[str, Any] = {}
 
 
@@ -173,7 +172,7 @@ def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
         from ray import ObjectRef as RayObjectRef
 
         if isinstance(routed_experts, RayObjectRef):
-            ray.internal.free([routed_experts])
+            ray.internal.free([routed_experts], local_only=False)
         rollout_state.routed_experts = None
     prompt_ids = getattr(rollout_state, "prompt_ids", None)
     rollout_state.tokens = list(prompt_ids) if prompt_ids is not None else None

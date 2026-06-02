@@ -33,7 +33,6 @@ from xtuner.v1.rl.utils import (
     AutoAcceleratorWorkers,
     CPUResourcesConfig,
     SingleAcceleratorWorker,
-    cancel_and_drain,
     find_master_addr_and_port,
     get_eos_token,
     register_cpu_resources,
@@ -509,7 +508,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         assert config.rollout_max_batch_size_per_instance, (
             "rollout_max_batch_size_per_instance must be set in RolloutConfig"
         )
-        http_concurrency = config.rollout_max_batch_size_per_instance * config.allow_over_concurrency_ratio
+        http_concurrency = math.ceil(config.rollout_max_batch_size_per_instance * config.allow_over_concurrency_ratio)
         limits = httpx.Limits(max_connections=http_concurrency, max_keepalive_connections=100)
         self.client = httpx.AsyncClient(limits=limits, timeout=self.config.rollout_timeout)
         self.server_task = None
@@ -525,9 +524,6 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.logger.info(f"Using eos_token: {eos_token} for model at {self.config.model_path}")
         self.eos_token: List[int] = [eos_token] if isinstance(eos_token, int) else eos_token
         self.receive_abort_request = threading.Event()
-        # After an abort signal, wait this long for an in-flight rollout request to return before cancelling the
-        # client-side request task.
-        self.abort_timeout = 10.0
         self.dist_init_addr: str = ""
         self.serverl_url: str = ""
         self.partial_rollout_handler = PartialRolloutHandler()
@@ -613,25 +609,15 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.receive_abort_request.set()
         return await self._send_abort_request()
 
-    async def cleanup_after_pause(self) -> None:
-        """Run backend-specific cleanup after paused requests are drained."""
-        return None
-
     async def _send_abort_request(self) -> bool:
         url = f"{self.server_url}/abort_request"
         try:
-            async with httpx.AsyncClient(timeout=self.abort_timeout) as client:
+            async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(url, json={"abort_all": True})
             response.raise_for_status()
-            self.logger.debug(f"Successfully sent abort request to {self.server_url}")
             return True
-        except Exception as e:
-            self.logger.error(f"Failed to send abort request to {self.server_url}: {e}")
+        except Exception:
             return False
-
-    async def _wait_abort_request(self) -> None:
-        while not self.receive_abort_request.is_set():
-            await asyncio.sleep(1)
 
     def continue_generation(self):
         """Resume the worker's generation process."""
@@ -726,6 +712,10 @@ class RolloutWorker(SingleAcceleratorWorker):
             if http_result.response:
                 # Case 1.1: Valid rollout response
                 rollout_state = await self._safe_handle_response(rollout_state, http_result.response)
+                if self.receive_abort_request.is_set():
+                    rollout_state.finish_reason = "abort"
+                    rollout_state.status = Status.ABORTED
+                    return rollout_state
                 if rollout_state.status in [Status.COMPLETED, Status.ABORTED]:
                     return rollout_state
 
@@ -901,12 +891,8 @@ class RolloutWorker(SingleAcceleratorWorker):
             raise TimeoutError("Server failed to start within the timeout period.")
 
     async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
-        send_task = None
-        abort_task = None
-
         try:
             if self.receive_abort_request.is_set():
-                self.logger.debug(f"Request to {url} was cancelled before sending due to an abort signal.")
                 return HttpRequestResult(error_type=HttpRequestErrorType.REQUEST_ABORTED, url=url, payload=payload)
             req = self.client.build_request(
                 "POST",
@@ -914,44 +900,17 @@ class RolloutWorker(SingleAcceleratorWorker):
                 headers=headers,
                 json=payload,
             )
-            send_task = asyncio.create_task(self.client.send(req))
-            abort_task = asyncio.create_task(self._wait_abort_request())
-            done, _ = await asyncio.wait(
-                {send_task, abort_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if send_task in done:
-                r = await send_task
-            else:
-                try:
-                    r = await asyncio.wait_for(asyncio.shield(send_task), timeout=self.abort_timeout)
-                except asyncio.TimeoutError:
-                    self.logger.debug(
-                        f"Request to {url} did not return within {self.abort_timeout:.2f}s after abort signal."
-                    )
-                    await cancel_and_drain([send_task])
-                    return HttpRequestResult(
-                        error_type=HttpRequestErrorType.REQUEST_ABORTED,
-                        url=url,
-                        payload=payload,
-                    )
+            r = await self.client.send(req)
             r.raise_for_status()
             return HttpRequestResult(response=r)
-
-        except asyncio.CancelledError:
-            self.logger.debug(f"Request to {url} was cancelled while waiting for the response.")
-            await cancel_and_drain([send_task, abort_task])
-            self.receive_abort_request.set()
-            return HttpRequestResult(error_type=HttpRequestErrorType.REQUEST_ABORTED, url=url, payload=payload)
         except Exception as e:
             error_type = HttpRequestErrorType.from_exception(e)
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
             return result
-        finally:
-            await cancel_and_drain([abort_task])
 
     async def _safe_handle_response(self, rollout_state: RolloutState, http_response: httpx.Response) -> RolloutState:
         uid = rollout_state.message_uid
+
         sample_params = rollout_state.sample_params
         is_token_out = sample_params.return_token_ids
         response = http_response.json()
@@ -961,6 +920,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             logprobs: list[float] = []
             routed_experts = None
             returned_response = ""
+            should_return_routed_experts = self.enable_return_routed_experts and sample_params.return_routed_experts
             try:
                 meta_info = response.get("meta_info") or {}
                 finish_reason_info = meta_info.get("finish_reason") or {}
@@ -991,9 +951,8 @@ class RolloutWorker(SingleAcceleratorWorker):
                 else:
                     num_return_tokens = response["meta_info"].get("completion_tokens", 0)
                     response_ids = response["output_ids"][-num_return_tokens:] if num_return_tokens > 0 else []
-
                 # 获取 routed_experts
-                if self.enable_return_routed_experts:
+                if should_return_routed_experts:
                     assert "routed_experts" in response["meta_info"], (
                         "enable_return_routed_experts is True, but routed_experts is not in meta_info"
                     )
@@ -1019,7 +978,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     if sample_params.return_logprob and not logprobs:
                         validation_errors.append("missing logprobs")
 
-                    if self.enable_return_routed_experts and routed_experts is None:
+                    if should_return_routed_experts and routed_experts is None:
                         validation_errors.append("missing routed_experts")
 
                     if validation_errors:

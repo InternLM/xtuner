@@ -54,7 +54,11 @@ class SGLangWorker(RolloutWorker):
         sglang_extra_params = self._transform_extra_params(sample_params.model_dump())
         payload.update(sglang_extra_params)
 
-        if self.enable_return_routed_experts and not rollout_state.extra_fields.get("disable_routed_experts", False):
+        if (
+            self.enable_return_routed_experts
+            and sample_params.return_routed_experts
+            and not rollout_state.extra_fields.get("disable_routed_experts", False)
+        ):
             payload["return_routed_experts"] = True
 
         if sample_params.return_token_ids:
@@ -100,7 +104,11 @@ class SGLangWorker(RolloutWorker):
         payload = {"model": self.model_name}
         sglang_sample_params = self._transform_sample_params(sample_params)
         sglang_extra_params = self._transform_extra_params(extra_params)
-        if self.enable_return_routed_experts and not extra_params.get("disable_routed_experts", False):
+        if (
+            self.enable_return_routed_experts
+            and sample_params.get("return_routed_experts", False)
+            and not extra_params.get("disable_routed_experts", False)
+        ):
             sglang_extra_params["return_routed_experts"] = True
 
         payload.update(sglang_extra_params)

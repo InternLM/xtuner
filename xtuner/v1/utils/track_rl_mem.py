@@ -24,12 +24,104 @@ def _get_current_node_id() -> str:
     return str(node_id)
 
 
+def _get_current_node_ray_gpu_resources(current_node_id: str) -> float | None:
+    for node in ray.nodes():
+        node_id = _get_actor_value(node, "NodeID", "node_id", "NodeId")
+        if str(node_id) != current_node_id:
+            continue
+        resources = node.get("Resources") or node.get("resources") or {}
+        return float(resources.get("GPU", 0))
+    return None
+
+
 def _get_actor_value(actor_info, *keys):
     for key in keys:
         value = actor_info.get(key)
         if value is not None:
             return value
     return None
+
+
+def _format_actor_distribution_name(actor_info) -> str:
+    actor_name = _get_actor_value(actor_info, "name", "Name")
+    class_name = _get_actor_value(actor_info, "class_name", "ActorClassName") or "Unnamed"
+    if actor_name:
+        return f"{actor_name}({class_name})"
+    return str(class_name)
+
+
+def _format_actor_distribution_names(actor_counts: dict[str, int]) -> list[str]:
+    return [
+        actor_name if count == 1 else f"{actor_name} x{count}" for actor_name, count in sorted(actor_counts.items())
+    ]
+
+
+def _build_actor_distribution_records(
+    actors,
+    *,
+    current_time: str,
+    step: int,
+    stable_actor_count_rounds: int,
+) -> list[dict]:
+    node_to_actor_counts: dict[str, dict[str, int]] = {}
+    node_metadata: dict[str, dict[str, str | None]] = {}
+
+    for node in ray.nodes():
+        if _get_actor_value(node, "Alive", "alive") is False:
+            continue
+        node_id = _get_actor_value(node, "NodeID", "node_id", "NodeId")
+        if node_id is None:
+            continue
+
+        node_key = str(node_id)
+        node_host = _get_actor_value(node, "NodeManagerHostname", "node_manager_hostname", "Hostname", "host")
+        node_ip = _get_actor_value(node, "NodeManagerAddress", "node_manager_address", "node_ip", "IP")
+        node_metadata[node_key] = {
+            "node_id": node_key,
+            "host": str(node_host) if node_host is not None else None,
+            "ip": str(node_ip) if node_ip is not None else None,
+        }
+        node_to_actor_counts.setdefault(node_key, {})
+
+    for actor_info in actors:
+        actor_node_id = _get_actor_value(actor_info, "node_id", "NodeID", "NodeId")
+        node_key = str(actor_node_id) if actor_node_id is not None else "UNKNOWN_NODE"
+        actor_counts = node_to_actor_counts.setdefault(node_key, {})
+        actor_name = _format_actor_distribution_name(actor_info)
+        actor_counts[actor_name] = actor_counts.get(actor_name, 0) + 1
+        node_metadata.setdefault(
+            node_key,
+            {
+                "node_id": node_key,
+                "host": None,
+                "ip": None,
+            },
+        )
+
+    total_actor_count = sum(sum(actor_counts.values()) for actor_counts in node_to_actor_counts.values())
+    records = []
+    for node_id, actor_counts in sorted(
+        node_to_actor_counts.items(),
+        key=lambda item: (
+            node_metadata.get(item[0], {}).get("host") or "",
+            node_metadata.get(item[0], {}).get("ip") or "",
+            item[0],
+        ),
+    ):
+        actor_count = sum(actor_counts.values())
+        records.append(
+            {
+                "time": current_time,
+                "step": step,
+                "total_alive_actors": total_actor_count,
+                "total_alive_nodes": len(node_to_actor_counts),
+                "stable_actor_count_rounds": stable_actor_count_rounds,
+                **node_metadata[node_id],
+                "actor_count": actor_count,
+                "actor_names": _format_actor_distribution_names(actor_counts),
+            }
+        )
+    return records
 
 
 def _get_nvml_process_getter(api_candidates):
@@ -156,9 +248,18 @@ def _round_gb(value: float) -> float:
     return round(value, 1)
 
 
-def monitor_actor_memory(work_dir: str, interval: int = 60):
+def monitor_actor_memory(
+    work_dir: str,
+    interval: int = 60,
+    actor_distribution_stable_rounds: int = 5,
+    actor_distribution_interval_multiplier: int = 5,
+):
     if pynvml is None:
         raise ImportError("pynvml 未安装，无法监控 GPU 内存")
+    if actor_distribution_stable_rounds < 1:
+        raise ValueError("actor_distribution_stable_rounds must be >= 1")
+    if actor_distribution_interval_multiplier < 1:
+        raise ValueError("actor_distribution_interval_multiplier must be >= 1")
 
     current_node_id = _get_current_node_id()
     print(f"开始监控当前节点 Actor 内存使用情况，间隔 {interval} 秒...")
@@ -167,6 +268,7 @@ def monitor_actor_memory(work_dir: str, interval: int = 60):
     print("=" * 80)
     os.makedirs(f"{work_dir}/tb", exist_ok=True)
     f = open(f"{work_dir}/actor_memory.json", "w")
+    actor_distribution_f = open(f"{work_dir}/ray_actor_distribution.jsonl", "w")
 
     pynvml.nvmlInit()
     try:
@@ -174,10 +276,18 @@ def monitor_actor_memory(work_dir: str, interval: int = 60):
     finally:
         pynvml.nvmlShutdown()
 
-    print(f"当前节点 GPU 数量: {local_gpus}")
+    local_ray_gpus = _get_current_node_ray_gpu_resources(current_node_id)
+    print(f"当前节点物理 GPU 数量(NVML): {local_gpus}")
+    if local_ray_gpus is not None:
+        print(f"当前节点 Ray 配置 GPU resource 数量: {local_ray_gpus:g}")
     tb_writer_list = [TensorboardWriter(log_dir=f"{work_dir}/tb/{rank}") for rank in range(max(local_gpus, 1))]
 
     count = 0
+    last_actor_count: int | None = None
+    stable_actor_count_rounds = 0
+    collect_actor_distribution = True
+    actor_distribution_interval = interval * actor_distribution_interval_multiplier
+    next_actor_distribution_time = 0.0
     try:
         while True:
             count += 1
@@ -192,6 +302,32 @@ def monitor_actor_memory(work_dir: str, interval: int = 60):
             current_time = time.strftime("%Y-%m-%d %H:%M:%S")
             memory_info["time"] = current_time
             memory_info["node_id"] = current_node_id
+
+            now = time.monotonic()
+            if collect_actor_distribution and now >= next_actor_distribution_time:
+                next_actor_distribution_time = now + actor_distribution_interval
+                actor_count = len(actors)
+                if actor_count == last_actor_count:
+                    stable_actor_count_rounds += 1
+                else:
+                    last_actor_count = actor_count
+                    stable_actor_count_rounds = 1
+
+                actor_distribution_records = _build_actor_distribution_records(
+                    actors,
+                    current_time=current_time,
+                    step=count,
+                    stable_actor_count_rounds=stable_actor_count_rounds,
+                )
+                for actor_distribution_record in actor_distribution_records:
+                    actor_distribution_record["sample_interval_seconds"] = actor_distribution_interval
+                    json.dump(actor_distribution_record, actor_distribution_f, ensure_ascii=False)
+                    actor_distribution_f.write("\n")
+                actor_distribution_f.flush()
+
+                if stable_actor_count_rounds >= actor_distribution_stable_rounds:
+                    collect_actor_distribution = False
+                    actor_distribution_f.close()
 
             for actor_info in actors:
                 actor_node_id = _get_actor_value(actor_info, "node_id", "NodeID", "NodeId")
@@ -304,6 +440,8 @@ def monitor_actor_memory(work_dir: str, interval: int = 60):
         print("\n监控已停止")
     finally:
         f.close()
+        if not actor_distribution_f.closed:
+            actor_distribution_f.close()
         for tb_writer in tb_writer_list:
             tb_writer.close()
 
@@ -312,9 +450,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="RL MEMORY MONITOR")
     parser.add_argument("--work_dir", type=str, default="dense_8b")
     parser.add_argument("--interval", type=int, default=60)
+    parser.add_argument("--actor_distribution_stable_rounds", type=int, default=5)
+    parser.add_argument("--actor_distribution_interval_multiplier", type=int, default=5)
     args = parser.parse_args()
     work_dir = args.work_dir
     interval = args.interval
+    actor_distribution_stable_rounds = args.actor_distribution_stable_rounds
+    actor_distribution_interval_multiplier = args.actor_distribution_interval_multiplier
 
     while True:
         try:
@@ -327,4 +469,9 @@ if __name__ == "__main__":
         except Exception:
             print("连接 Ray 集群失败, 等等")
 
-    monitor_actor_memory(work_dir=work_dir, interval=interval)
+    monitor_actor_memory(
+        work_dir=work_dir,
+        interval=interval,
+        actor_distribution_stable_rounds=actor_distribution_stable_rounds,
+        actor_distribution_interval_multiplier=actor_distribution_interval_multiplier,
+    )

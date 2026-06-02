@@ -2,12 +2,12 @@ from .compile import maybe_compile
 from .config import Config
 from .device import get_device, get_torch_device_module
 from .dist_utils import is_local_rank0
-from .dtensor import is_evenly_distributed
+from .dtensor import cal_total_norm, group_tensors_by_device_mesh_and_placements, is_evenly_distributed
 from .enum_helper import StrEnum
 from .exception_helper import ParallelConfigException
 from .init_weight import default_init_weights, init_params
 from .loader import HFCheckpointLoader
-from .logger import get_logger, log_format
+from .logger import get_logger, log_format, log_rank0
 from .misc import (
     XTUNER_DETERMINISTIC,
     FunctionEnum,
@@ -31,6 +31,7 @@ IGNORE_INDEX = -100
 
 __all__ = [
     "get_logger",
+    "log_rank0",
     "SharedMemory",
     "StrEnum",
     "ForwardState",
@@ -65,4 +66,6 @@ __all__ = [
     "clean_param_name",
     "set_deterministic",
     "trim_memory",
+    "group_tensors_by_device_mesh_and_placements",
+    "cal_total_norm",
 ]

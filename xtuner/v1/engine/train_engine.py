@@ -45,6 +45,7 @@ from xtuner.v1.utils import (
     get_device,
     get_logger,
     get_torch_device_module,
+    log_rank0,
     profile_time_and_memory,
 )
 from xtuner.v1.utils.grad_norm import cal_grad_norm
@@ -108,7 +109,7 @@ class HFCheckpointLoader:
 
     def load(self, key):
         if key not in self.weight_map:
-            logger.warning(f"{key} not in checkpoint.")
+            log_rank0.warning(f"{key} not in checkpoint.")
             return
 
         _file = self.weight_map[key]
@@ -176,7 +177,7 @@ class TrainEngine:
         model = model.fully_shard(self.fsdp_cfg)
 
         if dist.get_rank() == 0:
-            logger.info(model)
+            log_rank0.info(model)
         return model
 
     def build_optimizer(self, optim_cfg: OptimConfig) -> torch.optim.Optimizer:
@@ -211,7 +212,7 @@ class TrainEngine:
         iters_per_step = self.grad_accumulation_steps(len(data_batches))
 
         if self._count == 0:
-            logger.info(f"grad_accumulation_steps: {iters_per_step}")
+            log_rank0.info(f"grad_accumulation_steps: {iters_per_step}")
             self._count += 1
 
         micro_batch_iter = 0
@@ -279,12 +280,12 @@ class TrainEngine:
     def step_optimizer(self, grad_norm):
         """Step the optimizer to update the model parameters."""
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-            logger.warning(f"Gradient norm {grad_norm} is invalid, skipping optimizer step.")
+            log_rank0.warning(f"Gradient norm {grad_norm} is invalid, skipping optimizer step.")
             self.optimizer.zero_grad()
         elif (
             self.optim_cfg.skip_grad_norm_threshold is not None and grad_norm > self.optim_cfg.skip_grad_norm_threshold
         ):
-            logger.warning(
+            log_rank0.warning(
                 f"Gradient norm {grad_norm} exceeds the threshold {self.optim_cfg.skip_grad_norm_threshold}, skipping optimizer step."
             )
             self.optimizer.zero_grad()
@@ -317,11 +318,12 @@ class TrainEngine:
         save_dtype: torch.dtype = torch.bfloat16,
         cleanup_hf_dirs: Sequence[str | Path] = (),
     ) -> AsyncHFSaveHandle:
-        return self.model.async_save_hf(
-            hf_dir=hf_dir,
-            save_dtype=save_dtype,
-            cleanup_hf_dirs=cleanup_hf_dirs,
-        )
+        with profile_time_and_memory(f"[Async saving HF to {hf_dir} launch cost]"):
+            return self.model.async_save_hf(
+                hf_dir=hf_dir,
+                save_dtype=save_dtype,
+                cleanup_hf_dirs=cleanup_hf_dirs,
+            )
 
     def wait_async_hf(self, handle: AsyncHFSaveHandle | None = None) -> Path | None:
         return self.model.wait_async_hf(handle)
@@ -517,6 +519,14 @@ class TrainEngine:
         If the checkpoint does not contain optimizer states, only model weights will be loaded regardless of
         load_states/load_args settings.
         """
+        # Float8Handler.__init__ calls torch.serialization.add_safe_globals for
+        # WeightWithDynamic*Float8CastTensor, but the handler is lazily initialized
+        # on the first training step. We must register the safe globals before
+        # dcp.load attempts to unpickle those custom tensor types.
+        for mod in self.model.modules():
+            if isinstance(mod, BaseModel):
+                _ = mod.float8_handler
+
         load_optimizer = load_states or load_args
         state_dict = self._get_dcp_state_dict(cpu_offload=True, save_optimizer=load_optimizer)
 

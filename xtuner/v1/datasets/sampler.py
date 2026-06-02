@@ -10,7 +10,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.data import ConcatDataset as TorchConcatDataset
 from torch.utils.data import Sampler
 
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, log_rank0
 
 from .jsonl import JsonlDataset
 from .packing import MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
@@ -285,13 +285,13 @@ class LengthGroupedSampler(Sampler):
         self.step = state_dict["step"]
 
         if self.group_batch_size != (origin_group_batch_size := state_dict["group_batch_size"]):
-            logger.warning(
+            log_rank0.warning(
                 f"The group_batch_size in the state_dict ({origin_group_batch_size}) "
                 f"is different from the current group_batch_size ({self.group_batch_size})."
             )
 
         if self.group_size != (origin_group_size := state_dict["group_size"]):
-            logger.warning(
+            log_rank0.warning(
                 f"The group_size in the state_dict ({state_dict.get('group_size')}) "
                 f"is different from the current group_size ({self.group_size}). "
                 "The balance of grouped sampling may be affected, which will slow down training."

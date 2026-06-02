@@ -18,9 +18,19 @@ if [ $ACCELERATOR != "GPU" ] && [ $ACCELERATOR != "NPU" ]; then
   exit 1
 fi
 if [ "$ACCELERATOR" = "NPU" ]; then
-  ACCELERATOR_PER_NODE=${7:-16}
+  accelerator_per_node=${7:-16}
 else
-  ACCELERATOR_PER_NODE=${7:-8}
+  if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    IFS=',' read -ra visible_devices <<< "${CUDA_VISIBLE_DEVICES}"
+    accelerator_per_node=${#visible_devices[@]}
+  else
+    accelerator_per_node=${7:-8}
+  fi
+fi
+export ACCELERATOR
+RAY_ACCELERATOR_ARGS=()
+if [ "$ACCELERATOR" = "GPU" ]; then
+  RAY_ACCELERATOR_ARGS=(--num-gpus="$accelerator_per_node")
 fi
 
 ulimit -n 65536  # OSError: [Errno 24] Too many open files
@@ -87,6 +97,8 @@ fi
 # 2. Launch Ray cluster
 # 根据 NODE_COUNT 分配 num_cpus, 防止内存OOM
 node_count=${NODE_COUNT:-1}
+expected_accelerator_count=$((node_count * accelerator_per_node))
+export XTUNER_RL_NUM_WORKERS=${XTUNER_RL_NUM_WORKERS:-$expected_accelerator_count}
 
 WORK_DIR=$(realpath "$WORK_DIR")
 if [ "$RAY_RANK" -eq 0 ]; then
@@ -101,6 +113,7 @@ if [ "$RAY_RANK" -eq 0 ]; then
     --dashboard-port=$RAY_DASHBOARD_PORT \
     --include-dashboard=true \
     --disable-usage-stats \
+    "${RAY_ACCELERATOR_ARGS[@]}" \
     --temp-dir="/tmp/ray_log/"
 else
   while true; do
@@ -112,12 +125,11 @@ else
       sleep 2
     fi
   done
-  ray start --address="$RAY_MASTER_ADDR:$RAY_HEAD_PORT" --block --disable-usage-stats
+  ray start --address="$RAY_MASTER_ADDR:$RAY_HEAD_PORT" --block --disable-usage-stats "${RAY_ACCELERATOR_ARGS[@]}"
 fi
 
 while true; do
   result=$(ray status | grep ${ACCELERATOR} | cut -d ' ' -f2 | cut -d '/' -f2)
-  expected_accelerator_count=$((node_count * ${ACCELERATOR_PER_NODE}))
   if [ "$result" = "$expected_accelerator_count.0" ]; then
     break
   else
@@ -133,4 +145,5 @@ LOG_FILE="${WORK_DIR}/training_log_${current_time}.txt"
 
 python xtuner/v1/train/cli/rl.py \
     --config $CONFIG_PATH \
+    --num-workers $XTUNER_RL_NUM_WORKERS \
     2>&1 | tee -a "${WORK_DIR}/training_log_${current_time}.txt"

@@ -10,7 +10,7 @@ from xtuner.v1.model.dense.qwen3vl_text import Qwen3VLTextDense4BConfig, Qwen3VL
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
 from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config, Qwen3VLTextMoE235BA22Config
 from xtuner.v1.module.rope import RopeParametersConfig
-from xtuner.v1.utils import get_device, get_logger
+from xtuner.v1.utils import get_device, get_logger, log_rank0
 
 from ..base import BaseComposeConfig
 
@@ -36,11 +36,14 @@ class Qwen3VLVisionConfig(XTunerBaseModelConfig):
     deepstack_visual_indexes: list[int] = [8, 16, 24]
     initializer_range: float = 0.02
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
+    # TODO: `FSDPConfig` should be model-specific; temporarily keep
+    # `fully_shard` here until per-submodule FSDP config is supported.
+    fully_shard: bool = True
 
     def model_post_init(self, _):
         if self.attn_impl == "flash_attention" and get_device() == "cuda":
             if not (is_installed("flash-attn") or is_installed("flash-attn-3")):
-                logger.warning("flash-attn is not installed, using `flex_attention` instead.")
+                log_rank0.warning("flash-attn is not installed, using `flex_attention` instead.")
                 self.attn_impl = "flex_attention"
         return self
 
@@ -60,6 +63,9 @@ class Qwen3VLProjectorConfig(XTunerBaseModelConfig):
     text_hidden_size: int = 2048
     spatial_merge_size: int = 2
     deepstack_visual_indexes: list[int] = [8, 16, 24]
+    # TODO: `FSDPConfig` should be model-specific; temporarily keep
+    # `fully_shard` here until per-submodule FSDP config is supported.
+    fully_shard: bool = True
 
     def build(self):
         from .modeling_projector import Qwen3VLProjector
@@ -102,7 +108,7 @@ class Qwen3VLBaseConfig(BaseComposeConfig):
     @property
     def hf_config(self):
         # TODO(pppppM) Support saving HuggingFace format config
-        logger.warning(
+        log_rank0.warning(
             f"{type(self)} does not support conversion to HuggingFace config format. "
             "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
             f"If you have changed the default values in {type(self)}, it may cause the config in the saved "

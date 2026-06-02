@@ -1,26 +1,31 @@
 import torch
-import types
+import copy
 from .qwen3_vl_config import Qwen3VLBaseConfig
 from xtuner.v1.loss import CELossContext
 import torch.distributed as dist
 import torch.distributed.nn.functional as distF
 from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, log_rank0
 from typing_extensions import override
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE
 from torch.distributed.device_mesh import DeviceMesh
 from xtuner.v1.data_proto.utils import split_for_sequence_parallel
 from xtuner.v1.model import TorchCompileOption, DEFAULT_FLOAT8_CFG
+import torch
+from packaging.version import Version
 from ..base import BaseComposeModel, to_hf_key_list_wrapper
 
 logger = get_logger()
 
-QWEN3VL_COMPILE_CFG: dict[str, TorchCompileOption] = {
-    # "xtuner.v1.model.compose.qwen3_vl.modeling_projector.Qwen3VLProjector.forward": TorchCompileOption(fullgraph=True),
-    "xtuner.v1.model.compose.qwen3_vl.modeling_vision.Qwen3VLVisionLayer.forward": TorchCompileOption(fullgraph=True),
-    **DEFAULT_FLOAT8_CFG,
-}
+if Version(torch.__version__) >= Version("2.9.1"):
+    QWEN3VL_COMPILE_CFG: dict[str, TorchCompileOption] = {
+        "xtuner.v1.model.compose.qwen3_vl.modeling_projector.Qwen3VLProjector.forward": TorchCompileOption(fullgraph=True),
+        "xtuner.v1.model.compose.qwen3_vl.modeling_vision.Qwen3VLVisionLayer.forward": TorchCompileOption(fullgraph=True),
+        **DEFAULT_FLOAT8_CFG,
+    }
+else:
+    QWEN3VL_COMPILE_CFG = copy.deepcopy(DEFAULT_FLOAT8_CFG)
 
 
 class Qwen3VLForConditionalGeneration(BaseComposeModel):
@@ -31,8 +36,8 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
         if self.only_llm_forward:
             config.freeze_vision = True
             config.freeze_projector = True
-            logger.warning("only_llm_forward is True, vision and projector will be frozen " \
-                            "regardless of their individual freeze settings.")
+            log_rank0.warning("only_llm_forward is True, vision and projector will be frozen " \
+                              "regardless of their individual freeze settings.")
         super().__init__(config)  # type: ignore[arg-type]
 
         # if type(self.language_model) is Qwen3MoE:

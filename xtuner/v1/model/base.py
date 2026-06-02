@@ -52,7 +52,7 @@ from xtuner.v1.loss import BaseLossConfig, BaseLossContext, CELossConfig
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeParametersConfig, RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
-from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
+from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, log_rank0, profile_time_and_memory
 from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_compile
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
@@ -705,14 +705,16 @@ class BaseModel(nn.Module):
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
         tmp_hf_dir = hf_dir.with_name(f"{hf_dir.name}.incomplete")
+        status_dir = tmp_hf_dir.parent / f".{tmp_hf_dir.name}.async-hf-writer-status"
         if rank == 0:
             if tmp_hf_dir.exists():
                 rmtree(tmp_hf_dir)
+            if status_dir.exists():
+                rmtree(status_dir)
             tmp_hf_dir.mkdir(parents=True, exist_ok=True)
+            status_dir.mkdir(parents=True, exist_ok=True)
 
-        status_path = (
-            tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{self._async_hf_writer_status_filename(rank, world_size)}"
-        )
+        status_path = status_dir / self._async_hf_writer_status_filename(rank, world_size)
         cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
         if rank == 0:
             cleanup_done_path.unlink(missing_ok=True)
@@ -762,6 +764,7 @@ class BaseModel(nn.Module):
         cleanup_done_path: Path,
         rank: int,
     ) -> None:
+        log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] started")
         try:
             set_async_save_process_qos()
             self._cleanup_async_hf_dirs_before_write(
@@ -775,7 +778,9 @@ class BaseModel(nn.Module):
                 weight_map=weight_map,
                 status_path=status_path,
             )
+            log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] finished")
         except Exception as exc:
+            log_rank0.error(f"[Async saving HF to {tmp_hf_dir} writer] failed: {exc}")
             status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
             with status_path.open("w") as f:
                 f.write(json.dumps(status, indent=2))
@@ -874,11 +879,12 @@ class BaseModel(nn.Module):
 
         if rank == 0:
             self._write_hf_index_and_config(hf_dir=tmp_hf_dir, weight_map=merged_weight_map)
-        if dist.is_initialized():
-            dist.barrier()
         status_path.unlink(missing_ok=True)
         cleanup_done_path.unlink(missing_ok=True)
+        if dist.is_initialized():
+            dist.barrier()
         if rank == 0:
+            rmtree(status_path.parent, ignore_errors=True)
             if hf_dir.exists():
                 rmtree(hf_dir)
             tmp_hf_dir.rename(hf_dir)
@@ -1163,8 +1169,8 @@ class BaseModel(nn.Module):
             load_spec_mapping[name] = load_spec
 
         if hf_key_mapping_missing:
-            logger.info("These hf keys will not be influenced by `hf_key_mapping`:")
-            logger.info(json.dumps(list(hf_key_mapping_missing), indent=2))
+            log_rank0.info("These hf keys will not be influenced by `hf_key_mapping`:")
+            log_rank0.info(json.dumps(list(hf_key_mapping_missing), indent=2))
 
         self.load_spec_mapping = load_spec_mapping
 
@@ -1614,7 +1620,7 @@ class BaseModel(nn.Module):
                 and self.fsdp_config.fp32_lm_head
                 and load_spec.hf_keys[0] == "lm_head.weight"
             ):
-                logger.info(f"handling same hf param: {load_spec.hf_keys} separately")
+                log_rank0.info(f"handling same hf param: {load_spec.hf_keys} separately")
                 lm_head_tensor_list = self._fsdp_foreach_allgather([local_tensor], [load_spec])
                 lm_head_tensor_list = [
                     self.param_to_safetensor(safetensor, name)
@@ -2562,7 +2568,7 @@ class BaseModel(nn.Module):
                     setattr(cls, method_name, torch.compile(compiled_function, **compile_options))
 
         full_name = get_function_full_qualname(compiled_function)  # type: ignore[arg-type]
-        logger.info(f"Enabling torch.compile for function {full_name} with options: {compile_options}")
+        logger.debug(f"Enabling torch.compile for function {full_name} with options: {compile_options}")
 
     def _resolve_compile_cfg(
         self,
@@ -2579,7 +2585,7 @@ class BaseModel(nn.Module):
         # torch.compile is not supported on NPU
         if DEVICE == "npu":
             if custom_cfg is not False:
-                logger.warning("torch.compile is not supported on NPU, disabling torch.compile.")
+                log_rank0.warning("torch.compile is not supported on NPU, disabling torch.compile.")
             self._disable_compile_cfg(self.config)
             return {}
 

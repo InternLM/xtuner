@@ -1,4 +1,6 @@
+import asyncio
 import json
+import math
 import os
 import random
 import re
@@ -8,6 +10,7 @@ from pathlib import Path
 from shutil import rmtree
 from typing import Any, List, cast
 
+import numpy as np
 import ray
 import torch
 from mmengine.dist import get_rank
@@ -58,6 +61,13 @@ from xtuner.v1.utils.env_check import get_rollout_engine_version
 PG_READY_TIMEOUT = 30
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
+
+
+def _to_cpu_tensor(value: np.ndarray | None, *, dtype: torch.dtype | None = None) -> torch.Tensor | None:
+    if value is None:
+        return None
+    assert isinstance(value, np.ndarray), f"Expected np.ndarray, got {type(value)}"
+    return torch.as_tensor(value, dtype=dtype, device="cpu")
 
 
 def check_fa3():
@@ -148,11 +158,12 @@ class RLThroughputBenchmark:
 
 def get_train_seq_ctx(
     input_ids: torch.LongTensor,
-    position_ids: torch.Tensor | None = None,
+    position_ids: np.ndarray | None = None,
     multimodal_train_info: dict | None = None,
     len_response_ids: int = 0,
 ):
     seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
+    position_ids = _to_cpu_tensor(position_ids, dtype=torch.long)
     if position_ids is not None and len(position_ids.shape) == 3:
         # qwen3vl 需要特殊处理，其余的不需要额外处理
         max_value = position_ids.max(dim=-1).values  # (3,1)
@@ -165,7 +176,7 @@ def get_train_seq_ctx(
 
     if multimodal_train_info:
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
-        seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
+        seq_ctx.image_grid_thw = _to_cpu_tensor(multimodal_train_info.get("image_grid_thw"), dtype=torch.long)
     return seq_ctx
 
 
@@ -513,6 +524,7 @@ class BaseRLTrainer:
         self._init_train_state(cfg)
         self._init_train_worker_config(cfg, log_dir)
         self._init_rollout_config(cfg, log_dir)
+        self._ensure_rollout_http_concurrency(cfg)
         self._init_runtime_flags(cfg)
         self._advantage_estimator = cfg.advantage_estimator_config.build()
         self._cpu_resource_manager: CPUResourceManager | None = None
@@ -576,7 +588,8 @@ class BaseRLTrainer:
         self._seed = cfg.seed
         self.train_batch_size = cfg.train_batch_size
         self._sync_weights_interval = cfg.sync_weights_interval
-        set_deterministic()
+        if XTUNER_DETERMINISTIC:
+            set_deterministic()
         set_random_seed(cfg.seed)
 
     def _init_train_worker_config(self, cfg: BaseRLTrainerConfig, log_dir: Path) -> None:
@@ -595,6 +608,49 @@ class BaseRLTrainer:
                 f"Skip load rollout weights due to resume from checkpoint {self._load_checkpoint_cfg.checkpoint_path}"
             )
         self._rollout_config = cfg.rollout_config
+
+    def _ensure_rollout_http_concurrency(self, cfg: BaseRLTrainerConfig) -> None:
+        rollout_max_batch_size = cfg.rollout_config.rollout_max_batch_size_per_instance
+        if rollout_max_batch_size is None or rollout_max_batch_size <= 0:
+            return
+
+        if isinstance(cfg, RLDisaggregatedTrainerConfig):
+            rollout_worker_count = cfg.rollout_resources.num_workers
+        elif isinstance(cfg, RLColocateTrainerConfig):
+            rollout_worker_count = cfg.resources.num_workers
+        else:
+            rollout_worker_count = 1
+        active_rollout_worker_count, _ = cfg.rollout_config.get_active_servers_count(rollout_worker_count)
+        if active_rollout_worker_count <= 0:
+            return
+
+        tasks = cfg.agent_loop_manager_cfg.tasks
+        task_cfgs = tasks if isinstance(tasks, list) else [tasks]
+        total_weight = sum(task.weight for task in task_cfgs)
+        if total_weight <= 0:
+            return
+
+        scheduled_http_requests = 0.0
+        for task in task_cfgs:
+            task_batch_size = cfg.train_batch_size * task.weight / total_weight
+            over_sample_threshold = float(getattr(task.produce_strategy_config, "over_sample_threshold", 0.0))
+            scheduled_http_requests += (
+                task_batch_size * task.sampler_config.prompt_repeat_k * (1 + over_sample_threshold)
+            )
+
+        required_http_concurrency = math.ceil(scheduled_http_requests / active_rollout_worker_count)
+        current_http_concurrency = math.ceil(rollout_max_batch_size * cfg.rollout_config.allow_over_concurrency_ratio)
+        if current_http_concurrency >= required_http_concurrency:
+            return
+
+        new_ratio = required_http_concurrency / rollout_max_batch_size
+        cfg.rollout_config.allow_over_concurrency_ratio = new_ratio
+        self.logger.warning(
+            "Increasing rollout_config.allow_over_concurrency_ratio because httpx max_connections is smaller "
+            "than the expected per-worker rollout request concurrency: "
+            f"max_connections={current_http_concurrency}, "
+            f"required_connections={required_http_concurrency}"
+        )
 
     def _init_runtime_flags(self, cfg: BaseRLTrainerConfig) -> None:
         self._enable_evaluate = cfg.enable_evaluate
@@ -1582,7 +1638,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             "RLDisaggregatedTrainer expects get_batch() to return non-empty rollout_states "
                             "unless status is empty EXPIRED_BATCH."
                         )
-                        train_log_info = self._train_one_batch(
+                        # 非共卡训练要求后台 producer 在训练当前 batch 时继续推进；
+                        # 同步训练路径放到线程里执行，避免 ray.get / 文件写入阻塞事件循环。
+                        train_log_info = await asyncio.to_thread(
+                            self._train_one_batch,
                             train_batch,
                             train_step,
                             step_timer_dict,

@@ -57,10 +57,11 @@ class Train:
                 return command, config
             elif train_type == "rl":
                 infer_type = config.get("parameters", {}).get("infer_backend", "lmdeploy")
+                accelerator = config.get("parameters", {}).get("accelerator", "GPU")
                 command = (
                     f"cd {current_dir}; pwd; pip install -e .[all]; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + cudnn_patch
-                    + f"bash -x examples/v1/scripts/run_rl.sh {config_path} {infer_type} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
+                    + f"bash -x autotest/utils/ci_run_rl.sh {accelerator} {infer_type} {config_path} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
                 )
                 return command, config
         else:
@@ -77,7 +78,7 @@ class Train:
             check_metrics = config.get("assert_info", {}).get("check_metrics", {})
             return check_result(config["case_name"], base_path, cur_path, check_metrics)
         elif train_type == "rl":
-            cur_path = os.path.join(get_latest_subdir(work_dir), "exp_tracking/tracker.jsonl")
+            cur_path = os.path.join(get_latest_subdir(work_dir), "logs/exp_tracking/tracker.jsonl")
             check_metrics = config.get("assert_info", {})
             return check_rl_result(config["case_name"], base_path, cur_path, check_metrics)
         else:

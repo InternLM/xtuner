@@ -18,11 +18,13 @@ Bad Tests:
 - checkpoint 保存发生在 fit 完成的 model_step 上，且 manager.save 为 async 调用。
 - eval 在 producer 恢复前运行；update_weights 本身不直接 pause/continue rollout controller。
 - sync/checkpoint/eval interval 必须是 sync_weights_interval 的整数倍，资源布局必须 fail fast。
+- 前台训练 batch 阻塞时，后台 producer 仍能在事件循环中继续推进。
 """
 
 import asyncio
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -63,6 +65,22 @@ class _FakeManager:
         self.calls.append("shutdown")
         self._status = AgentLoopManagerStatus.FINISH
         self._finish_event.set()
+
+
+class _TickingManager(_FakeManager):
+    def __init__(self, get_batch_results, training_started: threading.Event, producer_ticked: threading.Event):
+        super().__init__(get_batch_results)
+        self._training_started = training_started
+        self._producer_ticked = producer_ticked
+
+    async def produce_loop(self, batch_size: int):
+        self.calls.append(("produce_loop_start", batch_size))
+        while not self._finish_event.is_set():
+            if self._training_started.is_set():
+                self.calls.append("produce_loop_tick_during_training")
+                self._producer_ticked.set()
+            await asyncio.sleep(0)
+        self.calls.append("produce_loop_exit")
 
 
 class TestRLDisaggregatedTrainer(unittest.TestCase):
@@ -217,6 +235,33 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
         trainer.train_controller.fit.assert_called_once()
         self.assertIn(("continue_produce", 1), manager.calls)
+        self.assertEqual(trainer._cur_step, 1)
+
+    def test_fit_keeps_background_producer_running_while_training_blocks(self):
+        # 验证非共卡训练阻塞在同步训练 batch 时，后台 producer 仍能继续调度。
+        train_sample = SimpleNamespace(message_uid=1, uid=1)
+        training_started = threading.Event()
+        producer_ticked = threading.Event()
+        manager = _TickingManager(
+            [ProduceBatchResult(rollout_states=[[train_sample]], status=ProduceBatchStatus.NORMAL)],
+            training_started,
+            producer_ticked,
+        )
+        trainer = self._make_trainer(manager)
+        trainer._sync_weights_and_save = AsyncMock()
+
+        def blocking_train_one_batch(*args, **kwargs):
+            training_started.set()
+            if not producer_ticked.wait(timeout=1.0):
+                raise AssertionError("background producer did not run while training was blocked")
+            return self._minimal_train_info(training_samples=1, training_tokens=4)
+
+        trainer._train_one_batch = MagicMock(side_effect=blocking_train_one_batch)
+
+        self._run_fit(trainer)
+
+        trainer._train_one_batch.assert_called_once()
+        self.assertIn("produce_loop_tick_during_training", manager.calls)
         self.assertEqual(trainer._cur_step, 1)
 
     def test_fit_runs_eval_before_reset_and_stops_producer(self):

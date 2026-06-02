@@ -39,8 +39,10 @@ def get_rms_norm_fn() -> RMSNormProtocol:
 
     device = get_device()
     if device in ["cpu", "cuda"]:
+        # XTUNER_HF_IMPL forces the native torch path so the result matches HF bitwise.
+        use_triton = os.getenv("XTUNER_USE_NATIVE_RMSNORM", "1") == "0" and os.getenv("XTUNER_HF_IMPL") != "true"
         # TODO: control triton rmsnorm by model config rather than env var
-        if os.getenv("XTUNER_USE_NATIVE_RMSNORM", "1") == "0" and device == "cuda":
+        if use_triton and device == "cuda":
             return _triton_rms_norm
         else:
             return native_rms_norm

@@ -1,9 +1,6 @@
-import asyncio
-
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
-from xtuner.v1.rl.utils import create_task
 
 from .agent_loop import AgentLoop, AgentLoopConfig
 
@@ -37,8 +34,6 @@ class SingleTurnAgentLoopConfig(AgentLoopConfig):
         )
     """
 
-    enable_batch_judge: bool = False
-
     def build_local(self, rollout_controller, judger: Judger | None = None, logger=None) -> "SingleTurnAgentLoop":
         return SingleTurnAgentLoop(
             rollout_ctl=rollout_controller,
@@ -60,8 +55,14 @@ class SingleTurnAgentLoop(AgentLoop):
         logger=None,
         enable_batch_judge: bool = False,
     ):
-        super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
-        self.enable_batch_judge = enable_batch_judge
+        super().__init__(
+            rollout_ctl=rollout_ctl,
+            sample_params=sample_params,
+            hf_checkpoint=hf_checkpoint,
+            judger=judger,
+            logger=logger,
+            enable_batch_judge=enable_batch_judge,
+        )
 
     async def generate_sample(
         self,
@@ -78,18 +79,5 @@ class SingleTurnAgentLoop(AgentLoop):
             return rollout_state
         if self.judger is not None and not self.enable_batch_judge:
             # 如果开启了批量打分，则在 generate_group 里统一打分，不在这里逐条打分
-            rollout_state = await self.judger.judge(rollout_state)
+            rollout_state = await self.run_judger(rollout_state)
         return rollout_state
-
-    async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
-        pending_tasks = []
-        for state in rollout_state:
-            state.sample_params = self.sample_params
-            task = create_task(self.generate_sample(state, **kwargs))
-            pending_tasks.append(task)
-        generated_samples = asyncio.gather(*pending_tasks)
-        group_samples = await generated_samples
-        if self.judger is not None and self.enable_batch_judge:
-            # 批量打分
-            group_samples = await self.judger.judge(group_samples)
-        return group_samples

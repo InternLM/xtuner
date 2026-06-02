@@ -18,7 +18,7 @@ import transformers
 from transformers import AutoConfig
 
 from .enum_helper import StrEnum
-from .logger import get_logger
+from .logger import get_logger, log_rank0
 
 
 HF_PATCH_MODULES_CACHE_PREFIX = "modules_cache"
@@ -28,9 +28,17 @@ XTUNER_DETERMINISTIC = os.getenv("XTUNER_DETERMINISTIC") == "true"
 
 
 def set_deterministic():
-    if XTUNER_DETERMINISTIC:
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-        torch.use_deterministic_algorithms(True, warn_only=True)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+    # Inductor 会在 torch.compile 前读取 dynamic_scale_rblock；确定性模式必须尽早关闭。
+    # torch.use_deterministic_algorithms(True) 只会让 reduction 的初始候选收敛成一个 config；
+    # dynamic rblock 仍可能在 precompile 后追加一个缩小 R*_BLOCK 的 launcher，并由 runtime
+    # benchmark 在多个 launcher 中选择。不同 rank/run 一旦选到不同 reduction 分块，浮点累加
+    # 顺序就会变化，最终可能得到 bitwise 不同的梯度。
+    os.environ["TORCHINDUCTOR_DYNAMIC_SCALE_RBLOCK"] = "0"
+    from torch._inductor import config as inductor_config
+
+    inductor_config.dynamic_scale_rblock = False
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
 
 # https://github.com/python/cpython/issues/82300#issuecomment-2169035092
@@ -231,7 +239,6 @@ def trim_memory() -> bool:
         return libc.malloc_trim(0)
     except Exception as e:
         if not _TRIM_MEMORY_WARNED:
-            _logger = get_logger()
-            _logger.warning(f" >>>>>>>>> [trim_memory] Failed to trim memory: {e} <<<<<<<<")
+            log_rank0.warning(f" >>>>>>>>> [trim_memory] Failed to trim memory: {e} <<<<<<<<")
             _TRIM_MEMORY_WARNED = True
         return False

@@ -25,7 +25,7 @@ from xtuner.v1.model.base import (
     ModelOutputs,
     XTunerBaseModelConfig,
 )
-from xtuner.v1.utils import get_device, get_logger
+from xtuner.v1.utils import get_device, get_logger, log_rank0
 from xtuner.v1.utils.process import set_async_save_process_qos
 
 from ..utils.misc import update_weight_map_from_safetensors_index
@@ -82,17 +82,17 @@ class BaseComposeModel(BaseModel):
         if freeze_vision:
             self.vision_tower.requires_grad_(False)
             self.vision_tower.eval()
-            logger.info("Freeze vision tower")
+            log_rank0.info("Freeze vision tower")
         freeze_projector = self.config.freeze_projector
         if freeze_projector:
             self.multi_modal_projector.requires_grad_(False)
             self.multi_modal_projector.eval()
-            logger.info("Freeze multi modal projector")
+            log_rank0.info("Freeze multi modal projector")
         freeze_language = self.config.freeze_language
         if freeze_language:
             self.language_model.requires_grad_(False)
             self.language_model.eval()
-            logger.info("Freeze language model")
+            log_rank0.info("Freeze language model")
 
     @override
     def init_weights(self) -> None:
@@ -131,7 +131,8 @@ class BaseComposeModel(BaseModel):
             self.vision_tower.blocks[-1].set_modules_to_forward_prefetch(  # type: ignore
                 [self.multi_modal_projector]
             )
-        self.multi_modal_projector.set_modules_to_forward_prefetch([self.language_model])  # type: ignore
+        if isinstance(self.multi_modal_projector, FSDPModule):
+            self.multi_modal_projector.set_modules_to_forward_prefetch([self.language_model])  # type: ignore
         self.language_model.set_modules_to_forward_prefetch([self.language_model.layers["0"]])  # type: ignore
 
         self._to_empty_meta()
@@ -191,14 +192,16 @@ class BaseComposeModel(BaseModel):
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
         tmp_hf_dir = hf_dir.with_name(f"{hf_dir.name}.incomplete")
+        status_dir = tmp_hf_dir.parent / f".{tmp_hf_dir.name}.async-hf-writer-status"
         if rank == 0:
             if tmp_hf_dir.exists():
                 rmtree(tmp_hf_dir)
+            if status_dir.exists():
+                rmtree(status_dir)
             tmp_hf_dir.mkdir(parents=True, exist_ok=True)
+            status_dir.mkdir(parents=True, exist_ok=True)
 
-        status_path = (
-            tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{self._async_hf_writer_status_filename(rank, world_size)}"
-        )
+        status_path = status_dir / self._async_hf_writer_status_filename(rank, world_size)
         cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
         if rank == 0:
             cleanup_done_path.unlink(missing_ok=True)
@@ -257,6 +260,7 @@ class BaseComposeModel(BaseModel):
         cleanup_done_path: Path,
         rank: int,
     ) -> None:
+        log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] started")
         try:
             set_async_save_process_qos()
             self._cleanup_async_hf_dirs_before_write(
@@ -269,7 +273,9 @@ class BaseComposeModel(BaseModel):
             status = {"rank": rank, "ok": True, "error": "", "weight_map": merged_weight_map}
             with status_path.open("w") as f:
                 f.write(json.dumps(status, indent=2))
+            log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] finished")
         except Exception as exc:
+            log_rank0.error(f"[Async saving HF to {tmp_hf_dir} writer] failed: {exc}")
             status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
             with status_path.open("w") as f:
                 f.write(json.dumps(status, indent=2))

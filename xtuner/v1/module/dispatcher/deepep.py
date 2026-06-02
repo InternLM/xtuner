@@ -370,11 +370,29 @@ class DeepEPDispatcher(
             num_out_tokens=num_out_tokens,
             num_negative_one_in_indices=num_neg_one_idx,
         )
+        # Per-call pinned allocation is cheap here: PyTorch's caching host
+        # allocator pools pinned blocks, so `cudaHostAlloc` only fires on cold
+        # start; steady-state cost is sub-microsecond.
+        #
+        # Do NOT "optimize" this by holding a single module-level pinned buffer
+        # and writing into it in place. Under multi-microbatch overlap the CPU
+        # thread runs well ahead of the GPU stream, and the next microbatch's
+        # host write would clobber the source before the previous microbatch's
+        # `non_blocking=True` H2D had actually executed. The fresh-tensor form
+        # is safe because the caching allocator refuses to recycle a pinned
+        # block until the CUDA events referencing it have completed — a
+        # guarantee a manually held buffer does not get.
         tokens_per_expert = torch.tensor(
             num_recv_tokens_per_expert_list,
             dtype=torch.long,
-            device=dispatched["topk_weights"].device,
+            pin_memory=True,
         )
+        # `non_blocking=True` is only safe because every downstream consumer of
+        # `tokens_per_expert` (group GEMM, FP8 quant kernels, prober) runs on
+        # the current CUDA stream, so stream ordering covers the H2D. If
+        # consumption moves to a different stream, the consumer must wait on an
+        # event recorded after this copy.
+        tokens_per_expert = tokens_per_expert.to(dispatched["topk_weights"].device, non_blocking=True)
 
         if decoding:
             raise NotImplementedError

@@ -16,6 +16,7 @@ from xtuner.v1.rl.utils import (
     AcceleratorResourcesConfig,
     AutoAcceleratorWorkers,
     CPUResourceManager,
+    PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S,
     clear_cpu_resource_manager,
     set_cpu_resource_manager,
 )
@@ -23,10 +24,6 @@ from xtuner.v1.rl.utils import (
 
 MODEL_PATH = os.environ.get("ROLLOUT_MODEL_PATH") or os.environ.get("MODEL_PATH", "")
 _RESOURCE_MAP = {"npu": "NPU", "cuda": "GPU"}
-
-
-def _env_int(name: str, default: int) -> int:
-    return int(os.environ.get(name, default))
 
 
 def _env_float(name: str, default: float) -> float:
@@ -116,23 +113,23 @@ class TestLMDeployAbortIntegration(unittest.IsolatedAsyncioTestCase):
     This intentionally starts a real LMDeploy server through XTuner's
     RolloutController, sends more requests than the LMDeploy max batch size, and
     asserts that /abort_request drains both API-side waiting requests and engine
-    requests within a short deadline.
+    requests within the configured pause cleanup deadline.
     """
 
     async def asyncSetUp(self):
         os.environ.setdefault("XTUNER_USE_FA3", "1")
         os.environ.setdefault("LMD_SKIP_WARMUP", "1")
 
-        self.num_workers = _env_int("XTUNER_LMDEPLOY_ABORT_TEST_NUM_WORKERS", 1)
-        self.tensor_parallel_size = _env_int("XTUNER_LMDEPLOY_ABORT_TEST_TP", self.num_workers)
-        self.max_batch_size = _env_int("XTUNER_LMDEPLOY_ABORT_TEST_MAX_BATCH", 8)
-        self.request_count = _env_int("XTUNER_LMDEPLOY_ABORT_TEST_REQUESTS", self.max_batch_size * 4)
-        self.max_tokens = _env_int("XTUNER_LMDEPLOY_ABORT_TEST_MAX_TOKENS", 1024)
-        self.min_tokens = _env_int("XTUNER_LMDEPLOY_ABORT_TEST_MIN_TOKENS", min(256, self.max_tokens))
-        self.abort_deadline_s = _env_float("XTUNER_LMDEPLOY_ABORT_TEST_ABORT_DEADLINE_S", 15.0)
+        self.num_workers = 1
+        self.tensor_parallel_size = self.num_workers
+        self.max_batch_size = 8
+        self.request_count = self.max_batch_size * 4
+        self.max_tokens = 1024
+        self.min_tokens = min(256, self.max_tokens)
+        self.abort_after_s = 5.0
         self.startup_activity_timeout_s = _env_float("XTUNER_LMDEPLOY_ABORT_TEST_ACTIVITY_TIMEOUT_S", 60.0)
 
-        ray.init(num_cpus=18, ignore_reinit_error=True)
+        ray.init(address="local", num_cpus=18, ignore_reinit_error=True)
         self.temp_dir = tempfile.TemporaryDirectory()
         self.pg = None
         self.rollout_ctl = None
@@ -236,12 +233,15 @@ class TestLMDeployAbortIntegration(unittest.IsolatedAsyncioTestCase):
 
         abort_start = time.perf_counter()
         await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
-        post_abort_metrics = await _wait_for_lmdeploy_idle(server_urls, timeout_s=self.abort_deadline_s)
+        post_abort_metrics = await _wait_for_lmdeploy_idle(
+            server_urls,
+            timeout_s=PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S,
+        )
         abort_elapsed = time.perf_counter() - abort_start
 
         results = await asyncio.wait_for(
             asyncio.gather(*refs, return_exceptions=True),
-            timeout=self.abort_deadline_s,
+            timeout=PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S,
         )
         exceptions = [result for result in results if isinstance(result, BaseException)]
         self.assertFalse(exceptions, msg=f"Rollout refs raised after abort: {exceptions[:3]}")
@@ -250,13 +250,59 @@ class TestLMDeployAbortIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn(Status.ABORTED, statuses, msg=f"Expected at least one aborted rollout, got statuses={statuses}")
         self.assertLess(
             abort_elapsed,
-            self.abort_deadline_s,
+            PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S,
             msg=f"LMDeploy abort exceeded deadline. elapsed={abort_elapsed:.2f}s metrics={post_abort_metrics}",
         )
         self.assertEqual(post_abort_metrics["api_routed"], 0, msg=f"metrics after abort: {post_abort_metrics}")
         self.assertEqual(post_abort_metrics["api_waiting"], 0, msg=f"metrics after abort: {post_abort_metrics}")
         self.assertEqual(post_abort_metrics["engine_running"], 0, msg=f"metrics after abort: {post_abort_metrics}")
         self.assertEqual(post_abort_metrics["engine_waiting"], 0, msg=f"metrics after abort: {post_abort_metrics}")
+
+    async def test_delayed_abort_returns_all_lmdeploy_requests_within_deadline(self):
+        rollout_ctl = self._build_rollout_controller()
+        refs = [rollout_ctl.generate.remote(self._make_state(i)) for i in range(self.request_count)]
+
+        await asyncio.sleep(self.abort_after_s)
+        abort_start = time.perf_counter()
+        await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
+        abort_elapsed = time.perf_counter() - abort_start
+        if abort_elapsed > PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S:
+            self.fail(
+                f"LMDeploy pause_generation exceeded {PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S:.2f}s "
+                f"after aborting {self.request_count} requests"
+            )
+        remaining_deadline_s = PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S - abort_elapsed
+
+        async def _await_ref(idx: int, ref):
+            result = await ref
+            return idx, result, time.perf_counter() - abort_start
+
+        try:
+            completed = await asyncio.wait_for(
+                asyncio.gather(*[_await_ref(i, ref) for i, ref in enumerate(refs)], return_exceptions=True),
+                timeout=remaining_deadline_s,
+            )
+        except asyncio.TimeoutError:
+            self.fail(
+                f"LMDeploy requests did not all return within {PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S:.2f}s "
+                f"after aborting {self.request_count} requests"
+            )
+
+        exceptions = [item for item in completed if isinstance(item, BaseException)]
+        self.assertFalse(exceptions, msg=f"Rollout refs raised after delayed abort: {exceptions[:3]}")
+
+        request_results = [(idx, result, elapsed) for idx, result, elapsed in completed]
+        slow_requests = [
+            (idx, elapsed)
+            for idx, _result, elapsed in request_results
+            if elapsed > PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S
+        ]
+        self.assertFalse(
+            slow_requests,
+            msg=f"Requests exceeded {PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S:.2f}s after abort: {slow_requests[:10]}",
+        )
+        statuses = [result.status for _idx, result, _elapsed in request_results]
+        self.assertIn(Status.ABORTED, statuses, msg=f"Expected at least one aborted rollout, got statuses={statuses}")
 
 
 if __name__ == "__main__":

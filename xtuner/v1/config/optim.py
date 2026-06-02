@@ -185,14 +185,9 @@ class MuonConfig(OptimConfig):
                     f"Muon params: {num_muon_regular / 1e6:.2f}M, AdamW params: {num_adamw / 1e6:.2f}M (counts by numel)"
                 )
             logger.info(f"Untrainable parameters names: {untrainable_names}")
-            logger.info(
-                f"using Muon optimizer distributed_mesh_size: {model.fsdp_mesh.size()}, "
-                f"distributed_mesh: {model.fsdp_mesh}"
-            )
 
         optimizer = Muon(
             param_groups,
-            distributed_mesh=model.language_model.fsdp_mesh,  # TODO: 暂不支持 EP>1; maybe rm device_mesh dependency?
             lr=self.lr,
             mu=self.momentum,
             betas=self.betas,

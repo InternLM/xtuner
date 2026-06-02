@@ -166,9 +166,33 @@ class GRPOLossContext(BaseRLLossContext):
         )
 
         assert old_logprobs is not None
-        ratio = (logprobs - old_logprobs.detach()).exp()
-        ratio = ratio * (shifted_labels != self.loss_cfg.ignore_idx).float()
-        extra_info = {"max_ratio": ratio.max()}
+        valid_mask = shifted_labels != self.loss_cfg.ignore_idx
+        valid_float = valid_mask.float()
+        cliprange_low = self.loss_cfg.policy_loss_cfg.get("cliprange_low")
+        cliprange_high = self.loss_cfg.policy_loss_cfg.get("cliprange_high")
+
+        log_ratio = logprobs.detach() - old_logprobs.detach()
+        log_ratio_safe = torch.clamp(log_ratio, min=-20.0, max=20.0)
+        ratio = torch.exp(log_ratio_safe)
+        kl1 = -log_ratio
+        kl3 = ratio - 1.0 - log_ratio_safe
+        ratio_abs_dev = (ratio - 1.0).abs()
+        ratio_max = ratio.masked_fill(~valid_mask, 0.0).max()
+        ratio_min = ratio.masked_fill(~valid_mask, float("inf")).min()
+        extra_info = {
+            "max_ratio": ratio_max,
+            "reduced_train_policy_ratio_abs_dev_sum": (ratio_abs_dev * valid_float).sum(),
+            "reduced_train_policy_kl1_sum": (kl1 * valid_float).sum(),
+            "reduced_train_policy_kl3_sum": (kl3 * valid_float).sum(),
+            "reduced_train_policy_valid_count": valid_float.sum(),
+            "reduced_train_policy_ratio_max": ratio_max,
+            "reduced_train_policy_ratio_min": ratio_min,
+        }
+        if cliprange_low is not None and cliprange_high is not None:
+            clip_low_mask = ratio < 1 - cliprange_low
+            clip_high_mask = ratio > 1 + cliprange_high
+            extra_info["reduced_train_policy_clip_low_count"] = (clip_low_mask & valid_mask).float().sum()
+            extra_info["reduced_train_policy_clip_high_count"] = (clip_high_mask & valid_mask).float().sum()
 
         if self.loss_cfg.use_kl_loss:
             ref_logprobs = loss_kwargs.ref_logprobs

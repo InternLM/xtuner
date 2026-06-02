@@ -81,46 +81,134 @@ class MTPLayer(nn.Module):
 
     def forward(
         self,
+        *hidden_states: torch.Tensor,
+        future_embeddings: torch.Tensor | list[torch.Tensor],
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
+        seq_ctx: SequenceContext | list[SequenceContext],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[torch.Tensor, ...]:
+        """Forward pass through the MTP layer.
+
+        Mirrors :meth:`MoEDecoderLayer.forward`: when a single ``hidden_states`` tensor is
+        provided, the layer runs the regular single-microbatch path and returns a 3-tuple
+        ``(hidden, router_logits, router_weights)``. When ``N`` hidden states are provided
+        (intra-layer micro-batching / domino EP), ``future_embeddings``, ``position_embeddings``
+        and ``seq_ctx`` must be lists of length ``N``; the per-microbatch preprocessing
+        (enorm/hnorm/eh_proj) is run independently and a single underlying decoder forward
+        is issued so the inner MoE EP communication can be overlapped across micro-batches.
+
+        Args:
+            hidden_states (torch.Tensor): One or more hidden state tensors. A single tensor
+                triggers the single-microbatch path; multiple tensors trigger the
+                multi-microbatch path.
+            future_embeddings (torch.Tensor | list[torch.Tensor]): Embeddings of the future
+                tokens, aligned per-microbatch with ``hidden_states``.
+            position_embeddings (tuple | list[tuple]): Rotary position embeddings (cos, sin),
+                aligned per-microbatch with ``hidden_states``.
+            seq_ctx (SequenceContext | list[SequenceContext]): Sequence context per micro-batch.
+
+        Returns:
+            tuple: For single-microbatch input, a 3-tuple
+                ``(hidden_states, router_logits, router_weights)``.
+                For ``N`` micro-batches, a flat tuple of length ``3 * N`` matching the
+                convention used by :meth:`MoEDecoderLayer._micro_batch_forward`:
+                ``(hidden_0, ..., hidden_{N-1}, router_logits_0, ..., router_weights_{N-1})``.
+        """
+        if len(hidden_states) == 1:
+            assert isinstance(future_embeddings, torch.Tensor), (
+                "future_embeddings should be a Tensor in single-microbatch mode"
+            )
+            assert isinstance(seq_ctx, SequenceContext), (
+                "seq_ctx should be a SequenceContext instance in single-microbatch mode"
+            )
+            assert isinstance(position_embeddings, tuple) and len(position_embeddings) == 2, (
+                "position_embeddings should be a (cos, sin) tuple in single-microbatch mode"
+            )
+            return self._forward(
+                hidden_states=hidden_states[0],
+                future_embeddings=future_embeddings,
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+            )
+
+        assert isinstance(future_embeddings, list), (
+            "future_embeddings should be a list aligned with hidden_states in multi-microbatch mode"
+        )
+        assert isinstance(seq_ctx, list), (
+            "seq_ctx should be a list aligned with hidden_states in multi-microbatch mode"
+        )
+        assert isinstance(position_embeddings, list), (
+            "position_embeddings should be a list aligned with hidden_states in multi-microbatch mode"
+        )
+        return self._micro_batch_forward(
+            hidden_states_list=list(hidden_states),
+            future_embeddings_list=future_embeddings,
+            position_embeddings_list=position_embeddings,
+            seq_ctx_list=seq_ctx,
+        )
+
+    def _forward(
+        self,
         hidden_states: torch.Tensor,
         future_embeddings: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Forward pass through the MTP layer.
+        projected = self._preprocess(hidden_states=hidden_states, future_embeddings=future_embeddings)
 
-        Args:
-            hidden_states (torch.Tensor): Hidden states from previous layer,
-                shape [batch, seq_len, hidden_size].
-            future_embeddings (torch.Tensor): Embeddings of future tokens,
-                shape [batch, seq_len, hidden_size].
-            position_embeddings (tuple[torch.Tensor, torch.Tensor]): Rotary position
-                embeddings (cos, sin).
-            seq_ctx (SequenceContext): Sequence context containing attention mask, etc.
-
-        Returns:
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A 3-tuple of
-                (hidden_states, router_weights, router_results) where each tensor
-                has shape [batch, seq_len, ...].
-        """
-        # Step 1: Normalize embeddings and hidden states separately
-        # This ensures both inputs are in the same numerical range
-        normalized_embedding = self.enorm(future_embeddings)
-        normalized_hidden = self.hnorm(hidden_states)
-
-        # Step 2: Concatenate and project to combine information
-        # [B, S, H] + [B, S, H] → [B, S, 2H] → [B, S, H]
-        combined = torch.cat([normalized_embedding, normalized_hidden], dim=-1)
-        projected = self.eh_proj(combined)
-
-        # Step 3: Pass through the standard decoder layer
-        # This includes attention, MLP, and their respective normalizations
-        # TODO: TMP hardcode here.
         hidden_states, router_results, router_weights = self.decoder_layer(
             projected,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
         )
 
-        # Step 4: Final normalization before output
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states, router_results, router_weights
+
+    def _micro_batch_forward(
+        self,
+        *,
+        hidden_states_list: list[torch.Tensor],
+        future_embeddings_list: list[torch.Tensor],
+        position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
+        seq_ctx_list: list[SequenceContext],
+    ) -> tuple[torch.Tensor, ...]:
+        n = len(hidden_states_list)
+        assert len(future_embeddings_list) == n and len(position_embeddings_list) == n and len(seq_ctx_list) == n, (
+            "All per-microbatch inputs must share the same length"
+        )
+
+        # Run MTP preprocessing eagerly across all micro-batches so the underlying decoder
+        # layer can overlap its EP communication in a single fused forward.
+        projected_list = [
+            self._preprocess(hidden_states=h, future_embeddings=e)
+            for h, e in zip(hidden_states_list, future_embeddings_list)
+        ]
+
+        layer_results = self.decoder_layer(
+            *projected_list,
+            position_embeddings=position_embeddings_list,
+            seq_ctx=seq_ctx_list,
+        )
+        assert isinstance(layer_results, tuple) and len(layer_results) == 3 * n, (
+            "Multi-microbatch MTP requires the wrapped decoder layer to return a flat "
+            f"(hidden..., router_logits..., router_weights...) tuple of length {3 * n}; "
+            f"got length {len(layer_results) if isinstance(layer_results, tuple) else type(layer_results)}"
+        )
+
+        hidden_out = [self.final_layernorm(h) for h in layer_results[:n]]
+        router_logits = list(layer_results[n : 2 * n])
+        router_weights = list(layer_results[2 * n :])
+        return tuple(hidden_out + router_logits + router_weights)
+
+    def _preprocess(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        future_embeddings: torch.Tensor,
+    ) -> torch.Tensor:
+        # Normalize embeddings and hidden states separately so both inputs share a numerical
+        # range, then concatenate along the last dim and project back to ``hidden_size``.
+        normalized_embedding = self.enorm(future_embeddings)
+        normalized_hidden = self.hnorm(hidden_states)
+        combined = torch.cat([normalized_embedding, normalized_hidden], dim=-1)
+        return self.eh_proj(combined)

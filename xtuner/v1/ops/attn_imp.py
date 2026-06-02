@@ -1,3 +1,4 @@
+import os
 import traceback
 from functools import lru_cache
 from typing import TypedDict
@@ -97,6 +98,14 @@ def _create_grouped_causal_mask(document_ids):
     return torch.where(final_mask, 0.0, float("-inf"))
 
 
+def _create_grouped_full_mask(document_ids):
+    # Non-causal block-diagonal mask: every position attends to all positions in the same
+    # document/image (no causal triangle). Used by bidirectional attention (e.g. vision towers).
+    doc_matrix = document_ids.unsqueeze(2) == document_ids.unsqueeze(1)
+
+    return torch.where(doc_matrix, 0.0, float("-inf"))
+
+
 def _create_windowed_grouped_causal_mask(document_ids, window_size):
     _, seq_len = document_ids.shape
 
@@ -133,7 +142,7 @@ def create_packing_block_causal_mask(seq_lens: torch.Tensor, window_size=(-1, -1
 
 
 def eager_attention(
-    q, k, v, cu_seqlens_q, softmax_scale, window_size=(-1, -1), dropout_p=0.0, s_aux=None, **kwargs
+    q, k, v, cu_seqlens_q, softmax_scale, window_size=(-1, -1), dropout_p=0.0, s_aux=None, causal=True, **kwargs
 ) -> AttnOpOutputs:
     # TODO(HHA): Currently, the mask is recalculated each time, which is quite time-consuming.
     # It should be refactored to be calculated only once.
@@ -148,11 +157,14 @@ def eager_attention(
     attn_weights = torch.matmul(q, k.transpose(2, 3)) * softmax_scale  # type: ignore
 
     batch_document_ids = _get_document_ids_from_seq_lens(cu_seqlens_q)
-    if window_size == (-1, -1):
-        # Generate casual mask, the lower left corner is 0, and the other positions are -inf
+    if window_size != (-1, -1):
+        attention_mask = _create_windowed_grouped_causal_mask(batch_document_ids, window_size[0])  # type: ignore
+    elif causal:
+        # Causal block-diagonal mask: attend within the document, lower triangle only.
         attention_mask = _create_grouped_causal_mask(batch_document_ids)
     else:
-        attention_mask = _create_windowed_grouped_causal_mask(batch_document_ids, window_size[0])  # type: ignore
+        # Non-causal block-diagonal mask (e.g. bidirectional vision attention).
+        attention_mask = _create_grouped_full_mask(batch_document_ids)
 
     attention_mask = attention_mask[None].to(attn_weights.dtype)  # 1,1,seq,seq
     causal_mask = attention_mask[:, :, :, : k.shape[-2]]
@@ -170,7 +182,9 @@ def eager_attention(
         scores = probs[..., :-1]  # we drop the sink here
         attn_logits = combined_logits.detach()
     else:
-        scores = torch.softmax(attn_weights, dim=-1, dtype=attn_weights.dtype)
+        # Upcast softmax to fp32 (matching HF's eager_attention_forward). Even when the forward
+        # values round identically in bf16, the fp32 softmax is what makes the *backward* bitwise.
+        scores = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(attn_weights.dtype)
         attn_logits = attn_weights.detach()
 
     attn_scores = nn.functional.dropout(scores, p=dropout_p, training=True)
@@ -258,3 +272,25 @@ attn_impl_mapping = {
     "flash_attention": flash_attention,
     "flex_attention": flex_attention,
 }
+
+
+def get_attn_impl_fn(attn_impl: str):
+    """Resolve the attention op implementation for a configured ``attn_impl``.
+
+    When ``XTUNER_HF_IMPL`` is set, the eager implementation is forced regardless
+    of the configured backend. XTuner's ``eager_attention`` matches HuggingFace's
+    ``eager_attention_forward`` bitwise (same fp32 softmax and dense causal mask),
+    which is what allows decoder layers to be aligned against transformers; the
+    fused flash/flex kernels are numerically close but not bitwise equal.
+
+    Args:
+        attn_impl (str): The configured backend key in ``attn_impl_mapping``.
+
+    Returns:
+        Callable[..., AttnOpOutputs]: The selected attention op.
+    """
+    # Read the env var live (rather than a cached constant) so tests can toggle the
+    # HF-parity path per model instance within a single process.
+    if os.getenv("XTUNER_HF_IMPL") == "true":
+        return eager_attention
+    return attn_impl_mapping[attn_impl]

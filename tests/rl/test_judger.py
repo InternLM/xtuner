@@ -13,10 +13,10 @@ from xtuner.v1.rl.utils import (
 )
 from xtuner.v1.data_proto.rl_data import RolloutState
 
-MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
-DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
-GEO_ROLLOUT_DATA_PATH = os.environ["GEO_ROLLOUT_DATA_PATH"]
-VERL_ROLLOUT_DATA_PATH = os.environ["VERL_ROLLOUT_DATA_PATH"]
+MODEL_PATH = os.environ.get("ROLLOUT_MODEL_PATH")
+DATA_PATH = os.environ.get("ROLLOUT_DATA_PATH")
+GEO_ROLLOUT_DATA_PATH = os.environ.get("GEO_ROLLOUT_DATA_PATH")
+VERL_ROLLOUT_DATA_PATH = os.environ.get("VERL_ROLLOUT_DATA_PATH")
 DAPO_DATA_PATH = os.environ.get("ROLLOUT_DAPO_DATA_PATH")
 FAKE_JUDGER_INPUT_ITEM = RolloutState(
     message=[{
@@ -31,7 +31,7 @@ def construct_gsm8k_judger_data(data_path) -> tuple[list[RolloutState], list[flo
     states = []
     history_reward = []
     if not data_path or not os.path.exists(data_path):
-        return states
+        return states, history_reward
     with open(data_path, 'r', encoding='utf-8') as f:
         for line in f:
             item = json.loads(line.strip())
@@ -52,12 +52,13 @@ def construct_geo3k_dapo_judger_data(data_path) -> tuple[list[RolloutState], lis
     states = []
     history_reward = []
     if not data_path or not os.path.exists(data_path):
-        return states
+        return states, history_reward
     with open(data_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
         for i in range(0, len(lines), 7):
             group = ''.join(lines[i:i + 7]).strip()
-            if not group: continue
+            if not group:
+                continue
             item = json.loads(group)
             states.append(
                 RolloutState(
@@ -67,7 +68,138 @@ def construct_geo3k_dapo_judger_data(data_path) -> tuple[list[RolloutState], lis
                 )
             )
             history_reward.append(item["reward"])
-    return states, history_reward   
+    return states, history_reward
+
+
+class TestComposedJudgerUnit(unittest.TestCase):
+
+    def _build_composed_judger_config(self, merge_fn=None):
+        from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig
+
+        def reward_a(response, label, extra_info):
+            return {"score": 1.0, "source": "a"}
+
+        def reward_b(response, label, extra_info):
+            return {"score": 0.25, "source": "b"}
+
+        return ComposedJudgerConfig(
+            branches={
+                "correctness": JudgerConfig(judger_name="correctness", reward_handler=reward_a),
+                "format": JudgerConfig(judger_name="format", reward_handler=reward_b),
+            },
+            merge_fn=merge_fn,
+        )
+
+    def _make_rollout_state(self, data_source):
+        rollout_state = FAKE_JUDGER_INPUT_ITEM.model_copy(deep=True)
+        rollout_state.data_source = data_source
+        return rollout_state
+
+    def test_composed_judger_single_branch_from_data_source(self):
+        judger = self._build_composed_judger_config().build()
+        rollout_state = asyncio.run(judger.judge(self._make_rollout_state("correctness")))
+
+        self.assertEqual(rollout_state.reward["score"], 1.0)
+        self.assertEqual(rollout_state.reward["source"], "a")
+
+    def test_composed_judger_batch_single_branch_from_data_source(self):
+        from xtuner.v1.rl.judger import ComposedJudger, Judger
+
+        class BatchJudger(Judger):
+            async def judge_payload(self, payload):
+                if isinstance(payload, list):
+                    return [{"score": 1.0, "source": "a"} for _ in payload]
+                return {"score": 1.0, "source": "a"}
+
+        judger = ComposedJudger(branches={"correctness": BatchJudger()})
+        rollout_states = [
+            self._make_rollout_state("correctness"),
+            self._make_rollout_state("correctness"),
+        ]
+
+        rollout_states = asyncio.run(judger.batch_judge(rollout_states))
+
+        self.assertEqual([state.reward["score"] for state in rollout_states], [1.0, 1.0])
+        self.assertEqual([state.reward["source"] for state in rollout_states], ["a", "a"])
+
+    def test_native_judger_batch_judge_not_supported(self):
+        from xtuner.v1.rl.judger import JudgerConfig
+
+        judger = JudgerConfig(judger_name="native", reward_handler=lambda **kwargs: {"score": 1.0}).build()
+
+        with self.assertRaisesRegex(NotImplementedError, "does not support batch_judge"):
+            asyncio.run(judger.batch_judge([self._make_rollout_state("correctness")]))
+
+    def test_remote_judger_uses_driver_side_preprocess_judger(self):
+        from xtuner.v1.rl.judger import Judger, RemoteJudger
+
+        class CustomPreprocessJudger(Judger):
+            def preprocess(self, rollout_state):
+                return {"custom_value": rollout_state.extra_fields["custom_value"]}
+
+        class RemoteMethod:
+            def __init__(self):
+                self.payload = None
+
+            async def remote(self, payload):
+                self.payload = payload
+                return {"score": payload["custom_value"]}
+
+        class FakeActor:
+            def __init__(self):
+                self.judge_payload = RemoteMethod()
+
+        actor = FakeActor()
+        judger = RemoteJudger(
+            actor=actor,
+            judger_name="remote_custom_preprocess",
+            preprocess_judger=CustomPreprocessJudger(),
+        )
+        rollout_state = self._make_rollout_state("correctness")
+        rollout_state.extra_fields["custom_value"] = 7
+
+        judged_state = asyncio.run(judger.judge(rollout_state))
+
+        self.assertEqual(actor.judge_payload.payload, {"custom_value": 7})
+        self.assertEqual(judged_state.reward, {"score": 7})
+
+    def test_composed_judger_config(self):
+        def merge_fn(original, judged):
+            original.reward = {
+                "correctness": judged["correctness"]["score"],
+                "format": judged["format"]["score"],
+            }
+            return original
+
+        judger = self._build_composed_judger_config(merge_fn=merge_fn).build()
+        rollout_state = self._make_rollout_state({"correctness": 1.0, "format": 1.0})
+        rollout_state = asyncio.run(judger.judge(rollout_state))
+
+        self.assertEqual(rollout_state.reward["correctness"], 1.0)
+        self.assertEqual(rollout_state.reward["format"], 0.25)
+
+    def test_composed_judger_requires_merge_fn_for_multiple_branches(self):
+        judger = self._build_composed_judger_config().build()
+        rollout_state = self._make_rollout_state({"correctness": 1.0, "format": 1.0})
+
+        with self.assertRaisesRegex(ValueError, "merge_fn is not provided"):
+            asyncio.run(judger.judge(rollout_state))
+
+    def test_composed_judger_data_source_validation(self):
+        judger = self._build_composed_judger_config().build()
+
+        with self.assertRaisesRegex(ValueError, "requires rollout_state.data_source"):
+            asyncio.run(judger.judge(self._make_rollout_state(None)))
+
+        with self.assertRaisesRegex(KeyError, "Unknown judger branch"):
+            asyncio.run(judger.judge(self._make_rollout_state("unknown")))
+
+        with self.assertRaisesRegex(ValueError, "must contain at least one judger branch"):
+            asyncio.run(judger.judge(self._make_rollout_state({})))
+
+        with self.assertRaisesRegex(KeyError, "Unknown judger branch"):
+            asyncio.run(judger.judge(self._make_rollout_state({"unknown": 1.0})))
+
 
 class TestJudgerController(unittest.TestCase):
 
@@ -85,6 +217,10 @@ class TestJudgerController(unittest.TestCase):
     async def _judger_batch(self, judger_router, states):
         return await asyncio.gather(*(judger_router.judge(s) for s in states))
     
+    @unittest.skipUnless(
+        VERL_ROLLOUT_DATA_PATH and os.path.exists(VERL_ROLLOUT_DATA_PATH),
+        "requires VERL_ROLLOUT_DATA_PATH",
+    )
     def test_gsm8k_judger(self):
         from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 
@@ -111,6 +247,10 @@ class TestJudgerController(unittest.TestCase):
         expected_avg_score = np.mean(history_reward)
         self.assertEqual(round(np.mean(rewards), 4), round(expected_avg_score, 4))
         
+    @unittest.skipUnless(
+        MODEL_PATH and DAPO_DATA_PATH and os.path.exists(DAPO_DATA_PATH),
+        "requires ROLLOUT_MODEL_PATH and ROLLOUT_DAPO_DATA_PATH",
+    )
     def test_dapo_batch_judge_score(self):
         # 测试 dapo judger + 1 个实例池 的评判分数是否正确
         from xtuner.v1.rl.judger.dapo_math import DapoMathJudgerConfig
@@ -138,6 +278,10 @@ class TestJudgerController(unittest.TestCase):
         expected_avg_score = np.mean(history_reward)
         self.assertEqual(round(np.mean(rewards), 4), round(expected_avg_score, 4))
 
+    @unittest.skipUnless(
+        GEO_ROLLOUT_DATA_PATH and os.path.exists(GEO_ROLLOUT_DATA_PATH),
+        "requires GEO_ROLLOUT_DATA_PATH",
+    )
     def test_geo_batch_judge_score(self):
         # 测试 geo judger + 4 个实例池的评判分数是否正确
         from xtuner.v1.rl.judger.geo3k import GEO3KJudgerConfig
@@ -154,6 +298,10 @@ class TestJudgerController(unittest.TestCase):
         # 验证Router中确实有4个Worker实例在运行
         self.assertEqual(len(router.get_worker_status()), 4)
 
+    @unittest.skipUnless(
+        VERL_ROLLOUT_DATA_PATH and os.path.exists(VERL_ROLLOUT_DATA_PATH),
+        "requires VERL_ROLLOUT_DATA_PATH",
+    )
     def test_multi_judger_router(self):
         import time
         from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
@@ -196,29 +344,6 @@ class TestJudgerController(unittest.TestCase):
             self.assertEqual(res.reward["score"], 1.0)
         finally:
             server.stop()
-
-    def test_composed_judger_config(self):
-        from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig
-
-        def reward_a(response, label, extra_info):
-            return {"score": 1.0, "source": "a"}
-
-        def reward_b(response, label, extra_info):
-            return {"score": 0.25, "source": "b"}
-
-        judger_config = ComposedJudgerConfig(
-            branches={
-                "correctness": JudgerConfig(judger_name="correctness", reward_handler=reward_a),
-                "format": JudgerConfig(judger_name="format", reward_handler=reward_b),
-            },
-            select_fn=lambda state, branches: ["correctness", "format"],
-        )
-
-        judger = judger_config.build()
-        rollout_state = asyncio.run(judger.judge(FAKE_JUDGER_INPUT_ITEM.model_copy(deep=True)))
-
-        self.assertEqual(rollout_state.reward["correctness"], 1.0)
-        self.assertEqual(rollout_state.reward["format"], 0.25)
 
 if __name__ == "__main__":
     unittest.main()

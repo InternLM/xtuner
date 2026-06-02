@@ -62,6 +62,7 @@ from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
 from xtuner.v1.utils import (
     get_device,
     get_logger,
+    log_rank0,
 )
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 from xtuner.v1.utils.router_offload import async_offload_to_cpu
@@ -154,6 +155,11 @@ class MoEConfig(TransformerConfig):
     freeze_routers: bool = False
     router_async_offload: bool = False
     aux_loss_cfg: AuxLossConfig = AuxLossConfig()
+    # TODO: `FSDPConfig` should be model-specific; temporarily keep
+    # `embed_reshard_after_forward` here until per-submodule FSDP config is supported.
+    # Compose models call `self.embed_tokens` multiple times per step, so default to
+    # keeping it unsharded after forward to avoid repeated all-gathers.
+    embed_reshard_after_forward: bool = True
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
@@ -383,11 +389,6 @@ class MoE(BaseModel):
             )
             if loss_ctx is None:
                 raise NotImplementedError("loss_ctx must be provided for intra-layer bsz > 1")
-            if self.mtp_block is not None:
-                raise NotImplementedError(
-                    "MTP is not supported in micro-batch forward mode (intra_layer_micro_batch > 1). "
-                    "Please set intra_layer_micro_batch=1 when using MTP."
-                )
 
             return self._micro_batch_forward(
                 seq_ctx_list=seq_ctx,
@@ -438,7 +439,10 @@ class MoE(BaseModel):
         else:
             cat_input_ids = torch.cat([ctx.input_ids for ctx in seq_ctx_list], dim=1)  # type: ignore
             cat_hidden_states = self.embed_tokens(cat_input_ids)
-        cat_position_ids = torch.cat([ctx.position_ids for ctx in seq_ctx_list], dim=1)  # type: ignore
+        # M-RoPE position_ids are 3D [axes, batch, seq] for VL while text-only ones are 2D
+        # [batch, seq]; -1 selects the seq dim in both cases. Hard-coded dim=1 was a text-only
+        # assumption and produced a wrong-length cos/sin for VL under intra_layer_micro_batch.
+        cat_position_ids = torch.cat([ctx.position_ids for ctx in seq_ctx_list], dim=-1)  # type: ignore
         cat_position_embeddings = self.rotary_emb(cat_hidden_states, cat_position_ids)  # type: ignore
         position_embeddings_list = list(
             zip(
@@ -467,6 +471,7 @@ class MoE(BaseModel):
         # Process through layers
         cat_seq_ctx: SequenceContext | None = None
 
+        hidden_states_list: list[torch.Tensor] = []
         moe_forward = False
 
         for seq_ctx in seq_ctx_list:
@@ -494,6 +499,7 @@ class MoE(BaseModel):
                     # should be optimized in the future.
                     hidden_states_list = [i.clone() for i in cat_hidden_states.chunk(len(seq_ctx_list), dim=1)]
                     moe_forward = True
+                assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
 
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
                     with async_save_on_cpu(
@@ -504,6 +510,7 @@ class MoE(BaseModel):
                         custom_check_fn=lambda x: x.data_ptr()
                         in [hidden_states.data_ptr() for hidden_states in hidden_states_list],
                         prefetch=True,
+                        reserve_pin_memory=True,
                     ):
                         layer_results = decoder_layer(
                             *hidden_states_list,
@@ -543,6 +550,56 @@ class MoE(BaseModel):
                     num_tokens_global=num_tokens_global,
                     world_size=z_world_size,
                 )
+
+        assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
+
+        if self.mtp_block is not None:
+            assert self.config.mtp_config is not None
+
+            # Build a per-microbatch SequenceContext clone for MTP. We always run the MTP
+            # block on every micro-batch so domino EP can overlap dispatch/combine across
+            # micro-batches at each MTP depth; per-microbatch loss aggregation below skips
+            # the ones whose loss context is absent.
+            mtp_seq_ctx_list: list[SequenceContext] = []
+            for seq_ctx in seq_ctx_list:
+                assert seq_ctx.position_ids is not None
+                mtp_seq_ctx_list.append(
+                    seq_ctx.copy(
+                        input_ids=seq_ctx.input_ids.clone() if seq_ctx.input_ids is not None else None,
+                        position_ids=seq_ctx.position_ids.clone(),
+                        inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
+                    )
+                )
+
+            mtp_outputs_per_mb = self.mtp_block(
+                *hidden_states_list,
+                embed_tokens_fn=self.embed_tokens,
+                position_embeddings=position_embeddings_list,
+                seq_ctx=mtp_seq_ctx_list,
+            )
+
+            mtp_losses = torch.tensor(0.0, device=DEVICE)
+            has_mtp_loss = False
+            for micro_batch_idx, (loss_ctx_dict, mtp_outputs) in enumerate(zip(loss_ctx_list, mtp_outputs_per_mb)):
+                mtp_loss_ctx_list = loss_ctx_dict.get("mtp")
+                if mtp_loss_ctx_list is None:
+                    continue
+
+                micro_batch_mtp_losses = torch.tensor(0.0, device=DEVICE)
+                for mtp_idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
+                    mtp_hidden_states, mtp_router_results, _ = mtp_hidden
+                    mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
+                    micro_batch_mtp_losses += mtp_loss
+
+                    if keep_router:
+                        router_logits_list[micro_batch_idx][f"mtp_layer{mtp_idx}"] = mtp_router_results
+
+                mtp_losses += micro_batch_mtp_losses / len(mtp_loss_ctx_list)
+                has_mtp_loss = True
+
+            if has_mtp_loss:
+                output["mtp_loss"] = mtp_losses * self.config.mtp_config.loss_scaling_factor
+
         # Apply final norm to all micro-batches
         cat_hidden_states = torch.cat(hidden_states_list, dim=1)
         cat_hidden_states = self.norm(cat_hidden_states)
@@ -710,7 +767,7 @@ class MoE(BaseModel):
 
             # Forward through MTP block
             mtp_outputs = self.mtp_block(
-                hidden_states=layer_hidden_states,
+                layer_hidden_states,
                 embed_tokens_fn=self.embed_tokens,
                 position_embeddings=position_embeddings,
                 seq_ctx=mtp_seq_ctx,
@@ -834,7 +891,7 @@ class MoE(BaseModel):
                 if self.config.freeze_routers:
                     layers[str(layer_idx)].gate.requires_grad_(False)
                     layers[str(layer_idx)].gate.eval()
-                    logger.info(f"Freeze MoE Router in layer {layer_idx}")
+                    log_rank0.info(f"Freeze MoE Router in layer {layer_idx}")
 
         layers.__class__.__repr__ = module_dict_repr  # type: ignore[method-assign]
         return layers
@@ -1004,7 +1061,7 @@ class MoE(BaseModel):
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
-            reshard_after_forward=self.fsdp_config.reshard_after_forward,
+            reshard_after_forward=self.config.embed_reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.embed_tokens,
         )
@@ -1020,7 +1077,7 @@ class MoE(BaseModel):
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=lm_head_mp_policy,
-            reshard_after_forward=self.fsdp_config.reshard_after_forward if self.mtp_block is None else False,
+            reshard_after_forward=False,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.lm_head,
         )
@@ -1082,42 +1139,57 @@ class MoE(BaseModel):
 
     @torch.no_grad  # type: ignore
     def scale_and_reduce_grad(self):
+        ep_enabled = self.ep_mesh is not None and self.ep_mesh.size() > 1
+
+        # Bucket gradients that need a cross-rank reduction by their target process
+        # group. Each bucket is reduced with a single coalesced NCCL all_reduce
+        # instead of one launch per parameter, which used to dominate latency for
+        # models with many small replicated tensors.
+        grads_by_group: dict[dist.ProcessGroup, list[torch.Tensor]] = {}
+
         for name, param in self.trainable_parameters():
             if param.grad is None:
                 continue
 
-            ep_enabled = self.ep_mesh is not None and self.ep_mesh.size() > 1
-            # Scale moe parameters
+            # Expert parameters live on a unique EP rank, so no cross-rank reduction
+            # is needed — just rescale by `ep_size` to keep the effective average.
             if ep_enabled and ".experts" in name:
                 param.grad.div_(self.ep_mesh.size())  # type: ignore
                 continue
 
-            if isinstance(param, DTensor):
-                replicate_dim_names = tuple(
-                    param.device_mesh.mesh_dim_names[i]
-                    for i, p in enumerate(param.placements)
-                    if isinstance(p, Replicate)
-                )
-                if replicate_dim_names:
-                    # `DeviceMesh.get_group()` only supports a single mesh dimension,
-                    # so calling it directly on a multi-dim sub-mesh raises RuntimeError.
-                    # `_flatten()` collapses all Replicate dims into a 1D mesh whose
-                    # process group covers every rank across those dimensions, allowing
-                    # a single all_reduce regardless of how many Replicate dims exist.
-                    if len(replicate_dim_names) > 1:
-                        flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
-                    else:
-                        # In the case that only one replicate dim, in pt2.8 _flatten is worked due to a bug.
-                        # in pt2.9.1 this bug is fixed and _flatten will raise error when the mesh is already 1D,
-                        # which means replicate_dim_names represents an existing single mesh dimension
-                        # so we directly get the submesh without flatten in this case.
-                        flat_mesh = param.device_mesh[replicate_dim_names[0]]
-                    grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
-                    dist.all_reduce(
-                        grad.div_(flat_mesh.size()),  # type: ignore
-                        ReduceOp.SUM,
-                        group=flat_mesh.get_group(),  # type: ignore
-                    )
+            if not isinstance(param, DTensor):
+                continue
+
+            replicate_dim_names = tuple(
+                param.device_mesh.mesh_dim_names[i] for i, p in enumerate(param.placements) if isinstance(p, Replicate)
+            )
+            if not replicate_dim_names:
+                continue
+
+            # `DeviceMesh.get_group()` only supports a single mesh dimension,
+            # so calling it directly on a multi-dim sub-mesh raises RuntimeError.
+            # `_flatten()` collapses all Replicate dims into a 1D mesh whose
+            # process group covers every rank across those dimensions, allowing
+            # a single all_reduce regardless of how many Replicate dims exist.
+            if len(replicate_dim_names) > 1:
+                flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
+            else:
+                # In the case that only one replicate dim, in pt2.8 _flatten is worked due to a bug.
+                # in pt2.9.1 this bug is fixed and _flatten will raise error when the mesh is already 1D,
+                # which means replicate_dim_names represents an existing single mesh dimension
+                # so we directly get the submesh without flatten in this case.
+                flat_mesh = param.device_mesh[replicate_dim_names[0]]
+
+            grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+            # Pre-scale locally so the SUM all_reduce below yields the mean across replicas.
+            grad.div_(flat_mesh.size())  # type: ignore
+            grads_by_group.setdefault(flat_mesh.get_group(), []).append(grad)  # type: ignore
+
+        # One coalesced all_reduce per process group covers all replicated grads.
+        for group, grads in grads_by_group.items():
+            with dist._coalescing_manager(group=group):
+                for grad in grads:
+                    dist.all_reduce(grad, ReduceOp.SUM, group=group)
 
     def _init_device_mesh(self, fsdp_config: FSDPConfig):
         self.fsdp_config = fsdp_config
