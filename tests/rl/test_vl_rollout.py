@@ -109,6 +109,7 @@ class TestVLMRollout(unittest.IsolatedAsyncioTestCase):
             enable_return_routed_experts=ep_size > 1, # ep_size > 1 默认打开r3
         )
         rollout_controller = rollout_config.build(pg)
+        await rollout_controller.get_ready_status.remote()
         result_refs = []
 
         # Test Case 1: 纯文本
