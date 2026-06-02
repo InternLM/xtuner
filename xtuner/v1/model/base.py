@@ -705,14 +705,16 @@ class BaseModel(nn.Module):
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
         tmp_hf_dir = hf_dir.with_name(f"{hf_dir.name}.incomplete")
+        status_dir = tmp_hf_dir.parent / f".{tmp_hf_dir.name}.async-hf-writer-status"
         if rank == 0:
             if tmp_hf_dir.exists():
                 rmtree(tmp_hf_dir)
+            if status_dir.exists():
+                rmtree(status_dir)
             tmp_hf_dir.mkdir(parents=True, exist_ok=True)
+            status_dir.mkdir(parents=True, exist_ok=True)
 
-        status_path = (
-            tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{self._async_hf_writer_status_filename(rank, world_size)}"
-        )
+        status_path = status_dir / self._async_hf_writer_status_filename(rank, world_size)
         cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
         if rank == 0:
             cleanup_done_path.unlink(missing_ok=True)
@@ -762,6 +764,7 @@ class BaseModel(nn.Module):
         cleanup_done_path: Path,
         rank: int,
     ) -> None:
+        log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] started")
         try:
             set_async_save_process_qos()
             self._cleanup_async_hf_dirs_before_write(
@@ -775,7 +778,9 @@ class BaseModel(nn.Module):
                 weight_map=weight_map,
                 status_path=status_path,
             )
+            log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] finished")
         except Exception as exc:
+            log_rank0.error(f"[Async saving HF to {tmp_hf_dir} writer] failed: {exc}")
             status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
             with status_path.open("w") as f:
                 f.write(json.dumps(status, indent=2))
@@ -874,11 +879,12 @@ class BaseModel(nn.Module):
 
         if rank == 0:
             self._write_hf_index_and_config(hf_dir=tmp_hf_dir, weight_map=merged_weight_map)
-        if dist.is_initialized():
-            dist.barrier()
         status_path.unlink(missing_ok=True)
         cleanup_done_path.unlink(missing_ok=True)
+        if dist.is_initialized():
+            dist.barrier()
         if rank == 0:
+            rmtree(status_path.parent, ignore_errors=True)
             if hf_dir.exists():
                 rmtree(hf_dir)
             tmp_hf_dir.rename(hf_dir)
