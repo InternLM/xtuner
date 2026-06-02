@@ -3,6 +3,13 @@ on:
   pull_request:
     branches:
       - "main"
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "autotest/**"
+      - ".github/workflows/e2e_test.yaml"
+      - ".github/workflows/e2e_test_npu.yaml"
+      - ".github/workflows/lint.yml"
 env:
   WORKSPACE_PREFIX: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-5)
   WORKSPACE_PREFIX_SHORT: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-3)
