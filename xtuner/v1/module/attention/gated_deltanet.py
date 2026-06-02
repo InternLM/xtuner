@@ -15,8 +15,7 @@ from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import get_logger
 
-from ...ops.gated_deltanet.causal_conv1d import causal_conv1d_fn
-from ...ops.gated_deltanet.chunk_gated_delta_rule import chunk_gated_delta_rule
+from ...ops.gated_deltanet import get_causal_conv1d_fn, get_chunk_gated_delta_rule_fn
 from ...ops.gated_deltanet.gen_seq_idx import gen_seq_idx
 from ...ops.gated_deltanet.rms_norm_gated import rms_norm_gated
 from ..linear import build_linear
@@ -146,8 +145,10 @@ class GatedDeltaNet(nn.Module):
         A = torch.empty(self.num_v_heads).uniform_(0, 16)
         self.A_log = nn.Parameter(torch.log(A))
 
-        self.causal_conv1d_fn = causal_conv1d_fn
-        self.chunk_gated_delta_rule = chunk_gated_delta_rule
+        # Resolved at build time so `XTUNER_HF_IMPL` selects the HF-native fla call patterns
+        # (same convention as `get_attn_impl_fn`).
+        self.causal_conv1d_fn = get_causal_conv1d_fn()
+        self.chunk_gated_delta_rule = get_chunk_gated_delta_rule_fn()
         assert FusedRMSNormGated is not None, (
             "FusedRMSNormGated is not available. Please install fla to use GatedDeltaNet by `pip install flash-linear-attention`."
         )

@@ -3,7 +3,18 @@ import os
 import sys
 from pathlib import Path
 
-from huggingface_hub import constants
+# Activate the Triton autotune pin installed by `xtuner.v1.__init__` (gated by this env
+# var). The pin must run before any module imports `fla`; see the patch's docstring in
+# `xtuner/v1/__init__.py` for why it lives there rather than here in the conftest.
+os.environ.setdefault("XTUNER_DETERMINISTIC", "true")
+
+# Trigger that patch in the pytest parent process. Each `MultiProcessTestCase` child is a
+# fresh `multiprocessing.spawn` Python that re-imports the test class top-level, which pulls
+# `xtuner.v1.*` and runs the same `xtuner/v1/__init__.py` block — so the patch is installed
+# in every process as long as `XTUNER_DETERMINISTIC=true` was inherited via the env.
+import xtuner.v1  # noqa: E402,F401
+
+from huggingface_hub import constants  # noqa: E402
 
 
 _HF_DYNAMIC_MODULE_PREFIX = "transformers_modules"

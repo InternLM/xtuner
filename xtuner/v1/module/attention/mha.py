@@ -15,7 +15,7 @@ from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module.rope import RopeScalingConfig
-from xtuner.v1.ops import AttnOpOutputs, attn_impl_mapping, flash_attn_varlen_func, get_apply_rotary_emb
+from xtuner.v1.ops import AttnOpOutputs, flash_attn_varlen_func, get_apply_rotary_emb, get_attn_impl_fn
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_logger, log_rank0
 
@@ -201,7 +201,7 @@ class MultiHeadAttention(nn.Module):
         )
         self.apply_rotary_emb = get_apply_rotary_emb(fope_sep_head, enable_partial_rotary=enable_partial_rotary)  # type: ignore
 
-        self.attn_impl_func: Callable[..., AttnOpOutputs] = attn_impl_mapping[attn_impl]  # type: ignore[assignment]
+        self.attn_impl_func: Callable[..., AttnOpOutputs] = get_attn_impl_fn(attn_impl)  # type: ignore[assignment]
 
     def prefilling(
         self,
