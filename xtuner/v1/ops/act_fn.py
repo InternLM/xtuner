@@ -24,6 +24,20 @@ def native_clipped_swiglu(fused_x: torch.Tensor, split_dim=-1, alpha=1.702, limi
     return gated_output
 
 
+def native_swiglu_clip(fused_x: torch.Tensor, split_dim=-1, limit: float = 7.0) -> torch.Tensor:
+    # Step3.5-style clipped SwiGLU: the clamp is applied *after* the silu activation on the
+    # gate and on the raw up projection. This differs from gpt-oss `clipped_swiglu`, which
+    # clamps pre-activation and uses a sigmoid-GLU with a `(up + 1)` term.
+    gate, up = torch.chunk(fused_x, 2, dim=split_dim)
+    gate = F.silu(gate).clamp(max=limit)
+    up = up.clamp(min=-limit, max=limit)
+    return gate * up
+
+
+def npu_swiglu_clip(fused_x: torch.Tensor, split_dim=-1, limit: float = 7.0) -> torch.Tensor:
+    raise NotImplementedError
+
+
 def native_gelu(x: torch.Tensor, approximate: str | None = None) -> torch.Tensor:
     if approximate is not None:
         return F.gelu(x, approximate=approximate)
@@ -49,6 +63,7 @@ def native_silu(x: torch.Tensor) -> torch.Tensor:
 act_fn_type_map_cuda = {
     "swiglu": native_swiglu,
     "clipped_swiglu": native_clipped_swiglu,
+    "swiglu_clip": native_swiglu_clip,
     "gelu": native_gelu,
     "gelu_pytorch_tanh": partial(native_gelu, approximate="tanh"),
     "silu": native_silu,
@@ -56,6 +71,7 @@ act_fn_type_map_cuda = {
 act_fn_type_map_npu = {
     "swiglu": npu_swiglu,
     "clipped_swiglu": npu_clipped_swiglu,
+    "swiglu_clip": npu_swiglu_clip,
     "gelu": npu_gelu,
     "gelu_pytorch_tanh": partial(npu_gelu, approximate="tanh"),
     "silu": native_silu,
