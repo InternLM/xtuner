@@ -198,7 +198,7 @@ class AgentLoop(ABC):
         generated_samples = asyncio.gather(*pending_tasks)
         group_samples = await generated_samples
         if self.judger is not None and self.enable_batch_judge:
-            if group_samples and all(sample.status == Status.COMPLETED for sample in group_samples):
+            if not any(sample.status == Status.ABORTED for sample in group_samples):
                 group_samples = await self.run_judger(group_samples)
         return group_samples
 
