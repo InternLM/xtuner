@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import numpy as np
 import ray
-from aiohttp import ClientConnectionResetError, ClientSession, web
+from aiohttp import ClientConnectionResetError, ClientSession, ClientTimeout, web
 
 from transformers import AutoTokenizer
 from xtuner.v1.utils import get_logger
@@ -70,6 +70,7 @@ class SessionServer:
         tokenizer_path (str): The path to the tokenizer model.
         host (str): Host for this session server to listen on.
         port (int): Port for this session server to listen on.
+        request_timeout (float): Total timeout in seconds for forwarding requests to the worker.
         read_bufsize (int): Buffer limit for line reader in ClientSession. Default is 64MB (2**26).
     """
 
@@ -79,12 +80,14 @@ class SessionServer:
         tokenizer_path: str,
         host: str = "127.0.0.1",
         port: int = 8080,
+        request_timeout: float = 1200.0,
         read_bufsize: int = 2**26,
     ):
         self.worker_base_url = worker_base_url.rstrip("/")
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
         self.host = host
         self.port = port
+        self.request_timeout = request_timeout
         self.read_bufsize = read_bufsize
         self.store = get_store()
         self.stop_word = self.tokenizer.eos_token or ""
@@ -109,7 +112,7 @@ class SessionServer:
         # 2. Store 做 string prefix match。
         prefix, nodes = await self.store.search.remote(session_id, prompt_text, filter_none=True)
         if prefix:
-            get_logger().info(f"Hit prefix cache for session {session_id}")
+            get_logger().debug(f"Hit prefix cache for session {session_id}")
         delta, delta_ids = prompt_text[len(prefix) :], []
         if delta:
             delta_ids = self.tokenizer.encode(delta, add_special_tokens=False)
@@ -316,7 +319,8 @@ class SessionServer:
         # read_bufsize controls StreamReader's line buffer limit; SSE events with large
         # tool_calls/reasoning_content payloads can exceed the 64KB default and trigger
         # "Chunk too big" from readuntil(b"\n").
-        async with ClientSession(read_bufsize=self.read_bufsize) as client:
+        timeout = ClientTimeout(total=self.request_timeout, sock_connect=30)
+        async with ClientSession(read_bufsize=self.read_bufsize, timeout=timeout) as client:
             async with client.request(
                 method=request.method, url=target_url, headers=forward_headers, data=request_body
             ) as resp:
@@ -562,11 +566,12 @@ class SessionServer:
 class SessionServerActor:
     """Ray actor wrapper that owns one SessionServer instance."""
 
-    def __init__(self, worker_base_url: str, tokenizer_path: str, host: str, port: int):
+    def __init__(self, worker_base_url: str, tokenizer_path: str, host: str, port: int, request_timeout: float):
         self.worker_base_url = worker_base_url
         self.tokenizer_path = tokenizer_path
         self.host = host
         self.port = port
+        self.request_timeout = request_timeout
         self.server: SessionServer | None = None
 
     @property
@@ -582,6 +587,7 @@ class SessionServerActor:
             tokenizer_path=self.tokenizer_path,
             host=self.host,
             port=self.port,
+            request_timeout=self.request_timeout,
         )
         await self.server.start()
         return self.server.url

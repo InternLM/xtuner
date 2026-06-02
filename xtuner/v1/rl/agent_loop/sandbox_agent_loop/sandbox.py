@@ -22,6 +22,7 @@ import asyncio
 import base64
 import io
 import os
+import random
 import re
 import shlex
 import tarfile
@@ -31,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+import httpx
 from lagent.utils import create_object
 
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
@@ -813,11 +815,7 @@ class SandboxStage:
             await asyncio.sleep(stuck_warn_sec)
             if not done:
                 get_logger().warning(
-                    "[%s] stage hook still running after %.1fs: phase=%s hook=%s",
-                    task_id,
-                    stuck_warn_sec,
-                    phase,
-                    hook_name,
+                    f"[{task_id}] stage hook still running after {stuck_warn_sec:.1f}s: phase={phase} hook={hook_name}"
                 )
 
         warn_task = asyncio.create_task(warn_if_stuck()) if stuck_warn_sec > 0 else None
@@ -829,7 +827,7 @@ class SandboxStage:
                 warn_task.cancel()
             elapsed = time.monotonic() - started
             if elapsed > 1:
-                get_logger().debug("[%s] hook done phase=%s hook=%s took=%.1fs", task_id, phase, hook_name, elapsed)
+                get_logger().debug(f"[{task_id}] hook done phase={phase} hook={hook_name} took={elapsed:.1f}s")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1036,8 +1034,42 @@ async def exec_in(
     return result
 
 
-async def http_upload(client: Any, target_path: str, content_b64: str) -> None:
-    await client.upload_bytes(target_path, base64.b64decode(content_b64))
+def _retryable_upload_error(exc: Exception) -> bool:
+    if isinstance(
+        exc,
+        (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.ReadTimeout,
+            httpx.RemoteProtocolError,
+        ),
+    ):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return False
+
+
+async def http_upload(client: Any, target_path: str, content_b64: str, *, max_attempts: int = 4) -> None:
+    content = base64.b64decode(content_b64)
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await client.upload_bytes(target_path, content)
+            return
+        except Exception as exc:
+            if not _retryable_upload_error(exc):
+                raise
+            last_exc = exc
+            if attempt == max_attempts:
+                break
+            delay = min(0.5 * (2 ** (attempt - 1)), 4.0) + random.uniform(0.0, 0.25)
+            get_logger().warning(
+                f"sandbox upload retry {attempt}/{max_attempts} for {target_path} after {type(exc).__name__}: {exc}"
+            )
+            await asyncio.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
 
 
 async def upload_tar_and_extract(
