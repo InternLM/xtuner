@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import numpy as np
 import ray
-from aiohttp import ClientSession, web
+from aiohttp import ClientConnectionResetError, ClientSession, web
 
 from transformers import AutoTokenizer
 from xtuner.v1.utils import get_logger
@@ -332,6 +332,12 @@ class SessionServer:
                         },
                     )
                     await response.prepare(request)
+                    # If the downstream client closes the socket mid-stream
+                    # (e.g. AsyncAPIClient bails out on a finish_reason=='error'
+                    # chunk after the prompt overflowed the session window),
+                    # keep draining the upstream so the trace is still recorded
+                    # in full but stop attempting to write to the closed socket.
+                    client_alive = True
                     async for line in resp.content:
                         # Keep unmodified line for trace store parsing
                         response_chunks.append(line)
@@ -347,8 +353,11 @@ class SessionServer:
                                 pass
 
                         # Delay writing the [DONE] line until after on_response
-                        if line.strip() != b"data: [DONE]":
-                            await response.write(line)
+                        if client_alive and line.strip() != b"data: [DONE]":
+                            try:
+                                await response.write(line)
+                            except (ConnectionError, ClientConnectionResetError):
+                                client_alive = False
 
                     raw_response = b"".join(response_chunks)  # Original raw response for exact tracing
                 else:
@@ -410,15 +419,19 @@ class SessionServer:
             get_logger().error(session_error_msg)
 
         if is_stream:
-            if session_error_msg:
-                error_payload = _lmdeploy_error_payload(session_error_msg)
-                await response.write(
-                    ("data: " + json.dumps(error_payload, ensure_ascii=False) + "\n\n").encode("utf-8")
-                )
-                skip_done = True
-            if not skip_done:
-                await response.write(b"data: [DONE]\n\n")
-            await response.write_eof()
+            try:
+                if session_error_msg:
+                    error_payload = _lmdeploy_error_payload(session_error_msg)
+                    await response.write(
+                        ("data: " + json.dumps(error_payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+                    )
+                    skip_done = True
+                if not skip_done:
+                    await response.write(b"data: [DONE]\n\n")
+                await response.write_eof()
+            except (ConnectionError, ClientConnectionResetError):
+                # Client already gone; trace was still recorded above.
+                pass
         elif session_error_msg:
             return web.json_response(_lmdeploy_error_payload(session_error_msg), status=500)
 
