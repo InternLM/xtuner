@@ -207,7 +207,7 @@ class AgentLoop(ABC):
 
     @overload
     async def run_judger(self, rollout_state: list[RolloutState]) -> list[RolloutState]: ...
-    
+
     # test for ci
     async def run_judger(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:
         assert self.judger is not None
