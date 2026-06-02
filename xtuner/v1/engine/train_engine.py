@@ -9,7 +9,7 @@ import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, cast
+from typing import Any, Callable, Dict, List, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -148,7 +148,6 @@ class TrainEngine:
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig,
         intra_layer_micro_batch: int = 1,
-        async_hf_export: bool = False,
     ) -> None:
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
@@ -158,7 +157,6 @@ class TrainEngine:
         self.intra_layer_micro_batch = intra_layer_micro_batch
         self._count = 0
         self.has_freeze_params = self.__has_freeze_params()
-        self._async_hf_export = async_hf_export
         self._async_checkpoint_pg: dist.ProcessGroup | None = None
         self._async_state_dict_cache: dict[str, Any] | None = None
 
@@ -312,30 +310,30 @@ class TrainEngine:
         """
         self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
 
-    def init_async_hf_runtime(self) -> None:
-        self.model.init_async_hf_runtime()
+    def init_async_hf_resources(self) -> None:
+        self.model.init_async_hf_resources()
+
+    def warmup_async_save_hf(self, hf_dir: str) -> None:
+        self.model.warmup_async_save_hf(hf_dir=hf_dir)
 
     def check_async_hf_failure(self) -> None:
         self.model.check_async_hf_failure()
 
-    def destroy_async_hf_runtime(self) -> None:
-        self.model.destroy_async_hf_runtime()
+    def destroy_async_hf_resources(self) -> None:
+        self.model.destroy_async_hf_resources()
 
     def async_save_hf(
         self,
         hf_dir: str,
         save_dtype: torch.dtype = torch.bfloat16,
-        cleanup_hf_dirs: Sequence[str | Path] = (),
+        file_finalize_callback: Callable[[Path], None] | None = None,
     ) -> AsyncHFSaveHandle:
         with profile_time_and_memory(f"[Async saving HF to {hf_dir} launch cost]"):
             return self.model.async_save_hf(
                 hf_dir=hf_dir,
                 save_dtype=save_dtype,
-                cleanup_hf_dirs=cleanup_hf_dirs,
+                file_finalize_callback=file_finalize_callback,
             )
-
-    def wait_async_hf(self, handle: AsyncHFSaveHandle | None = None) -> Path | None:
-        return self.model.wait_async_hf(handle)
 
     def _get_dcp_state_dict(
         self,
@@ -513,7 +511,7 @@ class TrainEngine:
 
     def __del__(self) -> None:
         try:
-            self.destroy_async_hf_runtime()
+            self.destroy_async_hf_resources()
         except Exception:
             pass
         try:

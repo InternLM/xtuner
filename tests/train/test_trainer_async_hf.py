@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import tempfile
+from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -44,12 +45,20 @@ class FakeAsyncHFHandle:
     def __init__(self, engine: "FakeAsyncHFEngine", payload: dict):
         self.engine = engine
         self.payload = payload
+        self._future: Future = Future()
+        try:
+            self._future.set_result(self.engine.commit_async_hf_save(self))
+        except BaseException as exc:
+            self._future.set_exception(exc)
 
     def result(self, timeout=None):
-        return self.engine.wait_async_hf(self)
+        return self._future.result(timeout=timeout)
 
     def cancel(self):
-        return False
+        return self._future.cancel()
+
+    def add_done_callback(self, fn):
+        self._future.add_done_callback(fn)
 
     def __getitem__(self, key):
         return self.payload[key]
@@ -58,7 +67,7 @@ class FakeAsyncHFHandle:
 class FakeAsyncHFEngine:
     def __init__(self):
         self.save_hf_calls = []
-        self.wait_async_hf_calls = []
+        self.commit_async_hf_calls = []
         self.train_step_calls = 0
         self.grad_norm_calls = 0
         self.optimizer_step_calls = 0
@@ -98,21 +107,18 @@ class FakeAsyncHFEngine:
     def destroy_async_checkpoint_pg(self) -> None:
         pass
 
-    def init_async_hf_runtime(self) -> None:
+    def init_async_hf_resources(self) -> None:
         pass
+
+    def warmup_async_save_hf(self, hf_dir: str) -> None:
+        self.init_async_hf_resources()
 
     def check_async_hf_failure(self) -> None:
         if self.async_hf_failure is not None:
             raise self.async_hf_failure
 
-    def destroy_async_hf_runtime(self) -> None:
+    def destroy_async_hf_resources(self) -> None:
         pass
-
-    def _cleanup_hf_dirs(self, cleanup_hf_dirs):
-        for cleanup_hf_dir in cleanup_hf_dirs:
-            cleanup_hf_dir = Path(cleanup_hf_dir)
-            if cleanup_hf_dir.exists():
-                shutil.rmtree(cleanup_hf_dir)
 
     def save_hf(self, hf_dir: Path | str):
         hf_dir = Path(hf_dir)
@@ -120,8 +126,7 @@ class FakeAsyncHFEngine:
         self.save_hf_calls.append(hf_dir)
         return hf_dir
 
-    def async_save_hf(self, hf_dir: Path | str, cleanup_hf_dirs=()):
-        self._cleanup_hf_dirs(cleanup_hf_dirs)
+    def async_save_hf(self, hf_dir: Path | str, file_finalize_callback=None):
         hf_dir = Path(hf_dir)
         hf_dir.mkdir(parents=True, exist_ok=True)
         self.save_hf_calls.append(hf_dir)
@@ -135,18 +140,19 @@ class FakeAsyncHFEngine:
             "ok": self.async_hf_status_ok,
             "error": self.async_hf_status_error,
             "weight_map": weight_map,
+            "file_finalize_callback": file_finalize_callback,
         }
         handle = FakeAsyncHFHandle(self, handle)
         self._pending_async_hf = handle
+        handle.add_done_callback(lambda _: self._clear_pending_async_hf(handle))
         return handle
 
-    def wait_async_hf(self, handle=None):
-        self.wait_async_hf_calls.append(handle)
-        if handle is None:
-            handle = self._pending_async_hf
-        if handle is None:
-            return None
+    def _clear_pending_async_hf(self, handle):
+        if self._pending_async_hf is handle:
+            self._pending_async_hf = None
 
+    def commit_async_hf_save(self, handle):
+        self.commit_async_hf_calls.append(handle)
         pending = handle.payload if isinstance(handle, FakeAsyncHFHandle) else handle
         local_status = {
             "rank": dist.get_rank(),
@@ -173,6 +179,8 @@ class FakeAsyncHFEngine:
                 hf_dir=Path(pending["hf_dir"]),
                 weight_map=merged_weight_map,
             )
+        if pending["file_finalize_callback"] is not None:
+            pending["file_finalize_callback"](Path(pending["hf_dir"]))
         if self._pending_async_hf is handle:
             self._pending_async_hf = None
         return Path(pending["hf_dir"])
@@ -304,5 +312,5 @@ class TestTrainerAsyncSaveHF(DistributedTestBase):
 
         trainer._maybe_save_hf()
         with self.assertRaisesRegex(RuntimeError, "Async HF save global consistency check failed"):
-            trainer._engine.wait_async_hf()
+            trainer._wait_for_pending_async_hf()
         self.assertIsNone(trainer._engine._pending_async_hf)

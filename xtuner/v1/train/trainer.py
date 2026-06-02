@@ -594,6 +594,7 @@ class Trainer:
         self._pending_async_hf_handle: AsyncHFSaveHandle | None = None
         self._pending_async_hf_step: int | None = None
         self._pending_async_hf_epoch: int | None = None
+        self._async_hf_file_finalize_failure: BaseException | None = None
         self._async_checkpoint = async_checkpoint
         self._pending_checkpoint: Future | None = None
         self._snapshot_interval = snapshot_interval
@@ -806,7 +807,7 @@ class Trainer:
         handles data loading, forward pass, backward pass, optimization, logging, and checkpointing.
         """
         if self._async_hf_export:
-            self._engine.init_async_hf_runtime()
+            self._engine.warmup_async_save_hf(str(self.exp_dir))
 
         train_begin = time.time()
         time_before_get_data = time.time()
@@ -874,9 +875,9 @@ class Trainer:
             if self.cur_step % 50 == 0:
                 gc.collect()
 
-        self._wait_for_pending_async_hf()
         if self._async_hf_export:
-            self._engine.destroy_async_hf_runtime()
+            self._finalize_pending_async_hf_save(wait_for_pending=True)
+            self._engine.destroy_async_hf_resources()
 
         # TODO: Should use flush rather than close
         self._wait_for_pending_checkpoint()
@@ -1114,7 +1115,6 @@ class Trainer:
             fsdp_cfg=fsdp_config,
             model_cfg=model_config,
             intra_layer_micro_batch=intra_layer_micro_batch,
-            async_hf_export=self._async_hf_export,
         )
         if model_path is not None and (model_config.dcp_ignore_frozen_params or load_checkpoint_path is None):
             engine.from_hf(hf_path=model_path, strict=strict)
@@ -1680,18 +1680,30 @@ class Trainer:
             return
 
         assert self._can_save_hf, "Model does not support saving in Huggingface format."
+
         if self._async_hf_export:
-            self._engine.check_async_hf_failure()
+            is_hf_save_step = self.cur_step % self._hf_interval == 0 or self.cur_step == self.total_step
+            has_pending_async_hf = self._pending_async_hf_handle is not None
+            self._finalize_pending_async_hf_save(wait_for_pending=is_hf_save_step and has_pending_async_hf)
 
         if self.cur_step % self._hf_interval != 0 and self.cur_step != self.total_step:
             return
 
         save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
         if self._async_hf_export:
-            self._wait_for_pending_async_hf()
-            self._pending_async_hf_handle = self._engine.async_save_hf(str(save_hf_path))
-            self._pending_async_hf_step = self.cur_step
-            self._pending_async_hf_epoch = self._cur_epoch
+            deleted_hf_checkpoints = self._get_deleted_hf_checkpoints(save_hf_path)
+            step = self.cur_step
+            epoch = self._cur_epoch
+            handle = self._engine.async_save_hf(
+                str(save_hf_path),
+                file_finalize_callback=self._build_async_hf_file_finalize_callback(
+                    save_hf_path=save_hf_path,
+                    deleted_hf_checkpoints=deleted_hf_checkpoints,
+                ),
+            )
+            self._pending_async_hf_handle = handle
+            self._pending_async_hf_step = step
+            self._pending_async_hf_epoch = epoch
             return
         else:
             self._engine.save_hf(str(save_hf_path))
@@ -1703,9 +1715,7 @@ class Trainer:
             )
             return
 
-    def _wait_for_pending_async_hf(self, timeout: int = 3000) -> None:
-        if self._async_hf_export:
-            self._engine.check_async_hf_failure()
+    def _wait_for_pending_async_hf(self) -> None:
         if self._pending_async_hf_handle is None:
             return
 
@@ -1716,19 +1726,90 @@ class Trainer:
         self._pending_async_hf_step = None
         self._pending_async_hf_epoch = None
 
-        try:
-            finalized_hf_path = handle.result(timeout=timeout)
-        except TimeoutError:
-            handle.cancel()
-            raise TimeoutError(f"Async HF save timed out after {timeout}s")
+        finalized_hf_path = handle.result()
         assert step is not None
         assert epoch is not None
-        self._finalize_hf_save(
-            finalized_hf_path,
-            step=step,
-            epoch=epoch,
-            delete_hf_dirs=True,
-        )
+        self._finalize_async_hf_save_metadata(finalized_hf_path, step=step, epoch=epoch)
+
+    def _finalize_pending_async_hf_save(self, wait_for_pending: bool = False) -> None:
+        if wait_for_pending:
+            self._wait_for_pending_async_hf()
+        elif self._pending_async_hf_handle is not None:
+            handle = self._pending_async_hf_handle
+            if handle.done():
+                self._wait_for_pending_async_hf()
+        if self._async_hf_file_finalize_failure is not None:
+            raise RuntimeError("Async HF file finalize failed") from self._async_hf_file_finalize_failure
+
+    def _get_deleted_hf_checkpoints(self, save_hf_path: Path) -> list[str]:
+        if self._hf_max_keep is None:
+            return []
+        hf_checkpoint_list = [*self.meta.latest_exp.hf_checkpoint_list, str(save_hf_path)]
+        if len(hf_checkpoint_list) <= self._hf_max_keep:
+            return []
+        return hf_checkpoint_list[: -self._hf_max_keep]
+
+    def _build_async_hf_file_finalize_callback(
+        self,
+        save_hf_path: Path,
+        deleted_hf_checkpoints: list[str],
+    ) -> Callable[[Path], None]:
+        def callback(finalized_hf_path: Path) -> None:
+            try:
+                self._finalize_hf_files(
+                    finalized_hf_path,
+                    save_hf_path=save_hf_path,
+                    deleted_hf_checkpoints=deleted_hf_checkpoints,
+                )
+            except BaseException as exc:
+                self._async_hf_file_finalize_failure = exc
+                raise
+
+        return callback
+
+    def _finalize_hf_files(
+        self,
+        finalized_hf_path: Path,
+        save_hf_path: Path,
+        deleted_hf_checkpoints: list[str],
+    ) -> None:
+        if self.rank != 0:
+            return
+
+        if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
+            self.tokenizer.save_pretrained(str(save_hf_path))
+        latest_hf_link = self.exp_dir / "hf-latest"
+        latest_hf_link.unlink(missing_ok=True)
+        latest_hf_link.symlink_to(finalized_hf_path.absolute(), target_is_directory=True)
+
+        for hf_dir in deleted_hf_checkpoints:
+            hf_path = Path(hf_dir)
+            if hf_path.exists():
+                rmtree(hf_path)
+
+    def _finalize_async_hf_save_metadata(self, finalized_hf_path: Path, step: int, epoch: int) -> None:
+        save_hf_path = finalized_hf_path
+
+        self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
+
+        if self._hf_max_keep is not None:
+            self.meta.latest_exp.hf_checkpoint_list = self.meta.latest_exp.hf_checkpoint_list[-self._hf_max_keep :]
+
+        meta_path = self.work_dir / self._META_PATH
+
+        if self.rank == 0:
+            with meta_path.open("w") as f:
+                f.write(self.meta.model_dump_json(indent=2))
+
+        hooks = self.hooks_config.get_hooks(HookStage.AFTER_SAVE_HF)
+        for hook in hooks:
+            hook(
+                checkpoint=save_hf_path,
+                step=step,
+                epoch=epoch,
+                total_step=self.total_step,
+                total_epoch=self.total_epoch,
+            )
 
     def _finalize_hf_save(self, finalized_hf_path: Path, step: int, epoch: int, delete_hf_dirs: bool) -> None:
         latest_hf_link = self.exp_dir / "hf-latest"
@@ -1746,7 +1827,6 @@ class Trainer:
         if self.rank == 0:
             if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
                 self.tokenizer.save_pretrained(str(save_hf_path))
-            # 将 latest_hf_link 指向 save_hf_path
             latest_hf_link.unlink(missing_ok=True)
             latest_hf_link.symlink_to(save_hf_path.absolute(), target_is_directory=True)
 

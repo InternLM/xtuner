@@ -27,15 +27,7 @@ def get_async_save_io_priority() -> int | None:
 
 
 def get_async_hf_save_file_lock_slots() -> int:
-    return max(
-        0,
-        int(
-            os.environ.get(
-                "XTUNER_ASYNC_HF_FILE_WRITE_LOCK_SLOTS",
-                os.environ.get("XTUNER_HF_SAVE_WRITER_SAVE_FILE_LOCK_SLOTS", "1"),
-            )
-        ),
-    )
+    return max(0, int(os.environ.get("ASYNC_HF_FILE_WRITE_LOCK_SLOTS", "1")))
 
 
 def set_async_save_process_qos() -> None:
