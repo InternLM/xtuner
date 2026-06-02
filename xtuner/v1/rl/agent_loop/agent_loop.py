@@ -19,6 +19,7 @@ from xtuner.v1.rl.utils import (
     cancel_and_drain,
     create_task,
     register_cpu_resources,
+    DEFAULT_JUDGER_CANCEL_TIMEOUT_S
 )
 from xtuner.v1.utils import get_logger, ray_method
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
