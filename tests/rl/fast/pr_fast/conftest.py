@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import types
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -19,6 +20,33 @@ from pydantic import BaseModel, ConfigDict
 # hook by default because it can inspect sandbox parent processes and fail before
 # the test logic runs.
 os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
+
+_PR_FAST_DIR = Path(__file__).resolve().parent
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _pytest_invocation_paths() -> list[Path]:
+    paths = []
+    for arg in sys.argv[1:]:
+        if not arg or arg.startswith("-"):
+            continue
+        path_arg = arg.split("::", 1)[0]
+        path = Path(path_arg)
+        if path.exists():
+            paths.append(path.resolve())
+    return paths
+
+
+def _should_install_import_stubs() -> bool:
+    paths = _pytest_invocation_paths()
+    return bool(paths) and all(_is_relative_to(path, _PR_FAST_DIR) for path in paths)
 
 
 def _new_module(name: str) -> types.ModuleType:
@@ -145,6 +173,9 @@ def _install_rl_trainer_worker_stubs() -> None:
     sys.modules.setdefault("xtuner.v1.rl.trainer.worker", worker_mod)
 
 
-_install_dataset_stubs()
-_install_train_trainer_stub()
-_install_rl_trainer_worker_stubs()
+# These stubs are only safe for isolated PR-fast runs. Full RL collection also
+# imports real smoke and integration tests, which require the real modules.
+if _should_install_import_stubs():
+    _install_dataset_stubs()
+    _install_train_trainer_stub()
+    _install_rl_trainer_worker_stubs()
