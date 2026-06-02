@@ -2,16 +2,17 @@
 
 `Judger` 是 XTuner RL 中负责给 rollout 结果打分的组件。它接收 `RolloutState`，读取模型生成结果和标签，计算 reward，并把分数写回 `rollout_state.reward`。后续的 advantage 计算、训练数据构建和默认评测逻辑都会依赖这个字段。
 
-在典型流程中，`AgentLoop` 先调用推理引擎生成 `response_ids`，再把 token 解码成文本形式的 `response`，最后调用 `judger.judge(rollout_state)`。
+在典型流程中，`AgentLoop` 先调用推理引擎生成 `response_ids`，再把 token 解码成文本形式的 `response`，最后通过 `run_judger()` 调用 `judger.judge(rollout_state)` 或 `judger.batch_judge(rollout_states)`。
 
 ## Judger 类型
 
-`xtuner/v1/rl/judger/native.py` 中定义了 Judger 的基础类型。可以先把它理解成两层：第一层是所有 Judger 统一实现的 `judge()` 接口；第二层是不同运行形态，决定这个 `judge()` 在本地执行、在 Ray actor 中执行，还是组合多个子 Judger 一起执行。
+`xtuner/v1/rl/judger/native.py` 中定义了 Judger 的基础类型。可以先把它理解成两层：第一层是所有 Judger 统一实现的 `judge()` 和 `batch_judge()` 接口；第二层是不同运行形态，决定打分逻辑在本地执行、在 Ray actor 中执行，还是组合多个子 Judger 一起执行。
 
 ```text
                                   ┌─────────────────────────────┐
                                   │        Judger (ABC)          │
                                   │  async judge(RolloutState)   │
+                                  │  async batch_judge(list)      │
                                   └──────────────┬──────────────┘
                                                  │
                  ┌───────────────────────────────┼───────────────────────────────┐
@@ -48,10 +49,10 @@
                          │                       │                       │
                          └───────────────────────┼───────────────────────┘
                                                  ▼
-                         select_fn 选择 branch，merge_fn 合并 reward dict
+                         data_source 选择 branch，merge_fn 合并 reward dict
 ```
 
-`RemoteJudger` 的作用是给 Ray actor 形式的 Judger 提供一个对外统一接口。它本身不实现具体打分逻辑，而是持有 `JudgerActor` 的 actor proxy，并在自己的 `judge()` 中调用 `actor.judge.remote(...)`。这样上层代码只需要面向 `Judger.judge()` 编程，不需要关心当前 Judger 是本地对象、Ray actor，还是多副本池中的一个远程副本。
+`RemoteJudger` 的作用是给 Ray actor 形式的 Judger 提供一个对外统一接口。它本身不实现具体打分逻辑，而是持有 `JudgerActor` 的 actor proxy。`judge()` 或 `batch_judge()` 会先在 driver 侧把 `RolloutState` 转成轻量 payload，再调用 `actor.judge_payload.remote(...)`，因此 Ray 序列化的是 payload，而不是完整 `RolloutState`。这样上层代码只需要面向 `Judger` 接口编程，不需要关心当前 Judger 是本地对象、Ray actor，还是多副本池中的一个远程副本。
 
 构建时有两条入口：
 
@@ -71,7 +72,7 @@ ComposedJudgerConfig
   └─ ComposedJudger
        ├─ branches["a"] -> JudgerConfig 或 ComposedJudgerConfig
        ├─ branches["b"] -> JudgerConfig 或 ComposedJudgerConfig
-       └─ select_fn + merge_fn 控制路由和合并
+       └─ RolloutState.data_source + merge_fn 控制路由和合并
 ```
 
 普通 `JudgerConfig` 根据 `cpu_resources` 决定执行模式。`cpu_resources` 表示 PG 外 Ray CPU worker 的资源需求，类型为 `CPUResourcesConfig`：
@@ -84,7 +85,7 @@ ComposedJudgerConfig
 
 `CPUResourcesConfig.cpu_memory_per_worker` 默认是 `1024**3`，通常不需要额外配置。PG 外 CPU actor 资源会注册到全局 `CPUResourceManager`，资源不足时会在组件构建阶段报错，避免 Ray actor 长时间 pending。
 
-`ComposedJudgerConfig` 用于多分支场景：一个样本可以按 `select_fn` 路由到不同 Judger，也可以同时运行多个 Judger，再用 `merge_fn` 合并结果。
+`ComposedJudgerConfig` 用于多分支场景：样本通过 `RolloutState.data_source` 路由到一个或多个 Judger。`data_source` 为字符串时选择一个 branch；为字典时使用字典 key 同时选择多个 branch，并用 `merge_fn` 合并结果。
 
 ## 输入输出约定
 
@@ -94,7 +95,7 @@ ComposedJudgerConfig
 Sampler -> RolloutState
   -> SingleTurnAgentLoop.generate_group()
   -> RolloutController.generate()
-  -> Judger.judge()
+  -> Judger.judge() / Judger.batch_judge()
   -> ReplayBuffer
   -> RLTrainer._prepare_train_data()
 ```
@@ -104,9 +105,12 @@ Judger 本身统一暴露异步接口：
 ```python
 async def judge(self, rollout_state: RolloutState) -> RolloutState:
     ...
+
+async def batch_judge(self, rollout_states: list[RolloutState]) -> list[RolloutState]:
+    ...
 ```
 
-接口类型上也允许批量输入，但内置 `NativeJudger` 默认按单条样本调用 `reward_handler`。只有自定义 Judger 明确支持 `list[RolloutState]` 时，才应打开 `SingleTurnAgentLoopConfig(enable_batch_judge=True)`。
+`judge()` 只处理单条样本；批量打分使用 `batch_judge()`。内置 `NativeJudger` 和 `CompassVerifierV2` 默认不支持批量打分，会在 `batch_judge()` 入口直接报错。只有当前 Judger 明确实现 `batch_judge()` 时，才应打开 `SingleTurnAgentLoopConfig(enable_batch_judge=True)`。
 
 ### Judger 输入
 
@@ -153,7 +157,7 @@ rollout_state.reward = {
 
 其他 reward 字段可以按任务需要扩展，例如 `acc`、`format`、`tool_ok`、`reason` 等。
 
-如果使用 `ComposedJudger` 的默认 `merge_fn`，输出不会自动生成总分，而是按 branch 名称保存各分支分数：
+如果使用 `ComposedJudger` 且 `data_source` 只选择一个 branch，输出会直接使用该 branch 的 reward。若 `data_source` 选择多个 branch，必须提供自定义 `merge_fn`，因为通用逻辑无法知道业务上应该如何聚合多个分数。例如：
 
 ```python
 rollout_state.reward = {
@@ -162,11 +166,11 @@ rollout_state.reward = {
 }
 ```
 
-如果训练或评测需要 `reward["score"]`，需要提供自定义 `merge_fn`。
+如果训练或评测需要 `reward["score"]`，`merge_fn` 必须生成这个字段。
 
-## select_fn 与 merge_fn
+## data_source 与 merge_fn
 
-`ComposedJudgerConfig` 的核心是 `branches`、`select_fn` 和 `merge_fn`：
+`ComposedJudgerConfig` 的核心是 `branches` 和 `merge_fn`，路由固定读取 `RolloutState.data_source`：
 
 ```python
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig
@@ -176,32 +180,24 @@ judger_config = ComposedJudgerConfig(
         "gsm8k": JudgerConfig(judger_name="gsm8k", reward_handler=gsm8k_reward),
         "format": JudgerConfig(judger_name="format", reward_handler=format_reward),
     },
-    select_fn=lambda state, branches: ["gsm8k", "format"],
     merge_fn=merge_rewards,
 )
 ```
 
-`select_fn` 负责选择要运行哪些分支：
+`data_source` 的含义：
 
-```python
-def select_fn(state: RolloutState, branches: dict[str, Judger]) -> str | list[str] | None:
-    ...
-```
-
-返回值含义：
-
-- `str`：运行一个 branch。
-- `list[str]`：运行多个 branch。
-- `None`：走 `default_key` 或单分支 fallback。
-
-默认 `select_fn` 会用 `rollout_state.data_source` 匹配 `branches` 的 key；匹配不到时返回 `None`。
+- `str`：必须等于某个 branch 名称，运行这一个 branch。
+- `dict`：key 必须都是 branch 名称，运行这些 branches。
+- `None`、空 dict、未知 branch、非字符串 key 或其他类型都会在 `ComposedJudger` 入口报错。
 
 `merge_fn` 负责把多个子 Judger 的输出合并回一个 `RolloutState`：
 
 ```python
+from xtuner.v1.rl.judger import JudgerOutput
+
 def merge_fn(
     original: RolloutState | list[RolloutState],
-    judged: dict[str, RolloutState | list[RolloutState]],
+    judged: dict[str, JudgerOutput | list[JudgerOutput]],
 ) -> RolloutState | list[RolloutState]:
     ...
 ```
@@ -216,19 +212,18 @@ def weight_fn(branch_name: str) -> float:
     }[branch_name]
 
 def merge_rewards(original, judged):
-    merged = original.model_copy(deep=True)
     branch_scores = {
-        name: state.reward["score"]
-        for name, state in judged.items()
+        name: output["score"]
+        for name, output in judged.items()
     }
-    merged.reward = {
+    original.reward = {
         "score": sum(weight_fn(name) * score for name, score in branch_scores.items()),
         **branch_scores,
     }
-    return merged
+    return original
 ```
 
-批量输入时，`merge_fn` 也需要返回同样长度的 `list[RolloutState]`。默认 `merge_fn` 已支持单条和批量输入，但只会生成 `{branch_name: score}`，不会额外生成 `score` 总分。
+批量输入时，`merge_fn` 的第一个参数是 `list[RolloutState]`，`judged` 中每个 branch 的值是同样长度的 `list[JudgerOutput]`，返回值也必须是同样长度的 `list[RolloutState]`。框架不提供默认 merge；多 branch 场景必须显式传入 `merge_fn`。
 
 ## 自定义 Judger
 

@@ -6,8 +6,7 @@ import requests  # type: ignore[import-untyped]
 from pydantic import ConfigDict
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.judger.native import Judger, JudgerConfig
-from xtuner.v1.utils.type_helper import ray_method
+from xtuner.v1.rl.judger.native import Judger, JudgerConfig, JudgerOutputBatch, JudgerPayloadBatch
 
 
 verify_prompt = """
@@ -38,6 +37,12 @@ Judging the correctness of the candidate's answer:
 
 
 class CompassVerifierV2(Judger):
+    """LLM-based verifier for single rollout samples.
+
+    ``CompassVerifierV2`` does not implement batch judging. Passing
+    ``list[RolloutState]`` to ``batch_judge`` raises before payload construction.
+    """
+
     def __init__(
         self,
         hosts: list[str],
@@ -45,6 +50,7 @@ class CompassVerifierV2(Judger):
         max_retries: int = 3,
         thinking_finish_words: list[str] | None = None,
     ):
+        super().__init__(judger_name="compass_verifier_v2")
         if not hosts:
             raise ValueError("CompassVerifierV2 requires at least one host.")
         self.hosts = hosts
@@ -56,16 +62,18 @@ class CompassVerifierV2(Judger):
             headers={"Authorization": "Bearer "},
             timeout=request_timeout,
         ).json()["data"][0]["id"]
-        self.judger_name = "compass_verifier_v2"
 
-    @ray_method
-    async def judge(self, rollout_state: RolloutState) -> RolloutState:  # type: ignore[override]
-        if rollout_state.status != Status.COMPLETED or rollout_state.response is None:
-            rollout_state.reward = {"score": -1}
-            return rollout_state
+    async def batch_judge(self, rollout_states: list[RolloutState]) -> list[RolloutState]:
+        raise NotImplementedError("CompassVerifierV2 does not support batch_judge.")
 
-        question = rollout_state.message[-1]["content"]
-        model_answer = rollout_state.response.replace("<|im_end|>", "").strip()
+    async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
+        if isinstance(payload, list):
+            raise NotImplementedError("CompassVerifierV2 does not support batch payloads.")
+        if payload["status"] != Status.COMPLETED or payload["response"] is None:
+            return {"score": -1}
+
+        question = payload["message"][-1]["content"]
+        model_answer = payload["response"].replace("<|im_end|>", "").strip()
         for thinking_finish_word in self.thinking_finish_words:
             if thinking_finish_word in model_answer:
                 model_answer = model_answer.split(thinking_finish_word)[-1]
@@ -76,12 +84,9 @@ class CompassVerifierV2(Judger):
         if len(model_answer) > 1000:
             model_answer = model_answer[-1000:]
 
-        assert rollout_state.reward_model is not None and "ground_truth" in rollout_state.reward_model, (
-            "RolloutState must have reward_model with 'ground_truth' for CompassVerifierV2."
-        )
-        outcome_reward = await self._judge_with_llm(question, model_answer, rollout_state.reward_model["ground_truth"])
-        rollout_state.reward = {"score": outcome_reward}
-        return rollout_state
+        assert payload["label"] is not None, "Judger payload must contain label for CompassVerifierV2."
+        outcome_reward = await self._judge_with_llm(question, model_answer, payload["label"])
+        return {"score": outcome_reward}
 
     async def _judge_with_llm(self, question: str, model_response: str, label: str):
         headers = {"Content-Type": "application/json"}
@@ -110,9 +115,6 @@ class CompassVerifierV2(Judger):
                     await asyncio.sleep(1)
                     print(f"[Judger]: Error try {i}: {str(e)}")
         raise RuntimeError(f"Cannot connect to judger service for {self.max_retries} times.")
-
-    def get_judger_name(self) -> str:
-        return self.judger_name
 
 
 class CompassVerifierV2Config(JudgerConfig):

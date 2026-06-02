@@ -1,10 +1,6 @@
-import asyncio
-from typing import overload
-
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
-from xtuner.v1.rl.utils import JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S, cancel_and_drain, create_task
 
 from .agent_loop import AgentLoop, AgentLoopConfig
 
@@ -38,8 +34,6 @@ class SingleTurnAgentLoopConfig(AgentLoopConfig):
         )
     """
 
-    enable_batch_judge: bool = False
-
     def build_local(self, rollout_controller, judger: Judger | None = None, logger=None) -> "SingleTurnAgentLoop":
         return SingleTurnAgentLoop(
             rollout_ctl=rollout_controller,
@@ -61,53 +55,14 @@ class SingleTurnAgentLoop(AgentLoop):
         logger=None,
         enable_batch_judge: bool = False,
     ):
-        super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
-        self.enable_batch_judge = enable_batch_judge
-        self._pause_event = asyncio.Event()
-
-    @overload
-    async def run_judger(self, rollout_state: RolloutState) -> RolloutState: ...
-
-    @overload
-    async def run_judger(self, rollout_state: list[RolloutState]) -> list[RolloutState]: ...
-
-    async def run_judger(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:
-        assert self.judger is not None
-        judge_task = create_task(self.judger.judge(rollout_state))
-        pause_task = create_task(self._pause_event.wait())
-        try:
-            done, _ = await asyncio.wait({judge_task, pause_task}, return_when=asyncio.FIRST_COMPLETED)
-            if judge_task in done:
-                return await judge_task
-            try:
-                return await asyncio.wait_for(
-                    asyncio.shield(judge_task),
-                    timeout=JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S,
-                )
-            except asyncio.TimeoutError:
-                await cancel_and_drain([judge_task])
-                for sample in rollout_state if isinstance(rollout_state, list) else [rollout_state]:
-                    sample.status = Status.ABORTED
-                    sample.finish_reason = "abort"
-                    sample.reward = None
-                return rollout_state
-        except asyncio.CancelledError:
-            await cancel_and_drain([judge_task])
-            for sample in rollout_state if isinstance(rollout_state, list) else [rollout_state]:
-                sample.status = Status.ABORTED
-                sample.finish_reason = "abort"
-                sample.reward = None
-            return rollout_state
-        finally:
-            await cancel_and_drain([pause_task])
-
-    async def pause(self) -> None:
-        self._pause_event.set()
-        # TODO: Decide whether Judger needs an explicit pause API for resources not owned by SingleTurnAgentLoop.
-        try:
-            await super().pause()
-        finally:
-            self._pause_event.clear()
+        super().__init__(
+            rollout_ctl=rollout_ctl,
+            sample_params=sample_params,
+            hf_checkpoint=hf_checkpoint,
+            judger=judger,
+            logger=logger,
+            enable_batch_judge=enable_batch_judge,
+        )
 
     async def generate_sample(
         self,
@@ -126,17 +81,3 @@ class SingleTurnAgentLoop(AgentLoop):
             # 如果开启了批量打分，则在 generate_group 里统一打分，不在这里逐条打分
             rollout_state = await self.run_judger(rollout_state)
         return rollout_state
-
-    async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
-        pending_tasks = []
-        for state in rollout_state:
-            state.sample_params = self.sample_params
-            task = create_task(self.generate_sample(state, **kwargs))
-            pending_tasks.append(task)
-        generated_samples = asyncio.gather(*pending_tasks)
-        group_samples = await generated_samples
-        if self.judger is not None and self.enable_batch_judge:
-            if not any(sample.status == Status.ABORTED for sample in group_samples):
-                # 批量打分
-                group_samples = await self.run_judger(group_samples)
-        return group_samples
