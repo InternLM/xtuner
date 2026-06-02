@@ -14,12 +14,12 @@ from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import (
+    JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S,
     CPUActorLauncher,
     CPUResourcesConfig,
     cancel_and_drain,
     create_task,
     register_cpu_resources,
-    DEFAULT_JUDGER_CANCEL_TIMEOUT_S
 )
 from xtuner.v1.utils import get_logger, ray_method
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
@@ -222,7 +222,7 @@ class AgentLoop(ABC):
             try:
                 return await asyncio.wait_for(
                     asyncio.shield(judge_task),
-                    timeout=DEFAULT_JUDGER_CANCEL_TIMEOUT_S,
+                    timeout=JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S,
                 )
             except asyncio.TimeoutError:
                 await cancel_and_drain([judge_task])
