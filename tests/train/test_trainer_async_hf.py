@@ -54,11 +54,8 @@ class FakeAsyncHFHandle:
     def result(self, timeout=None):
         return self._future.result(timeout=timeout)
 
-    def cancel(self):
-        return self._future.cancel()
-
-    def add_done_callback(self, fn):
-        self._future.add_done_callback(fn)
+    def done(self):
+        return self._future.done()
 
     def __getitem__(self, key):
         return self.payload[key]
@@ -141,7 +138,8 @@ class FakeAsyncHFEngine:
         }
         handle = FakeAsyncHFHandle(self, handle)
         self._pending_async_hf = handle
-        handle.add_done_callback(lambda _: self._clear_pending_async_hf(handle))
+        if handle.done():
+            self._clear_pending_async_hf(handle)
         return handle
 
     def _clear_pending_async_hf(self, handle):

@@ -122,7 +122,7 @@ class TestQwen3VLAsyncHF(DeterministicDDPTestCase):
             _set_hf_for_compose_submodules(model, QWEN3_VL_MOE_PATH)
 
             handle = model.async_save_hf(async_hf_dir)
-            finalized = model.wait_async_hf(handle)
+            finalized = handle.result()
             self.assertEqual(finalized, async_hf_dir)
 
             dist.barrier()
@@ -131,6 +131,7 @@ class TestQwen3VLAsyncHF(DeterministicDDPTestCase):
                 self._assert_async_hf_structure(origin_hf_dir, async_hf_dir)
 
             dist.barrier()
+            model.destroy_async_hf_resources()
             del model
             torch.cuda.empty_cache()
 
@@ -155,7 +156,7 @@ class TestQwen3VLAsyncHF(DeterministicDDPTestCase):
             model.from_hf(QWEN3_VL_MOE_PATH)
 
             handle = model.async_save_hf(async_hf_dir)
-            finalized = model.wait_async_hf(handle)
+            finalized = handle.result()
             self.assertEqual(finalized, async_hf_dir)
 
             dist.barrier()
@@ -165,6 +166,7 @@ class TestQwen3VLAsyncHF(DeterministicDDPTestCase):
                 _assert_hf_tensor_equal(self, origin_hf_dir, async_hf_dir)
 
             dist.barrier()
+            model.destroy_async_hf_resources()
             del model
             torch.cuda.empty_cache()
 

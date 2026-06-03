@@ -386,7 +386,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             tokenizer = AutoTokenizer.from_pretrained(QWEN3_MOE_PATH, trust_remote_code=True)
 
             handle = qwen_model.async_save_hf(hf_dir=saved_hf_path)
-            qwen_model.wait_async_hf(handle)
+            handle.result()
 
             if dist.get_rank() == 0:
                 tokenizer.save_pretrained(str(saved_hf_path))
@@ -443,6 +443,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
 
             dist.barrier()
 
+            qwen_model.destroy_async_hf_resources()
             del qwen_model
             torch.cuda.empty_cache()
 
