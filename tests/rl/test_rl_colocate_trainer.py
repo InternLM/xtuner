@@ -19,6 +19,7 @@ Bad Tests:
 """
 
 import asyncio
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +33,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, ProduceBatchResult
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import AgentLoopManager, _TaskRunner
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SerializedRayObjectRef
+from xtuner.v1.rl.rollout.controller import RolloutController, WorkerInfo
 from xtuner.v1.train.rl_trainer import RLColocateTrainer, RLThroughputBenchmark
 
 
@@ -131,6 +133,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer._benchmark_start_time_s = 100.0
         trainer._benchmark_training_samples = 0
         trainer._benchmark_training_tokens = 0
+        trainer._rollout_config = SimpleNamespace(rollout_timeout=37.0)
         trainer._save_trajectories = MagicMock()
         trainer._sync_weights_and_save = MagicMock(
             side_effect=lambda train_step, step_timer_dict: train_step % trainer._sync_weights_interval == 0
@@ -142,6 +145,9 @@ class TestRLColocateTrainer(unittest.TestCase):
 
         trainer.rollout_controller = SimpleNamespace(
             offload=SimpleNamespace(remote=MagicMock(return_value="rollout_offloaded")),
+            ensure_workers_healthy_before_training=SimpleNamespace(
+                remote=MagicMock(return_value="rollout_ready_for_training")
+            ),
         )
         trainer.train_controller = SimpleNamespace(
             onload=MagicMock(return_value="train_onloaded"),
@@ -180,10 +186,11 @@ class TestRLColocateTrainer(unittest.TestCase):
 
         with (
             patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
         ):
             trainer.fit()
 
+        trainer.rollout_controller.ensure_workers_healthy_before_training.remote.assert_called_once_with()
         trainer.rollout_controller.offload.remote.assert_called_once_with()
         trainer.train_controller.onload.assert_called_once_with(target="all")
         trainer.train_controller.fit.assert_called_once()
@@ -199,7 +206,7 @@ class TestRLColocateTrainer(unittest.TestCase):
 
         with (
             patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
         ):
             with self.assertRaisesRegex(AssertionError, "return non-empty rollout_states"):
                 trainer.fit()
@@ -208,6 +215,179 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer.train_controller.onload.assert_not_called()
         trainer.train_controller.fit.assert_not_called()
         self.assertEqual(trainer._cur_step, 0)
+
+    def test_fit_does_not_onload_train_when_rollout_training_barrier_fails(self):
+        # 验证共卡训练进入训练前必须先通过 rollout phase-switch barrier；
+        # 失败时不能 onload 训练。
+        async def _produce_batch(batch_size, train_step, *, model_step):
+            return ProduceBatchResult(
+                rollout_states=[[SimpleNamespace(message_uid=train_step, uid=train_step)]]
+            )
+
+        trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch))
+        trainer.rollout_controller.ensure_workers_healthy_before_training.remote.side_effect = RuntimeError(
+            "inactive rollout workers before training"
+        )
+
+        with (
+            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "inactive rollout workers"):
+                trainer.fit()
+
+        trainer.rollout_controller.ensure_workers_healthy_before_training.remote.assert_called_once_with()
+        trainer.rollout_controller.offload.remote.assert_not_called()
+        trainer.train_controller.onload.assert_not_called()
+        trainer.train_controller.fit.assert_not_called()
+        self.assertEqual(trainer._cur_step, 0)
+
+    def test_fit_uses_real_rollout_controller_barrier_to_recover_before_next_rollout(self):
+        # Trainer 只负责调用真实 rollout controller barrier；
+        # recovery 细节由 RolloutController.ensure_workers_healthy_before_training 覆盖。
+        events = []
+        worker_url = "http://worker-0"
+        worker_state = {"healthy": True}
+        workers_info = {}
+
+        class _RemoteAction:
+            def __init__(self, action):
+                self.remote = MagicMock(side_effect=action)
+
+        def check_health():
+            is_healthy = worker_state["healthy"]
+            events.append(("check_health", workers_info[0].is_active, is_healthy))
+            return is_healthy
+
+        def shutdown():
+            events.append(("shutdown", workers_info[0].is_active))
+            self.assertFalse(workers_info[0].is_active)
+
+        def init(*args, **kwargs):
+            events.append(("init", args, kwargs, worker_url))
+            self.assertFalse(workers_info[0].is_active)
+            worker_state["healthy"] = True
+            return 0, worker_url
+
+        def init_dist_port():
+            events.append(("init_dist_port",))
+            return "127.0.0.1:12345"
+
+        def assert_worker_available(event_name):
+            self.assertEqual(workers_info[0].url, worker_url)
+            self.assertTrue(worker_state["healthy"])
+            self.assertTrue(workers_info[0].is_active)
+            events.append((event_name, worker_state["healthy"], workers_info[0].is_active, worker_url))
+
+        worker = SimpleNamespace(
+            check_health=_RemoteAction(check_health),
+            shutdown=_RemoteAction(shutdown),
+            init=_RemoteAction(init),
+            init_dist_port=_RemoteAction(init_dist_port),
+            offload=_RemoteAction(lambda: assert_worker_available("rollout_offload")),
+            onload_weights=_RemoteAction(lambda: assert_worker_available("rollout_onload_weights")),
+            onload_kvcache=_RemoteAction(lambda: assert_worker_available("rollout_onload_kvcache")),
+        )
+        workers_info[0] = WorkerInfo(actor=worker, url=worker_url, is_active=True)
+
+        controller = RolloutController.__new__(RolloutController)
+        controller.rank2info = workers_info
+        controller.worker_info_lock = threading.RLock()
+        controller.health_checker = SimpleNamespace(
+            pause=lambda: events.append(("health_pause",)),
+            resume=lambda: events.append(("health_resume",)),
+            stop=lambda: events.append(("health_stop",)),
+        )
+        controller.logger = MagicMock()
+
+        class _LocalRolloutControllerProxy:
+            def __init__(self, real_controller):
+                self.ensure_workers_healthy_before_training = _RemoteAction(
+                    real_controller.ensure_workers_healthy_before_training
+                )
+                self.offload = _RemoteAction(real_controller.offload)
+                self.onload_weights = _RemoteAction(real_controller.onload_weights)
+                self.onload_kvcache = _RemoteAction(real_controller.onload_kvcache)
+
+        rollout_controller = _LocalRolloutControllerProxy(controller)
+        produce_calls = []
+
+        async def _produce_batch(batch_size, train_step, *, model_step):
+            produce_calls.append((batch_size, train_step, model_step))
+            events.append(("rollout", train_step, worker_state["healthy"], workers_info[0].is_active, worker_url))
+            if train_step == 1:
+                worker_state["healthy"] = False
+                events.append(("worker_failed", train_step, worker_url))
+            else:
+                self.assertTrue(worker_state["healthy"])
+                self.assertTrue(workers_info[0].is_active)
+                self.assertEqual(workers_info[0].url, worker_url)
+            return ProduceBatchResult(
+                rollout_states=[[SimpleNamespace(message_uid=train_step, uid=train_step)]]
+            )
+
+        trainer = self._make_trainer(
+            SimpleNamespace(produce_batch=_produce_batch),
+            total_train_steps=2,
+            sync_weights_interval=10,
+        )
+        trainer.rollout_controller = rollout_controller
+        trainer.train_controller.onload = MagicMock(side_effect=lambda target: events.append(("train_onload", target)))
+        trainer.train_controller.fit = MagicMock(
+            side_effect=lambda *args, rollout_idx, **kwargs: events.append(("train_fit", rollout_idx)) or []
+        )
+
+        def sync_rollout_after_train(train_step, step_timer_dict):
+            events.append(("sync_after_train", train_step))
+            rollout_controller.onload_weights.remote()
+            rollout_controller.onload_kvcache.remote()
+            return False
+
+        trainer._sync_weights_and_save = MagicMock(side_effect=sync_rollout_after_train)
+
+        with (
+            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+        ):
+            trainer.fit()
+
+        self.assertEqual(produce_calls, [(1, 1, 0), (1, 2, 0)])
+        self.assertEqual(workers_info[0].url, worker_url)
+        self.assertTrue(worker_state["healthy"])
+        self.assertTrue(workers_info[0].is_active)
+        self.assertEqual([event[0] for event in events].count("init"), 1)
+        self.assertNotIn(("init_dist_port",), events)
+        self.assertEqual(trainer.train_controller.fit.call_count, 2)
+        self.assertEqual(trainer._cur_step, 2)
+        self.assertLess(
+            events.index(("worker_failed", 1, worker_url)),
+            events.index(("check_health", True, False)),
+        )
+        self.assertLess(events.index(("check_health", True, False)), events.index(("shutdown", False)))
+        self.assertLess(events.index(("shutdown", False)), events.index(("init", (), {}, worker_url)))
+        self.assertLess(
+            events.index(("init", (), {}, worker_url)),
+            events.index(("check_health", False, True)),
+        )
+        self.assertLess(
+            events.index(("check_health", False, True)),
+            events.index(("rollout_offload", True, True, worker_url)),
+        )
+        self.assertLess(
+            events.index(("rollout_offload", True, True, worker_url)),
+            events.index(("train_onload", "all")),
+        )
+        self.assertLess(events.index(("train_onload", "all")), events.index(("train_fit", 1)))
+        self.assertLess(events.index(("train_fit", 1)), events.index(("sync_after_train", 1)))
+        self.assertLess(
+            events.index(("rollout_onload_weights", True, True, worker_url)),
+            events.index(("rollout", 2, True, True, worker_url)),
+        )
+        self.assertLess(
+            events.index(("rollout_onload_kvcache", True, True, worker_url)),
+            events.index(("rollout", 2, True, True, worker_url)),
+        )
+        self.assertIn(("rollout", 2, True, True, worker_url), events)
 
     def test_fit_uses_sync_interval_and_passes_rollout_model_step(self):
         # 验证 rollout 看到的是按 sync interval 推进后的 model_step。
@@ -226,7 +406,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
         with (
             patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
         ):
             trainer.fit()
 
@@ -252,7 +432,7 @@ class TestRLColocateTrainer(unittest.TestCase):
 
         with (
             patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
         ):
             trainer.fit()
 
