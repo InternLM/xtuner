@@ -39,7 +39,7 @@ class _BatchJudger:
     def __init__(self):
         self.calls: list[list[RolloutState]] = []
 
-    async def judge(self, rollout_states):
+    async def batch_judge(self, rollout_states):
         self.calls.append(rollout_states)
         for state in rollout_states:
             state.reward = {"score": float(state.uid)}
@@ -47,7 +47,7 @@ class _BatchJudger:
 
 
 class _SlowJudger:
-    async def judge(self, rollout_states):
+    async def batch_judge(self, rollout_states):
         await asyncio.sleep(60)
         return rollout_states
 
@@ -75,7 +75,7 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         loop.sample_params = SampleParams(max_tokens=8, temperature=0.7)
         loop.judger = judger
         loop.enable_batch_judge = True
-        loop._pause_event = asyncio.Event()
+        loop._judger_pause_event = asyncio.Event()
         loop.logger = MagicMock()
         return loop
 
@@ -124,10 +124,10 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         loop = self._build_loop({1: Status.COMPLETED, 2: Status.COMPLETED}, judger=_SlowJudger())
         samples = [self._state(1), self._state(2)]
 
-        with patch("xtuner.v1.rl.agent_loop.single_turn_agent_loop.DEFAULT_JUDGER_CANCEL_TIMEOUT_S", 0.01):
+        with patch("xtuner.v1.rl.agent_loop.agent_loop.JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S", 0.01):
             task = asyncio.create_task(loop.run_judger(samples))
             await asyncio.sleep(0)
-            loop._pause_event.set()
+            loop._judger_pause_event.set()
             result = await task
 
         self.assertEqual([state.uid for state in result], [1, 2])

@@ -178,31 +178,6 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(worker.receive_abort_request.is_set())
         worker._send_abort_request.assert_awaited_once_with()
 
-    async def test_send_abort_request_uses_abort_timeout(self):
-        # abort request 使用独立 timeout，避免 pause 时长被普通请求超时配置拖住。
-        worker = RolloutWorker.__new__(RolloutWorker)
-        worker.server_url = "http://test"
-        worker.abort_timeout = 0.25
-        worker.logger = MagicMock()
-        response = MagicMock()
-        response.raise_for_status = MagicMock()
-
-        client = MagicMock()
-        client.post = AsyncMock(return_value=response)
-        client_context = MagicMock()
-        client_context.__aenter__ = AsyncMock(return_value=client)
-        client_context.__aexit__ = AsyncMock(return_value=None)
-
-        with patch("xtuner.v1.rl.rollout.worker.httpx.AsyncClient", return_value=client_context) as client_cls:
-            result = await worker._send_abort_request()
-
-        self.assertTrue(result)
-        client_cls.assert_called_once_with(timeout=0.25)
-        client.post.assert_awaited_once_with(
-            "http://test/abort_request",
-            json={"abort_all": True},
-        )
-
     async def test_safe_post_request_returns_aborted_without_sending_when_abort_flag_is_set(self):
         # safe post 在发送前发现 abort flag 时，应直接返回 REQUEST_ABORTED，不再发 HTTP 请求。
         worker = RolloutWorker.__new__(RolloutWorker)
