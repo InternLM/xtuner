@@ -163,7 +163,7 @@ class AgentInSandboxLoop(AgentLoop):
         try:
             rollout_item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
             if rollout_state.uid is None:
-                rollout_state.uid = uuid.uuid4()
+                rollout_state.uid = uuid.uuid4().int
             rollout_item.uid = rollout_state.uid
             rollout_item.group_id = rollout_state.message_uid
             result = await self._run_item(rollout_item)
