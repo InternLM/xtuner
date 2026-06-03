@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import ray
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.utils import get_logger
 
@@ -42,6 +42,8 @@ def _free_ray_refs(obj: Any):
 
 
 class TokenizedSegment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     text: str
     token_ids: List[int]
     labels: List[int] | None = Field(default=None, repr=False)
@@ -230,7 +232,7 @@ class RolloutTraceStore:
     def list_sessions(self) -> List[str]:
         """List all session ids currently stored in the actor."""
         return list(self.sessions.keys())
-        
+
     def keys(self, session_id: str) -> List[str]:
         """Get all keys (i.e., strings) stored in a session's Trie.
 
@@ -278,7 +280,7 @@ class RolloutTraceStore:
         assert session_id in self.sessions, f"Session ID '{session_id}' not found for release."
         trie = self.sessions.pop(session_id)
         trie.release()
-    
+
     def release_all(self):
         """Release all sessions and free associated resources."""
         for session_id in list(self.sessions):

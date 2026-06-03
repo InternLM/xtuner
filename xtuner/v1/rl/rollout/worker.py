@@ -78,7 +78,9 @@ class RolloutConfig(BaseModel):
         enable_chunked_prefill (bool): Enable chunked prefill for memory efficiency. Defaults to False.
         chunked_prefill_size (int): Chunk size for prefill operations. Defaults to 128.
         skip_load_weights (bool): Skip weight loading for rollout worker. Defaults to False.
-        rollout_timeout (float): Timeout duration in seconds for rollout requests. Defaults to 3600.0.
+        rollout_timeout (float): Timeout duration in seconds for rollout requests. Defaults to 1200.0.
+        session_server_timeout (float): Timeout duration in seconds for SessionServer requests forwarded to rollout
+            workers. Defaults to 1200.0.
         context_length (int): Context length for the rollout worker.
         launch_server_method (Literal["ray", "multiprocessing"]): Server launch method. Defaults to "ray".
         system_prompt (Optional[str]): System prompt to guide generation behavior. Defaults to None.
@@ -222,6 +224,13 @@ class RolloutConfig(BaseModel):
         Parameter(
             group=infer_group,
             help="Timeout duration (in seconds) for rollout requests.",
+        ),
+    ] = 1200.0
+    session_server_timeout: Annotated[
+        float,
+        Parameter(
+            group=infer_group,
+            help="Timeout duration (in seconds) for SessionServer requests forwarded to rollout workers.",
         ),
     ] = 1200.0
     context_length: Annotated[
@@ -606,6 +615,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 tokenizer_path=str(self.config.tokenizer_path or self.config.model_path),
                 host=self.host,
                 port=self.session_server_port,
+                request_timeout=self.config.session_server_timeout,
             )
         )
         self.session_server_url = ray.get(

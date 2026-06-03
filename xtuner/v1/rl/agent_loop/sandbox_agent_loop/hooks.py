@@ -284,9 +284,7 @@ class PickAgent(Hook):
 # Minimal __init__ replacements so vendored lagent doesn't eager-import
 # optional deps (pandas, etc.) that sandbox images may lack.
 _MINIMAL_ACTIONS_INIT = (
-    "from .action_executor import ActionExecutor, AsyncActionExecutor\n"
     "from .base_action import AsyncActionMixin, BaseAction, tool_api\n"
-    "from .builtin_actions import FinishAction, InvalidAction, NoAction\n"
     "from .parser import BaseParser, JsonParser, TupleParser\n"
 )
 _MINIMAL_HOOKS_INIT = "from .hook import Hook, RemovableHandle\n"
@@ -510,7 +508,7 @@ class _ParseError(RuntimeError):
 def _parse_stage_stdout(result: StageResult) -> tuple[float, dict[str, dict[str, float]]]:
     """Returns ``(score, criteria)`` or raises :class:`_ParseError`."""
     if result.return_code != 0:
-        raise _ParseError(f"return_code={result.return_code}: {result.stderr[:500]}")
+        raise _ParseError(f"return_code={result.return_code}: {result.stderr}")
     stdout = result.stdout.strip()
     if not stdout:
         raise _ParseError("empty stdout")
