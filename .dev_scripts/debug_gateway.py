@@ -57,8 +57,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cpu-memory-per-worker-gb", type=int, default=8)
     parser.add_argument("--context-length", type=int, default=32768)
     parser.add_argument("--dist-port-base", type=int, default=42000)
-    parser.add_argument("--api-host", default="127.0.0.1")
-    parser.add_argument("--api-port", type=int, default=30080)
     parser.add_argument("--worker-log-dir", default=str(DEFAULT_WORK_DIR / "worker_logs"))
     parser.add_argument("--placement-group-name", default="xtuner_debug_gateway_pg")
     parser.add_argument(
@@ -127,8 +125,6 @@ def build_rollout_config(args: argparse.Namespace):
         context_length=args.context_length,
         worker_log_dir=args.worker_log_dir,
         dist_port_base=args.dist_port_base,
-        api_host=args.api_host,
-        api_port=args.api_port,
         tool_call_parser=args.tool_call_parser,
         reasoning_parser=args.reasoning_parser,
     )
