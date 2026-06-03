@@ -59,7 +59,7 @@ from xtuner.v1.utils.env_check import get_rollout_engine_version
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 PG_READY_TIMEOUT = 30
-RL_TRAINER_RAY_GET_TIMEOUT = 600
+RL_TRAINER_RAY_GET_TIMEOUT = 3600
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
