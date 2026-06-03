@@ -97,8 +97,7 @@ class TestUpdateWeight(unittest.TestCase):
             pack_max_length=1024,
         )
 
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_lmdeploy_update_weight_and_generate(self):
+    def _run_colocate_update_weight_and_generate(self):
         # init train
         TrainingWorker = ray.remote(
             runtime_env={
@@ -116,7 +115,6 @@ class TestUpdateWeight(unittest.TestCase):
         train_controller = TrainingController(
             workers=train_workers,
         )
-        train_controller.set_train_rollout_mode("colocate")
         # fixed sample params
         sample_params = SampleParams(temperature=0.0, max_tokens=128, top_k=1)
 
@@ -129,7 +127,7 @@ class TestUpdateWeight(unittest.TestCase):
         
         # start update weight test
         info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
-        train_controller.update_rollout_info(info_dict)
+        train_controller.update_rollout_info(info_dict, train_rollout_mode="colocate")
         
         # update weights
         ray.get(rollout_controller.offload.remote())
@@ -144,11 +142,14 @@ class TestUpdateWeight(unittest.TestCase):
         self.assertEqual(res_update_weight.response, res_baseline.response)
         ray.get(rollout_controller.shutdown.remote(), timeout=60)
 
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    def test_lmdeploy_update_weight_and_generate(self):
+        self._run_colocate_update_weight_and_generate()
+
+    @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "sglang backend is not enabled")
+    def test_sglang_update_weight_and_generate(self):
+        self._run_colocate_update_weight_and_generate()
+
 
 if __name__ == "__main__":
-    test_instance = TestUpdateWeight()
-    test_instance.setUp()
-    try:
-        test_instance.test_lmdeploy_update_weight_and_generate()
-    finally:
-        test_instance.tearDown()
+    unittest.main()
