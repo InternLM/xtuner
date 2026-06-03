@@ -25,6 +25,7 @@ class GSM8KToolAgentLoopConfig(AgentLoopConfig):
             hf_checkpoint=self.hf_checkpoint,
             sample_params=self.sample_params,
             judger=judger,
+            enable_batch_judge=self.enable_batch_judge,
         )
 
 
@@ -43,9 +44,14 @@ class GSM8KToolAgentLoop(AgentLoop):
         hf_checkpoint: str,
         sample_params: SampleParams,
         judger: Judger | None = None,
+        enable_batch_judge: bool = False,
     ):
         super().__init__(
-            rollout_ctl=rollout_ctl, hf_checkpoint=hf_checkpoint, sample_params=sample_params, judger=judger
+            rollout_ctl=rollout_ctl,
+            hf_checkpoint=hf_checkpoint,
+            sample_params=sample_params,
+            judger=judger,
+            enable_batch_judge=enable_batch_judge,
         )
         self.max_turns = max_turns
         self.tool_call_pattern = re.compile(r"\n*<tool_call>(.*?)</tool_call>", re.DOTALL)
@@ -152,6 +158,6 @@ class GSM8KToolAgentLoop(AgentLoop):
         assert len(rollout_state.response_ids) == len(rollout_state.response_mask) == len(rollout_state.logprobs), (
             f"{len(rollout_state.response_ids)} vs {len(rollout_state.response_mask)} vs {len(rollout_state.logprobs)}"
         )
-        if self.judger is not None:
-            rollout_state = await self.judger.judge(rollout_state)
+        if self.judger is not None and not self.enable_batch_judge:
+            rollout_state = await self.run_judger(rollout_state)
         return rollout_state

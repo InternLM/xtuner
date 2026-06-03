@@ -60,6 +60,7 @@ from xtuner.v1.utils import (
     log_rank0,
     profile_time_and_memory,
     record_git_info,
+    set_deterministic,
 )
 from xtuner.v1.utils.check_health import check_health
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -1385,8 +1386,7 @@ class Trainer:
     def _set_deterministic(self):
         if XTUNER_DETERMINISTIC:
             log_rank0.info("Setting deterministic algorithms")
-            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-            torch.use_deterministic_algorithms(True, warn_only=True)
+            set_deterministic()
 
     def _set_random_seed(self, seed: int):
         set_random_seed(seed)

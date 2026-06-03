@@ -1,5 +1,5 @@
 name: ete_test
-run-name: 'e2e_test-${{ github.event.inputs.run_case }}'
+run-name: e2e_test-${{ github.event.inputs.run_case || 'all' }}
 permissions:
   contents: write
   pages: write
@@ -23,7 +23,7 @@ on:
         type: string
         default: 'all'
   schedule:
-    - cron:  '00 22 * * 0-4'
+    - cron:  '00 16 * * 0-5'
 env:
   CI_GPU_IMAGE_REGISTRY: ${{ secrets.CI_GPU_IMAGE_REGISTRY }}
 

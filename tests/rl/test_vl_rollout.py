@@ -32,20 +32,12 @@ class TestVLMRollout(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls) -> None:
         os.environ["XTUNER_USE_FA3"] = "1"
-        os.environ["LMD_SKIP_WARMUP"] = "1"
 
     @classmethod
     def tearDownClass(cls) -> None:
         del os.environ["XTUNER_USE_FA3"]
-        del os.environ["LMD_SKIP_WARMUP"]
 
     def init_config(self):
-        self.resources_cfg = AcceleratorResourcesConfig(
-            accelerator=resource_map[torch.accelerator.current_accelerator().type],
-            num_workers=8,
-            num_cpus_per_worker=8,
-            cpu_memory_per_worker=16 * 1024**3,  # 16 GB
-        )
         self.max_prompt_length = 1024
         self.max_response_length = 2048
         self.context_length = self.max_prompt_length + self.max_response_length
@@ -117,6 +109,7 @@ class TestVLMRollout(unittest.IsolatedAsyncioTestCase):
             enable_return_routed_experts=ep_size > 1, # ep_size > 1 默认打开r3
         )
         rollout_controller = rollout_config.build(pg)
+        await rollout_controller.get_ready_status.remote()
         result_refs = []
 
         # Test Case 1: 纯文本

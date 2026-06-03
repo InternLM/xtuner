@@ -114,7 +114,7 @@ judger_config = GSM8KJudgerConfig(
 )
 ```
 
-`judger_name` 需要和样本中的 `data_source` 对应。`cpu_resources` 表示该 Judger 使用 PG 外 Ray CPU actor 执行打分；如果不配置 `cpu_resources`，Judger 会在本地执行。打分后，训练流程会从 `RolloutState.reward["score"]` 读取分数并计算 advantage。
+`judger_name` 是该 Judger 的逻辑名称。使用单个 `JudgerConfig` 时，样本会直接交给这个 Judger 打分；使用 `ComposedJudgerConfig` 时，`RolloutState.data_source` 会用于选择 branch，字符串值或字典 key 需要和 `branches` 中的名称对应。`cpu_resources` 表示该 Judger 使用 PG 外 Ray CPU actor 执行打分；如果不配置 `cpu_resources`，Judger 会在本地执行。打分后，训练流程会从 `RolloutState.reward["score"]` 读取分数并计算 advantage。
 
 ### 1.4 AgentLoopConfig 和 AgentLoopManagerConfig
 

@@ -1,165 +1,172 @@
 from __future__ import annotations
 
-from copy import deepcopy
+import asyncio
 from typing import Callable, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.data_proto.rl_data import RolloutState
 
-from .native import Judger, JudgerConfig
+from .native import Judger, JudgerConfig, JudgerOutput
 
 
-SelectedJudgerKeys: TypeAlias = str | list[str] | None
-JudgerSelectFn: TypeAlias = Callable[[RolloutState, dict[str, Judger]], SelectedJudgerKeys]
+# Merge function contract for multi-branch composed judging:
+# - The first argument is the original rollout state.
+# - The second argument maps each selected branch key to that branch's raw judger output.
+# - The function must return the same shape as the input rollout state with ``reward`` populated.
 JudgerMergeFn: TypeAlias = Callable[
-    [RolloutState | list[RolloutState], dict[str, RolloutState | list[RolloutState]]],
+    [RolloutState | list[RolloutState], dict[str, JudgerOutput | list[JudgerOutput]]],
     RolloutState | list[RolloutState],
 ]
-
-
-def default_select_fn(rollout_state: RolloutState, branches: dict[str, Judger]) -> SelectedJudgerKeys:
-    """Default branch selector for ``ComposedJudgerConfig``.
-
-    Selection order is intentionally simple:
-    1. If ``rollout_state.data_source`` is a string and matches a branch key, use it.
-    2. Otherwise return ``None`` and let ``default_key`` or the single-branch fallback decide.
-
-    Users with task-specific routing logic should pass a custom ``select_fn`` instead of extending
-    this default heuristic.
-    """
-    data_source = rollout_state.data_source
-    if isinstance(data_source, str) and data_source in branches:
-        return data_source
-
-    return None
-
-
-def default_merge_fn(
-    original: RolloutState | list[RolloutState],
-    judged: dict[str, RolloutState | list[RolloutState]],
-) -> RolloutState | list[RolloutState]:
-    """Default merger for ``ComposedJudgerConfig``.
-
-    This merger intentionally does not combine multiple judger scores into a single aggregated value.
-    It writes the merged reward as ``{branch_name: score}``, where ``branch_name`` is the selected
-    key from ``ComposedJudgerConfig.branches`` and ``score`` is taken from each child judger's
-    ``reward["score"]``.
-
-    Supports both single ``RolloutState`` and batched ``list[RolloutState]`` inputs. In the batch
-    case, each element in the list represents a different response to the same prompt, and each
-    branch's judged result must be a list of the same length.
-
-    Users who need weighted sums, richer reward payloads, or custom post-processing should provide
-    their own ``merge_fn``.
-    """
-    if isinstance(original, list):
-        for name, state in judged.items():
-            if not isinstance(state, list):
-                raise TypeError(
-                    f"default_merge_fn: branch {name!r} returned a single RolloutState "
-                    "but original is a list. All branches must return lists when input is a list."
-                )
-            if len(state) != len(original):
-                raise ValueError(
-                    f"default_merge_fn: branch {name!r} returned {len(state)} states "
-                    f"but original has {len(original)} states."
-                )
-        results: list[RolloutState] = []
-        for i, orig in enumerate(original):
-            merged = orig.model_copy(deep=True)
-            merged.reward = {}
-            for name, states in judged.items():
-                assert isinstance(states, list)
-                state_i: RolloutState = states[i]
-                reward = state_i.reward
-                if reward is None or "score" not in reward:
-                    raise KeyError(f"Default merge_fn requires reward['score'] for branch {name!r}.")
-                merged.reward[name] = reward["score"]
-            results.append(merged)
-        return results
-    else:
-        merged = original.model_copy(deep=True)
-        merged.reward = {}
-        for name, state in judged.items():
-            if isinstance(state, list):
-                raise TypeError(
-                    f"default_merge_fn: branch {name!r} returned a list but original is a single RolloutState."
-                )
-            if state.reward is None or "score" not in state.reward:
-                raise KeyError(f"Default merge_fn requires reward['score'] for branch {name!r}.")
-            merged.reward[name] = state.reward["score"]
-        return merged
 
 
 class ComposedJudger(Judger):
     def __init__(
         self,
         branches: dict[str, Judger],
-        select_fn: JudgerSelectFn = default_select_fn,
-        merge_fn: JudgerMergeFn = default_merge_fn,
-        default_key: str | None = "default",
+        merge_fn: JudgerMergeFn | None = None,
     ):
+        super().__init__()
         if not branches:
             raise ValueError("ComposedJudger requires at least one branch.")
         self.branches = branches
-        self.select_fn = select_fn
+        # ``merge_fn=None`` is only valid for routing mode, where each sample
+        # selects exactly one branch and that branch's reward is passed through.
+        # If ``data_source`` selects multiple branches, callers must provide an
+        # explicit merge function because reward aggregation is task-specific.
         self.merge_fn = merge_fn
-        self.default_key = default_key
 
-    def _resolve_selected_keys(self, rollout_state: RolloutState | list[RolloutState]) -> list[str]:
-        if isinstance(rollout_state, list):
-            selected = self.select_fn(rollout_state[0], self.branches)
-        else:
-            selected = self.select_fn(rollout_state, self.branches)
-
-        if selected is None:
-            selected_keys: list[str] = []
-        elif isinstance(selected, str):
-            selected_keys = [selected]
-        else:
-            selected_keys = list(dict.fromkeys(selected))
-
-        if not selected_keys:
-            if self.default_key is not None and self.default_key in self.branches:
-                return [self.default_key]
-            if len(self.branches) == 1:
-                return [next(iter(self.branches))]
-            state = rollout_state[0] if isinstance(rollout_state, list) else rollout_state
-            raise KeyError(
-                f"ComposedJudger could not select a branch for task_name={state.task_name!r}, "
-                f"data_source={state.data_source!r}, available={sorted(self.branches)}"
+    def _select_keys_from_data_source(self, rollout_state: RolloutState) -> list[str]:
+        data_source = rollout_state.data_source
+        if data_source is None:
+            raise ValueError(
+                "ComposedJudger requires rollout_state.data_source to route judger branches. "
+                f"task_name={rollout_state.task_name!r}, available={sorted(self.branches)}"
             )
-        return selected_keys
+        if isinstance(data_source, str):
+            if data_source not in self.branches:
+                raise KeyError(
+                    f"Unknown judger branch from data_source: {data_source!r}, available={sorted(self.branches)}"
+                )
+            return [data_source]
+        if isinstance(data_source, dict):
+            if not data_source:
+                raise ValueError("ComposedJudger data_source dict must contain at least one judger branch.")
+            selected_keys = []
+            for key in data_source:
+                if not isinstance(key, str):
+                    raise TypeError(f"ComposedJudger data_source dict keys must be strings, got {key!r}.")
+                if key not in self.branches:
+                    raise KeyError(
+                        f"Unknown judger branch from data_source: {key!r}, available={sorted(self.branches)}"
+                    )
+                selected_keys.append(key)
+            return selected_keys
 
-    async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:  # type: ignore[override]
-        selected_keys = self._resolve_selected_keys(rollout_state)
+        raise TypeError(
+            "ComposedJudger data_source must be a branch name string or a dict of branch names "
+            f"got {type(data_source).__name__}: {data_source!r}. "
+            f"task_name={rollout_state.task_name!r}, available={sorted(self.branches)}"
+        )
 
-        judged: dict[str, RolloutState | list[RolloutState]] = {}
-        for key in selected_keys:
-            if key not in self.branches:
-                raise KeyError(f"Unknown judger branch: {key}, available={sorted(self.branches)}")
-            judged[key] = await self.branches[key].judge(deepcopy(rollout_state))
-        return self.merge_fn(rollout_state, judged)
+    async def _judge_branch(
+        self,
+        key: str,
+        rollout_state: RolloutState,
+    ) -> tuple[str, JudgerOutput]:
+        branch = self.branches[key]
+        payload = branch.preprocess(rollout_state)
+        output = await branch.judge_payload(payload)
+        if isinstance(output, list):
+            raise TypeError(f"Branch {key!r} returned a list output for one RolloutState.")
+        return key, output
+
+    async def _batch_judge_branch(
+        self,
+        key: str,
+        rollout_states: list[RolloutState],
+    ) -> tuple[str, list[JudgerOutput]]:
+        branch = self.branches[key]
+        payloads = [branch.preprocess(state) for state in rollout_states]
+        outputs = await branch.judge_payload(payloads)
+        if not isinstance(outputs, list):
+            raise TypeError(f"Branch {key!r} returned a single output for a rollout state list.")
+        if len(outputs) != len(rollout_states):
+            raise ValueError(f"Branch {key!r} returned {len(outputs)} outputs for {len(rollout_states)} states.")
+        return key, outputs
+
+    def _postprocess_branch_batch(
+        self,
+        branch: Judger,
+        rollout_states: list[RolloutState],
+        outputs: list[JudgerOutput],
+    ) -> list[RolloutState]:
+        return [branch.postprocess(state, output) for state, output in zip(rollout_states, outputs)]
+
+    async def judge(self, rollout_state: RolloutState) -> RolloutState:
+        selected_keys = self._select_keys_from_data_source(rollout_state)
+
+        if len(selected_keys) == 1:
+            key = selected_keys[0]
+            _, output = await self._judge_branch(key, rollout_state)
+            return self.branches[key].postprocess(rollout_state, output)
+
+        if self.merge_fn is None:
+            raise ValueError(
+                "ComposedJudger selected multiple branches but merge_fn is not provided. "
+                f"selected_keys={selected_keys!r}"
+            )
+
+        judged = dict[str, JudgerOutput | list[JudgerOutput]](
+            await asyncio.gather(*(self._judge_branch(key, rollout_state) for key in selected_keys))
+        )
+        merged = self.merge_fn(rollout_state, judged)
+        if isinstance(merged, list):
+            raise TypeError("ComposedJudger merge_fn returned a list for judge.")
+        return merged
+
+    async def batch_judge(self, rollout_states: list[RolloutState]) -> list[RolloutState]:
+        if not rollout_states:
+            raise ValueError("ComposedJudger requires at least one RolloutState when input is a list.")
+        selected_keys = self._select_keys_from_data_source(rollout_states[0])
+
+        if len(selected_keys) == 1:
+            key = selected_keys[0]
+            _, outputs = await self._batch_judge_branch(key, rollout_states)
+            return self._postprocess_branch_batch(self.branches[key], rollout_states, outputs)
+
+        if self.merge_fn is None:
+            raise ValueError(
+                "ComposedJudger selected multiple branches but merge_fn is not provided. "
+                f"selected_keys={selected_keys!r}"
+            )
+
+        judged = dict[str, JudgerOutput | list[JudgerOutput]](
+            await asyncio.gather(*(self._batch_judge_branch(key, rollout_states) for key in selected_keys))
+        )
+        merged = self.merge_fn(rollout_states, judged)
+        if not isinstance(merged, list):
+            raise TypeError("ComposedJudger merge_fn returned a single RolloutState for batch_judge.")
+        return merged
 
 
 class ComposedJudgerConfig(BaseModel):
     """Configuration for composing multiple judgers.
 
-    ``ComposedJudgerConfig`` routes each rollout to one or more branch judgers
-    and merges the branch outputs back into a single ``RolloutState``. It is
-    useful when different samples in the same task require different reward
-    functions or when multiple rewards must be computed together.
+    ``ComposedJudgerConfig`` routes rollout states through
+    ``RolloutState.data_source``. A string value selects one branch and passes
+    that branch output through as ``RolloutState.reward``. A dict value selects
+    multiple branches by key and requires ``merge_fn`` to define the final
+    reward shape.
 
     Args:
         branches (dict[str, JudgerConfig | ComposedJudgerConfig]): Mapping from
-            branch name to judger configuration.
-        select_fn (JudgerSelectFn): Function that selects which branch names to
-            execute for a rollout. Defaults to ``default_select_fn``.
-        merge_fn (JudgerMergeFn | None): Function that merges branch outputs
-            into the returned rollout state. Defaults to the built-in merger.
-        default_key (str | None): Fallback branch name used when ``select_fn``
-            returns None. Defaults to "default".
+            branch name to judger configuration. Branch names must match
+            ``RolloutState.data_source`` string values or dict keys.
+        merge_fn (JudgerMergeFn | None): Function that merges multiple branch
+            outputs into the returned rollout state. Required when ``data_source``
+            may select more than one branch. Leave as ``None`` only when every
+            sample selects exactly one branch.
 
     **Examples:**
 
@@ -170,21 +177,19 @@ class ComposedJudgerConfig(BaseModel):
                 "math": GSM8KJudgerConfig(),
                 "format": JudgerConfig(judger_name="format", reward_handler=format_reward),
             },
-            select_fn=select_judger_branch,
+            merge_fn=merge_rewards,
         )
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     branches: dict[str, JudgerConfigLike]
-    # ``select_fn`` chooses which branch keys should be executed for one sample.
-    # Return a single string for single-judger routing, a list of strings for multi-judger execution,
-    # or ``None`` to fall back to ``default_key`` / single-branch implicit fallback.
-    select_fn: JudgerSelectFn = Field(default=default_select_fn, exclude=True)
-    # ``merge_fn`` merges the judged rollout states back into one rollout state.
-    # The default implementation does not aggregate scores; it writes ``{branch_name: score}``.
+    # Branch routing is fixed to ``RolloutState.data_source``:
+    # - str selects one branch.
+    # - dict keys select multiple branches.
+    # ``merge_fn=None`` means single-branch pass-through only. If data_source
+    # may select multiple branches, this must be set explicitly.
     merge_fn: JudgerMergeFn | None = Field(default=None, exclude=True)
-    default_key: str | None = "default"
 
     def build(self) -> Judger:
         from .factory import build_judger

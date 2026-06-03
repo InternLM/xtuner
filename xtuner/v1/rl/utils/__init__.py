@@ -52,6 +52,19 @@ from .ray_utils import (
 )
 
 
+# Producer pause cleanup timeout after pause/abort has been sent. If pending
+# rollout tasks still have not returned after this, producer cancels them.
+PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S = 300.0
+
+# One agent_loop.pause() call, including Ray scheduling and rollout worker abort fanout.
+# Keep it below PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S so producer owns final cleanup.
+AGENT_LOOP_PAUSE_REQUEST_TIMEOUT_S = 30.0
+
+# SingleTurnAgentLoop judger grace period after pause. Judger work is not rollout backend
+# abort, so keep it short to avoid blocking weight sync on external reward calls.
+JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S = 10.0
+
+
 __all__ = [
     "AcceleratorResourcesConfig",
     "SingleAcceleratorWorker",
@@ -94,4 +107,7 @@ __all__ = [
     "chat_trace_records_to_rollout_states",
     "sort_rollout_state_for_deterministic",
     "find_free_ports",
+    "PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S",
+    "AGENT_LOOP_PAUSE_REQUEST_TIMEOUT_S",
+    "JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S",
 ]
