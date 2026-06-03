@@ -935,6 +935,7 @@ class BaseModel(nn.Module):
         self._barrier_async_hf()
         if file_finalize_callback is not None:
             file_finalize_callback(hf_dir)
+        log_rank0.info(f"[Async saving HF to {hf_dir}] finalized")
         self._barrier_async_hf()
         return hf_dir
 
