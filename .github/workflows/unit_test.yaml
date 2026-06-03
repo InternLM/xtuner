@@ -52,6 +52,7 @@ jobs:
           fi
 
           echo "$changed_files"
+          echo "only_rl=$only_rl"
           echo "only_rl=$only_rl" >> "$GITHUB_OUTPUT"
 
   lint:
@@ -97,4 +98,5 @@ jobs:
         else
           test_target="tests"
         fi
+        echo "test_target=$test_target"
         python ci/scripts/xtuner_unittest.py "$IMAGE_INNER/$IMAGE" "source ${{env.WORKSPACE_PREFIX}}/BASE_ENV.sh;source ci/scripts/CI_ENV.sh" "pytest $test_target"
