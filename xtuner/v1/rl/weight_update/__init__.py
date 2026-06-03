@@ -1,4 +1,3 @@
-from .client import RolloutWeightUpdateClient
 from .data import (
     DeviceMeshRaw,
     RolloutBackend,
@@ -9,7 +8,6 @@ from .data import (
     WeightTransportType,
     WeightUpdateBatch,
 )
-from .exporter import WeightExporter
 from .transport import (
     IPCBackendAdapter,
     IPCWeightTransport,
@@ -19,8 +17,10 @@ from .transport import (
     SGLangIPCBackendAdapter,
     SGLangNCCLBackendAdapter,
     WeightTransport,
+    WeightUpdateRequest,
 )
 from .update_weighter import UpdateWeighter
+from .weight_iterator import WeightIterator
 
 
 __all__ = [
@@ -33,14 +33,14 @@ __all__ = [
     "RolloutBackend",
     "RolloutEngineInfo",
     "RolloutWeightUpdateInfo",
-    "RolloutWeightUpdateClient",
     "SGLangIPCBackendAdapter",
     "SGLangNCCLBackendAdapter",
     "ServiceUrlMap",
     "TrainRolloutMode",
     "UpdateWeighter",
-    "WeightExporter",
+    "WeightIterator",
     "WeightTransportType",
     "WeightUpdateBatch",
+    "WeightUpdateRequest",
     "WeightTransport",
 ]
