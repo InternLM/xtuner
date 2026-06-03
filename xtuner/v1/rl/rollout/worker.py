@@ -586,7 +586,9 @@ class RolloutWorker(SingleAcceleratorWorker):
     def shutdown(self):
         """Shut down the worker, its server task, and any child processes."""
         if self.server_task is not None:
-            ray.cancel(self.server_task, force=True)
+            server_task = self.server_task
+            self._request_server_terminate()
+            ray.cancel(server_task, force=True, recursive=True)
             self.server_task = None
             return
 
@@ -609,6 +611,24 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.server_process = None
             self.logger.debug(f"Worker {self.rank} server process and its children terminated.")
             return
+
+    def _request_server_terminate(self) -> bool:
+        """Ask the inference server to terminate itself if it supports it."""
+        terminate_url = f"{self.server_url}/terminate"
+        try:
+            response = requests.get(terminate_url, timeout=5.0)
+        except requests.RequestException as e:
+            self.logger.debug(f"Worker {self.rank} terminate request failed for {terminate_url}: {e}")
+            return False
+
+        if response.status_code == 200:
+            self.logger.debug(f"Worker {self.rank} terminate request accepted by {terminate_url}.")
+            return True
+
+        self.logger.debug(
+            f"Worker {self.rank} terminate request to {terminate_url} returned status {response.status_code}."
+        )
+        return False
 
     async def pause_generation(self):
         """Pause the worker's generation process."""

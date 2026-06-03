@@ -223,6 +223,7 @@ class LMDeployWorker(RolloutWorker):
         # Therefore, each server only needs to handle 1 / dp_size of the total requests
         max_batch_size = self.config.rollout_max_batch_size_per_instance // dp_size
         distributed_executor_backend = lmdeploy_config_kwargs.get("distributed_executor_backend", "ray")
+        lmdeploy_config_kwargs["allow_terminate_by_client"] = True
         lmdeploy_config_kwargs["log_level"] = lmdeploy_config_kwargs.pop("log_level", "ERROR")
         lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "ERROR")
         lmdeploy_config_kwargs["tm_log_level"] = lmdeploy_config_kwargs.pop("tm_log_level", "ERROR")
