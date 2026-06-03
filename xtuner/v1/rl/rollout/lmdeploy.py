@@ -184,6 +184,24 @@ class LMDeployWorker(RolloutWorker):
         assert response.status_code == 200, response.status_code
         return response.text
 
+    def _request_server_terminate(self) -> bool:
+        """Ask the inference server to terminate itself if it supports it."""
+        terminate_url = f"{self.server_url}/terminate"
+        try:
+            response = requests.get(terminate_url, timeout=5.0)
+        except requests.RequestException as e:
+            self.logger.debug(f"Worker {self.rank} terminate request failed for {terminate_url}: {e}")
+            return False
+
+        if response.status_code == 200:
+            self.logger.debug(f"Worker {self.rank} terminate request accepted by {terminate_url}.")
+            return True
+
+        self.logger.debug(
+            f"Worker {self.rank} terminate request to {terminate_url} returned status {response.status_code}."
+        )
+        return False
+
     async def _decode_routed_experts(self, routed_experts: Any) -> Any:
         if isinstance(routed_experts, str):
             if self.lmdeploy_actor is None:
