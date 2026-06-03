@@ -1326,15 +1326,13 @@ class BaseRLTrainer:
                 trajectory_items.append(
                     {
                         "prompt": data.message,
-                        "raw_prompt": data.extra_fields.get("raw_prompt", None),
                         "response": response,
                         "response_len": response_len,
                         "label": ground_truth,
                         "reward": reward,
                         "finish_reason": data.finish_reason,
                         "error_msg": data.error_msg,
-                        "sandbox_status": data.extra_fields.get("sandbox_status", None),
-                        "eval_error": data.extra_fields.get("eval_error", False),
+                        "agent_status": data.extra_fields.get("agent_status", None),
                         "agent_trajectory": data.extra_fields.get("agent_trajectory", None),
                     }
                 )

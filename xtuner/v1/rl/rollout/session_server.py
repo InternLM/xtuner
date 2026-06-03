@@ -73,7 +73,7 @@ def _extract_output_logprobs(choice: dict, output_token_ids: list[int]) -> list[
     return [item[0] for item in output_token_logprobs]
 
 
-_SESSION_SERVER_ONLY_KEYS = {"session_id", "xtuner_skip_trace_store", "xtuner_trace_enabled"}
+_SESSION_SERVER_ONLY_KEYS = {"session_id"}
 
 
 def _bool_request_value(value: Any, default: bool = False) -> bool:
@@ -85,10 +85,6 @@ def _bool_request_value(value: Any, default: bool = False) -> bool:
 
 
 def _request_uses_trace_store(req_body: dict) -> bool:
-    if _bool_request_value(req_body.get("xtuner_skip_trace_store"), False):
-        return False
-    if "xtuner_trace_enabled" in req_body:
-        return _bool_request_value(req_body.get("xtuner_trace_enabled"), True)
     return _bool_request_value(req_body.get("return_token_ids"), True)
 
 
