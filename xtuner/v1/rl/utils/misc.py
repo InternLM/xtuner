@@ -4,6 +4,7 @@ import random
 import socket
 import time
 import typing
+import urllib.error
 import urllib.request
 import uuid
 from abc import ABC
@@ -413,6 +414,10 @@ def check_chat_completions(base_url: str, model: str) -> bool:
         print(f"      Usage: {usage}")
         print("      ✓ Chat completions endpoint OK.")
         return True
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        print(f"      ✗ Failed ({time.time() - t0:.2f}s): HTTP {e.code} {e.reason}: {body[:2000]}")
+        return False
     except Exception as e:
         print(f"      ✗ Failed ({time.time() - t0:.2f}s): {e}")
         return False
