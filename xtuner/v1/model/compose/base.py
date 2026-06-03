@@ -192,7 +192,21 @@ class BaseComposeModel(BaseModel):
         save_dtype: torch.dtype = torch.bfloat16,
         safetensors_prefix: str = "model",
         file_finalize_callback: Callable[[Path], None] | None = None,
-        fake_safetensors: bool = False,
+    ) -> AsyncHFSaveHandle:
+        return self._async_save_hf(
+            hf_dir=hf_dir,
+            save_dtype=save_dtype,
+            safetensors_prefix=safetensors_prefix,
+            file_finalize_callback=file_finalize_callback,
+        )
+
+    def _async_save_hf(
+        self,
+        hf_dir: Path | str,
+        save_dtype: torch.dtype = torch.bfloat16,
+        safetensors_prefix: str = "model",
+        file_finalize_callback: Callable[[Path], None] | None = None,
+        use_file_lock: bool = True,
     ) -> AsyncHFSaveHandle:
         self._get_async_hf_resources()
         if self._hf_path is None and self.config.hf_config is None:
@@ -212,7 +226,6 @@ class BaseComposeModel(BaseModel):
             if tmp_hf_dir.exists():
                 rmtree(tmp_hf_dir)
             tmp_hf_dir.mkdir(parents=True, exist_ok=True)
-        self._barrier_async_hf()
 
         module_file_to_names: list[tuple[BaseModel, list[tuple[str, list[str]]]]] = []
         merged_weight_map: dict[str, str] = {}
@@ -241,7 +254,7 @@ class BaseComposeModel(BaseModel):
             args=(
                 tmp_hf_dir,
                 module_file_to_names,
-                fake_safetensors,
+                use_file_lock,
             ),
             daemon=False,
         )
@@ -279,7 +292,7 @@ class BaseComposeModel(BaseModel):
         self,
         tmp_hf_dir: Path,
         module_file_to_names: list[tuple[BaseModel, list[tuple[str, list[str]]]]],
-        fake_safetensors: bool = False,
+        use_file_lock: bool = True,
     ) -> None:
         log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] started")
         try:
@@ -289,7 +302,7 @@ class BaseComposeModel(BaseModel):
                     hf_dir=tmp_hf_dir,
                     module=module,
                     file_to_names=file_to_names,
-                    fake_safetensors=fake_safetensors,
+                    use_file_lock=use_file_lock,
                 )
             log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] finished")
         except Exception as exc:
@@ -301,7 +314,7 @@ class BaseComposeModel(BaseModel):
         hf_dir: Path,
         module: BaseModel,
         file_to_names: list[tuple[str, list[str]]],
-        fake_safetensors: bool = False,
+        use_file_lock: bool = True,
     ) -> None:
         for filename, names in file_to_names:
             tensors: dict[str, torch.Tensor] = {}
@@ -313,7 +326,7 @@ class BaseComposeModel(BaseModel):
                 tensors[name] = cached_tensor
             module._write_hf_save_plan(
                 {"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]},
-                fake_safetensors=fake_safetensors,
+                use_file_lock=use_file_lock,
             )
 
     def post_micro_batch_forward(self, batch_outputs: Sequence[ModelOutputs]) -> BatchForwardInfo:

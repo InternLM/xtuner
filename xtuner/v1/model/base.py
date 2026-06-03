@@ -104,23 +104,8 @@ class AsyncHFSaveHandle:
             raise RuntimeError("Async HF commit future is not initialized")
         return cast(Path, self.commit_future.result(timeout=timeout))
 
-    def cancel(self) -> bool:
-        if self.commit_future is None:
-            return False
-        return self.commit_future.cancel()
-
     def done(self) -> bool:
         return self.commit_future is not None and self.commit_future.done()
-
-    def exception(self, timeout: float | None = None) -> BaseException | None:
-        if self.commit_future is None:
-            return None
-        return self.commit_future.exception(timeout=timeout)
-
-    def add_done_callback(self, fn: Callable[[Future], None]) -> None:
-        if self.commit_future is None:
-            raise RuntimeError("Async HF commit future is not initialized")
-        self.commit_future.add_done_callback(fn)
 
 
 @dataclass
@@ -725,13 +710,6 @@ class BaseModel(nn.Module):
             if dist.is_initialized():
                 finalize_pg = dist.new_group(backend="gloo")
                 dist.barrier(group=finalize_pg)
-                rank = dist.get_rank()
-                world_size = dist.get_world_size()
-                gathered: list[Any] = [None for _ in range(world_size)]
-                dist.all_gather_object(gathered, {"rank": rank, "ok": True}, group=finalize_pg)
-
-            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="async-hf-finalize-probe") as probe_executor:
-                probe_executor.submit(lambda: None).result()
 
             self._async_hf_resources = AsyncHFResources(
                 finalize_pg=finalize_pg,
@@ -831,18 +809,18 @@ class BaseModel(nn.Module):
         safetensors_prefix: str = "model",
     ) -> None:
         rank = dist.get_rank() if dist.is_initialized() else 0
-        warmup_hf_dir = warmup_hf_dir / f".xtuner_async_hf_warmup_rank{rank}"
+        warmup_hf_dir = warmup_hf_dir / ".hf-warmup"
 
         if rank == 0:
             if warmup_hf_dir.exists():
                 rmtree(warmup_hf_dir)
         self._barrier_async_hf()
 
-        handle = self.async_save_hf(
+        handle = self._async_save_hf(
             hf_dir=warmup_hf_dir,
             save_dtype=save_dtype,
             safetensors_prefix=safetensors_prefix,
-            fake_safetensors=True,
+            use_file_lock=False,
         )
         cache_tensors, cache_bytes = self._async_hf_tensor_cache_stats()
         all_cache_stats = cast(
@@ -882,7 +860,21 @@ class BaseModel(nn.Module):
         save_dtype: torch.dtype = torch.bfloat16,
         safetensors_prefix: str = "model",
         file_finalize_callback: Callable[[Path], None] | None = None,
-        fake_safetensors: bool = False,
+    ) -> AsyncHFSaveHandle:
+        return self._async_save_hf(
+            hf_dir=hf_dir,
+            save_dtype=save_dtype,
+            safetensors_prefix=safetensors_prefix,
+            file_finalize_callback=file_finalize_callback,
+        )
+
+    def _async_save_hf(
+        self,
+        hf_dir: Path | str,
+        save_dtype: torch.dtype = torch.bfloat16,
+        safetensors_prefix: str = "model",
+        file_finalize_callback: Callable[[Path], None] | None = None,
+        use_file_lock: bool = True,
     ) -> AsyncHFSaveHandle:
         self._get_async_hf_resources()
         if self._hf_path is None and self.config.hf_config is None:
@@ -902,7 +894,6 @@ class BaseModel(nn.Module):
             if tmp_hf_dir.exists():
                 rmtree(tmp_hf_dir)
             tmp_hf_dir.mkdir(parents=True, exist_ok=True)
-        self._barrier_async_hf()
 
         file_to_names, weight_map = self._prepare_async_hf_snapshot(
             save_dtype=save_dtype,
@@ -921,7 +912,7 @@ class BaseModel(nn.Module):
             args=(
                 tmp_hf_dir,
                 file_to_names,
-                fake_safetensors,
+                use_file_lock,
             ),
             daemon=False,
         )
@@ -949,7 +940,7 @@ class BaseModel(nn.Module):
         self,
         tmp_hf_dir: Path,
         file_to_names: list[tuple[str, list[str]]],
-        fake_safetensors: bool = False,
+        use_file_lock: bool = True,
     ) -> None:
         log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] started")
         try:
@@ -957,7 +948,7 @@ class BaseModel(nn.Module):
             self._write_async_hf_snapshot(
                 hf_dir=tmp_hf_dir,
                 file_to_names=file_to_names,
-                fake_safetensors=fake_safetensors,
+                use_file_lock=use_file_lock,
             )
             log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] finished")
         except Exception as exc:
@@ -1910,40 +1901,32 @@ class BaseModel(nn.Module):
             if unique_name_list:
                 yield safetensor_name, unique_name_list, unique_hf_tensor_list
 
-    def _write_hf_save_plan(self, save_plan: _HFSavePlan, fake_safetensors: bool = False) -> list[str]:
+    def _write_hf_save_plan(self, save_plan: _HFSavePlan, use_file_lock: bool = True) -> list[str]:
         written_files: list[str] = []
         for safetensor_name, tensors in save_plan["save_tasks"]:
             filename = save_plan["hf_dir"] / safetensor_name
-            if fake_safetensors:
-                self._save_fake_hf_safetensors_file(tensors=tensors, filename=filename)
-            else:
-                self._save_hf_safetensors_file(
-                    tensors=tensors,
-                    filename=filename,
-                    hf_dir=save_plan["hf_dir"],
-                )
+            self._save_hf_safetensors_file(
+                tensors=tensors,
+                filename=filename,
+                hf_dir=save_plan["hf_dir"],
+                use_file_lock=use_file_lock,
+            )
             if tensors:
                 written_files.append(safetensor_name)
         return written_files
 
-    @staticmethod
-    def _save_fake_hf_safetensors_file(tensors: dict[str, torch.Tensor], filename: Path) -> None:
+    def _save_hf_safetensors_file(
+        self,
+        tensors: dict[str, torch.Tensor],
+        filename: Path,
+        hf_dir: Path,
+        use_file_lock: bool = True,
+    ) -> None:
         if not tensors:
             return
 
-        filename.parent.mkdir(parents=True, exist_ok=True)
-        total_bytes = sum(tensor.numel() * tensor.element_size() for tensor in tensors.values())
-        chunk_size = 64 * 1024 * 1024
-        chunk = b"\0" * min(chunk_size, max(total_bytes, 1))
-        remaining = total_bytes
-        with filename.open("wb") as f:
-            while remaining > 0:
-                nbytes = min(len(chunk), remaining)
-                f.write(chunk[:nbytes])
-                remaining -= nbytes
-
-    def _save_hf_safetensors_file(self, tensors: dict[str, torch.Tensor], filename: Path, hf_dir: Path) -> None:
-        if not tensors:
+        if not use_file_lock:
+            _save_file(tensors, filename)
             return
 
         lock_slots = get_async_hf_save_file_lock_slots()
@@ -2001,7 +1984,7 @@ class BaseModel(nn.Module):
         self,
         hf_dir: Path,
         file_to_names: list[tuple[str, list[str]]],
-        fake_safetensors: bool = False,
+        use_file_lock: bool = True,
     ) -> None:
         for filename, names in file_to_names:
             tensors: dict[str, torch.Tensor] = {}
@@ -2013,7 +1996,7 @@ class BaseModel(nn.Module):
                 tensors[name] = cached_tensor
             self._write_hf_save_plan(
                 {"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]},
-                fake_safetensors=fake_safetensors,
+                use_file_lock=use_file_lock,
             )
 
     def _write_hf_non_weight_files(self, hf_dir: Path) -> None:
