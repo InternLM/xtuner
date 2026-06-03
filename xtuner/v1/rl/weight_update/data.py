@@ -31,6 +31,11 @@ class RolloutWeightUpdateInfo:
     rollout_server_url_dict: ServiceUrlMap = field(default_factory=dict)
     worker_server_urls_status: dict[str, bool] = field(default_factory=dict)
 
+    # Used for external weight update NCCL group communication.
+    weight_update_host: str | None = None
+    weight_update_port: int | None = None
+    weight_update_port_base: int = 37000
+
 
 @dataclass
 class WeightUpdateBatch:

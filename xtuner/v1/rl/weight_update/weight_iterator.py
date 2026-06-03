@@ -21,7 +21,7 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 
-class WeightExporter:
+class WeightIterator:
     def __init__(
         self,
         *,
@@ -35,6 +35,26 @@ class WeightExporter:
         self.rollout_info = rollout_info
         self._global_hf_keys_mapping_cache = global_hf_keys_mapping_cache
 
+    def iter_batch_groups(self):
+        # Export path depends on rollout protocol: turbomind consumes layer-wise batches,
+        # compose models update submodules in order, and plain models use HF-style batches.
+        if self.rollout_info.train_rollout_mode == "colocate" and self.rollout_info.backend == "turbomind":
+            yield self.iter_layer_batches()
+            return
+
+        if isinstance(self.config.model_cfg, BaseComposeConfig):
+            # Only the last compose submodule sends the final update marker.
+            submodules = (
+                ("language_model", False),
+                ("vision_tower", False),
+                ("multi_modal_projector", True),
+            )
+            for submodule, final_update in submodules:
+                yield self.iter_hf_batches(submodule=submodule, final_update=final_update)
+            return
+
+        yield self.iter_hf_batches(final_update=True)
+
     def _get_hf_params(
         self,
         model,
@@ -42,6 +62,7 @@ class WeightExporter:
         target_ep_size: int,
         target_ep_rank: int,
         fsdp_tensor_list: list[tuple[torch.Tensor, LoadSpec]],
+        should_gather_train_ep_shards: bool,
     ) -> tuple[list[torch.Tensor], list[str]]:
         hf_keys_list: list[str] = []
         hf_tensor_list: list[torch.Tensor] = []
@@ -66,6 +87,18 @@ class WeightExporter:
             # FUSED load specs pack multiple HF tensors along load_spec.dim; split them
             # back into HF tensors before selecting the target rollout EP shard.
             dim = cast(int, load_spec.dim)
+
+            if should_gather_train_ep_shards and model_ep_size > 1:
+                assert model.ep_mesh is not None
+                ep_group = model.ep_mesh.get_group()
+                gathered_tensors = [torch.empty_like(fused_full_tensor) for _ in range(model_ep_size)]
+                dist.all_gather(
+                    gathered_tensors,
+                    fused_full_tensor.contiguous(),
+                    group=ep_group,
+                )
+                fused_full_tensor = torch.cat(gathered_tensors, dim=dim)
+
             num_split = len(hf_keys)
             hf_tensor_size = fused_full_tensor.shape[dim] / num_split
             assert hf_tensor_size.is_integer(), "Internal Error, hf_tensor_size is not integer"
@@ -87,7 +120,14 @@ class WeightExporter:
 
         return hf_tensor_list, hf_keys_list
 
-    def _rl_get_fused_ep_hf_param(self, model: MoE, target_ep_rank: int, target_ep_size: int, bucket_size: int):
+    def _rl_get_fused_ep_hf_param(
+        self,
+        model: MoE,
+        target_ep_rank: int,
+        target_ep_size: int,
+        bucket_size: int,
+        should_gather_train_ep_shards: bool,
+    ):
         fused_param_groups: list[tuple[torch.Tensor, LoadSpec]] = model._group_param_by_load_spec(LoadEnum.FUSED)
         model_ep_size = 1 if model.fsdp_config is None else model.fsdp_config.ep_size
         if not fused_param_groups:
@@ -106,6 +146,7 @@ class WeightExporter:
                     target_ep_size=target_ep_size,
                     target_ep_rank=target_ep_rank,
                     fsdp_tensor_list=tensor_list,
+                    should_gather_train_ep_shards=should_gather_train_ep_shards,
                 )
                 yield name_list, hf_params
                 safetensor_size = tensor_size
@@ -124,14 +165,13 @@ class WeightExporter:
                 target_ep_size=target_ep_size,
                 target_ep_rank=target_ep_rank,
                 fsdp_tensor_list=tensor_list,
+                should_gather_train_ep_shards=should_gather_train_ep_shards,
             )
             yield name_list, hf_params
 
     @torch.no_grad()
     def iter_hf_batches(self, submodule=None, final_update=False):
         """Update the model weights."""
-        rollout_device_mesh = self.rollout_info.rollout_device_mesh
-        assert rollout_device_mesh is not None
 
         model = self._engine.model
         if submodule:
@@ -147,22 +187,31 @@ class WeightExporter:
         )
 
         train_enable_ep = model.fsdp_config is not None and model.fsdp_config.ep_size > 1
+        should_gather_train_ep_shards = self.rollout_info.train_rollout_mode == "disaggregated" and train_enable_ep
+
         if train_enable_ep:
-            # Remap train EP shards to the rollout EP topology. Non-EP rollout receives
-            # the full fused tensor slice as target_ep_size=1.
-            if self.rollout_info.ep > 1:
+            if self.rollout_info.train_rollout_mode == "colocate" and self.rollout_info.ep > 1:
+                rollout_device_mesh = self.rollout_info.rollout_device_mesh
+                assert rollout_device_mesh is not None
+                # Colocated IPC can send only the expert slice needed by the local rollout
+                # EP rank
                 fused_gen = self._rl_get_fused_ep_hf_param(
                     model,
                     target_ep_rank=rollout_device_mesh["engine_parallel"].get_coordinate()[0],
                     target_ep_size=rollout_device_mesh["engine_parallel"].size(),
                     bucket_size=bucket_size,
+                    should_gather_train_ep_shards=should_gather_train_ep_shards,
                 )
             else:
+                # Disaggregated NCCL uses one trainer-side broadcast for all rollout ranks.
+                # Gather train EP shards first, then send the full expert tensor instead of
+                # slicing by rollout EP rank.
                 fused_gen = self._rl_get_fused_ep_hf_param(
                     model,
                     target_ep_rank=0,
                     target_ep_size=1,
                     bucket_size=bucket_size,
+                    should_gather_train_ep_shards=should_gather_train_ep_shards,
                 )
         else:
             fused_gen = model._get_fused_hf_param(
