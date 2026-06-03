@@ -870,8 +870,7 @@ class UpdateWeighter:
             if state_dict:
                 names = list(state_dict.keys())
                 tensors = [
-                    tensor.detach().to(device=DEVICE, non_blocking=True).contiguous()
-                    for tensor in state_dict.values()
+                    tensor.detach().to(device=DEVICE, non_blocking=True).contiguous() for tensor in state_dict.values()
                 ]
                 payload = {
                     "names": names,
@@ -928,8 +927,7 @@ class UpdateWeighter:
                     response.raise_for_status()
                     result = response.json()
                     assert result.get("success", True), (
-                        f"LMDeploy update_weights_from_distributed (finalize) failed: "
-                        f"{result.get('message', result)}"
+                        f"LMDeploy update_weights_from_distributed (finalize) failed: {result.get('message', result)}"
                     )
         dist.barrier(group=train_sync_group)
 
