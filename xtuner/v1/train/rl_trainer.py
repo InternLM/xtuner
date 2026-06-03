@@ -24,6 +24,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import get_store
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
     ProduceBatchResult,
@@ -56,7 +57,7 @@ from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 from xtuner.v1.utils.env_check import get_rollout_engine_version
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import get_store
+
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 PG_READY_TIMEOUT = 30
@@ -1399,6 +1400,18 @@ def add_apiproxy(self):
     info_dict = ray.get(self.rollout_controller.get_rollout_metadata.remote())
     model_name = info_dict["rollout_config"].model_name
 
+    def _check_chat_completions_with_retry(base_url: str, max_attempts: int = 5, interval: float = 3.0) -> bool:
+        for attempt in range(1, max_attempts + 1):
+            if check_chat_completions(base_url, model_name):
+                return True
+            if attempt < max_attempts:
+                self.logger.warning(
+                    f"check chat completions failed for {base_url}, "
+                    f"retrying {attempt}/{max_attempts - 1} after {interval}s"
+                )
+                time.sleep(interval)
+        return False
+
     delete_from_routedapiproxy(model_name)
     self.logger.info(f"deleted {model_name} from routedapiproxy")
     self.logger.info("registering to routedapiproxy")
@@ -1411,13 +1424,13 @@ def add_apiproxy(self):
         register_to_routedapiproxy(model_name, worker_session_url)
 
         # test server url
-        recheck_status_orig = check_chat_completions(worker_session_url, model_name)
+        recheck_status_orig = _check_chat_completions_with_retry(worker_session_url)
         if not recheck_status_orig:
             raise ValueError(f"check chat completions failed for {worker_session_url}")
 
     # test routed url
     routed_url = "http://s-20260104203038-22bhb.ailab-evalservice.pjh-service.org.cn/v1"
-    recheck_status_routed = check_chat_completions(routed_url, model_name)
+    recheck_status_routed = _check_chat_completions_with_retry(routed_url)
     if not recheck_status_routed:
         raise ValueError(f"check chat completions failed for {routed_url}")
     self.logger.info("registered to routedapiproxy")
@@ -1482,8 +1495,6 @@ class RLColocateTrainer(BaseRLTrainer):
         # self._maybe_start_gateway(cfg)
         bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
 
-        add_apiproxy(self)
-
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)
         if checkpoint_path is not None:
@@ -1494,6 +1505,8 @@ class RLColocateTrainer(BaseRLTrainer):
 
         if self._rollout_config.skip_load_weights:
             self._sync_weights_from_train_workers()
+
+        add_apiproxy(self)
 
     def _sync_weights_from_train_workers(self) -> None:
         self.logger.info("Rollout workers skip load weights, update weights from train workers.")

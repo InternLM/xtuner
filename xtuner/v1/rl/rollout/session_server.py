@@ -5,12 +5,72 @@ from typing import Any, Optional
 
 import numpy as np
 import ray
-from aiohttp import ClientSession, web
-from transformers import AutoTokenizer
+from aiohttp import ClientConnectionResetError, ClientSession, ClientTimeout, web
 
+from transformers import AutoTokenizer
 from xtuner.v1.utils import get_logger
 
+from .chat_template import canonicalize_messages_for_chat_template
 from .trace_store import TokenizedSegment, get_store
+
+
+def _is_error_payload(payload: dict) -> bool:
+    return payload.get("error") is not None or payload.get("type") == "error" or payload.get("object") == "error"
+
+
+def _lmdeploy_error_payload(message: str, status: int = 500, error_type: str = "internal_server_error") -> dict:
+    return {
+        "message": message,
+        "type": error_type,
+        "code": status,
+        "object": "error",
+    }
+
+
+def _stream_has_traceable_choices(raw: bytes) -> bool:
+    text = raw.decode("utf-8", errors="replace")
+    has_choices = False
+    saw_done = False
+    saw_terminal_finish = False
+    for line in text.split("\n"):
+        line = line.strip()
+        if line == "data: [DONE]":
+            saw_done = True
+            continue
+        if line.startswith("data: "):
+            try:
+                event = json.loads(line[6:])
+            except json.JSONDecodeError:
+                return False
+            if _is_error_payload(event):
+                return False
+            if event.get("choices"):
+                if any(choice.get("finish_reason") == "error" for choice in event.get("choices", [])):
+                    return False
+                if any(choice.get("finish_reason") for choice in event.get("choices", [])):
+                    saw_terminal_finish = True
+                has_choices = True
+    return has_choices and saw_done and saw_terminal_finish
+
+
+def _extract_output_logprobs(choice: dict, output_token_ids: list[int]) -> list[float]:
+    if not output_token_ids:
+        return []
+
+    output_token_logprobs = choice.get("output_token_logprobs")
+    if output_token_logprobs is None:
+        raise RuntimeError(
+            "SessionServer response choice has no output_token_logprobs; "
+            "the return_logprob protocol is required for training traces."
+        )
+
+    logprob_token_ids = [item[1] for item in output_token_logprobs]
+    if logprob_token_ids != output_token_ids:
+        raise RuntimeError(
+            "SessionServer response choice has mismatched output_token_logprobs: "
+            f"output_ids_len={len(output_token_ids)}, logprob_ids_len={len(logprob_token_ids)}"
+        )
+    return [item[0] for item in output_token_logprobs]
 
 
 class SessionServer:
@@ -30,6 +90,7 @@ class SessionServer:
         tokenizer_path (str): The path to the tokenizer model.
         host (str): Host for this session server to listen on.
         port (int): Port for this session server to listen on.
+        request_timeout (float): Total timeout in seconds for forwarding requests to the worker.
         read_bufsize (int): Buffer limit for line reader in ClientSession. Default is 64MB (2**26).
     """
 
@@ -39,12 +100,14 @@ class SessionServer:
         tokenizer_path: str,
         host: str = "127.0.0.1",
         port: int = 8080,
+        request_timeout: float = 1200.0,
         read_bufsize: int = 2**26,
     ):
         self.worker_base_url = worker_base_url.rstrip("/")
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
         self.host = host
         self.port = port
+        self.request_timeout = request_timeout
         self.read_bufsize = read_bufsize
         self.store = get_store()
         self.stop_word = self.tokenizer.eos_token or ""
@@ -60,13 +123,16 @@ class SessionServer:
         session_id = req_body["session_id"]
         # 1. chat_template render 出完整 prompt string，不 tokenize 全量
         prompt_text = self.tokenizer.apply_chat_template(
-            req_body["messages"], tools=req_body.get("tools", None), add_generation_prompt=True, tokenize=False
+            canonicalize_messages_for_chat_template(req_body["messages"]),
+            tools=req_body.get("tools", None),
+            add_generation_prompt=True,
+            tokenize=False,
         )
 
         # 2. Store 做 string prefix match。
         prefix, nodes = await self.store.search.remote(session_id, prompt_text, filter_none=True)
         if prefix:
-            get_logger().info(f"Hit prefix cache for session {session_id}")
+            get_logger().debug(f"Hit prefix cache for session {session_id}")
         delta, delta_ids = prompt_text[len(prefix) :], []
         if delta:
             delta_ids = self.tokenizer.encode(delta, add_special_tokens=False)
@@ -75,12 +141,12 @@ class SessionServer:
 
         # 3. 组装 OpenAI chat completions 请求。
         worker_req = {
-            **{k: v for k, v in req_body.items() if k not in ["session_id", "messages"]},
+            **{k: v for k, v in req_body.items() if k not in ["session_id", "messages", "logprobs", "top_logprobs"]},
             "messages": [],
             "input_ids": input_ids,
             "return_token_ids": True,
             "return_routed_experts": True,
-            "logprobs": True,
+            "return_logprob": True,
             "include_stop_str_in_output": True,
         }
         return worker_req
@@ -93,20 +159,27 @@ class SessionServer:
         tools = worker_resp["tools"]
         choice = worker_resp["choices"][0]
 
-        output_token_ids = choice["output_ids"]  # len = N_out
-        if choice.get("logprobs") and choice["logprobs"].get("content"):
-            output_logprobs = [item.get("logprob", 0.0) for item in choice["logprobs"]["content"]]
-        else:
-            output_logprobs = [0.0] * len(output_token_ids)
+        output_token_ids = choice.get("output_ids")  # len = N_out
+        if output_token_ids is None:
+            raise RuntimeError(
+                "SessionServer response choice has no output_ids; "
+                "cannot export a training trace for this assistant turn."
+            )
+        output_logprobs = _extract_output_logprobs(choice, output_token_ids)
         raw_routed_expert = choice.get("routed_experts")  # 本次 call 的 raw routed_expert，可为 None
 
         # 2. Store 把 input_delta / assistant_output 两个节点补齐字段。
         old_prompt = self.tokenizer.apply_chat_template(
-            messages, tools=tools, add_generation_prompt=True, tokenize=False
+            canonicalize_messages_for_chat_template(messages), tools=tools, add_generation_prompt=True, tokenize=False
         )
-        messages.append(choice["message"])
+        messages = [*messages, choice["message"]]
         new_prompt = (
-            self.tokenizer.apply_chat_template(messages, tools=tools, add_generation_prompt=False, tokenize=False)
+            self.tokenizer.apply_chat_template(
+                canonicalize_messages_for_chat_template(messages),
+                tools=tools,
+                add_generation_prompt=False,
+                tokenize=False,
+            )
         ).rstrip()
         assert new_prompt.startswith(old_prompt) and new_prompt.endswith(self.stop_word)
 
@@ -123,7 +196,7 @@ class SessionServer:
             # last node in nodes corresponds to the delta inserted in on_request (if any)
             if nodes:
                 delta_node_val: TokenizedSegment = nodes[-1].value
-                delta_len = delta_node_val.length
+                delta_len = len(delta_node_val.token_ids)
                 prefix_len = sum(len(n.value.token_ids) for n in nodes[:-1])
                 assert prefix_len + delta_len + len(output_token_ids) == len(raw_routed_expert)
 
@@ -192,13 +265,12 @@ class SessionServer:
         # Read the request body
         request_body = await request.read()
         request_data = session_id = messages = None
-        orig_logprobs = orig_return_token_ids = orig_return_routed_experts = False
-
+        orig_return_logprob = orig_return_token_ids = orig_return_routed_experts = False
         if request_body:
             try:
                 request_data = json.loads(request_body)
 
-                orig_logprobs = request_data.get("logprobs", False)
+                orig_return_logprob = request_data.get("return_logprob", False)
                 orig_return_token_ids = request_data.get("return_token_ids", False)
                 orig_return_routed_experts = request_data.get("return_routed_experts", False)
 
@@ -212,6 +284,10 @@ class SessionServer:
                 request_body = json.dumps(request_data).encode("utf-8")
             except json.JSONDecodeError:
                 pass
+            except Exception as exc:
+                message = f"SessionServer request hook failed: {type(exc).__name__}: {exc}"
+                get_logger().error(message)
+                return web.json_response(_lmdeploy_error_payload(message), status=500)
 
         # Build forwarding headers, dropping original Host
         forward_headers = dict(request.headers)
@@ -231,7 +307,7 @@ class SessionServer:
         def _clean_data(data: dict) -> bool:
             modified = False
             for key, drop in [
-                ("logprobs", not orig_logprobs),
+                ("output_token_logprobs", not orig_return_logprob),
                 ("output_ids", not orig_return_token_ids),
                 ("routed_experts", not orig_return_routed_experts),
             ]:
@@ -243,6 +319,11 @@ class SessionServer:
                         if key in c:
                             c.pop(key)
                             modified = True
+
+            for c in data.get("choices", []):
+                if "logprobs" in c:
+                    c.pop("logprobs")
+                    modified = True
 
             for c in data.get("choices", []):
                 if c.get("message") and isinstance(c["message"].get("content"), str):
@@ -260,7 +341,8 @@ class SessionServer:
         # read_bufsize controls StreamReader's line buffer limit; SSE events with large
         # tool_calls/reasoning_content payloads can exceed the 64KB default and trigger
         # "Chunk too big" from readuntil(b"\n").
-        async with ClientSession(read_bufsize=self.read_bufsize) as client:
+        timeout = ClientTimeout(total=self.request_timeout, sock_connect=30)
+        async with ClientSession(read_bufsize=self.read_bufsize, timeout=timeout) as client:
             async with client.request(
                 method=request.method, url=target_url, headers=forward_headers, data=request_body
             ) as resp:
@@ -276,6 +358,12 @@ class SessionServer:
                         },
                     )
                     await response.prepare(request)
+                    # If the downstream client closes the socket mid-stream
+                    # (e.g. AsyncAPIClient bails out on a finish_reason=='error'
+                    # chunk after the prompt overflowed the session window),
+                    # keep draining the upstream so the trace is still recorded
+                    # in full but stop attempting to write to the closed socket.
+                    client_alive = True
                     async for line in resp.content:
                         # Keep unmodified line for trace store parsing
                         response_chunks.append(line)
@@ -291,8 +379,11 @@ class SessionServer:
                                 pass
 
                         # Delay writing the [DONE] line until after on_response
-                        if line.strip() != b"data: [DONE]":
-                            await response.write(line)
+                        if client_alive and line.strip() != b"data: [DONE]":
+                            try:
+                                await response.write(line)
+                            except (ConnectionError, ClientConnectionResetError):
+                                client_alive = False
 
                     raw_response = b"".join(response_chunks)  # Original raw response for exact tracing
                 else:
@@ -314,37 +405,61 @@ class SessionServer:
                             for k, v in resp.headers.items()
                             if k.lower() not in ("transfer-encoding", "content-length", "content-encoding")
                         },
-                        body=final_raw_response,  # Modifed raw response without our injected trace params
+                        body=final_raw_response,  # Modified raw response without our injected trace params
                     )
 
         # Apply abstract on_response processing
         response_data = None
+        skip_done = False
+        session_error_msg = None
         if request_data:
             if is_stream:
-                response_data = self._parse_stream_response(raw_response)
+                skip_done = not _stream_has_traceable_choices(raw_response)
+                if not skip_done:
+                    try:
+                        response_data = self._parse_stream_response(raw_response)
+                    except Exception as exc:
+                        session_error_msg = f"SessionServer stream trace failed: {type(exc).__name__}: {exc}"
             else:
                 try:
                     response_data = json.loads(raw_response)
                 except json.JSONDecodeError:
                     pass
+                if isinstance(response_data, dict) and _is_error_payload(response_data):
+                    response_data = None
 
             if response_data is not None:
-                for c in response_data.get("choices", []):
-                    if c.get("message") and isinstance(c["message"].get("content"), str):
-                        c["message"]["content"] = c["message"]["content"].replace(self.stop_word, "")
-                        for tc in c["message"].get("tool_calls") or []:
-                            if isinstance(tc.get("function", {}).get("arguments"), str):
-                                tc["function"]["arguments"] = json.loads(tc["function"]["arguments"])
+                try:
+                    for c in response_data.get("choices", []):
+                        if c.get("message") and isinstance(c["message"].get("content"), str):
+                            c["message"]["content"] = c["message"]["content"].replace(self.stop_word, "")
 
-                response_data["session_id"] = session_id
-                response_data["messages"] = messages
-                response_data["tools"] = tools
-                await self.on_response(response_data)
+                    response_data["session_id"] = session_id
+                    response_data["messages"] = messages
+                    response_data["tools"] = tools
+                    await self.on_response(response_data)
+                except Exception as exc:
+                    session_error_msg = f"SessionServer response hook failed: {type(exc).__name__}: {exc}"
+
+        if session_error_msg:
+            get_logger().error(session_error_msg)
 
         if is_stream:
-            # write the delayed [DONE] line
-            await response.write(b"data: [DONE]\n\n")
-            await response.write_eof()
+            try:
+                if session_error_msg:
+                    error_payload = _lmdeploy_error_payload(session_error_msg)
+                    await response.write(
+                        ("data: " + json.dumps(error_payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+                    )
+                    skip_done = True
+                if not skip_done:
+                    await response.write(b"data: [DONE]\n\n")
+                await response.write_eof()
+            except (ConnectionError, ClientConnectionResetError):
+                # Client already gone; trace was still recorded above.
+                pass
+        elif session_error_msg:
+            return web.json_response(_lmdeploy_error_payload(session_error_msg), status=500)
 
         return response
 
@@ -362,22 +477,28 @@ class SessionServer:
         """Parse SSE stream to reconstruct the complete final message state."""
         text = raw.decode("utf-8", errors="replace")
         events = []
+        saw_done = False
         for line in text.split("\n"):
             line = line.strip()
-            if line.startswith("data: ") and line != "data: [DONE]":
-                try:
-                    events.append(json.loads(line[6:]))
-                except json.JSONDecodeError:
-                    pass
+            if line == "data: [DONE]":
+                saw_done = True
+                continue
+            if line.startswith("data: "):
+                event = json.loads(line[6:])
+                if _is_error_payload(event):
+                    raise RuntimeError(f"Upstream SSE stream returned error: {json.dumps(event, ensure_ascii=False)}")
+                events.append(event)
 
         if not events:
             return None
+        if not any(event.get("choices") for event in events):
+            raise RuntimeError(f"Upstream SSE stream ended without choices: {json.dumps(events, ensure_ascii=False)}")
 
         # Reconstruct standard stream output (Assuming OpenAI format here)
-        message = {"choices": [{"message": {"role": "assistant", "content": ""}}]}
-        content_parts = []
-        tool_calls_map = {}
-        usage = {}
+        message: dict[str, Any] = {"choices": [{"message": {"role": "assistant", "content": ""}}]}
+        content_parts: list[str] = []
+        tool_calls_map: dict[int, dict[str, Any]] = {}
+        usage: dict[str, Any] = {}
 
         for event in events:
             if event.get("id") and "id" not in message:
@@ -387,6 +508,10 @@ class SessionServer:
 
             choices = event.get("choices", [])
             for choice in choices:
+                if choice.get("finish_reason") == "error":
+                    raise RuntimeError(
+                        f"Upstream SSE choice finished with error: {json.dumps(event, ensure_ascii=False)}"
+                    )
                 delta = choice.get("delta", {})
 
                 # Check text content
@@ -394,25 +519,24 @@ class SessionServer:
                     content_parts.append(delta["content"])
 
                 # Check output ids
-                if choice.get("output_ids"):
+                if choice.get("output_ids") is not None:
                     assistant_choice = message["choices"][0]
                     if "output_ids" not in assistant_choice:
                         assistant_choice["output_ids"] = []
                     assistant_choice["output_ids"].extend(choice["output_ids"])
 
-                # Check routed experts
-                if choice.get("routed_experts"):
+                # Check routed experts. LMDeploy only emits this in the final
+                # chunk, often as a Ray shared-store key string.
+                if choice.get("routed_experts") is not None:
                     assistant_choice = message["choices"][0]
-                    if "routed_experts" not in assistant_choice:
-                        assistant_choice["routed_experts"] = []
-                    assistant_choice["routed_experts"].extend(choice["routed_experts"])
+                    assistant_choice["routed_experts"] = choice["routed_experts"]
 
-                # Check logprobs
-                if choice.get("logprobs") and choice["logprobs"].get("content"):
+                # Check raw output logprobs from LMDeploy return_logprob protocol.
+                if choice.get("output_token_logprobs") is not None:
                     assistant_choice = message["choices"][0]
-                    if "logprobs" not in assistant_choice:
-                        assistant_choice["logprobs"] = {"content": []}
-                    assistant_choice["logprobs"]["content"].extend(choice["logprobs"]["content"])
+                    if "output_token_logprobs" not in assistant_choice:
+                        assistant_choice["output_token_logprobs"] = []
+                    assistant_choice["output_token_logprobs"].extend(choice["output_token_logprobs"])
 
                 # Check reasoning content
                 if delta.get("reasoning_content"):
@@ -450,17 +574,26 @@ class SessionServer:
         if usage:
             message["usage"] = usage
 
+        assistant_choice = message["choices"][0]
+        if not saw_done:
+            raise RuntimeError("Upstream SSE stream ended without [DONE].")
+        if not assistant_choice.get("finish_reason"):
+            raise RuntimeError("Upstream SSE stream ended without terminal finish_reason.")
+        if assistant_choice.get("output_ids") is None:
+            raise RuntimeError("Upstream SSE stream ended without output_ids.")
+
         return message
 
 
 class SessionServerActor:
     """Ray actor wrapper that owns one SessionServer instance."""
 
-    def __init__(self, worker_base_url: str, tokenizer_path: str, host: str, port: int):
+    def __init__(self, worker_base_url: str, tokenizer_path: str, host: str, port: int, request_timeout: float):
         self.worker_base_url = worker_base_url
         self.tokenizer_path = tokenizer_path
         self.host = host
         self.port = port
+        self.request_timeout = request_timeout
         self.server: SessionServer | None = None
 
     @property
@@ -476,6 +609,7 @@ class SessionServerActor:
             tokenizer_path=self.tokenizer_path,
             host=self.host,
             port=self.port,
+            request_timeout=self.request_timeout,
         )
         await self.server.start()
         return self.server.url
