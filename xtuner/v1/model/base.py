@@ -710,6 +710,10 @@ class BaseModel(nn.Module):
             if dist.is_initialized():
                 finalize_pg = dist.new_group(backend="gloo")
                 dist.barrier(group=finalize_pg)
+                rank = dist.get_rank()
+                world_size = dist.get_world_size()
+                gathered: list[Any] = [None for _ in range(world_size)]
+                dist.all_gather_object(gathered, {"rank": rank, "ok": True}, group=finalize_pg)
 
             self._async_hf_resources = AsyncHFResources(
                 finalize_pg=finalize_pg,
@@ -719,23 +723,6 @@ class BaseModel(nn.Module):
             if finalize_pg is not None and dist.is_available() and dist.is_initialized():
                 dist.destroy_process_group(finalize_pg)
             raise RuntimeError("Failed to initialize async HF resources") from exc
-
-    def warmup_async_save_hf(
-        self,
-        hf_dir: Path | str,
-        save_dtype: torch.dtype = torch.bfloat16,
-        safetensors_prefix: str = "model",
-    ) -> None:
-        self.init_async_hf_resources()
-        try:
-            self._warmup_async_save_hf(
-                warmup_hf_dir=Path(hf_dir),
-                save_dtype=save_dtype,
-                safetensors_prefix=safetensors_prefix,
-            )
-        except BaseException:
-            self.destroy_async_hf_resources()
-            raise
 
     def destroy_async_hf_resources(self) -> None:
         resources = self._async_hf_resources
@@ -789,92 +776,12 @@ class BaseModel(nn.Module):
         if dist.is_initialized():
             dist.barrier(group=self._get_async_hf_finalize_pg())
 
-    def _merge_async_hf_weight_map(self, local_weight_map: Mapping[str, str]) -> dict[str, str]:
-        gathered_weight_map = self._all_gather_async_hf_object(dict(local_weight_map))
-        merged_weight_map: dict[str, str] = {}
-        for weight_map in gathered_weight_map:
-            merged_weight_map.update(cast(dict[str, str], weight_map))
-        return merged_weight_map
-
-    def _prewrite_async_hf_metadata(self, tmp_hf_dir: Path, weight_map: Mapping[str, str]) -> None:
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        if rank == 0:
-            self._write_hf_index_and_config(hf_dir=tmp_hf_dir, weight_map=weight_map)
-        self._barrier_async_hf()
-
-    def _warmup_async_save_hf(
-        self,
-        warmup_hf_dir: Path,
-        save_dtype: torch.dtype = torch.bfloat16,
-        safetensors_prefix: str = "model",
-    ) -> None:
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        warmup_hf_dir = warmup_hf_dir / ".hf-warmup"
-
-        if rank == 0:
-            if warmup_hf_dir.exists():
-                rmtree(warmup_hf_dir)
-        self._barrier_async_hf()
-
-        handle = self._async_save_hf(
-            hf_dir=warmup_hf_dir,
-            save_dtype=save_dtype,
-            safetensors_prefix=safetensors_prefix,
-            use_file_lock=False,
-        )
-        cache_tensors, cache_bytes = self._async_hf_tensor_cache_stats()
-        all_cache_stats = cast(
-            list[dict[str, Any]],
-            self._all_gather_async_hf_object(
-                {
-                    "rank": rank,
-                    "cache_tensors": cache_tensors,
-                    "cache_bytes": cache_bytes,
-                }
-            ),
-        )
-        try:
-            handle.result()
-            self._clear_pending_async_hf(handle)
-        finally:
-            if rank == 0:
-                rmtree(warmup_hf_dir, ignore_errors=True)
-            self._barrier_async_hf()
-
-        if rank == 0:
-            total_cache_tensors = sum(int(status.get("cache_tensors", 0)) for status in all_cache_stats)
-            total_cache_bytes = sum(int(status.get("cache_bytes", 0)) for status in all_cache_stats)
-            log_rank0.info(
-                f"[Async HF warmup] completed: cache_tensors={total_cache_tensors}, "
-                f"cache_bytes={total_cache_bytes / 1024**3:.2f} GiB"
-            )
-
-    def _async_hf_tensor_cache_stats(self) -> tuple[int, int]:
-        cache_tensors = len(self._async_hf_tensor_cache)
-        cache_bytes = sum(tensor.numel() * tensor.element_size() for tensor in self._async_hf_tensor_cache.values())
-        return cache_tensors, cache_bytes
-
     def async_save_hf(
         self,
         hf_dir: Path | str,
         save_dtype: torch.dtype = torch.bfloat16,
         safetensors_prefix: str = "model",
         file_finalize_callback: Callable[[Path], None] | None = None,
-    ) -> AsyncHFSaveHandle:
-        return self._async_save_hf(
-            hf_dir=hf_dir,
-            save_dtype=save_dtype,
-            safetensors_prefix=safetensors_prefix,
-            file_finalize_callback=file_finalize_callback,
-        )
-
-    def _async_save_hf(
-        self,
-        hf_dir: Path | str,
-        save_dtype: torch.dtype = torch.bfloat16,
-        safetensors_prefix: str = "model",
-        file_finalize_callback: Callable[[Path], None] | None = None,
-        use_file_lock: bool = True,
     ) -> AsyncHFSaveHandle:
         self._get_async_hf_resources()
         if self._hf_path is None and self.config.hf_config is None:
@@ -900,8 +807,12 @@ class BaseModel(nn.Module):
             safetensors_prefix=safetensors_prefix,
             device=DEVICE,
         )
-        merged_weight_map = self._merge_async_hf_weight_map(weight_map)
-        self._prewrite_async_hf_metadata(tmp_hf_dir=tmp_hf_dir, weight_map=merged_weight_map)
+        merged_weight_map: dict[str, str] = {}
+        for rank_weight_map in self._all_gather_async_hf_object(weight_map):
+            merged_weight_map.update(cast(dict[str, str], rank_weight_map))
+        if rank == 0:
+            self._write_hf_index_and_config(hf_dir=tmp_hf_dir, weight_map=merged_weight_map)
+        self._barrier_async_hf()
 
         if hasattr(DEVICE_MODULE, "synchronize"):
             DEVICE_MODULE.synchronize()
@@ -912,7 +823,6 @@ class BaseModel(nn.Module):
             args=(
                 tmp_hf_dir,
                 file_to_names,
-                use_file_lock,
             ),
             daemon=False,
         )
@@ -940,7 +850,6 @@ class BaseModel(nn.Module):
         self,
         tmp_hf_dir: Path,
         file_to_names: list[tuple[str, list[str]]],
-        use_file_lock: bool = True,
     ) -> None:
         log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] started")
         try:
@@ -948,7 +857,6 @@ class BaseModel(nn.Module):
             self._write_async_hf_snapshot(
                 hf_dir=tmp_hf_dir,
                 file_to_names=file_to_names,
-                use_file_lock=use_file_lock,
             )
             log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] finished")
         except Exception as exc:
@@ -1901,7 +1809,7 @@ class BaseModel(nn.Module):
             if unique_name_list:
                 yield safetensor_name, unique_name_list, unique_hf_tensor_list
 
-    def _write_hf_save_plan(self, save_plan: _HFSavePlan, use_file_lock: bool = True) -> list[str]:
+    def _write_hf_save_plan(self, save_plan: _HFSavePlan) -> list[str]:
         written_files: list[str] = []
         for safetensor_name, tensors in save_plan["save_tasks"]:
             filename = save_plan["hf_dir"] / safetensor_name
@@ -1909,24 +1817,13 @@ class BaseModel(nn.Module):
                 tensors=tensors,
                 filename=filename,
                 hf_dir=save_plan["hf_dir"],
-                use_file_lock=use_file_lock,
             )
             if tensors:
                 written_files.append(safetensor_name)
         return written_files
 
-    def _save_hf_safetensors_file(
-        self,
-        tensors: dict[str, torch.Tensor],
-        filename: Path,
-        hf_dir: Path,
-        use_file_lock: bool = True,
-    ) -> None:
+    def _save_hf_safetensors_file(self, tensors: dict[str, torch.Tensor], filename: Path, hf_dir: Path) -> None:
         if not tensors:
-            return
-
-        if not use_file_lock:
-            _save_file(tensors, filename)
             return
 
         lock_slots = get_async_hf_save_file_lock_slots()
@@ -1984,7 +1881,6 @@ class BaseModel(nn.Module):
         self,
         hf_dir: Path,
         file_to_names: list[tuple[str, list[str]]],
-        use_file_lock: bool = True,
     ) -> None:
         for filename, names in file_to_names:
             tensors: dict[str, torch.Tensor] = {}
@@ -1994,17 +1890,15 @@ class BaseModel(nn.Module):
                 if cached_tensor is None:
                     raise RuntimeError(f"Missing cached async HF tensor for key: {name}")
                 tensors[name] = cached_tensor
-            self._write_hf_save_plan(
-                {"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]},
-                use_file_lock=use_file_lock,
-            )
+            self._write_hf_save_plan({"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]})
 
-    def _write_hf_non_weight_files(self, hf_dir: Path) -> None:
+    def _write_hf_index_and_config(self, hf_dir: Path | str, weight_map: Mapping[str, str]) -> None:
+        if isinstance(hf_dir, str):
+            hf_dir = Path(hf_dir)
+
         if self.config.hf_config is not None:
             self.config.save_hf(hf_dir)
-            return
-
-        if self._hf_path is not None:
+        elif self._hf_path is not None:
             for file in cast(Path, self._hf_path).iterdir():
                 if file.suffix != ".safetensors":
                     target_path = hf_dir / file.name
@@ -2012,15 +1906,8 @@ class BaseModel(nn.Module):
                         copy(file, target_path)
                     else:
                         copytree(file, target_path, ignore_dangling_symlinks=True, dirs_exist_ok=True)
-            return
-
-        raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
-
-    def _write_hf_index_and_config(self, hf_dir: Path | str, weight_map: Mapping[str, str]) -> None:
-        if isinstance(hf_dir, str):
-            hf_dir = Path(hf_dir)
-
-        self._write_hf_non_weight_files(hf_dir)
+        else:
+            raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
 
         with open(hf_dir / "model.safetensors.index.json", "w") as f:
             index = {"weight_map": dict(weight_map), "metadata": {}}

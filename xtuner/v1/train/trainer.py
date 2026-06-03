@@ -807,7 +807,7 @@ class Trainer:
         handles data loading, forward pass, backward pass, optimization, logging, and checkpointing.
         """
         if self._async_hf_export:
-            self._engine.warmup_async_save_hf(str(self.exp_dir))
+            self._engine.init_async_hf_resources()
 
         train_begin = time.time()
         time_before_get_data = time.time()
@@ -1692,18 +1692,15 @@ class Trainer:
         save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
         if self._async_hf_export:
             deleted_hf_checkpoints = self._get_deleted_hf_checkpoints(save_hf_path)
-            step = self.cur_step
-            epoch = self._cur_epoch
-            handle = self._engine.async_save_hf(
-                str(save_hf_path),
+            self._pending_async_hf_handle = self._engine.async_save_hf(
+                hf_dir=str(save_hf_path),
                 file_finalize_callback=self._build_async_hf_file_finalize_callback(
                     save_hf_path=save_hf_path,
                     deleted_hf_checkpoints=deleted_hf_checkpoints,
                 ),
             )
-            self._pending_async_hf_handle = handle
-            self._pending_async_hf_step = step
-            self._pending_async_hf_epoch = epoch
+            self._pending_async_hf_step = self.cur_step
+            self._pending_async_hf_epoch = self._cur_epoch
             return
         else:
             self._engine.save_hf(str(save_hf_path))
@@ -1715,29 +1712,33 @@ class Trainer:
             )
             return
 
-    def _wait_for_pending_async_hf(self) -> None:
+    def _wait_for_pending_async_hf(self) -> tuple[Path, int, int] | None:
         if self._pending_async_hf_handle is None:
-            return
+            return None
 
         handle = self._pending_async_hf_handle
         step = self._pending_async_hf_step
         epoch = self._pending_async_hf_epoch
+        assert step is not None
+        assert epoch is not None
         self._pending_async_hf_handle = None
         self._pending_async_hf_step = None
         self._pending_async_hf_epoch = None
 
         finalized_hf_path = handle.result()
-        assert step is not None
-        assert epoch is not None
-        self._finalize_async_hf_save_metadata(finalized_hf_path, step=step, epoch=epoch)
+        return finalized_hf_path, step, epoch
 
     def _finalize_pending_async_hf_save(self, wait_for_pending: bool = False) -> None:
+        finalized_async_hf: tuple[Path, int, int] | None = None
         if wait_for_pending:
-            self._wait_for_pending_async_hf()
+            finalized_async_hf = self._wait_for_pending_async_hf()
         elif self._pending_async_hf_handle is not None:
             handle = self._pending_async_hf_handle
             if handle.done():
-                self._wait_for_pending_async_hf()
+                finalized_async_hf = self._wait_for_pending_async_hf()
+        if finalized_async_hf is not None:
+            finalized_hf_path, step, epoch = finalized_async_hf
+            self._finalize_async_hf_save_metadata(finalized_hf_path, step=step, epoch=epoch)
         if self._async_hf_file_finalize_failure is not None:
             raise RuntimeError("Async HF file finalize failed") from self._async_hf_file_finalize_failure
 

@@ -313,9 +313,6 @@ class TrainEngine:
     def init_async_hf_resources(self) -> None:
         self.model.init_async_hf_resources()
 
-    def warmup_async_save_hf(self, hf_dir: str) -> None:
-        self.model.warmup_async_save_hf(hf_dir=hf_dir)
-
     def check_async_hf_failure(self) -> None:
         self.model.check_async_hf_failure()
 

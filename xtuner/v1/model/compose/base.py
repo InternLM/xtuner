@@ -2,8 +2,8 @@ import json
 import multiprocessing as py_mp
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from shutil import rmtree
-from typing import Callable, Mapping, Self, Sequence
+from shutil import copy, copytree, rmtree
+from typing import Callable, Mapping, Self, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -176,7 +176,18 @@ class BaseComposeModel(BaseModel):
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
 
-        self._write_hf_non_weight_files(hf_dir)
+        if self.config.hf_config is not None:
+            self.config.save_hf(hf_dir)
+        elif self._hf_path is not None:
+            for file in cast(Path, self._hf_path).iterdir():
+                if file.suffix != ".safetensors":
+                    target_path = hf_dir / file.name
+                    if file.is_file():
+                        copy(file, target_path)
+                    else:
+                        copytree(file, target_path, ignore_dangling_symlinks=True, dirs_exist_ok=True)
+        else:
+            raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
 
         with open(hf_dir / "model.safetensors.index.json", "w") as f:
             json.dump({"weight_map": dict(weight_map), "metadata": {}}, f, indent=4)
@@ -192,21 +203,6 @@ class BaseComposeModel(BaseModel):
         save_dtype: torch.dtype = torch.bfloat16,
         safetensors_prefix: str = "model",
         file_finalize_callback: Callable[[Path], None] | None = None,
-    ) -> AsyncHFSaveHandle:
-        return self._async_save_hf(
-            hf_dir=hf_dir,
-            save_dtype=save_dtype,
-            safetensors_prefix=safetensors_prefix,
-            file_finalize_callback=file_finalize_callback,
-        )
-
-    def _async_save_hf(
-        self,
-        hf_dir: Path | str,
-        save_dtype: torch.dtype = torch.bfloat16,
-        safetensors_prefix: str = "model",
-        file_finalize_callback: Callable[[Path], None] | None = None,
-        use_file_lock: bool = True,
     ) -> AsyncHFSaveHandle:
         self._get_async_hf_resources()
         if self._hf_path is None and self.config.hf_config is None:
@@ -242,8 +238,12 @@ class BaseComposeModel(BaseModel):
             module_file_to_names.append((module, file_to_names))
             merged_weight_map.update(weight_map)
 
-        global_weight_map = self._merge_async_hf_weight_map(merged_weight_map)
-        self._prewrite_async_hf_metadata(tmp_hf_dir=tmp_hf_dir, weight_map=global_weight_map)
+        global_weight_map: dict[str, str] = {}
+        for rank_weight_map in self._all_gather_async_hf_object(merged_weight_map):
+            global_weight_map.update(cast(dict[str, str], rank_weight_map))
+        if rank == 0:
+            self._write_hf_index_and_config(hf_dir=tmp_hf_dir, weight_map=global_weight_map)
+        self._barrier_async_hf()
 
         if hasattr(DEVICE_MODULE, "synchronize"):
             DEVICE_MODULE.synchronize()
@@ -254,7 +254,6 @@ class BaseComposeModel(BaseModel):
             args=(
                 tmp_hf_dir,
                 module_file_to_names,
-                use_file_lock,
             ),
             daemon=False,
         )
@@ -278,21 +277,10 @@ class BaseComposeModel(BaseModel):
         handle.commit_future.add_done_callback(lambda _: commit_executor.shutdown(wait=False))
         return handle
 
-    def _async_hf_tensor_cache_stats(self) -> tuple[int, int]:
-        modules = (self.language_model, self.vision_tower, self.multi_modal_projector)
-        cache_tensors = 0
-        cache_bytes = 0
-        for module in modules:
-            module_cache_tensors, module_cache_bytes = module._async_hf_tensor_cache_stats()
-            cache_tensors += module_cache_tensors
-            cache_bytes += module_cache_bytes
-        return cache_tensors, cache_bytes
-
     def _run_async_hf_compose_writer(
         self,
         tmp_hf_dir: Path,
         module_file_to_names: list[tuple[BaseModel, list[tuple[str, list[str]]]]],
-        use_file_lock: bool = True,
     ) -> None:
         log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] started")
         try:
@@ -302,7 +290,6 @@ class BaseComposeModel(BaseModel):
                     hf_dir=tmp_hf_dir,
                     module=module,
                     file_to_names=file_to_names,
-                    use_file_lock=use_file_lock,
                 )
             log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] finished")
         except Exception as exc:
@@ -314,7 +301,6 @@ class BaseComposeModel(BaseModel):
         hf_dir: Path,
         module: BaseModel,
         file_to_names: list[tuple[str, list[str]]],
-        use_file_lock: bool = True,
     ) -> None:
         for filename, names in file_to_names:
             tensors: dict[str, torch.Tensor] = {}
@@ -324,10 +310,7 @@ class BaseComposeModel(BaseModel):
                 if cached_tensor is None:
                     raise RuntimeError(f"Missing cached async HF tensor for key: {name}")
                 tensors[name] = cached_tensor
-            module._write_hf_save_plan(
-                {"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]},
-                use_file_lock=use_file_lock,
-            )
+            module._write_hf_save_plan({"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]})
 
     def post_micro_batch_forward(self, batch_outputs: Sequence[ModelOutputs]) -> BatchForwardInfo:
         return self.language_model.post_micro_batch_forward(batch_outputs)

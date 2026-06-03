@@ -110,9 +110,6 @@ class FakeAsyncHFEngine:
     def init_async_hf_resources(self) -> None:
         pass
 
-    def warmup_async_save_hf(self, hf_dir: str) -> None:
-        self.init_async_hf_resources()
-
     def check_async_hf_failure(self) -> None:
         if self.async_hf_failure is not None:
             raise self.async_hf_failure
