@@ -440,5 +440,5 @@ class vLLMWorker(RolloutWorker):
         return rollout_state
 
     def _request_server_terminate(self) -> bool:
-        self.logger.warning("SGLang server does not support terminate request, will directly kill the process.")
+        self.logger.warning("VLLM server does not support terminate request, will directly kill the process.")
         return True

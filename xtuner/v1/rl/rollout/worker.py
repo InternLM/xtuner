@@ -532,7 +532,7 @@ class RolloutWorker(SingleAcceleratorWorker):
     def set_enable_partial_rollout(self, enable: bool) -> None:
         self.enable_partial_rollout = enable
 
-    def init(self, dist_init_addr: str = "") -> tuple[int, str]:
+    def init(self, dist_init_addr: str) -> tuple[int, str]:
         """Initialize the worker and launch the server.
 
         Args:
@@ -543,7 +543,6 @@ class RolloutWorker(SingleAcceleratorWorker):
             Tuple[int, str]: A tuple containing the worker's rank and its
                 server URL.
         """
-        self.dist_init_addr = dist_init_addr if dist_init_addr else self.dist_init_addr
         self.receive_abort_request.clear()
         self._launch_server()
         return (self.rank, self.server_url)

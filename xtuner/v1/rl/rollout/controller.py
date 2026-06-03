@@ -342,7 +342,6 @@ class RolloutController:
     def _recover_failed_workers(self) -> None:
         """Recover inactive workers before training while keeping health checks
         paused."""
-        self.health_checker.pause()
         with self.worker_info_lock:
             failed_workers = [info for info in self.rank2info.values() if not info.is_active]
 
@@ -363,12 +362,7 @@ class RolloutController:
             # 先保证把老的worker关掉
             ray.get(worker.shutdown.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
             # 保证新的worker启动在之前的端口上，否则权重更新会出错
-            _, url = ray.get(worker.init.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
-            if url != expected_url:
-                self.logger.error(
-                    f"Worker {worker} restarted with unexpected URL {url}; expected original URL {expected_url}."
-                )
-                return False
+            _, url = ray.get(worker.init.remote(dist_init_addr=expected_url), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
             is_healthy = ray.get(worker.check_health.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
             if is_healthy:
                 self.logger.info(f"Successfully restarted worker {worker} with URL {url}.")

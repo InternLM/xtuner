@@ -1698,7 +1698,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             await self._maybe_save_checkpoint(model_step)
             self._maybe_save_hf(model_step)
 
-        # 非共卡需要额外加健康检查恢复worker的逻辑
+        # TODO: 非共卡需要额外加健康检查恢复worker的逻辑，共卡是在训练之前恢复，但是非共卡不需要在训练之前恢复,挂掉就恢复或者更新权重前恢复，需要评估一下哪种方式更合理。
         with timer("sync_weight", step_timer_dict):
             bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
             self.update_weights()
