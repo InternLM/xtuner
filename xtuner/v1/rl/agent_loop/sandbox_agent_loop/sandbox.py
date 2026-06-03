@@ -27,6 +27,7 @@ import re
 import shlex
 import tarfile
 import time
+import traceback
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -129,12 +130,15 @@ class EntryDiagnostics:
                     {
                         "path": path,
                         "key": key,
-                        "error": f"{type(exc).__name__}: {exc}",
+                        "error": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip(),
                     }
                 )
                 if not spec.optional:
                     raise
-                get_logger().debug("entry diagnostic download %s failed: %s", path, exc)
+                get_logger().debug(
+                    f"entry diagnostic download {path} failed:\n"
+                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
+                )
 
 
 class EntryFailurePolicy:
@@ -173,14 +177,14 @@ class EntryFailurePolicy:
         except Exception as exc:
             if self.diagnostic_error_policy == "fail_entry":
                 outcome.result.error = (
-                    f"{outcome.result.error or 'entry failed'}; diagnostics failed: {type(exc).__name__}: {exc}"
+                    f"{outcome.result.error or 'entry failed'}; diagnostics failed:\n"
+                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
                 )
             else:
                 get_logger().debug(
-                    "entry %s diagnostics failed after %s: %s",
-                    entry.name,
-                    outcome.reason or outcome.source,
-                    exc,
+                    f"entry {entry.name} diagnostics failed after "
+                    f"{outcome.reason or outcome.source}:\n"
+                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
                 )
         return outcome
 
@@ -467,10 +471,11 @@ class ShellEntry:
                 self._finish_record(entry, outcome)
                 return outcome
             except Exception as exc:
+                error = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()
                 outcome = EntryOutcome(
                     source=type(self).__name__,
                     reason="exception",
-                    result=StageResult(return_code=None, stderr=str(exc), error=str(exc)),
+                    result=StageResult(return_code=None, stderr=error, error=error),
                 )
                 if self.failure is not None:
                     outcome = await self.failure.handle(client, item, record, entry, outcome)
@@ -578,10 +583,11 @@ class DetachedShellEntry:
                 self._finish_record(entry, outcome)
                 return outcome
             except Exception as exc:
+                error = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()
                 outcome = EntryOutcome(
                     source=type(self).__name__,
                     reason="exception",
-                    result=StageResult(return_code=None, stderr=str(exc), error=str(exc)),
+                    result=StageResult(return_code=None, stderr=error, error=error),
                 )
                 if self.failure is not None:
                     outcome = await self.failure.handle(client, item, record, entry, outcome)
@@ -728,12 +734,27 @@ class SandboxStage:
             if record.status != StageStatus.FAILED:
                 record.status = StageStatus.FAILED
             if record.error is None:
-                record.error = RolloutError(
-                    stage=stage_label,
-                    category="stage_exception",
-                    type=type(exc).__name__,
-                    message=str(exc),
-                )
+                latest_entry = record.entries[-1] if record.entries else None
+                if latest_entry is not None:
+                    message = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()
+                    if latest_entry.cmd:
+                        cmd = latest_entry.cmd
+                        if len(cmd) > 500:
+                            cmd = f"{cmd[:500]}...<truncated {len(cmd) - 500} chars>"
+                        message = f"{message}; entry_id={latest_entry.id}; entry_cmd={cmd}"
+                    record.error = RolloutError(
+                        stage=latest_entry.name,
+                        category="entry_exception",
+                        type=type(exc).__name__,
+                        message=message,
+                    )
+                else:
+                    record.error = RolloutError(
+                        stage=stage_label,
+                        category="stage_exception",
+                        type=type(exc).__name__,
+                        message="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip(),
+                    )
             raise
         finally:
             record.finished_at = time.monotonic()
@@ -747,8 +768,10 @@ class SandboxStage:
         record: StageRecord,
         stage_label: str,
     ) -> None:
+        hook_name = ""
         try:
             for hook in hooks:
+                hook_name = getattr(hook, "name", hook.__class__.__name__)
                 await self._run_hook(
                     hook,
                     client,
@@ -760,10 +783,10 @@ class SandboxStage:
         except Exception as exc:
             record.status = StageStatus.FAILED
             record.error = record.error or RolloutError(
-                stage=stage_label,
+                stage=f"{stage_label}.{phase}.{hook_name}" if hook_name else stage_label,
                 category=f"{phase}hook",
                 type=type(exc).__name__,
-                message=str(exc),
+                message="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip(),
             )
             raise
 
@@ -883,10 +906,10 @@ class SandboxPool:
             if record is not None:
                 record.status = StageStatus.FAILED
                 record.error = record.error or RolloutError(
-                    stage=record.judger_name or "infer",
+                    stage=f"sandbox:{name}.acquire",
                     category="acquire",
                     type=type(exc).__name__,
-                    message=str(exc),
+                    message="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip(),
                 )
             raise
         self._clients[name] = client
@@ -916,11 +939,17 @@ class SandboxPool:
                 try:
                     await self._provider.delete(env_id)
                 except Exception as exc:
-                    get_logger().warning(f"gateway delete failed for sandbox {name}: {exc}")
+                    get_logger().warning(
+                        f"gateway delete failed for sandbox {name} env_id={env_id}:\n"
+                        f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
+                    )
             try:
                 await client.aclose()
             except Exception as exc:
-                get_logger().warning(f"client aclose failed for sandbox {name}: {exc}")
+                get_logger().warning(
+                    f"client aclose failed for sandbox {name} env_id={env_id}:\n"
+                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
+                )
 
     @staticmethod
     def _url_of(client: Any) -> str | None:
@@ -957,14 +986,25 @@ class SandboxPool:
             try:
                 await self._provider.delete(env_id)
             except Exception as exc:
-                get_logger().warning(f"delete of unhealthy {env_id} failed: {exc}")
+                get_logger().warning(
+                    f"delete of unhealthy sandbox env_id={env_id} failed:\n"
+                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
+                )
             try:
                 await client.aclose()
             except Exception as exc:
-                get_logger().warning(f"aclose of unhealthy {env_id} failed: {exc}")
+                get_logger().warning(
+                    f"aclose of unhealthy sandbox env_id={env_id} failed:\n"
+                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
+                )
             last_err = RuntimeError(f"sandbox {env_id} unhealthy")
 
-        raise RuntimeError(f"could not acquire a healthy sandbox after {self._max_attempts} attempts: {last_err}")
+        last_err_msg = (
+            "".join(traceback.format_exception(type(last_err), last_err, last_err.__traceback__)).rstrip()
+            if last_err is not None
+            else "unknown"
+        )
+        raise RuntimeError(f"could not acquire a healthy sandbox after {self._max_attempts} attempts: {last_err_msg}")
 
     async def _wait_healthy(self, client: Any) -> bool:
         deadline = time.monotonic() + self._health_max_wait_sec
@@ -974,7 +1014,10 @@ class SandboxPool:
                 if h.get("ok"):
                     return True
             except Exception as exc:
-                get_logger().debug(f"health poll error: {exc}")
+                get_logger().debug(
+                    "health poll error:\n"
+                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
+                )
             await asyncio.sleep(self._health_poll_interval_sec)
         return False
 
