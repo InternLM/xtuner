@@ -53,6 +53,26 @@ def _stream_has_traceable_choices(raw: bytes) -> bool:
     return has_choices and saw_done and saw_terminal_finish
 
 
+def _extract_output_logprobs(choice: dict, output_token_ids: list[int]) -> list[float]:
+    if not output_token_ids:
+        return []
+
+    output_token_logprobs = choice.get("output_token_logprobs")
+    if output_token_logprobs is None:
+        raise RuntimeError(
+            "SessionServer response choice has no output_token_logprobs; "
+            "the return_logprob protocol is required for training traces."
+        )
+
+    logprob_token_ids = [item[1] for item in output_token_logprobs]
+    if logprob_token_ids != output_token_ids:
+        raise RuntimeError(
+            "SessionServer response choice has mismatched output_token_logprobs: "
+            f"output_ids_len={len(output_token_ids)}, logprob_ids_len={len(logprob_token_ids)}"
+        )
+    return [item[0] for item in output_token_logprobs]
+
+
 class SessionServer:
     """SessionServer intercepts and records requests sent to a remote LLM API
     worker.
@@ -121,12 +141,12 @@ class SessionServer:
 
         # 3. 组装 OpenAI chat completions 请求。
         worker_req = {
-            **{k: v for k, v in req_body.items() if k not in ["session_id", "messages"]},
+            **{k: v for k, v in req_body.items() if k not in ["session_id", "messages", "logprobs", "top_logprobs"]},
             "messages": [],
             "input_ids": input_ids,
             "return_token_ids": True,
             "return_routed_experts": True,
-            "logprobs": True,
+            "return_logprob": True,
             "include_stop_str_in_output": True,
         }
         return worker_req
@@ -145,10 +165,7 @@ class SessionServer:
                 "SessionServer response choice has no output_ids; "
                 "cannot export a training trace for this assistant turn."
             )
-        if choice.get("logprobs") and choice["logprobs"].get("content"):
-            output_logprobs = [item.get("logprob", 0.0) for item in choice["logprobs"]["content"]]
-        else:
-            output_logprobs = [0.0] * len(output_token_ids)
+        output_logprobs = _extract_output_logprobs(choice, output_token_ids)
         raw_routed_expert = choice.get("routed_experts")  # 本次 call 的 raw routed_expert，可为 None
 
         # 2. Store 把 input_delta / assistant_output 两个节点补齐字段。
@@ -248,12 +265,12 @@ class SessionServer:
         # Read the request body
         request_body = await request.read()
         request_data = session_id = messages = None
-        orig_logprobs = orig_return_token_ids = orig_return_routed_experts = False
+        orig_return_logprob = orig_return_token_ids = orig_return_routed_experts = False
         if request_body:
             try:
                 request_data = json.loads(request_body)
 
-                orig_logprobs = request_data.get("logprobs", False)
+                orig_return_logprob = request_data.get("return_logprob", False)
                 orig_return_token_ids = request_data.get("return_token_ids", False)
                 orig_return_routed_experts = request_data.get("return_routed_experts", False)
 
@@ -290,7 +307,7 @@ class SessionServer:
         def _clean_data(data: dict) -> bool:
             modified = False
             for key, drop in [
-                ("logprobs", not orig_logprobs),
+                ("output_token_logprobs", not orig_return_logprob),
                 ("output_ids", not orig_return_token_ids),
                 ("routed_experts", not orig_return_routed_experts),
             ]:
@@ -302,6 +319,11 @@ class SessionServer:
                         if key in c:
                             c.pop(key)
                             modified = True
+
+            for c in data.get("choices", []):
+                if "logprobs" in c:
+                    c.pop("logprobs")
+                    modified = True
 
             for c in data.get("choices", []):
                 if c.get("message") and isinstance(c["message"].get("content"), str):
@@ -509,12 +531,12 @@ class SessionServer:
                     assistant_choice = message["choices"][0]
                     assistant_choice["routed_experts"] = choice["routed_experts"]
 
-                # Check logprobs
-                if choice.get("logprobs") and choice["logprobs"].get("content"):
+                # Check raw output logprobs from LMDeploy return_logprob protocol.
+                if choice.get("output_token_logprobs") is not None:
                     assistant_choice = message["choices"][0]
-                    if "logprobs" not in assistant_choice:
-                        assistant_choice["logprobs"] = {"content": []}
-                    assistant_choice["logprobs"]["content"].extend(choice["logprobs"]["content"])
+                    if "output_token_logprobs" not in assistant_choice:
+                        assistant_choice["output_token_logprobs"] = []
+                    assistant_choice["output_token_logprobs"].extend(choice["output_token_logprobs"])
 
                 # Check reasoning content
                 if delta.get("reasoning_content"):
