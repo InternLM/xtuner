@@ -359,7 +359,7 @@ class Muon(Optimizer):
 
         # Pre-create sub-group process groups for MoE sub-group all-gather optimization.
         # This must happen in __init__ so that all ranks call dist.new_group collectively.
-        self._subgroup_cache: dict[tuple[int, int, int], tuple[ProcessGroup, int, int]] = {}
+        self._subgroup_cache: dict[tuple[int, int, int], ProcessGroup] = {}
         self._init_moe_subgroups()
 
     @overload
@@ -507,7 +507,6 @@ class Muon(Optimizer):
             return
 
         fsdp_size = device_mesh.size(sharded_mesh_dim)
-        fsdp_local_rank = device_mesh.get_local_rank(sharded_mesh_dim)
         mesh_tensor = device_mesh.mesh
         ndim = mesh_tensor.ndim
 
@@ -530,9 +529,8 @@ class Muon(Optimizer):
                     my_pg = pg
 
         assert my_pg is not None, f"Rank {current_rank} not found in any sub-group"
-        subgroup_rank = fsdp_local_rank % subgroup_size
 
-        self._subgroup_cache[cache_key] = (my_pg, subgroup_rank, subgroup_size)
+        self._subgroup_cache[cache_key] = my_pg
 
     def _create_muon_tasks(
         self,
@@ -611,8 +609,6 @@ class Muon(Optimizer):
                 skip_communication = False
                 use_subgroup_allgather = False
                 subgroup_process_group: ProcessGroup | None = None
-                subgroup_size = 1
-                subgroup_rank = 0
 
                 if sharded_mesh_dim is not None and ns_num_experts > 1:
                     fsdp_size = device_mesh.size(sharded_mesh_dim)
@@ -632,19 +628,14 @@ class Muon(Optimizer):
                         ns_num_experts = 1  # After all-gather each rank has 1 complete expert
                         use_subgroup_allgather = True
                         cache_key = (id(device_mesh), sharded_mesh_dim, sg_size)
-                        subgroup_process_group, subgroup_rank, subgroup_size = self._subgroup_cache[cache_key]
+                        subgroup_process_group = self._subgroup_cache[cache_key]
 
-                # Derive process_group, world_size, device_rank from the group's device_mesh
+                # Derive process_group from the group's device_mesh
                 if skip_communication or use_subgroup_allgather:
-                    # Each rank orthogonalizes its local experts independently, no all-to-all needed.
                     group_process_group = None
-                    group_world_size = 1
-                    group_device_rank = 0
 
                 elif sharded_mesh_dim is not None:
                     group_process_group = device_mesh.get_group(sharded_mesh_dim)
-                    group_world_size = device_mesh.size(sharded_mesh_dim)
-                    group_device_rank = device_mesh.get_local_rank(sharded_mesh_dim)
 
                 else:
                     # Not sharded on any active mesh dim; fall back to FSDP mesh dim
@@ -652,13 +643,25 @@ class Muon(Optimizer):
 
                     if fsdp_dim is not None:
                         group_process_group = device_mesh.get_group(fsdp_dim)
-                        group_world_size = device_mesh.size(fsdp_dim)
-                        group_device_rank = device_mesh.get_local_rank(fsdp_dim)
 
                     else:
                         group_process_group = None
-                        group_world_size = 1
-                        group_device_rank = 0
+
+                group_world_size = group_process_group.size() if group_process_group is not None else 1
+
+                # Determine communication strategy and the process group to use
+                if skip_communication:
+                    comm_strategy: Literal["agrs", "subgroup_allgather", "all_to_all", "local"] = "local"
+                    comm_pg: ProcessGroup | None = None
+                elif use_subgroup_allgather:
+                    comm_strategy = "subgroup_allgather"
+                    comm_pg = subgroup_process_group
+                elif sharded_tensor_dim is not None:
+                    comm_strategy = "all_to_all"
+                    comm_pg = group_process_group
+                else:
+                    comm_strategy = "local"
+                    comm_pg = group_process_group
 
                 # Create batches within this mesh group
                 for params in create_param_batches(mesh_params, batch_size=group_world_size):
@@ -700,16 +703,11 @@ class Muon(Optimizer):
                                 epsilon=epsilon,
                                 nesterov=nesterov,
                                 flatten=flatten,
-                                device_rank=group_device_rank,
-                                world_size=group_world_size,
-                                shard_dim=sharded_tensor_dim,
-                                process_group=group_process_group,
                                 newton_schulz_func=self._newton_schulz_func,
+                                comm_strategy="agrs",
+                                shard_dim=sharded_tensor_dim,
+                                process_group=comm_pg,
                                 num_experts=ns_num_experts,
-                                subgroup_process_group=subgroup_process_group,
-                                subgroup_size=subgroup_size,
-                                subgroup_rank=subgroup_rank,
-                                use_agrs=True,
                             )
                         )
 
@@ -726,15 +724,11 @@ class Muon(Optimizer):
                                 epsilon=epsilon,
                                 nesterov=nesterov,
                                 flatten=flatten,
-                                device_rank=group_device_rank,
-                                world_size=group_world_size,
-                                shard_dim=sharded_tensor_dim,
-                                process_group=group_process_group,
                                 newton_schulz_func=self._newton_schulz_func,
+                                comm_strategy=comm_strategy,
+                                shard_dim=sharded_tensor_dim,
+                                process_group=comm_pg,
                                 num_experts=ns_num_experts,
-                                subgroup_process_group=subgroup_process_group,
-                                subgroup_size=subgroup_size,
-                                subgroup_rank=subgroup_rank,
                             )
                         )
 
@@ -794,33 +788,31 @@ def muon_update_batch_async(
     epsilon: Tensor,  # Epsilon (scalar tensor)
     nesterov: bool,  # Whether to use Nesterov momentum
     flatten: bool,  # Whether to flatten 3D+ tensors to 2D
-    device_rank: int,  # Rank of the current device
-    world_size: int,  # Total number of devices to parallelize over
     newton_schulz_func: Callable,  # Newton-Schulz function for orthogonalization
+    comm_strategy: Literal["agrs", "subgroup_allgather", "all_to_all", "local"],
     shard_dim: int | None = None,  # Shard dimension for DTensor (if applicable)
-    process_group: ProcessGroup | None = None,
+    process_group: ProcessGroup | None = None,  # Unified process group for communication
     num_experts: int = 1,  # Number of experts for MoE models
-    subgroup_process_group: ProcessGroup | None = None,  # Sub-group PG for MoE all-gather
-    subgroup_size: int = 1,  # Number of ranks in the sub-group
-    subgroup_rank: int = 0,  # This rank's position within the sub-group
-    use_agrs: bool = False,  # Use All-Gather + Reduce-Scatter for partial batches
 ) -> Generator[None, None, None]:
     """Batched version of Muon update.
 
     Batch size should be equal to number of GPUs. All tensors in a batch should have identical shape, sharding, and
     dtype. Identical hyperparameters are used for all tensors in the batch.
 
-    When ``use_agrs`` is True the batch may be smaller than ``world_size``
-    (a "partial" or "remainder" batch).  Instead of padding and using
-    all-to-all, the function uses All-Gather to reconstruct full parameters,
-    selectively runs Newton-Schulz on a subset, then Reduce-Scatters the
-    results back.  This eliminates zero-padding overhead for partial batches.
+    The ``comm_strategy`` parameter determines the communication pattern:
+    - ``"agrs"``: All-Gather + Reduce-Scatter for partial batches (fewer params than ranks).
+    - ``"subgroup_allgather"``: Sub-group all-gather for MoE experts spanning a sub-group of ranks.
+    - ``"all_to_all"``: All-to-all exchange for evenly/unevenly sharded tensors.
+    - ``"local"``: No sharding; each rank orthogonalizes locally and optionally all-gathers.
     """
+    world_size = process_group.size() if process_group is not None else 1
 
     assert len(X) == len(G)
     assert len(X) == len(M)
-    if use_agrs:
+    if comm_strategy == "agrs":
         assert len(X) < world_size, f"AGRS path expects partial batch, got {len(X)} == {world_size}"
+    elif comm_strategy == "subgroup_allgather":
+        assert len(X) == 1, "subgroup_allgather expects a single-element batch"
     else:
         assert len(X) == world_size
 
@@ -832,384 +824,59 @@ def muon_update_batch_async(
         nesterov=nesterov,
     )
 
-    # Get one whole matrix for each device to orthogonalize
-    if shard_dim is not None:
+    # Orthogonalize — dispatch to the appropriate communication strategy
+    if comm_strategy == "agrs":
+        assert shard_dim is not None, "shard_dim must be provided for AGRS path"
+        assert process_group is not None, "process_group must be provided for AGRS path"
         assert isinstance(X[0], DTensor), "X should contain DTensors"
         assert not isinstance(U[0], DTensor), "U should contain local shards"
-
-        if use_agrs:
-            # === All-Gather + Selective Newton-Schulz + Reduce-Scatter path ===
-            # Used for partial (remainder) batches where len(batch) < world_size,
-            # avoiding the need to pad with zeros_like tensors.
-            R = len(U)  # Number of real parameters in this partial batch
-            W = world_size
-            assert process_group is not None, "process_group must be provided for AGRS path"
-
-            # Phase 1: All-Gather — each rank contributes R local shards,
-            # producing W*R shards across all ranks.
-            U_stacked = torch.stack(U)  # (R, *shard_shape)
-            ag_output = torch.empty((W * R,) + U[0].shape, dtype=U[0].dtype, device=U[0].device)
-
-            work = dist.all_gather_into_tensor(ag_output, U_stacked.contiguous(), group=process_group, async_op=True)
-            yield  # Yield point 1: overlap with other async work
-            work.wait()  # type: ignore[union-attr]
-
-            # Reconstruct R full parameters from gathered shards.
-            # ag_output layout: [rank0_param0, rank0_param1, ..., rank1_param0, ...]
-            # Reshape to (W, R, *shard_shape), then merge shard_dim to get full params.
-            ag_reshaped = ag_output.view(W, R, *U[0].shape)
-
-            if shard_dim == 0:
-                # (W, R, shard_size, ...) → (R, W, shard_size, ...) → (R, W*shard_size, ...)
-                full_params = ag_reshaped.permute(1, 0, *range(2, ag_reshaped.ndim)).flatten(1, 2)
-
-            else:
-                # General case: move W dim next to the shard_dim chunk, then flatten.
-                # ag_reshaped dims: [W=0, R=1, d0=2, d1=3, ...]
-                # Target: [R=1, d0=2, ..., W=0 next to shard chunk, ..., dN]
-                perm = list(range(ag_reshaped.ndim))
-                perm.remove(0)  # remove W
-                perm.insert(shard_dim + 1, 0)  # put W next to shard chunk (offset +1 for R dim)
-                full_params = ag_reshaped.permute(perm).flatten(shard_dim + 1, shard_dim + 2)
-            # full_params shape: (R, *full_param_shape)
-
-            # Phase 2: Selective Newton-Schulz — each rank orthogonalizes a subset.
-            # Rank r processes parameters where i % W == r, others get zeros.
-            ns_results = []
-            for i in range(R):
-                if i % W == device_rank:
-                    ns_results.append(
-                        muon_update_newton_schulz(
-                            full_params[i],
-                            newton_schulz_func=newton_schulz_func,
-                            flatten=flatten,
-                            epsilon=epsilon,
-                            num_experts=num_experts,
-                        )
-                    )
-                else:
-                    ns_results.append(torch.zeros_like(full_params[i]))
-
-            # Phase 3: Reduce-Scatter — sum partial NS results across ranks,
-            # each rank gets back its local shard of each parameter.
-            ns_stacked = torch.stack(ns_results)  # (R, *full_shape)
-            full_dim = ns_stacked.shape[shard_dim + 1]  # +1 because dim 0 is R
-            shard_size = full_dim // W
-
-            # Split the full dimension into (W, shard_size) for reduce-scatter
-            new_shape = list(ns_stacked.shape)
-            new_shape[shard_dim + 1 : shard_dim + 2] = [W, shard_size]
-            rs_input = ns_stacked.view(new_shape)
-
-            # Move the W dimension to front for reduce_scatter_tensor
-            w_pos = shard_dim + 1
-            perm = [w_pos] + list(range(0, w_pos)) + list(range(w_pos + 1, rs_input.ndim))
-            rs_input = rs_input.permute(perm).contiguous()
-
-            # Flatten trailing dims: (W, R*shard_numel) for reduce_scatter
-            rs_flat_in = rs_input.reshape(W, -1)
-            rs_flat_out = torch.empty(rs_flat_in.shape[1], dtype=rs_flat_in.dtype, device=rs_flat_in.device)
-
-            work = dist.reduce_scatter_tensor(
-                rs_flat_out,
-                rs_flat_in,
-                op=dist.ReduceOp.SUM,
-                group=process_group,
-                async_op=True,
-            )
-            yield  # Yield point 2: overlap with other async work
-            work.wait()  # type: ignore[union-attr]
-
-            # Unpack back to list of R local shards
-            U = list(rs_flat_out.view(R, *U_stacked.shape[1:]).unbind(0))
-
-        elif subgroup_process_group is not None:
-            # Sub-group all-gather path: reconstruct a complete expert from a small
-            # group of FSDP ranks that together hold all shards of one expert, then
-            # orthogonalize locally and slice back.  No global all-to-all needed.
-            assert world_size == 1, "Sub-group all-gather expects world_size=1 (no batch padding)"
-            local_shard = U[0]
-
-            # All-gather within sub-group to reconstruct full expert
-            gathered = torch.empty(
-                (subgroup_size,) + local_shard.shape,
-                dtype=local_shard.dtype,
-                device=local_shard.device,
-            )
-
-            work = dist.all_gather_into_tensor(
-                gathered, local_shard.contiguous(), group=subgroup_process_group, async_op=True
-            )
-            yield
-            work.wait()  # type: ignore[union-attr]
-
-            # Reconstruct full expert along shard_dim
-            if shard_dim == 0:
-                full_expert = gathered.flatten(0, 1)
-            else:
-                full_expert = torch.cat(gathered.unbind(0), dim=shard_dim)
-
-            # Orthogonalize (num_experts=1: we reconstructed exactly one expert)
-            full_expert = muon_update_newton_schulz(
-                full_expert,
-                newton_schulz_func=newton_schulz_func,
-                flatten=flatten,
-                epsilon=epsilon,
-                num_experts=num_experts,
-            )
-
-            # Slice back to local shard — no reverse communication needed
-            shard_size = full_expert.size(shard_dim) // subgroup_size
-            U[0] = full_expert.narrow(shard_dim, subgroup_rank * shard_size, shard_size)
-
-        else:
-            # All-to-all paths: use all-to-all to transform from a batch of shards
-            # to a single whole matrix per rank.
-            # https://www.essential.ai/blog/infra
-            assert process_group is not None, "process_group must be provided for sharded DTensors"
-
-            global_shard_dim_size = X[0].size(shard_dim)
-
-            if global_shard_dim_size >= world_size and global_shard_dim_size % world_size == 0:
-                # Standard path: use all-to-all for evenly sharded tensors
-                # Pack the list of shards into a single contiguous tensor
-                # U is currently [Shard_for_Rank0, Shard_for_Rank1, ...]
-                # Stack creates shape: (World_Size, *Shard_Shape)
-                U_packed = torch.stack(U)
-
-                # Allocate buffer to receive parts of the "Single Matrix"
-                # Shape: (World_Size, *Shard_Shape)
-                single_matrix_parts = torch.empty_like(U_packed)
-
-                # Perform optimized All-to-All
-                # This sends one large contiguous buffer instead of many small ones
-                work = dist.all_to_all_single(single_matrix_parts, U_packed, group=process_group, async_op=True)
-                yield
-                work.wait()  # type: ignore[union-attr]
-
-                # Reconstruct the full matrix
-                # single_matrix_parts has shape (World_Size, D0, D1...)
-                if shard_dim == 0:
-                    # Optimization: If sharded on dim 0, we can simply flatten the batch dim
-                    # to reconstruct the full matrix. This is a Zero-Copy View.
-                    single_matrix = single_matrix_parts.flatten(0, 1)
-                else:
-                    # General case (e.g., Col-wise sharding): We must concatenate along shard_dim.
-                    # This requires a memory copy.
-                    single_matrix = torch.cat(single_matrix_parts.unbind(0), dim=shard_dim)
-
-                # 5. Perform Newton-Schulz Orthogonalization
-                single_matrix = muon_update_newton_schulz(
-                    single_matrix,
-                    newton_schulz_func=newton_schulz_func,
-                    flatten=flatten,
-                    epsilon=epsilon,
-                    num_experts=num_experts,
-                )
-
-                # Prepare to scatter results back
-                if shard_dim == 0:
-                    # Optimization: View back to (World_Size, Shard_Size, ...)
-                    # This is a Zero-Copy View.
-                    single_matrix_shards_packed = single_matrix.view(world_size, -1, *single_matrix.shape[1:])
-                else:
-                    # General case: Split back into chunks and stack them.
-                    # We use stack to ensure the output is contiguous (World_Size, ...) for NCCL
-                    single_matrix_shards_packed = torch.stack(single_matrix.chunk(world_size, dim=shard_dim))
-
-                # Ensure contiguity is preserved (crucial for NCCL)
-                if not single_matrix_shards_packed.is_contiguous():
-                    single_matrix_shards_packed = single_matrix_shards_packed.contiguous()
-
-                # Allocate buffer for receiving updated gradients
-                U_packed_back = torch.empty_like(single_matrix_shards_packed)
-
-                # Perform optimized All-to-All (Scatter back)
-                work = dist.all_to_all_single(
-                    U_packed_back, single_matrix_shards_packed, group=process_group, async_op=True
-                )
-                yield
-                work.wait()  # type: ignore[union-attr]
-
-                # Unpack back to list form for the post-processing function
-                # unbind(0) is a view operation (slicing)
-                U = list(U_packed_back.unbind(0))
-
-            else:
-                # Uneven sharding path: use all-to-all with padding to handle uneven shards.
-                # Each rank still only orthogonalizes one matrix (no redundant computation).
-
-                # Calculate padded shard size (ceil division) so all ranks have same-sized tensors
-                padded_shard_size = (global_shard_dim_size + world_size - 1) // world_size
-
-                # Compute true local sizes for each rank using DTensor's sharding logic
-                local_sizes = []
-                for r in range(world_size):
-                    start = r * padded_shard_size
-                    end = min((r + 1) * padded_shard_size, global_shard_dim_size)
-                    local_sizes.append(max(0, end - start))
-
-                # Pad all local shards to the same size for uniform all-to-all
-                U_padded = []
-                for u in U:
-                    current_size = u.size(shard_dim)
-
-                    if current_size < padded_shard_size:
-                        pad_size = padded_shard_size - current_size
-                        pad_shape = list(u.shape)
-                        pad_shape[shard_dim] = pad_size
-                        padding = torch.zeros(pad_shape, dtype=u.dtype, device=u.device)
-                        u_padded = torch.cat([u, padding], dim=shard_dim)
-
-                    else:
-                        u_padded = u
-
-                    U_padded.append(u_padded)
-
-                # Stack into single tensor: (world_size, padded_shard_size, ...)
-                U_packed = torch.stack(U_padded)
-                single_matrix_parts = torch.empty_like(U_packed)
-
-                # All-to-all: each rank sends its shard of each matrix, receives all shards of one matrix
-                work = dist.all_to_all_single(single_matrix_parts, U_packed, group=process_group, async_op=True)
-                yield
-                work.wait()  # type: ignore[union-attr]
-
-                # Reconstruct the full matrix by unpadding and concatenating
-                if shard_dim == 0:
-                    # Flatten then unpad: total padded size = world_size * padded_shard_size
-                    single_matrix = single_matrix_parts.flatten(0, 1).narrow(0, 0, global_shard_dim_size)
-
-                else:
-                    # General case: unpad each shard then concatenate
-                    shards = []
-                    for r in range(world_size):
-                        true_size = local_sizes[r]
-
-                        if true_size > 0:
-                            shards.append(single_matrix_parts[r].narrow(shard_dim, 0, true_size))
-
-                    single_matrix = torch.cat(shards, dim=shard_dim)
-
-                # Orthogonalize
-                single_matrix = muon_update_newton_schulz(
-                    single_matrix,
-                    newton_schulz_func=newton_schulz_func,
-                    flatten=flatten,
-                    epsilon=epsilon,
-                    num_experts=num_experts,
-                )
-
-                # Split back into padded shards for all-to-all scatter
-                if shard_dim == 0:
-                    # Pad back to world_size * padded_shard_size, then view
-                    pad_total = world_size * padded_shard_size - global_shard_dim_size
-
-                    if pad_total > 0:
-                        pad_shape = list(single_matrix.shape)
-                        pad_shape[0] = pad_total
-                        padding = torch.zeros(pad_shape, dtype=single_matrix.dtype, device=single_matrix.device)
-                        single_matrix_padded = torch.cat([single_matrix, padding], dim=0)
-
-                    else:
-                        single_matrix_padded = single_matrix
-
-                    single_matrix_shards_packed = single_matrix_padded.view(
-                        world_size, padded_shard_size, *single_matrix.shape[1:]
-                    )
-
-                else:
-                    # General case: split and pad each shard
-                    shards_padded = []
-                    offset = 0
-
-                    for r in range(world_size):
-                        true_size = local_sizes[r]
-
-                        if true_size > 0:
-                            shard = single_matrix.narrow(shard_dim, offset, true_size)
-                            offset += true_size
-
-                            # Pad to padded_shard_size if needed
-                            if true_size < padded_shard_size:
-                                pad_shape = list(shard.shape)
-                                pad_shape[shard_dim] = padded_shard_size - true_size
-                                padding = torch.zeros(pad_shape, dtype=shard.dtype, device=shard.device)
-                                shard = torch.cat([shard, padding], dim=shard_dim)
-
-                        else:
-                            # Create zero-padded shard
-                            shape = list(single_matrix.shape)
-                            shape[shard_dim] = padded_shard_size
-                            shard = torch.zeros(shape, dtype=single_matrix.dtype, device=single_matrix.device)
-
-                        shards_padded.append(shard)
-
-                    single_matrix_shards_packed = torch.stack(shards_padded)
-
-                if not single_matrix_shards_packed.is_contiguous():
-                    single_matrix_shards_packed = single_matrix_shards_packed.contiguous()
-
-                U_packed_back = torch.empty_like(single_matrix_shards_packed)
-
-                # All-to-all scatter back
-                work = dist.all_to_all_single(
-                    U_packed_back, single_matrix_shards_packed, group=process_group, async_op=True
-                )
-                yield
-                work.wait()  # type: ignore[union-attr]
-
-                # Unpad and unpack to list form
-                my_size = local_sizes[device_rank]
-                U = []
-                for i in range(world_size):
-                    shard = U_packed_back[i]
-
-                    if my_size > 0 and my_size < padded_shard_size:
-                        shard = shard.narrow(shard_dim, 0, my_size)
-
-                    elif my_size == 0:
-                        shape = list(shard.shape)
-                        shape[shard_dim] = 0
-                        shard = torch.empty(shape, dtype=shard.dtype, device=shard.device)
-
-                    U.append(shard)
-
-    else:
-        # Matrices are not sharded, so we can directly orthogonalize
-        # Get a single matrix corresponding to this device
-        single_matrix = U[device_rank]
-        assert not isinstance(single_matrix, DTensor)
-
-        single_matrix = muon_update_newton_schulz(
-            single_matrix,
-            newton_schulz_func=newton_schulz_func,
-            flatten=flatten,
-            epsilon=epsilon,
-            num_experts=num_experts,
+        U = yield from _agrs_orthogonalize(
+            U,
+            shard_dim,
+            process_group,
+            newton_schulz_func,
+            flatten,
+            epsilon,
+            num_experts,
         )
-
-        if process_group is not None and process_group.size() > 1:
-            # Ensure input is contiguous
-            input_tensor = single_matrix.contiguous()
-
-            # Create output buffer
-            gathered_U = torch.empty(
-                (world_size,) + input_tensor.shape, dtype=input_tensor.dtype, device=input_tensor.device
-            )
-
-            # Use efficient all_gather
-            work = dist.all_gather_into_tensor(gathered_U, input_tensor, group=process_group, async_op=True)
-            yield
-            work.wait()  # type: ignore[union-attr]
-
-            # Unbind to list for compatibility
-            U = list(gathered_U.unbind(0))
-
-        else:
-            # Single GPU case, no need to gather
-            assert world_size == 1
-            U = [single_matrix]
+    elif comm_strategy == "subgroup_allgather":
+        assert shard_dim is not None, "shard_dim must be provided for subgroup_allgather path"
+        assert process_group is not None, "process_group must be provided for subgroup_allgather path"
+        assert isinstance(X[0], DTensor), "X should contain DTensors"
+        assert not isinstance(U[0], DTensor), "U should contain local shards"
+        U = yield from _subgroup_orthogonalize(
+            U,
+            shard_dim,
+            process_group,
+            newton_schulz_func,
+            flatten,
+            epsilon,
+            num_experts,
+        )
+    elif comm_strategy == "all_to_all":
+        assert shard_dim is not None, "shard_dim must be provided for all_to_all path"
+        assert process_group is not None, "process_group must be provided for all_to_all path"
+        assert isinstance(X[0], DTensor), "X should contain DTensors"
+        assert not isinstance(U[0], DTensor), "U should contain local shards"
+        U = yield from _all_to_all_orthogonalize(
+            U,
+            X[0].size(shard_dim),
+            shard_dim,
+            process_group,
+            newton_schulz_func,
+            flatten,
+            epsilon,
+            num_experts,
+        )
+    else:  # "local"
+        U = yield from _local_orthogonalize(
+            U,
+            process_group,
+            newton_schulz_func,
+            flatten,
+            epsilon,
+            num_experts,
+        )
 
     # Compute adjusted learning rate
     adjusted_lr = lr * lr_ratio
@@ -1222,6 +889,419 @@ def muon_update_batch_async(
         adjusted_lr=adjusted_lr,
         weight_decay=weight_decay,
     )
+
+
+def _agrs_orthogonalize(
+    U: list[Tensor],
+    shard_dim: int,
+    process_group: ProcessGroup,
+    newton_schulz_func: Callable,
+    flatten: bool,
+    epsilon: Tensor,
+    num_experts: int,
+) -> Generator[None, None, list[Tensor]]:
+    R = len(U)
+    W = process_group.size()
+    device_rank = process_group.rank()
+
+    # Phase 1: All-Gather — each rank contributes R local shards,
+    # producing W*R shards across all ranks.
+    U_stacked = torch.stack(U)  # (R, *shard_shape)
+    shard_shape = U_stacked.shape[1:]
+    ag_output = torch.empty((W * R,) + shard_shape, dtype=U[0].dtype, device=U[0].device)
+
+    work = dist.all_gather_into_tensor(ag_output, U_stacked.contiguous(), group=process_group, async_op=True)
+    yield  # Yield point 1: overlap with other async work
+    work.wait()  # type: ignore[union-attr]
+    del U_stacked
+
+    # Reconstruct R full parameters from gathered shards.
+    # ag_output layout: [rank0_param0, rank0_param1, ..., rank1_param0, ...]
+    # Reshape to (W, R, *shard_shape), then merge shard_dim to get full params.
+    ag_reshaped = ag_output.view(W, R, *shard_shape)
+
+    if shard_dim == 0:
+        # (W, R, shard_size, ...) → (R, W, shard_size, ...) → (R, W*shard_size, ...)
+        full_params = ag_reshaped.permute(1, 0, *range(2, ag_reshaped.ndim)).flatten(1, 2)
+    else:
+        # General case: move W dim next to the shard_dim chunk, then flatten.
+        # ag_reshaped dims: [W=0, R=1, d0=2, d1=3, ...]
+        # Target: [R=1, d0=2, ..., W=0 next to shard chunk, ..., dN]
+        perm = list(range(ag_reshaped.ndim))
+        perm.remove(0)  # remove W
+        perm.insert(shard_dim + 1, 0)  # put W next to shard chunk (offset +1 for R dim)
+        full_params = ag_reshaped.permute(perm).flatten(shard_dim + 1, shard_dim + 2)
+    # full_params shape: (R, *full_param_shape)
+
+    # Phase 2: Selective Newton-Schulz — each rank orthogonalizes a subset.
+    # Rank r processes parameters where i % W == r, others get zeros.
+    ns_results = []
+    for i in range(R):
+        if i % W == device_rank:
+            ns_results.append(
+                muon_update_newton_schulz(
+                    full_params[i],
+                    newton_schulz_func=newton_schulz_func,
+                    flatten=flatten,
+                    epsilon=epsilon,
+                    num_experts=num_experts,
+                )
+            )
+        else:
+            ns_results.append(torch.zeros_like(full_params[i]))
+
+    # Free all-gather buffer — full_params/ag_reshaped are views of ag_output
+    del full_params, ag_reshaped, ag_output
+
+    # Phase 3: Reduce-Scatter — sum partial NS results across ranks,
+    # each rank gets back its local shard of each parameter.
+    ns_stacked = torch.stack(ns_results)  # (R, *full_shape)
+    del ns_results
+    full_dim = ns_stacked.shape[shard_dim + 1]  # +1 because dim 0 is R
+    shard_size = full_dim // W
+
+    # Split the full dimension into (W, shard_size) for reduce-scatter
+    new_shape = list(ns_stacked.shape)
+    new_shape[shard_dim + 1 : shard_dim + 2] = [W, shard_size]
+    rs_input = ns_stacked.view(new_shape)
+
+    # Move the W dimension to front for reduce_scatter_tensor
+    w_pos = shard_dim + 1
+    perm = [w_pos] + list(range(0, w_pos)) + list(range(w_pos + 1, rs_input.ndim))
+    rs_input = rs_input.permute(perm).contiguous()
+    del ns_stacked  # Safe to free: .contiguous() created an independent copy
+
+    # Flatten trailing dims: (W, R*shard_numel) for reduce_scatter
+    rs_flat_in = rs_input.reshape(W, -1)
+    rs_flat_out = torch.empty(rs_flat_in.shape[1], dtype=rs_flat_in.dtype, device=rs_flat_in.device)
+
+    work = dist.reduce_scatter_tensor(
+        rs_flat_out,
+        rs_flat_in,
+        op=dist.ReduceOp.SUM,
+        group=process_group,
+        async_op=True,
+    )
+    yield  # Yield point 2: overlap with other async work
+    work.wait()  # type: ignore[union-attr]
+
+    # Unpack back to list of R local shards
+    return list(rs_flat_out.view(R, *shard_shape).unbind(0))
+
+
+def _subgroup_orthogonalize(
+    U: list[Tensor],
+    shard_dim: int,
+    process_group: ProcessGroup,
+    newton_schulz_func: Callable,
+    flatten: bool,
+    epsilon: Tensor,
+    num_experts: int,
+) -> Generator[None, None, list[Tensor]]:
+    # Sub-group all-gather path: reconstruct a complete expert from a small
+    # group of FSDP ranks that together hold all shards of one expert, then
+    # orthogonalize locally and slice back.  No global all-to-all needed.
+    subgroup_size = process_group.size()
+    subgroup_rank = process_group.rank()
+    assert len(U) == 1, "Sub-group all-gather expects world_size=1 (no batch padding)"
+    local_shard = U[0]
+
+    # All-gather within sub-group to reconstruct full expert
+    gathered = torch.empty(
+        (subgroup_size,) + local_shard.shape,
+        dtype=local_shard.dtype,
+        device=local_shard.device,
+    )
+
+    work = dist.all_gather_into_tensor(gathered, local_shard.contiguous(), group=process_group, async_op=True)
+    yield
+    work.wait()  # type: ignore[union-attr]
+
+    # Reconstruct full expert along shard_dim
+    if shard_dim == 0:
+        full_expert = gathered.flatten(0, 1)
+    else:
+        full_expert = torch.cat(gathered.unbind(0), dim=shard_dim)
+
+    # Orthogonalize (num_experts=1: we reconstructed exactly one expert)
+    full_expert = muon_update_newton_schulz(
+        full_expert,
+        newton_schulz_func=newton_schulz_func,
+        flatten=flatten,
+        epsilon=epsilon,
+        num_experts=num_experts,
+    )
+
+    # Slice back to local shard — no reverse communication needed
+    shard_size = full_expert.size(shard_dim) // subgroup_size
+    return [full_expert.narrow(shard_dim, subgroup_rank * shard_size, shard_size)]
+
+
+def _all_to_all_orthogonalize(
+    U: list[Tensor],
+    global_shard_dim_size: int,
+    shard_dim: int,
+    process_group: ProcessGroup,
+    newton_schulz_func: Callable,
+    flatten: bool,
+    epsilon: Tensor,
+    num_experts: int,
+) -> Generator[None, None, list[Tensor]]:
+    world_size = process_group.size()
+    device_rank = process_group.rank()
+    if global_shard_dim_size >= world_size and global_shard_dim_size % world_size == 0:
+        # Standard path: use all-to-all for evenly sharded tensors
+        # Pack the list of shards into a single contiguous tensor
+        # U is currently [Shard_for_Rank0, Shard_for_Rank1, ...]
+        # Stack creates shape: (World_Size, *Shard_Shape)
+        U_packed = torch.stack(U)
+
+        # Allocate buffer to receive parts of the "Single Matrix"
+        # Shape: (World_Size, *Shard_Shape)
+        single_matrix_parts = torch.empty_like(U_packed)
+
+        # Perform optimized All-to-All
+        # This sends one large contiguous buffer instead of many small ones
+        work = dist.all_to_all_single(single_matrix_parts, U_packed, group=process_group, async_op=True)
+        yield
+        work.wait()  # type: ignore[union-attr]
+        del U_packed
+
+        # Reconstruct the full matrix
+        # single_matrix_parts has shape (World_Size, D0, D1...)
+        if shard_dim == 0:
+            # Optimization: If sharded on dim 0, we can simply flatten the batch dim
+            # to reconstruct the full matrix. This is a Zero-Copy View.
+            single_matrix = single_matrix_parts.flatten(0, 1)
+        else:
+            # General case (e.g., Col-wise sharding): We must concatenate along shard_dim.
+            # This requires a memory copy.
+            single_matrix = torch.cat(single_matrix_parts.unbind(0), dim=shard_dim)
+
+        # 5. Perform Newton-Schulz Orthogonalization
+        single_matrix = muon_update_newton_schulz(
+            single_matrix,
+            newton_schulz_func=newton_schulz_func,
+            flatten=flatten,
+            epsilon=epsilon,
+            num_experts=num_experts,
+        )
+        del single_matrix_parts
+
+        # Prepare to scatter results back
+        if shard_dim == 0:
+            # Optimization: View back to (World_Size, Shard_Size, ...)
+            # This is a Zero-Copy View.
+            single_matrix_shards_packed = single_matrix.view(world_size, -1, *single_matrix.shape[1:])
+        else:
+            # General case: Split back into chunks and stack them.
+            # We use stack to ensure the output is contiguous (World_Size, ...) for NCCL
+            single_matrix_shards_packed = torch.stack(single_matrix.chunk(world_size, dim=shard_dim))
+
+        # Ensure contiguity is preserved (crucial for NCCL)
+        if not single_matrix_shards_packed.is_contiguous():
+            single_matrix_shards_packed = single_matrix_shards_packed.contiguous()
+
+        # Allocate buffer for receiving updated gradients
+        U_packed_back = torch.empty_like(single_matrix_shards_packed)
+
+        # Perform optimized All-to-All (Scatter back)
+        work = dist.all_to_all_single(U_packed_back, single_matrix_shards_packed, group=process_group, async_op=True)
+        yield
+        work.wait()  # type: ignore[union-attr]
+
+        # Unpack back to list form for the post-processing function
+        # unbind(0) is a view operation (slicing)
+        return list(U_packed_back.unbind(0))
+
+    else:
+        # Uneven sharding path: use all-to-all with padding to handle uneven shards.
+        # Each rank still only orthogonalizes one matrix (no redundant computation).
+
+        # Calculate padded shard size (ceil division) so all ranks have same-sized tensors
+        padded_shard_size = (global_shard_dim_size + world_size - 1) // world_size
+
+        # Compute true local sizes for each rank using DTensor's sharding logic
+        local_sizes = []
+        for r in range(world_size):
+            start = r * padded_shard_size
+            end = min((r + 1) * padded_shard_size, global_shard_dim_size)
+            local_sizes.append(max(0, end - start))
+
+        # Pad all local shards to the same size for uniform all-to-all
+        U_padded = []
+        for u in U:
+            current_size = u.size(shard_dim)
+
+            if current_size < padded_shard_size:
+                pad_size = padded_shard_size - current_size
+                pad_shape = list(u.shape)
+                pad_shape[shard_dim] = pad_size
+                padding = torch.zeros(pad_shape, dtype=u.dtype, device=u.device)
+                u_padded = torch.cat([u, padding], dim=shard_dim)
+
+            else:
+                u_padded = u
+
+            U_padded.append(u_padded)
+
+        # Stack into single tensor: (world_size, padded_shard_size, ...)
+        U_packed = torch.stack(U_padded)
+        del U_padded
+        single_matrix_parts = torch.empty_like(U_packed)
+
+        # All-to-all: each rank sends its shard of each matrix, receives all shards of one matrix
+        work = dist.all_to_all_single(single_matrix_parts, U_packed, group=process_group, async_op=True)
+        yield
+        work.wait()  # type: ignore[union-attr]
+        del U_packed
+
+        # Reconstruct the full matrix by unpadding and concatenating
+        if shard_dim == 0:
+            # Flatten then unpad: total padded size = world_size * padded_shard_size
+            single_matrix = single_matrix_parts.flatten(0, 1).narrow(0, 0, global_shard_dim_size)
+
+        else:
+            # General case: unpad each shard then concatenate
+            shards = []
+            for r in range(world_size):
+                true_size = local_sizes[r]
+
+                if true_size > 0:
+                    shards.append(single_matrix_parts[r].narrow(shard_dim, 0, true_size))
+
+            single_matrix = torch.cat(shards, dim=shard_dim)
+
+        # Orthogonalize
+        single_matrix = muon_update_newton_schulz(
+            single_matrix,
+            newton_schulz_func=newton_schulz_func,
+            flatten=flatten,
+            epsilon=epsilon,
+            num_experts=num_experts,
+        )
+        del single_matrix_parts
+
+        # Split back into padded shards for all-to-all scatter
+        if shard_dim == 0:
+            # Pad back to world_size * padded_shard_size, then view
+            pad_total = world_size * padded_shard_size - global_shard_dim_size
+
+            if pad_total > 0:
+                pad_shape = list(single_matrix.shape)
+                pad_shape[0] = pad_total
+                padding = torch.zeros(pad_shape, dtype=single_matrix.dtype, device=single_matrix.device)
+                single_matrix_padded = torch.cat([single_matrix, padding], dim=0)
+
+            else:
+                single_matrix_padded = single_matrix
+
+            single_matrix_shards_packed = single_matrix_padded.view(
+                world_size, padded_shard_size, *single_matrix.shape[1:]
+            )
+
+        else:
+            # General case: split and pad each shard
+            shards_padded = []
+            offset = 0
+
+            for r in range(world_size):
+                true_size = local_sizes[r]
+
+                if true_size > 0:
+                    shard = single_matrix.narrow(shard_dim, offset, true_size)
+                    offset += true_size
+
+                    # Pad to padded_shard_size if needed
+                    if true_size < padded_shard_size:
+                        pad_shape = list(shard.shape)
+                        pad_shape[shard_dim] = padded_shard_size - true_size
+                        padding = torch.zeros(pad_shape, dtype=shard.dtype, device=shard.device)
+                        shard = torch.cat([shard, padding], dim=shard_dim)
+
+                else:
+                    # Create zero-padded shard
+                    shape = list(single_matrix.shape)
+                    shape[shard_dim] = padded_shard_size
+                    shard = torch.zeros(shape, dtype=single_matrix.dtype, device=single_matrix.device)
+
+                shards_padded.append(shard)
+
+            single_matrix_shards_packed = torch.stack(shards_padded)
+
+        if not single_matrix_shards_packed.is_contiguous():
+            single_matrix_shards_packed = single_matrix_shards_packed.contiguous()
+
+        U_packed_back = torch.empty_like(single_matrix_shards_packed)
+
+        # All-to-all scatter back
+        work = dist.all_to_all_single(U_packed_back, single_matrix_shards_packed, group=process_group, async_op=True)
+        yield
+        work.wait()  # type: ignore[union-attr]
+
+        # Unpad and unpack to list form
+        my_size = local_sizes[device_rank]
+        U_result = []
+        for i in range(world_size):
+            shard = U_packed_back[i]
+
+            if my_size > 0 and my_size < padded_shard_size:
+                shard = shard.narrow(shard_dim, 0, my_size)
+
+            elif my_size == 0:
+                shape = list(shard.shape)
+                shape[shard_dim] = 0
+                shard = torch.empty(shape, dtype=shard.dtype, device=shard.device)
+
+            U_result.append(shard)
+
+        return U_result
+
+
+def _local_orthogonalize(
+    U: list[Tensor],
+    process_group: ProcessGroup | None,
+    newton_schulz_func: Callable,
+    flatten: bool,
+    epsilon: Tensor,
+    num_experts: int,
+) -> Generator[None, None, list[Tensor]]:
+    world_size = process_group.size() if process_group is not None else 1
+    device_rank = process_group.rank() if process_group is not None else 0
+    # Matrices are not sharded, so we can directly orthogonalize
+    # Get a single matrix corresponding to this device
+    single_matrix = U[device_rank]
+    assert not isinstance(single_matrix, DTensor)
+
+    single_matrix = muon_update_newton_schulz(
+        single_matrix,
+        newton_schulz_func=newton_schulz_func,
+        flatten=flatten,
+        epsilon=epsilon,
+        num_experts=num_experts,
+    )
+
+    if process_group is not None and process_group.size() > 1:
+        # Ensure input is contiguous
+        input_tensor = single_matrix.contiguous()
+
+        # Create output buffer
+        gathered_U = torch.empty(
+            (world_size,) + input_tensor.shape, dtype=input_tensor.dtype, device=input_tensor.device
+        )
+
+        # Use efficient all_gather
+        work = dist.all_gather_into_tensor(gathered_U, input_tensor, group=process_group, async_op=True)
+        yield
+        work.wait()  # type: ignore[union-attr]
+
+        # Unbind to list for compatibility
+        return list(gathered_U.unbind(0))
+
+    else:
+        # Single GPU case, no need to gather
+        assert world_size == 1
+        return [single_matrix]
 
 
 def adamw_update_foreach_async(
