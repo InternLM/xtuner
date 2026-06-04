@@ -58,10 +58,9 @@ class _FakeRolloutWorkerGenerate:
 
     def remote(self, *, rollout_state):
         self.calls.append(rollout_state)
-        return self._generate()
-
-    async def _generate(self):
-        return self.returned_state
+        result = asyncio.get_running_loop().create_future()
+        result.set_result(self.returned_state)
+        return result
 
 
 class _FakeRolloutWorker:
