@@ -2,11 +2,13 @@ import asyncio
 import math
 import os
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, TypeAlias, TypedDict
 from uuid import uuid4
 
 import ray
+import requests
 from ray.actor import ActorProxy
 from ray.util.placement_group import PlacementGroup
 
@@ -34,6 +36,8 @@ class WorkerInfo:
     url: str
     session_url: str | None = None
     is_active: bool = True
+    dist_init_addr: str = ""
+    ep_group_ranks: tuple[int, ...] = ()
 
 
 class RolloutWorkerMetadata(TypedDict):
@@ -258,6 +262,9 @@ class RolloutController:
                 workers = {rank: (info.actor, info.url, info.is_active) for rank, info in self.rank2info.items()}
 
             for rank, (actor, url, was_active) in workers.items():
+                if not was_active:
+                    continue
+
                 try:
                     is_healthy = ray.get(actor.check_health.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
                 except Exception as e:
@@ -271,9 +278,7 @@ class RolloutController:
                     info = self.rank2info[rank]
                     info.is_active = bool(is_healthy)
 
-                if is_healthy and not was_active:
-                    self.logger.info(f"Mark rollout worker {rank} active after final health check: url={url}")
-                elif not is_healthy and was_active:
+                if not is_healthy:
                     self.logger.warning(
                         f"Mark rollout worker {rank} inactive because final health check failed before training: url={url}"
                     )
@@ -323,47 +328,194 @@ class RolloutController:
         """Recover inactive workers before training while keeping health checks
         paused."""
         with self.worker_info_lock:
-            failed_workers = [info for info in self.rank2info.values() if not info.is_active]
+            failed_group_to_ranks: dict[tuple[int, ...], list[int]] = {}
+            for rank, info in self.rank2info.items():
+                if info.is_active:
+                    continue
+                group_ranks = info.ep_group_ranks or (rank,)
+                failed_group_to_ranks.setdefault(group_ranks, []).append(rank)
 
-        if not failed_workers:
+        if not failed_group_to_ranks:
             self.logger.info("No failed workers detected during recovery.")
             return
 
-        self.logger.warning(f"Detected {len(failed_workers)} failed workers. Initiating recovery process.")
-        for worker in failed_workers:
-            if self._restart_failed_workers(worker.actor, expected_url=worker.url):
+        failed_groups = set(failed_group_to_ranks)
+        for group_ranks in sorted(failed_groups):
+            failed_ranks = sorted(failed_group_to_ranks[group_ranks])
+            if len(group_ranks) > 1:
+                related_restart_ranks = [rank for rank in group_ranks if rank not in failed_ranks]
+                self.logger.warning(
+                    f"Detected failed rollout worker ranks={failed_ranks}; "
+                    f"restart_group_ranks={group_ranks}, related_restart_ranks={related_restart_ranks}."
+                )
+            else:
+                self.logger.warning(f"Detected failed rollout worker rank={failed_ranks[0]}. Initiating recovery.")
+
+        with self.worker_info_lock:
+            for group_ranks in failed_groups:
+                for rank in group_ranks:
+                    if rank in self.rank2info:
+                        self.rank2info[rank].is_active = False
+
+        for group_ranks in sorted(failed_groups):
+            if self._restart_worker_group(group_ranks):
                 with self.worker_info_lock:
-                    rank = self._get_rank_by_actor(worker.actor)
-                    if rank is not None:
+                    for rank in group_ranks:
                         self.rank2info[rank].is_active = True
 
-    def _restart_failed_workers(self, worker: RolloutWorker, expected_url: str) -> bool:
+    def _restart_worker_group(self, group_ranks: tuple[int, ...]) -> bool:
+        workers: list[tuple[int, RolloutWorker, str, str]] = []
         try:
-            # 先保证把老的worker关掉
-            ray.get(worker.shutdown.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
-            # 保证新的worker启动在之前的端口上，否则权重更新会出错
-            _, url = ray.get(worker.init.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
-            assert url == expected_url, f"Worker restarted with unexpected URL: expected {expected_url}, got {url}."
-            _, session_url = ray.get(worker.get_session_server_info.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
-            is_healthy = ray.get(worker.check_health.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+            with self.worker_info_lock:
+                workers = [
+                    (
+                        rank,
+                        self.rank2info[rank].actor,
+                        self.rank2info[rank].url,
+                        self.rank2info[rank].dist_init_addr,
+                    )
+                    for rank in group_ranks
+                ]
 
-            if is_healthy:
-                self.logger.info(f"Successfully restarted worker {worker} with URL {url}.")
-                with self.worker_info_lock:
-                    rank = self._get_rank_by_actor(worker)
-                    if rank is not None:
-                        self.rank2info[rank].url = url
-                        self.rank2info[rank].session_url = session_url
-                        self.worker_server_urls_map[rank] = url
-                return True
-            else:
-                self.logger.error(f"Worker {worker} is still unhealthy after restart.")
+            if not self._cleanup_inactive_worker_group(workers):
                 return False
-        except AssertionError:
-            raise
+            init_refs = [
+                actor.init.remote(dist_init_addr=dist_init_addr)  # type: ignore[attr-defined]
+                for _, actor, _, dist_init_addr in workers
+            ]
+            init_results = ray.get(init_refs, timeout=ROLLOUT_RAY_GET_TIMEOUT)
+            if len(init_results) != len(workers):
+                self.logger.error(
+                    f"Restarted rollout worker group ranks={group_ranks} returned "
+                    f"{len(init_results)} init results, expected {len(workers)}."
+                )
+                self._cleanup_inactive_worker_group(workers)
+                return False
+            for (rank, _, expected_url, _), (actual_rank, actual_url) in zip(workers, init_results):
+                if actual_rank != rank or actual_url != expected_url:
+                    self.logger.error(
+                        f"Restarted rollout worker {rank} returned rank={actual_rank}, url={actual_url}; "
+                        f"expected rank={rank}, url={expected_url}."
+                    )
+                    self._cleanup_inactive_worker_group(workers)
+                    return False
+
+            infer_not_ready_ranks = self._check_worker_group_infer_ready_after_restart(workers)
+            if infer_not_ready_ranks:
+                self.logger.error(
+                    f"Restarted rollout worker group ranks={group_ranks} has ranks not ready for inference: "
+                    f"{infer_not_ready_ranks}."
+                )
+                self._cleanup_inactive_worker_group(workers)
+                return False
+            else:
+                self.logger.info(f"Successfully restarted rollout worker group ranks={group_ranks}.")
+                return True
         except Exception as e:
             self.logger.error(f"Failed to restart worker: {e}")
+            if workers:
+                self._cleanup_inactive_worker_group(workers)
             return False
+
+    def _cleanup_inactive_worker_group(self, workers: list[tuple[int, RolloutWorker, str, str]]) -> bool:
+        shutdown_succeeded = True
+        for rank, actor, url, _ in workers:
+            try:
+                ray.get(actor.shutdown.remote(), timeout=60)  # type: ignore[attr-defined]
+            except Exception as e:
+                shutdown_succeeded = False
+                self.logger.warning(f"Cleanup shutdown failed for rollout worker {rank} at {url}: {e}")
+                continue
+            if not self._wait_worker_server_down_after_shutdown(rank, url):
+                shutdown_succeeded = False
+        return shutdown_succeeded
+
+    def _wait_worker_server_down_after_shutdown(
+        self,
+        rank: int,
+        url: str,
+        *,
+        max_attempts: int = 60,
+        retry_interval_seconds: float = 5.0,
+    ) -> bool:
+        endpoint_url = f"{url}/health"
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": f"Bearer {self.config.api_key}",
+        }
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = requests.get(endpoint_url, headers=headers, timeout=1.0)
+            except requests.RequestException:
+                return True
+            if attempt < max_attempts:
+                self.logger.warning(
+                    f"Rollout worker rank={rank} server still responds after shutdown "
+                    f"attempt={attempt}/{max_attempts}, url={url}, status={response.status_code}."
+                )
+                time.sleep(retry_interval_seconds)
+        self.logger.error(f"Rollout worker rank={rank} server did not stop after shutdown: url={url}.")
+        return False
+
+    def _check_worker_group_infer_ready_after_restart(
+        self,
+        workers: list[tuple[int, RolloutWorker, str, str]],
+        *,
+        max_attempts: int = 60,
+        retry_interval_seconds: float = 5.0,
+    ) -> list[int]:
+        # NOTE: 推理引擎现在仅依靠 /health 接口来判断是否 ready, 有可能会出现server已经ready了，但是推理引擎还未ready的情况，所以重启后需要判断推理引擎是否能够推理成功才认为启动成功
+        pending = {rank: url for rank, _, url, _ in workers}
+        for attempt in range(1, max_attempts + 1):
+            for rank, url in list(pending.items()):
+                if self._check_chat_completion_ready_once(rank, url, attempt, max_attempts):
+                    del pending[rank]
+            if not pending:
+                return []
+            if attempt < max_attempts:
+                time.sleep(retry_interval_seconds)
+        return sorted(pending)
+
+    def _check_chat_completion_ready_once(
+        self,
+        rank: int,
+        url: str,
+        attempt: int,
+        max_attempts: int,
+    ) -> bool:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.config.api_key}",
+        }
+        payload = {
+            "model": self.config.model_name,
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "n": 1,
+            "stream": False,
+            "max_tokens": 1,
+            "repetition_penalty": 1.0,
+            "top_k": 1,
+            "skip_special_tokens": True,
+        }
+        endpoint_url = f"{url}/v1/chat/completions"
+        try:
+            response = requests.post(endpoint_url, headers=headers, json=payload, timeout=60)
+        except requests.RequestException as e:
+            self.logger.warning(
+                f"Restarted rollout worker rank={rank} inference readiness request failed "
+                f"attempt={attempt}/{max_attempts}: {e}"
+            )
+            return False
+
+        if response.status_code != 200:
+            self.logger.warning(
+                f"Restarted rollout worker rank={rank} inference readiness request returned "
+                f"status={response.status_code}, attempt={attempt}/{max_attempts}, response={response.text}"
+            )
+            return False
+        return True
 
     def _update_dist_init_addr(self, nodes_per_engine, server_urls_per_engine, dist_init_addrs, tp_size):
         """Update the distributed initialization addresses for workers.
@@ -455,6 +607,22 @@ class RolloutController:
                 return rank
         return None
 
+    @staticmethod
+    def _build_rank_to_ep_group(active_ranks: list[int], server_urls_per_engine: int) -> dict[int, tuple[int, ...]]:
+        if server_urls_per_engine <= 1:
+            return {rank: (rank,) for rank in active_ranks}
+
+        assert len(active_ranks) % server_urls_per_engine == 0, (
+            f"active rollout worker count {len(active_ranks)} must be divisible by "
+            f"server_urls_per_engine={server_urls_per_engine}"
+        )
+        rank_to_ep_group: dict[int, tuple[int, ...]] = {}
+        for start in range(0, len(active_ranks), server_urls_per_engine):
+            ep_group = tuple(active_ranks[start : start + server_urls_per_engine])
+            for rank in ep_group:
+                rank_to_ep_group[rank] = ep_group
+        return rank_to_ep_group
+
     def _update_active_workers_and_urls_map(self, active_rollout_workers, worker_server_urls_map):
         """Update the list of active rollout workers and their server URLs.
 
@@ -518,29 +686,27 @@ class RolloutController:
             nodes_per_engine, server_urls_per_engine, init_dist_init_addrs, self.num_gpus_per_engine
         )
         # launch rollout servers
-        init_results = ray.get(
+        worker_server_urls = ray.get(
             [worker.init.remote(dist_init_addrs[i]) for i, worker in enumerate(active_rollout_workers)]
         )
-        worker_server_urls_map = dict(init_results)  # rank -> url
-        worker_session_url_dict = dict(
-            ray.get([worker.get_session_server_info.remote() for worker in active_rollout_workers])
-        )
+        worker_server_urls_map = dict(worker_server_urls)  # rank -> url
+        worker_dist_init_addr_map = {rank: dist_init_addrs[i] for i, (rank, _) in enumerate(worker_server_urls)}
         active_rollout_workers, worker_server_urls_map = self._update_active_workers_and_urls_map(
             active_rollout_workers, worker_server_urls_map
         )
         active_ranks = list(worker_server_urls_map.keys())
-        worker_session_url_dict = {rank: worker_session_url_dict[rank] for rank in active_ranks}
+        rank_to_ep_group = self._build_rank_to_ep_group(active_ranks, server_urls_per_engine)
         workers_info = {}
-        for i in range(len(active_rollout_workers)):
-            rank = list(worker_server_urls_map.keys())[i]
+        for i, rank in enumerate(active_ranks):
             url = worker_server_urls_map[rank]
             workers_info[rank] = WorkerInfo(
                 actor=active_rollout_workers[i],
                 url=url,
-                session_url=worker_session_url_dict[rank],
+                dist_init_addr=worker_dist_init_addr_map[rank],
+                ep_group_ranks=rank_to_ep_group[rank],
             )
         self.logger.info(f"Rollout worker server URLs: {[info.url for info in workers_info.values()]}")
-        self.logger.info(f"Rollout worker session server URLs: {[info.session_url for info in workers_info.values()]}")
+        self.logger.info(f"Rollout worker EP groups: {sorted(set(rank_to_ep_group.values()))}")
         return engine_rank_mesh_array, worker_server_urls_map, workers_info
 
 

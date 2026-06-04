@@ -184,34 +184,16 @@ class RolloutHealthChecker:
             return await asyncio.gather(*tasks)
 
         check_results = asyncio.run(_run_checks())
-        inactive_workers = []
         for (rank, _, _, _), is_healthy in zip(workers_to_check, check_results):
             if not is_healthy:
                 logger.warning(f"Worker {rank} failed health check. Marking as inactive.")
                 if self._worker_infos_lock is None:
                     self._workers_info[rank].is_active = False
-                    inactive_worker = self._workers_info[rank].actor
                 else:
                     with self._worker_infos_lock:
                         self._workers_info[rank].is_active = False
-                        inactive_worker = self._workers_info[rank].actor
-                if inactive_worker is None:
-                    logger.error(f"[RolloutHealthChecker] Worker {rank} has no actor reference. Skipping shutdown.")
-                    continue
-                inactive_workers.append((rank, inactive_worker))
             else:
                 logger.debug(f"[RolloutHealthChecker] Worker {rank} passed health check.")
-
-        for rank, inactive_worker in inactive_workers:
-            try:
-                ray.get(inactive_worker.offload.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
-            except Exception as e:
-                logger.error(f"Exception while offloading worker {rank}: {e}")
-
-            try:
-                ray.get(inactive_worker.shutdown.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
-            except Exception as e:
-                logger.error(f"Exception while shutting down worker {rank}: {e}")
 
     def _run_loop(self) -> None:
         assert self._stop_event is not None and self._pause_event is not None
