@@ -97,7 +97,7 @@ def start_ray(nnodes: int, cpus_per_task: int, memory_per_task: int, image: str,
     start_time = time.time()
     timeout_seconds = max_wait_minutes * 60
 
-    while job.status != JobStatus.RUNNING:
+    while job.status != JobStatus.RUNNING or any([ x == "none" for x in job.nodes_ip]):
         elapsed = time.time() - start_time
         if elapsed > timeout_seconds:
             raise TimeoutError(
@@ -107,7 +107,7 @@ def start_ray(nnodes: int, cpus_per_task: int, memory_per_task: int, image: str,
 
         time.sleep(10)  # Poll every 10 seconds
         job = cluster.get_job_info(job.job_id)
-        logger.info(f"Job status: {job.status}, elapsed: {elapsed:.1f}s")
+        logger.info(f"Job status: {job.status}, nodes_ip: {job.nodes_ip}, elapsed: {elapsed:.1f}s")
 
         if job.status == JobStatus.FAILED:
             raise RuntimeError(f"Job {job.job_id} failed")
@@ -386,13 +386,17 @@ def main(
             },
         )(cache_worker)
 
-        # Submit one task per file for fine-grained load balancing
+        # Dynamic task submission for better load balancing (avoids tail latency)
+        pending_configs = list(enumerate(dataset_config))
+        max_concurrent = nnodes * tasks_per_node
         res = []
-        logger.info(f"Submitting {total_files} tasks (one file per task) to {nnodes} nodes with {tasks_per_node} tasks per node")
 
-        for i, config in tqdm(enumerate(dataset_config), total=total_files, desc="Submitting tasks", unit="task"):
-            # Submit task with single config (worker will handle cache_dir internally)
-            res.append(worker.remote([config], tokenizer_path, i, tracker, tok_hash))
+        logger.info(f"Submitting tasks dynamically with max {max_concurrent} concurrent tasks")
+
+        # Submit initial batch (one per available worker slot)
+        for _ in range(min(max_concurrent, len(pending_configs))):
+            idx, config = pending_configs.pop(0)
+            res.append(worker.remote([config], tokenizer_path, idx, tracker, tok_hash))
 
         pbar = tqdm(total=total_files, desc="Processing files", unit="file")
         stop_event = threading.Event()
@@ -415,8 +419,19 @@ def main(
         progress_thread = threading.Thread(target=update_progress, daemon=True)
         progress_thread.start()
 
-        logger.info(f"\nWaiting for {len(res)} tasks to complete...")
-        ray.get(res)
+        # Dynamic task submission: submit new task when one completes
+        logger.info(f"Processing {total_files} files with dynamic task assignment...")
+        while res:
+            # Wait for at least one task to complete
+            ready, res = ray.wait(res, num_returns=1)
+
+            # Get result to ensure any exceptions are raised
+            ray.get(ready[0])
+
+            # Submit new task if there are remaining configs
+            if pending_configs:
+                idx, config = pending_configs.pop(0)
+                res.append(worker.remote([config], tokenizer_path, idx, tracker, tok_hash))
 
         stop_event.set()
         progress_thread.join(timeout=2)
