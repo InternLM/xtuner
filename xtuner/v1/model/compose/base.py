@@ -1,9 +1,9 @@
 import json
 import multiprocessing as py_mp
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from shutil import copy, copytree, rmtree
-from typing import Callable, Mapping, Self, Sequence, cast
+from typing import Mapping, Self, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -202,8 +202,7 @@ class BaseComposeModel(BaseModel):
         hf_dir: Path | str,
         save_dtype: torch.dtype = torch.bfloat16,
         safetensors_prefix: str = "model",
-        file_finalize_callback: Callable[[Path], None] | None = None,
-    ) -> AsyncHFSaveHandle:
+    ) -> Future[Path]:
         self._get_async_hf_resources()
         if self._hf_path is None and self.config.hf_config is None:
             raise NotImplementedError(
@@ -261,21 +260,26 @@ class BaseComposeModel(BaseModel):
 
         handle = AsyncHFSaveHandle(
             process=process,
-            commit_future=None,
             hf_dir=hf_dir,
             tmp_hf_dir=tmp_hf_dir,
         )
         commit_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="async-hf-commit")
-        handle.commit_future = commit_executor.submit(
+        commit_future = commit_executor.submit(
             self.commit_async_hf_save,
             handle,
-            file_finalize_callback=file_finalize_callback,
         )
         self._pending_async_hf = handle
-        handle.commit_future.add_done_callback(self._record_async_hf_commit_result)
-        handle.commit_future.add_done_callback(lambda _: self._clear_pending_async_hf(handle))
-        handle.commit_future.add_done_callback(lambda _: commit_executor.shutdown(wait=False))
-        return handle
+        commit_future.add_done_callback(self._record_async_hf_commit_result)
+
+        def clear_pending_async_hf(_: Future[Path]) -> None:
+            self._clear_pending_async_hf(handle)
+
+        def shutdown_commit_executor(_: Future[Path]) -> None:
+            commit_executor.shutdown(wait=False)
+
+        commit_future.add_done_callback(clear_pending_async_hf)
+        commit_future.add_done_callback(shutdown_commit_executor)
+        return commit_future
 
     def _run_async_hf_compose_writer(
         self,

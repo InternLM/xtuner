@@ -95,17 +95,8 @@ class _HFSavePlan(TypedDict):
 @dataclass
 class AsyncHFSaveHandle:
     process: Any
-    commit_future: Future | None
     hf_dir: Path
     tmp_hf_dir: Path
-
-    def result(self, timeout: float | None = None) -> Path:
-        if self.commit_future is None:
-            raise RuntimeError("Async HF commit future is not initialized")
-        return cast(Path, self.commit_future.result(timeout=timeout))
-
-    def done(self) -> bool:
-        return self.commit_future is not None and self.commit_future.done()
 
 
 @dataclass
@@ -781,8 +772,7 @@ class BaseModel(nn.Module):
         hf_dir: Path | str,
         save_dtype: torch.dtype = torch.bfloat16,
         safetensors_prefix: str = "model",
-        file_finalize_callback: Callable[[Path], None] | None = None,
-    ) -> AsyncHFSaveHandle:
+    ) -> Future[Path]:
         self._get_async_hf_resources()
         if self._hf_path is None and self.config.hf_config is None:
             raise NotImplementedError(
@@ -830,21 +820,26 @@ class BaseModel(nn.Module):
 
         handle = AsyncHFSaveHandle(
             process=process,
-            commit_future=None,
             hf_dir=hf_dir,
             tmp_hf_dir=tmp_hf_dir,
         )
         commit_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="async-hf-commit")
-        handle.commit_future = commit_executor.submit(
+        commit_future = commit_executor.submit(
             self.commit_async_hf_save,
             handle,
-            file_finalize_callback=file_finalize_callback,
         )
         self._pending_async_hf = handle
-        handle.commit_future.add_done_callback(self._record_async_hf_commit_result)
-        handle.commit_future.add_done_callback(lambda _: self._clear_pending_async_hf(handle))
-        handle.commit_future.add_done_callback(lambda _: commit_executor.shutdown(wait=False))
-        return handle
+        commit_future.add_done_callback(self._record_async_hf_commit_result)
+
+        def clear_pending_async_hf(_: Future[Path]) -> None:
+            self._clear_pending_async_hf(handle)
+
+        def shutdown_commit_executor(_: Future[Path]) -> None:
+            commit_executor.shutdown(wait=False)
+
+        commit_future.add_done_callback(clear_pending_async_hf)
+        commit_future.add_done_callback(shutdown_commit_executor)
+        return commit_future
 
     def _run_async_hf_writer(
         self,
@@ -898,7 +893,6 @@ class BaseModel(nn.Module):
     def commit_async_hf_save(
         self,
         handle: AsyncHFSaveHandle,
-        file_finalize_callback: Callable[[Path], None] | None = None,
     ) -> Path:
         self.check_async_hf_failure()
 
@@ -933,8 +927,6 @@ class BaseModel(nn.Module):
                 rmtree(hf_dir)
             handle.tmp_hf_dir.rename(hf_dir)
         self._barrier_async_hf()
-        if file_finalize_callback is not None:
-            file_finalize_callback(hf_dir)
         log_rank0.info(f"[Async saving HF to {hf_dir}] finalized")
         self._barrier_async_hf()
         return hf_dir

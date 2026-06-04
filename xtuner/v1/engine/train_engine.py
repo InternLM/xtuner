@@ -31,7 +31,6 @@ from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.loss import LogProbContext
 from xtuner.v1.model.base import (
-    AsyncHFSaveHandle,
     BaseModel,
     BatchForwardInfo,
     DataBatchInfo,
@@ -310,26 +309,15 @@ class TrainEngine:
         """
         self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
 
-    def init_async_hf_resources(self) -> None:
-        self.model.init_async_hf_resources()
-
-    def check_async_hf_failure(self) -> None:
-        self.model.check_async_hf_failure()
-
-    def destroy_async_hf_resources(self) -> None:
-        self.model.destroy_async_hf_resources()
-
     def async_save_hf(
         self,
         hf_dir: str,
         save_dtype: torch.dtype = torch.bfloat16,
-        file_finalize_callback: Callable[[Path], None] | None = None,
-    ) -> AsyncHFSaveHandle:
+    ) -> Future[Path]:
         with profile_time_and_memory(f"[Async saving HF to {hf_dir} launch cost]"):
             return self.model.async_save_hf(
                 hf_dir=hf_dir,
                 save_dtype=save_dtype,
-                file_finalize_callback=file_finalize_callback,
             )
 
     def _get_dcp_state_dict(
@@ -508,7 +496,7 @@ class TrainEngine:
 
     def __del__(self) -> None:
         try:
-            self.destroy_async_hf_resources()
+            self.model.destroy_async_hf_resources()
         except Exception:
             pass
         try:

@@ -40,25 +40,8 @@ class FakeHFModel(nn.Module):
         with (hf_dir / "model.safetensors.index.json").open("w") as f:
             json.dump({"metadata": {"total_size": len(weight_map)}, "weight_map": weight_map}, f)
 
-
-class FakeAsyncHFHandle:
-    def __init__(self, engine: "FakeAsyncHFEngine", payload: dict):
-        self.engine = engine
-        self.payload = payload
-        self._future: Future = Future()
-        try:
-            self._future.set_result(self.engine.commit_async_hf_save(self))
-        except BaseException as exc:
-            self._future.set_exception(exc)
-
-    def result(self, timeout=None):
-        return self._future.result(timeout=timeout)
-
-    def done(self):
-        return self._future.done()
-
-    def __getitem__(self, key):
-        return self.payload[key]
+    def destroy_async_hf_resources(self) -> None:
+        pass
 
 
 class FakeAsyncHFEngine:
@@ -104,23 +87,13 @@ class FakeAsyncHFEngine:
     def destroy_async_checkpoint_pg(self) -> None:
         pass
 
-    def init_async_hf_resources(self) -> None:
-        pass
-
-    def check_async_hf_failure(self) -> None:
-        if self.async_hf_failure is not None:
-            raise self.async_hf_failure
-
-    def destroy_async_hf_resources(self) -> None:
-        pass
-
     def save_hf(self, hf_dir: Path | str):
         hf_dir = Path(hf_dir)
         hf_dir.mkdir(parents=True, exist_ok=True)
         self.save_hf_calls.append(hf_dir)
         return hf_dir
 
-    def async_save_hf(self, hf_dir: Path | str, file_finalize_callback=None):
+    def async_save_hf(self, hf_dir: Path | str):
         hf_dir = Path(hf_dir)
         hf_dir.mkdir(parents=True, exist_ok=True)
         self.save_hf_calls.append(hf_dir)
@@ -129,26 +102,28 @@ class FakeAsyncHFEngine:
         shard_name = f"model-rank{rank}-of-{world_size}.safetensors"
         (hf_dir / shard_name).write_text(f"fake async model weights for rank {rank}")
         weight_map = {f"layers.rank{rank}.weight": shard_name} if self.async_hf_status_ok else {}
-        handle = {
+        payload = {
             "hf_dir": hf_dir,
             "ok": self.async_hf_status_ok,
             "error": self.async_hf_status_error,
             "weight_map": weight_map,
-            "file_finalize_callback": file_finalize_callback,
         }
-        handle = FakeAsyncHFHandle(self, handle)
-        self._pending_async_hf = handle
-        if handle.done():
-            self._clear_pending_async_hf(handle)
-        return handle
+        future: Future = Future()
+        self._pending_async_hf = future
+        try:
+            future.set_result(self.commit_async_hf_save(payload))
+        except BaseException as exc:
+            future.set_exception(exc)
+        if future.done():
+            self._clear_pending_async_hf(future)
+        return future
 
-    def _clear_pending_async_hf(self, handle):
-        if self._pending_async_hf is handle:
+    def _clear_pending_async_hf(self, future):
+        if self._pending_async_hf is future:
             self._pending_async_hf = None
 
-    def commit_async_hf_save(self, handle):
-        self.commit_async_hf_calls.append(handle)
-        pending = handle.payload if isinstance(handle, FakeAsyncHFHandle) else handle
+    def commit_async_hf_save(self, pending):
+        self.commit_async_hf_calls.append(pending)
         local_status = {
             "rank": dist.get_rank(),
             "ok": bool(pending["ok"]),
@@ -158,8 +133,6 @@ class FakeAsyncHFEngine:
         all_status = [None for _ in range(dist.get_world_size())]
         dist.all_gather_object(all_status, local_status)
         if not all(status["ok"] for status in all_status):
-            if self._pending_async_hf is handle:
-                self._pending_async_hf = None
             failed = ", ".join(
                 f"rank={status['rank']}({status['error']})" for status in all_status if not status["ok"]
             )
@@ -174,10 +147,6 @@ class FakeAsyncHFEngine:
                 hf_dir=Path(pending["hf_dir"]),
                 weight_map=merged_weight_map,
             )
-        if pending["file_finalize_callback"] is not None:
-            pending["file_finalize_callback"](Path(pending["hf_dir"]))
-        if self._pending_async_hf is handle:
-            self._pending_async_hf = None
         return Path(pending["hf_dir"])
 
 
