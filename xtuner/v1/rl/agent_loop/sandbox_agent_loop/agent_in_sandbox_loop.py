@@ -101,6 +101,10 @@ def _load_eval_trace_segment(artifacts: dict[str, Any]) -> tuple[list[dict[str, 
     return messages, tools
 
 
+def _to_json_safe(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
 class AgentInSandboxLoopConfig(AgentLoopConfig):
     """Run a sandbox agent runner from ``RolloutState.extra_fields``.
 
@@ -244,9 +248,4 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.response = str(item.artifacts.get("agent_response") or "")
         messages, tools = _load_eval_trace_segment(item.artifacts)
         if messages:
-            rollout_state.extra_fields["agent_trajectory"] = self.tokenizer.apply_chat_template(
-                canonicalize_messages_for_chat_template(messages),
-                tools=tools,
-                tokenize=False,
-                add_generation_prompt=False,
-            )
+            rollout_state.extra_fields["agent_trajectory"] = _to_json_safe({"messages": messages, "tools": tools})
