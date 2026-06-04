@@ -1,5 +1,5 @@
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,14 +25,15 @@ class AsyncSaveMonitor:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._interval = interval
-        self._thread: threading.Thread | None = None
+        self._executor: ThreadPoolExecutor | None = None
+        self._monitor_future: Future | None = None
 
     def start(self) -> None:
-        if self._thread is not None:
+        if self._executor is not None:
             return
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, name="AsyncSaveMonitor", daemon=True)
-        self._thread.start()
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="AsyncSaveMonitor")
+        self._monitor_future = self._executor.submit(self._run)
 
     def register(self, item: AsyncSaveWatchItem) -> None:
         with self._lock:
@@ -54,12 +55,16 @@ class AsyncSaveMonitor:
         ) from exc
 
     def stop(self) -> None:
-        thread = self._thread
-        if thread is None:
+        executor = self._executor
+        monitor_future = self._monitor_future
+        if executor is None:
             return
         self._stop_event.set()
-        thread.join()
-        self._thread = None
+        if monitor_future is not None:
+            monitor_future.result()
+        executor.shutdown(wait=True)
+        self._executor = None
+        self._monitor_future = None
 
     def _run(self) -> None:
         while not self._stop_event.wait(self._interval):
