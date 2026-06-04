@@ -510,7 +510,7 @@ class RolloutWorker(SingleAcceleratorWorker):
     def set_enable_partial_rollout(self, enable: bool) -> None:
         self.enable_partial_rollout = enable
 
-    def init(self, dist_init_addr: str) -> tuple[int, str]:
+    def init(self, dist_init_addr: str | None = None) -> tuple[int, str]:
         """Initialize the worker and launch the server.
 
         Args:
@@ -521,7 +521,8 @@ class RolloutWorker(SingleAcceleratorWorker):
             Tuple[int, str]: A tuple containing the worker's rank and its
                 server URL.
         """
-        self.dist_init_addr = dist_init_addr if dist_init_addr else self.dist_init_addr
+        if dist_init_addr is not None:
+            self.dist_init_addr = dist_init_addr
         self.receive_abort_request.clear()
         self._launch_server()
         return (self.rank, self.server_url)
@@ -549,13 +550,20 @@ class RolloutWorker(SingleAcceleratorWorker):
     def shutdown(self):
         """Shut down the worker, its server task, and any child processes."""
         if self.server_task is not None:
-            ray.cancel(self.server_task, force=True)
+            server_task = self.server_task
+            self._request_server_terminate()
+            ray.cancel(server_task, force=True, recursive=True)
+            self.server_task = None
             return
 
         if self.server_process is not None:
             import psutil
 
-            parent = psutil.Process(self.server_process.pid)
+            try:
+                parent = psutil.Process(self.server_process.pid)
+            except psutil.NoSuchProcess:
+                self.server_process = None
+                return
             children = parent.children(recursive=True)
             for child in children:
                 child.terminate()
@@ -564,6 +572,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 child.kill()
             parent.terminate()
             parent.wait(timeout=5)
+            self.server_process = None
             self.logger.debug(f"Worker {self.rank} server process and its children terminated.")
             return
 

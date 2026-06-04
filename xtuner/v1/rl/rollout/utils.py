@@ -139,6 +139,7 @@ class RolloutHealthChecker:
         self._thread.join(timeout=5)
         self._thread = None
         self._stop_event = None
+        self._pause_event = None
         logger.info("RolloutHealthChecker stopped.")
 
     def pause(self) -> None:
@@ -146,6 +147,9 @@ class RolloutHealthChecker:
             return
         self._pause_event.set()
         logger.info("RolloutHealthChecker paused.")
+
+    def is_paused(self) -> bool:
+        return self._pause_event is None or self._pause_event.is_set()
 
     def resume(self) -> None:
         if self._pause_event is None:

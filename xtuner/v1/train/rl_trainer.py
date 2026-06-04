@@ -59,6 +59,7 @@ from xtuner.v1.utils.env_check import get_rollout_engine_version
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 PG_READY_TIMEOUT = 30
+RL_TRAINER_RAY_GET_TIMEOUT = 3600
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
@@ -87,7 +88,10 @@ def bind_train_rollout(
     rollout_controller: RolloutControllerProxy,
 ) -> None:
     """Bind the training and rollout workers for update weights."""
-    info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())  # type: ignore[attr-defined]
+    info_dict = ray.get(
+        rollout_controller.get_rollout_metadata.remote(),  # type: ignore[attr-defined]
+        timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+    )
     train_controller.update_rollout_info(info_dict)
     return
 
@@ -665,7 +669,10 @@ class BaseRLTrainer:
         if cfg.gateway_config is None or not cfg.gateway_config.auto_start:
             return
         # gateway 依赖 rollout controller，因此在 rollout controller 构建完成后统一启动。
-        ray.get(self.rollout_controller.start_gateway.remote(cfg.gateway_config))
+        ray.get(
+            self.rollout_controller.start_gateway.remote(cfg.gateway_config),
+            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+        )
 
     def _build_agent_loop_components(self, cfg: BaseRLTrainerConfig, replay_buffer) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
@@ -855,9 +862,13 @@ class BaseRLTrainer:
         self._save_trajectories(train_batch, train_trajectory_path)
         self.logger.info(f"Train step {train_step} train trajectories saved to {train_trajectory_path}")
 
-        # 共卡需要先释放 rollout，再把训练 worker onload；非共卡不走这两个动作。
+        # 共卡需要先确认 rollout worker 可恢复，再释放 rollout，最后把训练 worker onload；非共卡不走这些动作。
         if offload_rollout_before_train:
-            ray.get(self.rollout_controller.offload.remote())
+            ray.get(
+                self.rollout_controller.ensure_workers_healthy_before_training.remote(),
+                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+            )
+            ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         if onload_train_before_train:
             with timer("onload", step_timer_dict):
                 self.train_controller.onload(target="all")
@@ -1373,12 +1384,12 @@ class RLColocateTrainer(BaseRLTrainer):
 
     def _sync_weights_from_train_workers(self) -> None:
         self.logger.info("Rollout workers skip load weights, update weights from train workers.")
-        ray.get(self.rollout_controller.offload.remote())
+        ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         self.train_controller.onload(target="model")
-        ray.get(self.rollout_controller.onload_weights.remote())
+        ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         self.train_controller.update_weights()
         self.train_controller.offload(target="model")
-        ray.get(self.rollout_controller.onload_kvcache.remote())
+        ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         self.logger.info("Rollout workers updated weights from train workers.")
 
     def fit(self):
@@ -1490,19 +1501,18 @@ class RLColocateTrainer(BaseRLTrainer):
             asyncio_run(self._maybe_save_checkpoint(train_step))
             self._maybe_save_hf(train_step)
 
-        ray.get(self.rollout_controller.recover_failed_workers.remote())
         timer_name = "sync_weight" if should_sync_weights else "switch_to_rollout"
         with timer(timer_name, step_timer_dict):
             if should_sync_weights:
                 bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
-                ray.get(self.rollout_controller.onload_weights.remote())
+                ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
                 self.train_controller.update_weights()
                 self.logger.info("Rollout workers update weights successfully in colocate mode")
                 self.train_controller.offload(target="model")
             else:
                 self.train_controller.offload(target="model")
-                ray.get(self.rollout_controller.onload_weights.remote())
-            ray.get(self.rollout_controller.onload_kvcache.remote())
+                ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+            ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         return should_sync_weights
 
 
@@ -1688,7 +1698,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             await self._maybe_save_checkpoint(model_step)
             self._maybe_save_hf(model_step)
 
-        ray.get(self.rollout_controller.recover_failed_workers.remote())
+        # TODO: 非共卡需要额外加健康检查恢复worker的逻辑，共卡是在训练之前恢复，但是非共卡不需要在训练之前恢复,挂掉就恢复或者更新权重前恢复，需要评估一下哪种方式更合理。
         with timer("sync_weight", step_timer_dict):
             bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
             self.update_weights()
