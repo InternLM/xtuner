@@ -163,7 +163,7 @@ class LMDeployWorker(RolloutWorker):
         url = f"{self.server_url}/{self.endpoints['sleep']}"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_keys}"}
         data = {"level": level}
-        response = requests.post(url, headers=headers, params=data)
+        response = requests.post(url, headers=headers, params=data, timeout=60)
         assert response.status_code == 200, response.status_code
         return response.text
 
@@ -180,9 +180,27 @@ class LMDeployWorker(RolloutWorker):
         url = f"{self.server_url}/{self.endpoints['wake_up']}"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_keys}"}
         data = {"tags": tags}
-        response = requests.post(url, headers=headers, params=data)
+        response = requests.post(url, headers=headers, params=data, timeout=60)
         assert response.status_code == 200, response.status_code
         return response.text
+
+    def _request_server_terminate(self) -> bool:
+        """Ask the inference server to terminate itself if it supports it."""
+        terminate_url = f"{self.server_url}/terminate"
+        try:
+            response = requests.get(terminate_url, timeout=5.0)
+        except requests.RequestException as e:
+            self.logger.debug(f"Worker {self.rank} terminate request failed for {terminate_url}: {e}")
+            return False
+
+        if response.status_code == 200:
+            self.logger.debug(f"Worker {self.rank} terminate request accepted by {terminate_url}.")
+            return True
+
+        self.logger.debug(
+            f"Worker {self.rank} terminate request to {terminate_url} returned status {response.status_code}."
+        )
+        return False
 
     async def _decode_routed_experts(self, routed_experts: Any) -> Any:
         if isinstance(routed_experts, str):
@@ -223,6 +241,7 @@ class LMDeployWorker(RolloutWorker):
         # Therefore, each server only needs to handle 1 / dp_size of the total requests
         max_batch_size = self.config.rollout_max_batch_size_per_instance // dp_size
         distributed_executor_backend = lmdeploy_config_kwargs.get("distributed_executor_backend", "ray")
+        lmdeploy_config_kwargs["allow_terminate_by_client"] = True
         lmdeploy_config_kwargs["log_level"] = lmdeploy_config_kwargs.pop("log_level", "ERROR")
         lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "ERROR")
         lmdeploy_config_kwargs["tm_log_level"] = lmdeploy_config_kwargs.pop("tm_log_level", "ERROR")

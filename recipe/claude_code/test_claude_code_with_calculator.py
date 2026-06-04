@@ -183,8 +183,6 @@ def _start_rollout_controller_and_gateway(
         ),
         tool_call_parser=os.environ.get("XTUNER_CLAUDECODE_TOOL_CALL_PARSER", "qwen3p5"),
         reasoning_parser=os.environ.get("XTUNER_CLAUDECODE_REASONING_PARSER", "qwen3"),
-        api_host="127.0.0.1",
-        api_port=find_free_ports()[0],
     )
     controller = rollout_config.build(placement_group)
     gateway_host = ray.util.get_node_ip_address()

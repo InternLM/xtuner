@@ -4,7 +4,6 @@ import json
 import math
 import multiprocessing
 import os
-import socket
 import threading
 import time
 import traceback
@@ -33,7 +32,6 @@ from xtuner.v1.rl.utils import (
     AutoAcceleratorWorkers,
     CPUResourcesConfig,
     SingleAcceleratorWorker,
-    find_master_addr_and_port,
     get_eos_token,
     register_cpu_resources,
 )
@@ -65,8 +63,6 @@ class RolloutConfig(BaseModel):
         tokenizer_path (str): Path to the model tokenizer. Defaults to "".
         api_key (Optional[Union[List[str], str]]): API keys for rollout service. Supports single key or
             list of keys. Defaults to None.
-        api_port (Optional[int]): Port number for the rollout API server. If not set, it will find an
-            available port starting from 8000. Defaults to 8000.
         gpus_per_node (int): Number of GPUs per node. Defaults to 8.
         dtype (str): Model data type ('bfloat16', 'float16', 'int8'). Defaults to "bfloat16".
         gpu_memory_utilization (float): GPU memory utilization ratio. Defaults to 0.85.
@@ -125,14 +121,6 @@ class RolloutConfig(BaseModel):
             help="API keys for the rollout service. Can be a single key or a list of keys.",
         ),
     ] = None
-    api_port: Annotated[
-        int,
-        Parameter(group=infer_group, help="Port number for the rollout API server. If not set, 8000 will be used."),
-    ] = 8000
-    api_host: Annotated[
-        str,
-        Parameter(group=infer_group, help="Host for the rollout API server."),
-    ] = "0.0.0.0"
     gpus_per_node: Annotated[int, Parameter(group=infer_group, help="Number of GPUs allocated per node.")] = 8
     dtype: Annotated[
         str,
@@ -399,16 +387,6 @@ class RolloutConfig(BaseModel):
         if self.tokenizer_path is None:
             self.tokenizer_path = str(self.model_path)
 
-        port = self.api_port
-        while True:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                try:
-                    s.bind((self.api_host if self.api_host != "0.0.0.0" else "localhost", port))
-                    break
-                except OSError:
-                    port += 1
-        self.api_port = port
-
         if self.device == "NPU":
             self.gpus_per_node = 16
 
@@ -532,7 +510,7 @@ class RolloutWorker(SingleAcceleratorWorker):
     def set_enable_partial_rollout(self, enable: bool) -> None:
         self.enable_partial_rollout = enable
 
-    def init(self, dist_init_addr: str) -> tuple[int, str]:
+    def init(self, dist_init_addr: str | None = None) -> tuple[int, str]:
         """Initialize the worker and launch the server.
 
         Args:
@@ -543,7 +521,8 @@ class RolloutWorker(SingleAcceleratorWorker):
             Tuple[int, str]: A tuple containing the worker's rank and its
                 server URL.
         """
-        self.dist_init_addr = dist_init_addr if dist_init_addr else self.dist_init_addr
+        if dist_init_addr is not None:
+            self.dist_init_addr = dist_init_addr
         self.receive_abort_request.clear()
         self._launch_server()
         return (self.rank, self.server_url)
@@ -551,34 +530,19 @@ class RolloutWorker(SingleAcceleratorWorker):
     def init_dist_port(self) -> str:
         """Initialize distributed communication ports.
 
-        This method acquires three free ports for the distributed setup:
-        one for the inference server, one for NCCL, and one for Ray's
-        distributed communication.
+        This method initializes three fixed ports for the distributed setup:
+        one for the inference server, one for NCCL, and one for distributed
+        communication.
 
         Returns:
             str: The distributed initialization address (host:port).
         """
-        scheduling_strategy = PlacementGroupSchedulingStrategy(
-            placement_group=ray.util.get_current_placement_group(),
-            placement_group_capture_child_tasks=True,
-            placement_group_bundle_index=self.engine_bundle_idxs[0],
-        )
-
         local_rank = int(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
-        interval = 1024
-        start_port = self.config.dist_port_base + local_rank * interval
-        end_port = start_port + interval
-        self.host, self.ports = ray.get(
-            find_master_addr_and_port.options(scheduling_strategy=scheduling_strategy).remote(
-                nums=3,
-                start_port=start_port,
-                end_port=end_port,
-            )
-        )
-
-        self.dist_port = self.ports[0]
-        self.server_port = self.ports[1]
-        self.nccl_port = self.ports[2]
+        base_port = self.config.dist_port_base + local_rank * 3
+        self.host = ray.util.get_node_ip_address()
+        self.dist_port = base_port
+        self.server_port = base_port + 1
+        self.nccl_port = base_port + 2
         self.dist_init_addr = f"{self.host}:{self.dist_port}"
         self.server_url = f"http://{self.host}:{self.server_port}"
         return self.dist_init_addr
@@ -586,13 +550,20 @@ class RolloutWorker(SingleAcceleratorWorker):
     def shutdown(self):
         """Shut down the worker, its server task, and any child processes."""
         if self.server_task is not None:
-            ray.cancel(self.server_task, force=True)
+            server_task = self.server_task
+            self._request_server_terminate()
+            ray.cancel(server_task, force=True, recursive=True)
+            self.server_task = None
             return
 
         if self.server_process is not None:
             import psutil
 
-            parent = psutil.Process(self.server_process.pid)
+            try:
+                parent = psutil.Process(self.server_process.pid)
+            except psutil.NoSuchProcess:
+                self.server_process = None
+                return
             children = parent.children(recursive=True)
             for child in children:
                 child.terminate()
@@ -601,6 +572,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 child.kill()
             parent.terminate()
             parent.wait(timeout=5)
+            self.server_process = None
             self.logger.debug(f"Worker {self.rank} server process and its children terminated.")
             return
 

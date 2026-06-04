@@ -93,8 +93,11 @@
 5. **Performance**: Unnecessary CPU-GPU synchronization (`item()`, `.cpu()` in hot paths), redundant data copies, inefficient collective communication patterns.
 6. **API Contracts**: Do public interface changes maintain backward compatibility? Are deprecation warnings added for breaking changes?
 7. **Resource Cleanup**: Are file handles, NCCL communicators, and CUDA streams properly cleaned up?
-8. **Metric Changes in `ProduceBatchResult`**: Check whether any metrics in `ProduceBatchResult` will be changed significantly. Call out any obvious increases or decreases, and highlight anything that looks abnormal or unexpected.
-9. **Routed Experts Memory Leak Risk**: Review whether this PR could unintentionally retain additional references to routed experts or make their lifecycle/state harder to track, which could eventually result in memory leaks.
+
+### Area-Specific Review Rules
+
+If a PR changes code under `xtuner/v1/rl`, read `.claude/rules/rl_review.md` before commenting or
+posting the final review summary.
 
 ### Review Output Format
 
@@ -130,4 +133,4 @@ APPROVE / REQUEST_CHANGES / COMMENT
 
 ## Rules
 
-Please refer to the docs in `./dev-rules` for the development guidelines.
+Please refer to the docs in `.claude/rules` for the development guidelines.

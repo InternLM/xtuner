@@ -293,6 +293,10 @@ class SGLangWorker(RolloutWorker):
 
         return sglang_server_args
 
+    def _request_server_terminate(self) -> bool:
+        self.logger.warning("SGLang server does not support terminate request, will directly kill the process.")
+        return True
+
     def _transform_sample_params(self, sample_params: Dict):
         if sample_params["top_p"] > 0:
             sample_params["top_k"] = -1  # top_p优先级更高

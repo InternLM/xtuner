@@ -73,8 +73,13 @@ class UpdateWeighter:
         self._sglang_disagg_executor: ThreadPoolExecutor | None = None
         self._train_update_sync_group: dist.ProcessGroup | None = None
         self._sglang_disagg_update_lock = Lock()
+        self._lmdeploy_disagg_group: dist.ProcessGroup | None = None
+        self._lmdeploy_disagg_group_name: str | None = None
+        self._lmdeploy_disagg_engine_urls: list[str] = []
+        self._lmdeploy_disagg_executor: ThreadPoolExecutor | None = None
+        self._lmdeploy_disagg_update_lock = Lock()
         self.use_fake_weight_update = (
-            False  # 仅在 lmdeploy 后端的 disaggregated 模式下使用，表示是否使用 fake 接口进行权重更新
+            False  # 仅在 lmdeploy turbomind 后端的 disaggregated 模式下使用，表示是否使用 fake 接口进行权重更新
         )
 
     def _hook_compare_test_sent_and_received_weight_hash(
@@ -150,9 +155,12 @@ class UpdateWeighter:
             if backend == "vllm":
                 raise NotImplementedError("Disaggregated train-rollout mode is not supported for vLLM backend.")
 
-            elif backend == "pytorch" or backend == "turbomind":
+            elif backend == "pytorch":
+                self.use_fake_weight_update = False
+
+            elif backend == "turbomind":
                 self.logger.warning(
-                    "Disaggregated train-rollout mode for lmdeploy backend is not fully supported yet. "
+                    "Disaggregated train-rollout mode for lmdeploy turbomind backend is not yet supported. "
                     "A fake no-op interface will be used temporarily.",
                 )
                 self.use_fake_weight_update = True  # 后续 fake 接口可根据这个标志跳过实际同步
@@ -172,6 +180,7 @@ class UpdateWeighter:
 
         if self.is_train_rollout_colocated:
             self._reset_sglang_disagg_group()
+            self._reset_lmdeploy_disagg_group()
 
     def _reset_sglang_disagg_group(self):
         if self._sglang_disagg_executor is not None:
@@ -185,6 +194,19 @@ class UpdateWeighter:
         self._sglang_disagg_group_name = None
         self._sglang_disagg_engine_urls = []
         self._sglang_disagg_executor = None
+
+    def _reset_lmdeploy_disagg_group(self):
+        if self._lmdeploy_disagg_executor is not None:
+            self._lmdeploy_disagg_executor.shutdown(wait=False, cancel_futures=True)
+        try:
+            if self._lmdeploy_disagg_group is not None:
+                dist.destroy_process_group(self._lmdeploy_disagg_group)
+        except Exception:
+            pass
+        self._lmdeploy_disagg_group = None
+        self._lmdeploy_disagg_group_name = None
+        self._lmdeploy_disagg_engine_urls = []
+        self._lmdeploy_disagg_executor = None
 
     def _get_train_update_sync_group(self) -> dist.ProcessGroup:
         if self._train_update_sync_group is None:
@@ -329,11 +351,9 @@ class UpdateWeighter:
         )
 
         train_enable_ep = model.fsdp_config is not None and model.fsdp_config.ep_size > 1
-        if train_enable_ep and not self.is_train_rollout_colocated:
-            raise NotImplementedError("Disaggregated update_weights with train expert parallelism is not supported.")
 
         if train_enable_ep:
-            if self.rollout_cfg_info["ep"] > 1:
+            if self.is_train_rollout_colocated and self.rollout_cfg_info["ep"] > 1:
                 rollout_device_mesh = self._ensure_rollout_device_mesh()
                 fused_gen = self._rl_get_fused_ep_hf_param(
                     model,
@@ -342,6 +362,9 @@ class UpdateWeighter:
                     bucket_size=bucket_size,
                 )
             else:
+                # Disaggregated update uses one external trainer+rollout process group.
+                # Broadcast the same full expert bucket to every rollout rank and let
+                # the backend loader apply its local TP/EP slicing.
                 fused_gen = self._rl_get_fused_ep_hf_param(
                     model,
                     target_ep_rank=0,
@@ -591,7 +614,7 @@ class UpdateWeighter:
             flattened_tensor_data["event_ipc_handle"] = self._update_params_ipc_event.ipc_handle()
         return flattened_tensor_data
 
-    def _get_sglang_disagg_engine_info(self) -> RolloutEngineInfo:
+    def _get_disagg_engine_info(self) -> RolloutEngineInfo:
         engine_info: RolloutEngineInfo = []
         seen_urls: set[str] = set()
         rank_to_engine_size: dict[int, int] = {}
@@ -622,7 +645,7 @@ class UpdateWeighter:
     def _ensure_sglang_disagg_group(self):
         if self._sglang_disagg_group is not None:
             return
-        engine_info = self._get_sglang_disagg_engine_info()
+        engine_info = self._get_disagg_engine_info()
         if not engine_info:
             self.logger.error("No active rollout engine url, cannot init sglang weight update group")
             return
@@ -686,6 +709,73 @@ class UpdateWeighter:
 
         self._sglang_disagg_group_name = group_name
         self._sglang_disagg_engine_urls = [url for _, url, _ in engine_info]
+
+    def _ensure_lmdeploy_disagg_group(self):
+        if self._lmdeploy_disagg_group is not None:
+            return
+        engine_info = self._get_disagg_engine_info()
+        if not engine_info:
+            self.logger.error("No active rollout engine url, cannot init lmdeploy weight update group")
+            return
+
+        os.environ["TORCHELASTIC_USE_AGENT_STORE"] = "False"
+        backend = "nccl"
+
+        master_address = None
+        master_port = None
+        try:
+            import ray
+
+            master_address = ray.util.get_node_ip_address()
+        except Exception:
+            master_address = socket.gethostbyname(socket.gethostname())
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("", 0))
+            master_port = int(sock.getsockname()[1])
+
+        group_name = f"xtuner_lmdeploy_weight_update_{self.rank}"
+        world_size = sum(engine_size for _, _, engine_size in engine_info) + 1
+
+        self._lmdeploy_disagg_executor = ThreadPoolExecutor(max_workers=max(1, len(engine_info)))
+        init_futures = []
+        rank_offset = 1
+        for _, url, engine_size in engine_info:
+            payload = {
+                "master_address": master_address,
+                "master_port": master_port,
+                "rank_offset": rank_offset,
+                "world_size": world_size,
+                "group_name": group_name,
+                "backend": backend,
+            }
+            init_futures.append(
+                self._lmdeploy_disagg_executor.submit(
+                    requests.post,
+                    f"{url}/init_weights_update_group",
+                    json=payload,
+                )
+            )
+            rank_offset += engine_size
+
+        self._lmdeploy_disagg_group = self._init_external_process_group(
+            backend=backend,
+            init_method=f"tcp://{master_address}:{master_port}",
+            world_size=world_size,
+            rank=0,
+            group_name=group_name,
+        )
+
+        for init_future in init_futures:
+            response = init_future.result()
+            response.raise_for_status()
+            result = response.json()
+            assert result.get("success", True), (
+                f"LMDeploy init_weights_update_group failed: {result.get('message', result)}"
+            )
+
+        self._lmdeploy_disagg_group_name = group_name
+        self._lmdeploy_disagg_engine_urls = [url for _, url, _ in engine_info]
 
     def _request_update_params_sglang_disaggregated(self, state_dict):
         if not state_dict:
@@ -751,6 +841,96 @@ class UpdateWeighter:
                 )
         dist.barrier(group=train_sync_group)
 
+    def _request_update_params_lmdeploy_disaggregated(self, state_dict, finished: bool = False):
+        if not state_dict and not finished:
+            return
+
+        train_sync_group = self._get_train_update_sync_group()
+        head_rank = 0
+        if dist.get_rank() != head_rank:
+            dist.barrier(group=train_sync_group)
+            return
+
+        self._ensure_lmdeploy_disagg_group()
+        if self._lmdeploy_disagg_group is None:
+            dist.barrier(group=train_sync_group)
+            return
+
+        assert self._lmdeploy_disagg_executor is not None
+        assert self._lmdeploy_disagg_group_name is not None
+        with self._lmdeploy_disagg_update_lock:
+            try:
+                from lmdeploy.utils import FlattenedTensorBucket
+            except Exception as e:
+                raise RuntimeError(
+                    "Disaggregated update_weights for lmdeploy backend requires lmdeploy builds that provide "
+                    "`lmdeploy.utils.FlattenedTensorBucket`."
+                ) from e
+
+            if state_dict:
+                names = list(state_dict.keys())
+                tensors = [
+                    tensor.detach().to(device=DEVICE, non_blocking=True).contiguous() for tensor in state_dict.values()
+                ]
+                payload = {
+                    "names": names,
+                    "dtypes": [str(tensor.dtype).replace("torch.", "") for tensor in tensors],
+                    "shapes": [list(tensor.shape) for tensor in tensors],
+                    "group_name": self._lmdeploy_disagg_group_name,
+                    "load_format": "flattened_bucket",
+                    "finished": finished,
+                }
+                update_futures = [
+                    self._lmdeploy_disagg_executor.submit(
+                        requests.post,
+                        f"{url}/update_weights_from_distributed",
+                        json=payload,
+                    )
+                    for url in self._lmdeploy_disagg_engine_urls
+                ]
+                flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=list(zip(names, tensors)))
+                flattened_tensor = flattened_tensor_bucket.get_flattened_tensor()
+                dist.broadcast(flattened_tensor, src=0, group=self._lmdeploy_disagg_group)
+                DEVICE_MODULE.synchronize()
+                for update_future in update_futures:
+                    response = update_future.result()
+                    response.raise_for_status()
+                    result = response.json()
+                    self._hook_compare_test_sent_and_received_weight_hash(
+                        result,
+                        names=names,
+                    )
+                    assert result.get("success", True), (
+                        f"LMDeploy update_weights_from_distributed failed: {result.get('message', result)}"
+                    )
+            else:
+                # finalize-only request: no tensors to broadcast, just trigger the
+                # rollout side's mod.update_weights() finalization hooks.
+                payload = {
+                    "names": [],
+                    "dtypes": [],
+                    "shapes": [],
+                    "group_name": self._lmdeploy_disagg_group_name,
+                    "load_format": "flattened_bucket",
+                    "finished": True,
+                }
+                update_futures = [
+                    self._lmdeploy_disagg_executor.submit(
+                        requests.post,
+                        f"{url}/update_weights_from_distributed",
+                        json=payload,
+                    )
+                    for url in self._lmdeploy_disagg_engine_urls
+                ]
+                for update_future in update_futures:
+                    response = update_future.result()
+                    response.raise_for_status()
+                    result = response.json()
+                    assert result.get("success", True), (
+                        f"LMDeploy update_weights_from_distributed (finalize) failed: {result.get('message', result)}"
+                    )
+        dist.barrier(group=train_sync_group)
+
     @ray_method
     def request_update_params(self, state_dict, train_enable_ep=False, finished=False):
         """Send a request to update the parameters on the rollout workers.
@@ -769,6 +949,10 @@ class UpdateWeighter:
 
         if self.rollout_cfg_info["backend"] == "sglang" and not self.is_train_rollout_colocated:
             self._request_update_params_sglang_disaggregated(state_dict)
+            return
+
+        if self.rollout_cfg_info["backend"] == "pytorch" and not self.is_train_rollout_colocated:
+            self._request_update_params_lmdeploy_disaggregated(state_dict, finished=finished)
             return
 
         cpu_mesh = self._ensure_rollout_device_mesh()["engine_parallel"]

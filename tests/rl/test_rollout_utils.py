@@ -23,6 +23,48 @@ RESOURCE_MAP = {"npu": "NPU", "cuda": "GPU"}
 TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 
 
+class _FakeControllerRemoteMethod:
+    def __init__(self, name, call_log, return_value=None):
+        self.name = name
+        self.call_log = call_log
+        self.return_value = return_value if return_value is not None else name
+
+    def remote(self, *args, **kwargs):
+        self.call_log.append((self.name, args, kwargs))
+        if isinstance(self.return_value, list):
+            if len(self.return_value) > 1:
+                value = self.return_value.pop(0)
+            else:
+                value = self.return_value[0]
+            if isinstance(value, Exception):
+                raise value
+            return value
+        if isinstance(self.return_value, Exception):
+            raise self.return_value
+        return self.return_value
+
+
+class _FakeControllerHealthChecker:
+    def __init__(self, paused=True, call_log=None):
+        self.call_log = call_log if call_log is not None else []
+        self._paused = paused
+
+    def is_paused(self):
+        self.call_log.append("health_is_paused")
+        return self._paused
+
+    def pause(self):
+        self.call_log.append("health_pause")
+        self._paused = True
+
+    def run_once(self):
+        self.call_log.append("run_once")
+
+    def resume(self):
+        self.call_log.append("health_resume")
+        self._paused = False
+
+
 class _FakeRemoteMethod:
     def __init__(self, name, call_log):
         self.name = name
@@ -44,6 +86,15 @@ class TestRolloutHealthChecker(unittest.TestCase):
     def _build_checker(self, workers_info):
         config = SimpleNamespace(health_check_interval_seconds=10, health_check_failure_threshold=1)
         return RolloutHealthChecker(config, workers_info)
+
+    def test_stopped_checker_is_treated_as_paused(self):
+        checker = self._build_checker({})
+        checker.start()
+        checker.resume()
+
+        checker.stop()
+
+        self.assertTrue(checker.is_paused())
 
     def test_shutdown_runs_when_offload_fails(self):
         worker = _FakeWorker()
@@ -90,6 +141,200 @@ class TestRolloutHealthChecker(unittest.TestCase):
         check_worker_health_mock.assert_not_called()
         ray_get_mock.assert_not_called()
         self.assertEqual(worker.call_log, [])
+
+
+class TestRolloutControllerTrainingBarrier(unittest.TestCase):
+    def _build_controller(self, workers_info, health_checker=None):
+        controller = RolloutController.__new__(RolloutController)
+        controller.rank2info = workers_info
+        controller.worker_info_lock = threading.RLock()
+        controller.health_checker = health_checker or _FakeControllerHealthChecker()
+        controller.logger = SimpleNamespace(
+            info=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+            exception=lambda *args, **kwargs: None,
+        )
+        return controller
+
+    def _ray_get(self, ref, timeout=None):
+        if isinstance(ref, list):
+            return ref
+        return ref
+
+    def _remote(self, func):
+        return SimpleNamespace(remote=func)
+
+    def test_ensure_workers_healthy_before_training_recovers_with_original_url(self):
+        # recovery 必须在原 URL 上重启成功，才能允许共卡训练继续。
+        call_log = []
+        health_results = [False, True]
+
+        def check_health():
+            result = health_results.pop(0)
+            call_log.append(("check_health", workers_info[0].is_active, result))
+            return result
+
+        def shutdown():
+            call_log.append(("shutdown", workers_info[0].is_active))
+
+        def init(*args, **kwargs):
+            call_log.append(("init", args, kwargs))
+            return 0, "http://worker-0"
+
+        def init_dist_port():
+            call_log.append(("init_dist_port",))
+            return "127.0.0.1:12345"
+
+        worker = SimpleNamespace(
+            offload=_FakeControllerRemoteMethod("offload", call_log),
+            shutdown=self._remote(shutdown),
+            init_dist_port=self._remote(init_dist_port),
+            init=self._remote(init),
+            check_health=self._remote(check_health),
+        )
+        workers_info = {0: WorkerInfo(actor=worker, url="http://worker-0", is_active=True)}
+        controller = self._build_controller(workers_info)
+
+        with patch("xtuner.v1.rl.rollout.controller.ray.get", side_effect=self._ray_get):
+            controller.ensure_workers_healthy_before_training()
+
+        self.assertTrue(workers_info[0].is_active)
+        self.assertEqual(workers_info[0].url, "http://worker-0")
+        self.assertEqual(
+            call_log,
+            [
+                ("check_health", True, False),
+                ("shutdown", False),
+                ("init", (), {}),
+                ("check_health", False, True),
+            ],
+        )
+
+    def test_ensure_workers_healthy_before_training_asserts_if_restarted_url_changes(self):
+        # recovery 重启后的 URL 必须保持不变，否则权重同步会连到错误服务。
+        call_log = []
+
+        def check_health():
+            call_log.append(("check_health", workers_info[0].is_active, False))
+            return False
+
+        def shutdown():
+            call_log.append(("shutdown", workers_info[0].is_active))
+
+        def init(*args, **kwargs):
+            call_log.append(("init", args, kwargs))
+            return 0, "http://worker-0-new"
+
+        worker = SimpleNamespace(
+            offload=_FakeControllerRemoteMethod("offload", call_log),
+            shutdown=self._remote(shutdown),
+            init=self._remote(init),
+            check_health=self._remote(check_health),
+        )
+        workers_info = {0: WorkerInfo(actor=worker, url="http://worker-0", is_active=True)}
+        controller = self._build_controller(workers_info)
+
+        with patch("xtuner.v1.rl.rollout.controller.ray.get", side_effect=self._ray_get):
+            with self.assertRaisesRegex(AssertionError, "unexpected URL"):
+                controller.ensure_workers_healthy_before_training()
+
+        self.assertFalse(workers_info[0].is_active)
+        self.assertEqual(workers_info[0].url, "http://worker-0")
+        self.assertEqual(
+            call_log,
+            [
+                ("check_health", True, False),
+                ("shutdown", False),
+                ("init", (), {}),
+            ],
+        )
+
+    def test_ensure_workers_healthy_before_training_fails_if_restart_health_check_fails(self):
+        # recovery 必须用原 URL 重启；重启后仍不健康时不能允许共卡训练继续。
+        call_log = []
+
+        def check_health():
+            call_log.append(("check_health", workers_info[0].is_active, False))
+            return False
+
+        def shutdown():
+            call_log.append(("shutdown", workers_info[0].is_active))
+
+        def init(*args, **kwargs):
+            call_log.append(("init", args, kwargs))
+            return 0, "http://worker-0"
+
+        def init_dist_port():
+            call_log.append(("init_dist_port",))
+            return "127.0.0.1:12345"
+
+        worker = SimpleNamespace(
+            offload=_FakeControllerRemoteMethod("offload", call_log),
+            shutdown=self._remote(shutdown),
+            init_dist_port=self._remote(init_dist_port),
+            init=self._remote(init),
+            check_health=self._remote(check_health),
+        )
+        workers_info = {0: WorkerInfo(actor=worker, url="http://worker-0", is_active=True)}
+        controller = self._build_controller(workers_info)
+
+        with patch("xtuner.v1.rl.rollout.controller.ray.get", side_effect=self._ray_get):
+            with self.assertRaisesRegex(RuntimeError, "inactive rollout workers before training"):
+                controller.ensure_workers_healthy_before_training()
+
+        self.assertFalse(workers_info[0].is_active)
+        self.assertEqual(workers_info[0].url, "http://worker-0")
+        self.assertEqual(
+            call_log,
+            [
+                ("check_health", True, False),
+                ("shutdown", False),
+                ("init", (), {}),
+                ("check_health", False, False),
+            ],
+        )
+
+    def test_ensure_workers_healthy_before_training_fails_if_worker_cannot_recover(self):
+        # recover 失败时不能进入训练，也不能执行最终 offload 伪装成安全。
+        call_log = []
+        worker = SimpleNamespace(
+            offload=_FakeControllerRemoteMethod("offload", call_log),
+            shutdown=_FakeControllerRemoteMethod("shutdown", call_log),
+            init_dist_port=_FakeControllerRemoteMethod("init_dist_port", call_log, "127.0.0.1:12345"),
+            init=_FakeControllerRemoteMethod("init", call_log, (0, "http://worker-0")),
+            check_health=_FakeControllerRemoteMethod("check_health", call_log, False),
+        )
+        workers_info = {0: WorkerInfo(actor=worker, url="http://worker-0", is_active=False)}
+        controller = self._build_controller(workers_info)
+
+        with patch("xtuner.v1.rl.rollout.controller.ray.get", side_effect=self._ray_get):
+            with self.assertRaisesRegex(RuntimeError, "inactive rollout workers before training"):
+                controller.ensure_workers_healthy_before_training()
+
+        self.assertFalse(workers_info[0].is_active)
+        self.assertNotEqual(call_log[-1], ("offload", (), {}))
+
+    def test_ensure_workers_healthy_before_training_fails_if_shutdown_fails(self):
+        # 旧 rollout server 不能确认释放时，不能继续进入共卡训练。
+        call_log = []
+        worker = SimpleNamespace(
+            offload=_FakeControllerRemoteMethod("offload", call_log),
+            shutdown=_FakeControllerRemoteMethod("shutdown", call_log, RuntimeError("shutdown failed")),
+            init_dist_port=_FakeControllerRemoteMethod("init_dist_port", call_log, "127.0.0.1:12345"),
+            init=_FakeControllerRemoteMethod("init", call_log, (0, "http://worker-0")),
+            check_health=_FakeControllerRemoteMethod("check_health", call_log, False),
+        )
+        workers_info = {0: WorkerInfo(actor=worker, url="http://worker-0", is_active=True)}
+        controller = self._build_controller(workers_info)
+
+        with patch("xtuner.v1.rl.rollout.controller.ray.get", side_effect=self._ray_get):
+            with self.assertRaisesRegex(RuntimeError, "inactive rollout workers before training"):
+                controller.ensure_workers_healthy_before_training()
+
+        self.assertFalse(workers_info[0].is_active)
+        self.assertIn(("shutdown", (), {}), call_log)
+        self.assertFalse(any(call[0] == "init" for call in call_log))
 
 
 class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
@@ -206,7 +451,7 @@ class TestRolloutControllerRecover(unittest.TestCase):
         out = asyncio_run(controller.generate(rollout_state))
         self.assertEqual(out.status, Status.FAILED)
 
-        controller.recover_failed_workers()
+        controller.ensure_workers_healthy_before_training()
 
         self.assertTrue(controller.rank2info[rank0].is_active)
         self.assertEqual(url, controller.rank2info[rank0].url)

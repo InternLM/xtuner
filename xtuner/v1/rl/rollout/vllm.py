@@ -438,3 +438,7 @@ class vLLMWorker(RolloutWorker):
         rollout_state.status = rollout_status
 
         return rollout_state
+
+    def _request_server_terminate(self) -> bool:
+        self.logger.warning("VLLM server does not support terminate request, will directly kill the process.")
+        return True
