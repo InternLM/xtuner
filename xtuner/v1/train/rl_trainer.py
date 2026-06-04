@@ -636,10 +636,11 @@ class BaseRLTrainer:
 
         if self._enable_evaluate:
             assert cfg.eval_agent_loop_manager_cfg is not None
+            self._eval_replay_buffer = SyncReplayBufferConfig().build()
             self.eval_agent_loop_manager = cfg.eval_agent_loop_manager_cfg.build(
                 rollout_controller=self.rollout_controller,
                 tokenizer=self.tokenizer,
-                replay_buffer=replay_buffer,
+                replay_buffer=self._eval_replay_buffer,
                 logger=self.logger,
                 sync_weights_interval=cfg.sync_weights_interval,
             )
@@ -771,19 +772,34 @@ class BaseRLTrainer:
             self.tokenizer.save_pretrained(str(save_hf_path))
 
     async def _run_initial_evaluate(self) -> None:
-        eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
-            self.evaluator.eval_batch_size,
-            train_step=1,
-            model_step=0,
-        )
-        if XTUNER_DETERMINISTIC:
-            eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
-                eval_produce_result.rollout_states
+        try:
+            eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
+                self.evaluator.eval_batch_size,
+                train_step=1,
+                model_step=0,
             )
-        eval_metrics = self.evaluator.run(eval_produce_result.rollout_states)
-        self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
-        tb_scores = {f"eval/{k}": v for k, v in eval_metrics.items()}
-        self._exp_tracker.add_scalars(tag_scalar_dict=tb_scores, global_step=0)
+            if XTUNER_DETERMINISTIC:
+                eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
+                    eval_produce_result.rollout_states
+                )
+            eval_batch = eval_produce_result.rollout_states
+            eval_metrics = self.evaluator.run(eval_batch)
+            eval_trajectory_dir = self.exp_dir / "eval_rollout"
+            eval_trajectory_dir.mkdir(parents=True, exist_ok=True)
+            eval_trajectory_path = eval_trajectory_dir / "eval_rollout_0.jsonl"
+            self._save_eval_trajectories(eval_batch, eval_trajectory_path)
+            self.logger.info(f"Initial eval trajectories saved to {eval_trajectory_path}")
+            self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
+            tb_scores = {f"eval/{k}": v for k, v in eval_metrics.items()}
+            self._exp_tracker.add_scalars(tag_scalar_dict=tb_scores, global_step=0)
+        finally:
+            self._release_trace_store()
+
+    def _release_trace_store(self) -> None:
+        self.logger.info("Release all sessions and free associated resources")
+        ray.get(get_store().release_all.remote())
+        keys = ray.get(get_store().list_sessions.remote())
+        assert len(keys) == 0, f"Store Keys not released: {keys}"
 
     def _train_one_batch(
         self,
@@ -829,10 +845,7 @@ class BaseRLTrainer:
                 rollout_idx=train_step,
             )
 
-        self.logger.info("Release all sessions and free associated resources")
-        ray.get(get_store().release_all.remote())
-        keys = ray.get(get_store().list_sessions.remote())
-        assert len(keys) == 0, f"Store Keys not released: {keys}"
+        self._release_trace_store()
 
         return {
             "data_info": data_info,
@@ -840,23 +853,26 @@ class BaseRLTrainer:
         }
 
     async def _run_evaluation(self, train_step: int) -> dict[str, float]:
-        eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
-            self.evaluator.eval_batch_size,
-            train_step=1,
-            model_step=0,
-        )
-        if XTUNER_DETERMINISTIC:
-            eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
-                eval_produce_result.rollout_states
+        try:
+            eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
+                self.evaluator.eval_batch_size,
+                train_step=train_step,
+                model_step=train_step,
             )
-        eval_batch = eval_produce_result.rollout_states
-        eval_metrics = self.evaluator.run(eval_batch)
-        eval_trajectory_dir = self.exp_dir / "eval_rollout"
-        eval_trajectory_dir.mkdir(parents=True, exist_ok=True)
-        eval_trajectory_path = eval_trajectory_dir / f"eval_rollout_{train_step}.jsonl"
-        self._save_trajectories(eval_batch, eval_trajectory_path)
-        self.logger.info(f"Train step {train_step} eval trajectories saved to {eval_trajectory_path}")
-        return eval_metrics
+            if XTUNER_DETERMINISTIC:
+                eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
+                    eval_produce_result.rollout_states
+                )
+            eval_batch = eval_produce_result.rollout_states
+            eval_metrics = self.evaluator.run(eval_batch)
+            eval_trajectory_dir = self.exp_dir / "eval_rollout"
+            eval_trajectory_dir.mkdir(parents=True, exist_ok=True)
+            eval_trajectory_path = eval_trajectory_dir / f"eval_rollout_{train_step}.jsonl"
+            self._save_eval_trajectories(eval_batch, eval_trajectory_path)
+            self.logger.info(f"Train step {train_step} eval trajectories saved to {eval_trajectory_path}")
+            return eval_metrics
+        finally:
+            self._release_trace_store()
 
     def _save_debug_rollout_batch(self, train_batch: list[list[RolloutState]], train_step: int) -> None:
         assert self._debug_rollout_dir is not None
@@ -1284,6 +1300,55 @@ class BaseRLTrainer:
                 "reward_min": rewards_tensor.min().item(),
                 "response_len_mean": response_lens.mean().item(),
                 "response_len_std": response_lens.std().item(),
+                "response_len_max": response_lens.max().item(),
+                "response_len_min": response_lens.min().item(),
+                "total_len": len(rewards),
+            }
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            for item in trajectory_items:
+                json.dump(item, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+
+    def _save_eval_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
+        rewards = []
+        trajectory_items = []
+
+        for group in data_groups:
+            for data in group:
+                reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
+                response = data.response or ""
+                response_len = len(self.tokenizer.encode(response, add_special_tokens=False))
+                rewards.append(reward)
+                ground_truth = None
+                if data.reward_model is not None:
+                    ground_truth = data.reward_model.get("ground_truth")
+                trajectory_items.append(
+                    {
+                        "prompt": data.message,
+                        "response": response,
+                        "response_len": response_len,
+                        "label": ground_truth,
+                        "reward": reward,
+                        "finish_reason": data.finish_reason,
+                        "error_msg": data.error_msg,
+                        "agent_status": data.extra_fields.get("agent_status", None),
+                        "agent_trajectory": data.extra_fields.get("agent_trajectory", None),
+                    }
+                )
+
+        rewards_tensor = torch.tensor(rewards).float() if rewards else torch.tensor([0.0]).float()
+        response_len_list = [item["response_len"] for item in trajectory_items]
+        response_lens = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
+
+        with open(save_path, "w", encoding="utf-8") as f:
+            summary = {
+                "reward_mean": rewards_tensor.mean().item(),
+                "reward_std": rewards_tensor.std(unbiased=False).item(),
+                "reward_max": rewards_tensor.max().item(),
+                "reward_min": rewards_tensor.min().item(),
+                "response_len_mean": response_lens.mean().item(),
+                "response_len_std": response_lens.std(unbiased=False).item(),
                 "response_len_max": response_lens.max().item(),
                 "response_len_min": response_lens.min().item(),
                 "total_len": len(rewards),
