@@ -323,7 +323,7 @@ class TestUpdateWeight(unittest.TestCase):
         self.rollout_cfg.skip_load_weights = False
         return self.rollout_cfg.build(rollout_pg)
 
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    @unittest.skip("skip lmdeploy disaggregated update-weight generation test until PR4638 is merged")
     def test_lmdeploy_disaggregated_update_weight_and_generate(self):
         train_controller = self._build_train_controller()
         rollout_controller = self._build_lmdeploy_rollout_controller()
@@ -342,7 +342,7 @@ class TestUpdateWeight(unittest.TestCase):
         self.assertEqual(res_update_weight.response, res_baseline.response)
         ray.get(rollout_controller.shutdown.remote(), timeout=60)
 
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    @unittest.skip("skip lmdeploy disaggregated update-weight generation test until PR4638 is merged")
     def test_lmdeploy_disaggregated_update_weight_after_pause_and_generate(self):
         train_controller = self._build_train_controller()
         rollout_controller = self._build_lmdeploy_rollout_controller()
@@ -364,7 +364,7 @@ class TestUpdateWeight(unittest.TestCase):
         self.assertEqual(res_update_weight.response, res_baseline.response)
         ray.get(rollout_controller.shutdown.remote(), timeout=60)
 
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    @unittest.skip("skip lmdeploy disaggregated update-weight generation test until PR4638 is merged")
     def test_lmdeploy_disaggregated_multi_update_and_generate(self):
         """Drive N consecutive update_weights+generate cycles on a single rollout engine.
 
