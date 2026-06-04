@@ -113,7 +113,7 @@ async def main_async(args: argparse.Namespace) -> int:
     if args.mode == "agentloop":
         if not args.hf_checkpoint:
             raise ValueError("--hf-checkpoint is required in agentloop mode.")
-        agent_loop = AgentInLocalhostLoop(hf_checkpoint=args.hf_checkpoint)
+        agent_loop = AgentInLocalhostLoop(hf_checkpoint=args.hf_checkpoint, mode=args.agentloop_mode)
 
     async def guarded(idx: int, tid: str, item: AgentRolloutItem) -> dict[str, Any]:
         async with sem:
@@ -153,6 +153,7 @@ def main(default_config: Path, argv: list[str] | None = None) -> int:
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--output", help="Optional JSONL path to dump full per-sample results")
     parser.add_argument("--mode", choices=("runner", "agentloop"), default="runner")
+    parser.add_argument("--agentloop-mode", choices=("train", "eval"), default="eval")
     parser.add_argument(
         "--hf-checkpoint",
         default=os.environ.get("HF_CHECKPOINT") or os.environ.get("QWEN3P5_VL_MODEL_PATH"),

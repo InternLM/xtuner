@@ -117,7 +117,7 @@ class RolloutState(BaseModel):
 
     input_ids: list[int] | None = None
     labels: list[int] | None = None
-    
+
     #  --- Judger 输出 ---
     reward: dict[str, Any] | None = None
 
