@@ -4,6 +4,8 @@ import asyncio
 import copy
 import importlib
 import json
+import os
+import time
 import traceback
 import uuid
 from typing import Any, Literal
@@ -22,6 +24,8 @@ from .schemas import AgentRolloutItem, RolloutStatus
 
 
 _MISSING = object()
+_DEFAULT_SANDBOX_CREATES_PER_SEC = 3.0
+_DEFAULT_SANDBOX_CREATES_BURST = 8
 
 
 def _import_from_path(path: str) -> Any:
@@ -36,6 +40,50 @@ def _inject_session_id(runner_cfg: dict[str, Any], session_id: str) -> None:
     for entry in runner_cfg.get("infer", {}).get("entries", []):
         if isinstance(entry, dict) and entry.get("name") == "start_agent_daemon":
             entry.setdefault("env", {})["XTUNER_SESSION_ID"] = session_id
+
+
+def _env_float(names: tuple[str, ...], default: float | None = None) -> float | None:
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None and value != "":
+            return float(value)
+    return default
+
+
+def _env_int(names: tuple[str, ...], default: int | None = None) -> int | None:
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None and value != "":
+            return int(value)
+    return default
+
+
+class _TokenBucket:
+    """Pace sandbox rollout starts from the long-lived agent loop."""
+
+    def __init__(self, rate_per_sec: float, capacity: int):
+        if rate_per_sec <= 0:
+            raise ValueError("rate_per_sec must be > 0")
+        if capacity <= 0:
+            raise ValueError("capacity must be > 0")
+        self._rate = float(rate_per_sec)
+        self._capacity = float(capacity)
+        self._tokens = float(capacity)
+        self._last = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            self._tokens = min(self._capacity, self._tokens + (now - self._last) * self._rate)
+            self._last = now
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return
+            wait = (1.0 - self._tokens) / self._rate
+            self._tokens = 0.0
+            self._last = now + wait
+        await asyncio.sleep(wait)
 
 
 def _resolve_runner(pipeline: Any, session_id: str) -> Any:
@@ -116,6 +164,8 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     """
 
     max_concurrent_samples: int | None = None
+    sandbox_creates_per_sec: float | None = None
+    sandbox_creates_burst: int | None = None
     mode: Literal["train", "eval"] = "train"
 
     def build_local(
@@ -128,6 +178,8 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
             judger=judger,
             logger=logger,
             max_concurrent_samples=self.max_concurrent_samples,
+            sandbox_creates_per_sec=self.sandbox_creates_per_sec,
+            sandbox_creates_burst=self.sandbox_creates_burst,
             mode=self.mode,
         )
 
@@ -141,12 +193,64 @@ class AgentInSandboxLoop(AgentLoop):
         judger: Judger | None = None,
         logger=None,
         max_concurrent_samples: int | None = None,
+        sandbox_creates_per_sec: float | None = None,
+        sandbox_creates_burst: int | None = None,
         mode: Literal["train", "eval"] = "train",
     ):
         super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
         self.max_concurrent_samples = max_concurrent_samples
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
+        self.sandbox_creates_per_sec = self._resolve_sandbox_creates_per_sec(sandbox_creates_per_sec)
+        self.sandbox_creates_burst = (
+            self._resolve_sandbox_creates_burst(sandbox_creates_burst)
+            if self.sandbox_creates_per_sec is not None
+            else None
+        )
+        self._sandbox_create_limiter = (
+            _TokenBucket(self.sandbox_creates_per_sec, self.sandbox_creates_burst)
+            if self.sandbox_creates_per_sec is not None and self.sandbox_creates_per_sec > 0
+            else None
+        )
+        if self._sandbox_create_limiter is not None:
+            self.logger.info(
+                "[AgentInSandboxLoop] sandbox rollout start rate limit: "
+                f"{self.sandbox_creates_per_sec:.2f}/s burst={self.sandbox_creates_burst}"
+            )
         self.mode = mode
+
+    @staticmethod
+    def _resolve_sandbox_creates_per_sec(value: float | None) -> float | None:
+        if value is None:
+            value = _env_float(
+                (
+                    "SANDBOX_AGENT_LOOP_CREATES_PER_SEC",
+                    "SANDBOX_CREATES_PER_SEC",
+                    "GATEWAY_CREATES_PER_SEC",
+                ),
+                _DEFAULT_SANDBOX_CREATES_PER_SEC,
+            )
+        if value is not None and value <= 0:
+            return None
+        return value
+
+    @staticmethod
+    def _resolve_sandbox_creates_burst(value: int | None) -> int:
+        if value is None:
+            value = _env_int(
+                (
+                    "SANDBOX_AGENT_LOOP_CREATES_BURST",
+                    "SANDBOX_CREATES_BURST",
+                    "GATEWAY_CREATES_BURST",
+                ),
+                _DEFAULT_SANDBOX_CREATES_BURST,
+            )
+        if value is None or value <= 0:
+            raise ValueError("sandbox_creates_burst must be > 0 when sandbox create rate limiting is enabled.")
+        return value
+
+    async def _throttle_sandbox_create(self) -> None:
+        if self._sandbox_create_limiter is not None:
+            await self._sandbox_create_limiter.acquire()
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> RolloutState:
@@ -171,6 +275,7 @@ class AgentInSandboxLoop(AgentLoop):
                 rollout_state.uid = uuid.uuid4().int
             rollout_item.uid = rollout_state.uid
             rollout_item.group_id = rollout_state.message_uid
+            await self._throttle_sandbox_create()
             result = await self._run_item(rollout_item)
             await self._fill_rollout_state(rollout_state, result)
             return rollout_state
