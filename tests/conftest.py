@@ -16,6 +16,8 @@ import xtuner.v1  # noqa: E402,F401
 
 from huggingface_hub import constants  # noqa: E402
 
+from xtuner._testing.patch_rollout_config import patch_rollout_config_dist_port_base
+
 
 _HF_DYNAMIC_MODULE_PREFIX = "transformers_modules"
 _HF_PATCH_MODULES_CACHE_PREFIX = "modules_cache"
@@ -52,4 +54,10 @@ def _cleanup_hf_dynamic_modules() -> None:
 
 
 def pytest_runtest_setup(item):
+    item_path_obj = getattr(item, "path", None)
+    if item_path_obj is None:
+        item_path_obj = item.fspath
+    item_path = Path(str(item_path_obj))
+    if item_path.parent.name == "rl":
+        patch_rollout_config_dist_port_base()
     _cleanup_hf_dynamic_modules()
