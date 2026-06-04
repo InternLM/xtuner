@@ -276,42 +276,48 @@ class RolloutController:
     def ensure_workers_healthy_before_training(self):
         """Ensure rollout workers are healthy before colocated training
         onloads."""
-        self.health_checker.pause()
-        with self.worker_info_lock:
-            workers = {rank: (info.actor, info.url, info.is_active) for rank, info in self.rank2info.items()}
-
-        for rank, (actor, url, was_active) in workers.items():
-            try:
-                is_healthy = ray.get(actor.check_health.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
-            except Exception as e:
-                is_healthy = False
-                self.logger.warning(f"Final health check raised for rollout worker {rank} at {url}: {e}.")
-
-            if not is_healthy:
-                self.logger.warning(f"Final health check failed for rollout worker {rank} at {url}.")
-
+        health_checker_was_paused = self.health_checker.is_paused()
+        if not health_checker_was_paused:
+            self.health_checker.pause()
+        try:
             with self.worker_info_lock:
-                info = self.rank2info[rank]
-                info.is_active = bool(is_healthy)
+                workers = {rank: (info.actor, info.url, info.is_active) for rank, info in self.rank2info.items()}
 
-            if is_healthy and not was_active:
-                self.logger.info(f"Mark rollout worker {rank} active after final health check: url={url}")
-            elif not is_healthy and was_active:
-                self.logger.warning(
-                    f"Mark rollout worker {rank} inactive because final health check failed before training: url={url}"
+            for rank, (actor, url, was_active) in workers.items():
+                try:
+                    is_healthy = ray.get(actor.check_health.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+                except Exception as e:
+                    is_healthy = False
+                    self.logger.warning(f"Final health check raised for rollout worker {rank} at {url}: {e}.")
+
+                if not is_healthy:
+                    self.logger.warning(f"Final health check failed for rollout worker {rank} at {url}.")
+
+                with self.worker_info_lock:
+                    info = self.rank2info[rank]
+                    info.is_active = bool(is_healthy)
+
+                if is_healthy and not was_active:
+                    self.logger.info(f"Mark rollout worker {rank} active after final health check: url={url}")
+                elif not is_healthy and was_active:
+                    self.logger.warning(
+                        f"Mark rollout worker {rank} inactive because final health check failed before training: url={url}"
+                    )
+
+            self._recover_failed_workers()
+            with self.worker_info_lock:
+                inactive_workers = [
+                    f"rank={rank}, url={info.url}" for rank, info in self.rank2info.items() if not info.is_active
+                ]
+            if inactive_workers:
+                raise RuntimeError(
+                    "inactive rollout workers before training: "
+                    + ", ".join(inactive_workers)
+                    + ". Refusing to onload training workers because rollout GPU memory may still be held."
                 )
-
-        self._recover_failed_workers()
-        with self.worker_info_lock:
-            inactive_workers = [
-                f"rank={rank}, url={info.url}" for rank, info in self.rank2info.items() if not info.is_active
-            ]
-        if inactive_workers:
-            raise RuntimeError(
-                "inactive rollout workers before training: "
-                + ", ".join(inactive_workers)
-                + ". Refusing to onload training workers because rollout GPU memory may still be held."
-            )
+        finally:
+            if not health_checker_was_paused:
+                self.health_checker.resume()
 
     def continue_generation(self):
         self.health_checker.resume()
@@ -362,7 +368,8 @@ class RolloutController:
             # 先保证把老的worker关掉
             ray.get(worker.shutdown.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
             # 保证新的worker启动在之前的端口上，否则权重更新会出错
-            _, url = ray.get(worker.init.remote(dist_init_addr=expected_url), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+            _, url = ray.get(worker.init.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+            assert url == expected_url, f"Worker restarted with unexpected URL: expected {expected_url}, got {url}."
             is_healthy = ray.get(worker.check_health.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
             if is_healthy:
                 self.logger.info(f"Successfully restarted worker {worker} with URL {url}.")
@@ -370,6 +377,8 @@ class RolloutController:
             else:
                 self.logger.error(f"Worker {worker} is still unhealthy after restart.")
                 return False
+        except AssertionError:
+            raise
         except Exception as e:
             self.logger.error(f"Failed to restart worker: {e}")
             return False

@@ -293,9 +293,24 @@ class TestRLColocateTrainer(unittest.TestCase):
         controller = RolloutController.__new__(RolloutController)
         controller.rank2info = workers_info
         controller.worker_info_lock = threading.RLock()
+        health_checker_state = {"paused": False}
+
+        def is_health_checker_paused():
+            events.append(("health_is_paused", health_checker_state["paused"]))
+            return health_checker_state["paused"]
+
+        def pause_health_checker():
+            events.append(("health_pause",))
+            health_checker_state["paused"] = True
+
+        def resume_health_checker():
+            events.append(("health_resume",))
+            health_checker_state["paused"] = False
+
         controller.health_checker = SimpleNamespace(
-            pause=lambda: events.append(("health_pause",)),
-            resume=lambda: events.append(("health_resume",)),
+            is_paused=is_health_checker_paused,
+            pause=pause_health_checker,
+            resume=resume_health_checker,
             stop=lambda: events.append(("health_stop",)),
         )
         controller.logger = MagicMock()
@@ -363,14 +378,21 @@ class TestRLColocateTrainer(unittest.TestCase):
             events.index(("worker_failed", 1, worker_url)),
             events.index(("check_health", True, False)),
         )
+        self.assertLess(events.index(("health_is_paused", False)), events.index(("health_pause",)))
+        self.assertLess(events.index(("health_pause",)), events.index(("check_health", True, False)))
         self.assertLess(events.index(("check_health", True, False)), events.index(("shutdown", False)))
-        self.assertLess(events.index(("shutdown", False)), events.index(("init", (), {}, worker_url)))
+        restart_event = ("init", (), {}, worker_url)
+        self.assertLess(events.index(("shutdown", False)), events.index(restart_event))
         self.assertLess(
-            events.index(("init", (), {}, worker_url)),
+            events.index(restart_event),
             events.index(("check_health", False, True)),
         )
         self.assertLess(
             events.index(("check_health", False, True)),
+            events.index(("health_resume",)),
+        )
+        self.assertLess(
+            events.index(("health_resume",)),
             events.index(("rollout_offload", True, True, worker_url)),
         )
         self.assertLess(

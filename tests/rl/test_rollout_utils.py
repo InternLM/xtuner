@@ -45,17 +45,24 @@ class _FakeControllerRemoteMethod:
 
 
 class _FakeControllerHealthChecker:
-    def __init__(self):
-        self.call_log = []
+    def __init__(self, paused=True, call_log=None):
+        self.call_log = call_log if call_log is not None else []
+        self._paused = paused
+
+    def is_paused(self):
+        self.call_log.append("health_is_paused")
+        return self._paused
 
     def pause(self):
-        self.call_log.append("pause")
+        self.call_log.append("health_pause")
+        self._paused = True
 
     def run_once(self):
         self.call_log.append("run_once")
 
     def resume(self):
-        self.call_log.append("resume")
+        self.call_log.append("health_resume")
+        self._paused = False
 
 
 class _FakeRemoteMethod:
@@ -79,6 +86,15 @@ class TestRolloutHealthChecker(unittest.TestCase):
     def _build_checker(self, workers_info):
         config = SimpleNamespace(health_check_interval_seconds=10, health_check_failure_threshold=1)
         return RolloutHealthChecker(config, workers_info)
+
+    def test_stopped_checker_is_treated_as_paused(self):
+        checker = self._build_checker({})
+        checker.start()
+        checker.resume()
+
+        checker.stop()
+
+        self.assertTrue(checker.is_paused())
 
     def test_shutdown_runs_when_offload_fails(self):
         worker = _FakeWorker()
@@ -128,11 +144,11 @@ class TestRolloutHealthChecker(unittest.TestCase):
 
 
 class TestRolloutControllerTrainingBarrier(unittest.TestCase):
-    def _build_controller(self, workers_info):
+    def _build_controller(self, workers_info, health_checker=None):
         controller = RolloutController.__new__(RolloutController)
         controller.rank2info = workers_info
         controller.worker_info_lock = threading.RLock()
-        controller.health_checker = _FakeControllerHealthChecker()
+        controller.health_checker = health_checker or _FakeControllerHealthChecker()
         controller.logger = SimpleNamespace(
             info=lambda *args, **kwargs: None,
             warning=lambda *args, **kwargs: None,
@@ -195,8 +211,8 @@ class TestRolloutControllerTrainingBarrier(unittest.TestCase):
             ],
         )
 
-    def test_ensure_workers_healthy_before_training_fails_if_restarted_url_changes(self):
-        # recovery 后 URL 改变时，不能允许共卡训练继续。
+    def test_ensure_workers_healthy_before_training_asserts_if_restarted_url_changes(self):
+        # recovery 重启后的 URL 必须保持不变，否则权重同步会连到错误服务。
         call_log = []
 
         def check_health():
@@ -209,6 +225,45 @@ class TestRolloutControllerTrainingBarrier(unittest.TestCase):
         def init(*args, **kwargs):
             call_log.append(("init", args, kwargs))
             return 0, "http://worker-0-new"
+
+        worker = SimpleNamespace(
+            offload=_FakeControllerRemoteMethod("offload", call_log),
+            shutdown=self._remote(shutdown),
+            init=self._remote(init),
+            check_health=self._remote(check_health),
+        )
+        workers_info = {0: WorkerInfo(actor=worker, url="http://worker-0", is_active=True)}
+        controller = self._build_controller(workers_info)
+
+        with patch("xtuner.v1.rl.rollout.controller.ray.get", side_effect=self._ray_get):
+            with self.assertRaisesRegex(AssertionError, "unexpected URL"):
+                controller.ensure_workers_healthy_before_training()
+
+        self.assertFalse(workers_info[0].is_active)
+        self.assertEqual(workers_info[0].url, "http://worker-0")
+        self.assertEqual(
+            call_log,
+            [
+                ("check_health", True, False),
+                ("shutdown", False),
+                ("init", (), {}),
+            ],
+        )
+
+    def test_ensure_workers_healthy_before_training_fails_if_restart_health_check_fails(self):
+        # recovery 必须用原 URL 重启；重启后仍不健康时不能允许共卡训练继续。
+        call_log = []
+
+        def check_health():
+            call_log.append(("check_health", workers_info[0].is_active, False))
+            return False
+
+        def shutdown():
+            call_log.append(("shutdown", workers_info[0].is_active))
+
+        def init(*args, **kwargs):
+            call_log.append(("init", args, kwargs))
+            return 0, "http://worker-0"
 
         def init_dist_port():
             call_log.append(("init_dist_port",))
@@ -236,6 +291,7 @@ class TestRolloutControllerTrainingBarrier(unittest.TestCase):
                 ("check_health", True, False),
                 ("shutdown", False),
                 ("init", (), {}),
+                ("check_health", False, False),
             ],
         )
 
@@ -278,7 +334,7 @@ class TestRolloutControllerTrainingBarrier(unittest.TestCase):
 
         self.assertFalse(workers_info[0].is_active)
         self.assertIn(("shutdown", (), {}), call_log)
-        self.assertNotIn(("init", (), {}), call_log)
+        self.assertFalse(any(call[0] == "init" for call in call_log))
 
 
 class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
