@@ -479,9 +479,16 @@ class RunAgentInstallDeps(Hook):
 
     name = "run_agent_install_deps"
 
-    def __init__(self, *, workspace: str, timeout: int = 600):
+    def __init__(
+        self,
+        *,
+        workspace: str,
+        timeout: int = 600,
+        env: dict[str, str] | None = None,
+    ):
         self.workspace = workspace
         self.timeout = timeout
+        self.env = env or {}
 
     async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
         chosen = record.agent
@@ -492,6 +499,7 @@ class RunAgentInstallDeps(Hook):
             client,
             f'[ -f "{script}" ] && bash "{script}" || true',
             timeout_sec=self.timeout,
+            env=self.env or None,
             raise_on_error=True,
         )
         stdout = (result.get("stdout") or "").strip()
