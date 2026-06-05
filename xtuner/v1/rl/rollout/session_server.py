@@ -1,17 +1,31 @@
+import copy
 import json
 from functools import reduce
+from http import HTTPStatus
 from operator import add
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 import ray
 from aiohttp import ClientConnectionResetError, ClientSession, ClientTimeout, web
-
 from transformers import AutoTokenizer
+
 from xtuner.v1.utils import get_logger
 
 from .chat_template import canonicalize_messages_for_chat_template
 from .trace_store import TokenizedSegment, get_store
+
+FMT_OPENAI = "openai"
+FMT_ANTHROPIC = "anthropic"
+
+# Fields the SessionServer consumes locally and never forwards upstream.
+_SESSION_SERVER_ONLY_KEYS = {"session_id"}
+
+
+def _detect_format(req_path: str) -> str:
+    if req_path.endswith("/messages") or "/v1/messages" in req_path:
+        return FMT_ANTHROPIC
+    return FMT_OPENAI
 
 
 def _is_error_payload(payload: dict) -> bool:
@@ -27,56 +41,12 @@ def _lmdeploy_error_payload(message: str, status: int = 500, error_type: str = "
     }
 
 
-def _stream_has_traceable_choices(raw: bytes) -> bool:
-    text = raw.decode("utf-8", errors="replace")
-    has_choices = False
-    saw_done = False
-    saw_terminal_finish = False
-    for line in text.split("\n"):
-        line = line.strip()
-        if line == "data: [DONE]":
-            saw_done = True
-            continue
-        if line.startswith("data: "):
-            try:
-                event = json.loads(line[6:])
-            except json.JSONDecodeError:
-                return False
-            if _is_error_payload(event):
-                return False
-            if event.get("choices"):
-                if any(choice.get("finish_reason") == "error" for choice in event.get("choices", [])):
-                    return False
-                if any(choice.get("finish_reason") for choice in event.get("choices", [])):
-                    saw_terminal_finish = True
-                has_choices = True
-    return has_choices and saw_done and saw_terminal_finish
-
-
-def _extract_output_logprobs(choice: dict, output_token_ids: list[int]) -> list[float]:
-    if not output_token_ids:
-        return []
-
-    output_token_logprobs = choice.get("output_token_logprobs")
-    if output_token_logprobs is None:
-        raise RuntimeError(
-            "SessionServer response choice has no output_token_logprobs; "
-            "the return_logprob protocol is required for training traces."
-        )
-
-    logprob_token_ids = [item[1] for item in output_token_logprobs]
-    if logprob_token_ids != output_token_ids:
-        raise RuntimeError(
-            "SessionServer response choice has mismatched output_token_logprobs: "
-            f"output_ids_len={len(output_token_ids)}, logprob_ids_len={len(logprob_token_ids)}"
-        )
-    return [item[0] for item in output_token_logprobs]
-
-
-_SESSION_SERVER_ONLY_KEYS = {"session_id"}
-
-
 def _bool_request_value(value: Any, default: bool = False) -> bool:
+    """Coerce an opaque request-body value (bool / int / str / None) to bool.
+
+    Mirrors how lmdeploy validates flag-style fields — accepts ``"true"``,
+    ``"1"`` etc. as truthy and ``"false"``, ``"0"`` as falsy.
+    """
     if value is None:
         return default
     if isinstance(value, str):
@@ -85,22 +55,158 @@ def _bool_request_value(value: Any, default: bool = False) -> bool:
 
 
 def _request_uses_trace_store(req_body: dict) -> bool:
+    """Whether this request should drive the trace_store / token-in-token-out path.
+
+    Evaluate-mode callers opt out by setting ``return_token_ids=False`` on the
+    request body; tracing then becomes a passthrough proxy with parameter-name
+    hygiene (``logprobs`` → ``return_logprob``) and the upstream worker handles
+    its own tokenization.
+    """
     if req_body.get("session_id") is None or "messages" not in req_body:
         return False
     return _bool_request_value(req_body.get("return_token_ids"), True)
 
 
+def _extract_output_logprobs(output_token_logprobs: Optional[list], output_token_ids: list[int]) -> list[float]:
+    if not output_token_ids:
+        return []
+
+    if output_token_logprobs is None:
+        raise RuntimeError(
+            "SessionServer response has no output_token_logprobs; "
+            "the return_logprob protocol is required for training traces."
+        )
+
+    logprob_token_ids = [item[1] for item in output_token_logprobs]
+    if logprob_token_ids != output_token_ids:
+        raise RuntimeError(
+            "SessionServer response has mismatched output_token_logprobs: "
+            f"output_ids_len={len(output_token_ids)}, logprob_ids_len={len(logprob_token_ids)}"
+        )
+    return [item[0] for item in output_token_logprobs]
+
+
+def _maybe_json_loads(value):
+    """Parse a JSON string, falling back to the original value on error."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _normalize_tool_call_arguments(messages) -> None:
+    """In-place: parse ``tool_calls[].function.arguments`` strings into dicts.
+
+    lmdeploy stringifies tool-call arguments; the standard OpenAI/chat_template
+    path expects dicts. Normalize so both paths share one shape.
+    """
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            if isinstance(fn, dict) and "arguments" in fn:
+                fn["arguments"] = _maybe_json_loads(fn["arguments"])
+
+
+def _strip_stop_word(content, stop_word: str):
+    """Remove ``stop_word`` from a message ``content`` field (any OpenAI shape).
+
+    OpenAI ``content`` accepts both a plain string and a list of typed parts
+    (``[{"type": "text", "text": "..."}, ...]``); the latter shows up after we
+    pass anthropic messages through ``to_openai_messages`` — multiple anthropic
+    text blocks inside one assistant turn become multiple ``text`` parts. The
+    stop_word can land in any of those ``text`` fields, so we walk both shapes.
+
+    Returns ``(content, modified)``. List parts are mutated in place; for str
+    a new string is returned (the original is left untouched).
+    """
+    if not stop_word or content is None:
+        return content, False
+    if isinstance(content, str):
+        if stop_word in content:
+            return content.replace(stop_word, ""), True
+        return content, False
+    if isinstance(content, list):
+        modified = False
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str) and stop_word in part["text"]:
+                part["text"] = part["text"].replace(stop_word, "")
+                modified = True
+        return content, modified
+    return content, False
+
+
+def _anthropic_response_to_assistant_message(response: dict) -> dict:
+    """Wrap an Anthropic ``MessagesResponse`` body as an anthropic-shaped assistant message.
+
+    The returned dict can be appended to ``MessagesRequest.messages`` so the
+    full conversation (input + this assistant turn) survives a round-trip
+    through ``MessagesRequest.model_validate`` + ``to_openai_messages``.
+    """
+    blocks = response.get("content") or []
+    normalized: List[dict] = []
+    for block in blocks:
+        btype = block.get("type")
+        if btype == "text":
+            normalized.append({"type": "text", "text": block.get("text", "")})
+        elif btype == "thinking":
+            nb: dict = {"type": "thinking", "thinking": block.get("thinking", "")}
+            if "signature" in block:
+                nb["signature"] = block["signature"]
+            normalized.append(nb)
+        elif btype == "tool_use":
+            tool_id = block.get("id")
+            name = block.get("name")
+            if not tool_id or not name:
+                raise ValueError(f"tool_use block missing id/name: {block}")
+            normalized.append({"type": "tool_use", "id": tool_id, "name": name, "input": block.get("input", {})})
+    return {"role": "assistant", "content": normalized}
+
+
+def _anthropic_request_to_openai(req_body: dict) -> tuple[list[dict], Optional[list[dict]]]:
+    """Anthropic request body → OpenAI (messages, tools).
+
+    Uses lmdeploy's ``MessagesRequest`` + ``to_openai_messages`` /
+    ``to_openai_tools`` to keep all anthropic content-block / tool-use /
+    tool-result / system handling consistent with what the worker would do.
+    """
+    from lmdeploy.serve.anthropic.adapter import to_openai_messages, to_openai_tools
+    from lmdeploy.serve.anthropic.protocol import MessagesRequest
+
+    req = MessagesRequest.model_validate(req_body)
+    messages = to_openai_messages(req)
+    converted_tools = to_openai_tools(req.tools)
+    tools = [t.model_dump() for t in converted_tools] if converted_tools else None
+    _normalize_tool_call_arguments(messages)
+    return messages, tools
+
+
 class SessionServer:
-    """SessionServer intercepts and records requests sent to a remote LLM API
-    worker.
+    """SessionServer intercepts and records requests sent to a remote LLM API worker.
 
-    It acts as a reverse-proxy (or interceptor) in front of an already running
-    worker (like lmdeploy, sglang, or vllm). It binds to a specific (host, port)
-    and relays any received traffic to the actual worker URL.
+    It acts as a reverse-proxy in front of an already running worker (lmdeploy,
+    sglang, vllm). Each supported endpoint is transparently forwarded along
+    its native path with its native response shape — only the on_request and
+    on_response hooks normalize messages to OpenAI form so the tokenizer +
+    ``trace_store`` always see one shape.
 
-    You can optionally provide before_request and after_response hooks to
-    perform extra logging, trace state mutations, or message cleanup before/after
-    routing the request to the worker backend.
+    Supported endpoints:
+
+    - ``POST /v1/chat/completions`` — passthrough
+    - ``POST /v1/messages`` (Anthropic) — passthrough; hooks render the
+      request via the lmdeploy adapter to drive prefix-cache lookup, swap
+      ``messages``/``system``/``tools``/``tool_choice`` out for raw
+      ``input_ids`` on the wire (lmdeploy requires this when ``input_ids`` is
+      set), then re-assemble the OpenAI-shaped trace from the anthropic
+      response.
+
+    The ``/v1/responses`` endpoint is intentionally rejected (501) because the
+    upstream worker does not implement it.
 
     Args:
         worker_base_url (str): The base URL of the real worker (e.g. "http://127.0.0.1:8000")
@@ -134,9 +240,29 @@ class SessionServer:
         self._site: Optional[web.TCPSite] = None
         self._lmdeploy_actor: Optional[ray.actor.ActorHandle] = None
 
-    async def on_request(self, req_body: dict, *, trace_enabled: bool = True) -> dict:
-        """Hook for processing/modifying the request before forwarding."""
+    async def on_request(self, req_body: dict, fmt: str, *, trace_enabled: bool = True) -> dict:
+        """Normalize the request to drive the prefix cache + inject extension fields.
 
+        When ``trace_enabled`` is False (evaluate mode), forward the request
+        as-is with parameter-name hygiene only — no token-in-token-out
+        rewrite — so the upstream worker handles tokenization on its own.
+
+        Args:
+            req_body (dict): The original client request body.
+            fmt (str): The detected request format (one of ``FMT_OPENAI`` /
+                ``FMT_ANTHROPIC``).
+            trace_enabled (bool): Whether the request should populate the
+                trace_store. Disabled when the caller sets
+                ``return_token_ids=False`` (evaluate path).
+
+        Returns:
+            dict: The forward-ready request body. The wire shape still
+            matches ``fmt``; in trace mode it carries ``input_ids`` plus the
+            ``return_*`` extension flags.
+        """
+        # Evaluate path: forward unchanged except for the legacy ``logprobs``
+        # → ``return_logprob`` rename and stripping the SessionServer-only
+        # ``session_id`` field.
         if not trace_enabled:
             worker_req = {k: v for k, v in req_body.items() if k not in _SESSION_SERVER_ONLY_KEYS}
             if "logprobs" in worker_req:
@@ -149,15 +275,33 @@ class SessionServer:
             return worker_req
 
         session_id = req_body["session_id"]
-        # 1. chat_template render 出完整 prompt string，不 tokenize 全量
+
+        # 1. Render the request as OpenAI chat-template input to drive the
+        #    string-prefix cache. For non-OpenAI formats we convert in-memory;
+        #    we do NOT mutate req_body["messages"] in those cases — the wire
+        #    body keeps its native shape.
+        if fmt == FMT_ANTHROPIC:
+            openai_messages, openai_tools = _anthropic_request_to_openai(req_body)
+        else:
+            openai_messages = req_body["messages"]
+            openai_tools = req_body.get("tools", None)
+
+        # Defensive scrub: an earlier round may have rendered ``<|im_end|>`` into
+        # an assistant text block (e.g. via ``include_stop_str_in_output``); if
+        # the client echoes that block back to us, the chat template would emit
+        # the stop_word twice and break tokenization.
+        for msg in openai_messages:
+            if isinstance(msg, dict) and "content" in msg:
+                msg["content"], _ = _strip_stop_word(msg["content"], self.stop_word)
+
         prompt_text = self.tokenizer.apply_chat_template(
-            canonicalize_messages_for_chat_template(req_body["messages"]),
-            tools=req_body.get("tools", None),
+            canonicalize_messages_for_chat_template(openai_messages),
+            tools=openai_tools,
             add_generation_prompt=True,
             tokenize=False,
         )
 
-        # 2. Store 做 string prefix match。
+        # 2. Prefix-cache lookup; insert the delta tail back into the store.
         prefix, nodes = await self.store.search.remote(session_id, prompt_text, filter_none=True)
         if prefix:
             get_logger().debug(f"Hit prefix cache for session {session_id}")
@@ -167,50 +311,91 @@ class SessionServer:
             await self.store.insert.remote(session_id, prompt_text, TokenizedSegment(text=delta, token_ids=delta_ids))
         input_ids = reduce(add, [node.value.token_ids for node in nodes] + [delta_ids])
 
-        # 3. 组装 OpenAI chat completions 请求。
+        # 3. Inject extension fields on the forwarded request. The body still
+        #    follows ``fmt``'s native schema. ``logprobs``/``top_logprobs`` are
+        #    dropped because we always force ``return_logprob=True`` to drive
+        #    the trace_store; their original values would just shadow ours.
         worker_req = {
-            **{
-                k: v
-                for k, v in req_body.items()
-                if k not in _SESSION_SERVER_ONLY_KEYS | {"messages", "logprobs", "top_logprobs"}
-            },
-            "messages": [],
-            "input_ids": input_ids,
-            "return_token_ids": True,
-            "return_routed_experts": True,
-            "return_logprob": True,
-            "include_stop_str_in_output": True,
+            k: v for k, v in req_body.items() if k not in _SESSION_SERVER_ONLY_KEYS | {"logprobs", "top_logprobs"}
         }
+        worker_req["input_ids"] = input_ids
+        worker_req["return_token_ids"] = True
+        worker_req["return_routed_experts"] = True
+        worker_req["return_logprob"] = True
+        worker_req["include_stop_str_in_output"] = True
+
+        if fmt == FMT_ANTHROPIC:
+            # lmdeploy's /v1/messages requires messages to be empty AND
+            # system / tools / tool_choice to be unset whenever input_ids is
+            # supplied (raw input_ids bypass message rendering).
+            worker_req["messages"] = []
+            worker_req.pop("system", None)
+            worker_req.pop("tools", None)
+            worker_req.pop("tool_choice", None)
+        else:
+            worker_req["messages"] = []
+
         return worker_req
 
-    async def on_response(self, worker_resp: dict, *, trace_enabled: bool = True) -> dict:
-        """Hook for processing the parsed response received from the worker."""
+    async def on_response(self, worker_resp: dict, fmt: str, orig_req_body: dict) -> dict:
+        """Trace the assistant turn into ``trace_store`` (always in OpenAI shape).
 
-        if not trace_enabled:
-            return {k: v for k, v in worker_resp.items() if k not in {"messages", "tools"}}
+        Args:
+            worker_resp (dict): The parsed upstream response (still in
+                ``fmt`` shape).
+            fmt (str): The request format that produced this response.
+            orig_req_body (dict): The original client request body, before
+                ``on_request`` rewrote it. Needed to reconstruct the full
+                conversation for OpenAI-shape tracing because the wire body
+                forwarded to the worker no longer carries ``messages`` /
+                ``system`` / ``tools``.
 
-        session_id = worker_resp["session_id"]
-        messages = worker_resp["messages"]
-        tools = worker_resp["tools"]
-        choice = worker_resp["choices"][0]
+        Returns:
+            dict: The (possibly trimmed) response — currently unused by the
+            caller but kept for symmetry.
+        """
+        session_id = orig_req_body["session_id"]
 
-        output_token_ids = choice.get("output_ids")  # len = N_out
+        if fmt == FMT_ANTHROPIC:
+            output_token_ids = worker_resp.get("output_ids")
+            output_token_logprobs = worker_resp.get("output_token_logprobs")
+            raw_routed_expert = worker_resp.get("routed_experts")
+            assistant_anthropic_msg = _anthropic_response_to_assistant_message(worker_resp)
+            full_req = copy.deepcopy(orig_req_body)
+            full_req.setdefault("messages", []).append(assistant_anthropic_msg)
+            openai_messages, openai_tools = _anthropic_request_to_openai(full_req)
+            assistant_msg = openai_messages[-1]
+            messages = openai_messages[:-1]
+            tools = openai_tools
+        else:
+            choice = worker_resp["choices"][0]
+            output_token_ids = choice.get("output_ids")
+            output_token_logprobs = choice.get("output_token_logprobs")
+            raw_routed_expert = choice.get("routed_experts")
+            assistant_msg = choice["message"]
+            messages = orig_req_body["messages"]
+            tools = orig_req_body.get("tools", None)
+
         if output_token_ids is None:
             raise RuntimeError(
-                "SessionServer response choice has no output_ids; "
-                "cannot export a training trace for this assistant turn."
+                "SessionServer response has no output_ids; cannot export a training trace for this assistant turn."
             )
-        output_logprobs = _extract_output_logprobs(choice, output_token_ids)
-        raw_routed_expert = choice.get("routed_experts")  # 本次 call 的 raw routed_expert，可为 None
+        output_logprobs = _extract_output_logprobs(output_token_logprobs, output_token_ids)
 
-        # 2. Store 把 input_delta / assistant_output 两个节点补齐字段。
+        if isinstance(assistant_msg.get("content"), (str, list)):
+            assistant_msg["content"], _ = _strip_stop_word(assistant_msg["content"], self.stop_word)
+        for msg in messages:
+            if isinstance(msg, dict) and "content" in msg:
+                msg["content"], _ = _strip_stop_word(msg["content"], self.stop_word)
+
+        # Render OpenAI prompts for the prefix-cache key boundary.
         old_prompt = self.tokenizer.apply_chat_template(
             canonicalize_messages_for_chat_template(messages), tools=tools, add_generation_prompt=True, tokenize=False
         )
-        messages = [*messages, choice["message"]]
+        full_messages = [*messages, assistant_msg]
         new_prompt = (
             self.tokenizer.apply_chat_template(
-                canonicalize_messages_for_chat_template(messages),
+                canonicalize_messages_for_chat_template(full_messages),
                 tools=tools,
                 add_generation_prompt=False,
                 tokenize=False,
@@ -235,14 +420,11 @@ class SessionServer:
                 prefix_len = sum(len(n.value.token_ids) for n in nodes[:-1])
                 assert prefix_len + delta_len + len(output_token_ids) == len(raw_routed_expert)
 
-                # split raw_routed_expert
-                # raw_routed_expert target shape mapping: [prefix_len + delta_len + response_len, ...]
                 delta_expert = raw_routed_expert[prefix_len : prefix_len + delta_len]
                 response_expert = raw_routed_expert[prefix_len + delta_len :]
 
                 if delta_len > 0:
                     delta_node_val.expert_key = ray.put(delta_expert)
-                    # update delta node in store
                     await self.store.insert.remote(session_id, old_prompt, delta_node_val)
 
                 raw_routed_expert = ray.put(response_expert)
@@ -262,9 +444,7 @@ class SessionServer:
             ),
         )
 
-        # 3. 返回标准 OpenAI response，session_id 由 SessionClient 层再剥
-        resp = {k: v for k, v in worker_resp.items() if k != "messages"}
-        return resp
+        return worker_resp
 
     @property
     def url(self) -> str:
@@ -295,31 +475,46 @@ class SessionServer:
         get_logger().info("SessionServer stopped.")
 
     async def _handle_request(self, request: web.Request) -> web.Response:
-        """Proxy handler for the worker API."""
+        """Proxy handler: detect format, run hooks, forward, stream back."""
+
+        req_path = request.match_info["path"]
+
+        # Reject /v1/responses outright — upstream worker doesn't implement it.
+        if req_path.endswith("/responses") or "/v1/responses" in req_path:
+            return web.json_response(
+                _lmdeploy_error_payload(
+                    "/v1/responses is not supported by SessionServer (upstream worker has no responses endpoint).",
+                    status=HTTPStatus.NOT_IMPLEMENTED,
+                    error_type="not_implemented",
+                ),
+                status=HTTPStatus.NOT_IMPLEMENTED,
+            )
+
+        fmt = _detect_format(req_path)
 
         # Read the request body
         request_body = await request.read()
-        request_data = session_id = messages = None
+        request_data = None
+        orig_req_body: Optional[dict] = None
         trace_enabled = False
-        orig_return_logprob = orig_return_token_ids = orig_return_routed_experts = False
+        orig_return_logprob = orig_return_token_ids = False
+        orig_return_routed_experts = True
         if request_body:
             try:
                 request_data = json.loads(request_body)
+                orig_req_body = copy.deepcopy(request_data)
 
                 trace_enabled = _request_uses_trace_store(request_data)
+                # Accept either ``return_logprob`` (canonical) or the legacy
+                # ``logprobs`` alias when deciding whether the client wanted
+                # logprobs forwarded back.
                 orig_return_logprob = _bool_request_value(
                     request_data.get("return_logprob", request_data.get("logprobs")), False
                 )
                 orig_return_token_ids = _bool_request_value(request_data.get("return_token_ids"), False)
                 orig_return_routed_experts = _bool_request_value(request_data.get("return_routed_experts"), True)
 
-                session_id = request_data.get("session_id")
-                messages = request_data.get("messages")
-                tools = request_data.get("tools", None)
-
-                # Apply purely abstract on_request processing
-                request_data = await self.on_request(request_data, trace_enabled=trace_enabled)
-                # Re-serialize the modified payload back to bytes
+                request_data = await self.on_request(request_data, fmt, trace_enabled=trace_enabled)
                 request_body = json.dumps(request_data).encode("utf-8")
             except json.JSONDecodeError:
                 pass
@@ -328,66 +523,39 @@ class SessionServer:
                 get_logger().error(message)
                 return web.json_response(_lmdeploy_error_payload(message), status=500)
 
-        # Build forwarding headers, dropping original Host
+        # Build forwarding headers, dropping original Host / Content-Length.
         forward_headers = dict(request.headers)
         forward_headers.pop("Host", None)
         forward_headers.pop("host", None)
         forward_headers.pop("Content-Length", None)
         forward_headers.pop("content-length", None)
+        if fmt == FMT_ANTHROPIC:
+            forward_headers["anthropic-version"] = "2023-06-01"
 
-        # Re-build Path
-        req_path = request.match_info["path"]
+        # Path is forwarded verbatim — each endpoint keeps its native shape.
         target_url = f"{self.worker_base_url}/{req_path.lstrip('/')}"
         if request.query_string:
             target_url += f"?{request.query_string}"
 
         is_stream = request_data.get("stream", False) if request_data else False
 
-        def _clean_data(data: dict) -> bool:
-            modified = False
-            for key, drop in [
-                ("output_token_logprobs", not orig_return_logprob),
-                ("output_ids", not orig_return_token_ids),
-                ("routed_experts", not orig_return_routed_experts),
-            ]:
-                if drop and key in data:
-                    data.pop(key)
-                    modified = True
-                if drop:
-                    for c in data.get("choices", []):
-                        if key in c:
-                            c.pop(key)
-                            modified = True
+        # Build the per-format stream cleaner (strips lmdeploy-injected
+        # extension fields that the client didn't ask for, and removes the
+        # stop word from any user-visible text).
+        clean_data = self._build_data_cleaner(
+            fmt,
+            orig_return_logprob=orig_return_logprob,
+            orig_return_token_ids=orig_return_token_ids,
+            orig_return_routed_experts=orig_return_routed_experts,
+        )
 
-            for c in data.get("choices", []):
-                if "logprobs" in c:
-                    c.pop("logprobs")
-                    modified = True
-
-            for c in data.get("choices", []):
-                if c.get("message") and isinstance(c["message"].get("content"), str):
-                    if self.stop_word in c["message"]["content"]:
-                        c["message"]["content"] = c["message"]["content"].replace(self.stop_word, "")
-                        modified = True
-                if c.get("delta") and isinstance(c["delta"].get("content"), str):
-                    if self.stop_word in c["delta"]["content"]:
-                        c["delta"]["content"] = c["delta"]["content"].replace(self.stop_word, "")
-                        modified = True
-
-            return modified
-
-        # Forward the request to the upstream worker
-        # read_bufsize controls StreamReader's line buffer limit; SSE events with large
-        # tool_calls/reasoning_content payloads can exceed the 64KB default and trigger
-        # "Chunk too big" from readuntil(b"\n").
         timeout = ClientTimeout(total=self.request_timeout, sock_connect=30)
         async with ClientSession(read_bufsize=self.read_bufsize, timeout=timeout) as client:
             async with client.request(
                 method=request.method, url=target_url, headers=forward_headers, data=request_body
             ) as resp:
-                # Setup proper stream vs sync response objects
                 if is_stream:
-                    response_chunks = []
+                    response_chunks: list[bytes] = []
                     response = web.StreamResponse(
                         status=resp.status,
                         headers={
@@ -404,16 +572,17 @@ class SessionServer:
                     # in full but stop attempting to write to the closed socket.
                     client_alive = True
                     async for line in resp.content:
-                        # Keep unmodified line for trace store parsing
+                        # Only retain chunks when we'll actually need to parse
+                        # them for tracing; evaluate-mode requests skip this
+                        # so memory does not grow with stream length.
                         if trace_enabled:
                             response_chunks.append(line)
 
-                        # Dynamically prune added fields before writing to client
                         if request_data is not None and line.startswith(b"data: ") and line.strip() != b"data: [DONE]":
                             try:
                                 text = line.decode("utf-8")
                                 data = json.loads(text[6:])
-                                if _clean_data(data):
+                                if clean_data(data):
                                     line = ("data: " + json.dumps(data) + "\n").encode("utf-8")
                             except Exception:
                                 pass
@@ -432,9 +601,9 @@ class SessionServer:
 
                     if request_data is not None:
                         try:
-                            clean_data = json.loads(raw_response)
-                            if _clean_data(clean_data):
-                                final_raw_response = json.dumps(clean_data).encode("utf-8")
+                            parsed = json.loads(raw_response)
+                            if clean_data(parsed):
+                                final_raw_response = json.dumps(parsed).encode("utf-8")
                         except Exception:
                             pass
 
@@ -445,21 +614,25 @@ class SessionServer:
                             for k, v in resp.headers.items()
                             if k.lower() not in ("transfer-encoding", "content-length", "content-encoding")
                         },
-                        body=final_raw_response,  # Modified raw response without our injected trace params
+                        body=final_raw_response,
                     )
 
         # Apply abstract on_response processing
-        response_data = None
+        response_data: Optional[dict] = None
         skip_done = bool(is_stream and not trace_enabled)
-        session_error_msg = None
-        if request_data and trace_enabled:
+        session_error_msg: Optional[str] = None
+        if request_data and trace_enabled and orig_req_body is not None:
             if is_stream:
-                skip_done = not _stream_has_traceable_choices(raw_response)
-                if not skip_done:
-                    try:
-                        response_data = self._parse_stream_response(raw_response)
-                    except Exception as exc:
-                        session_error_msg = f"SessionServer stream trace failed: {type(exc).__name__}: {exc}"
+                try:
+                    response_data = self._parse_stream_response(raw_response, fmt)
+                    if response_data is None:
+                        # Upstream emitted no traceable content — suppress the
+                        # synthetic [DONE] line we usually append; the real
+                        # stream content has already been forwarded as-is.
+                        skip_done = True
+                except Exception as exc:
+                    session_error_msg = f"SessionServer stream trace failed: {type(exc).__name__}: {exc}"
+                    skip_done = True
             else:
                 try:
                     response_data = json.loads(raw_response)
@@ -470,14 +643,7 @@ class SessionServer:
 
             if response_data is not None:
                 try:
-                    for c in response_data.get("choices", []):
-                        if c.get("message") and isinstance(c["message"].get("content"), str):
-                            c["message"]["content"] = c["message"]["content"].replace(self.stop_word, "")
-
-                    response_data["session_id"] = session_id
-                    response_data["messages"] = messages
-                    response_data["tools"] = tools
-                    await self.on_response(response_data, trace_enabled=trace_enabled)
+                    await self.on_response(response_data, fmt, orig_req_body)
                 except Exception as exc:
                     session_error_msg = f"SessionServer response hook failed: {type(exc).__name__}: {exc}"
 
@@ -496,7 +662,6 @@ class SessionServer:
                     await response.write(b"data: [DONE]\n\n")
                 await response.write_eof()
             except (ConnectionError, ClientConnectionResetError):
-                # Client already gone; trace was still recorded above.
                 pass
         elif session_error_msg:
             return web.json_response(_lmdeploy_error_payload(session_error_msg), status=500)
@@ -512,11 +677,87 @@ class SessionServer:
             return np.asarray(routed_experts_data)
         return np.asarray(routed_experts)
 
+    def _build_data_cleaner(
+        self, fmt: str, *, orig_return_logprob: bool, orig_return_token_ids: bool, orig_return_routed_experts: bool
+    ):
+        """Return a per-format ``data -> bool`` cleaner stripping injected fields."""
+        drops = {
+            "output_token_logprobs": not orig_return_logprob,
+            "output_ids": not orig_return_token_ids,
+            "routed_experts": not orig_return_routed_experts,
+        }
+
+        if fmt == FMT_ANTHROPIC:
+
+            def clean(data: dict) -> bool:
+                modified = False
+                # Non-stream MessagesResponse and stream MessageDeltaEvent put
+                # extension fields at the top level. ContentBlockDeltaEvent
+                # carries output_ids/output_token_logprobs on the event itself.
+                for key, drop in drops.items():
+                    if drop and key in data:
+                        data.pop(key)
+                        modified = True
+                # Stop-word scrubbing for text deltas / text content blocks.
+                delta = data.get("delta")
+                if isinstance(delta, dict) and isinstance(delta.get("text"), str) and self.stop_word in delta["text"]:
+                    delta["text"] = delta["text"].replace(self.stop_word, "")
+                    modified = True
+                for block in data.get("content") or []:
+                    if (
+                        isinstance(block, dict)
+                        and isinstance(block.get("text"), str)
+                        and self.stop_word in block["text"]
+                    ):
+                        block["text"] = block["text"].replace(self.stop_word, "")
+                        modified = True
+                return modified
+
+            return clean
+
+        # FMT_OPENAI
+        def clean_openai(data: dict) -> bool:
+            modified = False
+            for key, drop in drops.items():
+                if drop and key in data:
+                    data.pop(key)
+                    modified = True
+                if drop:
+                    for c in data.get("choices", []):
+                        if key in c:
+                            c.pop(key)
+                            modified = True
+
+            for c in data.get("choices", []):
+                if "logprobs" in c:
+                    c.pop("logprobs")
+                    modified = True
+
+            for c in data.get("choices", []):
+                msg = c.get("message")
+                if isinstance(msg, dict) and "content" in msg:
+                    msg["content"], changed = _strip_stop_word(msg["content"], self.stop_word)
+                    if changed:
+                        modified = True
+                delta = c.get("delta")
+                if isinstance(delta, dict) and "content" in delta:
+                    delta["content"], changed = _strip_stop_word(delta["content"], self.stop_word)
+                    if changed:
+                        modified = True
+
+            return modified
+
+        return clean_openai
+
     @staticmethod
-    def _parse_stream_response(raw: bytes) -> Optional[dict]:
-        """Parse SSE stream to reconstruct the complete final message state."""
+    def _parse_stream_response(raw: bytes, fmt: str) -> Optional[dict]:
+        """Parse an SSE stream and reconstruct the final response object.
+
+        Returns ``None`` when the stream carried no traceable content (so the
+        caller skips the trace hook entirely instead of recording garbage).
+        """
         text = raw.decode("utf-8", errors="replace")
-        events = []
+        events: list[dict] = []
         saw_done = False
         for line in text.split("\n"):
             line = line.strip()
@@ -531,10 +772,16 @@ class SessionServer:
 
         if not events:
             return None
+
+        if fmt == FMT_ANTHROPIC:
+            return SessionServer._parse_anthropic_stream(events)
+        return SessionServer._parse_openai_stream(events, saw_done=saw_done)
+
+    @staticmethod
+    def _parse_openai_stream(events: list[dict], *, saw_done: bool) -> Optional[dict]:
         if not any(event.get("choices") for event in events):
             raise RuntimeError(f"Upstream SSE stream ended without choices: {json.dumps(events, ensure_ascii=False)}")
 
-        # Reconstruct standard stream output (Assuming OpenAI format here)
         message: dict[str, Any] = {"choices": [{"message": {"role": "assistant", "content": ""}}]}
         content_parts: list[str] = []
         tool_calls_map: dict[int, dict[str, Any]] = {}
@@ -546,46 +793,33 @@ class SessionServer:
             if event.get("model"):
                 message["model"] = event["model"]
 
-            choices = event.get("choices", [])
-            for choice in choices:
+            for choice in event.get("choices", []):
                 if choice.get("finish_reason") == "error":
                     raise RuntimeError(
                         f"Upstream SSE choice finished with error: {json.dumps(event, ensure_ascii=False)}"
                     )
                 delta = choice.get("delta", {})
 
-                # Check text content
                 if delta.get("content"):
                     content_parts.append(delta["content"])
 
-                # Check output ids
                 if choice.get("output_ids") is not None:
-                    assistant_choice = message["choices"][0]
-                    if "output_ids" not in assistant_choice:
-                        assistant_choice["output_ids"] = []
-                    assistant_choice["output_ids"].extend(choice["output_ids"])
+                    message["choices"][0].setdefault("output_ids", []).extend(choice["output_ids"])
 
-                # Check routed experts. LMDeploy only emits this in the final
-                # chunk, often as a Ray shared-store key string.
                 if choice.get("routed_experts") is not None:
-                    assistant_choice = message["choices"][0]
-                    assistant_choice["routed_experts"] = choice["routed_experts"]
+                    message["choices"][0]["routed_experts"] = choice["routed_experts"]
 
-                # Check raw output logprobs from LMDeploy return_logprob protocol.
                 if choice.get("output_token_logprobs") is not None:
-                    assistant_choice = message["choices"][0]
-                    if "output_token_logprobs" not in assistant_choice:
-                        assistant_choice["output_token_logprobs"] = []
-                    assistant_choice["output_token_logprobs"].extend(choice["output_token_logprobs"])
+                    message["choices"][0].setdefault("output_token_logprobs", []).extend(
+                        choice["output_token_logprobs"]
+                    )
 
-                # Check reasoning content
                 if delta.get("reasoning_content"):
                     assistant_msg = message["choices"][0]["message"]
                     assistant_msg["reasoning_content"] = (
                         assistant_msg.get("reasoning_content", "") + delta["reasoning_content"]
                     )
 
-                # Check tool calls
                 for tc_delta in delta.get("tool_calls") or []:
                     idx = tc_delta.get("index", 0)
                     if idx not in tool_calls_map:
@@ -622,6 +856,110 @@ class SessionServer:
         if assistant_choice.get("output_ids") is None:
             raise RuntimeError("Upstream SSE stream ended without output_ids.")
 
+        return message
+
+    @staticmethod
+    def _parse_anthropic_stream(events: list[dict]) -> Optional[dict]:
+        """Aggregate Anthropic SSE events into a ``MessagesResponse``-shaped dict.
+
+        Extension fields:
+        - ``output_ids`` / ``output_token_logprobs`` live on each
+          ``content_block_delta`` event and are concatenated in order.
+        - ``routed_experts`` lives on the terminal ``message_delta`` event.
+
+        Returns ``None`` when no ``message_stop`` was seen — that means the
+        upstream stream was aborted before producing a complete turn.
+        """
+        message: dict[str, Any] = {"role": "assistant", "type": "message", "content": []}
+        content_blocks: list[dict] = []
+        current_block: Optional[dict] = None
+        output_ids: list[int] = []
+        output_token_logprobs: list = []
+        routed_experts = None
+        usage: dict[str, Any] = {}
+        saw_message_stop = False
+
+        for event in events:
+            etype = event.get("type", "")
+
+            if etype == "message_start":
+                msg = event.get("message", {})
+                if msg.get("id"):
+                    message["id"] = msg["id"]
+                if msg.get("model"):
+                    message["model"] = msg["model"]
+                if msg.get("usage"):
+                    usage = dict(msg["usage"])
+                if msg.get("role"):
+                    message["role"] = msg["role"]
+
+            elif etype == "content_block_start":
+                current_block = dict(event.get("content_block") or {})
+
+            elif etype == "content_block_delta":
+                delta = event.get("delta") or {}
+                dtype = delta.get("type")
+                if current_block is None:
+                    current_block = {}
+                if dtype == "text_delta":
+                    current_block.setdefault("type", "text")
+                    current_block["text"] = current_block.get("text", "") + delta.get("text", "")
+                elif dtype == "thinking_delta":
+                    current_block.setdefault("type", "thinking")
+                    current_block["thinking"] = current_block.get("thinking", "") + delta.get("thinking", "")
+                elif dtype == "signature_delta":
+                    current_block["signature"] = current_block.get("signature", "") + delta.get("signature", "")
+                elif dtype == "input_json_delta":
+                    current_block.setdefault("type", "tool_use")
+                    current_block["_partial_json"] = current_block.get("_partial_json", "") + delta.get(
+                        "partial_json", ""
+                    )
+
+                if event.get("output_ids"):
+                    output_ids.extend(event["output_ids"])
+                if event.get("output_token_logprobs"):
+                    output_token_logprobs.extend(event["output_token_logprobs"])
+
+            elif etype == "content_block_stop":
+                if current_block is not None:
+                    if "_partial_json" in current_block:
+                        raw = current_block.pop("_partial_json")
+                        try:
+                            current_block["input"] = json.loads(raw) if raw else {}
+                        except json.JSONDecodeError:
+                            current_block["input"] = {}
+                    content_blocks.append(current_block)
+                    current_block = None
+
+            elif etype == "message_delta":
+                d = event.get("delta") or {}
+                if d.get("stop_reason"):
+                    message["stop_reason"] = d["stop_reason"]
+                if d.get("stop_sequence") is not None:
+                    message["stop_sequence"] = d["stop_sequence"]
+                u = event.get("usage") or {}
+                for k, v in u.items():
+                    if isinstance(v, (int, float)):
+                        usage[k] = usage.get(k, 0) + v
+                    else:
+                        usage[k] = v
+                if event.get("routed_experts") is not None:
+                    routed_experts = event["routed_experts"]
+
+            elif etype == "message_stop":
+                saw_message_stop = True
+
+        if not saw_message_stop:
+            return None
+        if not output_ids:
+            raise RuntimeError("Upstream anthropic SSE stream ended without output_ids.")
+
+        message["content"] = content_blocks
+        message["output_ids"] = output_ids
+        message["output_token_logprobs"] = output_token_logprobs or None
+        message["routed_experts"] = routed_experts
+        if usage:
+            message["usage"] = usage
         return message
 
 
