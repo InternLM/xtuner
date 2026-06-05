@@ -93,6 +93,14 @@ class FakeEngine:
         pass
 
 
+class FakeAsyncDCPFailureEngine(FakeEngine):
+    def async_save_dcp(self, weights_dir: Path) -> Future:
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        f: Future = Future()
+        f.set_exception(RuntimeError("mock async dcp failure"))
+        return f
+
+
 def prepare(fn):
     def wrapper(self, *args, **kwargs):
         self.alpaca_path = os.environ["ALPACA_PATH"]
@@ -315,6 +323,60 @@ class TestTrainerSaveHF(DistributedTestBase):
             assert os.path.exists(checkpoint)
             weights_dir = Path(checkpoint) / "weights"
             assert weights_dir.exists(), f"Expected weights dir at {weights_dir}"
+
+    @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
+    @patch(
+        "xtuner.v1.train.trainer.Trainer.build_engine",
+        Mock(side_effect=lambda *args, **kwargs: FakeAsyncDCPFailureEngine()),
+    )
+    @patch("xtuner.v1.train.trainer.Trainer._prepare_model_input", Mock(return_value=[]))
+    @prepare
+    def test_async_save_checkpoint_failure_terminates_from_monitor(self):
+        self.create_pg(DEVICE)
+        work_dir_list = [self.work_dir]
+        dist.broadcast_object_list(work_dir_list, src=0)
+        self.work_dir = Path(work_dir_list[0])
+        model_cfg = Qwen3MoE30BA3Config()
+        optim_cfg = AdamWConfig(lr=1e-4, weight_decay=0.01)
+        fsdp_cfg = FSDPConfig(tp_size=1)
+        dataset_cfg = [
+            {
+                "dataset": DatasetConfig(name="alpaca", anno_path=self.alpaca_path, sample_ratio=1.0),
+                "tokenize_fn": FTDPTokenizeFnConfig(),
+            },
+        ]
+        dataloader_cfg = DataloaderConfig()
+        lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0.1, lr_min=1e-6)
+
+        trainer = Trainer(
+            load_from=str(self.fake_hf_model_dir),
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+            dataset_cfg=dataset_cfg,
+            dataloader_cfg=dataloader_cfg,
+            lr_cfg=lr_cfg,
+            tokenizer_path=self.tokenizer_path,
+            global_batch_size=2,
+            total_step=5,
+            work_dir=str(self.work_dir),
+            seed=42,
+            debug=False,
+            checkpoint_interval=5,
+            async_checkpoint=True,
+        )
+        trainer._cur_step = 5
+
+        with (
+            patch("xtuner.v1.utils.async_save_monitor.os.getpgrp", return_value=1234),
+            patch("xtuner.v1.utils.async_save_monitor.os.killpg") as killpg,
+        ):
+            self.assertTrue(trainer._maybe_save(is_snapshot=False))
+            trainer._wait_for_pending_checkpoint()
+            trainer._async_save_monitor._check_watched_futures()
+
+        killpg.assert_called_once()
+        self.assertIsNone(trainer._pending_checkpoint)
 
     @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
     @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))

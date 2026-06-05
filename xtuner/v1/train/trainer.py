@@ -7,7 +7,7 @@ import pickle
 import sys
 import threading
 import time
-from concurrent.futures import Future, TimeoutError
+from concurrent.futures import Future, wait
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -596,9 +596,6 @@ class Trainer:
         self._async_hf_export = async_hf_export
         self._pending_async_hf_future: Future[Path] | None = None
         self._pending_async_hf_finalize_done: threading.Event | None = None
-        self._pending_async_hf_step: int | None = None
-        self._pending_async_hf_epoch: int | None = None
-        self._async_hf_file_finalize_failure: BaseException | None = None
         self._async_save_monitor = AsyncSaveMonitor()
         self._save_finalize_lock = threading.RLock()
         self._async_checkpoint = async_checkpoint
@@ -812,7 +809,7 @@ class Trainer:
         This method executes the main training loop, iterating through the dataset and performing training steps. It
         handles data loading, forward pass, backward pass, optimization, logging, and checkpointing.
         """
-        if self._async_hf_export:
+        if self._async_hf_export or self._async_checkpoint:
             self._async_save_monitor.start()
 
         train_begin = time.time()
@@ -872,7 +869,6 @@ class Trainer:
             self._lr_scheduler.step()
             self._maybe_check_health()
             self._maybe_save_hf()
-            self._async_save_monitor.raise_if_failed()
             ckpt_saved = self._maybe_save(is_snapshot=False)
             if not ckpt_saved:
                 _ = self._maybe_save(is_snapshot=True)
@@ -883,12 +879,13 @@ class Trainer:
                 gc.collect()
 
         if self._async_hf_export:
-            self._finalize_pending_async_hf_save(wait_for_pending=True)
+            self._wait_for_pending_async_hf()
             self._engine.model.destroy_async_hf_resources()
-            self._async_save_monitor.stop()
 
         # TODO: Should use flush rather than close
         self._wait_for_pending_checkpoint()
+        if self._async_hf_export or self._async_checkpoint:
+            self._async_save_monitor.stop()
         self._engine.destroy_async_checkpoint_pg()
         self._exp_tracker.close()
         if self._metrics_recorder:
@@ -1190,18 +1187,16 @@ class Trainer:
                 raise RuntimeError("Health check failed, exit training")
             log_rank0.info(f"Health check passed at step {self.cur_step}")
 
-    def _wait_for_pending_checkpoint(self, timeout: int = 3000) -> None:
+    def _wait_for_pending_checkpoint(self) -> None:
         if self._pending_checkpoint is None:
             return
 
         future = self._pending_checkpoint
         self._pending_checkpoint = None
 
-        try:
-            future.result(timeout=timeout)
-        except TimeoutError:
-            future.cancel()
-            raise TimeoutError(f"Async checkpoint timed out after {timeout}s")
+        # Trainer owns pending async DCP state. AsyncSaveMonitor only observes
+        # the registered future and must not mutate this pending field.
+        wait([future])
 
     def _maybe_save(self, is_snapshot: bool = False) -> bool:
         ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
@@ -1241,6 +1236,7 @@ class Trainer:
         future: Future | None = None
         if self._async_checkpoint and not is_snapshot:
             future = self._engine.async_save_dcp(weights_dir=weights_path)
+            self._register_async_save_future("async_dcp", future, weights_path)
         else:
             self._engine.save_dcp(weights_dir=weights_path)
 
@@ -1689,43 +1685,33 @@ class Trainer:
 
         assert self._can_save_hf, "Model does not support saving in Huggingface format."
 
-        if self._async_hf_export:
-            is_hf_save_step = self.cur_step % self._hf_interval == 0 or self.cur_step == self.total_step
-            has_pending_async_hf = self._pending_async_hf_future is not None
-            self._finalize_pending_async_hf_save(wait_for_pending=is_hf_save_step and has_pending_async_hf)
-
         if self.cur_step % self._hf_interval != 0 and self.cur_step != self.total_step:
             return
 
         save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
         if self._async_hf_export:
+            self._wait_for_pending_async_hf()
             future = self._engine.async_save_hf(hf_dir=str(save_hf_path))
             finalize_done = threading.Event()
             save_step = self.cur_step
             save_epoch = self._cur_epoch
-            watch_item = AsyncSaveWatchItem(
-                name="async_hf",
-                future=future,
-                path=save_hf_path,
-                step=save_step,
-                epoch=save_epoch,
-            )
-            self._async_save_monitor.register(watch_item)
+            self._register_async_save_future("async_hf", future, save_hf_path)
 
             def finalize_hf_save(done_future: Future[Path]) -> None:
-                self._finalize_hf_save_from_future(
-                    done_future,
-                    watch_item=watch_item,
-                    step=save_step,
-                    epoch=save_epoch,
-                    finalize_done=finalize_done,
-                )
+                try:
+                    finalized_hf_path = done_future.result()
+                    self._finalize_hf_save(
+                        finalized_hf_path,
+                        step=save_step,
+                        epoch=save_epoch,
+                        delete_hf_dirs=True,
+                    )
+                finally:
+                    finalize_done.set()
 
             future.add_done_callback(finalize_hf_save)
             self._pending_async_hf_future = future
             self._pending_async_hf_finalize_done = finalize_done
-            self._pending_async_hf_step = self.cur_step
-            self._pending_async_hf_epoch = self._cur_epoch
             return
         else:
             self._engine.save_hf(str(save_hf_path))
@@ -1737,57 +1723,31 @@ class Trainer:
             )
             return
 
+    def _register_async_save_future(self, name: str, future: Future, path: Path) -> AsyncSaveWatchItem:
+        watch_item = AsyncSaveWatchItem(
+            name=name,
+            future=future,
+            path=path,
+            step=self.cur_step,
+            epoch=self._cur_epoch,
+        )
+        self._async_save_monitor.register(watch_item)
+        return watch_item
+
     def _wait_for_pending_async_hf(self) -> None:
         if self._pending_async_hf_future is None:
-            return None
+            return
 
         future = self._pending_async_hf_future
         finalize_done = self._pending_async_hf_finalize_done
         self._pending_async_hf_future = None
         self._pending_async_hf_finalize_done = None
-        self._pending_async_hf_step = None
-        self._pending_async_hf_epoch = None
 
-        try:
-            future.result()
-        finally:
-            if finalize_done is not None:
-                finalize_done.wait()
-        self._raise_if_async_hf_finalize_failed()
-
-    def _finalize_pending_async_hf_save(self, wait_for_pending: bool = False) -> None:
-        if wait_for_pending:
-            self._wait_for_pending_async_hf()
-        elif self._pending_async_hf_future is not None and self._pending_async_hf_future.done():
-            self._wait_for_pending_async_hf()
-        self._raise_if_async_hf_finalize_failed()
-
-    def _raise_if_async_hf_finalize_failed(self) -> None:
-        if self._async_hf_file_finalize_failure is not None:
-            raise RuntimeError("Async HF finalize failed") from self._async_hf_file_finalize_failure
-
-    def _finalize_hf_save_from_future(
-        self,
-        future: Future[Path],
-        *,
-        watch_item: AsyncSaveWatchItem,
-        step: int,
-        epoch: int,
-        finalize_done: threading.Event,
-    ) -> None:
-        try:
-            finalized_hf_path = future.result()
-            self._finalize_hf_save(
-                finalized_hf_path,
-                step=step,
-                epoch=epoch,
-                delete_hf_dirs=True,
-            )
-        except BaseException as exc:
-            self._async_hf_file_finalize_failure = exc
-            self._async_save_monitor.record_failure(watch_item, exc)
-        finally:
-            finalize_done.set()
+        # Trainer owns pending async HF state. AsyncSaveMonitor only observes
+        # the registered future and must not mutate these pending fields.
+        wait([future])
+        if finalize_done is not None:
+            finalize_done.wait()
 
     def _finalize_hf_save(self, finalized_hf_path: Path, step: int, epoch: int, delete_hf_dirs: bool) -> None:
         latest_hf_link = self.exp_dir / "hf-latest"

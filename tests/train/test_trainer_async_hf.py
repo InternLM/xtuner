@@ -266,7 +266,7 @@ class TestTrainerAsyncSaveHF(DistributedTestBase):
         Mock(side_effect=lambda *args, **kwargs: FakeAsyncHFEngine()),
     )
     @prepare
-    def test_async_save_hf_raises_on_writer_failure(self):
+    def test_async_save_hf_terminates_on_writer_failure(self):
         self.create_pg(DEVICE)
         self._broadcast_work_dir()
         trainer = self._build_trainer(total_step=3, async_hf_export=True)
@@ -274,7 +274,12 @@ class TestTrainerAsyncSaveHF(DistributedTestBase):
         trainer._engine.async_hf_status_error = "mock async hf failure"
         trainer._cur_step = 3
 
-        trainer._maybe_save_hf()
-        with self.assertRaisesRegex(RuntimeError, "Async HF save global consistency check failed"):
+        with (
+            patch("xtuner.v1.utils.async_save_monitor.os.getpgrp", return_value=1234),
+            patch("xtuner.v1.utils.async_save_monitor.os.killpg") as killpg,
+        ):
+            trainer._maybe_save_hf()
             trainer._wait_for_pending_async_hf()
+            trainer._async_save_monitor._check_watched_futures()
+        killpg.assert_called_once()
         self.assertIsNone(trainer._engine._pending_async_hf)
