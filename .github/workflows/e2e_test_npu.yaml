@@ -88,17 +88,7 @@ jobs:
           retention-days: 7
           name: npu-e2e-${{ github.run_id }}
 
-      - name: Deploy reports to llmcitester/xtuner@reports
-        if: ${{ !cancelled() && steps.reports.outputs.has_reports == 'true' }}
-        uses: JamesIves/github-pages-deploy-action@v4
-        with:
-          token: ${{ secrets.CI_REPORTS_DEPLOY_TOKEN }}
-          repository-name: ${{ env.CI_REPORTS_REPOSITORY }}
-          branch: ${{ env.CI_REPORTS_BRANCH }}
-          folder: ./${{ github.run_id }}
-          target-folder: e2e/npu/${{ github.run_id }}
-
-      - name: Prune old e2e reports
+      - name: Publish and prune NPU e2e reports
         if: ${{ !cancelled() && steps.reports.outputs.has_reports == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.CI_REPORTS_DEPLOY_TOKEN }}
@@ -107,28 +97,29 @@ jobs:
           REPO="${{ env.CI_REPORTS_REPOSITORY }}"
           BRANCH="${{ env.CI_REPORTS_BRANCH }}"
           KEEP="${{ env.CI_REPORTS_KEEP_RUNS }}"
+          SRC="${{ github.workspace }}/${{ github.run_id }}"
+          DEST="e2e/npu/${{ github.run_id }}"
           git clone --depth=1 -b "${BRANCH}" "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" pages
           cd pages
-          if [ ! -d e2e/npu ]; then
-            echo "No e2e/npu report directory yet, skip prune."
-            exit 0
+          rm -rf "${DEST}"
+          mkdir -p "$(dirname "${DEST}")"
+          cp -r "${SRC}" "${DEST}"
+          if [ -d e2e/npu ]; then
+            cd e2e/npu
+            mapfile -t RUN_DIRS < <(find . -maxdepth 1 -type d -regex './[0-9]+' -printf '%f\n' | sort -rn)
+            if [ "${#RUN_DIRS[@]}" -gt "${KEEP}" ]; then
+              for old_run in "${RUN_DIRS[@]:KEEP}"; do
+                rm -rf "${old_run}"
+                echo "Removed old NPU report: ${old_run}"
+              done
+            fi
+            cd ../..
           fi
-          cd e2e/npu
-          mapfile -t RUN_DIRS < <(find . -maxdepth 1 -type d -regex './[0-9]+' -printf '%f\n' | sort -rn)
-          if [ "${#RUN_DIRS[@]}" -le "${KEEP}" ]; then
-            echo "Report count ${#RUN_DIRS[@]} <= keep ${KEEP}, nothing to prune."
-            exit 0
-          fi
-          for old_run in "${RUN_DIRS[@]:KEEP}"; do
-            rm -rf "${old_run}"
-            echo "Removed old NPU report: ${old_run}"
-          done
-          cd ..
           git add -A
           if git diff --staged --quiet; then
-            echo "No prune changes to commit."
+            echo "No report changes to commit."
           else
             git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
-              commit -m "chore: prune npu e2e reports, keep latest ${KEEP} runs"
+              commit -m "chore: publish npu e2e report ${{ github.run_id }}, keep latest ${KEEP} runs"
             git push
           fi
