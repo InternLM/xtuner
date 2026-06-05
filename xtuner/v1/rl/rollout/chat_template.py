@@ -2,7 +2,6 @@ import copy
 import json
 from typing import Any
 
-
 _RAW_ARGUMENTS_KEY = "__xtuner_raw_arguments__"
 
 
@@ -15,10 +14,28 @@ def canonicalize_messages_for_chat_template(messages: list[dict]) -> list[dict]:
     template-renderable shape before ``apply_chat_template``. It must not
     mutate model responses returned to the agent/client, nor the generated
     token ids, labels, or raw rollout artifacts used for training.
+
+    Two transforms:
+
+    - ``tool_calls[].function.arguments`` strings are parsed to dicts so the
+      template's ``tojson`` filter sees a real object.
+    - Any ``role='system'`` entry past the first message is demoted to
+      ``role='user'``. Claude Agent SDK's ``context_management`` injects a JIT
+      system reminder at the tail before each assistant turn (and those persist
+      mid-conversation as the rollout progresses); Anthropic's API allows it,
+      but Qwen-style chat templates require ``system`` only at index 0.
+      Demoting (rather than dropping) keeps the dynamic CWD/todo/time hints
+      visible to the policy at the cost of a small semantic shift.
     """
 
     messages = copy.deepcopy(messages)
-    for message in messages:
+    for idx, message in enumerate(messages):
+        # TODO(wzy): drop this demote once the Qwen Jinja chat template
+        # accepts ``role='system'`` at any position. Until then we degrade SDK
+        # context_management injections to ``role='user'`` to keep the template
+        # renderable.
+        if idx > 0 and isinstance(message, dict) and message.get("role") == "system":
+            message["role"] = "user"
         tool_calls = message.get("tool_calls")
         if not isinstance(tool_calls, list):
             continue
