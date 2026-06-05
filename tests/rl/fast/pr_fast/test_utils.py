@@ -15,9 +15,9 @@ class TestFindMasterAddrAndPort(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """测试前设置 Ray 环境"""
-        # 如果 Ray 还没有初始化，则初始化它
+        # 单测必须启动隔离的本地 Ray，不能误连机器上已有的 Ray cluster。
         if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True)
+            ray.init(address="local", ignore_reinit_error=True, include_dashboard=False)
 
     @classmethod
     def tearDownClass(cls):
@@ -70,9 +70,9 @@ class TestGetAcceleratorIds(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """测试前设置 Ray 环境并检测可用的加速器类型"""
-        # 如果 Ray 还没有初始化，则初始化它
+        # 单测必须启动隔离的本地 Ray，不能误连机器上已有的 Ray cluster。
         if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True)
+            ray.init(address="local", ignore_reinit_error=True, include_dashboard=False)
         
     @classmethod
     def tearDownClass(cls):
