@@ -144,14 +144,6 @@ class SGLangWorker(RolloutWorker):
         response.raise_for_status()
         return response.json()
 
-    def check_health(self) -> bool:
-        try:
-            response = requests.get(f"{self.server_url}/{self.endpoints['health_generate']}", timeout=5.0)
-            return response.status_code == 200
-        except requests.RequestException as e:
-            self.logger.error(f"Health check failed for server {self.server_url}: {e}")
-            return False
-
     def flush_cache(self):
         """Flush the cache of the server."""
         # TODO: 支持 tp
