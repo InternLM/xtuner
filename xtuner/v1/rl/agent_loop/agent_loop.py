@@ -145,7 +145,7 @@ class AgentLoop(ABC):
         self.hf_checkpoint = hf_checkpoint
         self.tokenizer = load_tokenizer(hf_checkpoint, trust_remote_code=True)
         self.processor = load_processor(hf_checkpoint, trust_remote_code=True)
-        self.sample_params = sample_params
+        self.sample_params: SampleParams = sample_params if sample_params is not None else SampleParams()
         self.judger = judger
         if logger is None:
             self.logger = get_logger()
