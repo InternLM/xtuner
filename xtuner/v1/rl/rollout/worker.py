@@ -666,7 +666,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 "Authorization": f"Bearer {self.config.api_key}",
             }
             response = requests.get(
-                f"{self.server_url}/{self.endpoints['health_generate']}", headers=headers, timeout=30.0
+                f"{self.server_url}/{self.endpoints['health_generate']}", headers=headers, timeout=5.0
             )
             return response.status_code == 200
         except requests.RequestException as e:
