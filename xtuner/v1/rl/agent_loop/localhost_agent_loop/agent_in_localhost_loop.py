@@ -99,6 +99,8 @@ class AgentInLocalhostLoop(AgentLoop):
         max_concurrent_samples: int | None = None,
         mode: Literal["train", "eval"] = "train",
     ):
+        if hf_checkpoint is None:
+            raise ValueError("hf_checkpoint must be provided for AgentInLocalhostLoop.")
         super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
         self.max_concurrent_samples = max_concurrent_samples
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None

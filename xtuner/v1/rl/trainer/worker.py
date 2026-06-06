@@ -444,14 +444,16 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
                         rollout_routed_expert = ray.get(rollout_routed_expert_refs)
                     elif isinstance(rollout_routed_expert_refs, list):
                         _rollout_routed_expert = []
-                        _rollout_routed_expert_refs = rollout_routed_expert_refs    
+                        _rollout_routed_expert_refs = rollout_routed_expert_refs
                         for rollout_routed_expert_ref in rollout_routed_expert_refs:
-                            rollout_routed_expert = ray.get(rollout_routed_expert_ref) # np
+                            rollout_routed_expert = ray.get(rollout_routed_expert_ref)  # np
                             _rollout_routed_expert.append(rollout_routed_expert)
                         rollout_routed_expert = np.concatenate(_rollout_routed_expert, axis=0)[1:, ...]
                         rollout_routed_expert_refs = _rollout_routed_expert_refs
                     else:
-                        raise ValueError(f"Invalid rollout_routed_expert_refs type: {type(rollout_routed_expert_refs)}")
+                        raise ValueError(
+                            f"Invalid rollout_routed_expert_refs type: {type(rollout_routed_expert_refs)}"
+                        )
                     # free obj store explicitly
                     if self.sp_mesh is None or self.sp_mesh.size() == 1:
                         ray.internal.free(rollout_routed_expert_refs, local_only=False)
@@ -464,7 +466,7 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
                         -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
                     )
                     out_rollout_routed_expert.append(rollout_routed_expert)
-            
+
             seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
         else:
             assert isinstance(rollout_routed_experts, torch.Tensor), (
@@ -482,7 +484,9 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
             seq_ctx.rollout_routed_experts = rollout_routed_experts_tensor
 
         assert seq_ctx.input_ids is not None, "input_ids is None"
-        assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1), f"rollout_routed_experts.size(0) {seq_ctx.rollout_routed_experts.size(0)} != input_ids.size(1) {seq_ctx.input_ids.size(1)}"
+        assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1), (
+            f"rollout_routed_experts.size(0) {seq_ctx.rollout_routed_experts.size(0)} != input_ids.size(1) {seq_ctx.input_ids.size(1)}"
+        )
 
         if self.sp_mesh is not None and self.sp_mesh.size() > 1:
             dist.barrier()
