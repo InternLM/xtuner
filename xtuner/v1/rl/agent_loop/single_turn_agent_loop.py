@@ -54,7 +54,7 @@ class SingleTurnAgentLoop(AgentLoop):
     def __init__(
         self,
         rollout_ctl: RolloutController,
-        sample_params: SampleParams,
+        sample_params: SampleParams | None,
         hf_checkpoint: str,
         judger: Judger | None = None,
         logger=None,
@@ -72,6 +72,7 @@ class SingleTurnAgentLoop(AgentLoop):
             rollout_state.tokens = rollout_state.prompt_ids
 
         # 推理引擎generate, 生成的结果会覆盖到 rollout_state.response_ids 上
+        assert self.rollout_ctl is not None
         rollout_state = await self.rollout_ctl.generate.remote(rollout_state)  # type: ignore[attr-defined]
         # 非 COMPLETED 状态（如被截断、放弃等）直接早退，不触发打分
         if rollout_state.status != Status.COMPLETED:

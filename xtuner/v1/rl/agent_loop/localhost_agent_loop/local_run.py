@@ -29,6 +29,8 @@ def _load_config(path: Path) -> Any:
 async def _run_runner(dataset: Any, item: AgentRolloutItem) -> dict[str, Any]:
     runner_cfg = item.pipeline or dataset.pipeline
     runner = create_object(deepcopy(runner_cfg)) if isinstance(runner_cfg, dict) else runner_cfg
+    if isinstance(runner, str):
+        raise TypeError(f"runner must be an object with a run method, got import path {runner!r}")
     with ctx_session_id.set(str(item.uid)):
         result = await runner.run(item)
     dumped = result.model_dump(mode="json", exclude={"artifacts", "pipeline"})

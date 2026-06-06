@@ -356,7 +356,9 @@ def register_to_routedapiproxy(model_name: str, api_server_url: str) -> dict:
     }
     resp = requests.post(url, json=payload, headers=headers, timeout=30)
     resp.raise_for_status()
-    print(f"registered to routedapiproxy: {resp.json()}")
+    result = resp.json()
+    print(f"registered to routedapiproxy: {result}")
+    return result
 
 
 def delete_from_routedapiproxy(model_name: str) -> None:

@@ -113,6 +113,7 @@ autodoc_mock_imports = [
     "xxhash",
     "timm",
     "imageio",
+    "lagent",
     "httpx",
     "aiohttp",
     "cv2",

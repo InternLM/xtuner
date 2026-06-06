@@ -21,7 +21,6 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import get_store
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
     ProduceBatchResult,
@@ -60,6 +59,31 @@ from xtuner.v1.utils.env_check import get_rollout_engine_version
 PG_READY_TIMEOUT = 30
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
+
+
+def _is_routed_agent_loop_config(agent_loop_config: Any) -> bool:
+    config_type = type(agent_loop_config)
+    return config_type.__name__ in {
+        "AgentInLocalhostLoopConfig",
+        "AgentInSandboxLoopConfig",
+    } and config_type.__module__.startswith("xtuner.v1.rl.agent_loop.")
+
+
+def _agent_loop_manager_needs_routed_api_proxy(cfg: AgentLoopManagerConfig | None) -> bool:
+    if cfg is None:
+        return False
+    tasks = getattr(cfg, "tasks", None)
+    if tasks is None:
+        agent_loop_config = getattr(cfg, "agent_loop_config", None)
+        return _is_routed_agent_loop_config(agent_loop_config)
+    task_cfgs = tasks if isinstance(tasks, list) else [tasks]
+    return any(_is_routed_agent_loop_config(task.agent_loop_config) for task in task_cfgs)
+
+
+def _trainer_config_needs_routed_api_proxy(cfg: "BaseRLTrainerConfig") -> bool:
+    return _agent_loop_manager_needs_routed_api_proxy(
+        cfg.agent_loop_manager_cfg
+    ) or _agent_loop_manager_needs_routed_api_proxy(cfg.eval_agent_loop_manager_cfg)
 
 
 def check_fa3():
@@ -796,6 +820,8 @@ class BaseRLTrainer:
             self._release_trace_store()
 
     def _release_trace_store(self) -> None:
+        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import get_store
+
         self.logger.info("Release all sessions and free associated resources")
         ray.get(get_store().release_all.remote())
         keys = ray.get(get_store().list_sessions.remote())
@@ -952,19 +978,21 @@ class BaseRLTrainer:
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
                 if group[i].input_ids is not None:
-                    raw_input_ids = group[i].input_ids
-                    labels = group[i].labels
+                    raw_input_ids = cast(list[int], group[i].input_ids)
+                    labels = cast(list[int] | None, group[i].labels)
                     assert labels is not None, f"Labels cannot be None when input_ids is provided: {group[i]}"
                     assert len(raw_input_ids) == len(labels), (
                         f"{len(raw_input_ids)} vs {len(labels)}, data: {group[i]}"
                     )
 
-                    logprobs = group[i].logprobs
-                    if logprobs is not None:
-                        assert len(logprobs) == len(raw_input_ids), (
-                            f"{len(logprobs)} vs {len(raw_input_ids)}, data: {group[i]}"
+                    input_logprobs = group[i].logprobs
+                    if input_logprobs is not None:
+                        assert len(input_logprobs) == len(raw_input_ids), (
+                            f"{len(input_logprobs)} vs {len(raw_input_ids)}, data: {group[i]}"
                         )
-                        rollout_logprobs = torch.tensor(logprobs[1:], dtype=torch.float32).unsqueeze(0)
+                        rollout_logprobs: torch.Tensor | None = torch.tensor(
+                            input_logprobs[1:], dtype=torch.float32
+                        ).unsqueeze(0)
                     else:
                         raise ValueError(f"Logprobs cannot be None when input_ids is provided: {group[i]}")
 
@@ -981,7 +1009,7 @@ class BaseRLTrainer:
 
                     assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                     training_tokens += len(input_ids)
-                    input_ids_t = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
+                    input_ids_t = cast(torch.LongTensor, torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0))
                     shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
                     if rollout_logprobs is not None:
@@ -1006,7 +1034,7 @@ class BaseRLTrainer:
                     continue
 
                 item = group[i].response
-                logprobs: list[float] | None = None
+                response_logprobs: list[float] | None = None
 
                 response_ids: List[int] = []
                 assert prompt_ids is not None
@@ -1017,13 +1045,13 @@ class BaseRLTrainer:
                     else:
                         response_ids = cast(List[int], resp_ids_raw)
 
-                    logprobs = group[i].logprobs
-                    if logprobs is not None:
-                        assert len(logprobs) == len(response_ids), (
-                            f"{len(logprobs)} vs {len(response_ids)}, data: {group[i]}"
+                    response_logprobs = group[i].logprobs
+                    if response_logprobs is not None:
+                        assert len(response_logprobs) == len(response_ids), (
+                            f"{len(response_logprobs)} vs {len(response_ids)}, data: {group[i]}"
                         )
                         # 只有 response 部分有 logprobs, 需要前面追加
-                        logprobs = [0.0] * (len(prompt_ids) - 1) + logprobs  # type: ignore[arg-type]
+                        response_logprobs = [0.0] * (len(prompt_ids) - 1) + response_logprobs
                 else:
                     assert item is not None, "response item cannot be None"
                     response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
@@ -1060,10 +1088,10 @@ class BaseRLTrainer:
 
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 training_tokens += len(input_ids)
-                input_ids_t = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
+                input_ids_t = cast(torch.LongTensor, torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0))
 
-                if logprobs is not None:
-                    rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)
+                if response_logprobs is not None:
+                    rollout_logprobs = torch.tensor(response_logprobs, dtype=torch.float32).unsqueeze(0)
                     assert rollout_logprobs.size() == shifted_labels_t.size(), (
                         f"{rollout_logprobs.size()} vs {shifted_labels_t.size()}"
                     )
@@ -1451,7 +1479,8 @@ class RLColocateTrainer(BaseRLTrainer):
                 self._rollout_config.skip_load_weights = False
             self.rollout_controller = self._rollout_config.build(self._pg)
             # self._maybe_start_gateway(cfg)
-            add_apiproxy(self)
+            if _trainer_config_needs_routed_api_proxy(cfg):
+                add_apiproxy(self)
 
             replay_buffer = cfg.replay_buffer_config.build()
             self._build_agent_loop_components(cfg, replay_buffer)
@@ -1497,7 +1526,8 @@ class RLColocateTrainer(BaseRLTrainer):
         if self._rollout_config.skip_load_weights:
             self._sync_weights_from_train_workers()
 
-        add_apiproxy(self)
+        if _trainer_config_needs_routed_api_proxy(cfg):
+            add_apiproxy(self)
 
     def _sync_weights_from_train_workers(self) -> None:
         self.logger.info("Rollout workers skip load weights, update weights from train workers.")
@@ -1651,7 +1681,9 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         set_cpu_resource_manager(self._cpu_resource_manager)
         self.train_controller = self._train_worker_cfg.build(self._train_pg)
         self.rollout_controller = self._rollout_config.build(self._rollout_pg)
-        self._maybe_start_gateway(cfg)
+        # self._maybe_start_gateway(cfg)
+        if _trainer_config_needs_routed_api_proxy(cfg):
+            add_apiproxy(self)
 
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)
