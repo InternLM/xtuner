@@ -379,6 +379,20 @@ def get_store():
     )
 
 
+# reasoning rl may be not initialized
+def get_existing_store():
+    """Return the existing singleton store actor without creating one."""
+    global _handle_cache
+    if _handle_cache is not None:
+        return _handle_cache
+
+    try:
+        _handle_cache = ray.get_actor(_STORE_NAME, namespace=_STORE_NAMESPACE)
+    except ValueError:
+        return None
+    return _handle_cache
+
+
 if __name__ == "__main__":
     print("=== 评估使用 Trie 加速 tokenize.py 避免多轮对话重复 tokenization ===")
 

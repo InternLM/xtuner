@@ -65,6 +65,31 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 
+def _is_routed_agent_loop_config(agent_loop_config: Any) -> bool:
+    config_type = type(agent_loop_config)
+    return config_type.__name__ in {
+        "AgentInLocalhostLoopConfig",
+        "AgentInSandboxLoopConfig",
+    } and config_type.__module__.startswith("xtuner.v1.rl.agent_loop.")
+
+
+def _agent_loop_manager_needs_routed_api_proxy(cfg: AgentLoopManagerConfig | None) -> bool:
+    if cfg is None:
+        return False
+    tasks = getattr(cfg, "tasks", None)
+    if tasks is None:
+        agent_loop_config = getattr(cfg, "agent_loop_config", None)
+        return _is_routed_agent_loop_config(agent_loop_config)
+    task_cfgs = tasks if isinstance(tasks, list) else [tasks]
+    return any(_is_routed_agent_loop_config(task.agent_loop_config) for task in task_cfgs)
+
+
+def _trainer_config_needs_routed_api_proxy(cfg: "BaseRLTrainerConfig") -> bool:
+    return _agent_loop_manager_needs_routed_api_proxy(
+        cfg.agent_loop_manager_cfg
+    ) or _agent_loop_manager_needs_routed_api_proxy(cfg.eval_agent_loop_manager_cfg)
+
+
 def _to_cpu_tensor(value: np.ndarray | None, *, dtype: torch.dtype | None = None) -> torch.Tensor | None:
     if value is None:
         return None
@@ -865,11 +890,15 @@ class BaseRLTrainer:
             self._release_trace_store()
 
     def _release_trace_store(self) -> None:
-        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import get_store
+        from xtuner.v1.rl.rollout.trace_store import get_existing_store
+
+        store = get_existing_store()
+        if store is None:
+            return
 
         self.logger.info("Release all sessions and free associated resources")
-        ray.get(get_store().release_all.remote())
-        keys = ray.get(get_store().list_sessions.remote())
+        ray.get(store.release_all.remote())
+        keys = ray.get(store.list_sessions.remote())
         assert len(keys) == 0, f"Store Keys not released: {keys}"
 
     def _train_one_batch(

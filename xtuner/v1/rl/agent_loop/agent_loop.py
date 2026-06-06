@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 from abc import ABC, abstractmethod
-from typing import TypeAlias, cast, overload
+from typing import Any, TypeAlias, cast, overload
 
 import ray
 from pydantic import BaseModel, ConfigDict
@@ -244,7 +244,10 @@ class AgentLoop(ABC):
     async def pause(self) -> None:
         self._judger_pause_event.set()
         try:
-            await self.rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
+            rollout_ctl = self.rollout_ctl
+            if rollout_ctl is None:
+                return
+            await cast(Any, rollout_ctl.pause_generation).remote()
         finally:
             self._judger_pause_event.clear()
 
