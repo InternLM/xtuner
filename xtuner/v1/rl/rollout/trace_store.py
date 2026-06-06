@@ -309,9 +309,13 @@ class RolloutTraceStore:
             raise ValueError(
                 f"Prompt text '{prompt_text}' does not match any trace key '{key}' in session '{session_id}'."
             )
-        trace = {"input_ids": [], "labels": [], "logprobs": [], "routed_experts": []}
+        trace: dict[str, list[Any]] = {"input_ids": [], "labels": [], "logprobs": [], "routed_experts": []}
         for node in nodes:
-            node_val: TokenizedSegment = node.value
+            node_val = node.value
+            if not isinstance(node_val, TokenizedSegment):
+                raise TypeError(f"Unexpected trace node value type: {type(node_val)!r}")
+            assert node_val.labels is not None
+            assert node_val.logprobs is not None
             trace["input_ids"].extend(node_val.token_ids)
             trace["labels"].extend(node_val.labels)
             trace["logprobs"].extend(node_val.logprobs)

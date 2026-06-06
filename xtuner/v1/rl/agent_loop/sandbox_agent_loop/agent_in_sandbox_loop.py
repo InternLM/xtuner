@@ -188,7 +188,7 @@ class AgentInSandboxLoop(AgentLoop):
     def __init__(
         self,
         rollout_ctl: RolloutController | None = None,
-        hf_checkpoint: str = None,
+        hf_checkpoint: str | None = None,
         sample_params: SampleParams | None = None,
         judger: Judger | None = None,
         logger=None,
@@ -197,6 +197,8 @@ class AgentInSandboxLoop(AgentLoop):
         sandbox_creates_burst: int | None = None,
         mode: Literal["train", "eval"] = "train",
     ):
+        if hf_checkpoint is None:
+            raise ValueError("hf_checkpoint must be provided for AgentInSandboxLoop.")
         super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
         self.max_concurrent_samples = max_concurrent_samples
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
@@ -208,7 +210,9 @@ class AgentInSandboxLoop(AgentLoop):
         )
         self._sandbox_create_limiter = (
             _TokenBucket(self.sandbox_creates_per_sec, self.sandbox_creates_burst)
-            if self.sandbox_creates_per_sec is not None and self.sandbox_creates_per_sec > 0
+            if self.sandbox_creates_per_sec is not None
+            and self.sandbox_creates_per_sec > 0
+            and self.sandbox_creates_burst is not None
             else None
         )
         if self._sandbox_create_limiter is not None:

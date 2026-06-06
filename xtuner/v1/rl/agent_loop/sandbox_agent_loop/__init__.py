@@ -7,6 +7,10 @@ This module keeps project configs readable:
     runner = dict(type=Runner, infer=dict(type=SandboxStage, ...))
 """
 
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import (
+    AgentInSandboxLoop,
+    AgentInSandboxLoopConfig,
+)
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.hooks import (
     DownloadHook,
     ExecHook,
@@ -18,10 +22,6 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.hooks import (
     UploadAgentConfigSource,
     UploadChosenAgent,
     UploadHook,
-)
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import (
-    AgentInSandboxLoop,
-    AgentInSandboxLoopConfig,
 )
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.runner import Runner
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import (
