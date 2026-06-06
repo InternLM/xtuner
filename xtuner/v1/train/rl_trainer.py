@@ -21,8 +21,6 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
-from xtuner.v1.rl.agent_loop.localhost_agent_loop import AgentInLocalhostLoopConfig
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import AgentInSandboxLoopConfig, get_store
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
     ProduceBatchResult,
@@ -63,16 +61,23 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 
+def _is_routed_agent_loop_config(agent_loop_config: Any) -> bool:
+    config_type = type(agent_loop_config)
+    return config_type.__name__ in {
+        "AgentInLocalhostLoopConfig",
+        "AgentInSandboxLoopConfig",
+    } and config_type.__module__.startswith("xtuner.v1.rl.agent_loop.")
+
+
 def _agent_loop_manager_needs_routed_api_proxy(cfg: AgentLoopManagerConfig | None) -> bool:
     if cfg is None:
         return False
-    routed_agent_loop_config_types = (AgentInSandboxLoopConfig, AgentInLocalhostLoopConfig)
     tasks = getattr(cfg, "tasks", None)
     if tasks is None:
         agent_loop_config = getattr(cfg, "agent_loop_config", None)
-        return isinstance(agent_loop_config, routed_agent_loop_config_types)
+        return _is_routed_agent_loop_config(agent_loop_config)
     task_cfgs = tasks if isinstance(tasks, list) else [tasks]
-    return any(isinstance(task.agent_loop_config, routed_agent_loop_config_types) for task in task_cfgs)
+    return any(_is_routed_agent_loop_config(task.agent_loop_config) for task in task_cfgs)
 
 
 def _trainer_config_needs_routed_api_proxy(cfg: "BaseRLTrainerConfig") -> bool:
@@ -815,6 +820,8 @@ class BaseRLTrainer:
             self._release_trace_store()
 
     def _release_trace_store(self) -> None:
+        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import get_store
+
         self.logger.info("Release all sessions and free associated resources")
         ray.get(get_store().release_all.remote())
         keys = ray.get(get_store().list_sessions.remote())
