@@ -147,7 +147,7 @@ class RolloutConfig(BaseModel):
             group=infer_group,
             help="Base port number for distributed communication among rollout workers.",
         ),
-    ] = 35000
+    ] = 25000
     rollout_max_batch_size_per_instance: Annotated[
         Optional[int],
         Parameter(
@@ -536,7 +536,6 @@ class RolloutWorker(SingleAcceleratorWorker):
         if dist_init_addr is not None:
             self.dist_init_addr = dist_init_addr
         self.receive_abort_request.clear()
-        self._stop_session_server()
         self._launch_server()
         self._start_session_server()
         return (self.rank, self.server_url)
@@ -562,9 +561,10 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.server_url = f"http://{self.host}:{self.server_port}"
         return self.dist_init_addr
 
-    def shutdown(self):
+    def shutdown(self, *, stop_session_server: bool = False):
         """Shut down the worker, its server task, and any child processes."""
-        self._stop_session_server()
+        if stop_session_server:
+            self._stop_session_server()
 
         if self.server_task is not None:
             server_task = self.server_task
@@ -666,7 +666,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 "Authorization": f"Bearer {self.config.api_key}",
             }
             response = requests.get(
-                f"{self.server_url}/{self.endpoints['health_generate']}", headers=headers, timeout=5.0
+                f"{self.server_url}/{self.endpoints['health_generate']}", headers=headers, timeout=30.0
             )
             return response.status_code == 200
         except requests.RequestException as e:

@@ -361,7 +361,7 @@ class RolloutController:
             block (bool): Whether to block until the operation completes.
         """
         self.health_checker.stop()
-        self._broadcast_to_active_workers("shutdown")
+        self._broadcast_to_active_workers("shutdown", stop_session_server=True)
 
     def _recover_failed_workers(self) -> None:
         """Recover inactive workers before training while keeping health checks
@@ -436,7 +436,7 @@ class RolloutController:
                 dist_init_addrs[i : i + server_urls_per_engine] = [dist_init_addrs[i]] * server_urls_per_engine
         return dist_init_addrs
 
-    def _broadcast_to_active_workers(self, method_name: str):
+    def _broadcast_to_active_workers(self, method_name: str, **kwargs):
         """Helper function to call a method on all active workers.
 
         Args:
@@ -449,7 +449,7 @@ class RolloutController:
         futures = []
         with self.worker_info_lock:
             active_actors = [info.actor for info in self.rank2info.values() if info.is_active]
-        futures = [getattr(actor, method_name).remote() for actor in active_actors]
+        futures = [getattr(actor, method_name).remote(**kwargs) for actor in active_actors]
         results = ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
         return results
 

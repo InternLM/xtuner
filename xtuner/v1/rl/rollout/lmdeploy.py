@@ -163,7 +163,7 @@ class LMDeployWorker(RolloutWorker):
         url = f"{self.server_url}/{self.endpoints['sleep']}"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_keys}"}
         data = {"level": level}
-        response = requests.post(url, headers=headers, params=data, timeout=60)
+        response = requests.post(url, headers=headers, params=data, timeout=180)
         assert response.status_code == 200, response.status_code
         return response.text
 
@@ -180,7 +180,7 @@ class LMDeployWorker(RolloutWorker):
         url = f"{self.server_url}/{self.endpoints['wake_up']}"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_keys}"}
         data = {"tags": tags}
-        response = requests.post(url, headers=headers, params=data, timeout=60)
+        response = requests.post(url, headers=headers, params=data, timeout=180)
         assert response.status_code == 200, response.status_code
         return response.text
 
