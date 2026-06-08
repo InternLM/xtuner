@@ -3,6 +3,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 # Activate the Triton autotune pin installed by `xtuner.v1.__init__` (gated by this env
 # var). The pin must run before any module imports `fla`; see the patch's docstring in
 # `xtuner/v1/__init__.py` for why it lives there rather than here in the conftest.
@@ -19,8 +21,18 @@ from huggingface_hub import constants  # noqa: E402
 from xtuner._testing.patch_rollout_config import patch_rollout_config_dist_port_base
 
 
+_RL_TESTS_ROOT = Path(__file__).resolve().parent / "rl"
 _HF_DYNAMIC_MODULE_PREFIX = "transformers_modules"
 _HF_PATCH_MODULES_CACHE_PREFIX = "modules_cache"
+
+
+def init_with_local_address(ray_init):
+    def wrapped(*args, **kwargs):
+        if not args:
+            kwargs.setdefault("address", "local")
+        return ray_init(*args, **kwargs)
+
+    return wrapped
 
 
 def _is_hf_dynamic_module_root(path: str) -> bool:
@@ -61,3 +73,21 @@ def pytest_runtest_setup(item):
     if item_path.parent.name == "rl":
         patch_rollout_config_dist_port_base()
     _cleanup_hf_dynamic_modules()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    del nextitem
+    item_path = Path(str(getattr(item, "path", None) or item.fspath)).resolve()
+    if not item_path.is_relative_to(_RL_TESTS_ROOT):
+        yield
+        return
+
+    import ray
+
+    original_init = ray.init
+    ray.init = init_with_local_address(original_init)
+    try:
+        yield
+    finally:
+        ray.init = original_init
