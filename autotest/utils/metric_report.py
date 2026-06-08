@@ -1,4 +1,4 @@
-"""Generate e2e metric comparison plots and GitHub Actions job summaries."""
+"""Generate ete metric comparison plots and GitHub Actions job summaries."""
 
 import os
 from collections import deque
@@ -11,7 +11,7 @@ import numpy as np
 # Keep GitHub Step Summary small; full tracker.jsonl stays on cluster baseline paths.
 SUMMARY_JSONL_PREVIEW_LINES = 3
 
-DEFAULT_RAW_URL_BASE = "https://raw.githubusercontent.com/llmcitester/xtuner/reports/e2e"
+DEFAULT_RAW_URL_BASE = "https://raw.githubusercontent.com/llmcitester/xtuner/reports/ete"
 
 
 def get_report_dir() -> Path:

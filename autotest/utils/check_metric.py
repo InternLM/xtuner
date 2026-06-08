@@ -58,7 +58,10 @@ def check_result(case_name, base_path, cur_path, check_metric):
                 check_flag = False
         else:
             for idx, (old, cur) in enumerate(zip(base_metrics[metric], cur_metrics[metric])):
-                relative_error = round(abs(old - cur) / abs(old), 2)
+                if abs(old) < 1e-10:
+                    relative_error = float("inf") if abs(cur) > 1e-10 else 0.0
+                else:
+                    relative_error = round(abs(old - cur) / abs(old), 2)
                 if relative_error > max_error:
                     max_error = relative_error
                     max_error_idx = idx

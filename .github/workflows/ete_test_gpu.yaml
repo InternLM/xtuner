@@ -25,11 +25,11 @@ on:
     - cron:  '00 16 * * 0-5'
 env:
   CI_GPU_IMAGE_REGISTRY: ${{ secrets.CI_GPU_IMAGE_REGISTRY }}
-  # E2E PNG reports: llmcitester/xtuner @ branch reports, under e2e/{run_id}/
+  # ETE PNG reports: llmcitester/xtuner @ branch reports, under ete/{run_id}/
   CI_REPORTS_REPOSITORY: ${{ vars.CI_REPORTS_REPOSITORY || 'llmcitester/xtuner' }}
   CI_REPORTS_BRANCH: ${{ vars.CI_REPORTS_BRANCH || 'reports' }}
-  CI_REPORTS_RAW_URL_BASE: ${{ vars.CI_REPORTS_RAW_URL_BASE || 'https://raw.githubusercontent.com/llmcitester/xtuner/reports/e2e' }}
-  CI_REPORTS_BROWSE_URL_BASE: ${{ vars.CI_REPORTS_BROWSE_URL_BASE || 'https://github.com/llmcitester/xtuner/tree/reports/e2e' }}
+  CI_REPORTS_RAW_URL_BASE: ${{ vars.CI_REPORTS_RAW_URL_BASE || 'https://raw.githubusercontent.com/llmcitester/xtuner/reports/ete' }}
+  CI_REPORTS_BROWSE_URL_BASE: ${{ vars.CI_REPORTS_BROWSE_URL_BASE || 'https://github.com/llmcitester/xtuner/tree/reports/ete' }}
   CI_REPORTS_KEEP_RUNS: ${{ vars.CI_REPORTS_KEEP_RUNS || '30' }}
 
 jobs:
@@ -48,10 +48,10 @@ jobs:
       - name: Init job summary
         run: |
           {
-            echo "## E2E test report"
+            echo "## ETE test report"
             echo ""
             echo "- Workflow run: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-            echo "- Reports: [e2e/${{ github.run_id }}](${{ env.CI_REPORTS_BROWSE_URL_BASE }}/${{ github.run_id }})"
+            echo "- Reports: [ete/${{ github.run_id }}](${{ env.CI_REPORTS_BROWSE_URL_BASE }}/${{ github.run_id }})"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
       - name: run-test
@@ -90,9 +90,9 @@ jobs:
           path: ${{ github.workspace }}/${{ github.run_id }}/*.png
           if-no-files-found: error
           retention-days: 7
-          name: xtuner-e2e-${{ github.run_id }}
+          name: xtuner-ete-${{ github.run_id }}
 
-      - name: Publish and prune e2e reports
+      - name: Publish and prune ete reports
         if: always() && steps.reports.outputs.has_reports == 'true'
         env:
           GH_TOKEN: ${{ secrets.CI_REPORTS_DEPLOY_TOKEN }}
@@ -102,15 +102,15 @@ jobs:
           BRANCH="${{ env.CI_REPORTS_BRANCH }}"
           KEEP="${{ env.CI_REPORTS_KEEP_RUNS }}"
           SRC="${{ github.workspace }}/${{ github.run_id }}"
-          DEST="e2e/${{ github.run_id }}"
+          DEST="ete/${{ github.run_id }}"
           git clone --depth=1 -b "${BRANCH}" "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" pages
           cd pages
           rm -rf "${DEST}"
           mkdir -p "$(dirname "${DEST}")"
           cp -r "${SRC}" "${DEST}"
-          if [ -d e2e ]; then
-            cd e2e
-            mapfile -t RUN_DIRS < <(find . -maxdepth 1 -type d -regex './[0-9]+' -printf '%f\n' | sort -rn)
+          if [ -d ete ]; then
+            cd ete
+            mapfile -t RUN_DIRS < <(find . -maxdepth 1 -type d -regextype posix-egrep -regex './[0-9]+' -printf '%f\n' | sort -rn)
             if [ "${#RUN_DIRS[@]}" -gt "${KEEP}" ]; then
               for old_run in "${RUN_DIRS[@]:KEEP}"; do
                 rm -rf "${old_run}"
@@ -124,6 +124,6 @@ jobs:
             echo "No report changes to commit."
           else
             git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
-              commit -m "chore: publish e2e report ${{ github.run_id }}, keep latest ${KEEP} runs"
+              commit -m "chore: publish ete report ${{ github.run_id }}, keep latest ${KEEP} runs"
             git push
           fi

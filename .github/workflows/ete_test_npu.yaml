@@ -27,8 +27,8 @@ env:
   CI_NPU_IMAGE_REGISTRY: ${{ secrets.CI_NPU_IMAGE_REGISTRY }}
   CI_REPORTS_REPOSITORY: ${{ vars.CI_REPORTS_REPOSITORY || 'llmcitester/xtuner' }}
   CI_REPORTS_BRANCH: ${{ vars.CI_REPORTS_BRANCH || 'reports' }}
-  CI_REPORTS_RAW_URL_BASE: ${{ vars.CI_REPORTS_RAW_URL_BASE || 'https://raw.githubusercontent.com/llmcitester/xtuner/reports/e2e' }}
-  CI_REPORTS_BROWSE_URL_BASE: ${{ vars.CI_REPORTS_BROWSE_URL_BASE || 'https://github.com/llmcitester/xtuner/tree/reports/e2e' }}
+  CI_REPORTS_RAW_URL_BASE: ${{ vars.CI_REPORTS_RAW_URL_BASE || 'https://raw.githubusercontent.com/llmcitester/xtuner/reports/ete' }}
+  CI_REPORTS_BROWSE_URL_BASE: ${{ vars.CI_REPORTS_BROWSE_URL_BASE || 'https://github.com/llmcitester/xtuner/tree/reports/ete' }}
   CI_REPORTS_KEEP_RUNS: ${{ vars.CI_REPORTS_KEEP_RUNS || '30' }}
 
 jobs:
@@ -46,10 +46,10 @@ jobs:
       - name: Init job summary
         run: |
           {
-            echo "## NPU E2E test report"
+            echo "## NPU ETE test report"
             echo ""
             echo "- Workflow run: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-            echo "- Reports: [e2e/npu/${{ github.run_id }}](${{ env.CI_REPORTS_BROWSE_URL_BASE }}/npu/${{ github.run_id }})"
+            echo "- Reports: [ete/npu/${{ github.run_id }}](${{ env.CI_REPORTS_BROWSE_URL_BASE }}/npu/${{ github.run_id }})"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
       - name: run-test
@@ -86,9 +86,9 @@ jobs:
           path: ${{ github.workspace }}/${{ github.run_id }}/*.png
           if-no-files-found: error
           retention-days: 7
-          name: npu-e2e-${{ github.run_id }}
+          name: npu-ete-${{ github.run_id }}
 
-      - name: Publish and prune NPU e2e reports
+      - name: Publish and prune NPU ete reports
         if: always() && steps.reports.outputs.has_reports == 'true'
         env:
           GH_TOKEN: ${{ secrets.CI_REPORTS_DEPLOY_TOKEN }}
@@ -98,15 +98,15 @@ jobs:
           BRANCH="${{ env.CI_REPORTS_BRANCH }}"
           KEEP="${{ env.CI_REPORTS_KEEP_RUNS }}"
           SRC="${{ github.workspace }}/${{ github.run_id }}"
-          DEST="e2e/npu/${{ github.run_id }}"
+          DEST="ete/npu/${{ github.run_id }}"
           git clone --depth=1 -b "${BRANCH}" "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" pages
           cd pages
           rm -rf "${DEST}"
           mkdir -p "$(dirname "${DEST}")"
           cp -r "${SRC}" "${DEST}"
-          if [ -d e2e/npu ]; then
-            cd e2e/npu
-            mapfile -t RUN_DIRS < <(find . -maxdepth 1 -type d -regex './[0-9]+' -printf '%f\n' | sort -rn)
+          if [ -d ete/npu ]; then
+            cd ete/npu
+            mapfile -t RUN_DIRS < <(find . -maxdepth 1 -type d -regextype posix-egrep -regex './[0-9]+' -printf '%f\n' | sort -rn)
             if [ "${#RUN_DIRS[@]}" -gt "${KEEP}" ]; then
               for old_run in "${RUN_DIRS[@]:KEEP}"; do
                 rm -rf "${old_run}"
@@ -120,6 +120,6 @@ jobs:
             echo "No report changes to commit."
           else
             git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
-              commit -m "chore: publish npu e2e report ${{ github.run_id }}, keep latest ${KEEP} runs"
+              commit -m "chore: publish npu ete report ${{ github.run_id }}, keep latest ${KEEP} runs"
             git push
           fi
