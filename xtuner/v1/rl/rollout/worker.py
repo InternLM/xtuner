@@ -765,6 +765,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                     self.logger.warning(
                         f"Invalid rollout response for request {uid}, retrying {attempt + 1}/{max_retries}."
                     )
+                    if isinstance(rollout_state.routed_experts, ray.ObjectRef):
+                        free_object_refs([rollout_state.routed_experts])
+                        rollout_state.routed_experts = None
                     await asyncio.sleep(0.1)
                     continue
 

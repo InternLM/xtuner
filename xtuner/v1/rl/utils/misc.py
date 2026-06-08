@@ -243,3 +243,85 @@ def get_eos_token(model_path: str) -> int | List[int]:
             f"eos_token_id is not found in {generation_config_path}. You must provide eos_token manually."
         )
     return eos_token_id
+
+
+def register_to_routedapiproxy(model_name: str, api_server_url: str) -> dict:
+    url = "http://s-20260104203038-22bhb-decode.ailab-evalservice.svc:4000/v1/models/new"
+    payload = {
+        "model_name": model_name,
+        "api_key": "sk-admin",
+        "api_base": api_server_url,
+    }
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=30)
+    resp.raise_for_status()
+    result = resp.json()
+    print(f"registered to routedapiproxy: {result}")
+    return result
+
+
+def delete_from_routedapiproxy(model_name: str) -> None:
+    url = "http://s-20260104203038-22bhb-decode.ailab-evalservice.svc:4000/v1/models/delete"
+    payload = {
+        "model_name": model_name,
+    }
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=30)
+    resp.raise_for_status()
+    print(f"deleted from routedapiproxy: {resp.json()}")
+
+
+TIMEOUT = 120
+API_KEY = "sk-admin"
+
+HEADERS = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {API_KEY}",
+}
+
+
+def _post(url: str, payload: dict) -> dict:
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers=HEADERS, method="POST")
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        return json.loads(resp.read())
+
+
+def check_chat_completions(base_url: str, model: str) -> bool:
+    normalized_base_url = base_url.rstrip("/")
+    if normalized_base_url.endswith("/v1"):
+        url = f"{normalized_base_url}/chat/completions"
+    else:
+        url = f"{normalized_base_url}/v1/chat/completions"
+    payload = {
+        "model": model,
+        "session_id": str(uuid.uuid4()),
+        "messages": [{"role": "user", "content": "Reply with exactly: pong"}],
+        "max_tokens": 16,
+        "temperature": 0.0,
+        "extra_body": {"spaces_between_special_tokens": False},
+    }
+    print(f"========================POST {url}================================")
+    t0 = time.time()
+    try:
+        result = _post(url, payload)
+        elapsed = time.time() - t0
+        content = result["choices"][0]["message"]["content"]
+        usage = result.get("usage", {})
+        print(f"      Response ({elapsed:.2f}s): {content!r}")
+        print(f"      Usage: {usage}")
+        print("      ✓ Chat completions endpoint OK.")
+        return True
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        print(f"      ✗ Failed ({time.time() - t0:.2f}s): HTTP {e.code} {e.reason}: {body[:2000]}")
+        return False
+    except Exception as e:
+        print(f"      ✗ Failed ({time.time() - t0:.2f}s): {e}")
+        return False
