@@ -14,6 +14,7 @@ from xtuner.v1.rl.agent_loop import AgentLoopConfig, AgentLoopSpec, get_agent_lo
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.trace import flush_trace
 from xtuner.v1.utils import get_logger
 
 from .producer import (
@@ -589,6 +590,7 @@ class AgentLoopManager:
             )
         finally:
             progress.add_produce_time(time.perf_counter() - produce_start)
+            flush_trace()
         return _aggregate_status(statuses)
 
     async def pause_produce(
@@ -727,13 +729,15 @@ class AgentLoopManager:
         consume_progress.mark_consumed(consumed_counts)
         leftover_counts = await self.replay_buffer.count_statuses(self.task_names, _LEFTOVER_STATUSES)
         self._log_buffer_counts(task_batch_sizes, batch_by_task, leftover_counts)
-        return self._build_result_from_batch(
+        result = self._build_result_from_batch(
             task_batch_sizes,
             batch_by_task,
             leftover_counts,
             progress=consume_progress,
             pause_time_s=pause_time_s,
         )
+        flush_trace()
+        return result
 
     async def continue_produce(self, model_step: int) -> None:
         #
@@ -755,6 +759,7 @@ class AgentLoopManager:
         self._status = AgentLoopManagerStatus.FINISH
         self._update_event.set()
         self._finish_event.set()
+        flush_trace()
 
     async def _wait_for_status_exit(self, blocked_status: AgentLoopManagerStatus) -> None:
         while not self._finish_event.is_set() and self._status == blocked_status:

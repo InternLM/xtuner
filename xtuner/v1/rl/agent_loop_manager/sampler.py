@@ -128,11 +128,18 @@ class Sampler(_DatasetSampler):
         self.replay_buffer = replay_buffer
 
     async def sample(self, task_name: str, group_status: list[Status] | None = None) -> list[RolloutState]:
+        group = None
         for status in group_status or []:
             buffer_data = await self.replay_buffer.get(1, task_name=task_name, group_status=status)
             if buffer_data:
-                return buffer_data[0]
-        return self.sample_from_dataloader()
+                group = buffer_data[0]
+                break
+        if group is None:
+            group = self.sample_from_dataloader()
+        for state in group:
+            if state.task_name is None:
+                state.task_name = task_name
+        return group
 
     def save(self, checkpoint_path: Path | str) -> None:
         """Save the sampler's dataloader state to checkpoint."""

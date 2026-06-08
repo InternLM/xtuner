@@ -1,6 +1,7 @@
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.trace import trace_function
 
 from .agent_loop import AgentLoop, AgentLoopConfig
 
@@ -64,6 +65,11 @@ class SingleTurnAgentLoop(AgentLoop):
             enable_batch_judge=enable_batch_judge,
         )
 
+    @trace_function(
+        "xtuner.agent_loop.generate_sample",
+        target="rollout_state",
+        result="return",
+    )
     async def generate_sample(
         self,
         rollout_state: RolloutState,

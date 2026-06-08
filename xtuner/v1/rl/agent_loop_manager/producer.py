@@ -23,6 +23,14 @@ from xtuner.v1.data_proto.rl_data import (
 )
 from xtuner.v1.rl.agent_loop import AgentLoopSpec
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
+from xtuner.v1.rl.trace import (
+    TRACE_EXTRA_MODEL_STEP,
+    TRACE_EXTRA_PRODUCE_BATCH_ID,
+    TRACE_EXTRA_PRODUCER_FUTURE_STEP,
+    TRACE_EXTRA_TRAIN_STEP,
+    build_produce_batch_id,
+    trace_function,
+)
 from xtuner.v1.rl.utils import (
     AGENT_LOOP_PAUSE_REQUEST_TIMEOUT_S,
     PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S,
@@ -326,6 +334,20 @@ class ProduceContext:
     def should_abort(self) -> bool:
         return self.update_event.is_set()
 
+    def trace_kwargs(self) -> dict[str, Any]:
+        produce_batch_id = build_produce_batch_id(
+            self.train_step,
+            self.model_step,
+            self.progress.producer_future_step,
+        )
+        return {
+            "task_name": self.task_name,
+            "train_step": self.train_step,
+            "model_step": self.model_step,
+            "producer_future_step": self.progress.producer_future_step,
+            "produce_batch_id": produce_batch_id,
+        }
+
     async def expired_count(self) -> int:
         return await self.replay_buffer.count(task_name=self.task_name, group_status=Status.EXPIRED)
 
@@ -333,10 +355,21 @@ class ProduceContext:
         completed_count = await self.replay_buffer.count(task_name=self.task_name, group_status=Status.COMPLETED)
         return self.progress.consumed_samples[self.task_name] + completed_count
 
+    @trace_function(
+        "xtuner.producer.sample_group",
+        result="return",
+        trace_kwargs_getter=lambda self, *args, **kwargs: self.trace_kwargs(),
+    )
     async def sample_group(self, *, from_expired_pool: bool) -> list[RolloutState]:
         group_status = [Status.EXPIRED, Status.ABORTED] if from_expired_pool else [Status.ABORTED]
         return await self.sampler.sample(task_name=self.task_name, group_status=group_status)
 
+    @trace_function(
+        "xtuner.producer.generate_group",
+        target="rollout_state",
+        result="return",
+        trace_kwargs_getter=lambda self, *args, **kwargs: self.trace_kwargs(),
+    )
     async def generate_group(
         self,
         rollout_state: list[RolloutState],
@@ -344,6 +377,14 @@ class ProduceContext:
         enable_partial_rollout: bool = False,
     ) -> list[RolloutState]:
         # strategy 只表达“要生成”，不关心 agent_loop 是 ray actor 还是本地对象。
+        trace_kwargs = self.trace_kwargs()
+        for state in rollout_state:
+            extra_fields = dict(state.extra_fields or {})
+            extra_fields[TRACE_EXTRA_TRAIN_STEP] = trace_kwargs["train_step"]
+            extra_fields[TRACE_EXTRA_MODEL_STEP] = trace_kwargs["model_step"]
+            extra_fields[TRACE_EXTRA_PRODUCER_FUTURE_STEP] = trace_kwargs["producer_future_step"]
+            extra_fields[TRACE_EXTRA_PRODUCE_BATCH_ID] = trace_kwargs["produce_batch_id"]
+            state.extra_fields = extra_fields
         start = time.perf_counter()
         if isinstance(self.agent_loop, ray.actor.ActorHandle):
             result = await self.agent_loop.generate_group.remote(
@@ -364,6 +405,11 @@ class ProduceContext:
             extra_fields[GROUP_GENERATE_TIME_KEY] = elapsed
         return result
 
+    @trace_function(
+        "xtuner.producer.put_generated_group",
+        target="group",
+        trace_kwargs_getter=lambda self, *args, **kwargs: self.trace_kwargs(),
+    )
     async def put_generated_group(self, group: list[RolloutState]) -> bool:
         # 只有完整生成的 group 才需要业务有效性过滤；ABORTED / EXPIRED 保留原状态供重试或统计。
         is_completed = get_group_status(group) == Status.COMPLETED

@@ -17,6 +17,7 @@ from ray.util.placement_group import (
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from typing_extensions import Annotated
 
+from xtuner.v1.rl.trace import merge_trace_runtime_env
 from xtuner.v1.utils.logger import get_logger
 
 
@@ -185,6 +186,7 @@ class CPUActorLauncher:
         }
         if resolved_memory is not None and resolved_memory > 0:
             actor_options["memory"] = resolved_memory
+        merge_trace_runtime_env(actor_options)
 
         if pg is None:
             return actor_cls.options(**actor_options).remote(*init_args, **init_kwargs)

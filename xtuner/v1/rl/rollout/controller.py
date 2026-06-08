@@ -12,6 +12,7 @@ from ray.util.placement_group import PlacementGroup
 
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.rl.trace import trace_function
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
@@ -173,6 +174,11 @@ class RolloutController:
         return active_workers * concurrency_per_worker
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
+    @trace_function(
+        "xtuner.rollout_controller.generate",
+        target="rollout_state",
+        result="return",
+    )
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         if XTUNER_DETERMINISTIC:
             sample_params = rollout_state.sample_params.model_copy(deep=True)
