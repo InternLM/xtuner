@@ -810,6 +810,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                     self.logger.warning(
                         f"rollout request {uid} to {http_result.url} failed due to retryable error {http_result.error_type} with {http_result.error_msg}, retrying {attempt + 1}/{max_retries}."
                     )
+                    if isinstance(rollout_state.routed_experts, ray.ObjectRef):
+                        free_object_refs([rollout_state.routed_experts])
+                        rollout_state.routed_experts = None
                     await asyncio.sleep(0.1)
                     continue
 
