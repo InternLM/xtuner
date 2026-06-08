@@ -408,9 +408,22 @@ class RolloutController:
                 )
                 self._cleanup_inactive_worker_group(workers)
                 return False
-            else:
-                self.logger.info(f"Successfully restarted rollout worker group ranks={group_ranks}.")
-                return True
+
+            session_url_map = self._collect_worker_session_url_map([actor for _, actor, _, _ in workers])
+            missing_session_url_ranks = sorted(rank for rank, _, _, _ in workers if rank not in session_url_map)
+            if missing_session_url_ranks:
+                self.logger.error(
+                    f"Restarted rollout worker group ranks={group_ranks} has no SessionServer URL for "
+                    f"ranks={missing_session_url_ranks}."
+                )
+                self._cleanup_inactive_worker_group(workers)
+                return False
+
+            with self.worker_info_lock:
+                for rank, session_url in session_url_map.items():
+                    self.rank2info[rank].session_url = session_url
+            self.logger.info(f"Successfully restarted rollout worker group ranks={group_ranks}.")
+            return True
         except Exception as e:
             self.logger.error(f"Failed to restart worker: {e}")
             if workers:
@@ -475,6 +488,19 @@ class RolloutController:
             if attempt < max_attempts:
                 time.sleep(retry_interval_seconds)
         return sorted(pending)
+
+    def _collect_worker_session_url_map(self, active_rollout_workers: list[RolloutWorker]) -> dict[int, str]:
+        session_server_infos = ray.get(
+            [worker.get_session_server_info.remote() for worker in active_rollout_workers],  # type: ignore[attr-defined]
+            timeout=ROLLOUT_RAY_GET_TIMEOUT,
+        )
+        session_url_map: dict[int, str] = {}
+        for rank, session_url in session_server_infos:
+            if session_url is None:
+                self.logger.warning(f"Rollout worker rank={rank} has no SessionServer URL.")
+                continue
+            session_url_map[int(rank)] = session_url
+        return session_url_map
 
     def _check_chat_completion_ready_once(
         self,
@@ -696,16 +722,21 @@ class RolloutController:
         )
         active_ranks = list(worker_server_urls_map.keys())
         rank_to_ep_group = self._build_rank_to_ep_group(active_ranks, server_urls_per_engine)
+        worker_session_url_map = self._collect_worker_session_url_map(active_rollout_workers)
         workers_info = {}
         for i, rank in enumerate(active_ranks):
             url = worker_server_urls_map[rank]
             workers_info[rank] = WorkerInfo(
                 actor=active_rollout_workers[i],
                 url=url,
+                session_url=worker_session_url_map.get(rank),
                 dist_init_addr=worker_dist_init_addr_map[rank],
                 ep_group_ranks=rank_to_ep_group[rank],
             )
         self.logger.info(f"Rollout worker server URLs: {[info.url for info in workers_info.values()]}")
+        self.logger.info(
+            f"Rollout worker session URLs: {[info.session_url for info in workers_info.values() if info.session_url]}"
+        )
         self.logger.info(f"Rollout worker EP groups: {sorted(set(rank_to_ep_group.values()))}")
         return engine_rank_mesh_array, worker_server_urls_map, workers_info
 
