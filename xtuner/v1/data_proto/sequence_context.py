@@ -255,6 +255,7 @@ class SequenceContext:
         pixel_values = []
 
         image_grid_thw = []
+        num_img_tokens = []
         position_ids = []
         rollout_routed_experts = []
 
@@ -282,6 +283,8 @@ class SequenceContext:
                 pixel_values.append(seq_ctx.pixel_values)
             if seq_ctx.image_grid_thw is not None:
                 image_grid_thw.append(seq_ctx.image_grid_thw)
+            if seq_ctx.num_img_tokens is not None:
+                num_img_tokens.extend(seq_ctx.num_img_tokens)
             if seq_ctx.rollout_routed_experts is not None:
                 rollout_routed_experts.append(seq_ctx.rollout_routed_experts)
             position_ids.append(seq_ctx.position_ids)
@@ -304,6 +307,7 @@ class SequenceContext:
             inputs_embeds=torch.cat(inputs_embeds, dim=1) if inputs_embeds else None,  # type: ignore
             pixel_values=pixel_values,  # type: ignore
             image_grid_thw=torch.cat(image_grid_thw, dim=0) if image_grid_thw else None,  # type: ignore
+            num_img_tokens=num_img_tokens if num_img_tokens else None,
             position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
             rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None,  # type: ignore
         )
