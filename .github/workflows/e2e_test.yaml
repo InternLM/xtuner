@@ -36,7 +36,7 @@ jobs:
   ete_test:
     if: ${{!cancelled() }}
     runs-on: [h_cluster_ete]
-    timeout-minutes: 720
+    timeout-minutes: 1440
     steps:
       - name: Clean workdir
         run: sudo git clean -ffdx
@@ -71,7 +71,7 @@ jobs:
           fi
 
       - name: Check report files
-        if: ${{ !cancelled() }}
+        if: always()
         id: reports
         run: |
           REPORT_DIR="${{ github.workspace }}/${{ github.run_id }}"
@@ -84,7 +84,7 @@ jobs:
           fi
 
       - name: Upload comparison plots
-        if: ${{ !cancelled() && steps.reports.outputs.has_reports == 'true' }}
+        if: always() && steps.reports.outputs.has_reports == 'true'
         uses: actions/upload-artifact@v4
         with:
           path: ${{ github.workspace }}/${{ github.run_id }}/*.png
@@ -93,7 +93,7 @@ jobs:
           name: xtuner-e2e-${{ github.run_id }}
 
       - name: Publish and prune e2e reports
-        if: ${{ !cancelled() && steps.reports.outputs.has_reports == 'true' }}
+        if: always() && steps.reports.outputs.has_reports == 'true'
         env:
           GH_TOKEN: ${{ secrets.CI_REPORTS_DEPLOY_TOKEN }}
         run: |
