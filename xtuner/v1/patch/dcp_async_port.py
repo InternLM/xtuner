@@ -41,43 +41,52 @@ from xtuner.v1.utils.logger import get_logger
 
 logger = get_logger()
 
-# Default daemon port range, outside the ephemeral range (>=32768) and clear of the
-# common training MASTER_PORT (29500).
-_DEFAULT_PORT_BASE = 29600
-_DEFAULT_PORT_SPAN = 400
+# Default daemon port range "low:high" (high exclusive), outside the ephemeral range
+# (>=32768) and clear of the common training MASTER_PORT (29500).
+_DEFAULT_PORT_RANGE = "29600:30000"
 
 _PATCHED = False
 
 
-def _port_base() -> int:
-    return int(os.environ.get("XTUNER_DCP_DAEMON_PORT_BASE", str(_DEFAULT_PORT_BASE)))
+def _port_range() -> tuple[int, int]:
+    """Parse ``XTUNER_DCP_DAEMON_PORT_RANGE`` as ``"low:high"`` (high
+    exclusive).
+
+    Returns ``(low, high)`` with ``high > low`` guaranteed (a degenerate or inverted
+    range is clamped to a single port).
+    """
+    raw = os.environ.get("XTUNER_DCP_DAEMON_PORT_RANGE", _DEFAULT_PORT_RANGE)
+    low_str, high_str = raw.split(":")
+    low, high = int(low_str), int(high_str)
+    if high <= low:
+        high = low + 1
+    return low, high
 
 
-def _port_span() -> int:
-    return max(1, int(os.environ.get("XTUNER_DCP_DAEMON_PORT_SPAN", str(_DEFAULT_PORT_SPAN))))
-
-
-def _ephemeral_range() -> tuple[int, int] | None:
+def _read_kernel_ephemeral_range() -> tuple[int, int] | None:
     """Return the kernel ephemeral port range
     (net.ipv4.ip_local_port_range)."""
     try:
         with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
-            lo, hi = f.read().split()[:2]
-            return int(lo), int(hi)
+            low, high = f.read().split()[:2]
+            return int(low), int(high)
     except Exception:
         return None
 
 
-def _is_outside_ephemeral(base: int, hi_excl: int, eph: tuple[int, int] | None) -> bool:
-    """Whether [base, hi_excl) does not intersect the kernel ephemeral range.
+def _is_outside_ephemeral_range(
+    range_low: int, range_high_exclusive: int, ephemeral_range: tuple[int, int] | None
+) -> bool:
+    """Whether [range_low, range_high_exclusive) does not intersect the kernel
+    ephemeral range.
 
     The kernel only auto-assigns outbound ports from the ephemeral range, so a daemon port outside it cannot be grabbed
     by a transient connection during the spawn window.
     """
-    if eph is None:
+    if ephemeral_range is None:
         return False
-    eph_lo, eph_hi = eph
-    return hi_excl <= eph_lo or base > eph_hi
+    ephemeral_low, ephemeral_high = ephemeral_range
+    return range_high_exclusive <= ephemeral_low or range_low > ephemeral_high
 
 
 def _xtuner_dcp_get_free_port() -> int:
@@ -95,28 +104,37 @@ def _xtuner_dcp_get_free_port() -> int:
     NOT weaken in-use detection -- ``SO_REUSEADDR`` still cannot bind over an actively
     listening socket (that would require ``SO_REUSEPORT``).
     """
-    base = _port_base()
-    span = _port_span()
-    eph = _ephemeral_range()
-    last_err: OSError | None = None
-    for port in range(base, base + span):
+    range_low, range_high = _port_range()
+    ephemeral_range = _read_kernel_ephemeral_range()
+    last_error: OSError | None = None
+    for port in range(range_low, range_high):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # Bind the wildcard address ("") rather than localhost: the real daemon
+            # TCPStore server (GLOO PG init with MASTER_ADDR=node0's FQDN) binds all
+            # interfaces so other nodes can reach it, so probing the wildcard is the
+            # faithful predictor of the daemon bind. (torch's etcd_server binds localhost
+            # only because it is a single-host rendezvous; this daemon is cross-node.)
             sock.bind(("", port))
-            sock.listen(1)
-            # Per-checkpoint evidence for verification: every line must say "outside"; any
-            # "in-ephemeral" means the race can still trigger. Greppable at scale.
-            status = "outside" if _is_outside_ephemeral(port, port + 1, eph) else "in-ephemeral"
-            logger.info(f"[DCP async_save] DCP daemon port chosen: {port} ({status} ephemeral range {eph})")
+            # backlog is irrelevant for a probe we close immediately; we only confirm the
+            # port can enter LISTEN, mirroring the daemon's listener.
+            sock.listen(0)
+            # Per-checkpoint evidence emitted at debug level: "outside" means the port is
+            # safe; "in-ephemeral" means the race can still trigger. Enable debug logging
+            # to grep this at scale.
+            status = "outside" if _is_outside_ephemeral_range(port, port + 1, ephemeral_range) else "in-ephemeral"
+            logger.debug(
+                f"[DCP async_save] DCP daemon port chosen: {port} ({status} ephemeral range {ephemeral_range})"
+            )
             return port
-        except OSError as exc:
-            last_err = exc
+        except OSError as error:
+            last_error = error
         finally:
             sock.close()
     raise RuntimeError(
-        f"[DCP async_save] no free daemon port in [{base}, {base + span}); "
-        f"set XTUNER_DCP_DAEMON_PORT_BASE / XTUNER_DCP_DAEMON_PORT_SPAN to relocate. last error: {last_err}"
+        f"[DCP async_save] no free daemon port in [{range_low}, {range_high}); "
+        f'set XTUNER_DCP_DAEMON_PORT_RANGE (e.g. "29600:30000") to relocate. last error: {last_error}'
     )
 
 
@@ -129,21 +147,20 @@ def patch_dcp_async_daemon_port() -> None:
     _async_process_executor.get_free_port = _xtuner_dcp_get_free_port
     _PATCHED = True
 
-    base = _port_base()
-    hi_excl = base + _port_span()
-    eph = _ephemeral_range()
-    if _is_outside_ephemeral(base, hi_excl, eph):
-        logger.info(
+    range_low, range_high = _port_range()
+    ephemeral_range = _read_kernel_ephemeral_range()
+    if _is_outside_ephemeral_range(range_low, range_high, ephemeral_range):
+        logger.debug(
             f"[DCP async_save] patched daemon port selection to range "
-            f"[{base}, {hi_excl}), outside kernel ephemeral range {eph}"
+            f"[{range_low}, {range_high}), outside kernel ephemeral range {ephemeral_range}"
         )
     else:
         # NOTE: keep the real error signatures ("EADDRINUSE" / "address already in use")
         # out of this benign log line, so a naive grep for those tokens only matches
         # actual daemon failures, not this warning.
         logger.warning(
-            f"[DCP async_save] daemon port range [{base}, {hi_excl}) overlaps the kernel "
-            f"ephemeral range {eph}; the TCPStore daemon-port bind race may persist (the "
-            f"port can be grabbed during the spawn window). Set XTUNER_DCP_DAEMON_PORT_BASE "
-            f"below {eph[0] if eph else 32768} to avoid it."
+            f"[DCP async_save] daemon port range [{range_low}, {range_high}) overlaps the kernel "
+            f"ephemeral range {ephemeral_range}; the TCPStore daemon-port bind race may persist (the "
+            f"port can be grabbed during the spawn window). Set XTUNER_DCP_DAEMON_PORT_RANGE "
+            f"to a range below {ephemeral_range[0] if ephemeral_range else 32768} to avoid it."
         )
