@@ -1531,8 +1531,6 @@ def add_apiproxy(self):
     if not recheck_status_routed:
         raise ValueError(f"check chat completions failed for {routed_url}")
     self.logger.info("registered to routedapiproxy")
-    # import time
-    # time.sleep(1000000)
 
 
 class RLColocateTrainer(BaseRLTrainer):
