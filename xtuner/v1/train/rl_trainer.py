@@ -31,7 +31,6 @@ from xtuner.v1.rl.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop_manager.producer import default_should_continue_fn
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.gateway.config import GatewayConfig
 from xtuner.v1.rl.replay_buffer import (
     AsyncReplayBufferConfig,
     SyncReplayBufferConfig,
@@ -322,7 +321,6 @@ class BaseRLTrainerConfig(BaseModel):
     train_batch_size: int
     advantage_estimator_config: BaseAdvantageConfig = Field(default_factory=GRPOAdvantageConfig)
     sync_weights_interval: int = 1
-    gateway_config: GatewayConfig | None = None
 
     enable_evaluate: bool = True
     enable_initial_evaluate: bool = False
@@ -399,8 +397,6 @@ class RLColocateTrainerConfig(BaseRLTrainerConfig):
             configuration. Defaults to ``GRPOAdvantageConfig``.
         sync_weights_interval (int): Interval, in train steps, for syncing
             weights from training to rollout. Defaults to 1.
-        gateway_config (GatewayConfig | None): Optional gateway configuration.
-            Defaults to None.
         enable_evaluate (bool): Whether to run evaluation. Defaults to True.
         enable_initial_evaluate (bool): Whether to evaluate before training.
             Defaults to False.
@@ -486,8 +482,6 @@ class RLDisaggregatedTrainerConfig(BaseRLTrainerConfig):
             configuration. Defaults to ``GRPOAdvantageConfig``.
         sync_weights_interval (int): Interval, in train steps, for syncing
             weights from training to rollout. Defaults to 1.
-        gateway_config (GatewayConfig | None): Optional gateway configuration.
-            Defaults to None.
         enable_evaluate (bool): Whether to run evaluation. Defaults to True.
         enable_initial_evaluate (bool): Whether to evaluate before training.
             Defaults to False.
@@ -701,15 +695,6 @@ class BaseRLTrainer:
         self._debug_rollout_dir = Path(cfg.debug_rollout_dir) if cfg.debug_rollout_dir is not None else None
         self._debug_train = cfg.debug_train
         self._debug_train_files: dict[int, Path] = {}
-
-    def _maybe_start_gateway(self, cfg: BaseRLTrainerConfig) -> None:
-        if cfg.gateway_config is None or not cfg.gateway_config.auto_start:
-            return
-        # gateway 依赖 rollout controller，因此在 rollout controller 构建完成后统一启动。
-        ray.get(
-            self.rollout_controller.start_gateway.remote(cfg.gateway_config),
-            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
-        )
 
     def _build_agent_loop_components(self, cfg: BaseRLTrainerConfig, replay_buffer) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
@@ -1554,7 +1539,6 @@ class RLColocateTrainer(BaseRLTrainer):
                 )
                 self._rollout_config.skip_load_weights = False
             self.rollout_controller = self._rollout_config.build(self._pg)
-            # self._maybe_start_gateway(cfg)
             if _trainer_config_needs_routed_api_proxy(cfg):
                 add_apiproxy(self)
 
@@ -1588,7 +1572,6 @@ class RLColocateTrainer(BaseRLTrainer):
         self.train_controller.offload(target="all")
 
         self.rollout_controller = self._rollout_config.build(self._pg)
-        # self._maybe_start_gateway(cfg)
         bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
 
         replay_buffer = cfg.replay_buffer_config.build()
@@ -1756,7 +1739,6 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         set_cpu_resource_manager(self._cpu_resource_manager)
         self.train_controller = self._train_worker_cfg.build(self._train_pg)
         self.rollout_controller = self._rollout_config.build(self._rollout_pg)
-        # self._maybe_start_gateway(cfg)
         if _trainer_config_needs_routed_api_proxy(cfg):
             add_apiproxy(self)
 

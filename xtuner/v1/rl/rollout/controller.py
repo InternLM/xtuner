@@ -3,8 +3,7 @@ import math
 import os
 import threading
 from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, TypeAlias, TypedDict
+from typing import Any, Dict, List, Optional, TypeAlias, TypedDict
 from uuid import uuid4
 
 import ray
@@ -25,10 +24,6 @@ from .worker import (
     RolloutConfig,
     RolloutWorker,
 )
-
-
-if TYPE_CHECKING:
-    from xtuner.v1.rl.gateway.config import GatewayConfig
 
 
 @dataclass
@@ -67,10 +62,6 @@ class RolloutWorkerMetadata(TypedDict):
     # 键：服务器 URL 字符串
     # 值：布尔值，True 表示该 worker 处于活跃状态，False 表示已失效或停用
     worker_server_urls_status: Dict[str, bool]
-
-    # Gateway HTTP server URL (e.g. "http://1.2.3.4:8080").
-    # Set after start_gateway() is called; None if the gateway has not been started.
-    api_server_url: Optional[str]
 
     # worker rank -> SessionServer proxy URL. These are the externally
     # registered URLs for routedapiproxy; server_url_dict keeps the original
@@ -121,40 +112,6 @@ class RolloutController:
         )
         self.health_checker.start()
         self._tool_call_parser, self._reasoning_parser = self._build_output_parsers()
-        self._gateway_url: str | None = None
-
-    def start_gateway(self, config: "GatewayConfig") -> str | None:
-        """Start the gateway HTTP server in a daemon thread and return its URL.
-
-        The gateway exposes OpenAI-compatible endpoints that forward requests to
-        this controller via :class:`~xtuner.v1.rl.gateway.backend.local_backend.LocalRolloutBackend`.
-        Agent loops (e.g. CamelAgentLoop) discover the URL via :meth:`get_rollout_metadata`.
-
-        Args:
-            config: Gateway configuration.  ``port`` and ``host`` control where
-                the server binds; ``capture_folder`` enables per-request trace files.
-
-        Returns:
-            The base URL of the gateway, e.g. ``"http://1.2.3.4:8080"``, or
-            ``None`` when the configured rollout backend does not support the
-            gateway.
-        """
-        if self.config.rollout_backend == "sglang":
-            self.logger.error("XTuner gateway is not supported for SGLang rollout backend yet; skip starting gateway.")
-            return None
-
-        from xtuner.v1.rl.gateway import build_local_gateway_app, serve_gateway_in_thread
-
-        config.capture_folder = str(Path(self.config.worker_log_dir) / config._CAPTURE_PATH_FOLDER)
-        app = build_local_gateway_app(
-            ray.get_runtime_context().current_actor, config=config, rollout_config=self.config
-        )
-        serve_gateway_in_thread(app, config)
-        host = ray.util.get_node_ip_address() if config.host in ("", "0.0.0.0") else config.host
-        url = f"http://{host}:{config.port}"
-        self._gateway_url = url
-        self.logger.info(f"Gateway server started at {url}, capture_folder: {config.capture_folder}")
-        return url
 
     def get_rollout_metadata(self) -> RolloutWorkerMetadata:
         """Get information about the current rollout setup.
@@ -176,7 +133,6 @@ class RolloutController:
             "server_url_dict": self.worker_server_urls_map,
             "rollout_config": self.config,
             "worker_server_urls_status": worker_server_urls_status,
-            "api_server_url": self._gateway_url,
             "worker_session_url_dict": worker_session_url_dict,
             "worker_session_urls_status": worker_session_urls_status,
         }
