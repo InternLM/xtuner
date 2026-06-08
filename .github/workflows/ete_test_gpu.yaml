@@ -1,0 +1,129 @@
+name: ete_test_gpu
+run-name: ete_test_gpu-${{ github.event.inputs.run_case || 'all' }}
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_org:
+        required: false
+        description: 'Tested repository organization name. Default is InternLM'
+        type: string
+        default: 'InternLM/xtuner'
+      repo_ref:
+        required: false
+        description: 'Set branch or tag or commit id. Default is "main"'
+        type: string
+        default: 'main'
+      run_case:
+        required: false
+        description: 'Run a specific test case, e.g., "qwen3-rl-lmdeploy", as defined in autotest/config.yaml.'
+        type: string
+        default: 'all'
+  schedule:
+    - cron:  '00 16 * * 0-5'
+env:
+  CI_GPU_IMAGE_REGISTRY: ${{ secrets.CI_GPU_IMAGE_REGISTRY }}
+  # ETE PNG reports: llmcitester/xtuner @ branch reports, under ete/{run_id}/
+  CI_REPORTS_REPOSITORY: ${{ vars.CI_REPORTS_REPOSITORY || 'llmcitester/xtuner' }}
+  CI_REPORTS_BRANCH: ${{ vars.CI_REPORTS_BRANCH || 'reports' }}
+  CI_REPORTS_RAW_URL_BASE: ${{ vars.CI_REPORTS_RAW_URL_BASE || 'https://raw.githubusercontent.com/llmcitester/xtuner/reports/ete' }}
+  CI_REPORTS_BROWSE_URL_BASE: ${{ vars.CI_REPORTS_BROWSE_URL_BASE || 'https://github.com/llmcitester/xtuner/tree/reports/ete' }}
+  CI_REPORTS_KEEP_RUNS: ${{ vars.CI_REPORTS_KEEP_RUNS || '30' }}
+
+jobs:
+  ete_test:
+    if: ${{!cancelled() }}
+    runs-on: [h_cluster_ete]
+    timeout-minutes: 1440
+    steps:
+      - name: Clean workdir
+        run: sudo git clean -ffdx
+      - name: Clone repository
+        uses: actions/checkout@v2
+        with:
+          repository: ${{ github.event.inputs.repo_org || 'InternLM/xtuner' }}
+          ref: ${{github.event.inputs.repo_ref || 'main'}}
+      - name: Init job summary
+        run: |
+          {
+            echo "## ETE test report"
+            echo ""
+            echo "- Workflow run: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo "- Reports: [ete/${{ github.run_id }}](${{ env.CI_REPORTS_BROWSE_URL_BASE }}/${{ github.run_id }})"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: run-test
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          CI_REPORTS_RAW_URL_BASE: ${{ env.CI_REPORTS_RAW_URL_BASE }}
+        run: |
+          source /mnt/shared-storage-user/opencompass-shared/qa-llm-cicd/miniconda3/bin/activate
+          conda activate clusterx 
+          conda env list
+          unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
+          CASE_NAME="${{ github.event.inputs.run_case || 'all' }}"
+          if [ "$CASE_NAME" = "all" ]; then
+            pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
+          else
+            pytest autotest/test_all.py::test_all[$CASE_NAME] -m all -n 1 -vv --run_id ${{ github.run_id }}
+          fi
+
+      - name: Check report files
+        if: always()
+        id: reports
+        run: |
+          REPORT_DIR="${{ github.workspace }}/${{ github.run_id }}"
+          if compgen -G "${REPORT_DIR}/*.png" > /dev/null; then
+            echo "has_reports=true" >> "$GITHUB_OUTPUT"
+            echo "Found $(ls -1 "${REPORT_DIR}"/*.png | wc -l) comparison plot(s)."
+          else
+            echo "has_reports=false" >> "$GITHUB_OUTPUT"
+            echo "No comparison plots found under ${REPORT_DIR}, skip publish steps."
+          fi
+
+      - name: Upload comparison plots
+        if: always() && steps.reports.outputs.has_reports == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          path: ${{ github.workspace }}/${{ github.run_id }}/*.png
+          if-no-files-found: error
+          retention-days: 7
+          name: xtuner-ete-${{ github.run_id }}
+
+      - name: Publish and prune ete reports
+        if: always() && steps.reports.outputs.has_reports == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CI_REPORTS_DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ env.CI_REPORTS_REPOSITORY }}"
+          BRANCH="${{ env.CI_REPORTS_BRANCH }}"
+          KEEP="${{ env.CI_REPORTS_KEEP_RUNS }}"
+          SRC="${{ github.workspace }}/${{ github.run_id }}"
+          DEST="ete/${{ github.run_id }}"
+          git clone --depth=1 -b "${BRANCH}" "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" pages
+          cd pages
+          rm -rf "${DEST}"
+          mkdir -p "$(dirname "${DEST}")"
+          cp -r "${SRC}" "${DEST}"
+          if [ -d ete ]; then
+            cd ete
+            mapfile -t RUN_DIRS < <(find . -maxdepth 1 -type d -regextype posix-egrep -regex './[0-9]+' -printf '%f\n' | sort -rn)
+            if [ "${#RUN_DIRS[@]}" -gt "${KEEP}" ]; then
+              for old_run in "${RUN_DIRS[@]:KEEP}"; do
+                rm -rf "${old_run}"
+                echo "Removed old report: ${old_run}"
+              done
+            fi
+            cd ..
+          fi
+          git add -A
+          if git diff --staged --quiet; then
+            echo "No report changes to commit."
+          else
+            git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
+              commit -m "chore: publish ete report ${{ github.run_id }}, keep latest ${KEEP} runs"
+            git push
+          fi
