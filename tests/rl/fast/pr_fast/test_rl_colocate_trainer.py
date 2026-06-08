@@ -141,6 +141,9 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
 
         trainer.rollout_controller = SimpleNamespace(
+            ensure_workers_healthy_before_training=SimpleNamespace(
+                remote=MagicMock(return_value="rollout_ready_for_training")
+            ),
             offload=SimpleNamespace(remote=MagicMock(return_value="rollout_offloaded")),
         )
         trainer.train_controller = SimpleNamespace(
@@ -180,7 +183,7 @@ class TestRLColocateTrainer(unittest.TestCase):
 
         with (
             patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
         ):
             trainer.fit()
 
@@ -199,7 +202,7 @@ class TestRLColocateTrainer(unittest.TestCase):
 
         with (
             patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
         ):
             with self.assertRaisesRegex(AssertionError, "return non-empty rollout_states"):
                 trainer.fit()
@@ -226,7 +229,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
         with (
             patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
         ):
             trainer.fit()
 
@@ -252,7 +255,7 @@ class TestRLColocateTrainer(unittest.TestCase):
 
         with (
             patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
         ):
             trainer.fit()
 
@@ -329,7 +332,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         # 验证 debug 文件作为公开调试产物保存值快照，训练回放时恢复为 Ray ObjectRef。
         if not ray.is_initialized():
             try:
-                ray.init(local_mode=True, ignore_reinit_error=True, include_dashboard=False)
+                ray.init(address="local", num_cpus=1, ignore_reinit_error=True, include_dashboard=False)
             except Exception as exc:
                 self.skipTest(f"Ray init failed in this test environment: {exc}")
         try:

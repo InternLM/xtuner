@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 from abc import ABC, abstractmethod
-from typing import TypeAlias, cast, overload
+from typing import Any, TypeAlias, cast, overload
 
 import ray
 from pydantic import BaseModel, ConfigDict
@@ -31,7 +31,7 @@ AGENT_LOOP_CONCURRENCY_GROUP_GENERATE = "generate"
 class AgentLoopConfig(ABC, BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     hf_checkpoint: str
-    sample_params: SampleParams
+    sample_params: SampleParams | None = None
     cpu_resources: CPUResourcesConfig | None = None
     enable_batch_judge: bool = False
 
@@ -166,8 +166,8 @@ class AgentLoopConfig(ABC, BaseModel):
 class AgentLoop(ABC):
     def __init__(
         self,
-        rollout_ctl: RolloutController,
-        sample_params: SampleParams,
+        rollout_ctl: RolloutController | None,
+        sample_params: SampleParams | None,
         hf_checkpoint: str,
         judger: Judger | None = None,
         logger=None,
@@ -177,7 +177,7 @@ class AgentLoop(ABC):
         self.hf_checkpoint = hf_checkpoint
         self.tokenizer = load_tokenizer(hf_checkpoint, trust_remote_code=True)
         self.processor = load_processor(hf_checkpoint, trust_remote_code=True)
-        self.sample_params = sample_params
+        self.sample_params: SampleParams = sample_params if sample_params is not None else SampleParams()
         self.judger = judger
         self.enable_batch_judge = enable_batch_judge
         if logger is None:
@@ -198,7 +198,7 @@ class AgentLoop(ABC):
         generated_samples = asyncio.gather(*pending_tasks)
         group_samples = await generated_samples
         if self.judger is not None and self.enable_batch_judge:
-            if not any(sample.status == Status.ABORTED for sample in group_samples):
+            if all(sample.status == Status.COMPLETED for sample in group_samples):
                 group_samples = await self.run_judger(group_samples)
         return group_samples
 
@@ -244,7 +244,10 @@ class AgentLoop(ABC):
     async def pause(self) -> None:
         self._judger_pause_event.set()
         try:
-            await self.rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
+            rollout_ctl = self.rollout_ctl
+            if rollout_ctl is None:
+                return
+            await cast(Any, rollout_ctl.pause_generation).remote()
         finally:
             self._judger_pause_event.clear()
 

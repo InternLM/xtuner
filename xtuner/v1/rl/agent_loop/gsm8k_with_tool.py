@@ -42,7 +42,7 @@ class GSM8KToolAgentLoop(AgentLoop):
         max_turns: int,
         rollout_ctl: RolloutController,
         hf_checkpoint: str,
-        sample_params: SampleParams,
+        sample_params: SampleParams | None,
         judger: Judger | None = None,
         enable_batch_judge: bool = False,
     ):
@@ -105,6 +105,7 @@ class GSM8KToolAgentLoop(AgentLoop):
             rollout_state.sample_params = copy.deepcopy(base_sample_params)
             rollout_state.sample_params.max_tokens = remaining_max_tokens
 
+            assert self.rollout_ctl is not None
             rollout_state = await self.rollout_ctl.generate.remote(rollout_state)  # type: ignore[attr-defined]
             cur_turn += 1
             response_ids = cast(list[int], rollout_state.response_ids)

@@ -144,14 +144,6 @@ class SGLangWorker(RolloutWorker):
         response.raise_for_status()
         return response.json()
 
-    def check_health(self) -> bool:
-        try:
-            response = requests.get(f"{self.server_url}/{self.endpoints['health_generate']}", timeout=5.0)
-            return response.status_code == 200
-        except requests.RequestException as e:
-            self.logger.error(f"Health check failed for server {self.server_url}: {e}")
-            return False
-
     def flush_cache(self):
         """Flush the cache of the server."""
         # TODO: 支持 tp
@@ -292,6 +284,10 @@ class SGLangWorker(RolloutWorker):
         sglang_server_args = ServerArgs(**init_kwargs)
 
         return sglang_server_args
+
+    def _request_server_terminate(self) -> bool:
+        self.logger.warning("SGLang server does not support terminate request, will directly kill the process.")
+        return True
 
     def _transform_sample_params(self, sample_params: Dict):
         if sample_params["top_p"] > 0:

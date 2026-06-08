@@ -38,7 +38,8 @@ from xtuner.v1.rl.utils import (
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
-from .utils import PartialRolloutHandler
+from .session_server import SessionServerActor
+from .utils import ROLLOUT_RAY_GET_TIMEOUT, PartialRolloutHandler
 
 
 if TYPE_CHECKING:
@@ -77,7 +78,9 @@ class RolloutConfig(BaseModel):
         enable_chunked_prefill (bool): Enable chunked prefill for memory efficiency. Defaults to False.
         chunked_prefill_size (int): Chunk size for prefill operations. Defaults to 128.
         skip_load_weights (bool): Skip weight loading for rollout worker. Defaults to False.
-        rollout_timeout (float): Timeout duration in seconds for rollout requests. Defaults to 3600.0.
+        rollout_timeout (float): Timeout duration in seconds for rollout requests. Defaults to 1200.0.
+        session_server_timeout (float): Timeout duration in seconds for SessionServer requests forwarded to rollout
+            workers. Defaults to 1200.0.
         context_length (int): Context length for the rollout worker.
         launch_server_method (Literal["ray", "multiprocessing"]): Server launch method. Defaults to "ray".
         system_prompt (Optional[str]): System prompt to guide generation behavior. Defaults to None.
@@ -144,7 +147,7 @@ class RolloutConfig(BaseModel):
             group=infer_group,
             help="Base port number for distributed communication among rollout workers.",
         ),
-    ] = 35000
+    ] = 25000
     rollout_max_batch_size_per_instance: Annotated[
         Optional[int],
         Parameter(
@@ -221,6 +224,13 @@ class RolloutConfig(BaseModel):
         Parameter(
             group=infer_group,
             help="Timeout duration (in seconds) for rollout requests.",
+        ),
+    ] = 1200.0
+    session_server_timeout: Annotated[
+        float,
+        Parameter(
+            group=infer_group,
+            help="Timeout duration (in seconds) for SessionServer requests forwarded to rollout workers.",
         ),
     ] = 1200.0
     context_length: Annotated[
@@ -492,6 +502,8 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.server_task = None
         self.engine_bundle_idxs: list[int] = []
         self.server_process: Optional[multiprocessing.Process] = None
+        self.session_server_actor: Any | None = None
+        self.session_server_url: str | None = None
         self.logger = get_logger(log_dir=config.worker_log_dir, tag="RolloutWorker")
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.check_flag = True  # only print once
@@ -510,7 +522,7 @@ class RolloutWorker(SingleAcceleratorWorker):
     def set_enable_partial_rollout(self, enable: bool) -> None:
         self.enable_partial_rollout = enable
 
-    def init(self, dist_init_addr: str) -> tuple[int, str]:
+    def init(self, dist_init_addr: str | None = None) -> tuple[int, str]:
         """Initialize the worker and launch the server.
 
         Args:
@@ -521,41 +533,54 @@ class RolloutWorker(SingleAcceleratorWorker):
             Tuple[int, str]: A tuple containing the worker's rank and its
                 server URL.
         """
-        self.dist_init_addr = dist_init_addr if dist_init_addr else self.dist_init_addr
+        if dist_init_addr is not None:
+            self.dist_init_addr = dist_init_addr
         self.receive_abort_request.clear()
         self._launch_server()
+        self._start_session_server()
         return (self.rank, self.server_url)
 
     def init_dist_port(self) -> str:
         """Initialize distributed communication ports.
 
-        This method initializes three fixed ports for the distributed setup:
-        one for the inference server, one for NCCL, and one for distributed
-        communication.
+        This method initializes four fixed ports for the distributed setup:
+        one for distributed communication, one for the inference server, one
+        for NCCL, and one for the session server.
 
         Returns:
             str: The distributed initialization address (host:port).
         """
         local_rank = int(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
-        base_port = self.config.dist_port_base + local_rank * 3
+        base_port = self.config.dist_port_base + local_rank * 4
         self.host = ray.util.get_node_ip_address()
         self.dist_port = base_port
         self.server_port = base_port + 1
         self.nccl_port = base_port + 2
+        self.session_server_port = base_port + 3
         self.dist_init_addr = f"{self.host}:{self.dist_port}"
         self.server_url = f"http://{self.host}:{self.server_port}"
         return self.dist_init_addr
 
-    def shutdown(self):
+    def shutdown(self, *, stop_session_server: bool = False):
         """Shut down the worker, its server task, and any child processes."""
+        if stop_session_server:
+            self._stop_session_server()
+
         if self.server_task is not None:
-            ray.cancel(self.server_task, force=True)
+            server_task = self.server_task
+            self._request_server_terminate()
+            ray.cancel(server_task, force=True, recursive=True)
+            self.server_task = None
             return
 
         if self.server_process is not None:
             import psutil
 
-            parent = psutil.Process(self.server_process.pid)
+            try:
+                parent = psutil.Process(self.server_process.pid)
+            except psutil.NoSuchProcess:
+                self.server_process = None
+                return
             children = parent.children(recursive=True)
             for child in children:
                 child.terminate()
@@ -564,8 +589,51 @@ class RolloutWorker(SingleAcceleratorWorker):
                 child.kill()
             parent.terminate()
             parent.wait(timeout=5)
+            self.server_process = None
             self.logger.debug(f"Worker {self.rank} server process and its children terminated.")
             return
+
+    def _start_session_server(self) -> None:
+        """Start the per-worker SessionServer proxy."""
+        if self.session_server_actor is not None:
+            return
+
+        current_pg = ray.util.get_current_placement_group()
+        scheduling_strategy = PlacementGroupSchedulingStrategy(
+            placement_group=current_pg,
+            placement_group_capture_child_tasks=False,
+            placement_group_bundle_index=self.engine_bundle_idxs[0],
+        )
+        self.session_server_actor = (
+            ray.remote(SessionServerActor)
+            .options(
+                scheduling_strategy=scheduling_strategy,
+                num_cpus=0,
+            )
+            .remote(
+                worker_base_url=self.server_url,
+                tokenizer_path=str(self.config.tokenizer_path or self.config.model_path),
+                host=self.host,
+                port=self.session_server_port,
+                request_timeout=self.config.session_server_timeout,
+            )
+        )
+        self.session_server_url = ray.get(
+            self.session_server_actor.start.remote(),
+            timeout=ROLLOUT_RAY_GET_TIMEOUT,
+        )
+
+    def _stop_session_server(self) -> None:
+        if self.session_server_actor is not None:
+            try:
+                ray.get(self.session_server_actor.stop.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)
+            finally:
+                ray.kill(self.session_server_actor)
+                self.session_server_actor = None
+            self.session_server_url = None
+
+    def get_session_server_info(self) -> tuple[int, str | None]:
+        return self.rank, self.session_server_url
 
     async def pause_generation(self):
         """Pause the worker's generation process."""
