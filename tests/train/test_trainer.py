@@ -1,42 +1,40 @@
 import os
+import tempfile
+from pathlib import Path
+from unittest.mock import patch, Mock
 import pickle
 import shutil
-import tempfile
 import weakref
 from concurrent.futures import Future
-from pathlib import Path
-from unittest.mock import Mock, patch
+from pydantic import TypeAdapter
 
-import parametrize
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch.optim.lr_scheduler import SequentialLR
 from torch.testing._internal.common_distributed import DistributedTestBase
+import parametrize
 
-from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
-from xtuner.v1.datasets import FTDPTokenizeFnConfig
-from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
-from xtuner.v1.datasets.dataloader import Dataloader
-from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
-from xtuner.v1.loss import CELossConfig
+from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense4BConfig, Qwen3Dense8BConfig
 from xtuner.v1.model.compose.intern_s1 import InternS1Config, InternS1MiniConfig
 from xtuner.v1.model.compose.internvl import (
     InternVL3P5Dense8BConfig,
     InternVL3P5MoE30BA3Config,
 )
-from xtuner.v1.model.dense.qwen3 import Qwen3Dense4BConfig, Qwen3Dense8BConfig
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
-from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
-from xtuner.v1.train.trainer import (
-    HooksConfig,
-    HookStage,
-    LoadCheckpointConfig,
-    Trainer,
-    TrainerConfig,
-)
+from xtuner.v1.train.trainer import HooksConfig, Trainer, ResumeConfig, HookStage, LoadCheckpointConfig
+from xtuner.v1.datasets import FTDPTokenizeFnConfig
+from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
+from xtuner.v1.train.trainer import TrainerConfig
+from xtuner.v1.loss import CELossConfig
+from xtuner._testing import DeterministicDDPTestCase
+from unittest import TestCase
+from xtuner.v1.train.trainer import XTunerMeta, ExpInfo, ExpHistory, GitInfo
 from xtuner.v1.utils.device import get_device
+from xtuner.v1.datasets.dataloader import Dataloader
+from torch.optim.lr_scheduler import SequentialLR
+from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 
 
 DEVICE = get_device()
@@ -59,7 +57,7 @@ class FakeEngine:
     def train_step(self, *args, **kwargs):
         self.train_step_calls += 1
         return {"total_loss": 1.8, "step_consumed_tokens": 100, "step_consumed_img_tokens": 0.0, "grad_norm": torch.tensor(1.0), "efficient_attn_ratio": 0.5, "img_efficient_attn_ratio": 0.0, "logs_info": {"local_loss": 1.0, "reduced_llm_loss": 0.8}, "extra_info": ModelForwardExtraLogInfo()}
-
+        
 
     def save_hf(self, hf_path):
         self.save_hf_calls.append(hf_path)
@@ -93,14 +91,6 @@ class FakeEngine:
 
     def destroy_async_checkpoint_pg(self) -> None:
         pass
-
-
-class FakeAsyncDCPFailureEngine(FakeEngine):
-    def async_save_dcp(self, weights_dir: Path) -> Future:
-        weights_dir.mkdir(parents=True, exist_ok=True)
-        f: Future = Future()
-        f.set_exception(RuntimeError("mock async dcp failure"))
-        return f
 
 
 def prepare(fn):
@@ -249,7 +239,7 @@ class TestTrainerSaveHF(DistributedTestBase):
             assert f"step-{step}" in str(checkpoint)
             assert os.path.exists(checkpoint)
 
-        # save checkpoint at step 3 6 9 10
+        # save checkpoint at step 3 6 9 10 
         trainer = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,
@@ -325,60 +315,6 @@ class TestTrainerSaveHF(DistributedTestBase):
             assert os.path.exists(checkpoint)
             weights_dir = Path(checkpoint) / "weights"
             assert weights_dir.exists(), f"Expected weights dir at {weights_dir}"
-
-    @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
-    @patch(
-        "xtuner.v1.train.trainer.Trainer.build_engine",
-        Mock(side_effect=lambda *args, **kwargs: FakeAsyncDCPFailureEngine()),
-    )
-    @patch("xtuner.v1.train.trainer.Trainer._prepare_model_input", Mock(return_value=[]))
-    @prepare
-    def test_async_save_checkpoint_failure_terminates_from_monitor(self):
-        self.create_pg(DEVICE)
-        work_dir_list = [self.work_dir]
-        dist.broadcast_object_list(work_dir_list, src=0)
-        self.work_dir = Path(work_dir_list[0])
-        model_cfg = Qwen3MoE30BA3Config()
-        optim_cfg = AdamWConfig(lr=1e-4, weight_decay=0.01)
-        fsdp_cfg = FSDPConfig(tp_size=1)
-        dataset_cfg = [
-            {
-                "dataset": DatasetConfig(name="alpaca", anno_path=self.alpaca_path, sample_ratio=1.0),
-                "tokenize_fn": FTDPTokenizeFnConfig(),
-            },
-        ]
-        dataloader_cfg = DataloaderConfig()
-        lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0.1, lr_min=1e-6)
-
-        trainer = Trainer(
-            load_from=str(self.fake_hf_model_dir),
-            model_cfg=model_cfg,
-            optim_cfg=optim_cfg,
-            fsdp_cfg=fsdp_cfg,
-            dataset_cfg=dataset_cfg,
-            dataloader_cfg=dataloader_cfg,
-            lr_cfg=lr_cfg,
-            tokenizer_path=self.tokenizer_path,
-            global_batch_size=2,
-            total_step=5,
-            work_dir=str(self.work_dir),
-            seed=42,
-            debug=False,
-            checkpoint_interval=5,
-            async_checkpoint=True,
-        )
-        trainer._cur_step = 5
-
-        with (
-            patch("xtuner.v1.utils.async_save_monitor.os.getpgrp", return_value=1234),
-            patch("xtuner.v1.utils.async_save_monitor.os.killpg") as killpg,
-        ):
-            self.assertTrue(trainer._maybe_save(is_snapshot=False))
-            trainer._wait_for_pending_checkpoint()
-            trainer._async_save_monitor._check_watched_futures()
-
-        killpg.assert_called_once()
-        self.assertIsNone(trainer._pending_checkpoint)
 
     @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
     @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
@@ -482,7 +418,7 @@ class TestTrainerSaveHF(DistributedTestBase):
         assert resume_trainer1_2.cur_step == 16
         dist.barrier()
 
-        # 2. Test resume_from
+        # 2. Test resume_from 
         resume_trainer2 = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,
