@@ -543,15 +543,15 @@ class RolloutWorker(SingleAcceleratorWorker):
     def init_dist_port(self) -> str:
         """Initialize distributed communication ports.
 
-        This method initializes three fixed ports for the distributed setup:
-        one for the inference server, one for NCCL, and one for distributed
-        communication.
+        This method initializes four fixed ports for the distributed setup:
+        one for distributed communication, one for the inference server, one
+        for NCCL, and one for the session server.
 
         Returns:
             str: The distributed initialization address (host:port).
         """
         local_rank = int(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
-        base_port = self.config.dist_port_base + local_rank * 3
+        base_port = self.config.dist_port_base + local_rank * 4
         self.host = ray.util.get_node_ip_address()
         self.dist_port = base_port
         self.server_port = base_port + 1
