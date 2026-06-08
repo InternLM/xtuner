@@ -184,6 +184,28 @@ def _anthropic_request_to_openai(req_body: dict) -> tuple[list[dict], Optional[l
     return messages, tools
 
 
+def _filter_anthropic_user_tools(tools) -> Optional[list]:
+    """Drop Anthropic server-side tools (``web_search_*`` / ``computer_*`` / ``bash_*`` / ``text_editor_*``).
+
+    ``ToolParam`` in lmdeploy's anthropic protocol requires ``input_schema``;
+    server-side built-ins are managed by Anthropic itself and only carry
+    ``type`` + ``name``, so they fail ``MessagesRequest.model_validate`` and
+    the worker can't execute them anyway. Keep only entries that have an
+    ``input_schema`` (= user-defined tools the worker can route to).
+
+    Returns the filtered list (possibly empty), or ``None`` if input was None.
+    """
+    if tools is None:
+        return None
+    if not isinstance(tools, list):
+        return tools
+    kept = [t for t in tools if isinstance(t, dict) and "input_schema" in t]
+    if len(kept) != len(tools):
+        dropped = [t.get("type") or t.get("name") for t in tools if t not in kept]
+        get_logger().debug(f"Dropped {len(tools) - len(kept)} anthropic server-side tool(s): {dropped}")
+    return kept
+
+
 class SessionServer:
     """SessionServer intercepts and records requests sent to a remote LLM API worker.
 
@@ -500,6 +522,16 @@ class SessionServer:
         if request_body:
             try:
                 request_data = json.loads(request_body)
+                # Anthropic server-side built-ins (web_search_*, computer_*, ...)
+                # don't carry ``input_schema`` and the lmdeploy worker can't
+                # route them anyway — drop them before anything downstream
+                # (orig_req_body / on_request / wire forward) sees them.
+                if fmt == FMT_ANTHROPIC and "tools" in request_data:
+                    filtered = _filter_anthropic_user_tools(request_data["tools"])
+                    if filtered:
+                        request_data["tools"] = filtered
+                    else:
+                        request_data.pop("tools", None)
                 orig_req_body = copy.deepcopy(request_data)
 
                 trace_enabled = _request_uses_trace_store(request_data)
