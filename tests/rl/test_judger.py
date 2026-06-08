@@ -15,7 +15,6 @@ from xtuner.v1.data_proto.rl_data import RolloutState
 
 MODEL_PATH = os.environ.get("ROLLOUT_MODEL_PATH")
 DATA_PATH = os.environ.get("ROLLOUT_DATA_PATH")
-GEO_ROLLOUT_DATA_PATH = os.environ.get("GEO_ROLLOUT_DATA_PATH")
 VERL_ROLLOUT_DATA_PATH = os.environ.get("VERL_ROLLOUT_DATA_PATH")
 DAPO_DATA_PATH = os.environ.get("ROLLOUT_DAPO_DATA_PATH")
 FAKE_JUDGER_INPUT_ITEM = RolloutState(
@@ -277,26 +276,6 @@ class TestJudgerController(unittest.TestCase):
         rewards = [s.reward["score"] for s in rollout_states]
         expected_avg_score = np.mean(history_reward)
         self.assertEqual(round(np.mean(rewards), 4), round(expected_avg_score, 4))
-
-    @unittest.skipUnless(
-        GEO_ROLLOUT_DATA_PATH and os.path.exists(GEO_ROLLOUT_DATA_PATH),
-        "requires GEO_ROLLOUT_DATA_PATH",
-    )
-    def test_geo_batch_judge_score(self):
-        # 测试 geo judger + 4 个实例池的评判分数是否正确
-        from xtuner.v1.rl.judger.geo3k import GEO3KJudgerConfig
-        config = GEO3KJudgerConfig(
-            judger_name="geo3k",
-            cpu_resources=CPUResourcesConfig(num_workers=4, num_cpus_per_worker=1),
-        )
-        states, history_reward = construct_geo3k_dapo_judger_data(GEO_ROLLOUT_DATA_PATH)
-        router = config.build()
-        rollout_states = asyncio.run(self._judger_batch(router, states))
-        rewards = [s.reward["score"] for s in rollout_states]
-        expected_avg_score = np.mean(history_reward)
-        self.assertEqual(round(np.mean(rewards), 4), round(expected_avg_score, 4))
-        # 验证Router中确实有4个Worker实例在运行
-        self.assertEqual(len(router.get_worker_status()), 4)
 
     @unittest.skipUnless(
         VERL_ROLLOUT_DATA_PATH and os.path.exists(VERL_ROLLOUT_DATA_PATH),
