@@ -1,10 +1,10 @@
-"""PR-real smoke for real Qwen3.5 MoE VLM async RL training.
+"""Two-step real Qwen3.5 MoE VLM async RL training check.
 
 This test intentionally runs a real two-step ``RLColocateTrainer.fit()`` with
 LMDeploy, Qwen3.5 35B-A3B VLM MoE, Geometry3K multimodal data, async replay
 buffer, and async produce strategy.
 
-Smoke-level checks:
+Checks:
 - train/infer mismatch metrics stay finite and below PR thresholds;
 - each train step produces timing, batch-size, and async failure metrics;
 - async completed/aborted group accounting matches produced samples plus
@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 # XTUNER_DETERMINISTIC is read during xtuner imports. Keep it disabled for
-# this smoke because FA3 deterministic backward does not support hdim=256.
+# this 2-step test because FA3 deterministic backward does not support hdim=256.
 os.environ["XTUNER_DETERMINISTIC"] = "false"
 
 import ray
@@ -59,7 +59,7 @@ MEDIA_ROOT = Path(os.environ["GEO3K_MEDIA_ROOT"])
 DATA_PATH = Path(os.environ["GEO3K_LONGTAIL_DATA_PATH"])
 BACKEND_LMDEPLOY = os.environ["XTUNER_USE_LMDEPLOY"]
 
-EXPERIMENT_NAME = "qwen35_vl_moe_async_pr_real_smoke"
+EXPERIMENT_NAME = "qwen35_vl_moe_async_train_2step"
 
 TRAIN_BATCH_SIZE = 32
 PROMPT_REPEAT_K = 2
@@ -68,9 +68,21 @@ TOTAL_TRAIN_STEPS = 2
 MAX_PROMPT_LENGTH = 4096
 MAX_RESPONSE_LENGTH = 2048
 PACK_MAX_LENGTH = 8192
-MISMATCH_KL_MAX = float(os.environ.get("XTUNER_PR_REAL_SMOKE_MISMATCH_KL_MAX", "0.005"))
-MISMATCH_K3_KL_MAX = float(os.environ.get("XTUNER_PR_REAL_SMOKE_MISMATCH_K3_KL_MAX", "0.005"))
-RUN_ROOT = Path(os.environ.get("XTUNER_PR_REAL_SMOKE_RUN_ROOT", ".")).resolve()
+MISMATCH_KL_MAX = float(
+    os.environ.get(
+        "XTUNER_TRAIN_2STEP_MISMATCH_KL_MAX",
+        os.environ.get("XTUNER_PR_REAL_SMOKE_MISMATCH_KL_MAX", "0.005"),
+    )
+)
+MISMATCH_K3_KL_MAX = float(
+    os.environ.get(
+        "XTUNER_TRAIN_2STEP_MISMATCH_K3_KL_MAX",
+        os.environ.get("XTUNER_PR_REAL_SMOKE_MISMATCH_K3_KL_MAX", "0.005"),
+    )
+)
+RUN_ROOT = Path(
+    os.environ.get("XTUNER_TRAIN_2STEP_RUN_ROOT", os.environ.get("XTUNER_PR_REAL_SMOKE_RUN_ROOT", "."))
+).resolve()
 
 REQUIRED_STEP_METRICS = (
     "mismatch/mismatch_kl",
@@ -89,20 +101,20 @@ REQUIRED_STEP_METRICS = (
 )
 
 
-class TestQwen35VLMoEAsyncPRRealSmoke(unittest.TestCase):
+class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
     def setUp(self):
         if BACKEND_LMDEPLOY != "1":
-            raise RuntimeError("XTUNER_USE_LMDEPLOY=1 is required for PR-real smoke.")
+            raise RuntimeError("XTUNER_USE_LMDEPLOY=1 is required for Qwen3.5 VLM MoE async train 2-step.")
         if not MODEL_PATH.exists():
             raise FileNotFoundError(f"QWEN3_5_MOE_PATH does not exist: {MODEL_PATH}")
         if not MEDIA_ROOT.exists():
             raise FileNotFoundError(f"GEO3K_MEDIA_ROOT does not exist: {MEDIA_ROOT}")
         if not DATA_PATH.exists():
-            raise FileNotFoundError(f"Long-tail smoke dataset does not exist: {DATA_PATH}")
+            raise FileNotFoundError(f"Long-tail training dataset does not exist: {DATA_PATH}")
 
         self.temp_dir = RUN_ROOT / f"{EXPERIMENT_NAME}_{time.strftime('%Y%m%d%H%M%S')}_{os.getpid()}"
         self.temp_dir.mkdir(parents=True, exist_ok=False)
-        print(f"qwen35 vl moe async smoke work dir: {self.temp_dir}")
+        print(f"qwen35 vl moe async train 2-step work dir: {self.temp_dir}")
         self.produce_calls: list[dict[str, Any]] = []
         self.produce_results: list[ProduceBatchResult] = []
         self.update_weight_calls = 0
@@ -125,7 +137,7 @@ class TestQwen35VLMoEAsyncPRRealSmoke(unittest.TestCase):
         if hasattr(self, "_old_env"):
             self._restore_env()
 
-    def test_qwen35_vl_moe_async_fit_two_steps_and_metrics(self):
+    def test_qwen35_vl_moe_async_train_2step_and_metrics(self):
         work_dir = Path(self.temp_dir) / "work_dir"
         work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -151,7 +163,7 @@ class TestQwen35VLMoEAsyncPRRealSmoke(unittest.TestCase):
             "steps": step_metrics,
             "produce_calls": self.produce_calls,
         }
-        print("qwen35 vl moe async smoke diagnostics:\n" + json.dumps(diagnostics, ensure_ascii=False, indent=2))
+        print("qwen35 vl moe async train 2-step diagnostics:\n" + json.dumps(diagnostics, ensure_ascii=False, indent=2))
 
     def build_config(self, work_dir: Path) -> RLColocateTrainerConfig:
         resources = AcceleratorResourcesConfig(

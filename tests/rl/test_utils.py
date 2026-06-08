@@ -11,7 +11,7 @@ import parametrize
 
 class TestFindMasterAddrAndPort(unittest.TestCase):
     """测试 find_master_addr_and_port 函数"""
-    
+
     @classmethod
     def setUpClass(cls):
         """测试前设置 Ray 环境"""
@@ -25,33 +25,33 @@ class TestFindMasterAddrAndPort(unittest.TestCase):
         # 关闭 Ray（如果需要的话）
         if ray.is_initialized():
             ray.shutdown()
-    
+
     def test_find_master_addr_and_port_actual(self):
         """测试 find_master_addr_and_port 函数在实际 Ray 环境中的行为"""
         # 实际调用远程函数
         addr, port = ray.get(find_master_addr_and_port.remote())
-        
+
         # 验证返回的地址是有效的 IP 地址
         try:
             socket.inet_aton(addr)
             is_valid_ip = True
         except socket.error:
             is_valid_ip = False
-        
+
         self.assertTrue(is_valid_ip, f"返回的地址 {addr} 不是有效的 IP 地址")
-        
+
         # 验证端口是有效的端口号（介于 0 和 65535 之间）
         self.assertTrue(0 < port <= 65535, f"返回的端口 {port} 不是有效的端口号")
-    
+
     def test_find_master_addr_and_port_port_availability(self):
         """测试 find_master_addr_and_port 返回的端口是可用的"""
         # 调用远程函数
         addr, port = ray.get(find_master_addr_and_port.remote())
-        
+
         # 验证返回的端口确实是可用的
         # 创建一个新的套接字
         test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        
+
         try:
             # 尝试绑定到这个端口 - 这应该成功，因为 find_master_addr_and_port
             # 会在获取端口号后关闭套接字连接
@@ -66,14 +66,14 @@ class TestFindMasterAddrAndPort(unittest.TestCase):
 
 class TestGetAcceleratorIds(unittest.TestCase):
     """测试 get_accelerator_ids 函数"""
-    
+
     @classmethod
     def setUpClass(cls):
         """测试前设置 Ray 环境并检测可用的加速器类型"""
         # 单测必须启动隔离的本地 Ray，不能误连机器上已有的 Ray cluster。
         if not ray.is_initialized():
             ray.init(address="local", ignore_reinit_error=True, include_dashboard=False)
-        
+
     @classmethod
     def tearDownClass(cls):
         """测试后关闭 Ray 环境"""
