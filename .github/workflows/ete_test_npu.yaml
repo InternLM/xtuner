@@ -1,5 +1,5 @@
 name: ete_test_npu
-run-name: e2e_test_npu-${{ github.event.inputs.run_case || 'all' }}
+run-name: ete_test_npu-${{ github.event.inputs.run_case || 'all' }}
 permissions:
   contents: read
 

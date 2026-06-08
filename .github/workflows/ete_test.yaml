@@ -1,5 +1,5 @@
-name: ete_test
-run-name: e2e_test-${{ github.event.inputs.run_case || 'all' }}
+name: ete_test_gpu
+run-name: ete_test_gpu-${{ github.event.inputs.run_case || 'all' }}
 permissions:
   contents: read
 
