@@ -8,15 +8,13 @@ import urllib.error
 import urllib.request
 import uuid
 from abc import ABC
-from copy import deepcopy
-from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, List, Literal, Union
 
 import requests
 import torch.nn.functional as F
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.data_proto.utils import calculate_seq_staleness as calculate_seq_staleness
 from xtuner.v1.utils.logger import get_logger
 
@@ -245,102 +243,6 @@ def get_eos_token(model_path: str) -> int | List[int]:
             f"eos_token_id is not found in {generation_config_path}. You must provide eos_token manually."
         )
     return eos_token_id
-
-
-def chat_trace_records_to_rollout_states(
-    rollout_state: RolloutState,
-    records: list[Any],
-    *,
-    tokenizer: Any | None = None,
-    extra_fields: dict[str, Any] | None = None,
-) -> list[RolloutState]:
-    """Convert Gateway chat trace records into trainable rollout states.
-
-    The records may be ``ChatTraceRecord`` dataclass instances or serialized
-    dictionaries returned by ``/trace_store``.
-    """
-    normalized_records = []
-    for record in records:
-        if isinstance(record, dict):
-            normalized_records.append(record)
-        elif not isinstance(record, type) and is_dataclass(record):
-            normalized_records.append(asdict(record))
-        elif hasattr(record, "__dict__"):
-            normalized_records.append(dict(record.__dict__))
-        else:
-            raise TypeError(f"Unsupported chat trace record type: {type(record)}")
-
-    trace_count = len(normalized_records)
-    trace_summary = [
-        {
-            "request_id": record.get("request_id"),
-            "finish_reason": record.get("finish_reason"),
-            "status": record.get("status"),
-            "prompt_ids": record.get("prompt_ids", []),
-            "response_ids": record.get("response_ids", []),
-        }
-        for record in normalized_records
-    ]
-
-    states: list[RolloutState] = []
-    for index, record in enumerate(normalized_records):
-        prompt_ids = record.get("prompt_ids")
-        response_ids = record.get("response_ids")
-        if not prompt_ids or not response_ids:
-            raise RuntimeError(f"Gateway trace record {index} is missing prompt_ids or response_ids.")
-
-        logprobs = record.get("logprobs")
-        if not isinstance(logprobs, list) or len(logprobs) != len(response_ids):
-            logprobs = None
-
-        status_value = record.get("status")
-        if isinstance(status_value, Status):
-            status = status_value
-        elif isinstance(status_value, str):
-            try:
-                status = Status(status_value)
-            except ValueError:
-                status = Status.FAILED
-        else:
-            status = Status.FAILED
-
-        request_id = record.get("request_id")
-        try:
-            uid = int(request_id) if request_id is not None else None
-        except (TypeError, ValueError):
-            uid = None
-
-        response = record.get("output_text")
-        if response is None and tokenizer is not None:
-            try:
-                response = tokenizer.decode(response_ids)
-            except Exception:
-                response = None
-
-        normalized = rollout_state.model_copy(deep=True)
-        normalized.uid = uid
-        normalized.prompt_ids = list(prompt_ids)
-        normalized.tokens = list(prompt_ids)
-        normalized.response_ids = list(response_ids)
-        normalized.response_mask = [1] * len(response_ids)
-        normalized.logprobs = logprobs
-        normalized.response = response
-        normalized.finish_reason = record.get("finish_reason")
-        normalized.status = status
-        normalized.error_msg = None if status == Status.COMPLETED else f"Gateway trace status={status.value}"
-        normalized.reward = None
-        normalized.extra_fields = {
-            **deepcopy(rollout_state.extra_fields),
-            "gateway_trace_index": index,
-            "gateway_trace_count": trace_count,
-            "gateway_trace_records": deepcopy(trace_summary),
-            "gateway_request_id": record.get("request_id"),
-            "gateway_request_snapshot": record.get("request_snapshot"),
-            "gateway_response_snapshot": record.get("response_snapshot"),
-            **deepcopy(extra_fields or {}),
-        }
-        states.append(normalized)
-    return states
 
 
 def register_to_routedapiproxy(model_name: str, api_server_url: str) -> dict:

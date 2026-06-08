@@ -103,7 +103,6 @@ class UpdateWeighter:
         server_url_dict: ServiceUrlMap,
         rollout_config: RolloutConfig,
         worker_server_urls_status: Dict[str, bool],
-        api_server_url: str | None = None,
         worker_session_url_dict: ServiceUrlMap | None = None,
         worker_session_urls_status: Dict[str, bool] | None = None,
     ):
