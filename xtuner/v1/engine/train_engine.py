@@ -393,12 +393,20 @@ class TrainEngine:
         # temporary .incomplete directory and commit it only after every rank's
         # async_save future has completed.
         incomplete_dir = weights_dir.with_name(f"{weights_dir.name}.incomplete")
-        if weights_dir.exists():
+        # Check existence only on rank 0 and broadcast the result so all ranks
+        # raise (or continue) together. Without this, NFS cache inconsistencies
+        # could cause some ranks to raise while others proceed to the barrier,
+        # resulting in a deadlock.
+        dir_exists = torch.tensor(int(weights_dir.exists() if dist.get_rank() == 0 else 0), dtype=torch.int32)
+        dist.broadcast(dir_exists, src=0, group=async_checkpoint_pg)
+        if dir_exists.item():
             raise FileExistsError(f"Checkpoint directory already exists: {weights_dir}")
         if dist.get_rank() == 0:
             if incomplete_dir.exists():
                 shutil.rmtree(incomplete_dir)
             incomplete_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure rank 0 finishes rmtree+mkdir before any rank proceeds to write.
+        dist.barrier(group=async_checkpoint_pg)
 
         # XtunerCacheWriter.stage() creates its staging cache directly in POSIX
         # shared memory (/dev/shm). PyTorch's ForkingPickler detects
@@ -441,7 +449,20 @@ class TrainEngine:
                     dcp_future.result()
                     break
                 except BaseException as exc:
-                    if attempt == max_daemon_init_attempts or not self._is_async_checkpoint_daemon_init_error(exc):
+                    # Use all_reduce(MAX) so all ranks agree on whether this is
+                    # a retryable daemon-init error. Without this, ranks that
+                    # see a non-retryable error would raise (skipping the
+                    # barrier) while other ranks wait at the barrier, causing a
+                    # deadlock.
+                    is_retryable = attempt < max_daemon_init_attempts and self._is_async_checkpoint_daemon_init_error(
+                        exc
+                    )
+                    # 0 = retryable, 1 = fatal; MAX means any fatal rank wins.
+                    decision = torch.tensor(0 if is_retryable else 1, dtype=torch.int32)
+                    dist.all_reduce(decision, op=dist.ReduceOp.MAX, group=async_checkpoint_pg)
+                    is_fatal = bool(decision.item())
+
+                    if is_fatal:
                         elapsed = time.time() - t0
                         logger.error(f"[DCP async_save for {weights_dir}] failed after {elapsed:.2f}s: {exc}")
                         logger.error(traceback.format_exc())
@@ -492,6 +513,51 @@ class TrainEngine:
         storage_writer = XtunerCacheWriter(weights_dir, cache_staged_state_dict=True)
         storage_writer.state_dict_cache = self._async_state_dict_cache
         return storage_writer
+
+    @classmethod
+    def warmup_async_save_dcp(cls, work_dir: Path) -> None:
+        """Warm up async DCP save infrastructure with a tiny dummy state dict.
+
+        This triggers the full async save path — including daemon subprocess
+        spawn and its internal init_process_group — so that errors like port
+        conflicts (EADDRINUSE) surface before any real training begins.
+
+        Args:
+            work_dir (Path): Working directory for temporary preflight files.
+        """
+        preflight_dir = work_dir / ".preflight_dcp"
+        weights_dir = preflight_dir / "weights"
+
+        if dist.get_rank() == 0:
+            if preflight_dir.exists():
+                shutil.rmtree(preflight_dir)
+            weights_dir.mkdir(parents=True, exist_ok=True)
+        dist.barrier()
+
+        dummy_state_dict = {"_preflight": torch.zeros(1)}
+
+        try:
+            async_save_kwargs: dict[str, Any] = {}
+            state_dict_saver = importlib.import_module("torch.distributed.checkpoint.state_dict_saver")
+            async_checkpointer_type = getattr(state_dict_saver, "AsyncCheckpointerType", None)
+            if async_checkpointer_type is not None:
+                async_save_kwargs["async_checkpointer_type"] = async_checkpointer_type.PROCESS
+
+            future = cast(Any, dcp.async_save)(
+                dummy_state_dict,
+                checkpoint_id=weights_dir,
+                **async_save_kwargs,
+            )
+            future.result(timeout=300)
+        except Exception as e:
+            raise RuntimeError(
+                f"DCP warmup save failed. This usually indicates a port conflict "
+                f"or process group initialization issue. Error: {e}"
+            ) from e
+        finally:
+            if dist.get_rank() == 0 and preflight_dir.exists():
+                shutil.rmtree(preflight_dir, ignore_errors=True)
+            dist.barrier()
 
     def destroy_async_checkpoint_pg(self) -> None:
         """Destroy the dedicated gloo process group used for async

@@ -15,7 +15,7 @@ from torch.distributed.checkpoint._extension import (
     StreamTransformExtension,
 )
 from torch.distributed.checkpoint.filesystem import FileSystem
-from torch.distributed.checkpoint.staging import _copy_state_dict, _create_cpu_state_dict
+from torch.distributed.checkpoint.staging import _copy_state_dict
 from torch.distributed.checkpoint.storage import (
     WriteResult,
 )
@@ -23,6 +23,60 @@ from torch.futures import Future
 
 
 logger = logging.getLogger(__name__)
+
+
+def _create_coalesced_shm_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
+    """Create a CPU state dict backed by coalesced shared-memory buffers.
+
+    Instead of creating one shared-memory file per tensor (which leads to
+    thousands of fds and triggers ``received 0 items of ancdata`` when the
+    daemon subprocess tries to receive them all), this function groups tensors
+    by dtype, allocates a single large shared-memory tensor per dtype, and
+    returns views into that buffer.
+
+    Args:
+        state_dict (dict[str, Any]): The source state dict (tensors can be on
+            any device).
+
+    Returns:
+        dict[str, Any]: A new state dict with the same keys, where every tensor
+        is a view into a dtype-coalesced shared-memory buffer.
+    """
+    # Collect tensor metadata grouped by dtype
+    dtype_groups: dict[torch.dtype, list[tuple[str, torch.Size]]] = {}
+    for key, val in state_dict.items():
+        if isinstance(val, torch.Tensor) and val.numel() > 0:
+            dtype_groups.setdefault(val.dtype, []).append((key, val.size()))
+
+    # Allocate one coalesced buffer per dtype in shared memory
+    dtype_buffers: dict[torch.dtype, torch.Tensor] = {}
+    dtype_offsets: dict[torch.dtype, int] = {}
+    for dtype, items in dtype_groups.items():
+        total_numel = sum(size.numel() for _, size in items)
+        buf = torch.empty(total_numel, dtype=dtype)
+        buf.share_memory_()
+        dtype_buffers[dtype] = buf
+        dtype_offsets[dtype] = 0
+
+    # Build the output state dict with views into coalesced buffers
+    result: dict[str, Any] = {}
+    for key, val in state_dict.items():
+        if isinstance(val, torch.Tensor) and val.numel() > 0:
+            dtype = val.dtype
+            offset = dtype_offsets[dtype]
+            numel = val.numel()
+            view = dtype_buffers[dtype][offset : offset + numel].view(val.size())
+            dtype_offsets[dtype] = offset + numel
+            result[key] = view
+        elif isinstance(val, torch.Tensor):
+            # Zero-numel tensors: just create a shared empty tensor
+            t = torch.zeros_like(val, device="cpu")
+            t.share_memory_()
+            result[key] = t
+        else:
+            result[key] = val
+
+    return result
 
 
 # PyTorch 2.7+ introduced _extensions parameter for FileSystemWriter
@@ -194,16 +248,13 @@ class XtunerCacheWriter(FileSystemWriter):
         self.per_thread_copy_ahead = 0
 
         if not self.cache_staged_state_dict:
-            staged_state_dict = _create_cpu_state_dict(state_dict, share_memory=True)
+            staged_state_dict = _create_coalesced_shm_state_dict(state_dict)
             return _copy_state_dict(state_dict, staged_state_dict, type_check=self.type_check)
 
         if self.state_dict_cache is None:
             if not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0:
-                logger.info("[DCP async_save] creating shared-memory staged cache")
-            self.state_dict_cache = _create_cpu_state_dict(
-                state_dict,
-                share_memory=True,
-            )
+                logger.info("[DCP async_save] creating shared-memory staged cache (coalesced)")
+            self.state_dict_cache = _create_coalesced_shm_state_dict(state_dict)
 
         return _copy_state_dict(state_dict, self.state_dict_cache, type_check=self.type_check)
 

@@ -740,6 +740,8 @@ class Trainer:
 
         self._metrics_recorder = self._maybe_init_model_metrics_recorder(internal_metrics_cfg)
 
+        self._preflight_async_checkpoint()
+
     @classmethod
     def from_config(cls, config: TrainerConfig) -> Self:
         """Create a Trainer instance from a TrainerConfig.
@@ -866,6 +868,7 @@ class Trainer:
             ckpt_saved = self._maybe_save(is_snapshot=False)
             if not ckpt_saved:
                 _ = self._maybe_save(is_snapshot=True)
+            self._check_async_save_health()
 
             time_before_get_data = time.time()
 
@@ -1178,6 +1181,22 @@ class Trainer:
                 raise RuntimeError("Health check failed, exit training")
             log_rank0.info(f"Health check passed at step {self.cur_step}")
 
+    def _preflight_async_checkpoint(self) -> None:
+        """Warm up async DCP save to surface daemon init errors early."""
+        if not self._async_checkpoint:
+            return
+        log_rank0.info("Preflight: warming up async DCP save infrastructure...")
+        TrainEngine.warmup_async_save_dcp(work_dir=self.work_dir)
+        log_rank0.info("Preflight: async DCP save infrastructure verified OK.")
+
+    def _check_async_save_health(self) -> None:
+        """Non-blocking check: if any pending async save has failed, raise immediately."""
+        if self._pending_checkpoint is not None and self._pending_checkpoint.done():
+            exc = self._pending_checkpoint.exception()
+            if exc is not None:
+                self._pending_checkpoint = None
+                raise RuntimeError(f"Async DCP checkpoint failed in background: {exc}") from exc
+
     def _wait_for_pending_checkpoint(self, timeout: int = 3000) -> None:
         if self._pending_checkpoint is None:
             return
@@ -1227,7 +1246,7 @@ class Trainer:
 
         # Save model and optimizer
         future: Future | None = None
-        if self._async_checkpoint and not is_snapshot:
+        if self._async_checkpoint:
             future = self._engine.async_save_dcp(weights_dir=weights_path)
         else:
             self._engine.save_dcp(weights_dir=weights_path)
