@@ -1,6 +1,7 @@
 """Generate e2e metric comparison plots and GitHub Actions job summaries."""
 
 import os
+from collections import deque
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -34,11 +35,8 @@ def plot_comparison(
     base_metrics: dict,
     cur_metrics: dict,
     output_root: Path,
-) -> Path | None:
+) -> Path:
     metric_list = list(metric_keys.keys())
-    if not metric_list:
-        return None
-
     n_plots = len(metric_list)
     n_cols = int(np.ceil(np.sqrt(n_plots)))
     n_rows = int(np.ceil(n_plots / n_cols))
@@ -83,18 +81,34 @@ def plot_comparison(
 
 
 def format_jsonl_preview(path: str, label: str) -> str:
-    with open(path, encoding="utf-8") as f:
-        lines = [line.strip() for line in f if line.strip()]
-    total = len(lines)
     preview_lines = SUMMARY_JSONL_PREVIEW_LINES
-    if total <= preview_lines * 2:
-        body_lines = lines
+    max_buffered = preview_lines * 2
+    head: list[str] = []
+    tail: deque[str] = deque(maxlen=preview_lines)
+    total = 0
+
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            total += 1
+            if total <= max_buffered:
+                head.append(stripped)
+            elif total == max_buffered + 1:
+                overflow = head[preview_lines:]
+                head = head[:preview_lines]
+                tail.extend(overflow)
+                tail.append(stripped)
+            else:
+                tail.append(stripped)
+
+    if total <= max_buffered:
+        body_lines = head
         omitted = 0
     else:
-        body_lines = (
-            lines[:preview_lines] + [f"... ({total - preview_lines * 2} lines omitted) ..."] + lines[-preview_lines:]
-        )
-        omitted = total - preview_lines * 2
+        omitted = total - max_buffered
+        body_lines = head + [f"... ({omitted} lines omitted) ..."] + list(tail)
     md = f"**{label}** (`{path}`, {total} lines"
     if omitted:
         md += f", preview only, {omitted} lines omitted"
@@ -104,25 +118,16 @@ def format_jsonl_preview(path: str, label: str) -> str:
     return md
 
 
-def append_case_to_step_summary(
-    case_name: str,
-    base_jsonl: str,
-    cur_jsonl: str,
-    *,
-    with_image: bool = True,
-) -> None:
+def append_case_to_step_summary(case_name: str, base_jsonl: str, cur_jsonl: str) -> None:
     summary_file = os.environ.get("GITHUB_STEP_SUMMARY", "./tmp.md")
+    image_url = report_image_url(case_name)
     with open(summary_file, "a", encoding="utf-8") as f:
         f.write(f"## {case_name} 指标比较图\n")
-        if with_image:
-            image_url = report_image_url(case_name)
-            f.write('<div align="center">\n')
-            f.write(f'<img src="{image_url}"\n')
-            f.write('  style="max-width: 90%; border: 1px solid #ddd; border-radius: 8px;">\n')
-            f.write("</div>\n")
-            f.write(f"[在 reports 分支查看大图]({image_url})\n\n")
-        else:
-            f.write("无配置 check_metrics，跳过对比图生成。\n\n")
+        f.write('<div align="center">\n')
+        f.write(f'<img src="{image_url}"\n')
+        f.write('  style="max-width: 90%; border: 1px solid #ddd; border-radius: 8px;">\n')
+        f.write("</div>\n")
+        f.write(f"[在 reports 分支查看大图]({image_url})\n\n")
         f.write('<div align="center">\n')
         f.write(
             f'<details>\n<summary><strong style="text-align: left;">'
@@ -130,7 +135,8 @@ def append_case_to_step_summary(
         )
         f.write(format_jsonl_preview(base_jsonl, "Baseline"))
         f.write(format_jsonl_preview(cur_jsonl, "Current"))
-        f.write("</details>\n\n")
+        f.write("</details>\n")
+        f.write("</div>\n\n")
 
 
 def publish_comparison_report(
@@ -140,10 +146,10 @@ def publish_comparison_report(
     cur_metrics: dict,
     base_jsonl: str,
     cur_jsonl: str,
-) -> Path | None:
+) -> Path:
     """Write comparison PNG under ``{GITHUB_RUN_ID}/`` and append job
     summary."""
     output_root = get_report_dir()
     plot_path = plot_comparison(case_name, metric_keys, base_metrics, cur_metrics, output_root)
-    append_case_to_step_summary(case_name, base_jsonl, cur_jsonl, with_image=plot_path is not None)
+    append_case_to_step_summary(case_name, base_jsonl, cur_jsonl)
     return plot_path
