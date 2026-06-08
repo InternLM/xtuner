@@ -1,6 +1,6 @@
 base_path:
     base_output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-    base_baseline_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner_baseline
+    base_baseline_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner-baselines/latest
 
 default_config:
     train: 
@@ -38,7 +38,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft/20251117105949/tracker.jsonl
+                base_metric: qwen3-sft/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -65,7 +65,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft-ep8/cec3a8d2/tracker.jsonl
+                base_metric: qwen3-sft-ep8/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -92,7 +92,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft-ep8/cec3a8d2_resume/tracker.jsonl
+                base_metric: qwen3-sft-ep8/tracker-resume.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -118,7 +118,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft-tp2/cec3a8d2/tracker.jsonl
+                base_metric: qwen3-sft-tp2/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -145,7 +145,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft-recompute/d76995/tracker.jsonl
+                base_metric: qwen3-sft-recompute/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -174,7 +174,7 @@ case:
                     - XTUNER_ACTIVATION_OFFLOAD=1
                     - XTUNER_USE_FA3=1
             assert_info:
-                base_metric: qwen3-sft-fp8/d76995/tracker.jsonl
+                base_metric: qwen3-sft-fp8/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.1
                     loss/maxvio: 0.000001
@@ -201,7 +201,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft/20251117105949/tracker.jsonl
+                base_metric: qwen3-sft/tracker.jsonl
                 check_metrics:
                     grad_norm: 1
                     loss/maxvio: 0.05
@@ -225,7 +225,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft-celoss/812c1021/tracker.jsonl
+                base_metric: qwen3-sft-celoss/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -250,7 +250,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-30B-sp4-intralayer2/c0eba147/tracker.jsonl
+                base_metric: qwen3-30B-sp4-intralayer2/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -275,7 +275,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-30B-sp8-intralayer2/c0eba147/tracker.jsonl
+                base_metric: qwen3-30B-sp8-intralayer2/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.025
                     loss/maxvio: 0.000001
@@ -327,7 +327,7 @@ case:
                     - CACHE_DIR=/mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/.cache
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft-cache/e968368a/tracker.jsonl
+                base_metric: qwen3-sft-cache/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -353,7 +353,7 @@ case:
                     - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft-vl-dense/812c1021/tracker.jsonl
+                base_metric: qwen3-sft-vl-dense/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -381,7 +381,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
-                base_metric: qwen3-5-sft-vl-moe/e968368a/tracker.jsonl
+                base_metric: qwen3-5-sft-vl-moe/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/local_loss: 0.000001
@@ -409,7 +409,7 @@ case:
                     - XTUNER_ACTIVATION_OFFLOAD=1
                     - XTUNER_USE_FA3=1
             assert_info:
-                base_metric: qwen3-5-sft-fp8/625c0018/tracker.jsonl
+                base_metric: qwen3-5-sft-fp8/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.1
                     loss/local_loss: 0.000001
@@ -435,7 +435,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-sft-recompute/625c0018/tracker.jsonl
+                base_metric: qwen3-5-sft-recompute/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.02
                     loss/local_loss: 0.000001
@@ -459,7 +459,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-sft-tp2/625c0018/tracker.jsonl
+                base_metric: qwen3-5-sft-tp2/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.05
                     loss/local_loss: 0.000001
@@ -484,7 +484,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
             assert_info:
-                base_metric: qwen3-5-sft-sp4-resume/625c0018/tracker.jsonl
+                base_metric: qwen3-5-sft-sp4-resume/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.09
                     loss/local_loss: 0.000001
@@ -511,7 +511,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
             assert_info:
-                base_metric: qwen3-5-sft-sp4-resume/625c0018_resume/tracker.jsonl
+                base_metric: qwen3-5-sft-sp4-resume/tracker-resume.jsonl
                 check_metrics:
                     grad_norm: 0.02
                     loss/local_loss: 0.000001
@@ -538,7 +538,7 @@ case:
                     - CACHE_DIR=/mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/.cache_qwen3_5
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-sft-8nums-vs-16nums/147cb2ee/tracker.jsonl
+                base_metric: qwen3-5-sft-8nums-vs-16nums/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.02
                     loss/maxvio: 0.05
@@ -565,7 +565,7 @@ case:
                     - XTUNER_USE_FA3=1
                     - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
-                base_metric: qwen3-5-sft-fp8-vl/00f7e16/tracker.jsonl
+                base_metric: qwen3-5-sft-fp8-vl/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/local_loss: 0.000001
@@ -592,7 +592,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
-                base_metric: qwen3-5-sft-tp2-vl/00f7e16/tracker.jsonl
+                base_metric: qwen3-5-sft-tp2-vl/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/local_loss: 0.000001
@@ -619,7 +619,7 @@ case:
                     - XTUNER_GC_ENABLE=1
                     - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
-                base_metric: qwen3-5-sft-sp4-resume-vl/00f7e16/tracker.jsonl
+                base_metric: qwen3-5-sft-sp4-resume-vl/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/local_loss: 0.000001
@@ -648,7 +648,7 @@ case:
                     - XTUNER_GC_ENABLE=1
                     - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
-                base_metric: qwen3-5-sft-sp4-resume-vl/00f7e16_resume/tracker.jsonl
+                base_metric: qwen3-5-sft-sp4-resume-vl/tracker-resume.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/local_loss: 0.000001
@@ -674,7 +674,7 @@ case:
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-sft-mtp/00f7e16/tracker.jsonl
+                base_metric: qwen3-5-sft-mtp/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.05
                     loss/local_loss: 0.000001
@@ -700,7 +700,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
-                base_metric: qwen3-5-sft-mtp-vl/00f7e16/tracker.jsonl
+                base_metric: qwen3-5-sft-mtp-vl/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/local_loss: 0.000001
@@ -726,7 +726,7 @@ case:
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-rl-lmdeploy/20260203/tracker.jsonl
+                base_metric: qwen3-rl-lmdeploy/tracker.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy
@@ -770,7 +770,7 @@ case:
                     - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-rl-vl-lmdeploy/fb28789f/tracker.jsonl
+                base_metric: qwen3-rl-vl-lmdeploy/tracker.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy
@@ -814,7 +814,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-rl-vl-lmdeploy-grpo/00f7e16/tracker.jsonl
+                base_metric: qwen3-5-rl-vl-lmdeploy-grpo/tracker.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy
@@ -858,7 +858,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-rl-vl-lmdeploy-dapo/00f7e16/tracker.jsonl
+                base_metric: qwen3-5-rl-vl-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy
@@ -903,7 +903,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
             assert_info:
-                base_metric: qwen3-5-rl-vl-lmdeploy-resume/00f7e16/tracker.jsonl
+                base_metric: qwen3-5-rl-vl-lmdeploy-resume/tracker.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy
@@ -949,7 +949,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
             assert_info:
-                base_metric: qwen3-5-rl-vl-lmdeploy-resume/00f7e16_resume/tracker.jsonl
+                base_metric: qwen3-5-rl-vl-lmdeploy-resume/tracker-resume.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy
@@ -994,7 +994,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-rl-lmdeploy-dapo/00f7e16/tracker.jsonl
+                base_metric: qwen3-5-rl-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy
@@ -1044,7 +1044,7 @@ case:
                     - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
                     - XTUNER_USE_FA3=0
             assert_info:
-                base_metric: qwen3-rl-sglang/cf46114/tracker.jsonl
+                base_metric: qwen3-rl-sglang/tracker.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy
