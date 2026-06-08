@@ -77,7 +77,9 @@ def check_result(case_name, base_path, cur_path, check_metric):
         if check_flag:
             logger.info(f"✓ {metric} check pass，the most relative error is {max_error:.2%} in {max_error_idx} step.")
     result = not fail_metric
-    return result, f"Some metric check failed,{fail_metric}"
+    if result:
+        return result, "All metrics check passed."
+    return result, f"Some metric check failed: {fail_metric}"
 
 
 def check_rl_result(case_name, base_path, cur_path, assert_info):
