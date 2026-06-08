@@ -1,40 +1,42 @@
 import os
-import tempfile
-from pathlib import Path
-from unittest.mock import patch, Mock
 import pickle
 import shutil
+import tempfile
 import weakref
 from concurrent.futures import Future
-from pydantic import TypeAdapter
+from pathlib import Path
+from unittest.mock import Mock, patch
 
+import parametrize
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.optim.lr_scheduler import SequentialLR
 from torch.testing._internal.common_distributed import DistributedTestBase
-import parametrize
 
+from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
-from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
-from xtuner.v1.model.dense.qwen3 import Qwen3Dense4BConfig, Qwen3Dense8BConfig
+from xtuner.v1.datasets import FTDPTokenizeFnConfig
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
+from xtuner.v1.datasets.dataloader import Dataloader
+from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
+from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model.compose.intern_s1 import InternS1Config, InternS1MiniConfig
 from xtuner.v1.model.compose.internvl import (
     InternVL3P5Dense8BConfig,
     InternVL3P5MoE30BA3Config,
 )
-from xtuner.v1.train.trainer import HooksConfig, Trainer, ResumeConfig, HookStage, LoadCheckpointConfig
-from xtuner.v1.datasets import FTDPTokenizeFnConfig
-from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
-from xtuner.v1.train.trainer import TrainerConfig
-from xtuner.v1.loss import CELossConfig
-from xtuner._testing import DeterministicDDPTestCase
-from unittest import TestCase
-from xtuner.v1.train.trainer import XTunerMeta, ExpInfo, ExpHistory, GitInfo
-from xtuner.v1.utils.device import get_device
-from xtuner.v1.datasets.dataloader import Dataloader
-from torch.optim.lr_scheduler import SequentialLR
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense4BConfig, Qwen3Dense8BConfig
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
+from xtuner.v1.train.trainer import (
+    HooksConfig,
+    HookStage,
+    LoadCheckpointConfig,
+    Trainer,
+    TrainerConfig,
+)
+from xtuner.v1.utils.device import get_device
 
 
 DEVICE = get_device()
@@ -57,7 +59,7 @@ class FakeEngine:
     def train_step(self, *args, **kwargs):
         self.train_step_calls += 1
         return {"total_loss": 1.8, "step_consumed_tokens": 100, "step_consumed_img_tokens": 0.0, "grad_norm": torch.tensor(1.0), "efficient_attn_ratio": 0.5, "img_efficient_attn_ratio": 0.0, "logs_info": {"local_loss": 1.0, "reduced_llm_loss": 0.8}, "extra_info": ModelForwardExtraLogInfo()}
-        
+
 
     def save_hf(self, hf_path):
         self.save_hf_calls.append(hf_path)
@@ -247,7 +249,7 @@ class TestTrainerSaveHF(DistributedTestBase):
             assert f"step-{step}" in str(checkpoint)
             assert os.path.exists(checkpoint)
 
-        # save checkpoint at step 3 6 9 10 
+        # save checkpoint at step 3 6 9 10
         trainer = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,
@@ -480,7 +482,7 @@ class TestTrainerSaveHF(DistributedTestBase):
         assert resume_trainer1_2.cur_step == 16
         dist.barrier()
 
-        # 2. Test resume_from 
+        # 2. Test resume_from
         resume_trainer2 = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,

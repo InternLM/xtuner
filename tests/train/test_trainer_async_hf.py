@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 import tempfile
 from concurrent.futures import Future
 from pathlib import Path

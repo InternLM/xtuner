@@ -14,7 +14,7 @@ from importlib import import_module
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree, rmtree
-from typing import Annotated, Any, Callable, Generator, Iterable, Literal, Mapping, Sequence, cast
+from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, Sequence, cast
 
 import torch
 import torch.distributed as dist

@@ -3,7 +3,7 @@ import multiprocessing as py_mp
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from shutil import copy, copytree, rmtree
-from typing import Mapping, Self, Sequence, cast
+from typing import Callable, Mapping, Self, Sequence, cast
 
 import torch
 import torch.distributed as dist

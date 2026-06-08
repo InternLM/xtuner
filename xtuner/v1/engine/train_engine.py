@@ -9,7 +9,7 @@ import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any, Callable, Dict, List, cast
+from typing import Any, Dict, List, cast
 
 import torch
 import torch.distributed as dist
