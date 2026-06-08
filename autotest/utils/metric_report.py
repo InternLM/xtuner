@@ -34,8 +34,11 @@ def plot_comparison(
     base_metrics: dict,
     cur_metrics: dict,
     output_root: Path,
-) -> Path:
+) -> Path | None:
     metric_list = list(metric_keys.keys())
+    if not metric_list:
+        return None
+
     n_plots = len(metric_list)
     n_cols = int(np.ceil(np.sqrt(n_plots)))
     n_rows = int(np.ceil(n_plots / n_cols))
@@ -101,16 +104,25 @@ def format_jsonl_preview(path: str, label: str) -> str:
     return md
 
 
-def append_case_to_step_summary(case_name: str, base_jsonl: str, cur_jsonl: str) -> None:
+def append_case_to_step_summary(
+    case_name: str,
+    base_jsonl: str,
+    cur_jsonl: str,
+    *,
+    with_image: bool = True,
+) -> None:
     summary_file = os.environ.get("GITHUB_STEP_SUMMARY", "./tmp.md")
-    image_url = report_image_url(case_name)
     with open(summary_file, "a", encoding="utf-8") as f:
         f.write(f"## {case_name} 指标比较图\n")
-        f.write('<div align="center">\n')
-        f.write(f'<img src="{image_url}"\n')
-        f.write('  style="max-width: 90%; border: 1px solid #ddd; border-radius: 8px;">\n')
-        f.write("</div>\n")
-        f.write(f"[在 reports 分支查看大图]({image_url})\n\n")
+        if with_image:
+            image_url = report_image_url(case_name)
+            f.write('<div align="center">\n')
+            f.write(f'<img src="{image_url}"\n')
+            f.write('  style="max-width: 90%; border: 1px solid #ddd; border-radius: 8px;">\n')
+            f.write("</div>\n")
+            f.write(f"[在 reports 分支查看大图]({image_url})\n\n")
+        else:
+            f.write("无配置 check_metrics，跳过对比图生成。\n\n")
         f.write('<div align="center">\n')
         f.write(
             f'<details>\n<summary><strong style="text-align: left;">'
@@ -128,10 +140,10 @@ def publish_comparison_report(
     cur_metrics: dict,
     base_jsonl: str,
     cur_jsonl: str,
-) -> Path:
+) -> Path | None:
     """Write comparison PNG under ``{GITHUB_RUN_ID}/`` and append job
     summary."""
     output_root = get_report_dir()
     plot_path = plot_comparison(case_name, metric_keys, base_metrics, cur_metrics, output_root)
-    append_case_to_step_summary(case_name, base_jsonl, cur_jsonl)
+    append_case_to_step_summary(case_name, base_jsonl, cur_jsonl, with_image=plot_path is not None)
     return plot_path
