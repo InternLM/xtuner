@@ -472,4 +472,4 @@ class TestQwen3_5_VLDense(DeterministicDDPTestCase):
 
     @property
     def world_size(self) -> int:
-        return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "1"))
+        return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "4"))
