@@ -571,6 +571,13 @@ class RolloutWorker(SingleAcceleratorWorker):
             server_task = self.server_task
             self._request_server_terminate()
             ray.cancel(server_task, force=True, recursive=True)
+            try:
+                ray.get(server_task, timeout=60)
+            except ray.exceptions.GetTimeoutError:
+                self.logger.warning(f"Worker {self.rank} server task did not stop within shutdown timeout.")
+                raise
+            except Exception as e:
+                self.logger.debug(f"Worker {self.rank} server task stopped after shutdown: {e}")
             self.server_task = None
             return
 

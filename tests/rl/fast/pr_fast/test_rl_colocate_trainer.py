@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import ray
+import requests
 import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
