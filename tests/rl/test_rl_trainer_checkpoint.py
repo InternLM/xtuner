@@ -39,7 +39,6 @@ from xtuner.v1.rl.trainer import WorkerConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig, RLDisaggregatedTrainerConfig
 
-
 QWEN3_4B_PATH = os.environ.get("QWEN3_4B_PATH")
 CHECKPOINT_DIR = "checkpoints"
 TRAIN_STATE_PATH = "train_state.json"
@@ -208,6 +207,7 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             patch("xtuner.v1.train.rl_trainer.CPUResourceManager", _FakeCPUResourceManager),
             patch("xtuner.v1.train.rl_trainer.set_cpu_resource_manager", lambda manager: None),
             patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+            patch("xtuner.v1.train.rl_trainer.BaseRLTrainer._release_trace_store", return_value=None),
             patch.object(WorkerConfig, "build", autospec=True, side_effect=build_train_controller),
             patch.object(RolloutConfig, "build", autospec=True, side_effect=build_rollout_controller),
         ):
