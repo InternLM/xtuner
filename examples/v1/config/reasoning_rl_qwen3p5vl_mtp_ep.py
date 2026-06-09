@@ -29,6 +29,7 @@ from xtuner.v1.rl.agent_loop_manager import (
 )
 import ray
 
+# export LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
 
 def _as_list(value):
     return value if isinstance(value, list) else [value]
@@ -51,7 +52,7 @@ total_epochs = 15
 train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", 256))
 prompt_repeat_k = 8
 rollout_tp_size = 1
-rollout_ep_size = 2
+rollout_ep_size = 4
 max_prompt_length = 2048
 max_response_length = 8192
 pack_max_length = 32768
@@ -79,7 +80,7 @@ rollout_config = RolloutConfig(
     skip_load_weights=True,
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
-    gpu_memory_utilization=0.8,
+    gpu_memory_utilization=0.6,
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=True,
     rollout_max_batch_size_per_instance=512,

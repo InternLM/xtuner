@@ -19,6 +19,9 @@ from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
 
+
+# export LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
+
 from recipe.math_code_interpreter.xtuner_dataset import RLMathTokenizeFnConfig as MathTrainTokenizeFnConfig
 
 DATASET_CONFIG_PATH = Path(os.environ["DATA_PATH"])
