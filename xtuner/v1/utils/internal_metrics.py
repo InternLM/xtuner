@@ -252,7 +252,9 @@ class InternalMetricsRecorder:
             for i in range(0, len(data_batches)):
                 data_batch = data_batches[i]
                 seq_ctx = data_batch["seq_ctx"]
-                output = self.model(seq_ctx=seq_ctx, loss_ctx=None, **additional_kwargs)
+                loss_ctx = data_batch["loss_ctx"]
+
+                output = self.model(seq_ctx=seq_ctx, loss_ctx=loss_ctx, **additional_kwargs)  # type:ignore[arg-type]
 
                 if (
                     self.internal_metrics_cfg.monitor_moe_load_balance_stats

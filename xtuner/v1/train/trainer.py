@@ -46,7 +46,12 @@ from xtuner.v1.engine.train_engine import TrainStepInfo
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model.base import AsyncHFSaveHandle, ModelItem, XTunerBaseModelConfig
 from xtuner.v1.model.moe.moe import MoEConfig
-from xtuner.v1.patch import patch_dcp_save_state_dict, patch_dcp_save_with_cache_storage, patch_default_save_plan
+from xtuner.v1.patch import (
+    patch_dcp_async_daemon_port,
+    patch_dcp_save_state_dict,
+    patch_dcp_save_with_cache_storage,
+    patch_default_save_plan,
+)
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.profiler.prober_utils import setup_prober_list
@@ -573,6 +578,13 @@ class Trainer:
         self._micro_batch_size: int | None = None
         if skip_checkpoint_validation:
             patch_default_save_plan()
+
+        # Keep the DCP async checkpoint daemon port out of the kernel ephemeral range to
+        # avoid the TCPStore EADDRINUSE race where get_free_port's port is grabbed by a
+        # transient connection during the spawn window (more likely at large scale).
+        # Only relevant to async (process) checkpointing, so gate it on async_checkpoint.
+        if async_checkpoint:
+            patch_dcp_async_daemon_port()
 
         if patch_for_dcp_finish:
             if torch.__version__.startswith("2.7."):
@@ -1227,7 +1239,7 @@ class Trainer:
 
         # Save model and optimizer
         future: Future | None = None
-        if self._async_checkpoint and not is_snapshot:
+        if self._async_checkpoint:
             future = self._engine.async_save_dcp(weights_dir=weights_path)
         else:
             self._engine.save_dcp(weights_dir=weights_path)
