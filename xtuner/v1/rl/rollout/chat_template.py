@@ -2,6 +2,7 @@ import copy
 import json
 from typing import Any
 
+
 _RAW_ARGUMENTS_KEY = "__xtuner_raw_arguments__"
 
 
