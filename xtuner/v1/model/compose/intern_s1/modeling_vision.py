@@ -8,12 +8,17 @@ import numpy as np
 from transformers.models.internvl.modeling_internvl import InternVLVisionEmbeddings
 from transformers.modeling_outputs import BaseModelOutput
 
+_timm_import_error: ImportError | None = None
+
 try:
     from timm.layers import DropPath
-
-    has_timm = True
-except:
+except (ImportError, ModuleNotFoundError) as e:
     has_timm = False
+    DropPath = None
+    _timm_import_error = e
+else:
+    has_timm = True
+    _timm_import_error = None
 from tqdm import tqdm
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module, init_params, log_rank0
 from xtuner.v1.model import BaseModel
@@ -165,9 +170,15 @@ class InternS1VisionLayer(nn.Module):
         self.dropout = Dropout(config.hidden_dropout_prob)
 
         if drop_path_rate > 0.0:
-            assert has_timm, 'timm is not installed, please install it to use DropPath'
-        self.drop_path1 = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
-        self.drop_path2 = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
+            if not has_timm:
+                assert _timm_import_error is not None
+                raise _timm_import_error
+            assert DropPath is not None
+            self.drop_path1 = DropPath(drop_path_rate)
+            self.drop_path2 = DropPath(drop_path_rate)
+        else:
+            self.drop_path1 = nn.Identity()
+            self.drop_path2 = nn.Identity()
 
     @torch.no_grad()
     def init_weights(self):
@@ -334,7 +345,8 @@ class InternS1VisionModel(BaseModel):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
 
-        embedding_output, _ = self.embeddings(pixel_values, bool_masked_pos=bool_masked_pos)
+        embedding_outputs = self.embeddings(pixel_values, bool_masked_pos=bool_masked_pos)
+        embedding_output = embedding_outputs[0] if isinstance(embedding_outputs, tuple) else embedding_outputs
 
         encoder_outputs = self.encoder(
             embedding_output,

@@ -7,7 +7,7 @@ import torch.distributed.nn.functional as distF
 
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.utils import get_logger, get_padding_length, get_device
+from xtuner.v1.utils import get_logger, get_padding_length
 from xtuner.v1.model import TorchCompileOption, DEFAULT_FLOAT8_CFG
 from xtuner.v1.loss.utils import sp_split
 
@@ -24,7 +24,6 @@ from torch.distributed.fsdp import (
 )
 from ..base import BaseComposeModel, to_hf_key_list_wrapper
 
-DEVICE = get_device()
 logger = get_logger()
 
 INTERNS1_COMPILE_CFG: dict[str, TorchCompileOption] = {
@@ -130,26 +129,28 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
         inputs_embeds = self.language_model.embed_tokens(input_ids)  # type: ignore
 
         if pixel_values is not None:
+            vision_pixel_values: torch.Tensor = pixel_values
             # in-place op on custom-function outputs will spoil autograd
             inputs_embeds = inputs_embeds.clone()
 
             if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
-                vit_batch_size = pixel_values.shape[0]
+                vit_batch_size = vision_pixel_values.shape[0]
                 divisors = [sequence_parallel_mesh.size()]
                 pad_size = get_padding_length(vit_batch_size, divisors)
                 if pad_size != 0:
-                    pixel_values = torch.cat(
+                    vision_pixel_values = torch.cat(
                         [
-                            pixel_values,  # type: ignore
-                            pixel_values[0:1].repeat(pad_size, *[1] * (pixel_values.dim() - 1)),
+                            vision_pixel_values,  # type: ignore
+                            vision_pixel_values[0:1].repeat(pad_size, *[1] * (vision_pixel_values.dim() - 1)),
                         ],
                         dim=0,
                     )
-                pixel_values = pixel_values.chunk(sequence_parallel_mesh.size(), dim=0)[  # type: ignore
+                vision_pixel_values = vision_pixel_values.chunk(sequence_parallel_mesh.size(), dim=0)[  # type: ignore
                     sequence_parallel_mesh.get_local_rank()
                 ]
 
-            vit_embeds = self.extract_feature(pixel_values)
+            vision_pixel_values = vision_pixel_values.to(device=inputs_embeds.device, non_blocking=True)
+            vit_embeds = self.extract_feature(vision_pixel_values)
 
             if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
                 vit_embeds_list = distF.all_gather(vit_embeds, group=sequence_parallel_mesh.get_group())

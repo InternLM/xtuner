@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from xtuner.v1.model.moe.moe import DenseDecoderLayer, LMHead, MoEBlock, MoEDecoderLayer
-from xtuner.v1.module.attention.gated_deltanet import FusedRMSNormGated, GatedDeltaNet
+from xtuner.v1.module.attention.gated_deltanet import FusedRMSNormGated, GatedDeltaNet, has_fused_rms_norm_gated
 from xtuner.v1.module.attention.mha import MultiHeadAttention
 from xtuner.v1.module.attention.mla import MultiLatentAttention
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEGate, MoEMLP
@@ -30,7 +30,7 @@ def register_prober_list(model: nn.Module):
         elif isinstance(module, RMSNorm):
             wrapped = ProberList.wrap_rms_norm_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)  # type: ignore
-        elif FusedRMSNormGated is not None and isinstance(module, FusedRMSNormGated):
+        elif has_fused_rms_norm_gated and isinstance(module, FusedRMSNormGated):
             wrapped = ProberList.wrap_fused_rms_norm_gated_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)  # type: ignore
         elif isinstance(module, MoEMLP):
