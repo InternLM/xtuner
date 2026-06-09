@@ -31,7 +31,6 @@ from xtuner.v1.rl.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop_manager.producer import default_should_continue_fn
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.gateway.config import GatewayConfig
 from xtuner.v1.rl.replay_buffer import (
     AsyncReplayBufferConfig,
     SyncReplayBufferConfig,
@@ -51,6 +50,7 @@ from xtuner.v1.rl.utils import (
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
+from xtuner.v1.rl.utils.misc import check_chat_completions, delete_from_routedapiproxy, register_to_routedapiproxy
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -62,6 +62,31 @@ PG_READY_TIMEOUT = 30
 RL_TRAINER_RAY_GET_TIMEOUT = 3600
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
+
+
+def _is_routed_agent_loop_config(agent_loop_config: Any) -> bool:
+    config_type = type(agent_loop_config)
+    return config_type.__name__ in {
+        "AgentInLocalhostLoopConfig",
+        "AgentInSandboxLoopConfig",
+    } and config_type.__module__.startswith("xtuner.v1.rl.agent_loop.")
+
+
+def _agent_loop_manager_needs_routed_api_proxy(cfg: AgentLoopManagerConfig | None) -> bool:
+    if cfg is None:
+        return False
+    tasks = getattr(cfg, "tasks", None)
+    if tasks is None:
+        agent_loop_config = getattr(cfg, "agent_loop_config", None)
+        return _is_routed_agent_loop_config(agent_loop_config)
+    task_cfgs = tasks if isinstance(tasks, list) else [tasks]
+    return any(_is_routed_agent_loop_config(task.agent_loop_config) for task in task_cfgs)
+
+
+def _trainer_config_needs_routed_api_proxy(cfg: "BaseRLTrainerConfig") -> bool:
+    return _agent_loop_manager_needs_routed_api_proxy(
+        cfg.agent_loop_manager_cfg
+    ) or _agent_loop_manager_needs_routed_api_proxy(cfg.eval_agent_loop_manager_cfg)
 
 
 def _to_cpu_tensor(value: np.ndarray | None, *, dtype: torch.dtype | None = None) -> torch.Tensor | None:
@@ -214,6 +239,17 @@ def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
         )
         return False
     for item in group_data_items:
+        if item.input_ids is not None:
+            input_ids_valid = len(item.input_ids) > 1
+            labels_valid = item.labels is not None and len(item.labels) == len(item.input_ids)
+            logprobs_valid = item.logprobs is None or len(item.logprobs) == len(item.input_ids)
+            if not input_ids_valid or not labels_valid or not logprobs_valid:
+                logger.warning(
+                    "Invalid dataflow item found during training: input_ids, labels, and logprobs lengths mismatch."
+                )
+                return False
+            continue
+
         response_valid = item.response is not None and len(item.response) > 0
         ids_valid = item.response_ids is not None and len(item.response_ids) > 0
         if not ids_valid:
@@ -285,7 +321,6 @@ class BaseRLTrainerConfig(BaseModel):
     train_batch_size: int
     advantage_estimator_config: BaseAdvantageConfig = Field(default_factory=GRPOAdvantageConfig)
     sync_weights_interval: int = 1
-    gateway_config: GatewayConfig | None = None
 
     enable_evaluate: bool = True
     enable_initial_evaluate: bool = False
@@ -362,8 +397,6 @@ class RLColocateTrainerConfig(BaseRLTrainerConfig):
             configuration. Defaults to ``GRPOAdvantageConfig``.
         sync_weights_interval (int): Interval, in train steps, for syncing
             weights from training to rollout. Defaults to 1.
-        gateway_config (GatewayConfig | None): Optional gateway configuration.
-            Defaults to None.
         enable_evaluate (bool): Whether to run evaluation. Defaults to True.
         enable_initial_evaluate (bool): Whether to evaluate before training.
             Defaults to False.
@@ -449,8 +482,6 @@ class RLDisaggregatedTrainerConfig(BaseRLTrainerConfig):
             configuration. Defaults to ``GRPOAdvantageConfig``.
         sync_weights_interval (int): Interval, in train steps, for syncing
             weights from training to rollout. Defaults to 1.
-        gateway_config (GatewayConfig | None): Optional gateway configuration.
-            Defaults to None.
         enable_evaluate (bool): Whether to run evaluation. Defaults to True.
         enable_initial_evaluate (bool): Whether to evaluate before training.
             Defaults to False.
@@ -665,15 +696,6 @@ class BaseRLTrainer:
         self._debug_train = cfg.debug_train
         self._debug_train_files: dict[int, Path] = {}
 
-    def _maybe_start_gateway(self, cfg: BaseRLTrainerConfig) -> None:
-        if cfg.gateway_config is None or not cfg.gateway_config.auto_start:
-            return
-        # gateway 依赖 rollout controller，因此在 rollout controller 构建完成后统一启动。
-        ray.get(
-            self.rollout_controller.start_gateway.remote(cfg.gateway_config),
-            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
-        )
-
     def _build_agent_loop_components(self, cfg: BaseRLTrainerConfig, replay_buffer) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
         self.agent_loop_manager = cfg.agent_loop_manager_cfg.build(
@@ -686,10 +708,11 @@ class BaseRLTrainer:
 
         if self._enable_evaluate:
             assert cfg.eval_agent_loop_manager_cfg is not None
+            self._eval_replay_buffer = SyncReplayBufferConfig().build()
             self.eval_agent_loop_manager = cfg.eval_agent_loop_manager_cfg.build(
                 rollout_controller=self.rollout_controller,
                 tokenizer=self.tokenizer,
-                replay_buffer=replay_buffer,
+                replay_buffer=self._eval_replay_buffer,
                 logger=self.logger,
                 sync_weights_interval=cfg.sync_weights_interval,
             )
@@ -828,19 +851,40 @@ class BaseRLTrainer:
             self.tokenizer.save_pretrained(str(save_hf_path))
 
     async def _run_initial_evaluate(self) -> None:
-        eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
-            self.evaluator.eval_batch_size,
-            train_step=1,
-            model_step=0,
-        )
-        if XTUNER_DETERMINISTIC:
-            eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
-                eval_produce_result.rollout_states
+        try:
+            eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
+                self.evaluator.eval_batch_size,
+                train_step=1,
+                model_step=0,
             )
-        eval_metrics = self.evaluator.run(eval_produce_result.rollout_states)
-        self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
-        tb_scores = {f"eval/{k}": v for k, v in eval_metrics.items()}
-        self._exp_tracker.add_scalars(tag_scalar_dict=tb_scores, global_step=0)
+            if XTUNER_DETERMINISTIC:
+                eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
+                    eval_produce_result.rollout_states
+                )
+            eval_batch = eval_produce_result.rollout_states
+            eval_metrics = self.evaluator.run(eval_batch)
+            eval_trajectory_dir = self.exp_dir / "eval_rollout"
+            eval_trajectory_dir.mkdir(parents=True, exist_ok=True)
+            eval_trajectory_path = eval_trajectory_dir / "eval_rollout_0.jsonl"
+            self._save_eval_trajectories(eval_batch, eval_trajectory_path)
+            self.logger.info(f"Initial eval trajectories saved to {eval_trajectory_path}")
+            self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
+            tb_scores = {f"eval/{k}": v for k, v in eval_metrics.items()}
+            self._exp_tracker.add_scalars(tag_scalar_dict=tb_scores, global_step=0)
+        finally:
+            self._release_trace_store()
+
+    def _release_trace_store(self) -> None:
+        from xtuner.v1.rl.rollout.trace_store import get_existing_store
+
+        store = get_existing_store()
+        if store is None:
+            return
+
+        self.logger.info("Release all sessions and free associated resources")
+        ray.get(store.release_all.remote())
+        keys = ray.get(store.list_sessions.remote())
+        assert len(keys) == 0, f"Store Keys not released: {keys}"
 
     def _train_one_batch(
         self,
@@ -889,29 +933,35 @@ class BaseRLTrainer:
                 pack_max_length=self._train_worker_cfg.pack_max_length,
                 rollout_idx=train_step,
             )
+
+        self._release_trace_store()
+
         return {
             "data_info": data_info,
             "workers_log_item": workers_log_item,
         }
 
     async def _run_evaluation(self, train_step: int) -> dict[str, float]:
-        eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
-            self.evaluator.eval_batch_size,
-            train_step=1,
-            model_step=0,
-        )
-        if XTUNER_DETERMINISTIC:
-            eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
-                eval_produce_result.rollout_states
+        try:
+            eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
+                self.evaluator.eval_batch_size,
+                train_step=train_step,
+                model_step=train_step,
             )
-        eval_batch = eval_produce_result.rollout_states
-        eval_metrics = self.evaluator.run(eval_batch)
-        eval_trajectory_dir = self.exp_dir / "eval_rollout"
-        eval_trajectory_dir.mkdir(parents=True, exist_ok=True)
-        eval_trajectory_path = eval_trajectory_dir / f"eval_rollout_{train_step}.jsonl"
-        self._save_trajectories(eval_batch, eval_trajectory_path)
-        self.logger.info(f"Train step {train_step} eval trajectories saved to {eval_trajectory_path}")
-        return eval_metrics
+            if XTUNER_DETERMINISTIC:
+                eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
+                    eval_produce_result.rollout_states
+                )
+            eval_batch = eval_produce_result.rollout_states
+            eval_metrics = self.evaluator.run(eval_batch)
+            eval_trajectory_dir = self.exp_dir / "eval_rollout"
+            eval_trajectory_dir.mkdir(parents=True, exist_ok=True)
+            eval_trajectory_path = eval_trajectory_dir / f"eval_rollout_{train_step}.jsonl"
+            self._save_eval_trajectories(eval_batch, eval_trajectory_path)
+            self.logger.info(f"Train step {train_step} eval trajectories saved to {eval_trajectory_path}")
+            return eval_metrics
+        finally:
+            self._release_trace_store()
 
     def _save_debug_rollout_batch(self, train_batch: list[list[RolloutState]], train_step: int) -> None:
         assert self._debug_rollout_dir is not None
@@ -966,15 +1016,17 @@ class BaseRLTrainer:
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
 
-            is_vlm_model = "train_prompt_ids" in group[0].extra_fields
-            if is_vlm_model:
-                # TODO(hha): VLM, 不好的设计，后续要去掉
-                prompt_ids = group[0].extra_fields["train_prompt_ids"]
-            else:
-                prompt_ids = group[0].prompt_ids
-            assert prompt_ids is not None and len(prompt_ids) > 0, (
-                f"Prompt ids cannot be None or empty in data: {group[0]}"
-            )
+            prompt_ids = None
+            if any(data.input_ids is None for data in group):
+                is_vlm_model = "train_prompt_ids" in group[0].extra_fields
+                if is_vlm_model:
+                    # TODO(hha): VLM, 不好的设计，后续要去掉
+                    prompt_ids = group[0].extra_fields["train_prompt_ids"]
+                else:
+                    prompt_ids = group[0].prompt_ids
+                assert prompt_ids is not None and len(prompt_ids) > 0, (
+                    f"Prompt ids cannot be None or empty in data: {group[0]}"
+                )
             rewards = []
             for data in group:
                 assert data.reward is not None and "score" in data.reward, (
@@ -988,10 +1040,67 @@ class BaseRLTrainer:
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
+                if group[i].input_ids is not None:
+                    raw_input_ids = cast(list[int], group[i].input_ids)
+                    labels = cast(list[int] | None, group[i].labels)
+                    assert labels is not None, f"Labels cannot be None when input_ids is provided: {group[i]}"
+                    assert len(raw_input_ids) == len(labels), (
+                        f"{len(raw_input_ids)} vs {len(labels)}, data: {group[i]}"
+                    )
+
+                    input_logprobs = group[i].logprobs
+                    if input_logprobs is not None:
+                        assert len(input_logprobs) == len(raw_input_ids), (
+                            f"{len(input_logprobs)} vs {len(raw_input_ids)}, data: {group[i]}"
+                        )
+                        rollout_logprobs: torch.Tensor | None = torch.tensor(
+                            input_logprobs[1:], dtype=torch.float32
+                        ).unsqueeze(0)
+                    else:
+                        raise ValueError(f"Logprobs cannot be None when input_ids is provided: {group[i]}")
+
+                    input_ids = raw_input_ids[:-1]
+                    shifted_labels = labels[1:]
+                    prompt_len = sum(label == -100 for label in shifted_labels)
+                    response_len = len(shifted_labels) - prompt_len
+                    prompt_len_list.append(prompt_len)
+                    response_len_list.append(response_len)
+
+                    advatnages_val = advantages[i].item()
+                    actual_advantages = [0.0 if label == -100 else advatnages_val for label in shifted_labels]
+                    advantages_list.extend(actual_advantages)
+
+                    assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
+                    training_tokens += len(input_ids)
+                    input_ids_t = cast(torch.LongTensor, torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0))
+                    shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
+
+                    if rollout_logprobs is not None:
+                        assert rollout_logprobs.size() == shifted_labels_t.size(), (
+                            f"{rollout_logprobs.size()} vs {shifted_labels_t.size()}"
+                        )
+
+                    position_ids = group[i].position_ids
+                    multimodal_train_info = group[i].mm_info
+                    multi_info_cast = cast(dict | None, multimodal_train_info)
+                    seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multi_info_cast)
+
+                    data_dict = {
+                        "seq_ctx": seq_ctx,
+                        "shifted_labels": shifted_labels_t,
+                        "advantage": actual_advantages,
+                        "rollout_logprobs": rollout_logprobs,
+                    }
+
+                    seq_ctx.rollout_routed_experts = group[i].routed_experts
+                    data_batches.append(data_dict)
+                    continue
+
                 item = group[i].response
-                logprobs: list[float] | None = None
+                response_logprobs: list[float] | None = None
 
                 response_ids: List[int] = []
+                assert prompt_ids is not None
                 if group[i].response_ids is not None:
                     resp_ids_raw = group[i].response_ids
                     if isinstance(resp_ids_raw, torch.Tensor):
@@ -999,13 +1108,13 @@ class BaseRLTrainer:
                     else:
                         response_ids = cast(List[int], resp_ids_raw)
 
-                    logprobs = group[i].logprobs
-                    if logprobs is not None:
-                        assert len(logprobs) == len(response_ids), (
-                            f"{len(logprobs)} vs {len(response_ids)}, data: {group[i]}"
+                    response_logprobs = group[i].logprobs
+                    if response_logprobs is not None:
+                        assert len(response_logprobs) == len(response_ids), (
+                            f"{len(response_logprobs)} vs {len(response_ids)}, data: {group[i]}"
                         )
                         # 只有 response 部分有 logprobs, 需要前面追加
-                        logprobs = [0.0] * (len(prompt_ids) - 1) + logprobs  # type: ignore[arg-type]
+                        response_logprobs = [0.0] * (len(prompt_ids) - 1) + response_logprobs
                 else:
                     assert item is not None, "response item cannot be None"
                     response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
@@ -1042,10 +1151,10 @@ class BaseRLTrainer:
 
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 training_tokens += len(input_ids)
-                input_ids_t = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
+                input_ids_t = cast(torch.LongTensor, torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0))
 
-                if logprobs is not None:
-                    rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)
+                if response_logprobs is not None:
+                    rollout_logprobs = torch.tensor(response_logprobs, dtype=torch.float32).unsqueeze(0)
                     assert rollout_logprobs.size() == shifted_labels_t.size(), (
                         f"{rollout_logprobs.size()} vs {shifted_labels_t.size()}"
                     )
@@ -1243,7 +1352,7 @@ class BaseRLTrainer:
 
     def _save_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
         rewards = []
-        response_len_list = []
+        trajectory_items = []
 
         for group in data_groups:
             if not is_valid_for_training(group, self.logger):
@@ -1251,20 +1360,29 @@ class BaseRLTrainer:
             for data in group:
                 assert data.reward is not None
                 rewards.append(data.reward["score"])
-                if data.response_ids is not None:
-                    if isinstance(data.response_ids, torch.Tensor):
-                        response_ids = data.response_ids.flatten().tolist()
-                    else:
-                        response_ids = data.response_ids
-                    response_len_list.append(len(response_ids))
-                elif data.response is not None:
-                    response_ids = self.tokenizer.encode(data.response, add_special_tokens=False)
-                    response_len_list.append(len(response_ids))
+                response_ids = self._get_trajectory_response_ids(data)
+                response = data.response
+                if response is None and response_ids:
+                    response = self.tokenizer.decode(response_ids)
+                ground_truth = None
+                if data.reward_model is not None:
+                    ground_truth = data.reward_model.get("ground_truth")
+                trajectory_items.append(
+                    {
+                        "prompt": data.message,
+                        "raw_prompt": data.extra_fields.get("raw_prompt", None),
+                        "response": response,
+                        "response_len": len(response_ids),
+                        "label": ground_truth,
+                        "reward": data.reward["score"],
+                        "finish_reason": data.finish_reason,
+                    }
+                )
 
         rewards_tensor = torch.tensor(rewards).float() if rewards else torch.tensor([0.0]).float()
+        response_len_list = [item["response_len"] for item in trajectory_items]
         response_lens = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
 
-        _count = 0
         with open(save_path, "w", encoding="utf-8") as f:
             summary = {
                 "reward_mean": rewards_tensor.mean().item(),
@@ -1279,26 +1397,69 @@ class BaseRLTrainer:
             }
             json.dump(summary, f, ensure_ascii=False, indent=2)
             f.write("\n")
-            for group in data_groups:
-                if not is_valid_for_training(group, self.logger):
-                    continue
-                for data in group:
-                    assert data.reward is not None
-                    ground_truth = None
-                    if data.reward_model is not None:
-                        ground_truth = data.reward_model.get("ground_truth")
-                    item = {
+            for item in trajectory_items:
+                json.dump(item, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+
+    def _save_eval_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
+        rewards = []
+        trajectory_items = []
+
+        for group in data_groups:
+            for data in group:
+                reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
+                response = data.response or ""
+                response_len = len(self.tokenizer.encode(response, add_special_tokens=False))
+                rewards.append(reward)
+                ground_truth = None
+                if data.reward_model is not None:
+                    ground_truth = data.reward_model.get("ground_truth")
+                trajectory_items.append(
+                    {
                         "prompt": data.message,
-                        "raw_prompt": data.extra_fields.get("raw_prompt", None),
-                        "response": data.response,
-                        "response_len": response_len_list[_count],
+                        "response": response,
+                        "response_len": response_len,
                         "label": ground_truth,
-                        "reward": data.reward["score"],
+                        "reward": reward,
                         "finish_reason": data.finish_reason,
+                        "error_msg": data.error_msg,
+                        "agent_status": data.extra_fields.get("agent_status", None),
+                        "agent_trajectory": data.extra_fields.get("agent_trajectory", None),
                     }
-                    json.dump(item, f, ensure_ascii=False, indent=2)
-                    f.write("\n")
-                    _count += 1
+                )
+
+        rewards_tensor = torch.tensor(rewards).float() if rewards else torch.tensor([0.0]).float()
+        response_len_list = [item["response_len"] for item in trajectory_items]
+        response_lens = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
+
+        with open(save_path, "w", encoding="utf-8") as f:
+            summary = {
+                "reward_mean": rewards_tensor.mean().item(),
+                "reward_std": rewards_tensor.std(unbiased=False).item(),
+                "reward_max": rewards_tensor.max().item(),
+                "reward_min": rewards_tensor.min().item(),
+                "response_len_mean": response_lens.mean().item(),
+                "response_len_std": response_lens.std(unbiased=False).item(),
+                "response_len_max": response_lens.max().item(),
+                "response_len_min": response_lens.min().item(),
+                "total_len": len(rewards),
+            }
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            for item in trajectory_items:
+                json.dump(item, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+
+    def _get_trajectory_response_ids(self, data: RolloutState) -> list[int]:
+        if data.response_ids is not None:
+            if isinstance(data.response_ids, torch.Tensor):
+                return data.response_ids.flatten().tolist()
+            return data.response_ids
+        if data.input_ids is not None and data.labels is not None:
+            return [label for label in data.labels[1:] if label != -100]
+        if data.response is not None:
+            return self.tokenizer.encode(data.response, add_special_tokens=False)
+        return []
 
     def _log_mini_batch_metrics(self, workers_log_item: List[WorkerLogItem]):
         train_start_step = self._global_train_step + 1
@@ -1315,6 +1476,46 @@ class BaseRLTrainer:
                     global_step=current_global_step,
                 )
         self._global_train_step += len(workers_log_item[0]["train_metrics"])
+
+
+def add_apiproxy(self):
+    info_dict = ray.get(self.rollout_controller.get_rollout_metadata.remote())
+    model_name = info_dict["rollout_config"].model_name
+
+    def _check_chat_completions_with_retry(base_url: str, max_attempts: int = 5, interval: float = 3.0) -> bool:
+        for attempt in range(1, max_attempts + 1):
+            if check_chat_completions(base_url, model_name):
+                return True
+            if attempt < max_attempts:
+                self.logger.warning(
+                    f"check chat completions failed for {base_url}, "
+                    f"retrying {attempt}/{max_attempts - 1} after {interval}s"
+                )
+                time.sleep(interval)
+        return False
+
+    delete_from_routedapiproxy(model_name)
+    self.logger.info(f"deleted {model_name} from routedapiproxy")
+    self.logger.info("registering to routedapiproxy")
+
+    worker_session_url_dict = info_dict["worker_session_url_dict"]
+    worker_session_urls_status = info_dict["worker_session_urls_status"]
+    for _, worker_session_url in sorted(worker_session_url_dict.items()):
+        if not worker_session_urls_status.get(worker_session_url, False):
+            continue
+        register_to_routedapiproxy(model_name, worker_session_url)
+
+        # test server url
+        recheck_status_orig = _check_chat_completions_with_retry(worker_session_url)
+        if not recheck_status_orig:
+            raise ValueError(f"check chat completions failed for {worker_session_url}")
+
+    # test routed url
+    routed_url = "http://s-20260104203038-22bhb.ailab-evalservice.pjh-service.org.cn/v1"
+    recheck_status_routed = _check_chat_completions_with_retry(routed_url)
+    if not recheck_status_routed:
+        raise ValueError(f"check chat completions failed for {routed_url}")
+    self.logger.info("registered to routedapiproxy")
 
 
 class RLColocateTrainer(BaseRLTrainer):
@@ -1338,11 +1539,14 @@ class RLColocateTrainer(BaseRLTrainer):
                 )
                 self._rollout_config.skip_load_weights = False
             self.rollout_controller = self._rollout_config.build(self._pg)
-            self._maybe_start_gateway(cfg)
+            if _trainer_config_needs_routed_api_proxy(cfg):
+                add_apiproxy(self)
+
             replay_buffer = cfg.replay_buffer_config.build()
             self._build_agent_loop_components(cfg, replay_buffer)
             self._cpu_resource_manager.log_registered_summary()
             self.logger.warning("Debug rollout mode is enabled. Only rollout workers will be started.")
+
             return
 
         self.train_controller = self._train_worker_cfg.build(self._pg)
@@ -1368,7 +1572,6 @@ class RLColocateTrainer(BaseRLTrainer):
         self.train_controller.offload(target="all")
 
         self.rollout_controller = self._rollout_config.build(self._pg)
-        self._maybe_start_gateway(cfg)
         bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
 
         replay_buffer = cfg.replay_buffer_config.build()
@@ -1381,6 +1584,9 @@ class RLColocateTrainer(BaseRLTrainer):
 
         if self._rollout_config.skip_load_weights:
             self._sync_weights_from_train_workers()
+
+        if _trainer_config_needs_routed_api_proxy(cfg):
+            add_apiproxy(self)
 
     def _sync_weights_from_train_workers(self) -> None:
         self.logger.info("Rollout workers skip load weights, update weights from train workers.")
@@ -1533,7 +1739,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         set_cpu_resource_manager(self._cpu_resource_manager)
         self.train_controller = self._train_worker_cfg.build(self._train_pg)
         self.rollout_controller = self._rollout_config.build(self._rollout_pg)
-        self._maybe_start_gateway(cfg)
+        if _trainer_config_needs_routed_api_proxy(cfg):
+            add_apiproxy(self)
 
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)

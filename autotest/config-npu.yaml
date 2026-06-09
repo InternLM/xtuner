@@ -43,7 +43,7 @@ case:
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
                     - RANK=0
             assert_info:
-                base_metric: npu-qwen3-sft/812c1021/tracker.jsonl
+                base_metric: npu-qwen3-sft/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/reduced_llm_loss: 0.000001
@@ -69,7 +69,7 @@ case:
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
-                base_metric: npu-qwen3-sft-ep8/812c1021/tracker.jsonl
+                base_metric: npu-qwen3-sft-ep8/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/reduced_llm_loss: 0.000001
@@ -96,7 +96,7 @@ case:
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
-                base_metric: npu-qwen3-sft-ep8/812c1021_resume/tracker.jsonl
+                base_metric: npu-qwen3-sft-ep8_resume/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/reduced_llm_loss: 0.000001
@@ -121,7 +121,7 @@ case:
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
-                base_metric: npu-qwen3-sft-tp2/812c1021/tracker.jsonl
+                base_metric: npu-qwen3-sft-tp2/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/reduced_llm_loss: 0.000001
@@ -149,7 +149,7 @@ case:
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
-                base_metric: npu-qwen3-sft-recompute/812c1021/tracker.jsonl
+                base_metric: npu-qwen3-sft-recompute/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/reduced_llm_loss: 0.000001
@@ -175,7 +175,7 @@ case:
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
-                base_metric: npu-qwen3-sft/812c1021/tracker.jsonl
+                base_metric: npu-qwen3-sft/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/reduced_llm_loss: 0.000001
@@ -198,7 +198,7 @@ case:
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
-                base_metric: npu-qwen3-sft-celoss-vs-gpu/812c1021/tracker.jsonl
+                base_metric: npu-qwen3-sft-celoss-vs-gpu/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.02
                     loss/reduced_llm_loss: 0.01
@@ -229,7 +229,7 @@ case:
                     - VLLM_VERSION=0.11.0
                     - VLLM_USE_V1=1
             assert_info:
-                base_metric: npu-qwen3-rl-vllm/00f7e16/tracker.jsonl
+                base_metric: npu-qwen3-rl-vllm/tracker.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy

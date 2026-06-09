@@ -155,7 +155,9 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 
 WORKDIR ${CODESPACE}/DeepEP
 
-RUN pip wheel -w ${DEEP_EP_DIR} -v --no-deps .
+RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+    (pip show nvidia-nvshmem-cu12 >/dev/null 2>&1 || pip install nvidia-nvshmem-cu12==3.4.5) && \
+    pip wheel -w ${DEEP_EP_DIR} -v --no-deps .
 
 # compile deep_gemm
 FROM setup_env AS deep_gemm

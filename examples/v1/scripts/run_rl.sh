@@ -5,7 +5,6 @@ ray stop --force
 # bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_qwen3_8B_grpo.py "sglang" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
 # qwen2.5_7B_dapo_math training: 
 # bash examples/v1/scripts/run_rl.sh  examples/v1/config/rl_qwen25_7B_dapo.py "sglang" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
-
 CONFIG_PATH=$1
 INFER_BACKEND=$2
 MODEL_PATH=$3

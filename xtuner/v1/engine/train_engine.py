@@ -365,15 +365,6 @@ class TrainEngine:
             self._async_checkpoint_pg = dist.new_group(backend="gloo")
         return self._async_checkpoint_pg
 
-    @staticmethod
-    def _is_async_checkpoint_daemon_init_error(exc: BaseException) -> bool:
-        message = str(exc)
-        return (
-            "EADDRINUSE" in message
-            or "address already in use" in message
-            or "Checkpoint background process is dead" in message
-        )
-
     def async_save_dcp(
         self,
         weights_dir: Path,
@@ -424,34 +415,13 @@ class TrainEngine:
         dcp_future = start_async_save()
 
         def commit_async_save() -> None:
-            nonlocal dcp_future
-            # Retry only PyTorch DCP daemon init port races, such as
-            # EADDRINUSE from TCPStore. Other checkpoint failures still raise.
-            max_daemon_init_attempts = 3
-            for attempt in range(1, max_daemon_init_attempts + 1):
-                try:
-                    dcp_future.result()
-                    break
-                except BaseException as exc:
-                    if attempt == max_daemon_init_attempts or not self._is_async_checkpoint_daemon_init_error(exc):
-                        elapsed = time.time() - t0
-                        logger.error(f"[DCP async_save for {weights_dir}] failed after {elapsed:.2f}s: {exc}")
-                        logger.error(traceback.format_exc())
-                        raise
-
-                    if dist.get_rank() == 0:
-                        logger.warning(
-                            "[DCP async_save for %s] checkpoint daemon init failed on attempt %s/%s, retrying: %s",
-                            weights_dir,
-                            attempt,
-                            max_daemon_init_attempts,
-                            exc,
-                        )
-                        if incomplete_dir.exists():
-                            shutil.rmtree(incomplete_dir)
-                        incomplete_dir.mkdir(parents=True, exist_ok=True)
-                    dist.barrier(group=async_checkpoint_pg)
-                    dcp_future = start_async_save()
+            try:
+                dcp_future.result()
+            except BaseException as exc:
+                elapsed = time.time() - t0
+                logger.error(f"[DCP async_save for {weights_dir}] failed after {elapsed:.2f}s: {exc}")
+                logger.error(traceback.format_exc())
+                raise
 
             dist.barrier(group=async_checkpoint_pg)
             if dist.get_rank() == 0:

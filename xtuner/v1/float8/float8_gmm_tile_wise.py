@@ -88,6 +88,13 @@ class fp8_gmm_weight_per_block_act_per_tile(torch.autograd.Function):
     def forward(ctx, x, w_fp8, tokens_per_expert):
         seq, din = x.shape
         ne, dout, din = w_fp8.shape
+        ctx.zero_token_dispatch = seq == 0
+        ctx.input_shape = x.shape
+        ctx.weight_shape = w_fp8.shape
+
+        if ctx.zero_token_dispatch:
+            return x.new_empty((seq, dout))
+
         x_fp8, x_scale = per_tile_quant(x)
         (
             x_trans_quant_fp8,
@@ -104,6 +111,11 @@ class fp8_gmm_weight_per_block_act_per_tile(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output_hp):
+        if ctx.zero_token_dispatch:
+            dx = grad_output_hp.new_empty(ctx.input_shape)
+            dw = grad_output_hp.new_zeros(ctx.weight_shape)
+            return dx, dw, None
+
         (
             x_trans_quant_fp8,
             x_trans_quant_scale,
@@ -278,9 +290,10 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
             weight_fp8 = weight_to_per_block_float8_dynamic.apply(weight, torch.float8_e4m3fn, 128)
 
         orig_shape = input.shape
-        input = input.view(-1, input.shape[-1])
+        num_tokens = input.numel() // input.shape[-1]
+        input = input.view(num_tokens, input.shape[-1])
         out = fp8_gmm_weight_per_block_act_per_tile.apply(input, weight_fp8, tokens_per_expert)
-        out = out.view(*orig_shape[:-1], -1)
+        out = out.view(*orig_shape[:-1], self.out_features)
         return out
 
     @property
