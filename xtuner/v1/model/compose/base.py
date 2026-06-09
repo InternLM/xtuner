@@ -270,7 +270,6 @@ class BaseComposeModel(BaseModel):
             handle,
         )
         self._pending_async_hf = handle
-        commit_future.add_done_callback(self._record_async_hf_commit_result)
 
         def clear_pending_async_hf(_: Future[Path]) -> None:
             self._clear_pending_async_hf(handle)
