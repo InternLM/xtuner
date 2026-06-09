@@ -3,7 +3,7 @@
 本文件合并旧的 test_rollout_worker.py 和 test_rollout_utils.py 中不依赖真实模型/后端的测试：
 - SGLangWorker pause/continue 对 abort flag 和 server request 的控制。
 - RolloutWorker abort、abort request timeout 和 in-flight request 取消语义。
-- RolloutHealthChecker 对 inactive/unhealthy worker 的清理逻辑。
+- RolloutHealthManager 对 inactive/unhealthy worker 的清理逻辑。
 - PartialRolloutHandler 拼接 routed_experts 后释放旧 Ray ObjectRef 的逻辑。
 
 旧 test_rollout_utils.py 中的 TestRolloutControllerRecover 需要真实 Ray controller / lmdeploy backend，
@@ -14,12 +14,14 @@ import asyncio
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.rollout.controller import RolloutController
+from xtuner.v1.rl.rollout.health_manager import RolloutHealthManager
+from xtuner.v1.rl.rollout.proxy_manager import RolloutProxyManager
 from xtuner.v1.rl.rollout.sglang import SGLangWorker
-from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, RolloutHealthChecker
+from xtuner.v1.rl.rollout.utils import PartialRolloutHandler
 from xtuner.v1.rl.rollout.worker import RolloutWorker
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType
 
@@ -120,6 +122,103 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(router.session_ids, [456])
         self.assertEqual(worker.generate.calls, [request_state])
         self.assertEqual(result.status, Status.COMPLETED)
+
+    def test_register_active_workers_to_proxy_delegates_active_session_urls(self):
+        controller = RolloutController.__new__(RolloutController)
+        controller.worker_info_lock = threading.RLock()
+        controller.rank2info = {
+            0: SimpleNamespace(session_url="http://session-0", is_active=True),
+            1: SimpleNamespace(session_url="http://session-1", is_active=False),
+            2: SimpleNamespace(session_url=None, is_active=True),
+        }
+        controller.proxy_manager = MagicMock()
+
+        controller.register_active_workers_to_proxy()
+
+        controller.proxy_manager.replace_registered_session_urls.assert_called_once_with(["http://session-0"])
+
+    def test_proxy_operations_noop_without_proxy_manager(self):
+        controller = RolloutController.__new__(RolloutController)
+        controller.proxy_manager = None
+
+        controller.register_active_workers_to_proxy()
+        controller._on_worker_inactive(0)
+        controller._on_worker_recovered(0)
+
+    def test_proxy_callbacks_delegate_worker_session_url(self):
+        controller = RolloutController.__new__(RolloutController)
+        controller.proxy_manager = MagicMock()
+        controller.worker_info_lock = threading.RLock()
+        controller.rank2info = {
+            0: SimpleNamespace(session_url="http://session-0", is_active=False),
+        }
+
+        controller._on_worker_inactive(0)
+        controller.rank2info[0].is_active = True
+        controller._on_worker_recovered(0)
+
+        controller.proxy_manager.delete_session_url.assert_called_once_with("http://session-0")
+        controller.proxy_manager.register_session_url.assert_called_once_with("http://session-0")
+
+
+class TestRolloutProxyManager(unittest.TestCase):
+    def _build_manager(self):
+        config = SimpleNamespace(model_name="test-model", worker_log_dir=None)
+        return RolloutProxyManager(config)
+
+    def test_replace_registered_session_urls_replaces_proxy_registrations(self):
+        manager = self._build_manager()
+
+        with (
+            patch("xtuner.v1.rl.rollout.proxy_manager.delete_from_routedapiproxy") as delete_proxy,
+            patch("xtuner.v1.rl.rollout.proxy_manager.register_to_routedapiproxy") as register_proxy,
+            patch("xtuner.v1.rl.rollout.proxy_manager.check_chat_completions", return_value=True),
+        ):
+            manager.replace_registered_session_urls(["http://session-1", "http://session-0", "http://session-1"])
+
+        delete_proxy.assert_called_once_with("test-model")
+        self.assertEqual(
+            register_proxy.call_args_list,
+            [
+                call("test-model", "http://session-0"),
+                call("test-model", "http://session-1"),
+            ],
+        )
+
+    def test_replace_registered_session_urls_raises_when_validation_fails(self):
+        manager = self._build_manager()
+
+        with (
+            patch("xtuner.v1.rl.rollout.proxy_manager.delete_from_routedapiproxy") as delete_proxy,
+            patch("xtuner.v1.rl.rollout.proxy_manager.register_to_routedapiproxy"),
+            patch("xtuner.v1.rl.rollout.proxy_manager.check_chat_completions", return_value=False),
+            patch("xtuner.v1.rl.rollout.proxy_manager.time.sleep"),
+            self.assertRaisesRegex(RuntimeError, "check chat completions failed"),
+        ):
+            manager.replace_registered_session_urls(["http://session-0"])
+
+        self.assertEqual(
+            delete_proxy.call_args_list,
+            [
+                call("test-model"),
+                call("test-model", "http://session-0"),
+            ],
+        )
+
+    def test_delete_and_register_session_url_use_single_url_payload(self):
+        manager = self._build_manager()
+        manager._registered_session_urls = {"http://session-0"}
+
+        with (
+            patch("xtuner.v1.rl.rollout.proxy_manager.delete_from_routedapiproxy") as delete_proxy,
+            patch("xtuner.v1.rl.rollout.proxy_manager.register_to_routedapiproxy") as register_proxy,
+            patch("xtuner.v1.rl.rollout.proxy_manager.check_chat_completions", return_value=True),
+        ):
+            manager.delete_session_url("http://session-0")
+            manager.register_session_url("http://session-0")
+
+        delete_proxy.assert_called_once_with("test-model", "http://session-0")
+        register_proxy.assert_called_once_with("test-model", "http://session-0")
 
 
 class TestSGLangWorker(unittest.TestCase):
@@ -222,16 +321,17 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
         response.raise_for_status.assert_called_once_with()
 
 
-class TestRolloutHealthChecker(unittest.TestCase):
-    def _build_checker(self, workers_info):
+class TestRolloutHealthManager(unittest.TestCase):
+    def _build_manager(self, workers_info, **kwargs):
         config = SimpleNamespace(health_check_interval_seconds=10, health_check_failure_threshold=1)
-        return RolloutHealthChecker(config, workers_info)
+        return RolloutHealthManager(config, workers_info, **kwargs)
 
     def test_shutdown_runs_when_offload_fails(self):
         # worker 健康检查失败且 offload 也失败时，health checker 应 shutdown 并标记 inactive。
         worker = _FakeWorker()
         workers_info = {0: SimpleNamespace(actor=worker, url="http://worker-0", is_active=True)}
-        checker = self._build_checker(workers_info)
+        inactive_ranks = []
+        manager = self._build_manager(workers_info, on_worker_inactive=inactive_ranks.append)
 
         async def unhealthy_worker(*args, **kwargs):
             return False
@@ -240,15 +340,16 @@ class TestRolloutHealthChecker(unittest.TestCase):
             worker.call_log.append((ref, "get"))
             if ref == "offload":
                 raise RuntimeError("offload failed")
-            return None
+            return ref
 
         with (
-            patch("xtuner.v1.rl.rollout.utils.check_worker_health", side_effect=unhealthy_worker),
-            patch("xtuner.v1.rl.rollout.utils.ray.get", side_effect=ray_get),
+            patch("xtuner.v1.rl.rollout.health_manager.check_worker_health", side_effect=unhealthy_worker),
+            patch("xtuner.v1.rl.rollout.health_manager.ray.get", side_effect=ray_get),
         ):
-            checker.run_once()
+            manager.run_once()
 
         self.assertFalse(workers_info[0].is_active)
+        self.assertEqual(inactive_ranks, [0])
         self.assertEqual(
             worker.call_log,
             [
@@ -263,13 +364,13 @@ class TestRolloutHealthChecker(unittest.TestCase):
         # 已 inactive 的 worker 不再重复健康检查、offload 或 shutdown。
         worker = _FakeWorker()
         workers_info = {0: SimpleNamespace(actor=worker, url="http://worker-0", is_active=False)}
-        checker = self._build_checker(workers_info)
+        manager = self._build_manager(workers_info)
 
         with (
-            patch("xtuner.v1.rl.rollout.utils.check_worker_health") as check_worker_health_mock,
-            patch("xtuner.v1.rl.rollout.utils.ray.get") as ray_get_mock,
+            patch("xtuner.v1.rl.rollout.health_manager.check_worker_health") as check_worker_health_mock,
+            patch("xtuner.v1.rl.rollout.health_manager.ray.get") as ray_get_mock,
         ):
-            checker.run_once()
+            manager.run_once()
 
         check_worker_health_mock.assert_not_called()
         ray_get_mock.assert_not_called()

@@ -141,7 +141,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
 
         trainer.rollout_controller = SimpleNamespace(
-            ensure_workers_healthy_before_training=SimpleNamespace(
+            recover_unhealthy_workers=SimpleNamespace(
                 remote=MagicMock(return_value="rollout_ready_for_training")
             ),
             offload=SimpleNamespace(remote=MagicMock(return_value="rollout_offloaded")),

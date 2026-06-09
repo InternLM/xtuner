@@ -132,7 +132,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             update_weights=MagicMock(return_value="update"),
         )
         trainer.rollout_controller = SimpleNamespace(
-            recover_failed_workers=SimpleNamespace(remote=MagicMock(return_value="recover")),
+            recover_unhealthy_workers=SimpleNamespace(remote=MagicMock(return_value="recover")),
             pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause")),
             continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue")),
             onload_weights=SimpleNamespace(remote=MagicMock(return_value="onload_weights")),

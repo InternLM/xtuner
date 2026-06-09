@@ -263,11 +263,13 @@ def register_to_routedapiproxy(model_name: str, api_server_url: str) -> dict:
     return result
 
 
-def delete_from_routedapiproxy(model_name: str) -> None:
+def delete_from_routedapiproxy(model_name: str, api_server_url: str | None = None) -> None:
     url = "http://s-20260104203038-22bhb-decode.ailab-evalservice.svc:4000/v1/models/delete"
     payload = {
         "model_name": model_name,
     }
+    if api_server_url is not None:
+        payload["api_base"] = api_server_url
     headers = {
         "accept": "application/json",
         "Content-Type": "application/json",
