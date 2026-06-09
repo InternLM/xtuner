@@ -122,6 +122,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             return_value=([{"seq_ctx": "fake"}], {"batch_size": 1, "rewards/mean": 1.0})
         )
         trainer._save_trajectories = MagicMock()
+        trainer._save_eval_trajectories = MagicMock()
         trainer._log_step = MagicMock()
         trainer._maybe_save_checkpoint = AsyncMock()
         trainer._maybe_save_hf = MagicMock()

@@ -1494,23 +1494,15 @@ def add_apiproxy(self):
                 time.sleep(interval)
         return False
 
-    worker_session_url_dict = info_dict["worker_session_url_dict"]
-    worker_session_urls_status = info_dict["worker_session_urls_status"]
-    if not worker_session_url_dict:
-        raise RuntimeError("Routed API proxy requested, but rollout metadata contains no SessionServer URLs.")
-    active_worker_session_urls = [
-        worker_session_url
-        for _, worker_session_url in sorted(worker_session_url_dict.items())
-        if worker_session_urls_status.get(worker_session_url, False)
-    ]
-    if not active_worker_session_urls:
-        raise RuntimeError("Routed API proxy requested, but no active SessionServer URLs are available.")
-
     delete_from_routedapiproxy(model_name)
     self.logger.info(f"deleted {model_name} from routedapiproxy")
     self.logger.info("registering to routedapiproxy")
 
-    for worker_session_url in active_worker_session_urls:
+    worker_session_url_dict = info_dict["worker_session_url_dict"]
+    worker_session_urls_status = info_dict["worker_session_urls_status"]
+    for _, worker_session_url in sorted(worker_session_url_dict.items()):
+        if not worker_session_urls_status.get(worker_session_url, False):
+            continue
         register_to_routedapiproxy(model_name, worker_session_url)
 
         # test server url

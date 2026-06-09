@@ -183,6 +183,9 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
     def _patched_runtime(self):
         runtime = SimpleNamespace(train_controllers=[], rollout_controllers=[])
 
+        async def inline_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
         def build_pg(resources_config, name="train"):
             idx = len(getattr(build_pg, "built", []))
             build_pg.built = getattr(build_pg, "built", []) + [name]
@@ -199,15 +202,11 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             return controller
 
         with (
-            patch("xtuner.v1.rl.utils.ray_accelerator_worker.ray.is_initialized", return_value=True),
-            patch(
-                "xtuner.v1.rl.utils.ray_accelerator_worker.ray.available_resources",
-                return_value={"CPU": 64, "memory": 128 * 1024**3, "GPU": 8},
-            ),
             patch("xtuner.v1.train.rl_trainer.AutoAcceleratorWorkers.build_placement_group", side_effect=build_pg),
             patch("xtuner.v1.train.rl_trainer.CPUResourceManager", _FakeCPUResourceManager),
             patch("xtuner.v1.train.rl_trainer.set_cpu_resource_manager", lambda manager: None),
             patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+            patch("asyncio.to_thread", side_effect=inline_to_thread),
             patch.object(WorkerConfig, "build", autospec=True, side_effect=build_train_controller),
             patch.object(RolloutConfig, "build", autospec=True, side_effect=build_rollout_controller),
         ):

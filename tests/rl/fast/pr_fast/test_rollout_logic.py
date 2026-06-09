@@ -3,7 +3,7 @@
 本文件合并旧的 test_rollout_worker.py 和 test_rollout_utils.py 中不依赖真实模型/后端的测试：
 - SGLangWorker pause/continue 对 abort flag 和 server request 的控制。
 - RolloutWorker abort、abort request timeout 和 in-flight request 取消语义。
-- RolloutHealthChecker 对 inactive/unhealthy worker 的清理逻辑。
+- RolloutHealthChecker 对 inactive/unhealthy worker 的状态标记逻辑。
 - PartialRolloutHandler 拼接 routed_experts 后释放旧 Ray ObjectRef 的逻辑。
 
 旧 test_rollout_utils.py 中的 TestRolloutControllerRecover 需要真实 Ray controller / lmdeploy backend，
@@ -227,8 +227,8 @@ class TestRolloutHealthChecker(unittest.TestCase):
         config = SimpleNamespace(health_check_interval_seconds=10, health_check_failure_threshold=1)
         return RolloutHealthChecker(config, workers_info)
 
-    def test_shutdown_runs_when_offload_fails(self):
-        # worker 健康检查失败且 offload 也失败时，health checker 应 shutdown 并标记 inactive。
+    def test_unhealthy_worker_is_marked_inactive(self):
+        # worker 健康检查失败时，health checker 只标记 inactive；清理/恢复由 controller 统一处理。
         worker = _FakeWorker()
         workers_info = {0: SimpleNamespace(actor=worker, url="http://worker-0", is_active=True)}
         checker = self._build_checker(workers_info)
@@ -236,28 +236,12 @@ class TestRolloutHealthChecker(unittest.TestCase):
         async def unhealthy_worker(*args, **kwargs):
             return False
 
-        def ray_get(ref, timeout=None):
-            worker.call_log.append((ref, "get"))
-            if ref == "offload":
-                raise RuntimeError("offload failed")
-            return None
-
-        with (
-            patch("xtuner.v1.rl.rollout.utils.check_worker_health", side_effect=unhealthy_worker),
-            patch("xtuner.v1.rl.rollout.utils.ray.get", side_effect=ray_get),
-        ):
+        with patch("xtuner.v1.rl.rollout.utils.check_worker_health", side_effect=unhealthy_worker) as health_check:
             checker.run_once()
 
         self.assertFalse(workers_info[0].is_active)
-        self.assertEqual(
-            worker.call_log,
-            [
-                ("offload", "remote"),
-                ("offload", "get"),
-                ("shutdown", "remote"),
-                ("shutdown", "get"),
-            ],
-        )
+        health_check.assert_called_once_with(worker, 0, "http://worker-0", True, 1)
+        self.assertEqual(worker.call_log, [])
 
     def test_inactive_worker_is_not_cleaned_up_again(self):
         # 已 inactive 的 worker 不再重复健康检查、offload 或 shutdown。

@@ -386,6 +386,9 @@ def get_existing_store():
     if _handle_cache is not None:
         return _handle_cache
 
+    if not ray.is_initialized():
+        return None
+
     try:
         _handle_cache = ray.get_actor(_STORE_NAME, namespace=_STORE_NAMESPACE)
     except ValueError:

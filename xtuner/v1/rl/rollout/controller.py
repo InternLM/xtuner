@@ -385,47 +385,32 @@ class RolloutController:
             ]
             init_results = ray.get(init_refs, timeout=ROLLOUT_RAY_GET_TIMEOUT)
             if len(init_results) != len(workers):
-                self.logger.error(
+                raise RuntimeError(
                     f"Restarted rollout worker group ranks={group_ranks} returned "
                     f"{len(init_results)} init results, expected {len(workers)}."
                 )
-                self._cleanup_inactive_worker_group(workers)
-                return False
-            for (rank, _, expected_url, _), (actual_rank, actual_url) in zip(workers, init_results):
+
+            for worker_info, init_result in zip(workers, init_results):
+                rank, _, expected_url, _ = worker_info
+                actual_rank, actual_url = init_result
                 if actual_rank != rank or actual_url != expected_url:
-                    self.logger.error(
+                    raise RuntimeError(
                         f"Restarted rollout worker {rank} returned rank={actual_rank}, url={actual_url}; "
                         f"expected rank={rank}, url={expected_url}."
                     )
-                    self._cleanup_inactive_worker_group(workers)
-                    return False
 
             infer_not_ready_ranks = self._check_worker_group_infer_ready_after_restart(workers)
             if infer_not_ready_ranks:
-                self.logger.error(
+                raise RuntimeError(
                     f"Restarted rollout worker group ranks={group_ranks} has ranks not ready for inference: "
                     f"{infer_not_ready_ranks}."
                 )
-                self._cleanup_inactive_worker_group(workers)
-                return False
 
-            session_url_map = self._collect_worker_session_url_map([actor for _, actor, _, _ in workers])
-            missing_session_url_ranks = sorted(rank for rank, _, _, _ in workers if rank not in session_url_map)
-            if missing_session_url_ranks:
-                self.logger.error(
-                    f"Restarted rollout worker group ranks={group_ranks} has no SessionServer URL for "
-                    f"ranks={missing_session_url_ranks}."
-                )
-                self._cleanup_inactive_worker_group(workers)
-                return False
-
-            with self.worker_info_lock:
-                for rank, session_url in session_url_map.items():
-                    self.rank2info[rank].session_url = session_url
+            # SessionServer is not stopped during worker restart, so its URL in rank2info remains valid.
             self.logger.info(f"Successfully restarted rollout worker group ranks={group_ranks}.")
             return True
         except Exception as e:
-            self.logger.error(f"Failed to restart worker: {e}")
+            self.logger.error(f"Failed to restart worker group ranks={group_ranks}: {e}")
             if workers:
                 self._cleanup_inactive_worker_group(workers)
             return False
@@ -488,19 +473,6 @@ class RolloutController:
             if attempt < max_attempts:
                 time.sleep(retry_interval_seconds)
         return sorted(pending)
-
-    def _collect_worker_session_url_map(self, active_rollout_workers: list[RolloutWorker]) -> dict[int, str]:
-        session_server_infos = ray.get(
-            [worker.get_session_server_info.remote() for worker in active_rollout_workers],  # type: ignore[attr-defined]
-            timeout=ROLLOUT_RAY_GET_TIMEOUT,
-        )
-        session_url_map: dict[int, str] = {}
-        for rank, session_url in session_server_infos:
-            if session_url is None:
-                self.logger.warning(f"Rollout worker rank={rank} has no SessionServer URL.")
-                continue
-            session_url_map[int(rank)] = session_url
-        return session_url_map
 
     def _check_chat_completion_ready_once(
         self,
@@ -712,24 +684,29 @@ class RolloutController:
             nodes_per_engine, server_urls_per_engine, init_dist_init_addrs, self.num_gpus_per_engine
         )
         # launch rollout servers
-        worker_server_urls = ray.get(
+        init_results = ray.get(
             [worker.init.remote(dist_init_addrs[i]) for i, worker in enumerate(active_rollout_workers)]
         )
-        worker_server_urls_map = dict(worker_server_urls)  # rank -> url
-        worker_dist_init_addr_map = {rank: dist_init_addrs[i] for i, (rank, _) in enumerate(worker_server_urls)}
+        worker_server_urls_map = dict(init_results)  # rank -> url
+        worker_dist_init_addr_map = {rank: dist_init_addrs[i] for i, (rank, _) in enumerate(init_results)}
         active_rollout_workers, worker_server_urls_map = self._update_active_workers_and_urls_map(
             active_rollout_workers, worker_server_urls_map
         )
         active_ranks = list(worker_server_urls_map.keys())
         rank_to_ep_group = self._build_rank_to_ep_group(active_ranks, server_urls_per_engine)
-        worker_session_url_map = self._collect_worker_session_url_map(active_rollout_workers)
+        worker_session_url_dict = dict(
+            ray.get(
+                [worker.get_session_server_info.remote() for worker in active_rollout_workers],  # type: ignore[attr-defined]
+                timeout=ROLLOUT_RAY_GET_TIMEOUT,
+            )
+        )
         workers_info = {}
         for i, rank in enumerate(active_ranks):
             url = worker_server_urls_map[rank]
             workers_info[rank] = WorkerInfo(
                 actor=active_rollout_workers[i],
                 url=url,
-                session_url=worker_session_url_map.get(rank),
+                session_url=worker_session_url_dict.get(rank),
                 dist_init_addr=worker_dist_init_addr_map[rank],
                 ep_group_ranks=rank_to_ep_group[rank],
             )
