@@ -5,8 +5,6 @@ import multiprocessing as py_mp
 import os
 import pydoc
 import re
-import threading
-import traceback
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from functools import reduce
@@ -102,9 +100,6 @@ class AsyncHFSaveHandle:
 @dataclass
 class AsyncHFResources:
     finalize_pg: dist.ProcessGroup | None
-    failure_event: threading.Event
-    failure_exception: BaseException | None = None
-    failure_traceback: str = ""
 
 
 class TorchCompileOption(TypedDict):
@@ -708,7 +703,6 @@ class BaseModel(nn.Module):
 
             self._async_hf_resources = AsyncHFResources(
                 finalize_pg=finalize_pg,
-                failure_event=threading.Event(),
             )
         except BaseException as exc:
             if finalize_pg is not None and dist.is_available() and dist.is_initialized():
@@ -733,27 +727,6 @@ class BaseModel(nn.Module):
 
     def _get_async_hf_finalize_pg(self) -> dist.ProcessGroup | None:
         return self._get_async_hf_resources().finalize_pg
-
-    def check_async_hf_failure(self) -> None:
-        resources = self._async_hf_resources
-        if resources is None or not resources.failure_event.is_set():
-            return
-
-        message = "Async HF save failed in background"
-        if resources.failure_traceback:
-            message = f"{message}:\n{resources.failure_traceback}"
-        raise RuntimeError(message) from resources.failure_exception
-
-    def _record_async_hf_commit_result(self, future: Future) -> None:
-        try:
-            future.result()
-        except BaseException as exc:
-            resources = self._async_hf_resources
-            if resources is None:
-                return
-            resources.failure_exception = exc
-            resources.failure_traceback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-            resources.failure_event.set()
 
     def _all_gather_async_hf_object(self, local_obj: Any) -> list[Any]:
         if not dist.is_initialized():
@@ -829,7 +802,6 @@ class BaseModel(nn.Module):
             handle,
         )
         self._pending_async_hf = handle
-        commit_future.add_done_callback(self._record_async_hf_commit_result)
 
         def clear_pending_async_hf(_: Future[Path]) -> None:
             self._clear_pending_async_hf(handle)
@@ -894,8 +866,6 @@ class BaseModel(nn.Module):
         self,
         handle: AsyncHFSaveHandle,
     ) -> Path:
-        self.check_async_hf_failure()
-
         process = handle.process
         hf_dir = handle.hf_dir
 
