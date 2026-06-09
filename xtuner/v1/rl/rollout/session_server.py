@@ -8,12 +8,13 @@ from typing import Any, List, Optional
 import numpy as np
 import ray
 from aiohttp import ClientConnectionResetError, ClientSession, ClientTimeout, web
-from transformers import AutoTokenizer
 
+from transformers import AutoTokenizer
 from xtuner.v1.utils import get_logger
 
 from .chat_template import canonicalize_messages_for_chat_template
 from .trace_store import TokenizedSegment, get_store
+
 
 FMT_OPENAI = "openai"
 FMT_ANTHROPIC = "anthropic"
@@ -55,7 +56,8 @@ def _bool_request_value(value: Any, default: bool = False) -> bool:
 
 
 def _request_uses_trace_store(req_body: dict) -> bool:
-    """Whether this request should drive the trace_store / token-in-token-out path.
+    """Whether this request should drive the trace_store / token-in-token-out
+    path.
 
     Evaluate-mode callers opt out by setting ``return_token_ids=False`` on the
     request body; tracing then becomes a passthrough proxy with parameter-name
@@ -112,7 +114,8 @@ def _normalize_tool_call_arguments(messages) -> None:
 
 
 def _strip_stop_word(content, stop_word: str):
-    """Remove ``stop_word`` from a message ``content`` field (any OpenAI shape).
+    """Remove ``stop_word`` from a message ``content`` field (any OpenAI
+    shape).
 
     OpenAI ``content`` accepts both a plain string and a list of typed parts
     (``[{"type": "text", "text": "..."}, ...]``); the latter shows up after we
@@ -140,7 +143,8 @@ def _strip_stop_word(content, stop_word: str):
 
 
 def _anthropic_response_to_assistant_message(response: dict) -> dict:
-    """Wrap an Anthropic ``MessagesResponse`` body as an anthropic-shaped assistant message.
+    """Wrap an Anthropic ``MessagesResponse`` body as an anthropic-shaped
+    assistant message.
 
     The returned dict can be appended to ``MessagesRequest.messages`` so the
     full conversation (input + this assistant turn) survives a round-trip
@@ -185,7 +189,8 @@ def _anthropic_request_to_openai(req_body: dict) -> tuple[list[dict], Optional[l
 
 
 def _filter_anthropic_user_tools(tools) -> Optional[list]:
-    """Drop Anthropic server-side tools (``web_search_*`` / ``computer_*`` / ``bash_*`` / ``text_editor_*``).
+    """Drop Anthropic server-side tools (``web_search_*`` / ``computer_*`` /
+    ``bash_*`` / ``text_editor_*``).
 
     ``ToolParam`` in lmdeploy's anthropic protocol requires ``input_schema``;
     server-side built-ins are managed by Anthropic itself and only carry
@@ -207,7 +212,8 @@ def _filter_anthropic_user_tools(tools) -> Optional[list]:
 
 
 class SessionServer:
-    """SessionServer intercepts and records requests sent to a remote LLM API worker.
+    """SessionServer intercepts and records requests sent to a remote LLM API
+    worker.
 
     It acts as a reverse-proxy in front of an already running worker (lmdeploy,
     sglang, vllm). Each supported endpoint is transparently forwarded along
@@ -261,7 +267,8 @@ class SessionServer:
         self._lmdeploy_actor: Optional[ray.actor.ActorHandle] = None
 
     async def on_request(self, req_body: dict, fmt: str, *, trace_enabled: bool = True) -> dict:
-        """Normalize the request to drive the prefix cache + inject extension fields.
+        """Normalize the request to drive the prefix cache + inject extension
+        fields.
 
         When ``trace_enabled`` is False (evaluate mode), forward the request
         as-is with parameter-name hygiene only — no token-in-token-out
@@ -358,7 +365,8 @@ class SessionServer:
         return worker_req
 
     async def on_response(self, worker_resp: dict, fmt: str, orig_req_body: dict) -> dict:
-        """Trace the assistant turn into ``trace_store`` (always in OpenAI shape).
+        """Trace the assistant turn into ``trace_store`` (always in OpenAI
+        shape).
 
         Args:
             worker_resp (dict): The parsed upstream response (still in
@@ -710,7 +718,8 @@ class SessionServer:
     def _build_data_cleaner(
         self, fmt: str, *, orig_return_logprob: bool, orig_return_token_ids: bool, orig_return_routed_experts: bool
     ):
-        """Return a per-format ``data -> bool`` cleaner stripping injected fields."""
+        """Return a per-format ``data -> bool`` cleaner stripping injected
+        fields."""
         drops = {
             "output_token_logprobs": not orig_return_logprob,
             "output_ids": not orig_return_token_ids,
@@ -890,7 +899,8 @@ class SessionServer:
 
     @staticmethod
     def _parse_anthropic_stream(events: list[dict]) -> Optional[dict]:
-        """Aggregate Anthropic SSE events into a ``MessagesResponse``-shaped dict.
+        """Aggregate Anthropic SSE events into a ``MessagesResponse``-shaped
+        dict.
 
         Extension fields:
         - ``output_ids`` / ``output_token_logprobs`` live on each
