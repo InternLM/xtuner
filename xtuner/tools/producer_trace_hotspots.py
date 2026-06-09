@@ -14,6 +14,8 @@ from xtuner.v1.rl.trace import (
     TraceViewerScope,
 )
 from xtuner.tools.producer_trace_analysis import (
+    _percentile,
+    _split_span_stage,
     display_trace_stage,
     filter_trace_events_by_scope,
     load_trace_jsonl,
@@ -327,27 +329,6 @@ def _build_stage_stats(records: Iterable[TraceSpanRecord]) -> list[dict[str, Any
             }
         )
     return sorted(stats, key=lambda item: (item["p95_s"], item["total_s"]), reverse=True)
-
-
-def _split_span_stage(stage: str) -> tuple[str | None, str | None]:
-    for suffix in (".start", ".end", ".error"):
-        if stage.endswith(suffix):
-            return stage[: -len(suffix)], suffix[1:]
-    return None, None
-
-
-def _percentile(sorted_values: list[float], percentile: float) -> float:
-    if not sorted_values:
-        return 0.0
-    if len(sorted_values) == 1:
-        return sorted_values[0]
-    position = (len(sorted_values) - 1) * percentile
-    lower = int(position)
-    upper = min(lower + 1, len(sorted_values) - 1)
-    if lower == upper:
-        return sorted_values[lower]
-    fraction = position - lower
-    return sorted_values[lower] * (1 - fraction) + sorted_values[upper] * fraction
 
 
 _HTML_TEMPLATE = """<!doctype html>

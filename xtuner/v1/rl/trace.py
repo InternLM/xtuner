@@ -373,7 +373,7 @@ class BufferedTraceJsonlWriter:
     def _open_file(self) -> None:
         path = self.output_dir / f"{TRACE_JSONL_BASENAME}_{self._writer_id}_{self._shard_idx:06d}.jsonl"
         self._file = path.open("a", encoding="utf-8")
-        self._bytes_written = path.stat().st_size if path.exists() else 0
+        self._bytes_written = path.stat().st_size
 
     def _flush_file(self) -> None:
         if self._file is not None:

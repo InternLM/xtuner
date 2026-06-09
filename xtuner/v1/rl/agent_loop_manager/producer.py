@@ -363,7 +363,9 @@ class ProduceContext:
         group_status = [Status.EXPIRED, Status.ABORTED] if from_expired_pool else [Status.ABORTED]
         return await self.sampler.sample(task_name=self.task_name, group_status=group_status)
 
-    @trace_function("xtuner.producer.generate_group", trace_kwargs_getter=lambda self, *args, **kwargs: self.trace_kwargs())
+    @trace_function(
+        "xtuner.producer.generate_group", trace_kwargs_getter=lambda self, *args, **kwargs: self.trace_kwargs()
+    )
     async def generate_group(
         self,
         rollout_state: list[RolloutState],
@@ -392,11 +394,9 @@ class ProduceContext:
             )
         elapsed = time.perf_counter() - start
         for item in result:
-            extra_fields = getattr(item, "extra_fields", None)
-            if extra_fields is None:
-                extra_fields = {}
-                setattr(item, "extra_fields", extra_fields)
-            extra_fields[GROUP_GENERATE_TIME_KEY] = elapsed
+            item_extra_fields = dict(item.extra_fields)
+            item_extra_fields[GROUP_GENERATE_TIME_KEY] = elapsed
+            item.extra_fields = item_extra_fields
         return result
 
     @trace_function(
