@@ -190,11 +190,7 @@ class AgentLoop(ABC):
     @abstractmethod
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
 
-    @trace_function(
-        "xtuner.agent_loop.generate_group",
-        target="rollout_state",
-        result="return",
-    )
+    @trace_function("xtuner.agent_loop.generate_group")
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         pending_tasks = []
         for state in rollout_state:
@@ -214,11 +210,7 @@ class AgentLoop(ABC):
     @overload
     async def run_judger(self, rollout_state: list[RolloutState]) -> list[RolloutState]: ...
 
-    @trace_function(
-        "xtuner.judger.judge",
-        target="rollout_state",
-        result="return",
-    )
+    @trace_function("xtuner.judger.judge")
     async def run_judger(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:
         assert self.judger is not None
         if isinstance(rollout_state, list):

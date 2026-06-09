@@ -13,7 +13,7 @@ from ray import ObjectRef as RayObjectRef
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.utils import free_object_refs
 from xtuner.v1.utils import get_logger
-
+from xtuner.v1.rl.trace import trace_function
 
 if TYPE_CHECKING:
     from .controller import WorkerInfo
@@ -275,6 +275,7 @@ class PartialRolloutHandler:
     def __init__(self) -> None:
         self.logger = get_logger(self.__class__.__name__)
 
+    @trace_function("xtuner.partial_rollout_handler.postprocess")
     def preprocess(self, rollout_state: RolloutState, max_tokens: int) -> RolloutState:
         # Set up token and length variable
         response_ids = list(rollout_state.response_ids or [])
@@ -291,6 +292,7 @@ class PartialRolloutHandler:
         )
         return rollout_state
 
+    @trace_function("xtuner.partial_rollout_handler.postprocess")
     async def postprocess(
         self,
         rollout_state: RolloutState,

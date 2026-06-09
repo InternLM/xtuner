@@ -174,11 +174,7 @@ class RolloutController:
         return active_workers * concurrency_per_worker
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
-    @trace_function(
-        "xtuner.rollout_controller.generate",
-        target="rollout_state",
-        result="return",
-    )
+    @trace_function("xtuner.rollout_controller.generate")
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         if XTUNER_DETERMINISTIC:
             sample_params = rollout_state.sample_params.model_copy(deep=True)

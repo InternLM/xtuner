@@ -681,12 +681,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         return routed_experts
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
-    @trace_function(
-        "xtuner.rollout_worker.generate",
-        target="rollout_state",
-        result="return",
-        trace_kwargs_getter=lambda self, *args, **kwargs: {"worker_rank": self.rank},
-    )
+    @trace_function("xtuner.rollout_worker.generate", trace_kwargs_getter=lambda self, *args, **kwargs: {"worker_rank": self.rank})
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         try:
             # TODO(@duanyanhui):

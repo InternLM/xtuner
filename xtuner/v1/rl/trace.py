@@ -636,6 +636,10 @@ class TraceTargetResolver:
             return target(*args, **kwargs)
         if target is not None:
             return target
+        rollout_state = bound_arguments.get("rollout_state")
+        rollout_states = cls.as_rollout_state_list(rollout_state)
+        if rollout_states:
+            return rollout_states if len(rollout_states) > 1 else rollout_states[0]
         for value in bound_arguments.values():
             states = cls.as_rollout_state_list(value)
             if states:
@@ -796,14 +800,12 @@ class TraceFunctionDecorator:
         target: str | RolloutState | Sequence[RolloutState] | Callable[..., Any] | None = None,
         target_getter: Callable[..., Any] | None = None,
         trace_kwargs_getter: Callable[..., dict[str, Any] | None] | None = None,
-        result: str | Callable[[Any], Any] | None = None,
         trace_kwargs: dict[str, Any] | None = None,
     ) -> None:
         self.name = name
         self.target = target
         self.target_getter = target_getter
         self.trace_kwargs_getter = trace_kwargs_getter
-        self.result = result
         self.trace_kwargs = trace_kwargs or {}
 
     def decorate(self, func: Callable[..., Any]):
@@ -824,9 +826,7 @@ class TraceFunctionDecorator:
         )
 
     def _end_target(self, start_target: Any, return_value: Any) -> Any:
-        if callable(self.result):
-            return self.result(return_value)
-        if self.result == "return":
+        if TraceTargetResolver.as_rollout_state_list(return_value):
             return return_value
         return start_target
 
@@ -911,15 +911,33 @@ def trace_function(
     target: str | RolloutState | Sequence[RolloutState] | Callable[..., Any] | None = None,
     target_getter: Callable[..., Any] | None = None,
     trace_kwargs_getter: Callable[..., dict[str, Any] | None] | None = None,
-    result: str | Callable[[Any], Any] | None = None,
     **trace_kwargs: Any,
 ):
+    """Trace a whole sync/async function as one task-level span.
+
+    Target resolution for the `.start` event:
+    - If `target_getter` is provided, use its return value.
+    - Else if `target` is provided, resolve that explicit target.
+    - Else prefer the argument named `rollout_state` when it is a `RolloutState`
+      or `list[RolloutState]`.
+    - Else fall back to the first `RolloutState` / `list[RolloutState]` found
+      in the bound arguments.
+
+    Target resolution for the `.end` event:
+    - If the function returns a `RolloutState` or `list[RolloutState]`, use the
+      return value so the end event reflects the latest task state.
+    - Otherwise reuse the start target.
+
+    In practice this means standard XTuner functions whose task parameter is
+    named `rollout_state` usually do not need to pass `target=...`. Functions
+    with non-standard parameter names such as `group` should still pass an
+    explicit `target`.
+    """
     return TraceFunctionDecorator(
         name,
         target=target,
         target_getter=target_getter,
         trace_kwargs_getter=trace_kwargs_getter,
-        result=result,
         trace_kwargs=trace_kwargs,
     ).decorate
 
