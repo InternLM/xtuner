@@ -936,6 +936,22 @@ class AgentLoopManager:
         checkpoint_path = Path(checkpoint_path)
         return checkpoint_path / self._MANAGER_STATE_PATH
 
+    def _progress_state_without_replay_buffer(self, progress_state: dict) -> dict:
+        progress_state = dict(progress_state)
+        consumed_samples = dict(progress_state["consumed_samples"])
+        task_names = list(consumed_samples)
+        next_consumer_step = int(progress_state["next_consumer_step"])
+
+        progress_state["producer_future_step"] = next_consumer_step
+        progress_state["target_samples"] = dict(consumed_samples)
+        progress_state["target_upto_future_step"] = max(0, next_consumer_step - 1)
+        progress_state["raw_rewards_sum"] = {task_name: 0.0 for task_name in task_names}
+        progress_state["raw_rewards_count"] = {task_name: 0 for task_name in task_names}
+        progress_state["produced_samples"] = {task_name: 0 for task_name in task_names}
+        progress_state["produced_tokens"] = {task_name: 0 for task_name in task_names}
+        progress_state["produce_time_s"] = 0.0
+        return progress_state
+
     def _get_pending_task_counts(self) -> dict[str, int]:
         pending_task_counts: dict[str, int] = {}
         for task in self.task_runners:
@@ -944,7 +960,13 @@ class AgentLoopManager:
                 pending_task_counts[task.task_name] = pending_count
         return pending_task_counts
 
-    async def save(self, checkpoint_path: Path | str, model_step: int) -> None:
+    async def save(
+        self,
+        checkpoint_path: Path | str,
+        model_step: int,
+        *,
+        no_save_replay_buffer: bool = False,
+    ) -> None:
         """Save all task sampler states and the shared replay buffer."""
         checkpoint_path = Path(checkpoint_path)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
@@ -961,14 +983,20 @@ class AgentLoopManager:
             task_checkpoint_path.mkdir(parents=True, exist_ok=True)
             task.sampler.save(task_checkpoint_path)
         # manager 层保持 async 语义；同步入口只允许在 trainer 边界用 asyncio_run 包起来。
-        await self.replay_buffer.save(checkpoint_path)
+        if no_save_replay_buffer:
+            self.logger.info(f"Skip saving replay buffer to {checkpoint_path}")
+        else:
+            await self.replay_buffer.save(checkpoint_path)
         manager_state_path = self._manager_state_path(checkpoint_path)
         progress_state = self._produce_progress.state_dict()
+        if no_save_replay_buffer:
+            progress_state = self._progress_state_without_replay_buffer(progress_state)
         with manager_state_path.open("w") as f:
             json.dump(
                 {
                     "status": self._status.name,
                     "model_step": self._model_step,
+                    "replay_buffer_saved": not no_save_replay_buffer,
                     **progress_state,
                 },
                 f,
@@ -979,12 +1007,17 @@ class AgentLoopManager:
         checkpoint_path = Path(checkpoint_path)
         for task in self.task_runners:
             task.sampler.resume(self._task_checkpoint_path(checkpoint_path, task.task_name))
-        # replay buffer 恢复是 async I/O，不能在已有 event loop 中再次嵌套 asyncio_run。
-        await self.replay_buffer.resume(checkpoint_path)
 
         manager_state_path = self._manager_state_path(checkpoint_path)
         with manager_state_path.open("r") as f:
             manager_state = json.load(f)
+        if manager_state.get("replay_buffer_saved", True):
+            # replay buffer 恢复是 async I/O，不能在已有 event loop 中再次嵌套 asyncio_run。
+            await self.replay_buffer.resume(checkpoint_path)
+        elif len(self.replay_buffer) > 0:
+            raise RuntimeError("Cannot resume without replay buffer checkpoint into a non-empty buffer")
+        else:
+            self.logger.info(f"Skip replay buffer resume for checkpoint without replay buffer: {checkpoint_path}")
         saved_model_step = manager_state["model_step"]
         self._produce_progress.load_state_dict(manager_state)
 
