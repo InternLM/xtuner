@@ -13,6 +13,7 @@ from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     set_model_state_dict,
 )
+from xtuner.v1.model.base import BaseModel
 from xtuner.v1.train.trainer import TrainerConfig
 from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTensorWiseFloat8CastTensor,
@@ -24,8 +25,14 @@ import torch.distributed.checkpoint as dcp
 
 
 usage = """Usage
-clusterx  run --image <image> --no-env -N 8 --gpus-per-task 8 --cpus-per-task 150 --memory-per-task 1500  export PYTHONPATH=<custom-xtuner>:<interntrain>:<xtuenr-path> '&&' torchrun --nproc-
-per-node 8  --master-addr '$MASTER_ADDR' --master-port '$MASTER_PORT' --nnodes '$WORLD_SIZE' --node-rank '$RANK' .dev_scripts/dcp_to_hf.py <dcp-path> --hf-path <hf-path>
+torchrun --nproc-per-node 8 .dev_scripts/dcp_to_hf.py <dcp-path> --hf-path <hf-path> [--remote-hf-path <remote-hf-path>] [--dtype bf16|fp8]
+
+Arguments:
+  <dcp-path>                 DCP checkpoint dir, e.g. <work_dirs>/<timestamp>/checkpoints/ckpt-step-6
+  --hf-path <hf-path>        Output dir for the HF checkpoint (defaults to a subfolder of <dcp-path>)
+  --remote-hf-path <path>    Source of the remote code/config; required when the model has no `hf_config`
+                             (falls back to the run's `load_from` when omitted)
+  --dtype bf16|fp8           Save dtype, defaults to bf16; `fp8` saves per-block float8_e4m3fn
 """
 
 cli = App(usage=usage)
@@ -40,6 +47,12 @@ def dcp_to_hf(
         ),
     ],
     hf_path: Annotated[
+        Path | None,
+        Parameter(
+            help="Path to save hf checkpoint, defaults to a subfolder of dcp path"
+        ),
+    ] = None,
+    remote_hf_path: Annotated[
         Path | None,
         Parameter(
             help="Path to save hf checkpoint, defaults to a subfolder of dcp path"
@@ -76,10 +89,25 @@ def dcp_to_hf(
         model_cfg.ep_size = ep_size
         fsdp_cfg.ep_size = ep_size
 
+
     with torch.device("meta"):
         model = model_cfg.build()
 
     model.fully_shard(fsdp_cfg)
+
+    # Remote-code HF models keep `model_cfg.hf_config` as None, so every sub-model needs `_hf_path`
+    # pointing at the original repo for `save_hf` to copy back its config and modeling code. The path
+    # comes from `--remote-hf-path`, falling back to the run's `load_from`.
+    if model_cfg.hf_config is None:
+        remote_hf_path = remote_hf_path or trainer_cfg.load_from
+        if remote_hf_path is None:
+            raise RuntimeError("Remote code found! please set --remote-hf-path")
+
+        for module in model.modules():
+            if module is model:
+                continue
+            if isinstance(module, BaseModel):
+                module._hf_path = remote_hf_path
 
     load_options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
     set_options = StateDictOptions(cpu_offload=True, strict=True)
@@ -88,8 +116,8 @@ def dcp_to_hf(
         shard_model_state_dict = get_model_state_dict(model, options=load_options)
         # inplace state_dict
         dcp.load(
-            state_dict=shard_model_state_dict,
-            checkpoint_id=dcp_path / "model",
+            state_dict={"model": shard_model_state_dict},
+            checkpoint_id=dcp_path / "weights",
         )
         set_model_state_dict(model, shard_model_state_dict, options=set_options)
 
@@ -97,6 +125,8 @@ def dcp_to_hf(
         model.save_hf(hf_path)
     else:
         model.save_hf(hf_path, save_dtype=torch.float8_e4m3fn)
+
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":
