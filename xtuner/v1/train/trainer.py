@@ -605,13 +605,7 @@ class Trainer:
 
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
-        self._async_hf_export = async_hf_export
-        self._pending_async_hf_future: Future[Path] | None = None
-        self._pending_async_hf_finalize_done: threading.Event | None = None
-        self._async_save_monitor = AsyncSaveMonitor()
-        self._save_finalize_lock = threading.RLock()
-        self._async_checkpoint = async_checkpoint
-        self._pending_checkpoint: Future | None = None
+        self._init_async_save_resources(async_hf_export=async_hf_export, async_checkpoint=async_checkpoint)
         self._snapshot_interval = snapshot_interval
         self._check_health_interval = check_health_interval
         self._hf_max_keep = hf_max_keep
@@ -755,6 +749,16 @@ class Trainer:
 
         self._metrics_recorder = self._maybe_init_model_metrics_recorder(internal_metrics_cfg)
 
+    def _init_async_save_resources(self, *, async_hf_export: bool, async_checkpoint: bool) -> None:
+        self._async_hf_export = async_hf_export
+        self._pending_async_hf_future: Future[Path] | None = None
+        self._pending_async_hf_finalize_done: threading.Event | None = None
+        self._async_checkpoint = async_checkpoint
+        self._pending_checkpoint: Future | None = None
+        self._pending_checkpoint_finalize_done: threading.Event | None = None
+        self._async_save_monitor = AsyncSaveMonitor()
+        self._save_finalize_lock = threading.RLock()
+
     @classmethod
     def from_config(cls, config: TrainerConfig) -> Self:
         """Create a Trainer instance from a TrainerConfig.
@@ -894,11 +898,13 @@ class Trainer:
             self._wait_for_pending_async_hf()
             self._engine.model.destroy_async_hf_resources()
 
+        if self._async_checkpoint:
+            self._wait_for_pending_checkpoint()
+            self._engine.destroy_async_checkpoint_pg()
+
         # TODO: Should use flush rather than close
-        self._wait_for_pending_checkpoint()
         if self._async_hf_export or self._async_checkpoint:
             self._async_save_monitor.stop()
-        self._engine.destroy_async_checkpoint_pg()
         self._exp_tracker.close()
         if self._metrics_recorder:
             self._metrics_recorder.close()
@@ -1204,11 +1210,15 @@ class Trainer:
             return
 
         future = self._pending_checkpoint
+        finalize_done = self._pending_checkpoint_finalize_done
         self._pending_checkpoint = None
+        self._pending_checkpoint_finalize_done = None
 
         # Trainer owns pending async DCP state. AsyncSaveMonitor only observes
         # the registered future and must not mutate this pending field.
         wait([future])
+        if finalize_done is not None:
+            finalize_done.wait()
 
     def _maybe_save(self, is_snapshot: bool = False) -> bool:
         ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
@@ -1245,10 +1255,14 @@ class Trainer:
             DEVICE_MODULE.empty_cache()
 
         # Save model and optimizer
-        future: Future | None = None
+        async_dcp_future: Future | None = None
         if self._async_checkpoint:
-            future = self._engine.async_save_dcp(weights_dir=weights_path)
-            self._register_async_save_future("async_dcp", future, weights_path)
+            async_dcp_future = self._engine.async_save_dcp(weights_dir=weights_path)
+            self._register_async_save_future(
+                "async_dcp",
+                async_dcp_future,
+                weights_path,
+            )
         else:
             self._engine.save_dcp(weights_dir=weights_path)
 
@@ -1267,14 +1281,11 @@ class Trainer:
             # TODO: Maybe we need a better way to serialize and deserialize config, rather than using pickle
             config_path = checkpoint_path / "trainer_config.json"
             config_bin = checkpoint_path / "trainer_config.bin"
-            with config_path.open("w") as f:
-                f.write(self._trainer_cfg.model_dump_json(indent=2))
+            with config_path.open("w") as config_file:
+                config_file.write(self._trainer_cfg.model_dump_json(indent=2))
 
-            with config_bin.open("wb") as f:
-                pickle.dump(self._trainer_cfg, f)
-
-        if future is not None:
-            self._pending_checkpoint = future
+            with config_bin.open("wb") as config_bin_file:
+                pickle.dump(self._trainer_cfg, config_bin_file)
 
         dist.barrier()
 
@@ -1292,15 +1303,65 @@ class Trainer:
                     )
                 )
 
+        if self._async_checkpoint:
+            assert async_dcp_future is not None
+            future = async_dcp_future
+            finalize_done = threading.Event()
+            save_step = self.cur_step
+            save_epoch = self._cur_epoch
+            save_total_consumed_tokens = int(total_consumed_tokens)
+
+            def finalize_dcp_save(done_future: Future) -> None:
+                try:
+                    done_future.result()
+                    self._finalize_dcp_save(
+                        checkpoint_path=checkpoint_path,
+                        meta_path=meta_path,
+                        is_snapshot=is_snapshot,
+                        step=save_step,
+                        epoch=save_epoch,
+                        total_consumed_tokens=save_total_consumed_tokens,
+                        barrier_before_hooks=False,
+                    )
+                finally:
+                    finalize_done.set()
+
+            future.add_done_callback(finalize_dcp_save)
+            self._pending_checkpoint = future
+            self._pending_checkpoint_finalize_done = finalize_done
+            return True
+        else:
+            self._finalize_dcp_save(
+                checkpoint_path=checkpoint_path,
+                meta_path=meta_path,
+                is_snapshot=is_snapshot,
+                step=self.cur_step,
+                epoch=self._cur_epoch,
+                total_consumed_tokens=int(total_consumed_tokens),
+                barrier_before_hooks=True,
+            )
+            return True
+
+    def _finalize_dcp_save(
+        self,
+        *,
+        checkpoint_path: Path,
+        meta_path: Path,
+        is_snapshot: bool,
+        step: int,
+        epoch: int,
+        total_consumed_tokens: int,
+        barrier_before_hooks: bool,
+    ) -> None:
         with self._save_finalize_lock:
             # Update meta
             current_exp = self.meta.latest_exp
             ckp_list = current_exp.checkpoint_list if not is_snapshot else current_exp.snap_checkpoint_list
             ckp_list.append(str(checkpoint_path))
-            current_exp.cur_step = self.cur_step
-            current_exp.cur_epoch = self._cur_epoch
-            current_exp.consumed_tokens = int(total_consumed_tokens)
-            current_exp.history[-1]["end"] = self.cur_step
+            current_exp.cur_step = step
+            current_exp.cur_epoch = epoch
+            current_exp.consumed_tokens = total_consumed_tokens
+            current_exp.history[-1]["end"] = step
 
             # Delete checkpoints and update meta's checkpoint_list
             ckp_maxkeep = self._checkpoint_maxkeep if not is_snapshot else 1
@@ -1316,7 +1377,8 @@ class Trainer:
                 with meta_path.open("w") as f:
                     f.write(self.meta.model_dump_json(indent=2))
 
-        dist.barrier()
+        if barrier_before_hooks:
+            dist.barrier()
 
         if is_snapshot:
             hooks = self.hooks_config.get_hooks(HookStage.AFTER_SAVE_SNAPSHOT)
@@ -1326,13 +1388,11 @@ class Trainer:
         for hook in hooks:
             hook(
                 checkpoint=checkpoint_path,
-                step=self.cur_step,
-                epoch=self._cur_epoch,
+                step=step,
+                epoch=epoch,
                 total_step=self.total_step,
                 total_epoch=self.total_epoch,
             )
-
-        return True
 
     def _save_dataloader(self, dataloader_path: Path | str):
         dataloader_state = self._dataloader.get_state_dict()
@@ -1735,7 +1795,12 @@ class Trainer:
             )
             return
 
-    def _register_async_save_future(self, name: str, future: Future, path: Path) -> AsyncSaveWatchItem:
+    def _register_async_save_future(
+        self,
+        name: str,
+        future: Future,
+        path: Path,
+    ) -> AsyncSaveWatchItem:
         watch_item = AsyncSaveWatchItem(
             name=name,
             future=future,

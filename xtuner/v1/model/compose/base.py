@@ -1,10 +1,10 @@
 import json
 import multiprocessing as py_mp
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from pathlib import Path
-from shutil import copy, copytree, rmtree
-from typing import Mapping, Self, Sequence, cast
+from shutil import rmtree
+from typing import Self, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -173,42 +173,20 @@ class BaseComposeModel(BaseModel):
                 json.dump({"weight_map": weight_map_dict, "metadata": {}}, f, indent=4)
         dist.barrier()
 
-    def _write_hf_index_and_config(self, hf_dir: Path | str, weight_map: Mapping[str, str]) -> None:
-        if isinstance(hf_dir, str):
-            hf_dir = Path(hf_dir)
-
-        if self.config.hf_config is not None:
-            self.config.save_hf(hf_dir)
-        elif self._hf_path is not None:
-            for file in cast(Path, self._hf_path).iterdir():
-                if file.suffix != ".safetensors":
-                    target_path = hf_dir / file.name
-                    if file.is_file():
-                        copy(file, target_path)
-                    else:
-                        copytree(file, target_path, ignore_dangling_symlinks=True, dirs_exist_ok=True)
-        else:
-            raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
-
-        with open(hf_dir / "model.safetensors.index.json", "w") as f:
-            json.dump({"weight_map": dict(weight_map), "metadata": {}}, f, indent=4)
-
-    def destroy_async_hf_resources(self) -> None:
-        super().destroy_async_hf_resources()
-        for module in (self.language_model, self.vision_tower, self.multi_modal_projector):
-            module._async_hf_tensor_cache.clear()
-
     def async_save_hf(
         self,
         hf_dir: Path | str,
         save_dtype: torch.dtype = torch.bfloat16,
         safetensors_prefix: str = "model",
     ) -> Future[Path]:
-        self._get_async_hf_resources()
+        resources = self._get_async_hf_resources()
         if self._hf_path is None and self.config.hf_config is None:
             raise NotImplementedError(
                 "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
             )
+        # Async HF stages tensors in CPU memory before the writer process flushes them to disk.
+        # Allowing multiple in-flight HF saves would make these staged tensors accumulate quickly
+        # when background I/O cannot keep up with the training loop.
         if self._pending_async_hf is not None:
             raise RuntimeError(
                 "Previous async HF save is still pending. Wait for the returned async HF handle before launching a new one."
@@ -264,9 +242,8 @@ class BaseComposeModel(BaseModel):
             hf_dir=hf_dir,
             tmp_hf_dir=tmp_hf_dir,
         )
-        commit_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="async-hf-commit")
-        commit_future = commit_executor.submit(
-            self.commit_async_hf_save,
+        commit_future = resources.commit_executor.submit(
+            self._commit_async_hf_save,
             handle,
         )
         self._pending_async_hf = handle
@@ -274,11 +251,7 @@ class BaseComposeModel(BaseModel):
         def clear_pending_async_hf(_: Future[Path]) -> None:
             self._clear_pending_async_hf(handle)
 
-        def shutdown_commit_executor(_: Future[Path]) -> None:
-            commit_executor.shutdown(wait=False)
-
         commit_future.add_done_callback(clear_pending_async_hf)
-        commit_future.add_done_callback(shutdown_commit_executor)
         return commit_future
 
     def _run_async_hf_compose_writer(

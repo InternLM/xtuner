@@ -1,40 +1,42 @@
 import os
-import tempfile
-from pathlib import Path
-from unittest.mock import patch, Mock
 import pickle
 import shutil
+import tempfile
 import weakref
 from concurrent.futures import Future
-from pydantic import TypeAdapter
+from pathlib import Path
+from unittest.mock import Mock, patch
 
+import parametrize
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.optim.lr_scheduler import SequentialLR
 from torch.testing._internal.common_distributed import DistributedTestBase
-import parametrize
 
+from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
-from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
-from xtuner.v1.model.dense.qwen3 import Qwen3Dense4BConfig, Qwen3Dense8BConfig
+from xtuner.v1.datasets import FTDPTokenizeFnConfig
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
+from xtuner.v1.datasets.dataloader import Dataloader
+from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
+from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model.compose.intern_s1 import InternS1Config, InternS1MiniConfig
 from xtuner.v1.model.compose.internvl import (
     InternVL3P5Dense8BConfig,
     InternVL3P5MoE30BA3Config,
 )
-from xtuner.v1.train.trainer import HooksConfig, Trainer, ResumeConfig, HookStage, LoadCheckpointConfig
-from xtuner.v1.datasets import FTDPTokenizeFnConfig
-from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
-from xtuner.v1.train.trainer import TrainerConfig
-from xtuner.v1.loss import CELossConfig
-from xtuner._testing import DeterministicDDPTestCase
-from unittest import TestCase
-from xtuner.v1.train.trainer import XTunerMeta, ExpInfo, ExpHistory, GitInfo
-from xtuner.v1.utils.device import get_device
-from xtuner.v1.datasets.dataloader import Dataloader
-from torch.optim.lr_scheduler import SequentialLR
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense4BConfig, Qwen3Dense8BConfig
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
+from xtuner.v1.train.trainer import (
+    HooksConfig,
+    HookStage,
+    LoadCheckpointConfig,
+    Trainer,
+    TrainerConfig,
+)
+from xtuner.v1.utils.device import get_device
 
 
 DEVICE = get_device()
@@ -56,8 +58,16 @@ class FakeEngine:
 
     def train_step(self, *args, **kwargs):
         self.train_step_calls += 1
-        return {"total_loss": 1.8, "step_consumed_tokens": 100, "step_consumed_img_tokens": 0.0, "grad_norm": torch.tensor(1.0), "efficient_attn_ratio": 0.5, "img_efficient_attn_ratio": 0.0, "logs_info": {"local_loss": 1.0, "reduced_llm_loss": 0.8}, "extra_info": ModelForwardExtraLogInfo()}
-        
+        return {
+            "total_loss": 1.8,
+            "step_consumed_tokens": 100,
+            "step_consumed_img_tokens": 0.0,
+            "grad_norm": torch.tensor(1.0),
+            "efficient_attn_ratio": 0.5,
+            "img_efficient_attn_ratio": 0.0,
+            "logs_info": {"local_loss": 1.0, "reduced_llm_loss": 0.8},
+            "extra_info": ModelForwardExtraLogInfo(),
+        }
 
     def save_hf(self, hf_path):
         self.save_hf_calls.append(hf_path)
@@ -74,7 +84,7 @@ class FakeEngine:
         self.optimizer_step_calls += 1
         return 1.0
 
-    def clip_grad_norm(self, do_clip: bool=True, dtype=torch.float32):
+    def clip_grad_norm(self, do_clip: bool = True, dtype=torch.float32):
         self.grad_norm_calls += 1
         return torch.tensor(1.0)
 
@@ -100,7 +110,6 @@ def prepare(fn):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.fake_hf_model_dir = Path(self.temp_dir.name) / "fake_hf_model"
         self.work_dir = Path(self.temp_dir.name) / "work_dir"
-
 
         self.fake_hf_model_dir.mkdir()
         (self.fake_hf_model_dir / "config.json").write_text('{"model_type": "fake_model"}')
@@ -155,7 +164,7 @@ class TestTrainerSaveHF(DistributedTestBase):
             hf_interval=3,
             hf_max_keep=2,
             seed=42,
-            debug=False
+            debug=False,
         )
 
         # Run training
@@ -239,7 +248,7 @@ class TestTrainerSaveHF(DistributedTestBase):
             assert f"step-{step}" in str(checkpoint)
             assert os.path.exists(checkpoint)
 
-        # save checkpoint at step 3 6 9 10 
+        # save checkpoint at step 3 6 9 10
         trainer = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,
@@ -418,7 +427,7 @@ class TestTrainerSaveHF(DistributedTestBase):
         assert resume_trainer1_2.cur_step == 16
         dist.barrier()
 
-        # 2. Test resume_from 
+        # 2. Test resume_from
         resume_trainer2 = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,
@@ -457,9 +466,7 @@ class TestTrainerConfig(DeterministicDDPTestCase):
         self.dataset_config = [
             {
                 "dataset": DatasetConfig(name="alpaca", anno_path=os.environ["ALPACA_PATH"], sample_ratio=1.0),
-                "tokenize_fn": OpenaiTokenizeFunctionConfig(
-                    max_length=16386, chat_template="qwen3"
-                ),
+                "tokenize_fn": OpenaiTokenizeFunctionConfig(max_length=16386, chat_template="qwen3"),
                 # "tokenize_fn": FTDPTokenizeFnConfig(max_length=16386),
             },
         ]
@@ -536,7 +543,7 @@ class TestTrainerConfig(DeterministicDDPTestCase):
             # torch_compile must be False when pack_to_max_length is False
             (False, None, False, True),
             (False, None, True, False),
-        ]
+        ],
     )
     def test_resolve_compile(self, pack_to_max_length, compile_cfg, torch_compile, success: bool):
         model_cfg = Qwen3Dense4BConfig()
@@ -558,7 +565,7 @@ class TestTrainerConfig(DeterministicDDPTestCase):
         [
             (1, 8, 8),
             (8, 1, 8),
-        ]
+        ],
     )
     def test_resolve_ep_size(self, model_ep_size, fsdp_ep_size, target_ep_size):
         model_cfg = Qwen3MoE30BA3Config()
@@ -651,16 +658,14 @@ class TestHooksConfig(DeterministicDDPTestCase):
     CHECKPOINT_INTERVAL = 5
     SNAPSHOT_INTERVAL = 2
     HF_INTERVAL = 10
-    ERROR_MESG_PREFIX="[HooksConfig Test Failed]: "
+    ERROR_MESG_PREFIX = "[HooksConfig Test Failed]: "
 
     def _build_trainer(self, hooks_config: HooksConfig):
         model_cfg = Qwen3MoE30BA3Config(num_hidden_layers=2, hidden_size=1024, moe_intermediate_size=384)
         dataset_config = [
             {
                 "dataset": DatasetConfig(name="alpaca", anno_path=os.environ["ALPACA_PATH"], sample_ratio=1.0),
-                "tokenize_fn": OpenaiTokenizeFunctionConfig(
-                    max_length=100, chat_template="qwen3"
-                ),
+                "tokenize_fn": OpenaiTokenizeFunctionConfig(max_length=100, chat_template="qwen3"),
                 # "tokenize_fn": FTDPTokenizeFnConfig(max_length=16386),
             },
         ]
@@ -714,7 +719,6 @@ class TestHooksConfig(DeterministicDDPTestCase):
         def train_step_hook(train_step_info, step, epoch, total_step, total_epoch):
             nonlocal train_step_function_call_times
             train_step_function_call_times += 1
-
 
         class CheckpointHook:
             def __init__(self) -> None:
@@ -780,8 +784,102 @@ class TestHooksConfig(DeterministicDDPTestCase):
         )
         self._cleanup_trainer(trainer)
 
+    def test_async_hf_save_hook_timing(self):
+        self.create_pg(DEVICE)
+
+        class AsyncHFHook:
+            def __init__(self) -> None:
+                self.calls: list[tuple[int, int, Path, bool]] = []
+                self.trainer: weakref.ReferenceType[Trainer] | None = None
+
+            def connect_trainer(self, trainer: Trainer):
+                self.trainer = weakref.ref(trainer)
+
+            def __call__(self, checkpoint, step, epoch, total_step, total_epoch):
+                assert self.trainer is not None
+                trainer = self.trainer()
+                assert trainer is not None
+                checkpoint = Path(checkpoint)
+                self.calls.append((step, trainer.cur_step, checkpoint, checkpoint.exists()))
+
+        async_hf_hook = AsyncHFHook()
+        hooks_config = HooksConfig(after_save_hf=async_hf_hook)
+
+        model_cfg = Qwen3MoE30BA3Config(num_hidden_layers=2, hidden_size=1024, moe_intermediate_size=384)
+        dataset_config = [
+            {
+                "dataset": DatasetConfig(name="alpaca", anno_path=os.environ["ALPACA_PATH"], sample_ratio=1.0),
+                "tokenize_fn": OpenaiTokenizeFunctionConfig(max_length=100, chat_template="qwen3"),
+            },
+        ]
+        dataloader_config = DataloaderConfig(pack_max_length=100)
+
+        optim_cfg = AdamWConfig(lr=0.1, weight_decay=0.1)
+        lr_cfg = LRConfig(lr_type="cosine", lr_min=0.001, warmup_ratio=0.03)
+
+        temp_dir = tempfile.TemporaryDirectory()
+        work_dir = temp_dir.name
+        if dist.get_rank() == 0:
+            work_dir_list = [work_dir]
+        else:
+            work_dir_list = [None]
+        dist.broadcast_object_list(work_dir_list, src=0)
+        work_dir = work_dir_list[0]
+
+        trainer_cfg = TrainerConfig(
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            dataset_cfg=dataset_config,
+            dataloader_cfg=dataloader_config,
+            lr_cfg=lr_cfg,
+            loss_cfg=CELossConfig(mode="chunk", chunk_size=1024),
+            global_batch_size=self.world_size,
+            sp_size=1,
+            total_step=4,
+            seed=42,
+            checkpoint_interval=None,
+            snapshot_interval=None,
+            async_hf_export=True,
+            hf_interval=2,
+            hf_max_keep=2,
+            tokenizer_path=os.environ["QWEN3_MOE_PATH"],
+            work_dir=work_dir,
+            hooks_config=hooks_config,
+        )
+        trainer = Trainer.from_config(trainer_cfg)
+        try:
+            trainer.fit()
+
+            self.assertEqual(
+                [step for step, _, _, _ in async_hf_hook.calls],
+                [2, 4],
+                self.ERROR_MESG_PREFIX + "Async HF hook not called at expected steps",
+            )
+            for save_step, trainer_step, checkpoint, exists in async_hf_hook.calls:
+                self.assertLessEqual(
+                    trainer_step,
+                    min(save_step + 2, trainer.total_step),
+                    self.ERROR_MESG_PREFIX + "Async HF finalize lagged behind the next save point",
+                )
+                self.assertIn(
+                    f"hf-{save_step}",
+                    checkpoint.as_posix(),
+                    self.ERROR_MESG_PREFIX + "Async HF hook checkpoint path has unexpected step",
+                )
+                self.assertTrue(exists, self.ERROR_MESG_PREFIX + "Async HF hook ran before checkpoint was visible")
+
+            self.assertEqual(
+                [Path(path).name for path in trainer.meta.latest_exp.hf_checkpoint_list],
+                ["hf-2", "hf-4"],
+                self.ERROR_MESG_PREFIX + "Async HF meta checkpoint list mismatch",
+            )
+        finally:
+            self._cleanup_trainer(trainer)
+            temp_dir.cleanup()
+
     def test_serialize_hooks_config(self):
         self.create_pg(DEVICE)
+
         class CheckpointHook:
             def __init__(self) -> None:
                 self.count = 0
@@ -860,9 +958,11 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
     )
 
     # 2. operate
-    with (patch.object(Dataloader, 'load_state_dict') as mock_data_load_state_dict,
-          patch.object(FakeEngine, 'load_dcp') as mock_load_dcp,
-          patch.object(SequentialLR, 'load_state_dict') as mock_lr_load_state_dict):
+    with (
+        patch.object(Dataloader, "load_state_dict") as mock_data_load_state_dict,
+        patch.object(FakeEngine, "load_dcp") as mock_load_dcp,
+        patch.object(SequentialLR, "load_state_dict") as mock_lr_load_state_dict,
+    ):
         trainer = Trainer(
             load_from=fake_hf_model_dir,
             model_cfg=model_cfg,
@@ -891,9 +991,11 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
         trainer.fit()
 
     # 4. 2nd create: resume train with auto_resume and load_checkpoint_cfg
-    with (patch.object(Dataloader, 'load_state_dict') as mock_data_load_state_dict,
-          patch.object(FakeEngine, 'load_dcp') as mock_load_dcp,
-          patch.object(SequentialLR, 'load_state_dict') as mock_lr_load_state_dict):
+    with (
+        patch.object(Dataloader, "load_state_dict") as mock_data_load_state_dict,
+        patch.object(FakeEngine, "load_dcp") as mock_load_dcp,
+        patch.object(SequentialLR, "load_state_dict") as mock_lr_load_state_dict,
+    ):
         latest_checkpoint = Path(trainer.meta.latest_exp.latest_checkpoint)
         trainer2 = Trainer(
             load_from=fake_hf_model_dir,

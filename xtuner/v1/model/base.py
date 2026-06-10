@@ -56,7 +56,11 @@ from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_co
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
 from xtuner.v1.utils.misc import FunctionEnum, FunctionType, get_function_full_qualname, get_function_type
-from xtuner.v1.utils.process import get_async_hf_save_file_lock_slots, set_async_save_process_qos
+from xtuner.v1.utils.process import (
+    get_async_hf_save_file_lock_slots,
+    get_async_hf_writer_join_timeout,
+    set_async_save_process_qos,
+)
 
 from .utils import ModelForwardExtraLogInfo
 
@@ -100,6 +104,7 @@ class AsyncHFSaveHandle:
 @dataclass
 class AsyncHFResources:
     finalize_pg: dist.ProcessGroup | None
+    commit_executor: ThreadPoolExecutor
 
 
 class TorchCompileOption(TypedDict):
@@ -687,7 +692,7 @@ class BaseModel(nn.Module):
         with profile_time_and_memory(f"[Saving HF to [{safetensors_prefix}]{hf_dir} cost]"):
             self._save_hf(hf_dir=hf_dir, save_dtype=save_dtype, safetensors_prefix=safetensors_prefix)
 
-    def init_async_hf_resources(self) -> None:
+    def _init_async_hf_resources(self) -> None:
         if self._async_hf_resources is not None:
             return
 
@@ -703,6 +708,7 @@ class BaseModel(nn.Module):
 
             self._async_hf_resources = AsyncHFResources(
                 finalize_pg=finalize_pg,
+                commit_executor=ThreadPoolExecutor(max_workers=1, thread_name_prefix="async-hf-commit"),
             )
         except BaseException as exc:
             if finalize_pg is not None and dist.is_available() and dist.is_initialized():
@@ -712,33 +718,29 @@ class BaseModel(nn.Module):
     def destroy_async_hf_resources(self) -> None:
         resources = self._async_hf_resources
         self._async_hf_resources = None
-        self._async_hf_tensor_cache.clear()
+        for module in self.modules():
+            if isinstance(module, BaseModel):
+                module._async_hf_tensor_cache.clear()
         if resources is None:
             return
 
+        resources.commit_executor.shutdown(wait=True)
         if resources.finalize_pg is not None and dist.is_available() and dist.is_initialized():
             dist.destroy_process_group(resources.finalize_pg)
 
     def _get_async_hf_resources(self) -> AsyncHFResources:
         if self._async_hf_resources is None:
-            self.init_async_hf_resources()
+            self._init_async_hf_resources()
         assert self._async_hf_resources is not None
         return self._async_hf_resources
 
-    def _get_async_hf_finalize_pg(self) -> dist.ProcessGroup | None:
-        return self._get_async_hf_resources().finalize_pg
-
     def _all_gather_async_hf_object(self, local_obj: Any) -> list[Any]:
-        if not dist.is_initialized():
-            return [local_obj]
-
         gathered: list[Any] = [None for _ in range(dist.get_world_size())]
-        dist.all_gather_object(gathered, local_obj, group=self._get_async_hf_finalize_pg())
+        dist.all_gather_object(gathered, local_obj, group=self._get_async_hf_resources().finalize_pg)
         return gathered
 
     def _barrier_async_hf(self) -> None:
-        if dist.is_initialized():
-            dist.barrier(group=self._get_async_hf_finalize_pg())
+        dist.barrier(group=self._get_async_hf_resources().finalize_pg)
 
     def async_save_hf(
         self,
@@ -746,11 +748,14 @@ class BaseModel(nn.Module):
         save_dtype: torch.dtype = torch.bfloat16,
         safetensors_prefix: str = "model",
     ) -> Future[Path]:
-        self._get_async_hf_resources()
+        resources = self._get_async_hf_resources()
         if self._hf_path is None and self.config.hf_config is None:
             raise NotImplementedError(
                 "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
             )
+        # Async HF stages tensors in CPU memory before the writer process flushes them to disk.
+        # Allowing multiple in-flight HF saves would make these staged tensors accumulate quickly
+        # when background I/O cannot keep up with the training loop.
         if self._pending_async_hf is not None:
             raise RuntimeError(
                 "Previous async HF save is still pending. Wait for the returned async HF handle before launching a new one."
@@ -796,9 +801,8 @@ class BaseModel(nn.Module):
             hf_dir=hf_dir,
             tmp_hf_dir=tmp_hf_dir,
         )
-        commit_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="async-hf-commit")
-        commit_future = commit_executor.submit(
-            self.commit_async_hf_save,
+        commit_future = resources.commit_executor.submit(
+            self._commit_async_hf_save,
             handle,
         )
         self._pending_async_hf = handle
@@ -806,11 +810,7 @@ class BaseModel(nn.Module):
         def clear_pending_async_hf(_: Future[Path]) -> None:
             self._clear_pending_async_hf(handle)
 
-        def shutdown_commit_executor(_: Future[Path]) -> None:
-            commit_executor.shutdown(wait=False)
-
         commit_future.add_done_callback(clear_pending_async_hf)
-        commit_future.add_done_callback(shutdown_commit_executor)
         return commit_future
 
     def _run_async_hf_writer(
@@ -862,7 +862,7 @@ class BaseModel(nn.Module):
         if self._pending_async_hf is handle:
             self._pending_async_hf = None
 
-    def commit_async_hf_save(
+    def _commit_async_hf_save(
         self,
         handle: AsyncHFSaveHandle,
     ) -> Path:
@@ -873,14 +873,22 @@ class BaseModel(nn.Module):
         local_error = ""
 
         rank = dist.get_rank() if dist.is_initialized() else 0
-        process.join()
-        exit_code = process.exitcode
-        if exit_code is None:
+        join_timeout = get_async_hf_writer_join_timeout()
+        process.join(timeout=join_timeout)
+        if process.is_alive():
+            process.terminate()
+            process.join()
+
             local_ok = False
-            local_error = "async_hf_writer_exitcode_missing"
-        elif exit_code != 0:
-            local_ok = False
-            local_error = f"child_exit_code={exit_code}"
+            local_error = f"child_timeout={join_timeout}"
+        else:
+            exit_code = process.exitcode
+            if exit_code is None:
+                local_ok = False
+                local_error = "async_hf_writer_exitcode_missing"
+            elif exit_code != 0:
+                local_ok = False
+                local_error = f"child_exit_code={exit_code}"
 
         local_status = {"rank": rank, "ok": local_ok, "error": local_error}
         all_status = cast(list[dict[str, Any]], self._all_gather_async_hf_object(local_status))
@@ -891,14 +899,12 @@ class BaseModel(nn.Module):
             )
             raise RuntimeError(f"Async HF save global consistency check failed: {failed}")
 
-        self._barrier_async_hf()
         if rank == 0:
             if hf_dir.exists():
                 rmtree(hf_dir)
             handle.tmp_hf_dir.rename(hf_dir)
         self._barrier_async_hf()
         log_rank0.info(f"[Async saving HF to {hf_dir}] finalized")
-        self._barrier_async_hf()
         return hf_dir
 
     def safetensors_to_params(

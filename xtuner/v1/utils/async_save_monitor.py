@@ -23,7 +23,6 @@ class AsyncSaveWatchItem:
 class AsyncSaveMonitor:
     def __init__(self, interval: float = 5.0):
         self._items: list[AsyncSaveWatchItem] = []
-        self._terminated = False
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._interval = interval
@@ -72,11 +71,6 @@ class AsyncSaveMonitor:
             self._terminate_failure(failure)
 
     def _terminate_failure(self, failure: tuple[AsyncSaveWatchItem, BaseException]) -> None:
-        with self._lock:
-            if self._terminated:
-                return
-            self._terminated = True
-
         item, exc = failure
         logger.error(
             f"{item.name} failed at step={item.step}, epoch={item.epoch}, path={item.path}: {exc}",

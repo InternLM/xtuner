@@ -38,7 +38,7 @@ from xtuner.v1.model.base import (
     ModelOutputs,
     XTunerBaseModelConfig,
 )
-from xtuner.v1.patch.xtuner_storage import XtunerCacheWriter
+from xtuner.v1.patch.xtuner_storage import XtunerCacheWriter, _get_async_dcp_save_timeout
 from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.utils import (
     get_device,
@@ -415,8 +415,9 @@ class TrainEngine:
         dcp_future = start_async_save()
 
         def commit_async_save() -> None:
+            save_timeout = _get_async_dcp_save_timeout()
             try:
-                dcp_future.result()
+                dcp_future.result(timeout=save_timeout)
             except BaseException as exc:
                 elapsed = time.time() - t0
                 logger.error(f"[DCP async_save for {weights_dir}] failed after {elapsed:.2f}s: {exc}")
