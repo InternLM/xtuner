@@ -1715,10 +1715,18 @@ class RLColocateTrainer(BaseRLTrainer):
         """Save state and switch colocated resources back to rollout
         workers."""
         should_sync_weights = train_step % self._sync_weights_interval == 0
+        will_evaluate = self._enable_evaluate and train_step % self._evaluate_step == 0
+        needs_rollout_ready = train_step < self._total_train_steps or will_evaluate
         with timer("save_ckpt", step_timer_dict):
             self.train_controller.offload(target="optimizer")
             asyncio_run(self._maybe_save_checkpoint(train_step))
             self._maybe_save_hf(train_step)
+
+        if not needs_rollout_ready:
+            with timer("final_offload", step_timer_dict):
+                self.train_controller.offload(target="model")
+            self.logger.info("Final train step reached without scheduled evaluation; skip rollout worker onload.")
+            return False
 
         timer_name = "sync_weight" if should_sync_weights else "switch_to_rollout"
         with timer(timer_name, step_timer_dict):
