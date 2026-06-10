@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import importlib
-import json
 import traceback
 import uuid
 from typing import Any, Literal
@@ -59,14 +58,31 @@ def _load_eval_trace_segment(artifacts: dict[str, Any]) -> tuple[list[dict[str, 
     return messages, segment.get("tools")
 
 
-def _to_json_safe(value: Any) -> Any:
-    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+def _count_tool_turns(messages: list[dict[str, Any]]) -> int:
+    """Number of assistant turns that emitted at least one tool_call."""
+    return sum(
+        1 for m in messages if isinstance(m, dict) and isinstance(m.get("tool_calls"), list) and m["tool_calls"]
+    )
+
+
+def _extract_reward_payload(item: AgentRolloutItem) -> dict[str, Any] | None:
+    for record in item.judgers.values():
+        reward = record.metadata.get("reward")
+        if isinstance(reward, dict):
+            payload = dict(reward)
+            if item.reward is not None:
+                payload.setdefault("score", item.reward)
+            return payload
+    if item.reward is not None:
+        return {"score": item.reward}
+    return None
 
 
 class AgentInLocalhostLoopConfig(AgentLoopConfig):
     """Run a localhost agent runner from ``RolloutState.extra_fields``."""
 
     max_concurrent_samples: int | None = None
+    sample_timeout_s: float | None = None
     mode: Literal["train", "eval"] = "train"
 
     def build_local(
@@ -82,6 +98,7 @@ class AgentInLocalhostLoopConfig(AgentLoopConfig):
             judger=judger,
             logger=logger,
             max_concurrent_samples=self.max_concurrent_samples,
+            sample_timeout_s=self.sample_timeout_s,
             mode=self.mode,
         )
 
@@ -97,12 +114,14 @@ class AgentInLocalhostLoop(AgentLoop):
         judger: Judger | None = None,
         logger=None,
         max_concurrent_samples: int | None = None,
+        sample_timeout_s: float | None = None,
         mode: Literal["train", "eval"] = "train",
     ):
         if hf_checkpoint is None:
             raise ValueError("hf_checkpoint must be provided for AgentInLocalhostLoop.")
         super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
         self.max_concurrent_samples = max_concurrent_samples
+        self.sample_timeout_s = sample_timeout_s
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
         self.mode = mode
 
@@ -113,34 +132,72 @@ class AgentInLocalhostLoop(AgentLoop):
             async with self._sample_semaphore:
                 return await self.generate_sample(state, **kwargs)
 
-        tasks = []
+        tasks: list[asyncio.Task[RolloutState]] = []
         for state in rollout_state:
             state.sample_params = self.sample_params
-            tasks.append(create_task(generate_one(state)))
+            task = create_task(generate_one(state))
+            tasks.append(task)
+
         return await asyncio.gather(*tasks)
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         try:
-            item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
-            if rollout_state.uid is None:
-                rollout_state.uid = uuid.uuid4().int
-            item.uid = rollout_state.uid
-            item.group_id = rollout_state.message_uid
-            result = await self._run_item(item)
-            await self._fill_rollout_state(rollout_state, result)
-            return rollout_state
+            if self.sample_timeout_s is not None and self.sample_timeout_s > 0:
+                return await asyncio.wait_for(
+                    self._generate_sample_impl(rollout_state),
+                    timeout=self.sample_timeout_s,
+                )
+            return await self._generate_sample_impl(rollout_state)
+        except asyncio.TimeoutError:
+            self.logger.warning(
+                f"[AgentInLocalhostLoop] sample timed out after {self.sample_timeout_s:.1f}s "
+                f"(uid={rollout_state.uid}, group_id={rollout_state.message_uid})."
+            )
+            return self._fail_rollout_state(
+                rollout_state,
+                finish_reason="timeout",
+                error_msg=f"TimeoutError: localhost agent sample exceeded {self.sample_timeout_s:.1f}s",
+                agent_status="timeout",
+            )
         except Exception as exc:
             if self.mode == "train" and _is_trace_key_mismatch(exc):
                 raise
-            rollout_state.status = Status.COMPLETED if self.mode == "eval" else Status.FAILED
-            rollout_state.finish_reason = "error"
-            if self.mode == "eval":
-                rollout_state.reward = {"score": 0.0}
-                rollout_state.response = ""
-                rollout_state.extra_fields["agent_status"] = "exception"
-            rollout_state.error_msg = f"{type(exc).__name__}: {exc}"
             self.logger.error(f"[AgentInLocalhostLoop] failed: {exc}\n{traceback.format_exc()}")
-            return rollout_state
+            return self._fail_rollout_state(
+                rollout_state,
+                finish_reason="error",
+                error_msg=f"{type(exc).__name__}: {exc}",
+                agent_status="exception",
+            )
+
+    async def _generate_sample_impl(self, rollout_state: RolloutState) -> RolloutState:
+        item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
+        if rollout_state.uid is None:
+            rollout_state.uid = uuid.uuid4().int
+        item.uid = rollout_state.uid
+        item.group_id = rollout_state.message_uid
+        result = await self._run_item(item)
+        await self._fill_rollout_state(rollout_state, result)
+        return rollout_state
+
+    def _fail_rollout_state(
+        self,
+        rollout_state: RolloutState,
+        *,
+        finish_reason: str,
+        error_msg: str,
+        agent_status: str,
+    ) -> RolloutState:
+        if rollout_state.uid is None:
+            rollout_state.uid = uuid.uuid4().int
+        rollout_state.status = Status.COMPLETED if self.mode == "eval" else Status.FAILED
+        rollout_state.finish_reason = finish_reason
+        if self.mode == "eval":
+            rollout_state.reward = {"score": 0.0}
+            rollout_state.response = ""
+            rollout_state.extra_fields["agent_status"] = agent_status
+        rollout_state.error_msg = error_msg
+        return rollout_state
 
     async def _run_item(self, item: AgentRolloutItem) -> AgentRolloutItem:
         runner = _resolve_runner(item.pipeline)
@@ -154,10 +211,25 @@ class AgentInLocalhostLoop(AgentLoop):
             self._fill_eval_rollout_state(rollout_state, item)
             return
 
+        response_message = item.artifacts.get("response_message") or {}
         rollout_state.status = Status.COMPLETED if item.status == RolloutStatus.COMPLETED else Status.FAILED
-        rollout_state.finish_reason = "stop" if item.status == RolloutStatus.COMPLETED else "error"
-        rollout_state.reward = {"score": item.reward} if item.reward is not None else None
+        rollout_state.finish_reason = str(
+            response_message.get("finish_reason") or ("stop" if item.status == RolloutStatus.COMPLETED else "error")
+        )
+        rollout_state.reward = _extract_reward_payload(item)
+        rollout_state.extra_fields["agent_status"] = item.status.value
         rollout_state.extra_fields["agent_artifacts"] = item.artifacts
+        rollout_state.extra_fields["agent_judgers"] = {
+            name: record.model_dump(mode="json") for name, record in item.judgers.items()
+        }
+        messages, tools = _load_eval_trace_segment(item.artifacts)
+        if messages:
+            rollout_state.extra_fields["agent_messages"] = messages
+            rollout_state.extra_fields["agent_tools"] = tools
+            rollout_state.extra_fields["agent_tool_turns"] = _count_tool_turns(messages)
+        finish_info = response_message.get("finish_info")
+        if isinstance(finish_info, dict) and finish_info:
+            rollout_state.extra_fields["agent_finish_info"] = finish_info
         if item.error is not None:
             rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
         if item.status != RolloutStatus.COMPLETED:
@@ -180,13 +252,15 @@ class AgentInLocalhostLoop(AgentLoop):
         ]
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
-        rollout_state.response = str(item.artifacts.get("response") or "")
+        content = response_message.get("content")
+        rollout_state.response = content if isinstance(content, str) else (str(content) if content is not None else "")
         rollout_state.extra_fields["raw_prompt"] = prompt_text
 
     def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
         is_success = item.status == RolloutStatus.COMPLETED
+        response_message = item.artifacts.get("response_message") or {}
         rollout_state.status = Status.COMPLETED
-        rollout_state.finish_reason = "stop" if is_success else "error"
+        rollout_state.finish_reason = str(response_message.get("finish_reason") or ("stop" if is_success else "error"))
         rollout_state.reward = {"score": item.reward if is_success and item.reward is not None else 0.0}
         rollout_state.input_ids = None
         rollout_state.labels = None
@@ -200,9 +274,15 @@ class AgentInLocalhostLoop(AgentLoop):
             rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
 
         messages, tools = _load_eval_trace_segment(item.artifacts)
-        rollout_state.response = str(item.artifacts.get("response") or "")
+        content = response_message.get("content")
+        rollout_state.response = content if isinstance(content, str) else (str(content) if content is not None else "")
         if messages:
-            rollout_state.extra_fields["agent_trajectory"] = _to_json_safe({"messages": messages, "tools": tools})
+            rollout_state.extra_fields["agent_messages"] = messages
+            rollout_state.extra_fields["agent_tools"] = tools
+            rollout_state.extra_fields["agent_tool_turns"] = _count_tool_turns(messages)
+        finish_info = response_message.get("finish_info")
+        if isinstance(finish_info, dict) and finish_info:
+            rollout_state.extra_fields["agent_finish_info"] = finish_info
 
 
 __all__ = ["AgentInLocalhostLoop", "AgentInLocalhostLoopConfig"]

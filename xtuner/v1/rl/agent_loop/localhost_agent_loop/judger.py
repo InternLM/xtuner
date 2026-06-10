@@ -43,20 +43,22 @@ class LocalhostJudgerStage:
         record.status = StageStatus.RUNNING
         record.started_at = record.started_at or time.monotonic()
         try:
+            # reward_model stays as-is (dataset-provided ground_truth/style etc.).
+            # Per-rollout artifacts (response message, agent trace) flow through extra_fields.
             reward_model = dict(item.reward_model or {})
+            segment = item.artifacts["messages"][-1]
+            response_message = item.artifacts.get("response_message") or {}
+            content = response_message.get("content")
+            response = content if isinstance(content, str) else (str(content) if content is not None else "")
 
-            messages = item.artifacts["messages"][-1]["messages"]
-            tool_turns = sum(
-                1 for message in messages if isinstance(message.get("tool_calls"), list) and message["tool_calls"]
-            )
-            reward_model.setdefault("agent_trace", messages)
-            reward_model.setdefault("num_turns", tool_turns)
-
-            response = str(item.artifacts.get("response") or "")
             rollout_state = RolloutState(
                 message=[{"role": "user", "content": item.instruction}],
                 response=response,
                 reward_model=reward_model,
+                extra_fields={
+                    "agent_messages": segment["messages"],
+                    "response_message": response_message,
+                },
                 status=Status.COMPLETED,
             )
             judged = await self.judger.judge(rollout_state)

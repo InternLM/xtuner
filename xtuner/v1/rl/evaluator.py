@@ -18,10 +18,18 @@ def default_compute_metric_func(samples: list[RolloutState]) -> dict[str, float]
         return {"accuracy": 0.0}
 
     positives = []
+    tool_turns_list: list[int] = []
     for s in samples:
         positives.append(1 if _reward_score(s) > 0 else 0)
+        turns = s.extra_fields.get("agent_tool_turns")
+        if isinstance(turns, int):
+            tool_turns_list.append(turns)
 
-    metrics = {"accuracy": sum(positives) / len(positives)}
+    metrics: dict[str, float] = {"accuracy": sum(positives) / len(positives)}
+    if tool_turns_list:
+        metrics["tool_turns/mean"] = sum(tool_turns_list) / len(tool_turns_list)
+        metrics["tool_turns/min"] = float(min(tool_turns_list))
+        metrics["tool_turns/max"] = float(max(tool_turns_list))
     metrics.update(_compute_grouped_pass_metrics(samples, positives))
     return metrics
 
