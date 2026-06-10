@@ -206,6 +206,9 @@ def get_train_seq_ctx(
     if multimodal_train_info:
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = _to_cpu_tensor(multimodal_train_info.get("image_grid_thw"), dtype=torch.long)
+        num_img_tokens = multimodal_train_info.get("num_img_tokens")
+        if num_img_tokens is not None:
+            seq_ctx.num_img_tokens = [num_img_tokens]
     return seq_ctx
 
 
