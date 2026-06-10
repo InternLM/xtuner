@@ -674,19 +674,13 @@ class Muon(Optimizer):
                     lr_ratios = [s["lr_ratio"] for s in states]
                     assert len(set(lr_ratios)) == 1, f"Found different lr_ratios: {set(lr_ratios)}"
 
-                    # AGRS (All-Gather + Reduce-Scatter) only works with even
-                    # sharding — all ranks must contribute the same number of
-                    # elements.  Uneven sharding falls back to padded all-to-all
-                    # which has dedicated uneven-shard handling.
-                    is_evenly_sharded = (
-                        sharded_tensor_dim is None or params[0].size(sharded_tensor_dim) % group_world_size == 0
-                    )
-
+                    # Remainder batches (len(params) < world_size) always use
+                    # AGRS — it supports uneven sharding and avoids the padding
+                    # overhead of a sparse all-to-all.
                     is_remainder = (
                         len(params) < group_world_size
                         and sharded_tensor_dim is not None
                         and group_process_group is not None
-                        and is_evenly_sharded
                     )
 
                     if is_remainder:
@@ -833,6 +827,7 @@ def muon_update_batch_async(
         U = yield from _agrs_orthogonalize(
             U,
             shard_dim,
+            X[0].size(shard_dim),
             process_group,
             newton_schulz_func,
             flatten,
@@ -894,6 +889,7 @@ def muon_update_batch_async(
 def _agrs_orthogonalize(
     U: list[Tensor],
     shard_dim: int,
+    global_shard_dim_size: int,
     process_group: ProcessGroup,
     newton_schulz_func: Callable,
     flatten: bool,
@@ -904,37 +900,49 @@ def _agrs_orthogonalize(
     W = process_group.size()
     device_rank = process_group.rank()
 
-    # Phase 1: All-Gather — each rank contributes R local shards,
-    # producing W*R shards across all ranks.
-    U_stacked = torch.stack(U)  # (R, *shard_shape)
-    shard_shape = U_stacked.shape[1:]
-    ag_output = torch.empty((W * R,) + shard_shape, dtype=U[0].dtype, device=U[0].device)
+    my_local_size = U[0].size(shard_dim)
+    padded_shard_size = (global_shard_dim_size + W - 1) // W
+
+    # Phase 1: All-Gather — pad local shards to uniform size, then gather.
+    need_pad = my_local_size < padded_shard_size
+    if need_pad:
+        pad_amount = padded_shard_size - my_local_size
+        pad_shape = list(U[0].shape)
+        pad_shape[shard_dim] = pad_amount
+        padding = torch.zeros(pad_shape, dtype=U[0].dtype, device=U[0].device)
+        U_padded = [torch.cat([u, padding], dim=shard_dim) for u in U]
+    else:
+        U_padded = U
+
+    padded_shard_shape = list(U[0].shape)
+    padded_shard_shape[shard_dim] = padded_shard_size
+
+    U_stacked = torch.stack(U_padded)  # (R, *padded_shard_shape)
+    ag_output = torch.empty((W * R,) + tuple(padded_shard_shape), dtype=U[0].dtype, device=U[0].device)
 
     work = dist.all_gather_into_tensor(ag_output, U_stacked.contiguous(), group=process_group, async_op=True)
     yield  # Yield point 1: overlap with other async work
     work.wait()  # type: ignore[union-attr]
-    del U_stacked
+    del U_stacked, U_padded
 
     # Reconstruct R full parameters from gathered shards.
-    # ag_output layout: [rank0_param0, rank0_param1, ..., rank1_param0, ...]
-    # Reshape to (W, R, *shard_shape), then merge shard_dim to get full params.
-    ag_reshaped = ag_output.view(W, R, *shard_shape)
+    ag_reshaped = ag_output.view(W, R, *padded_shard_shape)
 
     if shard_dim == 0:
-        # (W, R, shard_size, ...) → (R, W, shard_size, ...) → (R, W*shard_size, ...)
+        # (W, R, padded_shard_size, ...) → (R, W, padded_shard_size, ...) → (R, W*padded_shard_size, ...)
         full_params = ag_reshaped.permute(1, 0, *range(2, ag_reshaped.ndim)).flatten(1, 2)
     else:
-        # General case: move W dim next to the shard_dim chunk, then flatten.
-        # ag_reshaped dims: [W=0, R=1, d0=2, d1=3, ...]
-        # Target: [R=1, d0=2, ..., W=0 next to shard chunk, ..., dN]
         perm = list(range(ag_reshaped.ndim))
-        perm.remove(0)  # remove W
-        perm.insert(shard_dim + 1, 0)  # put W next to shard chunk (offset +1 for R dim)
+        perm.remove(0)
+        perm.insert(shard_dim + 1, 0)
         full_params = ag_reshaped.permute(perm).flatten(shard_dim + 1, shard_dim + 2)
-    # full_params shape: (R, *full_param_shape)
+    # full_params shape: (R, *full_padded_shape) — may include trailing padding
+
+    # Strip padding to get the true global size
+    full_params = full_params.narrow(shard_dim + 1, 0, global_shard_dim_size)
+    del ag_reshaped, ag_output
 
     # Phase 2: Selective Newton-Schulz — each rank orthogonalizes a subset.
-    # Rank r processes parameters where i % W == r, others get zeros.
     ns_results = []
     for i in range(R):
         if i % W == device_rank:
@@ -950,28 +958,33 @@ def _agrs_orthogonalize(
         else:
             ns_results.append(torch.zeros_like(full_params[i]))
 
-    # Free all-gather buffer — full_params/ag_reshaped are views of ag_output
-    del full_params, ag_reshaped, ag_output
+    del full_params
 
-    # Phase 3: Reduce-Scatter — sum partial NS results across ranks,
-    # each rank gets back its local shard of each parameter.
+    # Phase 3: Reduce-Scatter — pad NS results back to W * padded_shard_size,
+    # then reduce-scatter into equal chunks.
     ns_stacked = torch.stack(ns_results)  # (R, *full_shape)
     del ns_results
-    full_dim = ns_stacked.shape[shard_dim + 1]  # +1 because dim 0 is R
-    shard_size = full_dim // W
 
-    # Split the full dimension into (W, shard_size) for reduce-scatter
+    # Pad back along shard_dim to make it divisible into W equal chunks
+    pad_total = W * padded_shard_size - global_shard_dim_size
+    if pad_total > 0:
+        pad_shape = list(ns_stacked.shape)
+        pad_shape[shard_dim + 1] = pad_total  # +1 because dim 0 is R
+        padding = torch.zeros(pad_shape, dtype=ns_stacked.dtype, device=ns_stacked.device)
+        ns_stacked = torch.cat([ns_stacked, padding], dim=shard_dim + 1)
+
+    # Split the padded full dimension into (W, padded_shard_size) for reduce-scatter
     new_shape = list(ns_stacked.shape)
-    new_shape[shard_dim + 1 : shard_dim + 2] = [W, shard_size]
+    new_shape[shard_dim + 1 : shard_dim + 2] = [W, padded_shard_size]
     rs_input = ns_stacked.view(new_shape)
 
     # Move the W dimension to front for reduce_scatter_tensor
     w_pos = shard_dim + 1
     perm = [w_pos] + list(range(0, w_pos)) + list(range(w_pos + 1, rs_input.ndim))
     rs_input = rs_input.permute(perm).contiguous()
-    del ns_stacked  # Safe to free: .contiguous() created an independent copy
+    del ns_stacked
 
-    # Flatten trailing dims: (W, R*shard_numel) for reduce_scatter
+    # Flatten trailing dims: (W, R*padded_shard_numel) for reduce_scatter
     rs_flat_in = rs_input.reshape(W, -1)
     rs_flat_out = torch.empty(rs_flat_in.shape[1], dtype=rs_flat_in.dtype, device=rs_flat_in.device)
 
@@ -985,8 +998,11 @@ def _agrs_orthogonalize(
     yield  # Yield point 2: overlap with other async work
     work.wait()  # type: ignore[union-attr]
 
-    # Unpack back to list of R local shards
-    return list(rs_flat_out.view(R, *shard_shape).unbind(0))
+    # Unpack and strip padding to get true local shards
+    result = list(rs_flat_out.view(R, *padded_shard_shape).unbind(0))
+    if need_pad:
+        result = [r.narrow(shard_dim, 0, my_local_size) for r in result]
+    return result
 
 
 def _subgroup_orthogonalize(
