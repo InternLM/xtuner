@@ -6,13 +6,19 @@
 
 ## Judger 类型
 
-`xtuner/v1/rl/judger/native.py` 中定义了 Judger 的基础类型。可以先把它理解成两层：第一层是所有 Judger 统一实现的 `judge()` 和 `batch_judge()` 接口；第二层是不同运行形态，决定打分逻辑在本地执行、在 Ray actor 中执行，还是组合多个子 Judger 一起执行。
+`xtuner/v1/rl/judger/native.py` 中定义了 Judger 的基础类型。可以先把它理解成三层：第一层是 `BaseJudger`，只定义所有 Judger 最小统一的 `judge()` 和 `batch_judge()` 接口；第二层是 `Judger`，在 `BaseJudger` 之上引入 `preprocess -> judge_payload -> postprocess` 的可组合 payload 契约；第三层是不同运行形态，决定打分逻辑在本地执行、在 Ray actor 中执行，还是组合多个子 Judger 一起执行。
 
 ```text
                                   ┌─────────────────────────────┐
-                                  │        Judger (ABC)          │
+                                  │        BaseJudger            │
                                   │  async judge(RolloutState)   │
                                   │  async batch_judge(list)      │
+                                  └──────────────┬──────────────┘
+                                                 │
+                                  ┌──────────────▼──────────────┐
+                                  │           Judger             │
+                                  │ preprocess / judge_payload   │
+                                  │        / postprocess         │
                                   └──────────────┬──────────────┘
                                                  │
                  ┌───────────────────────────────┼───────────────────────────────┐
@@ -44,13 +50,15 @@
                          │                       │                       │
                  ┌───────▼───────┐       ┌───────▼───────┐       ┌───────▼───────┐
                  │   branch A    │       │   branch B    │       │   branch ...  │
-                 │ 任意 Judger    │       │ 任意 Judger    │       │ 任意 Judger    │
+                 │ Judger branch  │       │ Judger branch  │       │ Judger branch  │
                  └───────┬───────┘       └───────┬───────┘       └───────┬───────┘
                          │                       │                       │
                          └───────────────────────┼───────────────────────┘
                                                  ▼
                          data_source 选择 branch，merge_fn 合并 reward dict
 ```
+
+`Judger` 的 `preprocess` 和 `postprocess` 不是额外包装，而是重要的接口边界：`preprocess` 负责从 `RolloutState` 中提取评分需要的最小 payload，`judge_payload` 只处理这份轻量 payload，`postprocess` 再把输出写回原始 `RolloutState`。这样可以避免在组合打分或远程打分时对完整 `RolloutState` 做 `deepcopy`，减少大字段序列化开销，也避免由复制复杂对象带来的潜在对象生命周期风险。
 
 `RemoteJudger` 的作用是给 Ray actor 形式的 Judger 提供一个对外统一接口。它本身不实现具体打分逻辑，而是持有 `JudgerActor` 的 actor proxy。`judge()` 或 `batch_judge()` 会先在 driver 侧把 `RolloutState` 转成轻量 payload，再调用 `actor.judge_payload.remote(...)`，因此 Ray 序列化的是 payload，而不是完整 `RolloutState`。这样上层代码只需要面向 `Judger` 接口编程，不需要关心当前 Judger 是本地对象、Ray actor，还是多副本池中的一个远程副本。
 
@@ -85,7 +93,7 @@ ComposedJudgerConfig
 
 `CPUResourcesConfig.cpu_memory_per_worker` 默认是 `1024**3`，通常不需要额外配置。PG 外 CPU actor 资源会注册到全局 `CPUResourceManager`，资源不足时会在组件构建阶段报错，避免 Ray actor 长时间 pending。
 
-`ComposedJudgerConfig` 用于多分支场景：样本通过 `RolloutState.data_source` 路由到一个或多个 Judger。`data_source` 为字符串时选择一个 branch；为字典时使用字典 key 同时选择多个 branch，并用 `merge_fn` 合并结果。
+`ComposedJudgerConfig` 用于多分支场景：样本通过 `RolloutState.data_source` 路由到一个或多个 Judger。`data_source` 为字符串时选择一个 branch；为字典时使用字典 key 同时选择多个 branch，并用 `merge_fn` 合并结果。`ComposedJudger` 只支持继承 `Judger` 的 branch，不支持只继承 `BaseJudger` 的 branch；因为它内部通过 `preprocess -> judge_payload -> postprocess` 组合多个分支，并且已经移除了对 `RolloutState` 的 `deepcopy` 逻辑。如果在没有 `deepcopy` 的情况下直接支持任意 `BaseJudger.judge()`，多个分支可能会同时读写同一个 `RolloutState`，存在状态互相覆盖或其他副作用风险。
 
 ## 输入输出约定
 
@@ -227,7 +235,7 @@ def merge_rewards(original, judged):
 
 ## 自定义 Judger
 
-自定义 Judger 有三种常见方式。
+自定义 Judger 有四种常见方式。
 
 ### 方式一：自定义 reward_handler
 
@@ -287,20 +295,39 @@ judger_config = JudgerConfig(
 
 ### 方式三：继承 Judger
 
-如果打分需要读取 `RolloutState.extra_fields`、工具调用轨迹、多轮状态、状态码或其他字段，可以直接继承 `Judger`：
+如果打分需要读取 `RolloutState.extra_fields`、工具调用轨迹、多轮状态、状态码或其他字段，推荐继承 `Judger`，并按需重载 `preprocess`、`judge_payload` 和 `postprocess`。这比直接重写 `judge()` 更适合 XTuner 的运行时：
+
+- `preprocess` 可以只从 `RolloutState` 里提取评分需要的字段，避免把完整 `RolloutState` 传给远程 actor。
+- `judge_payload` 只处理轻量 payload，方便本地、Ray actor 和多副本池复用同一套逻辑。
+- `postprocess` 统一把结果写回原始 `RolloutState`，不用对 `RolloutState` 做 `deepcopy`。
+- `ComposedJudger` 可以安全组合这种 Judger branch，并在多分支场景中拿到每个 branch 的 raw output 交给 `merge_fn`。
 
 ```python
 from xtuner.v1.data_proto.rl_data import RolloutState
-from xtuner.v1.rl.judger import Judger
+from xtuner.v1.rl.judger import Judger, JudgerOutput, JudgerPayload, JudgerPayloadBatch
 
 class ToolJudger(Judger):
-    async def judge(self, rollout_state: RolloutState) -> RolloutState:
-        tool_ok = rollout_state.extra_fields.get("tool_ok", False)
-        answer = (rollout_state.response or "").strip()
-        label = rollout_state.reward_model["ground_truth"]
-        rollout_state.reward = {
+    def preprocess(self, rollout_state: RolloutState) -> JudgerPayload:
+        return {
+            "response": rollout_state.response,
+            "label": rollout_state.reward_model["ground_truth"],
+            "tool_ok": rollout_state.extra_fields.get("tool_ok", False),
+        }
+
+    async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutput:
+        assert not isinstance(payload, list)
+        tool_ok = payload["tool_ok"]
+        answer = (payload["response"] or "").strip()
+        label = payload["label"]
+        return {
             "score": 1.0 if tool_ok and answer == label else 0.0,
             "tool_ok": tool_ok,
+        }
+
+    def postprocess(self, rollout_state: RolloutState, output: JudgerOutput) -> RolloutState:
+        rollout_state.reward = {
+            "score": output["score"],
+            "tool_ok": output["tool_ok"],
         }
         return rollout_state
 ```
@@ -330,6 +357,12 @@ judger_config = ToolJudgerConfig(
 )
 judger = judger_config.build()
 ```
+
+### 方式四：继承 BaseJudger
+
+如果你的打分逻辑确实无法拆成 `preprocess -> judge_payload -> postprocess`，可以考虑直接继承 `BaseJudger` 并完整实现 `judge()` / `batch_judge()`。这通常只适合非常特殊的场景，例如打分过程必须整体接管 `RolloutState` 的状态转换，或者依赖无法序列化成轻量 payload 的本地对象。
+
+需要注意：只继承 `BaseJudger` 的实现不能作为 `ComposedJudger` 的 branch。`ComposedJudger` 为了避免 `deepcopy(RolloutState)` 带来的潜在风险和额外序列化开销，内部只通过 `Judger` 的 payload 契约调用 branch。如果直接支持任意 `BaseJudger.judge()` 且不做 `deepcopy`，多个 branch 在同一个 `RolloutState` 上并发运行时可能互相覆盖 `reward` 或修改其他字段，导致结果不稳定。因此，如果后续需要接入 `ComposedJudger`、`RemoteJudger` 或 `JudgerPool`，应优先继承 `Judger` 并重载 `preprocess` / `judge_payload` / `postprocess`。
 
 ## 在训练配置中使用
 

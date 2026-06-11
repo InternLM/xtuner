@@ -10,6 +10,7 @@ from .factory import (
 from .geo3k import GEO3KJudgerConfig
 from .gsm8k import GSM8KJudgerConfig
 from .native import (
+    BaseJudger,
     Judger,
     JudgerConfig,
     JudgerOutput,
