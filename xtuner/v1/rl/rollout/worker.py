@@ -785,6 +785,13 @@ class RolloutWorker(SingleAcceleratorWorker):
             server_task = self.server_task
             self._request_server_terminate()
             ray.cancel(server_task, force=True, recursive=True)
+            try:
+                ray.get(server_task, timeout=60)
+            except ray.exceptions.GetTimeoutError:
+                self.logger.warning(f"Worker {self.rank} server task did not stop within shutdown timeout.")
+                raise
+            except Exception as e:
+                self.logger.debug(f"Worker {self.rank} server task stopped after shutdown: {e}")
             self.server_task = None
             return
 
@@ -887,6 +894,9 @@ class RolloutWorker(SingleAcceleratorWorker):
         except requests.RequestException as e:
             self.logger.error(f"Health check failed for server {self.server_url}: {e}")
             return False
+
+    def check_health_generate(self) -> bool:
+        return self.check_health()
 
     async def _decode_routed_experts(self, routed_experts: Any) -> Any:
         return routed_experts

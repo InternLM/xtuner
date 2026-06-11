@@ -183,6 +183,29 @@ class LMDeployWorker(RolloutWorker):
         """Onloads the KV cache by waking up the model."""
         return self._wake_up(tags=["kv_cache"])
 
+    def check_health_generate(self) -> bool:
+        try:
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.config.api_key}",
+            }
+            response = requests.post(
+                f"{self.server_url}/{self.endpoints['v1/chat/completions']}",
+                headers=headers,
+                json={
+                    "model": self.config.model_name,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 1,
+                    "temperature": 0,
+                    "stream": False,
+                },
+                timeout=30.0,
+            )
+            return response.status_code == 200
+        except requests.RequestException as e:
+            self.logger.error(f"LMDeploy generate health check failed for server {self.server_url}: {e}")
+            return False
+
     def _get_request_payload(self, rollout_state: RolloutState) -> dict:
         tools = rollout_state.tools
         tool_choice = rollout_state.tool_choice
