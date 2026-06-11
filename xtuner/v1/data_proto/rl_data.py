@@ -62,6 +62,7 @@ class MultimodalInfo(TypedDict):
     # 使用TypedDict给出pixel_values的类型提示
     pixel_values: NotRequired[np.ndarray | RayObjectRef | None]
     image_grid_thw: NotRequired[np.ndarray | None]
+    num_img_tokens: NotRequired[list[int]]
 
 
 class RolloutFunctionCall(BaseModel):

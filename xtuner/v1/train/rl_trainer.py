@@ -206,6 +206,9 @@ def get_train_seq_ctx(
     if multimodal_train_info:
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = _to_cpu_tensor(multimodal_train_info.get("image_grid_thw"), dtype=torch.long)
+        num_img_tokens = multimodal_train_info.get("num_img_tokens")
+        if num_img_tokens is not None:
+            seq_ctx.num_img_tokens = [num_img_tokens]
     return seq_ctx
 
 
@@ -333,6 +336,7 @@ class BaseRLTrainerConfig(BaseModel):
     hf_interval: int | None = -1
     hf_max_keep: int | None = -1
     checkpoint_no_save_optimizer: bool = False
+    checkpoint_no_save_replay_buffer: bool = False
     log_dir: Path | str | None = None
     seed: int = 42
     debug_rollout: bool = False
@@ -417,6 +421,8 @@ class RLColocateTrainerConfig(BaseRLTrainerConfig):
             keep. Defaults to -1.
         checkpoint_no_save_optimizer (bool): Whether to skip optimizer states
             when saving checkpoints. Defaults to False.
+        checkpoint_no_save_replay_buffer (bool): Whether to skip replay buffer
+            state when saving checkpoints. Defaults to False.
         log_dir (Path | str | None): Directory for logs. Defaults to None.
         seed (int): Global random seed. Defaults to 66.
         debug_rollout (bool): Whether to enable rollout debugging. Defaults to
@@ -502,6 +508,8 @@ class RLDisaggregatedTrainerConfig(BaseRLTrainerConfig):
             keep. Defaults to -1.
         checkpoint_no_save_optimizer (bool): Whether to skip optimizer states
             when saving checkpoints. Defaults to False.
+        checkpoint_no_save_replay_buffer (bool): Whether to skip replay buffer
+            state when saving checkpoints. Defaults to False.
         log_dir (Path | str | None): Directory for logs. Defaults to None.
         seed (int): Global random seed. Defaults to 66.
         debug_rollout (bool): Whether to enable rollout debugging. Defaults to
@@ -593,6 +601,7 @@ class BaseRLTrainer:
         self._checkpoint_interval = cfg.checkpoint_interval
         self._checkpoint_maxkeep = cfg.checkpoint_maxkeep
         self._checkpoint_no_save_optimizer = cfg.checkpoint_no_save_optimizer
+        self._checkpoint_no_save_replay_buffer = cfg.checkpoint_no_save_replay_buffer
         self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(cfg.auto_resume, cfg.load_checkpoint_cfg)
 
     def _init_logger(self, cfg: BaseRLTrainerConfig, logger_tag: str) -> Path:
@@ -787,7 +796,11 @@ class BaseRLTrainer:
         self.logger.info(f"Saving sampler state to {checkpoint_path}")
         # 保持 manager checkpoint 的 async 调用链。
         # 是否 asyncio_run 只由 trainer 最外层同步入口统一决定。
-        await self.agent_loop_manager.save(checkpoint_path, model_step=cur_step)
+        await self.agent_loop_manager.save(
+            checkpoint_path,
+            model_step=cur_step,
+            no_save_replay_buffer=self._checkpoint_no_save_replay_buffer,
+        )
 
         # 2. Save DCP checkpoint (model + optimizer)
         self.logger.info(f"Saving DCP checkpoint to {checkpoint_path}")
@@ -1702,10 +1715,18 @@ class RLColocateTrainer(BaseRLTrainer):
         """Save state and switch colocated resources back to rollout
         workers."""
         should_sync_weights = train_step % self._sync_weights_interval == 0
+        will_evaluate = self._enable_evaluate and train_step % self._evaluate_step == 0
+        needs_rollout_ready = train_step < self._total_train_steps or will_evaluate
         with timer("save_ckpt", step_timer_dict):
             self.train_controller.offload(target="optimizer")
             asyncio_run(self._maybe_save_checkpoint(train_step))
             self._maybe_save_hf(train_step)
+
+        if not needs_rollout_ready:
+            with timer("final_offload", step_timer_dict):
+                self.train_controller.offload(target="model")
+            self.logger.info("Final train step reached without scheduled evaluation; skip rollout worker onload.")
+            return False
 
         timer_name = "sync_weight" if should_sync_weights else "switch_to_rollout"
         with timer(timer_name, step_timer_dict):

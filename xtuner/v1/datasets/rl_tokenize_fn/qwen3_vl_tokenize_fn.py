@@ -113,6 +113,8 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
                     mm_info["pixel_values"] = _tensor_to_numpy(data["pixel_values"])  # for ray put into shared memory
                 if "image_grid_thw" in data:
                     mm_info["image_grid_thw"] = _tensor_to_numpy(data["image_grid_thw"])
+                if "num_img_tokens" in data:
+                    mm_info["num_img_tokens"] = data["num_img_tokens"]
 
             data_source = item.get("data_source")
             assert data_source is not None, "data_source is required in item"

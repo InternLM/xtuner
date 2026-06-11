@@ -127,6 +127,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._log_step = MagicMock()
         trainer._maybe_save_checkpoint = AsyncMock()
         trainer._maybe_save_hf = MagicMock()
+        trainer._checkpoint_no_save_replay_buffer = False
         trainer.train_controller = SimpleNamespace(
             fit=MagicMock(return_value=[{"train_metrics": [], "sft_train_metrics": {}}]),
             onload=MagicMock(return_value="onload"),
@@ -192,7 +193,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             trainer.fit()
 
         checkpoint_path = Path(trainer.exp_dir) / trainer._CHECKPOINT_DIR / "ckpt-step-1"
-        manager.save.assert_awaited_once_with(checkpoint_path, model_step=1)
+        manager.save.assert_awaited_once_with(checkpoint_path, model_step=1, no_save_replay_buffer=False)
         with (checkpoint_path / trainer._SAVE_TRAIN_STATE_PATH).open("r") as f:
             self.assertEqual(json.load(f), {"cur_step": 1})
         self.assertIn(("continue_produce", 1), manager.calls)

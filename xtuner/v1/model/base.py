@@ -627,7 +627,15 @@ class BaseModel(nn.Module):
             for name, param in module.named_parameters(recurse=False):
                 full_name = full_param_name_mapping[id(param)]
                 full_name = self._clean_param_name(full_name)
-                hf_name_list = self.to_hf_key_list(full_name)
+                # Match fp32 patterns against the post-mapping HF keys (the names that actually land
+                # in the saved checkpoint), so this FSDP-ignore decision stays consistent with the
+                # save path (`_split_ignored_params` / `_get_save_dtype`). `load_spec_mapping` is
+                # built in `_init_load_spec` during __init__ (and rebuilt after fp8 padding), both
+                # of which run before `fully_shard`, so the lookup is always populated here.
+                load_spec = self.load_spec_mapping.get(full_name)
+                if load_spec is None:
+                    raise ValueError(f"Internal Error. Parameter {full_name} not found in load_spec_mapping.")
+                hf_name_list = load_spec.hf_keys
 
                 for hf_name in hf_name_list:
                     if any(re.search(p, hf_name) for p in patterns):  # type: ignore
@@ -951,7 +959,9 @@ class BaseModel(nn.Module):
             local_tensor[:non_pad_len].copy_(loaded_tensor_slice)
 
             if non_pad_len < local_tensor.shape[self.FSDP_SHARD_DIM]:
-                assert self.config.float8_cfg is not None
+                assert self.config.float8_cfg is not None, (
+                    f"Shape mismatched! xtuner param shape: {param_name}, hf param {loaded_tensor.shape}"
+                )
                 local_tensor[non_pad_len:].copy_(0.0)  # type: ignore  # padded part must be set to 0
         else:
             local_tensor.copy_(loaded_tensor)
