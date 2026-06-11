@@ -708,9 +708,10 @@ class Muon(Optimizer):
                     else:
                         yield AsyncTask(
                             muon_update_batch_async(
-                                X=pad_batch(params, group_world_size),
-                                G=pad_batch(gradients, group_world_size),
-                                M=pad_batch(momentums, group_world_size),
+                                X=params,
+                                G=gradients,
+                                M=momentums,
+                                batch_size=group_world_size,
                                 lr=lr,
                                 lr_ratio=lr_ratios[0],
                                 momentum=mu,
@@ -787,6 +788,7 @@ def muon_update_batch_async(
     shard_dim: int | None = None,  # Shard dimension for DTensor (if applicable)
     process_group: ProcessGroup | None = None,  # Unified process group for communication
     num_experts: int = 1,  # Number of experts for MoE models
+    batch_size: int | None = None,  # If set, pad X/G/M to this size with zeros
 ) -> Generator[None, None, None]:
     """Batched version of Muon update.
 
@@ -799,6 +801,11 @@ def muon_update_batch_async(
     - ``"all_to_all"``: All-to-all exchange for evenly/unevenly sharded tensors.
     - ``"local"``: No sharding; each rank orthogonalizes locally and optionally all-gathers.
     """
+    if batch_size is not None:
+        X = pad_batch(X, batch_size)
+        G = pad_batch(G, batch_size)
+        M = pad_batch(M, batch_size)
+
     world_size = process_group.size() if process_group is not None else 1
 
     assert len(X) == len(G)
