@@ -45,15 +45,16 @@ from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
-    AsyncProduceStrategyConfig,
+    DisaggAsyncProduceStrategyConfig,
+    DisaggAgentLoopManagerConfig,
+    DisaggTaskSpecConfig,
     SamplerConfig,
-    SyncProduceStrategyConfig,
     TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger import GSM8KJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
-from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
+from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import WorkerConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig
@@ -193,17 +194,15 @@ agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=training_sample_params,
 )
-if over_sample_threshold > 0 or partial_rollout:
-    produce_strategy_config = AsyncProduceStrategyConfig(
-        over_sample_threshold=over_sample_threshold,
-        enable_partial_rollout=partial_rollout,
-        tail_batch_trigger_size=tail_batch_trigger_size,
-        max_staleness=max_staleness,
-    )
-else:
-    produce_strategy_config = SyncProduceStrategyConfig()
-agent_loop_manager_cfg = AgentLoopManagerConfig(
-    tasks=TaskSpecConfig(
+# 非共卡后台 producer 使用独立的 Disagg* config，不复用共卡 AsyncProduceStrategyConfig。
+produce_strategy_config = DisaggAsyncProduceStrategyConfig(
+    over_sample_threshold=over_sample_threshold,
+    enable_partial_rollout=partial_rollout,
+    tail_batch_trigger_size=tail_batch_trigger_size,
+    max_staleness=max_staleness,
+)
+agent_loop_manager_cfg = DisaggAgentLoopManagerConfig(
+    tasks=DisaggTaskSpecConfig(
         task_name="train_task",
         agent_loop_config=agent_loop_config,
         judger_config=judger_config,
@@ -258,7 +257,7 @@ trainer = RLDisaggregatedTrainerConfig(
     train_worker_cfg=train_worker_cfg,
     rollout_config=rollout_config,
     tokenizer_path=model_path,
-    replay_buffer_config=SyncReplayBufferConfig(),
+    replay_buffer_config=AsyncReplayBufferConfig(),
     agent_loop_manager_cfg=agent_loop_manager_cfg,
     eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
     evaluator_config=evaluator_config,
