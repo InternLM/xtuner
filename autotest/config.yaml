@@ -352,6 +352,7 @@ case:
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
                     - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
                     - XTUNER_DETERMINISTIC=true
+                    - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
                 base_metric: qwen3-sft-vl-dense/tracker.jsonl
                 check_metrics:
@@ -769,6 +770,7 @@ case:
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k/test.jsonl
                     - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k
                     - XTUNER_DETERMINISTIC=true
+                    - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
                 base_metric: qwen3-rl-vl-lmdeploy/tracker.jsonl
                 check_metrics:
@@ -813,6 +815,7 @@ case:
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
+                    - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
                 base_metric: qwen3-5-rl-vl-lmdeploy-grpo/tracker.jsonl
                 check_metrics:
@@ -857,6 +860,7 @@ case:
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
+                    - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
                 base_metric: qwen3-5-rl-vl-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
@@ -902,6 +906,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
+                    - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
                 base_metric: qwen3-5-rl-vl-lmdeploy-resume/tracker.jsonl
                 check_metrics:
@@ -948,6 +953,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
+                    - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
                 base_metric: qwen3-5-rl-vl-lmdeploy-resume/tracker-resume.jsonl
                 check_metrics:
@@ -993,6 +999,7 @@ case:
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
+                    - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
                 base_metric: qwen3-5-rl-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
@@ -1041,7 +1048,6 @@ case:
                     - XTUNER_USE_LMDEPLOY=0
                     - XTUNER_USE_VLLM=0
                     - XTUNER_USE_SGLANG=1
-                    - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
                     - XTUNER_USE_FA3=0
             assert_info:
                 base_metric: qwen3-rl-sglang/tracker.jsonl
