@@ -1376,8 +1376,7 @@ class BaseRLTrainer:
                 ground_truth = None
                 if data.reward_model is not None:
                     ground_truth = data.reward_model.get("ground_truth")
-                response_text_len = len(self.tokenizer.encode(response or "", add_special_tokens=False))
-                response_train_len = len(response_ids)
+                response_len = len(response_ids)
                 trajectory_items.append(
                     {
                         "uid": data.uid,
@@ -1390,14 +1389,9 @@ class BaseRLTrainer:
                         "prompt": data.message,
                         "label": ground_truth,
                         "response": response,
-                        # Backward-compatible scalar aliases for quick tables.
                         "reward": data.reward["score"],
-                        "response_len": response_train_len,
-                        "lengths": {
-                            "num_tokens": data.num_tokens,
-                            "response_train_tokens": response_train_len,
-                            "response_text_tokens": response_text_len,
-                        },
+                        "prompt_len": data.num_tokens,
+                        "response_len": response_len,
                         "reward_payload": data.reward,
                         "agent": {
                             "status": data.extra_fields.get("agent_status", None),
@@ -1441,8 +1435,7 @@ class BaseRLTrainer:
                 reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
                 response = data.response or ""
                 response_ids = self._get_trajectory_response_ids(data)
-                response_len = len(self.tokenizer.encode(response, add_special_tokens=False))
-                response_train_len = len(response_ids)
+                response_len = len(response_ids)
                 rewards.append(reward)
                 ground_truth = None
                 if data.reward_model is not None:
@@ -1456,12 +1449,8 @@ class BaseRLTrainer:
                         "status": data.status.value if hasattr(data.status, "value") else str(data.status),
                         "prompt": data.message,
                         "response": response,
+                        "prompt_len": data.num_tokens,
                         "response_len": response_len,
-                        "lengths": {
-                            "num_tokens": data.num_tokens,
-                            "response_train_tokens": response_train_len,
-                            "response_text_tokens": response_len,
-                        },
                         "label": ground_truth,
                         "reward": reward,
                         "reward_payload": data.reward or {"score": reward},

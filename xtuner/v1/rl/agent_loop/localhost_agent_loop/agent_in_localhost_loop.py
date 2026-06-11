@@ -254,7 +254,6 @@ class AgentInLocalhostLoop(AgentLoop):
         rollout_state.routed_experts = data["routed_experts"]
         content = response_message.get("content")
         rollout_state.response = content if isinstance(content, str) else (str(content) if content is not None else "")
-        rollout_state.extra_fields["raw_prompt"] = prompt_text
 
     def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
         is_success = item.status == RolloutStatus.COMPLETED
