@@ -463,6 +463,49 @@ class TrainEngine:
         storage_writer.state_dict_cache = self._async_state_dict_cache
         return storage_writer
 
+    def warmup_async_save_dcp(self, timeout: float = 1800.0) -> None:
+        """Pre-initialize the async DCP checkpoint daemon before training.
+
+        Runs one tiny dummy ``async_save`` so process-group creation / TCPStore binding happens now and errors like
+        EADDRINUSE surface before any training step is wasted. A rank that fails raises immediately; the launcher then
+        tears the job down -- the standard path for init-time failures.
+
+        Args:
+            timeout (float): Seconds to wait for the warmup save before declaring a hang. Defaults to 1800 to match
+                PyTorch's own daemon-init wait.
+        """
+        async_checkpoint_pg = self._get_async_checkpoint_pg()
+        # warmup_dir is per-rank and lives in node-local /dev/shm, so each rank
+        # prepares and cleans up its OWN directory (a rank0-only guard would
+        # leak every non-zero rank's directory).
+        warmup_dir = Path(f"/dev/shm/xtuner_dcp_warmup_{dist.get_rank()}")
+        if warmup_dir.exists():
+            shutil.rmtree(warmup_dir, ignore_errors=True)
+        warmup_dir.mkdir(parents=True, exist_ok=True)
+
+        async_save_kwargs: dict[str, Any] = {}
+        state_dict_saver = importlib.import_module("torch.distributed.checkpoint.state_dict_saver")
+        async_checkpointer_type = getattr(state_dict_saver, "AsyncCheckpointerType", None)
+        if async_checkpointer_type is not None:
+            async_save_kwargs["async_checkpointer_type"] = async_checkpointer_type.PROCESS
+
+        try:
+            future = cast(Any, dcp.async_save)(
+                {"_warmup": torch.zeros(1)},
+                checkpoint_id=warmup_dir,
+                process_group=async_checkpoint_pg,
+                **async_save_kwargs,
+            )
+            future.result(timeout=timeout)
+        finally:
+            shutil.rmtree(warmup_dir, ignore_errors=True)
+
+        # Ensure warmup does not leave stale state that could be mistakenly
+        # reused by the first real checkpoint (different state_dict structure).
+        self._async_state_dict_cache = None
+
+        log_rank0.info("[DCP] Async save warmup completed successfully")
+
     def destroy_async_checkpoint_pg(self) -> None:
         """Destroy the dedicated gloo process group used for async
         checkpoint."""
