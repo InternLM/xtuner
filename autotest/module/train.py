@@ -1,7 +1,13 @@
+import json
 import os
+import shutil
+from typing import Any
 
 from utils.check_metric import check_result, check_rl_result
 from utils.run_cmd import run_cmd
+
+
+FIRST_RUN_TRACKER_SNAPSHOT = "_first_run_tracker.jsonl"
 
 
 class Train:
@@ -10,7 +16,7 @@ class Train:
         config_path = config.get("parameters").get("config")
         train_type = config.get("type")
         nproc_per_node = config.get("resource", {}).get("gpus_per_task", 8)
-        pip_package = config.get("resource", {}).get("pip_package", 'ls')
+        pip_package = config.get("resource", {}).get("pip_package", "ls")
         if train_type in ["sft", "rl"]:
             model_config = config.get("parameters", {}).get("model", None)
             config_path = config.get("parameters", {}).get("config", None)
@@ -70,21 +76,27 @@ class Train:
 
     def validate(config):
         work_dir = config.get("work_dir", None)
-        base_path = os.path.join(
-            config.get("base_path").get("base_baseline_path"), config.get("assert_info", {}).get("base_metric", None)
-        )
+        base_metric = config.get("assert_info", {}).get("base_metric", None)
+        base_path = os.path.join(config.get("base_path").get("base_baseline_path"), base_metric)
         train_type = config.get("type")
+        case_name = config["case_name"]
+        phase = config.get("phase")
+        context = config.get("context", {})
+
+        cur_path = resolve_tracker_path(work_dir, train_type, phase, context=context)
+
         if train_type == "sft":
-            cur_path = os.path.join(get_latest_subdir(work_dir), "logs/exp_tracking/rank0/tracker.jsonl")
             check_metrics = config.get("assert_info", {}).get("check_metrics", {})
-            return check_result(config["case_name"], base_path, cur_path, check_metrics)
+            result = check_result(case_name, base_path, cur_path, check_metrics, phase=phase)
         elif train_type == "rl":
-            cur_path = os.path.join(get_latest_subdir(work_dir), "logs/exp_tracking/tracker.jsonl")
             check_metrics = config.get("assert_info", {})
-            return check_rl_result(config["case_name"], base_path, cur_path, check_metrics)
+            result = check_rl_result(case_name, base_path, cur_path, check_metrics, phase=phase)
         else:
             print("Unknown type: {train_type}")
             return False
+
+        snapshot_first_run_tracker(work_dir, phase, cur_path, context=context)
+        return result
 
     def pre_action(config=None):
         action_info = config.get("pre_action", None)
@@ -101,12 +113,92 @@ class Train:
                 run_cmd(action_cmd)
 
 
-def get_latest_subdir(work_dir):
-    dirs = [
-        d for d in os.listdir(work_dir) if os.path.isdir(os.path.join(work_dir, d)) and len(d) == 14 and d.isdigit()
-    ]
+def list_timestamp_subdirs(work_dir: str) -> list[str]:
+    return sorted(
+        name
+        for name in os.listdir(work_dir)
+        if os.path.isdir(os.path.join(work_dir, name)) and len(name) == 14 and name.isdigit()
+    )
 
-    if not dirs:
-        return None
-    latest = max(dirs, key=lambda d: os.path.getmtime(os.path.join(work_dir, d)))
-    return os.path.join(work_dir, latest)
+
+def _tracker_relpath(train_type: str) -> str:
+    if train_type == "sft":
+        return "logs/exp_tracking/rank0/tracker.jsonl"
+    return "logs/exp_tracking/tracker.jsonl"
+
+
+def _tracker_path(exp_dir: str | None, train_type: str) -> str:
+    return os.path.join(exp_dir, _tracker_relpath(train_type))
+
+
+def _snapshot_path(work_dir: str) -> str:
+    return os.path.join(work_dir, FIRST_RUN_TRACKER_SNAPSHOT)
+
+
+def _write_first_run_segment(src: str, dst: str) -> None:
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    seen_steps: set[Any] = set()
+    with open(src, encoding="utf-8") as fin, open(dst, "w", encoding="utf-8") as fout:
+        for line in fin:
+            if not line.strip():
+                continue
+            step = json.loads(line).get("step")
+            if step in seen_steps:
+                break
+            seen_steps.add(step)
+            fout.write(line if line.endswith("\n") else f"{line}\n")
+
+
+def _has_duplicate_steps(tracker_path: str) -> bool:
+    steps: list[Any] = []
+    with open(tracker_path, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                steps.append(json.loads(line).get("step"))
+    return len(steps) != len(set(steps))
+
+
+def resolve_tracker_path(
+    work_dir: str,
+    train_type: str,
+    phase: str | None,
+    context: dict[str, Any] | None = None,
+) -> str:
+    context = context or {}
+    snapshot = context.get("first_run_tracker") or _snapshot_path(work_dir)
+
+    if phase == "first":
+        if os.path.isfile(snapshot):
+            return snapshot
+
+        subdirs = list_timestamp_subdirs(work_dir)
+        if len(subdirs) > 1:
+            exp_dir = os.path.join(work_dir, subdirs[0])
+        else:
+            exp_dir = os.path.join(work_dir, subdirs[-1]) if subdirs else None
+        live_tracker = _tracker_path(exp_dir, train_type)
+
+        if os.path.isfile(live_tracker) and _has_duplicate_steps(live_tracker):
+            _write_first_run_segment(live_tracker, snapshot)
+            if os.path.isfile(snapshot) and os.path.getsize(snapshot) > 0:
+                return snapshot
+        return live_tracker
+
+    subdirs = list_timestamp_subdirs(work_dir)
+    exp_dir = os.path.join(work_dir, subdirs[-1]) if subdirs else None
+    return _tracker_path(exp_dir, train_type)
+
+
+def snapshot_first_run_tracker(
+    work_dir: str,
+    phase: str | None,
+    cur_path: str,
+    context: dict[str, Any] | None = None,
+) -> None:
+    if phase != "first" or not os.path.isfile(cur_path):
+        return
+    snapshot = _snapshot_path(work_dir)
+    if cur_path != snapshot:
+        shutil.copy2(cur_path, snapshot)
+    if context is not None:
+        context["first_run_tracker"] = snapshot

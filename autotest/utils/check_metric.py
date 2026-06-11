@@ -10,6 +10,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+MEMORY_GRADIENT_WARMUP_STEPS = 5
+MEMORY_GRADIENT_MIN_SEGMENT_LEN = 8
+MEMORY_GRADIENT_POSITIVE_RATIO = 0.65
+MEMORY_GRADIENT_MIN_SLOPE_GB = 1e-4
+MEMORY_GRADIENT_MIN_REL_DRIFT = 0.00015
+MEMORY_GRADIENT_RESUME_DROP_GB = 0.005
+
 
 def extract_value(file, metrics):
     metric_all = {metric: [] for metric in metrics}
@@ -25,7 +32,57 @@ def extract_value(file, metrics):
     return total_step, metric_all
 
 
-def check_result(case_name, base_path, cur_path, check_metric):
+def _split_memory_segments(values: np.ndarray) -> list[np.ndarray]:
+    if len(values) < MEMORY_GRADIENT_MIN_SEGMENT_LEN:
+        return [values]
+
+    segments: list[np.ndarray] = []
+    start = 0
+    for idx in range(1, len(values)):
+        dropped = values[idx - 1] - values[idx]
+        if dropped >= MEMORY_GRADIENT_RESUME_DROP_GB:
+            if idx - start >= MEMORY_GRADIENT_MIN_SEGMENT_LEN:
+                segments.append(values[start:idx])
+            start = idx
+    if len(values) - start >= MEMORY_GRADIENT_MIN_SEGMENT_LEN:
+        segments.append(values[start:])
+    return segments or [values]
+
+
+def detect_memory_upward_gradient(values: list[float]) -> tuple[bool, str]:
+    """Detect sustained upward memory drift (possible leak) in the current
+    run."""
+    if len(values) <= MEMORY_GRADIENT_WARMUP_STEPS + MEMORY_GRADIENT_MIN_SEGMENT_LEN:
+        return False, ""
+
+    series = np.asarray(values[MEMORY_GRADIENT_WARMUP_STEPS:], dtype=float)
+
+    for seg_idx, segment in enumerate(_split_memory_segments(series)):
+        if len(segment) < MEMORY_GRADIENT_MIN_SEGMENT_LEN:
+            continue
+
+        deltas = np.diff(segment)
+        positive_ratio = float(np.mean(deltas > 1e-4))
+        x = np.arange(len(segment))
+        slope, _ = np.polyfit(x, segment, 1)
+        mean_val = float(np.mean(segment))
+        if mean_val < 1e-10:
+            continue
+
+        relative_drift = float(slope * (len(segment) - 1) / mean_val)
+        slope_rising = slope > MEMORY_GRADIENT_MIN_SLOPE_GB
+        mostly_increasing = positive_ratio >= MEMORY_GRADIENT_POSITIVE_RATIO
+        drift_too_large = relative_drift > MEMORY_GRADIENT_MIN_REL_DRIFT
+
+        if slope_rising and mostly_increasing and drift_too_large:
+            return True, (
+                f"segment {seg_idx}: slope={slope:.6f} GB/step, "
+                f"relative_drift={relative_drift:.4f}, positive_ratio={positive_ratio:.2f}"
+            )
+    return False, ""
+
+
+def check_result(case_name, base_path, cur_path, check_metric, phase=None):
     fail_metric = {}
     metric_list = list(check_metric.keys())
     base_steps, base_metrics = extract_value(base_path, metric_list)
@@ -34,7 +91,7 @@ def check_result(case_name, base_path, cur_path, check_metric):
         f"current steps is not equal to base steps, current steps: {cur_steps}, base steps: {base_steps}"
     )
 
-    publish_comparison_report(case_name, check_metric, base_metrics, cur_metrics, base_path, cur_path)
+    publish_comparison_report(case_name, check_metric, base_metrics, cur_metrics, base_path, cur_path, phase=phase)
 
     for metric, threshold in check_metric.items():
         max_error = 0.0
@@ -42,13 +99,20 @@ def check_result(case_name, base_path, cur_path, check_metric):
         check_flag = True
         if metric == "runtime_info/tgs":
             if cur_steps > 10:
-                relative_errors = abs(np.array(base_metrics[metric][10:-1]) - np.array(cur_metrics[metric][10:-1])) / (
-                    np.array(base_metrics[metric][10:-1])
+                base_vals = np.array(base_metrics[metric][10:-1], dtype=float)
+                cur_vals = np.array(cur_metrics[metric][10:-1], dtype=float)
+                degradation = np.zeros_like(base_vals, dtype=float)
+                valid_base = np.abs(base_vals) >= 1e-10
+                degradation[valid_base] = np.maximum(
+                    (base_vals[valid_base] - cur_vals[valid_base]) / np.abs(base_vals[valid_base]),
+                    0.0,
                 )
-                max_error = np.percentile(relative_errors, 80)
+                max_error = float(np.percentile(degradation, 80))
                 if max_error > threshold:
                     fail_metric[metric] = (
-                        f"{metric} relative error bigger than {threshold} after 10 step, baseline: {base_metrics[metric][10:-1]}, now: {cur_metrics[metric][10:-1]}, relative error: {relative_errors}"
+                        f"{metric} degradation bigger than {threshold} after step 10, "
+                        f"baseline: {base_metrics[metric][10:-1]}, now: {cur_metrics[metric][10:-1]}, "
+                        f"degradation: {degradation.tolist()}"
                     )
                     check_flag = False
                 else:
@@ -56,6 +120,28 @@ def check_result(case_name, base_path, cur_path, check_metric):
             else:
                 logger.warning("It's meaningless to compare tgs because of the small steps.")
                 check_flag = False
+        elif metric == "memory/max_memory_GB":
+            for idx, (old, cur) in enumerate(zip(base_metrics[metric], cur_metrics[metric])):
+                if abs(old) < 1e-10:
+                    relative_error = float("inf") if abs(cur) > 1e-10 else 0.0
+                else:
+                    relative_error = round(abs(old - cur) / abs(old), 2)
+                if relative_error > max_error:
+                    max_error = relative_error
+                    max_error_idx = idx
+                if relative_error > threshold:
+                    fail_metric[metric] = (
+                        f"{metric} relative error bigger than {threshold} in {idx} steps, "
+                        f"baseline: {old:.6f}, now: {cur:.6f}, relative error: {relative_error}"
+                    )
+                    check_flag = False
+                    break
+
+            if check_flag:
+                has_gradient, gradient_info = detect_memory_upward_gradient(cur_metrics[metric])
+                if has_gradient:
+                    fail_metric[metric] = f"{metric} shows sustained upward gradient in current run, {gradient_info}"
+                    check_flag = False
         else:
             for idx, (old, cur) in enumerate(zip(base_metrics[metric], cur_metrics[metric])):
                 if abs(old) < 1e-10:
@@ -82,7 +168,7 @@ def check_result(case_name, base_path, cur_path, check_metric):
     return result, f"Some metric check failed: {fail_metric}"
 
 
-def check_rl_result(case_name, base_path, cur_path, assert_info):
+def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
     fail_metric = {}
     check_metrics_list = assert_info["check_metrics"]
 
@@ -96,7 +182,9 @@ def check_rl_result(case_name, base_path, cur_path, assert_info):
     )
 
     check_metric_dict = {item["metric"]: item["threshold"] for item in check_metrics_list}
-    publish_comparison_report(case_name, check_metric_dict, base_metrics, cur_metrics, base_path, cur_path)
+    publish_comparison_report(
+        case_name, check_metric_dict, base_metrics, cur_metrics, base_path, cur_path, phase=phase
+    )
 
     for config in check_metrics_list:
         metric = config["metric"]
