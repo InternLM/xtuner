@@ -40,8 +40,9 @@ from xtuner.v1.rl.utils import (
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
+from .health_manager import ROLLOUT_RAY_GET_TIMEOUT
 from .session_server import SessionServerActor
-from .utils import ROLLOUT_RAY_GET_TIMEOUT, PartialRolloutHandler
+from .utils import PartialRolloutHandler
 
 
 if TYPE_CHECKING:
