@@ -33,6 +33,7 @@ class WorkerSnapshot:
     rank: int
     actor: "RolloutWorker"
     url: str
+    session_url: str | None
     lifecycle_state: WorkerLifecycleState
     active: bool
     lifecycle_group_ranks: tuple[int, ...]
@@ -124,6 +125,7 @@ class RolloutHealthManager:
                     rank=rank,
                     actor=info.actor,
                     url=info.url,
+                    session_url=getattr(info, "session_url", None),
                     lifecycle_state=info.lifecycle_state,
                     active=info.is_active(),
                     lifecycle_group_ranks=tuple(getattr(info, "lifecycle_group_ranks", ()) or ()),
