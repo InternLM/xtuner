@@ -70,12 +70,12 @@ class SessionRouter:
             rank = next(self._worker_cycler)
             if self._worker_infos_lock is None:
                 info = self._worker_infos[rank]
-                if info and info.is_active:
+                if info and info.is_active and info.is_request_entrypoint:
                     return rank, info.actor
             else:
                 with self._worker_infos_lock:
                     info = self._worker_infos[rank]
-                    if info and info.is_active:
+                    if info and info.is_active and info.is_request_entrypoint:
                         return rank, info.actor
         return -1, None
 
@@ -90,7 +90,7 @@ class SessionRouter:
                 else:
                     with self._worker_infos_lock:
                         info = self._worker_infos.get(worker_rank)
-                if info and info.is_active:
+                if info and info.is_active and info.is_request_entrypoint:
                     self._map[session_id] = (worker_rank, self._now())
                     return info.actor
 

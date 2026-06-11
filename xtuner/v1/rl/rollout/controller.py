@@ -28,12 +28,14 @@ from .worker import (
 
 @dataclass
 class WorkerInfo:
-    """A data class to hold all state information for a single worker."""
+    """Controller-owned state record for one rollout server process."""
 
     actor: RolloutWorker
     url: str
     session_url: str | None = None
     is_active: bool = True
+    lifecycle_group_ranks: tuple[int, ...] = ()
+    is_request_entrypoint: bool = True
 
 
 class RolloutWorkerMetadata(TypedDict):
@@ -98,7 +100,6 @@ class RolloutController:
         self.worker_server_urls_map: dict[int, str] = {}
         self.rank2info: dict[int, WorkerInfo] = {}
         self.engine_rank_mesh_array, self.worker_server_urls_map, self.rank2info = self._init_workers(placement_group)
-        self.num_active_workers = len(self.rank2info)
         self.worker_info_lock = threading.RLock()
         # The timeout for the environment to wait for the rollout controller's response.
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
@@ -154,11 +155,11 @@ class RolloutController:
 
     def get_ready_status(self) -> tuple[bool, dict[str, Any]]:
         with self.worker_info_lock:
-            active_workers = sum(1 for info in self.rank2info.values() if info.is_active)
-            total_workers = len(self.rank2info)
+            request_workers = [info for info in self.rank2info.values() if info.is_request_entrypoint]
+            active_workers = sum(1 for info in request_workers if info.is_active)
         return active_workers > 0, {
             "active_workers": active_workers,
-            "total_workers": total_workers,
+            "total_workers": len(request_workers),
         }
 
     def get_generate_concurrency(self) -> int:
@@ -169,7 +170,9 @@ class RolloutController:
             self.config.rollout_max_batch_size_per_instance * self.config.allow_over_concurrency_ratio
         )
         with self.worker_info_lock:
-            active_workers = sum(1 for info in self.rank2info.values() if info.is_active)
+            active_workers = sum(
+                1 for info in self.rank2info.values() if info.is_active and info.is_request_entrypoint
+            )
         return active_workers * concurrency_per_worker
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
@@ -365,33 +368,6 @@ class RolloutController:
             self.logger.error(f"Failed to restart worker: {e}")
             return False
 
-    def _update_dist_init_addr(self, nodes_per_engine, server_urls_per_engine, dist_init_addrs, tp_size):
-        """Update the distributed initialization addresses for workers.
-
-        This is used to group workers that belong to the same inference engine.
-
-        Args:
-            nodes_per_engine (int): The number of nodes per inference engine.
-            server_urls_per_engine (int): The number of server urls per inference engine.
-            dist_init_addrs (list): The list of initial addresses.
-            tp_size (int): The tensor parallel size.
-
-        Returns:
-            list: The updated list of distributed initialization addresses.
-        """
-        # lmdeploy pytorch ep: server_urls_per_engine > 1
-        # sglang cross node engine: nodes_per_engine > 1
-        assert server_urls_per_engine == 1 or nodes_per_engine == 1
-        if nodes_per_engine > 1:
-            index = list(range(0, self.num_active_workers + 1, tp_size)) + [self.num_active_workers]
-            for i in range(1, len(index)):
-                dist_init_addrs[index[i - 1] : index[i]] = [dist_init_addrs[index[i - 1]]] * (index[i] - index[i - 1])
-        if server_urls_per_engine > 1:
-            activate_servers = len(dist_init_addrs)
-            for i in range(0, activate_servers, server_urls_per_engine):
-                dist_init_addrs[i : i + server_urls_per_engine] = [dist_init_addrs[i]] * server_urls_per_engine
-        return dist_init_addrs
-
     def _broadcast_to_active_workers(self, method_name: str, **kwargs):
         """Helper function to call a method on all active workers.
 
@@ -409,25 +385,27 @@ class RolloutController:
         results = ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
         return results
 
-    def _get_worker_cls(self):
+    def _get_worker_base_cls(self):
         if os.environ.get("XTUNER_USE_LMDEPLOY") == "1":
             from .lmdeploy import LMDeployWorker
 
-            worker_cls = LMDeployWorker
+            return LMDeployWorker
         elif os.environ.get("XTUNER_USE_VLLM") == "1":
             from .vllm import vLLMWorker
 
-            worker_cls = vLLMWorker
+            return vLLMWorker
         elif os.environ.get("XTUNER_USE_SGLANG") == "1":
             from .sglang import SGLangWorker
 
-            worker_cls = SGLangWorker
+            return SGLangWorker
         else:
             raise NotImplementedError(
                 "Rollout backend is not supported."
                 "Please set XTUNER_USE_LMDEPLOY or XTUNER_USE_VLLM"
                 " or XTUNER_USE_SGLANG environment variable."
             )
+
+    def _build_remote_worker_cls(self, worker_base_cls):
         assert self.config.rollout_max_batch_size_per_instance is not None, (
             "rollout_max_batch_size_per_instance must be set before building RolloutWorker."
         )
@@ -439,7 +417,7 @@ class RolloutController:
             concurrency_groups={
                 ROLLOUT_CONCURRENCY_GROUP_GENERATE: worker_generate_max_concurrency,
             },
-        )(worker_cls)
+        )(worker_base_cls)
 
     def _get_rank_by_actor(self, actor: RolloutWorker) -> Optional[int]:
         """Get rank by actor object.
@@ -455,93 +433,74 @@ class RolloutController:
                 return rank
         return None
 
-    def _update_active_workers_and_urls_map(self, active_rollout_workers, worker_server_urls_map):
-        """Update the list of active rollout workers and their server URLs.
-
-        When the inference engine is launched across nodes (rollout_cross_node_comm=True), only the worker with
-        tp_rank=0 in each engine is responsible for receiving input data. Other tp_ranks do not accept input.
-        Therefore, this function updates active_rollout_workers and worker_server_urls_map to keep only the tp_rank=0
-        workers and their corresponding URLs.
-        """
-        if self.config.rollout_cross_node_comm or self.num_gpus_per_engine < self.config.gpus_per_node:
-            return active_rollout_workers, worker_server_urls_map
-        else:
-            active_worker_interval = self.num_gpus_per_engine // self.config.gpus_per_node
-            active_rank = list(worker_server_urls_map.keys())[::active_worker_interval]
-            active_worker_server_urls = list(worker_server_urls_map.values())[::active_worker_interval]
-            return active_rollout_workers[::active_worker_interval], dict(zip(active_rank, active_worker_server_urls))
-
     def _init_workers(self, placement_group: PlacementGroup):
         """Initializes and configures the pool of RolloutWorker actors.
 
-        This method creates workers from the placement group, configures distributed
-        inference engines by grouping workers, where each group forms a tensor-parallel
-        inference engine. It determines the `active_workers` to act as the head of each
-        engine, constructs the `engine_rank_mesh_array` to define engine topology,
-        acquires necessary distributed communication ports, and finally launches servers
-        on the `active_workers` to get their addresses.
+        This method follows the same high-level flow as the legacy implementation:
+        create workers, initialize worker-local ports, build engine groups,
+        select workers that launch rollout servers, launch servers, and
+        expose request-entrypoint server URLs to rollout traffic.
 
         Returns:
-            Tuple[List, Dict]: A tuple where the first element is
-            `engine_rank_mesh_array`, a list of lists containing the ranks of workers
-            in each engine, and the second element is `worker_server_urls_map`,
-            a dictionary mapping the rank of each active worker to its
-            corresponding server URL.
+            A tuple of `engine_rank_mesh_array`, `request_server_urls_by_rank`,
+            and `workers_info`. `request_server_urls_by_rank` only includes
+            rollout request entrypoint servers.
         """
-        # Create workers from placement group
-        workers, rank_bundle_idx_list = AutoAcceleratorWorkers.from_placement_group(
-            self._get_worker_cls(), self.config, placement_group
-        )
-        active_servers_count, nodes_per_engine = self.config.get_active_servers_count(len(workers))
-        interval = len(workers) // active_servers_count
-        active_rollout_workers = workers[::interval]
-        server_urls_per_engine = self.config.server_urls_per_engine
+        worker_base_cls = self._get_worker_base_cls()
+        worker_cls = self._build_remote_worker_cls(worker_base_cls)
 
-        set_bundle_idxs_objectref = []
-        engine_rank_mesh_array = []
-        activate_worker_idx = 0
-        for active_worker in active_rollout_workers:
-            head_rank, _ = rank_bundle_idx_list[activate_worker_idx]
-            engine_workers_meta = rank_bundle_idx_list[head_rank : head_rank + interval]
-            engine_bundle_idxs = [meta[1] for meta in engine_workers_meta]  # meta: (rank, bundle_idx)
-            set_bundle_idxs_objectref.append(active_worker._set_engine_bundle_idxs.remote(engine_bundle_idxs))  # type: ignore[attr-defined]
-            engine_rank_mesh_array.append([meta[0] for meta in engine_workers_meta])
-            activate_worker_idx += interval
-        ray.get(set_bundle_idxs_objectref)
-        # set engine mesh list for each worker
-        ray.get(
-            [worker._set_engine_rank_mesh_array.remote(engine_rank_mesh_array) for worker in active_rollout_workers]
-        )  # type: ignore[attr-defined]
-        # init dist_init_addr for each worker according to parallel settings
-        init_dist_init_addrs = ray.get([worker.init_dist_port.remote() for worker in active_rollout_workers])  # type: ignore[attr-defined]
-        dist_init_addrs = self._update_dist_init_addr(
-            nodes_per_engine, server_urls_per_engine, init_dist_init_addrs, self.num_gpus_per_engine
+        # Create workers from placement group.
+        workers, rank_bundle_idx_list = AutoAcceleratorWorkers.from_placement_group(
+            worker_cls, self.config, placement_group
         )
-        # launch rollout servers
-        init_results = ray.get(
-            [worker.init.remote(dist_init_addrs[i]) for i, worker in enumerate(active_rollout_workers)]
-        )
-        worker_server_urls_map = dict(init_results)  # rank -> url
-        worker_session_url_dict = dict(
-            ray.get([worker.get_session_server_info.remote() for worker in active_rollout_workers])
-        )
-        active_rollout_workers, worker_server_urls_map = self._update_active_workers_and_urls_map(
-            active_rollout_workers, worker_server_urls_map
-        )
-        active_ranks = list(worker_server_urls_map.keys())
-        worker_session_url_dict = {rank: worker_session_url_dict[rank] for rank in active_ranks}
-        workers_info = {}
-        for i in range(len(active_rollout_workers)):
-            rank = list(worker_server_urls_map.keys())[i]
-            url = worker_server_urls_map[rank]
-            workers_info[rank] = WorkerInfo(
-                actor=active_rollout_workers[i],
-                url=url,
-                session_url=worker_session_url_dict[rank],
+        rank_to_actor = {rank: worker for (rank, _), worker in zip(rank_bundle_idx_list, workers)}
+
+        rank_to_dist_init_addr = {
+            rank: dist_init_addr
+            for (rank, _), dist_init_addr in zip(
+                rank_bundle_idx_list,
+                ray.get([worker.init_dist_port.remote() for worker in workers]),  # type: ignore[attr-defined]
             )
+        }
+
+        engine_launch_specs = worker_base_cls.build_engine_launch_specs(
+            self.config,
+            rank_bundle_idx_list,
+            rank_to_dist_init_addr,
+        )
+        engine_rank_mesh_array = [list(engine_spec.engine_ranks) for engine_spec in engine_launch_specs]
+
+        server_rank_to_url = dict(
+            ray.get(
+                [
+                    rank_to_actor[server_process.worker_rank].init.remote(  # type: ignore[attr-defined]
+                        engine_launch_spec=engine_spec,
+                    )
+                    for engine_spec in engine_launch_specs
+                    for server_process in engine_spec.server_processes
+                ]
+            )
+        )
+
+        workers_info: dict[int, WorkerInfo] = {}
+        for engine_spec in engine_launch_specs:
+            for server_process in engine_spec.server_processes:
+                rank = server_process.worker_rank
+                url = server_rank_to_url[rank]
+                workers_info[rank] = WorkerInfo(
+                    actor=rank_to_actor[rank],
+                    url=url,
+                    lifecycle_group_ranks=engine_spec.server_worker_ranks,
+                    is_request_entrypoint=server_process.accepts_rollout_requests,
+                )
+
+        request_server_urls_by_rank = {
+            rank: info.url for rank, info in workers_info.items() if info.is_request_entrypoint
+        }
+
         self.logger.info(f"Rollout worker server URLs: {[info.url for info in workers_info.values()]}")
-        self.logger.info(f"Rollout worker session server URLs: {[info.session_url for info in workers_info.values()]}")
-        return engine_rank_mesh_array, worker_server_urls_map, workers_info
+        self.logger.info(f"Rollout worker request-serving server URLs: {request_server_urls_by_rank}")
+        return engine_rank_mesh_array, request_server_urls_by_rank, workers_info
 
 
 RayRolloutController = ray.remote(RolloutController)

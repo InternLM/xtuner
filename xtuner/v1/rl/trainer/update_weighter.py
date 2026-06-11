@@ -959,6 +959,7 @@ class UpdateWeighter:
         cpu_mesh = self._ensure_rollout_device_mesh()["engine_parallel"]
         cpu_group = cpu_mesh.get_group()
         head_rank = cpu_mesh.mesh[0].item()
+        is_lmdeploy_ep = self.rollout_cfg_info["backend"] == "pytorch" and self.rollout_cfg_info["ep"] > 1
         if self.rollout_url is None:
             self.logger.error(f"rank {self.rank} url in None, cannot update weights and skip")
             return
@@ -1092,7 +1093,9 @@ class UpdateWeighter:
                         group=cpu_group,
                     )
 
-        if dist.get_rank() == head_rank:
+        # LMDeploy EP starts one server per EP rank, and each server owns its
+        # own update endpoint. TP and SGLang still update through the engine head.
+        if dist.get_rank() == head_rank or is_lmdeploy_ep:
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.rollout_cfg_info['api_key']}",
