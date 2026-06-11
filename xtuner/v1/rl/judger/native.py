@@ -97,7 +97,8 @@ JudgerOutputBatch: TypeAlias = JudgerOutput | list[JudgerOutput]
 class BaseJudger:
     """Minimal judger interface.
 
-    Subclass ``BaseJudger`` directly only when the implementation owns the
+    Prefer subclassing ``Judger`` instead of overriding ``BaseJudger``
+    directly. Subclass ``BaseJudger`` only when the implementation owns the
     whole ``judge`` / ``batch_judge`` flow. ``ComposedJudger`` currently does
     not support BaseJudger-only branches because it composes branches through
     the ``Judger`` payload contract: ``preprocess -> judge_payload ->
