@@ -54,8 +54,8 @@ class _FakeManager:
         self.calls.append(("get_batch", batch_size, train_step))
         return self._results.pop(0)
 
-    async def pause_produce(self, *, use_global_progress: bool):
-        self.calls.append(("pause_produce", use_global_progress))
+    async def pause_produce(self):
+        self.calls.append("pause_produce")
         return 0.25
 
     async def continue_produce(self, model_step: int):
@@ -81,6 +81,17 @@ class _TickingManager(_FakeManager):
                 self._producer_ticked.set()
             await asyncio.sleep(0)
         self.calls.append("produce_loop_exit")
+
+
+class _FailingProducerManager(_FakeManager):
+    async def produce_loop(self, batch_size: int):
+        self.calls.append(("produce_loop_start", batch_size))
+        raise RuntimeError("background producer failed")
+
+    async def get_batch(self, batch_size: int, train_step: int):
+        self.calls.append(("get_batch", batch_size, train_step))
+        await asyncio.sleep(0.05)
+        return self._results.pop(0)
 
 
 class TestRLDisaggregatedTrainer(unittest.TestCase):
@@ -266,6 +277,18 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._train_one_batch.assert_called_once()
         self.assertIn("produce_loop_tick_during_training", manager.calls)
         self.assertEqual(trainer._cur_step, 1)
+
+    def test_fit_observes_background_producer_failure_before_training_waited_batch(self):
+        # 后台 producer 异常是终止性失败；前台 get_batch 还在等待时必须立刻暴露，不能先训练随后才失败。
+        train_sample = SimpleNamespace(message_uid=1, uid=1)
+        manager = _FailingProducerManager([ProduceBatchResult(rollout_states=[[train_sample]])])
+        trainer = self._make_trainer(manager)
+
+        with self.assertRaisesRegex(RuntimeError, "background producer failed"):
+            self._run_fit(trainer)
+
+        trainer.train_controller.fit.assert_not_called()
+        self.assertIn(("get_batch", 2, 1), manager.calls)
 
     def test_fit_runs_eval_before_reset_and_stops_producer(self):
         # 验证 eval 在 producer 恢复前执行，避免生产侧提前抢占 rollout 资源。

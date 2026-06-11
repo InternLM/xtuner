@@ -31,7 +31,13 @@ from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense4BConfig
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
-from xtuner.v1.rl.agent_loop_manager import AgentLoopManagerConfig, SamplerConfig, SyncProduceStrategyConfig
+from xtuner.v1.rl.agent_loop_manager import (
+    AgentLoopManagerConfig,
+    DisaggAgentLoopManagerConfig,
+    DisaggAsyncProduceStrategyConfig,
+    SamplerConfig,
+    SyncProduceStrategyConfig,
+)
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
@@ -206,6 +212,7 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             patch("xtuner.v1.train.rl_trainer.AutoAcceleratorWorkers.build_placement_group", side_effect=build_pg),
             patch("xtuner.v1.train.rl_trainer.CPUResourceManager", _FakeCPUResourceManager),
             patch("xtuner.v1.train.rl_trainer.set_cpu_resource_manager", lambda manager: None),
+            patch("xtuner.v1.train.rl_trainer.get_rollout_engine_version", return_value={}),
             patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
             patch("xtuner.v1.train.rl_trainer.BaseRLTrainer._release_trace_store", return_value=None),
             patch.object(WorkerConfig, "build", autospec=True, side_effect=build_train_controller),
@@ -231,7 +238,13 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             pack_max_length=256,
         )
 
-    def _build_agent_loop_manager_config(self, model_path: str) -> AgentLoopManagerConfig:
+    def _build_agent_loop_manager_config(
+        self,
+        model_path: str,
+        *,
+        mode: str = "colocate",
+        produce_strategy_config=None,
+    ) -> AgentLoopManagerConfig | DisaggAgentLoopManagerConfig:
         dataloader_cfg = DataloaderConfig(
             dataset_config_list=[
                 {
@@ -251,7 +264,11 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             num_workers=0,
             round_up=False,
         )
-        return AgentLoopManagerConfig(
+        manager_config_cls = DisaggAgentLoopManagerConfig if mode == "disaggregated" else AgentLoopManagerConfig
+        produce_strategy_config = produce_strategy_config or (
+            DisaggAsyncProduceStrategyConfig() if mode == "disaggregated" else SyncProduceStrategyConfig()
+        )
+        return manager_config_cls(
             tasks=[
                 {
                     "task_name": "unit_task",
@@ -259,10 +276,10 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
                         hf_checkpoint=model_path,
                         sample_params=SampleParams(max_tokens=2, temperature=0.0, top_k=1),
                     ),
-                    "produce_strategy_config": SyncProduceStrategyConfig(),
+                    "produce_strategy_config": produce_strategy_config,
                     "sampler_config": SamplerConfig(dataloader_cfg=dataloader_cfg, prompt_repeat_k=2),
                 }
-            ]
+            ],
         )
 
     def _build_rollout_config(self, model_path: str) -> RolloutConfig:
@@ -329,7 +346,11 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             rollout_config=self._build_rollout_config(QWEN3_4B_PATH),
             tokenizer_path=QWEN3_4B_PATH,
             replay_buffer_config=AsyncReplayBufferConfig(),
-            agent_loop_manager_cfg=self._build_agent_loop_manager_config(QWEN3_4B_PATH),
+            agent_loop_manager_cfg=self._build_agent_loop_manager_config(
+                QWEN3_4B_PATH,
+                mode="disaggregated",
+                produce_strategy_config=DisaggAsyncProduceStrategyConfig(over_sample_threshold=0.0),
+            ),
             load_from=QWEN3_4B_PATH,
             total_train_steps=total_train_steps,
             train_batch_size=1,

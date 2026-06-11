@@ -25,11 +25,14 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop_manager import (
+    AgentLoopManager,
     AgentLoopManagerConfig,
+    DisaggAgentLoopManager,
+    DisaggAgentLoopManagerConfig,
     ProduceBatchResult,
     ProduceBatchStatus,
 )
-from xtuner.v1.rl.agent_loop_manager.producer import default_should_continue_fn
+from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.replay_buffer import (
     AsyncReplayBufferConfig,
@@ -194,7 +197,7 @@ def get_train_seq_ctx(
     seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
     position_ids = _to_cpu_tensor(position_ids, dtype=torch.long)
     if position_ids is not None and len(position_ids.shape) == 3:
-        # qwen3vl 需要特殊处理，其余的不需要额外处理
+        # VLM 位置编码需要补 response 段。
         max_value = position_ids.max(dim=-1).values  # (3,1)
         response_position_ids = max_value.unsqueeze(-1).expand(-1, -1, len_response_ids) + torch.arange(
             1, len_response_ids + 1, device=max_value.device
@@ -315,7 +318,7 @@ class BaseRLTrainerConfig(BaseModel):
     rollout_config: RolloutConfig
     tokenizer_path: str | Path
     replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
-    agent_loop_manager_cfg: AgentLoopManagerConfig
+    agent_loop_manager_cfg: AgentLoopManagerConfig | DisaggAgentLoopManagerConfig
     eval_agent_loop_manager_cfg: AgentLoopManagerConfig | None = None
     evaluator_config: EvaluatorConfig | None = None
     load_from: str | Path
@@ -450,6 +453,7 @@ class RLColocateTrainerConfig(BaseRLTrainerConfig):
         )
     """
 
+    agent_loop_manager_cfg: AgentLoopManagerConfig
     resources: AcceleratorResourcesConfig
 
     def build(self) -> "RLColocateTrainer":
@@ -540,6 +544,7 @@ class RLDisaggregatedTrainerConfig(BaseRLTrainerConfig):
         )
     """
 
+    agent_loop_manager_cfg: DisaggAgentLoopManagerConfig
     train_resources: AcceleratorResourcesConfig
     rollout_resources: AcceleratorResourcesConfig
 
@@ -555,6 +560,8 @@ class BaseRLTrainer:
 
     train_controller: TrainingController
     rollout_controller: RolloutControllerProxy
+    agent_loop_manager: AgentLoopManager | DisaggAgentLoopManager
+    eval_agent_loop_manager: AgentLoopManager
     _debug_train_files: dict[int, Path]
 
     def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
@@ -707,23 +714,27 @@ class BaseRLTrainer:
 
     def _build_agent_loop_components(self, cfg: BaseRLTrainerConfig, replay_buffer) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
-        self.agent_loop_manager = cfg.agent_loop_manager_cfg.build(
+        agent_loop_manager = cfg.agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
             logger=self.logger,
             sync_weights_interval=cfg.sync_weights_interval,
         )
+        self.agent_loop_manager = cast(AgentLoopManager | DisaggAgentLoopManager, agent_loop_manager)
 
         if self._enable_evaluate:
             assert cfg.eval_agent_loop_manager_cfg is not None
-            self._eval_replay_buffer = SyncReplayBufferConfig().build()
-            self.eval_agent_loop_manager = cfg.eval_agent_loop_manager_cfg.build(
-                rollout_controller=self.rollout_controller,
-                tokenizer=self.tokenizer,
-                replay_buffer=self._eval_replay_buffer,
-                logger=self.logger,
-                sync_weights_interval=cfg.sync_weights_interval,
+            # 评测始终走一次同步 rollout。
+            self.eval_agent_loop_manager = cast(
+                AgentLoopManager,
+                cfg.eval_agent_loop_manager_cfg.build(
+                    rollout_controller=self.rollout_controller,
+                    tokenizer=self.tokenizer,
+                    replay_buffer=replay_buffer,
+                    logger=self.logger,
+                    sync_weights_interval=cfg.sync_weights_interval,
+                ),
             )
 
             total_eval_samples = len(self.eval_agent_loop_manager.data_sampler)
@@ -759,7 +770,7 @@ class BaseRLTrainer:
         return load_checkpoint_cfg
 
     def _resume_train_controller_and_state(self, checkpoint_path: Path | str) -> Path:
-        # 子类只复用训练 worker 和 train_state 恢复，权重同步流程各自维护。
+        # 权重同步恢复由共卡/非共卡子类分别处理。
         self.logger.info(f"Resume train controller and state from {checkpoint_path}")
         checkpoint_path = Path(checkpoint_path)
         self.train_controller.resume(self._load_checkpoint_cfg)
@@ -773,11 +784,7 @@ class BaseRLTrainer:
     async def _resume_agent_loop_manager(self, checkpoint_path: Path | str) -> int:
         self.logger.info(f"Resume agent_loop_manager from {checkpoint_path}")
         checkpoint_path = Path(checkpoint_path)
-        # asyncio_run 只能出现在 trainer 的同步边界：
-        # - colocate 的 __init__/fit/_sync_weights_and_save 仍是同步入口，可以显式包一层；
-        # - disaggregated 的 _fit 已经在 asyncio_run 启动的事件循环里，内部必须全程 await。
-        # 因此 agent_loop_manager / replay_buffer 的 save/resume 必须保持 async；如果它们内部再调用
-        # asyncio_run，save/resume 会在 disaggregated 训练循环里触发 nested asyncio_run 失败。
+        # manager/replay_buffer 保持 async；asyncio_run 只放在 trainer 同步边界。
         saved_model_step = await self.agent_loop_manager.resume(checkpoint_path)
         return saved_model_step
 
@@ -919,7 +926,7 @@ class BaseRLTrainer:
         self._save_trajectories(train_batch, train_trajectory_path)
         self.logger.info(f"Train step {train_step} train trajectories saved to {train_trajectory_path}")
 
-        # 共卡需要先确认 rollout worker 可恢复，再释放 rollout，最后把训练 worker onload；非共卡不走这些动作。
+        # 共卡训练前切换资源：检查 rollout -> offload rollout -> onload train。
         if offload_rollout_before_train:
             ray.get(
                 self.rollout_controller.ensure_workers_healthy_before_training.remote(),
@@ -1133,7 +1140,6 @@ class BaseRLTrainer:
                     response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
 
                 # 返回的 routed_experts 不包括 eos 的值，实际上也不需要，需要减一
-                # TODO: verl tool agent loop 是否需要？
                 input_ids = prompt_ids + response_ids[:-1]
 
                 prompt_len_list.append(len(prompt_ids))
@@ -1533,8 +1539,9 @@ def add_apiproxy(self):
 
 class RLColocateTrainer(BaseRLTrainer):
     _META_PATH = ".xtuner_rl_colocate_trainer"
+    agent_loop_manager: AgentLoopManager
 
-    # 共卡 trainer 保留自己的资源编排、resume、主循环和权重同步；通用保存、日志仍在 BaseRLTrainer。
+    # 共卡保留资源切换和权重同步流程；通用保存、日志在 BaseRLTrainer。
     def __init__(self, cfg: RLColocateTrainerConfig):
         self._init_common(cfg, meta_path=self._META_PATH, logger_tag="RLTrainer")
         self._num_workers = float(cfg.resources.num_workers)
@@ -1579,9 +1586,7 @@ class RLColocateTrainer(BaseRLTrainer):
             )
             return
 
-        # Free trainer-side GPU memory before bringing up colocated rollout workers.
-        # Backends like sglang may size KV cache against their own target utilization
-        # instead of the trainer's transient footprint, which can cause init-time OOM.
+        # 先释放训练显存，再启动共卡 rollout worker。
         self.train_controller.offload(target="all")
 
         self.rollout_controller = self._rollout_config.build(self._pg)
@@ -1634,7 +1639,7 @@ class RLColocateTrainer(BaseRLTrainer):
             self.logger.info(f"Train step {train_step}/{self._total_train_steps} start")
             step_timer_dict = {}
             with timer("step", step_timer_dict):
-                # 共卡路径一次调用内完成 rollout 生产和 replay buffer 消费。
+                # 共卡一次调用内完成生产和消费。
                 self.logger.info(
                     f"[Step {train_step}] start to generate rollout experience for train step {train_step} with model step {model_step}"
                 )
@@ -1712,8 +1717,7 @@ class RLColocateTrainer(BaseRLTrainer):
         return previous_step - (previous_step % self._sync_weights_interval)
 
     def _sync_weights_and_save(self, train_step: int, step_timer_dict: dict) -> bool:
-        """Save state and switch colocated resources back to rollout
-        workers."""
+        """保存后切回共卡 rollout 资源。"""
         should_sync_weights = train_step % self._sync_weights_interval == 0
         will_evaluate = self._enable_evaluate and train_step % self._evaluate_step == 0
         needs_rollout_ready = train_step < self._total_train_steps or will_evaluate
@@ -1745,6 +1749,7 @@ class RLColocateTrainer(BaseRLTrainer):
 
 class RLDisaggregatedTrainer(BaseRLTrainer):
     _META_PATH = ".xtuner_rl_disaggregated_trainer"
+    agent_loop_manager: DisaggAgentLoopManager
 
     def __init__(self, cfg: RLDisaggregatedTrainerConfig):
         self._init_common(cfg, meta_path=self._META_PATH, logger_tag="RLDisaggTrainer")
@@ -1765,9 +1770,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)
-        # 在非共卡使用模式时，生产者和消费者并发执行
-        # 为了让生产者和消费者配合，不能引入生产中的早停机制，否则生产不够，消费者会被阻塞
-        # 所以 should_continue_fn 必须为 default_should_continue_fn
+        # 非共卡 producer 不允许早停，否则 consumer 可能永久等不到 batch。
         for task_runner in self.agent_loop_manager.task_runners:
             if task_runner.produce_strategy.should_continue_fn is not default_should_continue_fn:
                 raise ValueError(
@@ -1816,8 +1819,36 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         asyncio_run(self.agent_loop_manager.continue_produce(model_step=saved_model_step))
 
     def fit(self):
-        # 对外保留同步 fit 接口，内部用 async loop 组织 producer/consumer。
+        # 对外同步 fit；内部用 async loop 组织 producer/consumer。
         return asyncio_run(self._fit())
+
+    async def _get_batch_or_raise_producer_failure(
+        self,
+        producer_task: asyncio.Task,
+        *,
+        batch_size: int,
+        train_step: int,
+    ) -> ProduceBatchResult:
+        # consumer 等 batch 时同步观察后台 producer；producer 异常立即终止训练。
+        get_batch_task = create_task(
+            self.agent_loop_manager.get_batch(batch_size, train_step=train_step),
+            done_callbacks=[],
+        )
+        done, _ = await asyncio.wait(
+            {get_batch_task, producer_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if producer_task in done:
+            if not get_batch_task.done():
+                get_batch_task.cancel()
+                await asyncio.gather(get_batch_task, return_exceptions=True)
+            if producer_task.cancelled():
+                raise asyncio.CancelledError
+            if producer_task.exception() is not None:
+                producer_task.result()
+            raise RuntimeError("Disaggregated background producer exited before training finished.")
+
+        return get_batch_task.result()
 
     async def _fit(self):
         self.logger.info("Start RL disaggregated training")
@@ -1827,16 +1858,19 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         if self._enable_initial_evaluate:
             await self._run_initial_evaluate()
+            # 初始 eval 会暂停 rollout generation；启动后台 producer 前先恢复。
+            await self.agent_loop_manager.continue_produce(model_step=self._cur_step)
 
         self._benchmark_start_time_s = time.perf_counter()
         self._benchmark_training_samples = 0
         self._benchmark_training_tokens = 0
 
-        # 后台 producer 只负责持续往 replay buffer 写数据，前台 trainer 通过 get_batch 消费。
+        # 后台 producer 写 buffer，前台 trainer 取 batch。
         producer_task = create_task(
             self.agent_loop_manager.produce_loop(
                 batch_size=self.train_batch_size,
-            )
+            ),
+            done_callbacks=[],
         )
         try:
             # train_step 表示“下一步待完成训练”；空 expired 不算完成，所以必须用 while 支持重试同一步。
@@ -1848,8 +1882,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 eval_log_info = {}
                 with timer("step", step_timer_dict):
                     with timer("get_batch", step_timer_dict):
-                        produce_result = await self.agent_loop_manager.get_batch(
-                            self.train_batch_size, train_step=train_step
+                        produce_result = await self._get_batch_or_raise_producer_failure(
+                            producer_task,
+                            batch_size=self.train_batch_size,
+                            train_step=train_step,
                         )
                     if XTUNER_DETERMINISTIC:
                         produce_result.rollout_states = sort_rollout_state_for_deterministic(
@@ -1857,23 +1893,20 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                         )
 
                     train_batch = produce_result.rollout_states
-                    # EXPIRED_BATCH 分两类：空 batch 是控制面同步；非空 batch 仍然是可训练数据。
+                    # 空 expired 只触发同步；非空 expired 仍需训练。
                     empty_expired_batch = produce_result.status == ProduceBatchStatus.EXPIRED_BATCH and not train_batch
                     if empty_expired_batch:
-                        # 没有完成训练，能同步的只能是上一轮已经完成的 Model Step。
                         sync_model_step = train_step - 1
                         self.logger.info(
                             "Skip train step because rollout model is expired and a newer model already exists; "
                             f"sync completed model_step={sync_model_step} first."
                         )
                     else:
-                        # 非空 expired 必须训练出当前 step 的新模型版本，否则 producer 没有更新权重可恢复。
                         assert train_batch, (
                             "RLDisaggregatedTrainer expects get_batch() to return non-empty rollout_states "
                             "unless status is empty EXPIRED_BATCH."
                         )
-                        # 非共卡训练要求后台 producer 在训练当前 batch 时继续推进；
-                        # 同步训练路径放到线程里执行，避免 ray.get / 文件写入阻塞事件循环。
+                        # 训练路径放到线程里执行，避免阻塞事件循环。
                         train_log_info = await asyncio.to_thread(
                             self._train_one_batch,
                             train_batch,
@@ -1884,7 +1917,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                         )
                         sync_model_step = train_step
 
-                    # 后续保存、同步、评测、恢复 producer 都以“已完成的 Model Step”为唯一口径。
+                    # 保存、同步、评测、恢复 producer 都以已完成 model_step 为口径。
                     need_sync = (
                         empty_expired_batch
                         or produce_result.status == ProduceBatchStatus.EXPIRED_BATCH
@@ -1893,9 +1926,9 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                     )
 
                     if need_sync:
-                        # 同步前先暂停后台 producer，避免 save/sync 时还有 pending rollout 继续写 buffer。
+                        # 同步前暂停 producer，避免 pending rollout 继续写 buffer。
                         with timer("pause_produce", step_timer_dict):
-                            await self.agent_loop_manager.pause_produce(use_global_progress=True)
+                            await self.agent_loop_manager.pause_produce()
 
                         await self._sync_weights_and_save(sync_model_step, step_timer_dict)
 
@@ -1904,14 +1937,14 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             and sync_model_step > 0
                             and sync_model_step % self._evaluate_step == 0
                         ):
-                            # eval 放在恢复 producer 前，避免后台生产抢占 rollout 资源。
+                            # eval 在恢复 producer 前执行，避免资源抢占。
                             with timer("evaluation", step_timer_dict):
                                 eval_log_info.update(await self._run_evaluation(sync_model_step))
 
                         await self.agent_loop_manager.continue_produce(model_step=sync_model_step)
 
                 if empty_expired_batch:
-                    # 空 expired 没有完成训练，不能 log 成已完成 step，也不能推进 _cur_step。
+                    # 空 expired 不推进训练步。
                     continue
                 self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
                 self._cur_step = train_step
@@ -1921,7 +1954,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             await producer_task
 
     async def _sync_weights_and_save(self, model_step: int, step_timer_dict: dict):
-        # 非共卡已经在 _fit 里暂停 producer；这里保持静止态下的 save -> bind -> update 顺序。
+        # producer 已暂停；保持 save -> bind -> update 顺序。
         with timer("save_ckpt", step_timer_dict):
             await self._maybe_save_checkpoint(model_step)
             self._maybe_save_hf(model_step)
@@ -1932,6 +1965,6 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             self.update_weights()
 
     def update_weights(self):
-        # producer 的 pause/continue 由 AgentLoopManager 控制，避免这里提前恢复 rollout 影响 eval 顺序。
+        # rollout 恢复由 AgentLoopManager 控制。
         self.train_controller.update_weights()
         self.logger.info("Rollout workers update weights successfully in disaggregated mode")

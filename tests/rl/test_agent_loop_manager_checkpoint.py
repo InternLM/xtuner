@@ -13,11 +13,11 @@ Bad Tests:
 本文件主要覆盖的 public 行为:
 - 共卡 produce_batch 下，SyncProduceStrategy / AsyncProduceStrategy 都会在 resume 后
   继续同一段 sampler 序列。
-- 非共卡 produce_loop/get_batch 下，AsyncProduceStrategy 也会在 resume 后
+- 非共卡 produce_loop/get_batch 下，DisaggAsyncProduceStrategy 也会在 resume 后
   继续同一段 sampler 序列。
 - save/resume 后，checkpoint 中尚未消费的 completed rollout group 仍可通过 get_batch 取出。
 - save 时如果 AsyncProduceStrategy 仍有 pending rollout task，会 fail fast，避免保存不完整状态。
-- resume 后的 AsyncProduceStrategy 后台 producer 必须等 trainer 显式 continue_produce 后才恢复。
+- resume 后的 DisaggAsyncProduceStrategy 后台 producer 必须等 trainer 显式 continue_produce 后才恢复。
 """
 
 import asyncio
@@ -36,6 +36,8 @@ from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
     AsyncProduceStrategyConfig,
+    DisaggAgentLoopManagerConfig,
+    DisaggAsyncProduceStrategyConfig,
     SamplerConfig,
     SyncProduceStrategyConfig,
 )
@@ -126,10 +128,19 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
             )
         dataset_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
 
-    def _build_manager(self, replay_buffer_config, *, rollout_controller=None, produce_strategy_config=None):
+    def _build_manager(
+        self,
+        replay_buffer_config,
+        *,
+        rollout_controller=None,
+        produce_strategy_config=None,
+        mode="colocate",
+    ):
         assert QWEN3_4B_PATH is not None
         rollout_controller = rollout_controller or _FakeRolloutController()
-        produce_strategy_config = produce_strategy_config or SyncProduceStrategyConfig()
+        produce_strategy_config = produce_strategy_config or (
+            DisaggAsyncProduceStrategyConfig() if mode == "disaggregated" else SyncProduceStrategyConfig()
+        )
         dataloader_cfg = DataloaderConfig(
             dataset_config_list=[
                 {
@@ -149,7 +160,8 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
             num_workers=0,
             round_up=False,
         )
-        manager_cfg = AgentLoopManagerConfig(
+        manager_config_cls = DisaggAgentLoopManagerConfig if mode == "disaggregated" else AgentLoopManagerConfig
+        manager_cfg = manager_config_cls(
             tasks=[
                 {
                     "task_name": "unit_task",
@@ -160,7 +172,7 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
                     "produce_strategy_config": produce_strategy_config,
                     "sampler_config": SamplerConfig(dataloader_cfg=dataloader_cfg, prompt_repeat_k=2),
                 }
-            ]
+            ],
         )
         return manager_cfg.build(
             rollout_controller=rollout_controller,
@@ -169,11 +181,20 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
         )
 
     def _build_async_manager(self, *, rollout_controller=None):
-        with patch("xtuner.v1.rl.agent_loop_manager.producer.ray.get", side_effect=lambda ref, *_, **__: ref):
+        with patch("ray.get", side_effect=lambda ref, *_, **__: ref):
             return self._build_manager(
                 AsyncReplayBufferConfig(),
                 rollout_controller=rollout_controller,
                 produce_strategy_config=AsyncProduceStrategyConfig(over_sample_threshold=0.0),
+            )
+
+    def _build_disagg_async_manager(self, *, rollout_controller=None):
+        with patch("ray.get", side_effect=lambda ref, *_, **__: ref):
+            return self._build_manager(
+                AsyncReplayBufferConfig(),
+                rollout_controller=rollout_controller,
+                produce_strategy_config=DisaggAsyncProduceStrategyConfig(over_sample_threshold=0.0),
+                mode="disaggregated",
             )
 
     def _build_sync_produce_batch_manager(self):
@@ -238,14 +259,14 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(QWEN3_4B_PATH, "QWEN3_4B_PATH is required for AgentLoopManager checkpoint tests")
     async def test_async_produce_loop_resume_continues_same_sampler_suffix_after_checkpoint(self):
-        # 验证非共卡 AsyncProduceStrategy: sample1 后保存 checkpoint，正常继续生产 sample2/sample3。
+        # 验证非共卡 DisaggAsyncProduceStrategy: sample1 后保存 checkpoint，正常继续生产 sample2/sample3。
         # 从 checkpoint resume 后也必须继续生产同一段 sample2/sample3。
-        manager = self._build_async_manager()
+        manager = self._build_disagg_async_manager()
         produce_task = asyncio.create_task(manager.produce_loop(batch_size=1))
 
         try:
             sample1_index = await self._consume_async_index(manager, train_step=1)
-            await manager.pause_produce(use_global_progress=True)
+            await manager.pause_produce()
 
             with tempfile.TemporaryDirectory() as tmp_dir:
                 checkpoint_path = Path(tmp_dir) / "ckpt"
@@ -256,7 +277,7 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
                     await self._continue_and_consume_async_index(manager, train_step=3, model_step=2),
                 ]
 
-                restored_manager = self._build_async_manager()
+                restored_manager = self._build_disagg_async_manager()
                 restored_model_step = await restored_manager.resume(checkpoint_path)
                 restored_produce_task = asyncio.create_task(restored_manager.produce_loop(batch_size=1))
                 try:
@@ -282,7 +303,7 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
     @unittest.skipUnless(QWEN3_4B_PATH, "QWEN3_4B_PATH is required for AgentLoopManager checkpoint tests")
     async def test_resume_keeps_unconsumed_completed_groups_available_to_get_batch(self):
         # 验证 save 时 replay buffer 中未消费的 completed group，resume 后仍可被 get_batch 消费。
-        manager = self._build_manager(AsyncReplayBufferConfig())
+        manager = self._build_disagg_async_manager()
         buffered_group = [
             RolloutState(
                 uid=9000 + idx,
@@ -303,7 +324,7 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
             checkpoint_path = Path(tmp_dir) / "ckpt"
             await manager.save(checkpoint_path, model_step=4)
 
-            restored_manager = self._build_manager(AsyncReplayBufferConfig())
+            restored_manager = self._build_disagg_async_manager()
             restored_model_step = await restored_manager.resume(checkpoint_path)
             result = await restored_manager.get_batch(batch_size=1, train_step=5)
 
@@ -316,11 +337,12 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
         # 验证后台异步 rollout 还在进行时不能保存。
         # 否则 checkpoint 会丢失未入库的生产结果。
         rollout_controller = _BlockingRolloutController()
-        with patch("xtuner.v1.rl.agent_loop_manager.producer.ray.get", side_effect=lambda ref, *_, **__: ref):
+        with patch("ray.get", side_effect=lambda ref, *_, **__: ref):
             manager = self._build_manager(
                 AsyncReplayBufferConfig(),
                 rollout_controller=rollout_controller,
-                produce_strategy_config=AsyncProduceStrategyConfig(over_sample_threshold=0.0),
+                produce_strategy_config=DisaggAsyncProduceStrategyConfig(over_sample_threshold=0.0),
+                mode="disaggregated",
             )
         produce_task = asyncio.create_task(manager.produce_loop(batch_size=1))
 
@@ -341,21 +363,23 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             checkpoint_path = Path(tmp_dir) / "ckpt"
             rollout_controller = _FakeRolloutController()
-            with patch("xtuner.v1.rl.agent_loop_manager.producer.ray.get", side_effect=lambda ref, *_, **__: ref):
+            with patch("ray.get", side_effect=lambda ref, *_, **__: ref):
                 manager = self._build_manager(
                     AsyncReplayBufferConfig(),
                     rollout_controller=rollout_controller,
-                    produce_strategy_config=AsyncProduceStrategyConfig(over_sample_threshold=0.0),
+                    produce_strategy_config=DisaggAsyncProduceStrategyConfig(over_sample_threshold=0.0),
+                    mode="disaggregated",
                 )
             await manager.save(checkpoint_path, model_step=1)
 
             restored_rollout_controller = _FakeRolloutController()
-            with patch("xtuner.v1.rl.agent_loop_manager.producer.ray.get", side_effect=lambda ref, *_, **__: ref):
+            with patch("ray.get", side_effect=lambda ref, *_, **__: ref):
                 restored_manager = self._build_manager(
                     AsyncReplayBufferConfig(),
                     rollout_controller=restored_rollout_controller,
-                    produce_strategy_config=AsyncProduceStrategyConfig(over_sample_threshold=0.0),
-            )
+                    produce_strategy_config=DisaggAsyncProduceStrategyConfig(over_sample_threshold=0.0),
+                    mode="disaggregated",
+                )
             restored_model_step = await restored_manager.resume(checkpoint_path)
             produce_task = asyncio.create_task(restored_manager.produce_loop(batch_size=1))
 
