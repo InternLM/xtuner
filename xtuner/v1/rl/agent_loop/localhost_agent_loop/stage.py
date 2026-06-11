@@ -48,8 +48,10 @@ class LocalhostStage:
             spec = self._pick_agent(item, record)
             agent = create_object(deepcopy(_resolve_agent_config(spec.config)))
             output = await agent(item.instruction)
-            content = output.content if hasattr(output, "content") else output
-            item.artifacts["response"] = content if isinstance(content, str) else str(content)
+            response_message = output.model_dump(mode="json") if hasattr(output, "model_dump") else None
+            if response_message is None:
+                raise TypeError("Agent forward must return an AgentMessage-like object.")
+            item.artifacts["response_message"] = response_message
             messages = agent.get_messages()
             if not isinstance(messages, list) or not messages:
                 raise ValueError("Agent messages artifact must be a non-empty list.")
@@ -59,7 +61,9 @@ class LocalhostStage:
             if not isinstance(segment["messages"], list):
                 raise TypeError("Agent messages trace segment.messages must be a list.")
             item.artifacts["messages"] = messages
-            result = StageResult(stdout=item.artifacts["response"], return_code=0)
+            content = response_message.get("content")
+            stdout = content if isinstance(content, str) else (str(content) if content is not None else "")
+            result = StageResult(stdout=stdout, return_code=0)
             record.entry_result = result
             record.status = StageStatus.COMPLETED
             return result
