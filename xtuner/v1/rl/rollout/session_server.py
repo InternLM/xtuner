@@ -253,6 +253,7 @@ class SessionServer:
         port: int = 8080,
         request_timeout: float = 1200.0,
         read_bufsize: int = 2**26,
+        enable_return_routed_experts: bool = False,
     ):
         self.worker_base_url = worker_base_url.rstrip("/")
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -260,6 +261,7 @@ class SessionServer:
         self.port = port
         self.request_timeout = request_timeout
         self.read_bufsize = read_bufsize
+        self.enable_return_routed_experts = enable_return_routed_experts
         self.store = get_store()
         self.stop_word = self.tokenizer.eos_token or ""
 
@@ -422,57 +424,71 @@ class SessionServer:
         old_prompt = self.tokenizer.apply_chat_template(
             canonicalize_messages_for_chat_template(messages), tools=tools, add_generation_prompt=True, tokenize=False
         )
-        full_messages = [*messages, assistant_msg]
-        new_prompt = (
-            self.tokenizer.apply_chat_template(
-                canonicalize_messages_for_chat_template(full_messages),
-                tools=tools,
-                add_generation_prompt=False,
-                tokenize=False,
+        try:
+            full_messages = [*messages, assistant_msg]
+            new_prompt = (
+                self.tokenizer.apply_chat_template(
+                    canonicalize_messages_for_chat_template(full_messages),
+                    tools=tools,
+                    add_generation_prompt=False,
+                    tokenize=False,
+                )
+            ).rstrip()
+            assert new_prompt.startswith(old_prompt) and new_prompt.endswith(self.stop_word)
+
+            if raw_routed_expert is not None:
+                raw_routed_expert = await self._decode_routed_experts(raw_routed_expert)
+                if len(raw_routed_expert) > 0:
+                    num_layers = raw_routed_expert.shape[1]
+                    topk_experts = raw_routed_expert.shape[2]
+                    dummy_expert = np.full((1, num_layers, topk_experts), 0, dtype=raw_routed_expert.dtype)
+                    raw_routed_expert = np.concatenate([dummy_expert, raw_routed_expert], axis=0)
+
+                _, nodes = await self.store.search.remote(session_id, old_prompt, filter_none=True)
+
+                # last node in nodes corresponds to the delta inserted in on_request (if any)
+                if nodes:
+                    delta_node_val: TokenizedSegment = nodes[-1].value
+                    delta_len = len(delta_node_val.token_ids)
+                    prefix_len = sum(len(n.value.token_ids) for n in nodes[:-1])
+                    assert prefix_len + delta_len + len(output_token_ids) == len(raw_routed_expert)
+
+                    delta_expert = raw_routed_expert[prefix_len : prefix_len + delta_len]
+                    response_expert = raw_routed_expert[prefix_len + delta_len :]
+
+                    if delta_len > 0:
+                        delta_node_val.expert_key = ray.put(delta_expert)
+                        await self.store.insert.remote(session_id, old_prompt, delta_node_val)
+
+                    raw_routed_expert = ray.put(response_expert)
+                else:
+                    raw_routed_expert = ray.put(raw_routed_expert)
+            elif self.enable_return_routed_experts and _bool_request_value(
+                orig_req_body.get("return_routed_experts"), True
+            ):
+                raise RuntimeError(
+                    "SessionServer response is missing routed_experts, but enable_return_routed_experts is True."
+                    " The upstream worker may encounter an LLM call error."
+                )
+
+            await self.store.insert.remote(
+                session_id,
+                key=new_prompt,
+                value=TokenizedSegment(
+                    text=new_prompt[len(old_prompt) :],
+                    token_ids=output_token_ids,
+                    logprobs=output_logprobs,
+                    labels=output_token_ids,
+                    expert_key=raw_routed_expert,
+                    length=len(output_token_ids),
+                ),
             )
-        ).rstrip()
-        assert new_prompt.startswith(old_prompt) and new_prompt.endswith(self.stop_word)
-
-        if raw_routed_expert is not None:
-            raw_routed_expert = await self._decode_routed_experts(raw_routed_expert)
-            if len(raw_routed_expert) > 0:
-                num_layers = raw_routed_expert.shape[1]
-                topk_experts = raw_routed_expert.shape[2]
-                dummy_expert = np.full((1, num_layers, topk_experts), 0, dtype=raw_routed_expert.dtype)
-                raw_routed_expert = np.concatenate([dummy_expert, raw_routed_expert], axis=0)
-
-            _, nodes = await self.store.search.remote(session_id, old_prompt, filter_none=True)
-
-            # last node in nodes corresponds to the delta inserted in on_request (if any)
-            if nodes:
-                delta_node_val: TokenizedSegment = nodes[-1].value
-                delta_len = len(delta_node_val.token_ids)
-                prefix_len = sum(len(n.value.token_ids) for n in nodes[:-1])
-                assert prefix_len + delta_len + len(output_token_ids) == len(raw_routed_expert)
-
-                delta_expert = raw_routed_expert[prefix_len : prefix_len + delta_len]
-                response_expert = raw_routed_expert[prefix_len + delta_len :]
-
-                if delta_len > 0:
-                    delta_node_val.expert_key = ray.put(delta_expert)
-                    await self.store.insert.remote(session_id, old_prompt, delta_node_val)
-
-                raw_routed_expert = ray.put(response_expert)
-            else:
-                raw_routed_expert = ray.put(raw_routed_expert)
-
-        await self.store.insert.remote(
-            session_id,
-            key=new_prompt,
-            value=TokenizedSegment(
-                text=new_prompt[len(old_prompt) :],
-                token_ids=output_token_ids,
-                logprobs=output_logprobs,
-                labels=output_token_ids,
-                expert_key=raw_routed_expert,
-                length=len(output_token_ids),
-            ),
-        )
+        except Exception:
+            if self.enable_return_routed_experts:
+                matched_key, nodes = await self.store.search.remote(session_id, old_prompt, filter_none=True)
+                if matched_key == old_prompt and nodes and getattr(nodes[-1].value, "expert_key", None) is None:
+                    await self.store.release.remote(session_id, old_prompt)
+            raise
 
         return worker_resp
 
@@ -1008,12 +1024,21 @@ class SessionServer:
 class SessionServerActor:
     """Ray actor wrapper that owns one SessionServer instance."""
 
-    def __init__(self, worker_base_url: str, tokenizer_path: str, host: str, port: int, request_timeout: float):
+    def __init__(
+        self,
+        worker_base_url: str,
+        tokenizer_path: str,
+        host: str,
+        port: int,
+        request_timeout: float,
+        enable_return_routed_experts: bool = False,
+    ):
         self.worker_base_url = worker_base_url
         self.tokenizer_path = tokenizer_path
         self.host = host
         self.port = port
         self.request_timeout = request_timeout
+        self.enable_return_routed_experts = enable_return_routed_experts
         self.server: SessionServer | None = None
 
     @property
@@ -1030,6 +1055,7 @@ class SessionServerActor:
             host=self.host,
             port=self.port,
             request_timeout=self.request_timeout,
+            enable_return_routed_experts=self.enable_return_routed_experts,
         )
         await self.server.start()
         return self.server.url

@@ -295,16 +295,17 @@ class RolloutTraceStore:
         trie = self.get_or_create(session_id)
         return trie.search(text, filter_none)
 
-    def release(self, session_id: str):
-        """Release the Trie and free associated resources for a specific
-        session.
+    def release(self, session_id: str, key: str | None = None):
+        """Release Trie nodes and free associated resources for a session.
 
         Args:
             session_id (str): The session identifier.
+            key (str | None): If None, release the whole session Trie and drop the session. Otherwise release only
+                the node at ``key`` (used by the SessionServer to drop an orphaned placeholder), keeping the session.
         """
         assert session_id in self.sessions, f"Session ID '{session_id}' not found for release."
-        trie = self.sessions.pop(session_id)
-        trie.release()
+        trie = self.sessions.pop(session_id) if key is None else self.sessions[session_id]
+        trie.release(key)
 
     def release_all(self):
         """Release all sessions and free associated resources."""

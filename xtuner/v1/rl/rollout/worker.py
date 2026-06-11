@@ -698,6 +698,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 host=self.host,
                 port=self.session_server_port,
                 request_timeout=self.config.session_server_timeout,
+                enable_return_routed_experts=self.enable_return_routed_experts,
             )
         )
         self.session_server_url = ray.get(
