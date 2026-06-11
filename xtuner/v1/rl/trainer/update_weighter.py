@@ -110,8 +110,11 @@ class UpdateWeighter:
         tp = rollout_config.tensor_parallel_size
         ep = rollout_config.expert_parallel_size
         assert tp == 1 or ep == 1, "Either tensor parallel size or engine parallel size must be 1."
-        rollout_server_url = server_url_dict.get(self.rank, "")
-        if worker_server_urls_status.get(rollout_server_url, "False") is False:
+        rollout_server_url = server_url_dict.get(self.rank)
+        if not rollout_server_url:
+            self.logger.error(f"rank {self.rank} has no rollout server url.")
+            self.rollout_url = None
+        elif not worker_server_urls_status.get(rollout_server_url, False):
             self.logger.error(f"Rollout server url {rollout_server_url} is not available.")
             self.rollout_url = None
         else:

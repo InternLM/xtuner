@@ -2,6 +2,7 @@ import asyncio
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -17,13 +18,15 @@ if TYPE_CHECKING:
     from .worker import RolloutConfig, RolloutWorker
 
 ROLLOUT_RAY_GET_TIMEOUT = int(os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", str(5 * 3600)))  # default 5 hours
+ROLLOUT_RECOVERY_MAX_PARALLEL_GROUPS = 4
+HEALTH_MANAGER_STOP_JOIN_TIMEOUT = 30.0
 logger = get_logger()
 
 __all__ = [
+    "HEALTH_MANAGER_STOP_JOIN_TIMEOUT",
     "ROLLOUT_RAY_GET_TIMEOUT",
     "RolloutHealthManager",
     "WorkerSnapshot",
-    "check_worker_health",
     "shutdown_worker",
 ]
 
@@ -68,6 +71,7 @@ class RolloutHealthManager:
         self._pause_event: Optional[threading.Event] = None
         self._thread: Optional[threading.Thread] = None
         self._operation_lock = threading.Lock()
+        self._worker_health_failure_counts: dict[int, int] = {}
         self._stopped = False
 
     def start(self) -> None:
@@ -84,7 +88,8 @@ class RolloutHealthManager:
         logger.info("RolloutHealthManager started.")
 
     def stop(self) -> None:
-        if not self._thread:
+        thread = self._thread
+        if not thread:
             return
 
         assert self._stop_event is not None
@@ -93,8 +98,13 @@ class RolloutHealthManager:
         if self._pause_event:
             self._pause_event.clear()
 
-        if self._thread:
-            self._thread.join()
+        thread.join(timeout=HEALTH_MANAGER_STOP_JOIN_TIMEOUT)
+        if thread.is_alive():
+            logger.warning(
+                f"RolloutHealthManager stop timed out after {HEALTH_MANAGER_STOP_JOIN_TIMEOUT}s; "
+                "health thread is still exiting."
+            )
+            return
 
         self._thread = None
         self._stop_event = None
@@ -179,27 +189,49 @@ class RolloutHealthManager:
 
             results: dict[int, bool] = {}
             sorted_failed_groups = sorted(failed_groups, key=lambda group: group.ranks)
-            for group_index, group in enumerate(sorted_failed_groups):
-                if self._is_stopping():
-                    for remaining_group in sorted_failed_groups[group_index:]:
-                        self._set_group_lifecycle_state(remaining_group.ranks, WorkerLifecycleState.INACTIVE)
-                        for rank in remaining_group.ranks:
-                            results[rank] = False
-                    return results
+            if self._is_stopping():
+                for group in sorted_failed_groups:
+                    self._set_group_lifecycle_state(group.ranks, WorkerLifecycleState.INACTIVE)
+                    for rank in group.ranks:
+                        results[rank] = False
+                return results
 
-                is_recovered = self._restart_worker_group(group)
-                for rank in group.ranks:
-                    results[rank] = is_recovered
-                if self._is_stopping():
+            logger.info(
+                f"Restarting rollout worker groups in parallel: "
+                f"group_ranks={[group.ranks for group in sorted_failed_groups]}, "
+                f"max_parallel_groups={ROLLOUT_RECOVERY_MAX_PARALLEL_GROUPS}."
+            )
+            group_recovery_results: dict[tuple[int, ...], bool] = {}
+            max_workers = min(len(sorted_failed_groups), max(1, ROLLOUT_RECOVERY_MAX_PARALLEL_GROUPS))
+            with ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="rollout-recovery",
+            ) as pool:
+                future_to_group = {
+                    pool.submit(self._restart_worker_group, group): group for group in sorted_failed_groups
+                }
+                for future in as_completed(future_to_group):
+                    group = future_to_group[future]
+                    try:
+                        group_recovery_results[group.ranks] = future.result()
+                    except Exception:
+                        logger.exception(f"Failed to restart rollout worker group ranks={group.ranks}.")
+                        group_recovery_results[group.ranks] = False
+
+            if self._is_stopping():
+                for group in sorted_failed_groups:
+                    is_recovered = group_recovery_results.get(group.ranks, False)
                     if is_recovered:
                         self._shutdown_worker_group(group, wait_server_down=False, best_effort=True)
                     self._set_group_lifecycle_state(group.ranks, WorkerLifecycleState.INACTIVE)
-                    results.update({rank: False for rank in group.ranks})
-                    for remaining_group in sorted_failed_groups[group_index + 1 :]:
-                        self._set_group_lifecycle_state(remaining_group.ranks, WorkerLifecycleState.INACTIVE)
-                        for rank in remaining_group.ranks:
-                            results[rank] = False
-                    return results
+                    for rank in group.ranks:
+                        results[rank] = False
+                return results
+
+            for group in sorted_failed_groups:
+                is_recovered = group_recovery_results.get(group.ranks, False)
+                for rank in group.ranks:
+                    results[rank] = is_recovered
 
                 next_lifecycle_state = WorkerLifecycleState.ACTIVE if is_recovered else WorkerLifecycleState.INACTIVE
                 self._set_group_lifecycle_state(group.ranks, next_lifecycle_state)
@@ -236,38 +268,82 @@ class RolloutHealthManager:
         with self._operation_lock:
             workers_snapshot = self.snapshot_workers()
             workers_to_check = [worker for worker in workers_snapshot.values() if worker.active]
-            if not workers_to_check:
-                return 0
 
-            tasks = [
-                check_worker_health(
-                    worker.actor,
-                    worker.rank,
-                    worker.url,
-                    worker.active,
-                    worker.is_request_entrypoint,
-                    self._check_failure_threshold,
+        if not workers_to_check:
+            return 0
+
+        check_results = self._check_workers_health(workers_to_check)
+
+        failed_groups: set[tuple[int, ...]] = set()
+        for worker, is_healthy in zip(workers_to_check, check_results):
+            if not is_healthy:
+                logger.warning(f"Worker {worker.rank} failed health check. Marking as inactive.")
+                failed_groups.add(worker.lifecycle_group_ranks or (worker.rank,))
+            else:
+                logger.debug(f"[RolloutHealthManager] Worker {worker.rank} remains active after health check.")
+
+        if failed_groups and not self._is_stopping():
+            with self._operation_lock:
+                current_workers_snapshot = self.snapshot_workers()
+                active_groups = {
+                    worker.lifecycle_group_ranks or (worker.rank,)
+                    for worker in current_workers_snapshot.values()
+                    if worker.active
+                }
+                failed_groups = failed_groups & active_groups
+                for group_ranks in failed_groups:
+                    self._set_group_lifecycle_state(group_ranks, WorkerLifecycleState.INACTIVE)
+
+        return len(workers_to_check)
+
+    def _check_workers_health(self, workers_to_check: list[WorkerSnapshot]) -> list[bool]:
+        """Run periodic check_health probes concurrently."""
+        if self._check_failure_threshold <= 0:
+            return [False for _ in workers_to_check]
+
+        async def check_one_worker(worker: WorkerSnapshot) -> bool:
+            if worker.actor is None or not worker.active:
+                logger.warning("Worker has no actor reference or is marked inactive.")
+                return False
+            try:
+                is_healthy = await asyncio.wait_for(
+                    worker.actor.check_health.remote(),  # type: ignore[attr-defined]
+                    timeout=60,
                 )
-                for worker in workers_to_check
-            ]
+            except Exception as e:
+                logger.error(f"Exception during check_health for worker {worker.rank} at {worker.url}: {e}.")
+                return False
+            if not is_healthy:
+                logger.warning(f"check_health failed for worker {worker.rank} at {worker.url}.")
+            return bool(is_healthy)
 
-            async def _run_checks() -> list[bool]:
-                """Run active worker health checks concurrently."""
-                return await asyncio.gather(*tasks)
+        async def check_workers(workers: list[WorkerSnapshot]) -> list[bool]:
+            return await asyncio.gather(*(check_one_worker(worker) for worker in workers))
 
-            check_results = asyncio.run(_run_checks())
-            failed_groups: set[tuple[int, ...]] = set()
+        check_results = asyncio.run(check_workers(workers_to_check))
+        keep_active_by_rank: dict[int, bool] = {}
+        with self._operation_lock:
             for worker, is_healthy in zip(workers_to_check, check_results):
-                if not is_healthy:
-                    logger.warning(f"Worker {worker.rank} failed health check. Marking as inactive.")
-                    failed_groups.add(worker.lifecycle_group_ranks or (worker.rank,))
+                if is_healthy:
+                    self._worker_health_failure_counts.pop(worker.rank, None)
+                    keep_active_by_rank[worker.rank] = True
                 else:
-                    logger.debug(f"[RolloutHealthManager] Worker {worker.rank} passed health check.")
+                    failure_count = self._worker_health_failure_counts.get(worker.rank, 0) + 1
+                    self._worker_health_failure_counts[worker.rank] = failure_count
+                    if failure_count >= self._check_failure_threshold:
+                        logger.warning(
+                            f"Worker {worker.rank} reached health check failure threshold: "
+                            f"{failure_count}/{self._check_failure_threshold}."
+                        )
+                        keep_active_by_rank[worker.rank] = False
+                    else:
+                        logger.warning(
+                            f"Worker {worker.rank} health check failed but remains active: "
+                            f"{failure_count}/{self._check_failure_threshold}."
+                        )
+                        keep_active_by_rank[worker.rank] = True
 
-            for group_ranks in failed_groups:
-                self._set_group_lifecycle_state(group_ranks, WorkerLifecycleState.INACTIVE)
-
-            return len(workers_to_check)
+        return [keep_active_by_rank[worker.rank] for worker in workers_to_check]
 
     def _run_loop(self) -> None:
         assert self._stop_event is not None and self._pause_event is not None
@@ -327,6 +403,8 @@ class RolloutHealthManager:
             for rank in group_ranks:
                 if rank in self._workers_info:
                     self._workers_info[rank].lifecycle_state = lifecycle_state
+                if lifecycle_state is WorkerLifecycleState.ACTIVE:
+                    self._worker_health_failure_counts.pop(rank, None)
 
     def _shutdown_worker_group(
         self,
@@ -339,7 +417,11 @@ class RolloutHealthManager:
         results."""
         shutdown_succeeded = True
         for worker in group.workers:
-            if not shutdown_worker(worker, wait_server_down=wait_server_down, best_effort=best_effort):
+            if not shutdown_worker(
+                worker,
+                wait_server_down=wait_server_down,
+                best_effort=best_effort,
+            ):
                 shutdown_succeeded = False
         return best_effort or shutdown_succeeded
 
@@ -434,16 +516,12 @@ class RolloutHealthManager:
         pending_workers = {worker.rank: worker for worker in request_workers}
         for attempt in range(1, max_attempts + 1):
             for rank, worker in list(pending_workers.items()):
-                health_ref = None
                 try:
-                    health_ref = worker.actor.check_health_generate.remote()  # type: ignore[attr-defined]
-                    is_generate_ready = ray.get(health_ref, timeout=60)
+                    is_generate_ready = ray.get(
+                        worker.actor.check_health_generate.remote(),  # type: ignore[attr-defined]
+                        timeout=60,
+                    )
                 except Exception as e:
-                    if health_ref is not None:
-                        try:
-                            ray.cancel(health_ref, force=True)
-                        except Exception:
-                            pass
                     logger.warning(
                         f"Restarted rollout worker rank={worker.rank} generate readiness check failed "
                         f"attempt={attempt}/{max_attempts}, url={worker.url}: {e}"
@@ -504,33 +582,3 @@ def shutdown_worker(
             logger.error(f"Rollout worker rank={worker.rank} server did not stop after shutdown: url={worker.url}.")
             shutdown_succeeded = False
     return best_effort or shutdown_succeeded
-
-
-async def check_worker_health(
-    worker: "RolloutWorker",
-    rank: int,
-    url: str,
-    is_active: bool,
-    is_request_entrypoint: bool,
-    failure_threshold: int = 3,
-) -> bool:
-    if worker is None or not is_active:
-        logger.warning("Worker has no actor reference or is marked inactive.")
-        return False
-    health_method_name = "check_health_generate" if is_request_entrypoint else "check_health"
-    failing_count = 0
-    while failing_count < failure_threshold:
-        try:
-            health_method = getattr(worker, health_method_name)
-            health_status = await health_method.remote()  # type: ignore[attr-defined]
-            if health_status:
-                return True
-            failing_count += 1
-            logger.warning(f"{health_method_name} failed for worker {rank} at {url}. Failure count: {failing_count}")
-        except Exception as e:
-            failing_count += 1
-            logger.error(
-                f"Exception during {health_method_name} for worker {rank} at {url}: {e}. "
-                f"Failure count: {failing_count}"
-            )
-    return False

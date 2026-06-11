@@ -285,14 +285,14 @@ class RolloutController:
         if failed_worker_urls:
             self.logger.warning(f"Abort request failed: worker_urls={failed_worker_urls}")
 
-    def ensure_workers_healthy_before_training(self):
+    async def ensure_workers_healthy_before_training(self):
         """Ensure rollout workers are healthy before colocated training
         onloads."""
         health_manager_was_paused = self.health_manager.is_paused()
         if not health_manager_was_paused:
             self.health_manager.pause()
         try:
-            self.health_manager.ensure_workers_healthy_before_training()
+            await asyncio.to_thread(self.health_manager.ensure_workers_healthy_before_training)
             inactive_workers = [
                 f"rank={worker.rank}, url={worker.url}"
                 for worker in self.health_manager.snapshot_workers().values()
