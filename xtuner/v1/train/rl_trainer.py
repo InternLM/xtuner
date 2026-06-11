@@ -39,6 +39,7 @@ from xtuner.v1.rl.replay_buffer import (
 )
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.trace import TraceConfig, close_trace, configure_trace
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
 from xtuner.v1.rl.utils import (
@@ -324,6 +325,7 @@ class BaseRLTrainerConfig(BaseModel):
     train_batch_size: int
     advantage_estimator_config: BaseAdvantageConfig = Field(default_factory=GRPOAdvantageConfig)
     sync_weights_interval: int = 1
+    trace_config: TraceConfig = Field(default_factory=TraceConfig)
 
     enable_evaluate: bool = True
     enable_initial_evaluate: bool = False
@@ -563,6 +565,7 @@ class BaseRLTrainer:
         self._init_load_source(cfg)
         self._init_save_config(cfg)
         log_dir = self._init_logger(cfg, logger_tag)
+        self._init_trace(cfg)
         self._save_runtime_environment(log_dir)
         self._init_train_state(cfg)
         self._init_train_worker_config(cfg, log_dir)
@@ -603,6 +606,40 @@ class BaseRLTrainer:
         self._checkpoint_no_save_optimizer = cfg.checkpoint_no_save_optimizer
         self._checkpoint_no_save_replay_buffer = cfg.checkpoint_no_save_replay_buffer
         self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(cfg.auto_resume, cfg.load_checkpoint_cfg)
+
+    def _init_trace(self, cfg: BaseRLTrainerConfig) -> None:
+        trace_config = cfg.trace_config
+        if trace_config.enabled and trace_config.output_dir is None:
+            trace_config = trace_config.model_copy(update={"output_dir": self.exp_dir / "producer_trace"})
+        self._trace_viewer_handle: Any | None = None
+        self._trace_config = trace_config
+        configure_trace(trace_config)
+        self._maybe_start_trace_viewer(trace_config)
+
+    def _maybe_start_trace_viewer(self, trace_config: TraceConfig) -> None:
+        if not trace_config.enabled or not trace_config.viewer_enabled or trace_config.output_dir is None:
+            return
+        if get_rank() != 0:
+            return
+
+        from xtuner.tools.producer_trace_viewer import start_trace_viewer
+
+        handle = start_trace_viewer(
+            Path(trace_config.output_dir),
+            host=trace_config.viewer_host,
+            port=trace_config.viewer_port,
+            refresh_interval_s=trace_config.viewer_refresh_interval_s,
+            scope=trace_config.viewer_scope,
+        )
+        self._trace_viewer_handle = handle
+        self.logger.info(f"Producer Trace Viewer: {handle.url}")
+
+    def _close_trace(self) -> None:
+        handle = getattr(self, "_trace_viewer_handle", None)
+        if handle is not None:
+            handle.close()
+            self._trace_viewer_handle = None
+        close_trace()
 
     def _init_logger(self, cfg: BaseRLTrainerConfig, logger_tag: str) -> Path:
         log_dir = self.exp_dir / "logs"
@@ -1612,6 +1649,12 @@ class RLColocateTrainer(BaseRLTrainer):
         self.logger.info("Rollout workers updated weights from train workers.")
 
     def fit(self):
+        try:
+            return self._fit()
+        finally:
+            self._close_trace()
+
+    def _fit(self):
         self.logger.info("Start RL training")
         if self._cur_step >= self._total_train_steps:
             self.logger.info(f"Train steps {self._total_train_steps} reached, stop training")
@@ -1817,7 +1860,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
     def fit(self):
         # 对外保留同步 fit 接口，内部用 async loop 组织 producer/consumer。
-        return asyncio_run(self._fit())
+        try:
+            return asyncio_run(self._fit())
+        finally:
+            self._close_trace()
 
     async def _fit(self):
         self.logger.info("Start RL disaggregated training")

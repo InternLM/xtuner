@@ -13,6 +13,7 @@ from ray.util.placement_group import PlacementGroup
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.trace import trace_function
 from xtuner.v1.rl.utils import (
     JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S,
     CPUActorLauncher,
@@ -189,6 +190,7 @@ class AgentLoop(ABC):
     @abstractmethod
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
 
+    @trace_function("xtuner.agent_loop.generate_group")
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         pending_tasks = []
         for state in rollout_state:
@@ -208,6 +210,7 @@ class AgentLoop(ABC):
     @overload
     async def run_judger(self, rollout_state: list[RolloutState]) -> list[RolloutState]: ...
 
+    @trace_function("xtuner.judger.judge")
     async def run_judger(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:
         assert self.judger is not None
         if isinstance(rollout_state, list):

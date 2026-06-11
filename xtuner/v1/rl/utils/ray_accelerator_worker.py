@@ -15,6 +15,8 @@ from ray.util.placement_group import (
 )
 from typing_extensions import Annotated
 
+from xtuner.v1.rl.trace import merge_trace_runtime_env
+
 from .ray_utils import find_master_addr_and_port, get_accelerator_ids
 
 
@@ -458,6 +460,7 @@ class AutoAcceleratorWorkers:
                 (rank, bundle_index).
         """
         pg_options = cls.get_pg_options(pg)
+        merge_trace_runtime_env(pg_options)
         device_type = cls.get_device_type(pg)
         sorted_bundle_idxs, master_addr, master_port, world_size = cls.get_spmd_info(pg)
 

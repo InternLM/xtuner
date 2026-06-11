@@ -28,6 +28,7 @@ from xtuner.v1.data_proto.rl_data import (
     reset_rollout_response,
     update_status_from_finish_reason,
 )
+from xtuner.v1.rl.trace import merge_trace_runtime_env, trace_function, trace_span
 from xtuner.v1.rl.utils import (
     AutoAcceleratorWorkers,
     CPUResourcesConfig,
@@ -445,13 +446,15 @@ class RolloutConfig(BaseModel):
         )
         generate_max_concurrency = self.get_controller_generate_concurrency(placement_group)
         get_logger().info(f"Calculated RolloutController generate concurrency: {generate_max_concurrency}")
+        actor_options = {"num_cpus": num_workers}
+        merge_trace_runtime_env(actor_options)
         return (
             ray.remote(
                 concurrency_groups={
                     ROLLOUT_CONCURRENCY_GROUP_GENERATE: generate_max_concurrency,
                 },
             )(RolloutController)
-            .options(num_cpus=num_workers)
+            .options(**actor_options)
             .remote(self, placement_group)
         )
 
@@ -678,6 +681,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         return routed_experts
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
+    @trace_function("xtuner.rollout_worker.generate", trace_kwargs_getter=lambda self, *args, **kwargs: {"worker_rank": self.rank})
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         try:
             # TODO(@duanyanhui):
@@ -739,7 +743,12 @@ class RolloutWorker(SingleAcceleratorWorker):
 
             for attempt in range(max_retries + 1):
                 is_last_attempt = attempt == max_retries
-                http_result = await self._safe_post_request(endpoint_url, headers=headers, payload=payload)
+                async with trace_span(
+                    rollout_state,
+                    "xtuner.rollout_engine.generate",
+                    worker_rank=self.rank,
+                ):
+                    http_result = await self._safe_post_request(endpoint_url, headers=headers, payload=payload)
 
                 # Case 1: HTTP Request is Successful
                 if http_result.response:
