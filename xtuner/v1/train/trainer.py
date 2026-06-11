@@ -1426,7 +1426,7 @@ class Trainer:
             if torch.accelerator.current_accelerator().type == "cuda":
                 backend = "cpu:gloo,cuda:nccl"
             elif torch.accelerator.current_accelerator().type == "npu":
-                backend = "hccl"
+                backend = "npu:hccl"
             else:
                 raise NotImplementedError
 
