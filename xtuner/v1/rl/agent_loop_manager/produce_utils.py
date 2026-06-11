@@ -389,7 +389,7 @@ async def refresh_for_all_tasks(
     task_stale_thresholds: dict[str, int] = {}
     for task in task_runners:
         # 没有 stale_threshold 的同步策略按 1 处理。
-        task_stale_thresholds[task.task_name] = task.stale_threshold or 1
+        task_stale_thresholds[task.task_name] = task.stale_threshold if task.stale_threshold is not None else 1
 
     expired_counts = await replay_buffer.refresh_staleness(
         task_stale_thresholds=task_stale_thresholds,

@@ -311,9 +311,6 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         if ctx.task_name not in ctx.progress.target_samples:
             raise KeyError(f"DisaggProduceProgress.target_samples missing task_name={ctx.task_name!r}")
 
-        if ctx.total_target <= 0:
-            return ProduceBatchStatus.NORMAL
-
         # TODO: place this check just before while loop
         if ctx.should_abort():
             return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
@@ -329,6 +326,9 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
             return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
         if self.is_model_expired(ctx.train_step, ctx.model_step):
             return ProduceBatchStatus.EXPIRED_BATCH
+
+        if ctx.total_target <= 0:
+            return ProduceBatchStatus.NORMAL
 
         expired_count = await ctx.expired_count()
         sample_from_expired = self.tail_batch_trigger_size > 0 and expired_count >= self.tail_batch_trigger_size
