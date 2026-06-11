@@ -8,8 +8,9 @@ import threading
 import time
 import traceback
 from abc import abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, TypeAlias, Union, cast
 
 import httpx
 import ray
@@ -48,6 +49,56 @@ if TYPE_CHECKING:
 
 infer_group = Group("inference", help="Inference worker configuration.")
 ROLLOUT_CONCURRENCY_GROUP_GENERATE = "generate"
+
+
+@dataclass(frozen=True)
+class ServerProcessSpec:
+    """How to start one rollout server process."""
+
+    # Worker rank that owns this server process.
+    worker_rank: int
+    # Placement-group bundle indexes assigned to this server process.
+    placement_group_bundle_idxs: tuple[int, ...]
+    # Distributed init address used by every server process in the same engine.
+    # Filled after init_dist_port initializes worker-local ports.
+    dist_init_addr: str | None = None
+    # Whether this server is the rollout request entrypoint for its engine.
+    accepts_rollout_requests: bool = True
+    # Node index of this server inside a multi-node logical engine.
+    node_rank: int = 0
+    # Number of nodes used by this logical engine.
+    nnodes: int = 1
+
+
+@dataclass(frozen=True)
+class EngineLaunchSpec:
+    """How to launch rollout servers for one logical inference engine."""
+
+    # All worker ranks that form this logical inference engine.
+    engine_ranks: tuple[int, ...]
+    # Server processes required by this engine.
+    server_processes: tuple[ServerProcessSpec, ...]
+
+    @property
+    def server_worker_ranks(self) -> tuple[int, ...]:
+        return tuple(server.worker_rank for server in self.server_processes)
+
+    @property
+    def request_entrypoint_servers(self) -> tuple[ServerProcessSpec, ...]:
+        return tuple(server for server in self.server_processes if server.accepts_rollout_requests)
+
+    @property
+    def request_entrypoint_worker_ranks(self) -> tuple[int, ...]:
+        return tuple(server.worker_rank for server in self.request_entrypoint_servers)
+
+    @property
+    def placement_group_bundle_idxs(self) -> tuple[int, ...]:
+        return tuple(
+            bundle_idx for server in self.server_processes for bundle_idx in server.placement_group_bundle_idxs
+        )
+
+
+EngineLaunchSpecs: TypeAlias = tuple[EngineLaunchSpec, ...]
 
 
 class RolloutConfig(BaseModel):
@@ -491,7 +542,8 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.accelerator = accelerator
         self.server_func: Callable
         self.endpoints: dict[str, str] = dict()
-        self.engine_rank_mesh_array: list[list[int]]
+        self.engine_rank_mesh_array: list[list[int]] = []
+        self.engine_launch_spec: EngineLaunchSpec | None = None
         # http_concurrency is calculated based on the max batch size per engine and the total number of engines
         assert config.rollout_max_batch_size_per_instance, (
             "rollout_max_batch_size_per_instance must be set in RolloutConfig"
@@ -519,22 +571,184 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.partial_rollout_handler = PartialRolloutHandler()
         self.enable_partial_rollout: bool = False
 
+    @staticmethod
+    def _get_num_gpus_per_engine(config: RolloutConfig) -> int:
+        return config.num_gpus_per_engine
+
+    @classmethod
+    def validate_engine_launch_specs(
+        cls,
+        engine_launch_specs: EngineLaunchSpecs,
+        *,
+        known_worker_ranks: tuple[int, ...] | None = None,
+    ) -> EngineLaunchSpecs:
+        """Validate backend launch layout before the controller launches
+        servers."""
+        if not engine_launch_specs:
+            raise ValueError("engine_launch_specs must define at least one engine.")
+
+        known_worker_rank_set = set(known_worker_ranks) if known_worker_ranks is not None else None
+        seen_engine_ranks: set[int] = set()
+        seen_server_ranks: set[int] = set()
+        seen_bundle_idxs: set[int] = set()
+        for engine_index, engine_spec in enumerate(engine_launch_specs):
+            if not engine_spec.engine_ranks:
+                raise ValueError(f"EngineLaunchSpec[{engine_index}] must define at least one engine rank.")
+            engine_rank_set = set(engine_spec.engine_ranks)
+            if len(engine_rank_set) != len(engine_spec.engine_ranks):
+                raise ValueError(
+                    f"EngineLaunchSpec[{engine_index}] has duplicate engine ranks: {engine_spec.engine_ranks}."
+                )
+            if known_worker_rank_set is not None:
+                unknown_engine_ranks = sorted(
+                    rank for rank in engine_spec.engine_ranks if rank not in known_worker_rank_set
+                )
+                if unknown_engine_ranks:
+                    raise ValueError(
+                        f"EngineLaunchSpec[{engine_index}] references unknown engine ranks: {unknown_engine_ranks}."
+                    )
+            duplicated_engine_ranks = sorted(rank for rank in engine_spec.engine_ranks if rank in seen_engine_ranks)
+            if duplicated_engine_ranks:
+                raise ValueError(
+                    f"EngineLaunchSpec[{engine_index}] engine ranks appear in more than one engine: "
+                    f"{duplicated_engine_ranks}."
+                )
+            seen_engine_ranks.update(engine_spec.engine_ranks)
+
+            if not engine_spec.server_processes:
+                raise ValueError(f"EngineLaunchSpec[{engine_index}] must define at least one server process.")
+
+            for server_process in engine_spec.server_processes:
+                server_rank = server_process.worker_rank
+                if server_rank not in engine_rank_set:
+                    raise ValueError(
+                        f"EngineLaunchSpec[{engine_index}] server worker_rank={server_rank} "
+                        f"must be part of engine_ranks={engine_spec.engine_ranks}."
+                    )
+                if server_rank in seen_server_ranks:
+                    raise ValueError(f"Server worker_rank={server_rank} appears in more than one server process.")
+                seen_server_ranks.add(server_rank)
+
+                if not server_process.placement_group_bundle_idxs:
+                    raise ValueError(f"Server worker_rank={server_rank} must own at least one placement-group bundle.")
+                if len(set(server_process.placement_group_bundle_idxs)) != len(
+                    server_process.placement_group_bundle_idxs
+                ):
+                    raise ValueError(
+                        f"Server worker_rank={server_rank} has duplicate placement-group bundles: "
+                        f"{server_process.placement_group_bundle_idxs}."
+                    )
+                duplicated_bundle_idxs = sorted(
+                    bundle_idx
+                    for bundle_idx in server_process.placement_group_bundle_idxs
+                    if bundle_idx in seen_bundle_idxs
+                )
+                if duplicated_bundle_idxs:
+                    raise ValueError(
+                        f"Placement-group bundles are assigned to multiple server processes: {duplicated_bundle_idxs}."
+                    )
+                seen_bundle_idxs.update(server_process.placement_group_bundle_idxs)
+
+                if server_process.nnodes < 1:
+                    raise ValueError(f"Server worker_rank={server_rank} must have nnodes >= 1.")
+                if server_process.node_rank < 0 or server_process.node_rank >= server_process.nnodes:
+                    raise ValueError(
+                        f"Server worker_rank={server_rank} has invalid node_rank={server_process.node_rank} "
+                        f"for nnodes={server_process.nnodes}."
+                    )
+
+            if not engine_spec.request_entrypoint_servers:
+                raise ValueError(f"EngineLaunchSpec[{engine_index}] must expose at least one request entrypoint.")
+
+        if known_worker_rank_set is not None:
+            missing_engine_ranks = sorted(known_worker_rank_set - seen_engine_ranks)
+            if missing_engine_ranks:
+                raise ValueError(
+                    f"EngineLaunchSpecs do not cover known worker ranks in engine_ranks: {missing_engine_ranks}."
+                )
+
+        return engine_launch_specs
+
+    @classmethod
+    def build_engine_launch_specs(
+        cls,
+        config: RolloutConfig,
+        rank_bundle_idx_list: list[tuple[int, int]],
+        rank_to_dist_init_addr: dict[int, str] | None = None,
+    ) -> EngineLaunchSpecs:
+        """Build default launch spec: one request-serving server per engine."""
+        num_gpus_per_engine = cls._get_num_gpus_per_engine(config)
+        num_workers = len(rank_bundle_idx_list)
+        if num_workers % num_gpus_per_engine != 0:
+            raise ValueError(
+                f"num_rollout_workers={num_workers} must be divisible by num_gpus_per_engine={num_gpus_per_engine}."
+            )
+
+        engine_launch_specs: list[EngineLaunchSpec] = []
+        for engine_start in range(0, num_workers, num_gpus_per_engine):
+            engine_meta = rank_bundle_idx_list[engine_start : engine_start + num_gpus_per_engine]
+            engine_ranks = tuple(rank for rank, _ in engine_meta)
+            engine_bundle_idxs = tuple(bundle_idx for _, bundle_idx in engine_meta)
+            engine_dist_init_addr = None if rank_to_dist_init_addr is None else rank_to_dist_init_addr[engine_ranks[0]]
+            engine_launch_specs.append(
+                EngineLaunchSpec(
+                    engine_ranks=engine_ranks,
+                    server_processes=(
+                        ServerProcessSpec(
+                            worker_rank=engine_ranks[0],
+                            placement_group_bundle_idxs=engine_bundle_idxs,
+                            dist_init_addr=engine_dist_init_addr,
+                        ),
+                    ),
+                )
+            )
+        return cls.validate_engine_launch_specs(
+            tuple(engine_launch_specs),
+            known_worker_ranks=tuple(rank for rank, _ in rank_bundle_idx_list),
+        )
+
+    def _get_current_server_process_spec(
+        self,
+        engine_launch_spec: EngineLaunchSpec | None = None,
+    ) -> ServerProcessSpec | None:
+        engine_launch_spec = engine_launch_spec or self.engine_launch_spec
+        if engine_launch_spec is None:
+            return None
+
+        for server_process_spec in engine_launch_spec.server_processes:
+            if server_process_spec.worker_rank == self.rank:
+                return server_process_spec
+        raise RuntimeError(
+            f"Engine launch spec does not include rollout worker rank={self.rank} "
+            f"in server_worker_ranks={engine_launch_spec.server_worker_ranks}."
+        )
+
     def set_enable_partial_rollout(self, enable: bool) -> None:
         self.enable_partial_rollout = enable
 
-    def init(self, dist_init_addr: str | None = None) -> tuple[int, str]:
+    def init(
+        self,
+        *,
+        engine_launch_spec: EngineLaunchSpec | None = None,
+    ) -> tuple[int, str]:
         """Initialize the worker and launch the server.
-
-        Args:
-            dist_init_addr (str): The distributed initialization address.
-                If not provided, the one generated by `init_dist_port` is used.
 
         Returns:
             Tuple[int, str]: A tuple containing the worker's rank and its
                 server URL.
         """
-        if dist_init_addr is not None:
-            self.dist_init_addr = dist_init_addr
+        if engine_launch_spec is not None:
+            # Initial controller startup passes the immutable launch spec and caches
+            # it on the actor. Recovery calls init() without arguments after
+            # shutdown, intentionally reusing this cached placement/dist layout.
+            self.engine_launch_spec = engine_launch_spec
+            server_process_spec = cast(
+                ServerProcessSpec,
+                self._get_current_server_process_spec(engine_launch_spec),
+            )
+            self.engine_bundle_idxs = list(server_process_spec.placement_group_bundle_idxs)
+            if server_process_spec.dist_init_addr is not None:
+                self.dist_init_addr = server_process_spec.dist_init_addr
         self.receive_abort_request.clear()
         self._launch_server()
         self._start_session_server()
@@ -1223,20 +1437,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                         f"You should use lmdeploy >= v0.10.2 to support return_token_ids, but current version is {lmdeploy_version}"
                     )
             self.check_flag = False
-
-    def _set_engine_rank_mesh_array(self, engine_rank_mesh_array: list[list[int]]):
-        self.engine_rank_mesh_array = engine_rank_mesh_array
-
-    def _set_engine_bundle_idxs(self, engine_bundle_idxs: list[int]):
-        """Set the bundle indices for the inference engine.
-
-        This is used by some backends (like LMDeploy with Ray executor) to
-        know which bundles in the placement group belong to this engine.
-
-        Args:
-            engine_bundle_idxs (list[int]): A list of bundle indices.
-        """
-        self.engine_bundle_idxs = engine_bundle_idxs
 
     @abstractmethod
     def _get_request_payload(self, rollout_state: RolloutState) -> dict:
