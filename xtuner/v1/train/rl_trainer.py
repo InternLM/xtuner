@@ -929,7 +929,7 @@ class BaseRLTrainer:
         # 共卡训练前切换资源：检查 rollout -> offload rollout -> onload train。
         if offload_rollout_before_train:
             ray.get(
-                self.rollout_controller.ensure_workers_healthy_before_training.remote(),
+                self.rollout_controller.check_and_recover_workers.remote(),
                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
             )
             ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
