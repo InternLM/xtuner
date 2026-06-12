@@ -117,7 +117,7 @@ def _diagnostics_dir() -> Path:
 
 
 def _new_dump_path(kind: str) -> Path:
-    now = time.strftime("%Y%m%d_%H%M%S")
+    now = time.strftime("%H%M%S")
     ns = time.time_ns() % 1_000_000_000
     return _diagnostics_dir() / f"{kind}_{now}_{ns:09d}_pid{os.getpid()}.txt"
 
