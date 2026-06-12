@@ -14,6 +14,7 @@ import copy
 import math
 from typing import Callable, overload
 
+import parametrize
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -370,7 +371,8 @@ class TestMuonFSDP(DeterministicDDPTestCase):
     def world_size(self) -> int:
         return 4
 
-    def test_muon_fsdp_matches_reference(self):
+    @parametrize.parametrize("enable_all2all", [True, False])
+    def test_muon_fsdp_matches_reference(self, enable_all2all: bool):
         """One Muon step on a fully-sharded model must match the single-process
         reference for every parameter, across all param categories.
 
@@ -428,7 +430,7 @@ class TestMuonFSDP(DeterministicDDPTestCase):
         fsdp_loss.backward()
 
         # ── Production Muon optimizer step ────────────────────────────────────
-        muon_config = MuonConfig(lr=LR, momentum=MU, weight_decay=WD, eps=EPSILON, betas=BETAS)
+        muon_config = MuonConfig(lr=LR, momentum=MU, weight_decay=WD, eps=EPSILON, betas=BETAS, enable_all2all=enable_all2all)
         optim = muon_config.build(model)
         optim.step()
 
