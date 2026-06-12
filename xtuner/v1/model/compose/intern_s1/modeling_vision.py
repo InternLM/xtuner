@@ -286,7 +286,6 @@ class InternS1VisionModel(BaseModel):
         )
 
         self._hf_prefix = "model.vision_tower."
-        self._init_load_spec()
 
     @torch.no_grad()
     def init_weights(self) -> None:
