@@ -147,7 +147,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
 
         trainer.rollout_controller = SimpleNamespace(
-            ensure_workers_healthy_before_training=SimpleNamespace(
+            check_and_recover_workers=SimpleNamespace(
                 remote=MagicMock(return_value="rollout_ready_for_training")
             ),
             offload=SimpleNamespace(remote=MagicMock(return_value="rollout_offloaded")),
@@ -214,6 +214,32 @@ class TestRLColocateTrainer(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "return non-empty rollout_states"):
                 trainer.fit()
 
+        trainer.rollout_controller.offload.remote.assert_not_called()
+        trainer.train_controller.onload.assert_not_called()
+        trainer.train_controller.fit.assert_not_called()
+        self.assertEqual(trainer._cur_step, 0)
+
+    def test_fit_does_not_onload_train_when_rollout_training_barrier_fails(self):
+        # 验证共卡训练进入训练前必须先通过 rollout phase-switch barrier；
+        # 失败时不能 onload 训练。
+        async def _produce_batch(batch_size, train_step, *, model_step):
+            return ProduceBatchResult(
+                rollout_states=[[SimpleNamespace(message_uid=train_step, uid=train_step)]]
+            )
+
+        trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch))
+        trainer.rollout_controller.check_and_recover_workers.remote.side_effect = RuntimeError(
+            "inactive rollout workers after recovery"
+        )
+
+        with (
+            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "inactive rollout workers"):
+                trainer.fit()
+
+        trainer.rollout_controller.check_and_recover_workers.remote.assert_called_once_with()
         trainer.rollout_controller.offload.remote.assert_not_called()
         trainer.train_controller.onload.assert_not_called()
         trainer.train_controller.fit.assert_not_called()

@@ -97,23 +97,23 @@ def _mock_rollout_remote(cls):
 
 @_mock_rollout_remote
 class MockTimeoutRolloutController(RolloutController):
-    def _get_worker_cls(self): return _mock_rollout_remote(MockTimeoutRolloutWorker)
+    def _get_worker_base_cls(self): return MockTimeoutRolloutWorker
 
 @_mock_rollout_remote
 class MockRequestErrorRolloutController(RolloutController):
-    def _get_worker_cls(self): return _mock_rollout_remote(MockRequestErrorRolloutWorker)
+    def _get_worker_base_cls(self): return MockRequestErrorRolloutWorker
 
 @_mock_rollout_remote
 class MockClientErrorRolloutController(RolloutController):
-    def _get_worker_cls(self): return _mock_rollout_remote(MockClientErrorRolloutWorker)
+    def _get_worker_base_cls(self): return MockClientErrorRolloutWorker
 
 @_mock_rollout_remote
 class MockServerErrorRolloutController(RolloutController):
-    def _get_worker_cls(self): return _mock_rollout_remote(MockServerErrorRolloutWorker)
+    def _get_worker_base_cls(self): return MockServerErrorRolloutWorker
 
 @_mock_rollout_remote
 class MockInvalidResponseRolloutController(RolloutController):
-    def _get_worker_cls(self): return _mock_rollout_remote(MockInvalidResponseRolloutWorker)
+    def _get_worker_base_cls(self): return MockInvalidResponseRolloutWorker
     
 class TestMockRollout(unittest.TestCase):
     @classmethod

@@ -379,7 +379,6 @@ def get_store():
     )
 
 
-# reasoning rl may be not initialized
 def get_existing_store():
     """Return the existing singleton store actor without creating one."""
     global _handle_cache
