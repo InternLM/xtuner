@@ -269,6 +269,9 @@ class Muon(Optimizer):
         use_triton (bool): Whether to use Triton kernel for Newton-Schulz. Ignored if custom function is provided.
         newton_schulz_func (Callable | None): Use a custom Newton-Schulz function for orthogonalization.
             Signature is `func(input: Tensor, epsilon: float, num_experts: int) -> Tensor`.
+        enable_all2all (bool): Whether to allow the all-to-all communication strategy when a full batch
+            (batch size == world size) is available. Set to False to force the all-gather + reduce-scatter
+            (AGRS) path even for full batches. Useful on cluster topologies where all-to-all is unreliable.
 
     Muon optimizer algorithm by Keller Jordan: https://kellerjordan.github.io/posts/muon/
     FSDP2 Muon uses all-to-all communications: https://www.essential.ai/blog/infra
@@ -287,6 +290,7 @@ class Muon(Optimizer):
         flatten: bool = False,
         use_triton: bool = False,
         newton_schulz_func: Callable | None = None,
+        enable_all2all: bool = True,
     ):
         # Check hyperparameters
         if lr < 0.0:
@@ -314,6 +318,7 @@ class Muon(Optimizer):
             num_experts=1,  # Default: no MoE expert handling
         )
         super().__init__(params, defaults)
+        self._enable_all2all = enable_all2all
 
         # Pre-compute lr adjustment ratios for each Muon parameter based on global shape.
         # This must happen at init time because DTensor.shape here is guaranteed to be
@@ -649,20 +654,6 @@ class Muon(Optimizer):
 
                 group_world_size = group_process_group.size() if group_process_group is not None else 1
 
-                # Determine communication strategy and the process group to use
-                if skip_communication:
-                    comm_strategy: Literal["agrs", "subgroup_allgather", "all_to_all", "local"] = "local"
-                    comm_pg: ProcessGroup | None = None
-                elif use_subgroup_allgather:
-                    comm_strategy = "subgroup_allgather"
-                    comm_pg = subgroup_process_group
-                elif sharded_tensor_dim is not None:
-                    comm_strategy = "all_to_all"
-                    comm_pg = group_process_group
-                else:
-                    comm_strategy = "local"
-                    comm_pg = group_process_group
-
                 # Create batches within this mesh group
                 for params in create_param_batches(mesh_params, batch_size=group_world_size):
                     gradients: list[Tensor] = [g for p in params if (g := p.grad) is not None]
@@ -674,17 +665,15 @@ class Muon(Optimizer):
                     lr_ratios = [s["lr_ratio"] for s in states]
                     assert len(set(lr_ratios)) == 1, f"Found different lr_ratios: {set(lr_ratios)}"
 
-                    # Remainder batches (len(params) < world_size) always use
-                    # AGRS — it supports uneven sharding and avoids the padding
-                    # overhead of a sparse all-to-all.
-                    is_remainder = (
-                        len(params) < group_world_size
+                    # Use AGRS when: params can't fill a full all-to-all batch, or all-to-all is disabled.
+                    use_agrs = (
+                        (len(params) < group_world_size or not self._enable_all2all)
                         and sharded_tensor_dim is not None
                         and group_process_group is not None
                     )
 
-                    if is_remainder:
-                        # AG+RS path for partial batches: no zero-padding needed
+                    if use_agrs:
+                        # AG+RS path: handles remainder batches and all-to-all-disabled clusters
                         yield AsyncTask(
                             muon_update_batch_async(
                                 X=params,
@@ -700,12 +689,26 @@ class Muon(Optimizer):
                                 newton_schulz_func=self._newton_schulz_func,
                                 comm_strategy="agrs",
                                 shard_dim=sharded_tensor_dim,
-                                process_group=comm_pg,
+                                process_group=group_process_group,
                                 num_experts=ns_num_experts,
                             )
                         )
 
                     else:
+                        # Full batch: determine communication strategy
+                        if skip_communication:
+                            comm_strategy: Literal["agrs", "subgroup_allgather", "all_to_all", "local"] = "local"
+                            comm_pg: ProcessGroup | None = None
+                        elif use_subgroup_allgather:
+                            comm_strategy = "subgroup_allgather"
+                            comm_pg = subgroup_process_group
+                        elif sharded_tensor_dim is not None:
+                            comm_strategy = "all_to_all"
+                            comm_pg = group_process_group
+                        else:
+                            comm_strategy = "local"
+                            comm_pg = group_process_group
+
                         yield AsyncTask(
                             muon_update_batch_async(
                                 X=params,
@@ -796,7 +799,8 @@ def muon_update_batch_async(
     dtype. Identical hyperparameters are used for all tensors in the batch.
 
     The ``comm_strategy`` parameter determines the communication pattern:
-    - ``"agrs"``: All-Gather + Reduce-Scatter for partial batches (fewer params than ranks).
+    - ``"agrs"``: All-Gather + Reduce-Scatter. Handles partial batches (fewer params than ranks) and
+      full batches when all-to-all is disabled (``enable_all2all=False``).
     - ``"subgroup_allgather"``: Sub-group all-gather for MoE experts spanning a sub-group of ranks.
     - ``"all_to_all"``: All-to-all exchange for evenly/unevenly sharded tensors.
     - ``"local"``: No sharding; each rank orthogonalizes locally and optionally all-gathers.
@@ -811,7 +815,7 @@ def muon_update_batch_async(
     assert len(X) == len(G)
     assert len(X) == len(M)
     if comm_strategy == "agrs":
-        assert len(X) < world_size, f"AGRS path expects partial batch, got {len(X)} == {world_size}"
+        assert len(X) <= world_size, f"AGRS requires batch size <= world_size, got {len(X)} > {world_size}"
     elif comm_strategy == "subgroup_allgather":
         assert len(X) == 1, "subgroup_allgather expects a single-element batch"
     else:
