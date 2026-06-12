@@ -122,6 +122,17 @@ class TestComposedJudgerUnit(unittest.TestCase):
         self.assertEqual([state.reward["score"] for state in rollout_states], [1.0, 1.0])
         self.assertEqual([state.reward["source"] for state in rollout_states], ["a", "a"])
 
+    def test_composed_judger_rejects_base_judger_only_branch(self):
+        from xtuner.v1.rl.judger import BaseJudger, ComposedJudger
+
+        class JudgeOnlyJudger(BaseJudger):
+            async def judge(self, rollout_state):
+                rollout_state.reward = {"score": 2.0, "source": "judge"}
+                return rollout_state
+
+        with self.assertRaisesRegex(TypeError, "must inherit Judger, not only BaseJudger"):
+            ComposedJudger(branches={"custom": JudgeOnlyJudger()})
+
     def test_native_judger_batch_judge_not_supported(self):
         from xtuner.v1.rl.judger import JudgerConfig
 

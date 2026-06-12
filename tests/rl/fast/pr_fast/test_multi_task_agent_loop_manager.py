@@ -2,14 +2,14 @@
 
 本文件从旧的 test_multi_task_agent_loop_manager.py 迁入共卡路径测试：
 - produce_batch 按 task 权重分配 batch，并按 task 名稳定返回训练数据。
-- 自定义 get_task_batch_sizes 可以禁用某些 task。
 - produce_batch 会汇总 producer 收尾耗时和 group 生成耗时。
 - 共卡 produce_batch 必须返回非空训练 batch。
-- 多 task 中任一 task 返回 UPDATE_WEIGHT_AND_ABORT 时，public 结果状态会体现该中断。
+- 共卡 produce_batch 不聚合 producer status，public 状态保持 NORMAL。
 
 非共卡 get_batch / produce_loop / pause_continue 编排暂不迁入 PR-fast。
 """
 
+import asyncio
 import unittest
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -19,9 +19,13 @@ from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
     AgentLoopManager,
     AgentLoopManagerConfig,
     TaskSpecConfig,
+)
+from xtuner.v1.rl.agent_loop_manager.disagg_agent_loop_manager import DisaggAgentLoopManager
+from xtuner.v1.rl.agent_loop_manager.produce_utils import (
+    GROUP_GENERATE_TIME_KEY,
+    ProduceBatchStatus,
     _TaskRunner,
 )
-from xtuner.v1.rl.agent_loop_manager.producer import GROUP_GENERATE_TIME_KEY, ProduceBatchStatus
 
 
 class _FakeSampler:
@@ -35,31 +39,30 @@ class _FakeSampler:
 class _FakeProduceStrategy:
     def __init__(
         self,
-        status: ProduceBatchStatus = ProduceBatchStatus.NORMAL,
         cleanup_pause_time_s: float = 0.0,
         stale_threshold: int = 1,
     ):
-        self.status = status
         self.cleanup_pause_time_s = cleanup_pause_time_s
         self.stale_threshold = stale_threshold
         self.called_batch_sizes: list[int] = []
         self.called_train_steps: list[int] = []
         self.called_model_steps: list[int] = []
-        self.called_update_events: list[object | None] = []
-        self.called_update_event_states: list[bool | None] = []
         self.called_progresses: list[object] = []
         self.cleanup_model_steps: list[int] = []
         self.cleanup_progresses: list[object | None] = []
         self.cleanup_call_count = 0
 
-    async def produce_batch(self, ctx) -> ProduceBatchStatus:
+    async def produce_batch(self, ctx) -> None:
         self.called_batch_sizes.append(ctx.task_batch_size)
         self.called_train_steps.append(ctx.train_step)
         self.called_model_steps.append(ctx.model_step)
-        self.called_update_events.append(ctx.update_event)
-        self.called_update_event_states.append(None if ctx.update_event is None else ctx.update_event.is_set())
+        self.assert_colocate_context(ctx)
         self.called_progresses.append(ctx.progress)
-        return self.status
+
+    def assert_colocate_context(self, ctx) -> None:
+        for disagg_only_name in ("update_event", "available_count", "total_target"):
+            if hasattr(ctx, disagg_only_name):
+                raise AssertionError(f"colocate ProduceContext should not expose {disagg_only_name}")
 
     async def pause_produce(self, ctx) -> float:
         self.cleanup_call_count += 1
@@ -67,30 +70,24 @@ class _FakeProduceStrategy:
         self.cleanup_progresses.append(ctx.progress)
         return self.cleanup_pause_time_s
 
-    def is_model_expired(self, train_step: int, model_step: int) -> bool:
-        return False
 
-
-class _FakeStatusProduceStrategy:
-    def __init__(self, status: ProduceBatchStatus, pause_time_s: float):
-        self.status = status
+class _FakeTimedProduceStrategy:
+    def __init__(self, pause_time_s: float):
         self.pause_time_s = pause_time_s
         self.cleanup_call_count = 0
         self.called_train_steps: list[int] = []
         self.called_model_steps: list[int] = []
-        self.called_update_events: list[object | None] = []
-        self.called_update_event_states: list[bool | None] = []
         self.called_progresses: list[object] = []
         self.cleanup_model_steps: list[int] = []
         self.cleanup_progresses: list[object | None] = []
 
-    async def produce_batch(self, ctx) -> ProduceBatchStatus:
+    async def produce_batch(self, ctx) -> None:
         self.called_train_steps.append(ctx.train_step)
         self.called_model_steps.append(ctx.model_step)
-        self.called_update_events.append(ctx.update_event)
-        self.called_update_event_states.append(None if ctx.update_event is None else ctx.update_event.is_set())
+        for disagg_only_name in ("update_event", "available_count", "total_target"):
+            if hasattr(ctx, disagg_only_name):
+                raise AssertionError(f"colocate ProduceContext should not expose {disagg_only_name}")
         self.called_progresses.append(ctx.progress)
-        return self.status
 
     async def pause_produce(self, ctx) -> float:
         self.cleanup_call_count += 1
@@ -98,8 +95,13 @@ class _FakeStatusProduceStrategy:
         self.cleanup_progresses.append(ctx.progress)
         return self.pause_time_s
 
-    def is_model_expired(self, train_step: int, model_step: int) -> bool:
-        return False
+
+class _FailingProduceStrategy:
+    async def produce_batch(self, ctx) -> None:
+        raise RuntimeError("original produce failure")
+
+    async def pause_produce(self, ctx) -> float:
+        raise RuntimeError("cleanup failure")
 
 
 class _FakeRolloutState:
@@ -171,6 +173,14 @@ def _fake_agent_loop():
     return agent_loop
 
 
+def _fake_rollout_controller():
+    rollout_controller = MagicMock()
+    rollout_controller.continue_generation.remote = AsyncMock()
+    rollout_controller.pause_generation.remote = AsyncMock()
+    rollout_controller.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+    return rollout_controller
+
+
 class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
     def test_manager_config_accepts_single_task_spec(self):
         # 单 task 配置可以直接传入，兼容最小 AgentLoopManager 配置。
@@ -231,6 +241,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 ),
             ],
             replay_buffer=replay_buffer,
+            rollout_controller=_fake_rollout_controller(),
         )
 
         result = await multi_task_manager.produce_batch(batch_size=7, train_step=3, model_step=2)
@@ -247,56 +258,49 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertIn("task_b", result.task_results)
         self.assertIn("task_c", result.task_results)
 
-    async def test_custom_get_task_batch_sizes_can_disable_tasks(self):
-        # 自定义 task batch size 可以禁用某个 task，训练 batch 只从启用 task 取数。
-        strategy_a = _FakeProduceStrategy()
-        strategy_b = _FakeProduceStrategy()
+    async def test_disagg_get_batch_aggregates_multi_task_results_without_colocate_surface(self):
+        # 非共卡 get_batch 使用后台 progress 消费 replay buffer，不依赖共卡 produce_batch 继承面。
         replay_buffer = _FakeReplayBuffer(
             rollout_states_by_task={
-                "task_a": [["a-0"]],
-                "task_b": [["b-0"], ["b-1"]],
+                "task_a": [["a-0"], ["a-1"]],
+                "task_b": [["b-0"]],
             },
-            leftover_counts={},
+            leftover_counts={
+                ("task_a", Status.COMPLETED): 2,
+                ("task_b", Status.COMPLETED): 1,
+            },
         )
-
-        class _CustomBatchManager(AgentLoopManager):
-            def get_task_batch_sizes(self, global_batch_size: int, train_step: int) -> dict[str, int]:
-                self.observed_train_step = train_step
-                return {"task_a": 0, "task_b": global_batch_size}
-
-        multi_task_manager = _CustomBatchManager(
+        manager = DisaggAgentLoopManager(
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
                     agent_loop=_fake_agent_loop(),
-                    produce_strategy=strategy_a,
+                    produce_strategy=_FakeProduceStrategy(),
                     sampler=_FakeSampler(),
-                    weight=1.0,
+                    weight=2.0,
                     order=0,
                 ),
                 _TaskRunner(
                     task_name="task_b",
                     agent_loop=_fake_agent_loop(),
-                    produce_strategy=strategy_b,
+                    produce_strategy=_FakeProduceStrategy(),
                     sampler=_FakeSampler(),
                     weight=1.0,
                     order=1,
                 ),
             ],
             replay_buffer=replay_buffer,
+            rollout_controller=_fake_rollout_controller(),
         )
 
-        result = await multi_task_manager.produce_batch(batch_size=2, train_step=9, model_step=8)
+        result = await manager.get_batch(batch_size=3, train_step=2)
 
-        self.assertEqual(multi_task_manager.observed_train_step, 9)
-        self.assertEqual(result.task_batch_sizes, {"task_a": 0, "task_b": 2})
-        self.assertEqual(strategy_a.called_batch_sizes, [])
-        self.assertEqual(strategy_b.called_batch_sizes, [2])
-        self.assertEqual(result.rollout_states, [["b-0"], ["b-1"]])
+        self.assertEqual(result.rollout_states, [["a-0"], ["a-1"], ["b-0"]])
+        self.assertEqual(result.task_batch_sizes, {"task_a": 2, "task_b": 1})
 
-    async def test_status_returning_strategy_uses_cleanup_and_reconstructs_group_timing_stats(self):
+    async def test_produce_batch_uses_cleanup_and_reconstructs_group_timing_stats(self):
         # 共卡 produce_batch 会把 producer 收尾耗时和 rollout group 生成耗时汇总到结果中。
-        strategy = _FakeStatusProduceStrategy(status=ProduceBatchStatus.NORMAL, pause_time_s=1.25)
+        strategy = _FakeTimedProduceStrategy(pause_time_s=1.25)
         replay_buffer = _FakeReplayBuffer(
             rollout_states_by_task={
                 "task_a": [
@@ -319,6 +323,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 ),
             ],
             replay_buffer=replay_buffer,
+            rollout_controller=_fake_rollout_controller(),
         )
 
         result = await manager.produce_batch(batch_size=2, train_step=7, model_step=6)
@@ -336,26 +341,27 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 _TaskRunner(
                     task_name="task_a",
                     agent_loop=_fake_agent_loop(),
-                    produce_strategy=_FakeStatusProduceStrategy(status=ProduceBatchStatus.NORMAL, pause_time_s=0.0),
+                    produce_strategy=_FakeTimedProduceStrategy(pause_time_s=0.0),
                     sampler=_FakeSampler(),
                     weight=1.0,
                     order=0,
                 ),
             ],
             replay_buffer=_FakeReplayBuffer(rollout_states_by_task={}, leftover_counts={}),
+            rollout_controller=_fake_rollout_controller(),
         )
 
         with self.assertRaisesRegex(AssertionError, "must return non-empty rollout_states"):
             await manager.produce_batch(batch_size=1, train_step=3, model_step=2)
 
-    async def test_produce_batch_returns_update_abort_when_any_task_requests_abort(self):
-        # 多 task 共卡生产时，任一 task 返回 UPDATE_WEIGHT_AND_ABORT 会体现在 public 结果状态中。
+    async def test_produce_batch_status_stays_normal_for_colocate_flow(self):
+        # 共卡生产不再消费 producer status；只要训练 batch 非空，public 状态保持 NORMAL。
         manager = AgentLoopManager(
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
                     agent_loop=_fake_agent_loop(),
-                    produce_strategy=_FakeProduceStrategy(status=ProduceBatchStatus.NORMAL),
+                    produce_strategy=_FakeProduceStrategy(),
                     sampler=_FakeSampler(),
                     weight=1.0,
                     order=0,
@@ -363,7 +369,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 _TaskRunner(
                     task_name="task_b",
                     agent_loop=_fake_agent_loop(),
-                    produce_strategy=_FakeProduceStrategy(status=ProduceBatchStatus.EXPIRED_BATCH),
+                    produce_strategy=_FakeProduceStrategy(),
                     sampler=_FakeSampler(),
                     weight=1.0,
                     order=1,
@@ -371,7 +377,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 _TaskRunner(
                     task_name="task_c",
                     agent_loop=_fake_agent_loop(),
-                    produce_strategy=_FakeProduceStrategy(status=ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT),
+                    produce_strategy=_FakeProduceStrategy(),
                     sampler=_FakeSampler(),
                     weight=1.0,
                     order=2,
@@ -385,9 +391,87 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 },
                 leftover_counts={},
             ),
+            rollout_controller=_fake_rollout_controller(),
         )
 
         result = await manager.produce_batch(batch_size=3, train_step=6, model_step=5)
 
-        self.assertEqual(result.status, ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT)
+        self.assertEqual(result.status, ProduceBatchStatus.NORMAL)
         self.assertEqual(result.rollout_states, [["a-0"], ["b-0"], ["c-0"]])
+
+    async def test_produce_batch_waits_all_tasks_before_any_pause(self):
+        # fast task 不能在 slow task 仍在生产时提前 pause rollout worker。
+        events: list[str] = []
+        fast_done = asyncio.Event()
+        test_case = self
+
+        class _FastStrategy(_FakeProduceStrategy):
+            async def produce_batch(self, ctx) -> None:
+                events.append("fast_produce_done")
+                fast_done.set()
+
+            async def pause_produce(self, ctx) -> float:
+                test_case.assertIn("slow_produce_done", events)
+                events.append("fast_pause")
+                return 0.0
+
+        class _SlowStrategy(_FakeProduceStrategy):
+            async def produce_batch(self, ctx) -> None:
+                await fast_done.wait()
+                events.append("slow_produce_done")
+
+            async def pause_produce(self, ctx) -> float:
+                test_case.assertIn("slow_produce_done", events)
+                events.append("slow_pause")
+                return 0.0
+
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_fast",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=_FastStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                ),
+                _TaskRunner(
+                    task_name="task_slow",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=_SlowStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=1,
+                ),
+            ],
+            replay_buffer=_FakeReplayBuffer(
+                rollout_states_by_task={"task_fast": [["fast-0"]], "task_slow": [["slow-0"]]},
+                leftover_counts={},
+            ),
+            rollout_controller=_fake_rollout_controller(),
+        )
+
+        result = await manager.produce_batch(batch_size=2, train_step=4, model_step=3)
+
+        self.assertEqual(result.rollout_states, [["fast-0"], ["slow-0"]])
+        self.assertEqual(events[:2], ["fast_produce_done", "slow_produce_done"])
+
+    async def test_produce_batch_preserves_original_terminal_exception(self):
+        # 终止性生产异常应直接暴露给 trainer，保留生产调用处的调试堆栈。
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=_FailingProduceStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                ),
+            ],
+            replay_buffer=_FakeReplayBuffer(rollout_states_by_task={}, leftover_counts={}),
+            rollout_controller=_fake_rollout_controller(),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "original produce failure"):
+            await manager.produce_batch(batch_size=1, train_step=3, model_step=2)

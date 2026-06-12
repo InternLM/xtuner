@@ -30,7 +30,8 @@ import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, ProduceBatchResult
-from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import AgentLoopManager, _TaskRunner
+from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import AgentLoopManager
+from xtuner.v1.rl.agent_loop_manager.produce_utils import _TaskRunner
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SerializedRayObjectRef
 from xtuner.v1.train.rl_trainer import RLColocateTrainer, RLThroughputBenchmark
 
@@ -71,11 +72,16 @@ class _FakeSampler:
         return [item]
 
 
-def _build_fake_agent_loop():
+def _build_fake_rollout_controller():
     rollout_ctl = MagicMock()
     rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
     rollout_ctl.pause_generation.remote = AsyncMock(return_value=None)
     rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+    return rollout_ctl
+
+
+def _build_fake_agent_loop():
+    rollout_ctl = _build_fake_rollout_controller()
     agent_loop = MagicMock()
     agent_loop.rollout_ctl = rollout_ctl
 
@@ -178,6 +184,7 @@ class TestRLColocateTrainer(unittest.TestCase):
                 )
             ],
             replay_buffer=replay_buffer,
+            rollout_controller=_build_fake_rollout_controller(),
         )
         trainer = self._make_trainer(manager)
 

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Callable, TypeAlias
+from typing import Callable, TypeAlias, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.data_proto.rl_data import RolloutState
 
-from .native import Judger, JudgerConfig, JudgerOutput
+from .native import BaseJudger, Judger, JudgerConfig, JudgerOutput
 
 
 # Merge function contract for multi-branch composed judging:
@@ -29,12 +29,34 @@ class ComposedJudger(Judger):
         super().__init__()
         if not branches:
             raise ValueError("ComposedJudger requires at least one branch.")
-        self.branches = branches
+        self._validate_branches(branches)
+        self.branches = cast(dict[str, Judger], branches)
         # ``merge_fn=None`` is only valid for routing mode, where each sample
         # selects exactly one branch and that branch's reward is passed through.
         # If ``data_source`` selects multiple branches, callers must provide an
         # explicit merge function because reward aggregation is task-specific.
         self.merge_fn = merge_fn
+
+    def _validate_branches(self, branches: dict[str, Judger]) -> None:
+        for key, branch in branches.items():
+            if isinstance(branch, Judger):
+                continue
+            if isinstance(branch, BaseJudger):
+                # ComposedJudger intentionally composes branches through the
+                # Judger payload contract instead of calling arbitrary
+                # BaseJudger.judge() implementations. This avoids deep-copying
+                # RolloutState for every branch, which would add serialization
+                # overhead and can be risky for large or externally owned
+                # rollout fields. Without deepcopy, BaseJudger-only branches
+                # could concurrently mutate the same RolloutState.
+                raise TypeError(
+                    "ComposedJudger branch must inherit Judger, not only BaseJudger. "
+                    "BaseJudger-only branches implement their own judge flow and are not supported in "
+                    f"ComposedJudger yet. branch={key!r}, type={type(branch).__name__}"
+                )
+            raise TypeError(
+                f"ComposedJudger branch must be a Judger instance. branch={key!r}, type={type(branch).__name__}"
+            )
 
     def _select_keys_from_data_source(self, rollout_state: RolloutState) -> list[str]:
         data_source = rollout_state.data_source
@@ -109,7 +131,8 @@ class ComposedJudger(Judger):
         if len(selected_keys) == 1:
             key = selected_keys[0]
             _, output = await self._judge_branch(key, rollout_state)
-            return self.branches[key].postprocess(rollout_state, output)
+            branch = self.branches[key]
+            return branch.postprocess(rollout_state, output)
 
         if self.merge_fn is None:
             raise ValueError(
@@ -132,8 +155,9 @@ class ComposedJudger(Judger):
 
         if len(selected_keys) == 1:
             key = selected_keys[0]
+            branch = self.branches[key]
             _, outputs = await self._batch_judge_branch(key, rollout_states)
-            return self._postprocess_branch_batch(self.branches[key], rollout_states, outputs)
+            return self._postprocess_branch_batch(branch, rollout_states, outputs)
 
         if self.merge_fn is None:
             raise ValueError(

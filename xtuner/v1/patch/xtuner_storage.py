@@ -70,7 +70,11 @@ def _release_write_lock(fd: int) -> None:
 
 
 def _get_file_write_lock_slots() -> int:
-    return max(0, int(os.environ.get("ASYNC_DCP_FILE_WRITE_LOCK_SLOTS", "0")))
+    return max(0, int(os.environ.get("ASYNC_DCP_FILE_WRITE_LOCK_SLOTS", "2")))
+
+
+def _get_async_dcp_save_timeout() -> int:
+    return max(0, int(os.environ.get("ASYNC_DCP_SAVE_TIMEOUT", "7200")))
 
 
 def _get_file_write_lock_key(path: Union[str, os.PathLike]) -> str:

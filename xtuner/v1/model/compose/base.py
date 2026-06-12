@@ -1,8 +1,10 @@
 import json
 import multiprocessing as py_mp
+from collections.abc import Callable
+from concurrent.futures import Future
 from pathlib import Path
 from shutil import rmtree
-from typing import Callable, Self, Sequence
+from typing import Self, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -176,35 +178,28 @@ class BaseComposeModel(BaseModel):
         hf_dir: Path | str,
         save_dtype: torch.dtype = torch.bfloat16,
         safetensors_prefix: str = "model",
-        cleanup_hf_dirs: Sequence[str | Path] = (),
-    ) -> AsyncHFSaveHandle:
+    ) -> Future[Path]:
+        resources = self._get_async_hf_resources()
         if self._hf_path is None and self.config.hf_config is None:
             raise NotImplementedError(
                 "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
             )
+        # Async HF stages tensors in CPU memory before the writer process flushes them to disk.
+        # Allowing multiple in-flight HF saves would make these staged tensors accumulate quickly
+        # when background I/O cannot keep up with the training loop.
         if self._pending_async_hf is not None:
             raise RuntimeError(
-                "Previous async HF save is still pending. Call wait_async_hf before launching a new one."
+                "Previous async HF save is still pending. Wait for the returned async HF handle before launching a new one."
             )
         rank = dist.get_rank() if dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
 
         if isinstance(hf_dir, str):
             hf_dir = Path(hf_dir)
-        tmp_hf_dir = hf_dir.with_name(f"{hf_dir.name}.incomplete")
-        status_dir = tmp_hf_dir.parent / f".{tmp_hf_dir.name}.async-hf-writer-status"
+        tmp_hf_dir = hf_dir.with_name(f".{hf_dir.name}.incomplete")
         if rank == 0:
             if tmp_hf_dir.exists():
                 rmtree(tmp_hf_dir)
-            if status_dir.exists():
-                rmtree(status_dir)
             tmp_hf_dir.mkdir(parents=True, exist_ok=True)
-            status_dir.mkdir(parents=True, exist_ok=True)
-
-        status_path = status_dir / self._async_hf_writer_status_filename(rank, world_size)
-        cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
-        if rank == 0:
-            cleanup_done_path.unlink(missing_ok=True)
 
         module_file_to_names: list[tuple[BaseModel, list[tuple[str, list[str]]]]] = []
         merged_weight_map: dict[str, str] = {}
@@ -221,6 +216,13 @@ class BaseComposeModel(BaseModel):
             module_file_to_names.append((module, file_to_names))
             merged_weight_map.update(weight_map)
 
+        global_weight_map: dict[str, str] = {}
+        for rank_weight_map in self._all_gather_async_hf_object(merged_weight_map):
+            global_weight_map.update(cast(dict[str, str], rank_weight_map))
+        if rank == 0:
+            self._write_hf_index_and_config(hf_dir=tmp_hf_dir, weight_map=global_weight_map)
+        self._barrier_async_hf()
+
         if hasattr(DEVICE_MODULE, "synchronize"):
             DEVICE_MODULE.synchronize()
 
@@ -230,11 +232,6 @@ class BaseComposeModel(BaseModel):
             args=(
                 tmp_hf_dir,
                 module_file_to_names,
-                merged_weight_map,
-                status_path,
-                cleanup_hf_dirs,
-                cleanup_done_path,
-                rank,
             ),
             daemon=False,
         )
@@ -244,41 +241,36 @@ class BaseComposeModel(BaseModel):
             process=process,
             hf_dir=hf_dir,
             tmp_hf_dir=tmp_hf_dir,
-            status_path=status_path,
-            cleanup_done_path=cleanup_done_path,
+        )
+        commit_future = resources.commit_executor.submit(
+            self._commit_async_hf_save,
+            handle,
         )
         self._pending_async_hf = handle
-        return handle
+
+        def clear_pending_async_hf(_: Future[Path]) -> None:
+            self._clear_pending_async_hf(handle)
+
+        commit_future.add_done_callback(clear_pending_async_hf)
+        return commit_future
 
     def _run_async_hf_compose_writer(
         self,
         tmp_hf_dir: Path,
         module_file_to_names: list[tuple[BaseModel, list[tuple[str, list[str]]]]],
-        merged_weight_map: dict[str, str],
-        status_path: Path,
-        cleanup_hf_dirs: Sequence[str | Path],
-        cleanup_done_path: Path,
-        rank: int,
     ) -> None:
         log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] started")
         try:
             set_async_save_process_qos()
-            self._cleanup_async_hf_dirs_before_write(
-                cleanup_hf_dirs=cleanup_hf_dirs,
-                cleanup_done_path=cleanup_done_path,
-                rank=rank,
-            )
             for module, file_to_names in module_file_to_names:
-                self._write_async_hf_module_snapshot(hf_dir=tmp_hf_dir, module=module, file_to_names=file_to_names)
-            status = {"rank": rank, "ok": True, "error": "", "weight_map": merged_weight_map}
-            with status_path.open("w") as f:
-                f.write(json.dumps(status, indent=2))
+                self._write_async_hf_module_snapshot(
+                    hf_dir=tmp_hf_dir,
+                    module=module,
+                    file_to_names=file_to_names,
+                )
             log_rank0.info(f"[Async saving HF to {tmp_hf_dir} writer] finished")
         except Exception as exc:
             log_rank0.error(f"[Async saving HF to {tmp_hf_dir} writer] failed: {exc}")
-            status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
-            with status_path.open("w") as f:
-                f.write(json.dumps(status, indent=2))
             raise
 
     def _write_async_hf_module_snapshot(
