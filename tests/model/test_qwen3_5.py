@@ -300,7 +300,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
                     atol=tol,
                     rtol=tol
                 ),
-                f"Expected text loss around {key}, but got {loss.item()}"
+                f"Expected {key} loss around {loss_reference[key]}, but got {loss.item()}"
             )
 
 
