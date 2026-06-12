@@ -171,6 +171,28 @@ class LMDeployWorker(RolloutWorker):
             known_worker_ranks=tuple(rank for rank, _ in rank_bundle_idx_list),
         )
 
+    @classmethod
+    def build_metadata_engine_rank_mesh_array(
+        cls,
+        engine_launch_specs: EngineLaunchSpecs,
+    ) -> list[list[int]]:
+        """Keep LMDeploy EP metadata compatible with origin/main.
+
+        Pure EP uses one request-serving server per EP rank. The logical engine topology is still stored in
+        EngineLaunchSpec.engine_ranks for dp_rank and lifecycle operations, but update_weighter expects the public
+        metadata mesh to contain one single-rank entry per request server.
+        """
+        metadata_engine_rank_mesh_array: list[list[int]] = []
+        for engine_spec in engine_launch_specs:
+            request_entrypoint_servers = engine_spec.request_entrypoint_servers
+            if len(request_entrypoint_servers) > 1:
+                metadata_engine_rank_mesh_array.extend(
+                    [server_process.worker_rank] for server_process in request_entrypoint_servers
+                )
+            else:
+                metadata_engine_rank_mesh_array.append(list(engine_spec.engine_ranks))
+        return metadata_engine_rank_mesh_array
+
     def offload(self):
         """Offloads the model weights and KV cache."""
         return self._sleep(level=2)
