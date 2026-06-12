@@ -3,9 +3,13 @@ Judger 体系关系图
 =================
 
                         ┌─────────────────┐
-                        │     Judger      │  ← 所有 judger 的统一接口
+                        │   BaseJudger    │  ← 所有 judger 的最小统一接口
                         │   judge(state)  │
                         │ batch_judge(list)│
+                        └────────┬────────┘
+                                 │ 继承
+                        ┌────────▼────────┐
+                        │     Judger      │  ← preprocess/judge_payload/postprocess 契约
                         └────────┬────────┘
                                  │ 继承
               ┌──────────────────┼───────────────────┐
@@ -90,9 +94,40 @@ JudgerOutput: TypeAlias = dict[str, Any]
 JudgerOutputBatch: TypeAlias = JudgerOutput | list[JudgerOutput]
 
 
-class Judger:
+class BaseJudger:
+    """Minimal judger interface.
+
+    Prefer subclassing ``Judger`` instead of overriding ``BaseJudger``
+    directly. Subclass ``BaseJudger`` only when the implementation owns the
+    whole ``judge`` / ``batch_judge`` flow. ``ComposedJudger`` currently does
+    not support BaseJudger-only branches because it composes branches through
+    the ``Judger`` payload contract: ``preprocess -> judge_payload ->
+    postprocess``. Branches used inside ``ComposedJudger`` should inherit
+    ``Judger`` instead.
+    """
+
     def __init__(self, judger_name: str | None = None):
         self._judger_name = judger_name or self.__class__.__name__
+
+    async def judge(self, rollout_state: RolloutState) -> RolloutState:
+        raise NotImplementedError(f"{self.__class__.__name__}.judge() is not implemented.")
+
+    async def batch_judge(self, rollout_states: list[RolloutState]) -> list[RolloutState]:
+        raise NotImplementedError(f"{self.__class__.__name__}.batch_judge() is not implemented.")
+
+    def get_judger_name(self) -> str:
+        return self._judger_name
+
+
+class Judger(BaseJudger):
+    """Judger interface with a composable payload contract.
+
+    ``preprocess`` extracts the minimal payload needed for scoring, and
+    ``postprocess`` writes the output back to the original ``RolloutState``.
+    This avoids deep-copying ``RolloutState`` in composed or remote judging,
+    which can introduce subtle object-lifetime risks and unnecessary
+    serialization overhead for large rollout fields.
+    """
 
     def preprocess(self, rollout_state: RolloutState) -> JudgerPayload:
         return {
@@ -126,9 +161,6 @@ class Judger:
 
     async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
         raise NotImplementedError(f"{self.__class__.__name__}.judge_payload() is not implemented.")
-
-    def get_judger_name(self) -> str:
-        return self._judger_name
 
 
 class NativeJudger(Judger):
