@@ -7,7 +7,7 @@ from utils.check_metric import check_result, check_rl_result
 from utils.run_cmd import run_cmd
 
 
-FIRST_RUN_TRACKER_SNAPSHOT = "_first_run_tracker.jsonl"
+FIRST_RUN_TRACKER_SNAPSHOT = "first_run_tracker.jsonl"
 
 
 class Train:
@@ -83,7 +83,11 @@ class Train:
         phase = config.get("phase")
         context = config.get("context", {})
 
-        cur_path = resolve_tracker_path(work_dir, train_type, phase, context=context)
+        run_id = config.get("run_id")
+
+        cur_path = resolve_tracker_path(
+            work_dir, train_type, phase, context=context, run_id=run_id, case_name=case_name
+        )
 
         if train_type == "sft":
             check_metrics = config.get("assert_info", {}).get("check_metrics", {})
@@ -95,7 +99,7 @@ class Train:
             print("Unknown type: {train_type}")
             return False
 
-        snapshot_first_run_tracker(work_dir, phase, cur_path, context=context)
+        snapshot_first_run_tracker(run_id, case_name, train_type, phase, cur_path, context=context)
         return result
 
     def pre_action(config=None):
@@ -131,8 +135,9 @@ def _tracker_path(exp_dir: str | None, train_type: str) -> str:
     return os.path.join(exp_dir, _tracker_relpath(train_type))
 
 
-def _snapshot_path(work_dir: str) -> str:
-    return os.path.join(work_dir, FIRST_RUN_TRACKER_SNAPSHOT)
+def _snapshot_path(run_id: str | None, case_name: str, train_type: str) -> str:
+    snapshot_dir = os.path.join(os.getcwd(), str(run_id or "0"), ".snapshots", case_name, train_type)
+    return os.path.join(snapshot_dir, FIRST_RUN_TRACKER_SNAPSHOT)
 
 
 def _write_first_run_segment(src: str, dst: str) -> None:
@@ -163,12 +168,16 @@ def resolve_tracker_path(
     train_type: str,
     phase: str | None,
     context: dict[str, Any] | None = None,
+    run_id: str | None = None,
+    case_name: str | None = None,
 ) -> str:
     context = context or {}
-    snapshot = context.get("first_run_tracker") or _snapshot_path(work_dir)
+    snapshot = context.get("first_run_tracker")
+    if snapshot is None and case_name is not None:
+        snapshot = _snapshot_path(run_id, case_name, train_type)
 
     if phase == "first":
-        if os.path.isfile(snapshot):
+        if snapshot and os.path.isfile(snapshot):
             return snapshot
 
         subdirs = list_timestamp_subdirs(work_dir)
@@ -178,7 +187,7 @@ def resolve_tracker_path(
             exp_dir = os.path.join(work_dir, subdirs[-1]) if subdirs else None
         live_tracker = _tracker_path(exp_dir, train_type)
 
-        if os.path.isfile(live_tracker) and _has_duplicate_steps(live_tracker):
+        if snapshot and os.path.isfile(live_tracker) and _has_duplicate_steps(live_tracker):
             _write_first_run_segment(live_tracker, snapshot)
             if os.path.isfile(snapshot) and os.path.getsize(snapshot) > 0:
                 return snapshot
@@ -190,14 +199,17 @@ def resolve_tracker_path(
 
 
 def snapshot_first_run_tracker(
-    work_dir: str,
+    run_id: str | None,
+    case_name: str,
+    train_type: str,
     phase: str | None,
     cur_path: str,
     context: dict[str, Any] | None = None,
 ) -> None:
     if phase != "first" or not os.path.isfile(cur_path):
         return
-    snapshot = _snapshot_path(work_dir)
+    snapshot = _snapshot_path(run_id, case_name, train_type)
+    os.makedirs(os.path.dirname(snapshot), exist_ok=True)
     if cur_path != snapshot:
         shutil.copy2(cur_path, snapshot)
     if context is not None:
