@@ -75,6 +75,9 @@ class MuonConfig(OptimConfig):
     adjust_lr: Annotated[
         Literal["rms_norm", "spectral_norm", "none"], Parameter(help="Method for adjusting lr in Muon")
     ] = "rms_norm"
+    enable_all2all: Annotated[
+        bool, Parameter(help="Allow all-to-all comm strategy; set False on topologies where all-to-all is unreliable")
+    ] = True
 
     def build(self, model):
         trainable_parameters_names = model.trainable_parameters()
@@ -197,6 +200,7 @@ class MuonConfig(OptimConfig):
             adjust_lr=self.adjust_lr,
             use_triton=False,
             epsilon=self.eps,
+            enable_all2all=self.enable_all2all,
         )
 
         return optimizer
