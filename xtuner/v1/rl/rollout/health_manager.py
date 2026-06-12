@@ -144,11 +144,20 @@ class RolloutHealthManager:
                 for rank, info in self._workers_info.items()
             }
 
-    def recover_failed_workers(self, reason: str) -> dict[int, bool]:
+    def snapshot_active_workers(self, *, request_entrypoint_only: bool = False) -> list[WorkerSnapshot]:
+        """Return active worker snapshots, optionally only request
+        entrypoints."""
+        return [
+            worker
+            for worker in self.snapshot_workers().values()
+            if worker.active and (not request_entrypoint_only or worker.is_request_entrypoint)
+        ]
+
+    def recover_failed_workers(self) -> dict[int, bool]:
         """Synchronously restart inactive or incomplete worker groups and
         return per-rank recovery results."""
         if self._is_stopping():
-            message = f"RolloutHealthManager is stopped; reject recovery: reason={reason}."
+            message = "RolloutHealthManager is stopped; reject recovery."
             logger.warning(message)
             raise RuntimeError(message)
 
@@ -160,7 +169,7 @@ class RolloutHealthManager:
                 if is_incomplete or any(not worker.active for worker in group.workers):
                     failed_groups.append(group)
             if not failed_groups:
-                logger.info(f"No failed rollout workers detected during recovery: reason={reason}.")
+                logger.info("No failed rollout workers detected during recovery.")
                 return {}
 
             for group in sorted(failed_groups, key=lambda group: group.ranks):
@@ -170,19 +179,16 @@ class RolloutHealthManager:
                 if missing_ranks:
                     logger.error(
                         f"Detected incomplete rollout worker group: group_ranks={group.ranks}, "
-                        f"missing_ranks={missing_ranks}, failed_ranks={failed_ranks}, reason={reason}."
+                        f"missing_ranks={missing_ranks}, failed_ranks={failed_ranks}."
                     )
                 elif len(group.ranks) > 1:
                     related_restart_ranks = [rank for rank in group.ranks if rank not in failed_ranks]
                     logger.warning(
                         f"Detected failed rollout worker ranks={failed_ranks}; "
-                        f"restart_group_ranks={group.ranks}, related_restart_ranks={related_restart_ranks}, "
-                        f"reason={reason}."
+                        f"restart_group_ranks={group.ranks}, related_restart_ranks={related_restart_ranks}."
                     )
                 else:
-                    logger.warning(
-                        f"Detected failed rollout worker rank={failed_ranks[0]}. Initiating recovery: reason={reason}."
-                    )
+                    logger.warning(f"Detected failed rollout worker rank={failed_ranks[0]}. Initiating recovery.")
 
             for group in failed_groups:
                 self._set_group_lifecycle_state(group.ranks, WorkerLifecycleState.RECOVERING)
@@ -237,26 +243,22 @@ class RolloutHealthManager:
                 self._set_group_lifecycle_state(group.ranks, next_lifecycle_state)
             return results
 
-    def ensure_workers_healthy_before_training(self) -> dict[int, bool]:
-        """Run a training barrier health check and recover failed groups before
-        training resumes."""
+    def check_and_recover_workers(self) -> dict[int, bool]:
+        """Run an explicit health check and recover failed worker groups."""
         self._check_active_workers_and_mark_failed_groups()
-        return self.recover_failed_workers(reason="before_training")
+        return self.recover_failed_workers()
 
     def run_once(self) -> None:
         logger.debug("RolloutHealthManager running health checks for all workers.")
         checked_active_count = self._check_active_workers_and_mark_failed_groups()
-        has_active_workers = any(worker.active for worker in self.snapshot_workers().values())
-        if has_active_workers or self._is_stopping():
+        if self.snapshot_active_workers() or self._is_stopping():
             return
 
         if checked_active_count == 0:
             logger.warning("No active rollout workers before health check. Initiating recovery.")
-            reason = "no_active_workers_before_health_check"
         else:
             logger.warning("All rollout workers failed after health check. Initiating recovery.")
-            reason = "all_workers_failed_after_health_check"
-        self.recover_failed_workers(reason=reason)
+        self.recover_failed_workers()
 
     def _is_stopping(self) -> bool:
         """Return whether the health manager is stopping or already stopped."""
@@ -266,8 +268,7 @@ class RolloutHealthManager:
         """Health-check active workers and mark any failed lifecycle group
         inactive."""
         with self._operation_lock:
-            workers_snapshot = self.snapshot_workers()
-            workers_to_check = [worker for worker in workers_snapshot.values() if worker.active]
+            workers_to_check = self.snapshot_active_workers()
 
         if not workers_to_check:
             return 0
@@ -284,11 +285,8 @@ class RolloutHealthManager:
 
         if failed_groups and not self._is_stopping():
             with self._operation_lock:
-                current_workers_snapshot = self.snapshot_workers()
                 active_groups = {
-                    worker.lifecycle_group_ranks or (worker.rank,)
-                    for worker in current_workers_snapshot.values()
-                    if worker.active
+                    worker.lifecycle_group_ranks or (worker.rank,) for worker in self.snapshot_active_workers()
                 }
                 failed_groups = failed_groups & active_groups
                 for group_ranks in failed_groups:

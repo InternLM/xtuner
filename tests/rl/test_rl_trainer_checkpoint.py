@@ -90,7 +90,7 @@ class _FakeRolloutController:
         self.pause_generation = _RemoteMethod(async_result=True)
         self.continue_generation = _RemoteMethod(async_result=True)
         self.offload = _RemoteMethod(return_value="rollout_offloaded")
-        self.ensure_workers_healthy_before_training = _RemoteMethod(return_value="rollout_ready_for_training")
+        self.check_and_recover_workers = _RemoteMethod(return_value="rollout_ready_for_training")
         self.recover_failed_workers = _RemoteMethod(return_value="rollout_recovered")
         self.onload_weights = _RemoteMethod(return_value="weights_loaded")
         self.onload_kvcache = _RemoteMethod(return_value="kvcache_loaded")

@@ -3,7 +3,7 @@ import math
 import os
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, TypeAlias, TypedDict
+from typing import Dict, List, Optional, TypeAlias, TypedDict
 from uuid import uuid4
 
 import ray
@@ -71,6 +71,7 @@ class RolloutWorkerMetadata(TypedDict):
     workers.
     """
 
+    # TODO(@duanyanhui): combine server_url_dict, worker_server_urls_status, worker_session_url_dict, and worker_session_urls_status into a single dict keyed by rank or URL to avoid potential inconsistencies.
     # 推理引擎的拓扑结构，每个子列表代表一个推理引擎包含的所有 worker ranks
     # 例如：[[0, 1, 2, 3], [4, 5, 6, 7]] 表示有 2 个推理引擎，每个引擎包含 4 个 workers
     # 用于确定分布式推理的并行组划分
@@ -135,6 +136,7 @@ class RolloutController:
             self.engine_rank_mesh_array,
             self.worker_server_urls_map,
             self.rank2info,
+            self.server_process_rank2info,
         ) = self._init_workers(placement_group)
         self.worker_info_lock = threading.RLock()
         # The timeout for the environment to wait for the rollout controller's response.
@@ -191,15 +193,6 @@ class RolloutController:
 
         return tool_call_parser, reasoning_parser
 
-    def get_ready_status(self) -> tuple[bool, dict[str, Any]]:
-        workers = self.health_manager.snapshot_workers()
-        active_workers = [worker for worker in workers.values() if worker.is_request_entrypoint]
-        active_worker_count = sum(1 for worker in active_workers if worker.active)
-        return active_worker_count > 0, {
-            "active_workers": active_worker_count,
-            "total_workers": len(active_workers),
-        }
-
     def get_generate_concurrency(self) -> int:
         assert self.config.rollout_max_batch_size_per_instance is not None, (
             "rollout_max_batch_size_per_instance must be set before building AgentLoop."
@@ -207,11 +200,7 @@ class RolloutController:
         concurrency_per_worker = math.ceil(
             self.config.rollout_max_batch_size_per_instance * self.config.allow_over_concurrency_ratio
         )
-        active_worker_count = sum(
-            1
-            for worker in self.health_manager.snapshot_workers().values()
-            if worker.active and worker.is_request_entrypoint
-        )
+        active_worker_count = len(self.health_manager.snapshot_active_workers(request_entrypoint_only=True))
         return active_worker_count * concurrency_per_worker
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
@@ -266,7 +255,7 @@ class RolloutController:
 
     def set_enable_partial_rollout(self, enable: bool) -> None:
         """Propagate enable_partial_rollout flag to all active workers."""
-        active_workers = [worker for worker in self.health_manager.snapshot_workers().values() if worker.active]
+        active_workers = self.health_manager.snapshot_active_workers()
         ray.get(
             [
                 worker.actor.set_enable_partial_rollout.remote(enable)  # type: ignore[attr-defined]
@@ -276,7 +265,7 @@ class RolloutController:
 
     def pause_generation(self):
         self.health_manager.pause()
-        active_workers = [worker for worker in self.health_manager.snapshot_workers().values() if worker.active]
+        active_workers = self.health_manager.snapshot_active_workers()
         futures = [
             worker.actor.pause_generation.remote()  # type: ignore[attr-defined]
             for worker in active_workers
@@ -295,14 +284,13 @@ class RolloutController:
         if failed_worker_urls:
             self.logger.warning(f"Abort request failed: worker_urls={failed_worker_urls}")
 
-    async def ensure_workers_healthy_before_training(self):
-        """Ensure rollout workers are healthy before colocated training
-        onloads."""
+    async def check_and_recover_workers(self):
+        """Run an explicit rollout worker health check and recovery barrier."""
         health_manager_was_paused = self.health_manager.is_paused()
         if not health_manager_was_paused:
             self.health_manager.pause()
         try:
-            await asyncio.to_thread(self.health_manager.ensure_workers_healthy_before_training)
+            await asyncio.to_thread(self.health_manager.check_and_recover_workers)
             inactive_workers = [
                 f"rank={worker.rank}, url={worker.url}"
                 for worker in self.health_manager.snapshot_workers().values()
@@ -310,9 +298,9 @@ class RolloutController:
             ]
             if inactive_workers:
                 raise RuntimeError(
-                    "inactive rollout workers before training: "
+                    "inactive rollout workers after recovery: "
                     + ", ".join(inactive_workers)
-                    + ". Refusing to onload training workers because rollout GPU memory may still be held."
+                    + ". Refusing to continue because rollout worker resources may still be held."
                 )
         finally:
             if not health_manager_was_paused:
@@ -355,7 +343,7 @@ class RolloutController:
         Returns:
             A list of futures if `block` is False, otherwise a list of results.
         """
-        active_workers = [worker for worker in self.health_manager.snapshot_workers().values() if worker.active]
+        active_workers = self.health_manager.snapshot_active_workers()
         futures = [getattr(worker.actor, method_name).remote(**kwargs) for worker in active_workers]
         results = ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
         return results
@@ -417,10 +405,9 @@ class RolloutController:
         expose request-entrypoint server URLs to rollout traffic.
 
         Returns:
-            Same public return contract as origin/main: a tuple of
-            `engine_rank_mesh_array`, `worker_server_urls_map`, and active
-            `workers_info`. All server-process workers are kept
-            internally in `self.server_process_rank2info` for lifecycle management.
+            A tuple of `engine_rank_mesh_array`, `worker_server_urls_map`,
+            active `workers_info`, and all server-process workers for lifecycle
+            management.
         """
         worker_base_cls = self._get_worker_base_cls()
         worker_cls = self._build_remote_worker_cls(worker_base_cls)
@@ -500,7 +487,6 @@ class RolloutController:
         workers_info = {rank: info for rank, info in server_process_workers_info.items() if info.is_request_entrypoint}
 
         active_session_urls_by_rank = {rank: info.session_url for rank, info in workers_info.items()}
-        self.server_process_rank2info = server_process_workers_info
         self.logger.info(
             f"Rollout server-process worker URLs: {[info.url for info in server_process_workers_info.values()]}"
         )
@@ -508,7 +494,7 @@ class RolloutController:
         self.logger.info(f"Rollout worker session server URLs: {active_session_urls_by_rank}")
         lifecycle_groups = sorted({info.lifecycle_group_ranks for info in server_process_workers_info.values()})
         self.logger.info(f"Rollout worker lifecycle groups: {lifecycle_groups}")
-        return engine_rank_mesh_array, worker_server_urls_map, workers_info
+        return engine_rank_mesh_array, worker_server_urls_map, workers_info, server_process_workers_info
 
 
 RayRolloutController = ray.remote(RolloutController)

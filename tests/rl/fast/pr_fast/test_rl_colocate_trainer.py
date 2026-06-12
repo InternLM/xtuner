@@ -147,7 +147,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
 
         trainer.rollout_controller = SimpleNamespace(
-            ensure_workers_healthy_before_training=SimpleNamespace(
+            check_and_recover_workers=SimpleNamespace(
                 remote=MagicMock(return_value="rollout_ready_for_training")
             ),
             offload=SimpleNamespace(remote=MagicMock(return_value="rollout_offloaded")),
@@ -228,8 +228,8 @@ class TestRLColocateTrainer(unittest.TestCase):
             )
 
         trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch))
-        trainer.rollout_controller.ensure_workers_healthy_before_training.remote.side_effect = RuntimeError(
-            "inactive rollout workers before training"
+        trainer.rollout_controller.check_and_recover_workers.remote.side_effect = RuntimeError(
+            "inactive rollout workers after recovery"
         )
 
         with (
@@ -239,7 +239,7 @@ class TestRLColocateTrainer(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "inactive rollout workers"):
                 trainer.fit()
 
-        trainer.rollout_controller.ensure_workers_healthy_before_training.remote.assert_called_once_with()
+        trainer.rollout_controller.check_and_recover_workers.remote.assert_called_once_with()
         trainer.rollout_controller.offload.remote.assert_not_called()
         trainer.train_controller.onload.assert_not_called()
         trainer.train_controller.fit.assert_not_called()
