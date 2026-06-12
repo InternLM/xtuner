@@ -56,6 +56,7 @@ case:
     npu-qwen3-sft-ep8:
         -
             type: sft
+            phase: first
             parameters:
                 config: autotest/config/npu_qwen3_moe_30BA3_ep8.py
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
@@ -80,6 +81,7 @@ case:
             timeout: 10800
         -
             type: sft
+            phase: resume
             pre_action:
                 command: 'python ./autotest/utils/update_meta.py /mnt/hwfile/llmrazor/qa-llm-cicd/test_output npu-qwen3-sft-ep8 sft'
             parameters:

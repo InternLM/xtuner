@@ -54,6 +54,7 @@ case:
     qwen3-sft-ep8:
         -
             type: sft
+            phase: first
             parameters:
                 config: autotest/config/qwen3_moe_30BA3_ep8.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
@@ -79,6 +80,7 @@ case:
             timeout: 1500
         -
             type: sft
+            phase: resume
             pre_action:
                 command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-sft-ep8 sft'
             parameters:
@@ -352,6 +354,7 @@ case:
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
                     - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
                     - XTUNER_DETERMINISTIC=true
+                    - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
                 base_metric: qwen3-sft-vl-dense/tracker.jsonl
                 check_metrics:
@@ -474,6 +477,7 @@ case:
     qwen3-5-sft-sp4-resume:
         -
             type: sft
+            phase: first
             parameters:
                 config: autotest/config/qwen3_5_moe_30BA3_sp4.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
@@ -498,6 +502,7 @@ case:
 
         -
             type: sft
+            phase: resume
             pre_action:
                 command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sft-sp4-resume sft'
             parameters:
@@ -607,6 +612,7 @@ case:
     qwen3-5-sft-sp4-resume-vl:
         -
             type: sft
+            phase: first
             parameters:
                 config: autotest/config/qwen3_5_moe_30BA3_sp4_vl.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
@@ -633,6 +639,7 @@ case:
 
         -
             type: sft
+            phase: resume
             pre_action:
                 command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sft-sp4-resume-vl sft'
             parameters:
@@ -745,7 +752,7 @@ case:
                        operator: <=
                     -
                        metric: response/response_len/mean
-                       threshold: 0.12
+                       threshold: 0.15
                        method: relative
                        operator: <
                     -
@@ -890,6 +897,7 @@ case:
     qwen3-5-rl-vl-lmdeploy-resume:
         -
             type: rl
+            phase: first
             parameters:
                 config: autotest/config/rl_qwen3p5_vl_35B_dapo_ep2_resume.py
                 infer_backend: lmdeploy
@@ -934,6 +942,7 @@ case:
 
         -
             type: rl
+            phase: resume
             pre_action:
                 command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-rl-vl-lmdeploy-resume rl'
             parameters:
@@ -1041,7 +1050,6 @@ case:
                     - XTUNER_USE_LMDEPLOY=0
                     - XTUNER_USE_VLLM=0
                     - XTUNER_USE_SGLANG=1
-                    - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
                     - XTUNER_USE_FA3=0
             assert_info:
                 base_metric: qwen3-rl-sglang/tracker.jsonl

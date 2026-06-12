@@ -21,12 +21,16 @@ def get_report_dir() -> Path:
     return report_dir
 
 
-def report_image_url(case_name: str) -> str:
+def report_suffix_from_phase(phase: str | None) -> str:
+    return "_resume" if phase == "resume" else ""
+
+
+def report_image_url(case_name: str, report_suffix: str = "") -> str:
     run_id = os.environ.get("GITHUB_RUN_ID", "0")
     raw_base = os.environ.get("CI_REPORTS_RAW_URL_BASE", "").rstrip("/") or DEFAULT_RAW_URL_BASE
     device = os.environ.get("DEVICE", "")
     prefix = f"{raw_base}/npu" if device == "npu" else raw_base
-    return f"{prefix}/{run_id}/{case_name}_comparison.png"
+    return f"{prefix}/{run_id}/{case_name}{report_suffix}_comparison.png"
 
 
 def plot_comparison(
@@ -35,6 +39,7 @@ def plot_comparison(
     base_metrics: dict,
     cur_metrics: dict,
     output_root: Path,
+    report_suffix: str = "",
 ) -> Path:
     metric_list = list(metric_keys.keys())
     n_plots = len(metric_list)
@@ -72,9 +77,10 @@ def plot_comparison(
         else:
             ax.axis("off")
 
-    fig.suptitle(f"{case_name}_metrics_comparison", fontsize=16)
+    title = f"{case_name}{report_suffix}_metrics_comparison"
+    fig.suptitle(title, fontsize=16)
     plt.tight_layout()
-    output_path = output_root / f"{case_name}_comparison.png"
+    output_path = output_root / f"{case_name}{report_suffix}_comparison.png"
     plt.savefig(output_path, dpi=100, bbox_inches="tight")
     plt.close()
     return output_path
@@ -118,11 +124,13 @@ def format_jsonl_preview(path: str, label: str) -> str:
     return md
 
 
-def append_case_to_step_summary(case_name: str, base_jsonl: str, cur_jsonl: str) -> None:
+def append_case_to_step_summary(case_name: str, base_jsonl: str, cur_jsonl: str, report_suffix: str = "") -> None:
     summary_file = os.environ.get("GITHUB_STEP_SUMMARY", "./tmp.md")
-    image_url = report_image_url(case_name)
+    image_url = report_image_url(case_name, report_suffix)
+    phase_label = "resume" if report_suffix == "_resume" else None
+    title = f"{case_name} ({phase_label})" if phase_label else case_name
     with open(summary_file, "a", encoding="utf-8") as f:
-        f.write(f"## {case_name} 指标比较图\n")
+        f.write(f"## {title} 指标比较图\n")
         f.write('<div align="center">\n')
         f.write(f'<img src="{image_url}"\n')
         f.write('  style="max-width: 90%; border: 1px solid #ddd; border-radius: 8px;">\n')
@@ -146,10 +154,12 @@ def publish_comparison_report(
     cur_metrics: dict,
     base_jsonl: str,
     cur_jsonl: str,
+    phase: str | None = None,
 ) -> Path:
     """Write comparison PNG under ``{GITHUB_RUN_ID}/`` and append job
     summary."""
+    report_suffix = report_suffix_from_phase(phase)
     output_root = get_report_dir()
-    plot_path = plot_comparison(case_name, metric_keys, base_metrics, cur_metrics, output_root)
-    append_case_to_step_summary(case_name, base_jsonl, cur_jsonl)
+    plot_path = plot_comparison(case_name, metric_keys, base_metrics, cur_metrics, output_root, report_suffix)
+    append_case_to_step_summary(case_name, base_jsonl, cur_jsonl, report_suffix)
     return plot_path
