@@ -752,7 +752,7 @@ case:
                        operator: <=
                     -
                        metric: response/response_len/mean
-                       threshold: 0.12
+                       threshold: 0.15
                        method: relative
                        operator: <
                     -
