@@ -3,7 +3,7 @@
 本文件合并旧的 test_rollout_worker.py 和 test_rollout_utils.py 中不依赖真实模型/后端的测试：
 - SGLangWorker pause/continue 对 abort flag 和 server request 的控制。
 - RolloutWorker abort、abort request timeout 和 in-flight request 取消语义。
-- RolloutHealthChecker 对 inactive/unhealthy worker 的清理逻辑。
+- RolloutHealthManager 对 inactive/unhealthy worker 的生命周期标记逻辑。
 - PartialRolloutHandler 拼接 routed_experts 后释放旧 Ray ObjectRef 的逻辑。
 
 旧 test_rollout_utils.py 中的 TestRolloutControllerRecover 需要真实 Ray controller / lmdeploy backend，
@@ -21,26 +21,25 @@ import httpx
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.rollout.controller import RolloutController
 from xtuner.v1.rl.rollout.sglang import SGLangWorker
-from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, RolloutHealthChecker
+from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, WorkerLifecycleState
 from xtuner.v1.rl.rollout.worker import RolloutWorker
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
 
-class _FakeRemoteMethod:
-    def __init__(self, name, call_log):
-        self.name = name
-        self.call_log = call_log
+class _FakeAsyncRemoteMethod:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
 
     def remote(self):
-        self.call_log.append((self.name, "remote"))
-        return self.name
+        self.calls.append(())
 
+        async def _result():
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
 
-class _FakeWorker:
-    def __init__(self):
-        self.call_log = []
-        self.offload = _FakeRemoteMethod("offload", self.call_log)
-        self.shutdown = _FakeRemoteMethod("shutdown", self.call_log)
+        return _result()
 
 
 class _FakeRolloutRouter:
@@ -391,58 +390,44 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(*(run_case(*case) for case in cases))
 
 
-class TestRolloutHealthChecker(unittest.TestCase):
-    def _build_checker(self, workers_info):
-        config = SimpleNamespace(health_check_interval_seconds=10, health_check_failure_threshold=1)
-        return RolloutHealthChecker(config, workers_info)
+class TestRolloutHealthManager(unittest.TestCase):
+    def _build_manager(self, workers_info, *, failure_threshold=1):
+        config = SimpleNamespace(health_check_interval_seconds=10, health_check_failure_threshold=failure_threshold)
+        return RolloutHealthManager(config, workers_info, worker_infos_lock=threading.RLock())
 
-    def test_shutdown_runs_when_offload_fails(self):
-        # worker 健康检查失败且 offload 也失败时，health checker 应 shutdown 并标记 inactive。
-        worker = _FakeWorker()
-        workers_info = {0: SimpleNamespace(actor=worker, url="http://worker-0", is_active=True)}
-        checker = self._build_checker(workers_info)
+    def test_marks_worker_inactive_after_consecutive_health_failures(self):
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(False))
+        worker_info = WorkerInfo(actor=actor, url="http://worker-0")
+        workers_info = {0: worker_info}
+        manager = self._build_manager(workers_info, failure_threshold=2)
 
-        async def unhealthy_worker(*args, **kwargs):
-            return False
+        manager._check_active_workers_and_mark_failed_groups()
 
-        def ray_get(ref, timeout=None):
-            worker.call_log.append((ref, "get"))
-            if ref == "offload":
-                raise RuntimeError("offload failed")
-            return None
+        self.assertTrue(worker_info.is_active())
+        self.assertEqual(actor.check_health.calls, [()])
 
-        with (
-            patch("xtuner.v1.rl.rollout.utils.check_worker_health", side_effect=unhealthy_worker),
-            patch("xtuner.v1.rl.rollout.utils.ray.get", side_effect=ray_get),
-        ):
-            checker.run_once()
+        manager._check_active_workers_and_mark_failed_groups()
 
-        self.assertFalse(workers_info[0].is_active)
-        self.assertEqual(
-            worker.call_log,
-            [
-                ("offload", "remote"),
-                ("offload", "get"),
-                ("shutdown", "remote"),
-                ("shutdown", "get"),
-            ],
-        )
+        self.assertFalse(worker_info.is_active())
+        self.assertEqual(worker_info.lifecycle_state, WorkerLifecycleState.INACTIVE)
+        self.assertEqual(actor.check_health.calls, [(), ()])
 
     def test_inactive_worker_is_not_cleaned_up_again(self):
-        # 已 inactive 的 worker 不再重复健康检查、offload 或 shutdown。
-        worker = _FakeWorker()
-        workers_info = {0: SimpleNamespace(actor=worker, url="http://worker-0", is_active=False)}
-        checker = self._build_checker(workers_info)
+        # 已 inactive 的 worker 不再重复健康检查。
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
+        workers_info = {
+            0: WorkerInfo(
+                actor=actor,
+                url="http://worker-0",
+                lifecycle_state=WorkerLifecycleState.INACTIVE,
+            )
+        }
+        manager = self._build_manager(workers_info)
 
-        with (
-            patch("xtuner.v1.rl.rollout.utils.check_worker_health") as check_worker_health_mock,
-            patch("xtuner.v1.rl.rollout.utils.ray.get") as ray_get_mock,
-        ):
-            checker.run_once()
+        checked_count = manager._check_active_workers_and_mark_failed_groups()
 
-        check_worker_health_mock.assert_not_called()
-        ray_get_mock.assert_not_called()
-        self.assertEqual(worker.call_log, [])
+        self.assertEqual(checked_count, 0)
+        self.assertEqual(actor.check_health.calls, [])
 
 
 class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):

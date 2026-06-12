@@ -379,12 +379,14 @@ def get_store():
     )
 
 
-# reasoning rl may be not initialized
 def get_existing_store():
     """Return the existing singleton store actor without creating one."""
     global _handle_cache
     if _handle_cache is not None:
         return _handle_cache
+
+    if not ray.is_initialized():
+        return None
 
     try:
         _handle_cache = ray.get_actor(_STORE_NAME, namespace=_STORE_NAMESPACE)
