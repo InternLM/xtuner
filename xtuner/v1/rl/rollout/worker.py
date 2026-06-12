@@ -64,7 +64,10 @@ class ServerProcessSpec:
     # Distributed init address used by every server process in the same engine.
     # Filled after init_dist_port initializes worker-local ports.
     dist_init_addr: str | None = None
-    # Whether this server is the rollout request entrypoint for its engine.
+    # Whether this server is exposed as a rollout request entrypoint. Some
+    # backends launch extra server processes that must participate in
+    # lifecycle/health operations but must not be added to worker_server_urls_map
+    # or receive normal rollout traffic.
     accepts_rollout_requests: bool = True
     # Node index of this server inside a multi-node logical engine.
     node_rank: int = 0
@@ -896,9 +899,6 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.logger.error(f"Health check failed for server {self.server_url}: {e}")
             return False
 
-    def check_health_generate(self) -> bool:
-        return self.check_health()
-
     async def _decode_routed_experts(self, routed_experts: Any) -> Any:
         return routed_experts
 
@@ -1405,6 +1405,10 @@ class RolloutWorker(SingleAcceleratorWorker):
                         f"You should use lmdeploy >= v0.10.2 to support return_token_ids, but current version is {lmdeploy_version}"
                     )
             self.check_flag = False
+
+    @abstractmethod
+    def check_health_generate(self) -> bool:
+        raise NotImplementedError("check_health_generate must be implemented by rollout worker subclasses.")
 
     @abstractmethod
     def _get_request_payload(self, rollout_state: RolloutState) -> dict:

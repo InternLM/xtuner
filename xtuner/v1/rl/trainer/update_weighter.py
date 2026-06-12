@@ -110,11 +110,8 @@ class UpdateWeighter:
         tp = rollout_config.tensor_parallel_size
         ep = rollout_config.expert_parallel_size
         assert tp == 1 or ep == 1, "Either tensor parallel size or engine parallel size must be 1."
-        rollout_server_url = server_url_dict.get(self.rank)
-        if not rollout_server_url:
-            self.logger.error(f"rank {self.rank} has no rollout server url.")
-            self.rollout_url = None
-        elif not worker_server_urls_status.get(rollout_server_url, False):
+        rollout_server_url = server_url_dict.get(self.rank, "")
+        if worker_server_urls_status.get(rollout_server_url, "False") is False:
             self.logger.error(f"Rollout server url {rollout_server_url} is not available.")
             self.rollout_url = None
         else:
@@ -962,7 +959,6 @@ class UpdateWeighter:
         cpu_mesh = self._ensure_rollout_device_mesh()["engine_parallel"]
         cpu_group = cpu_mesh.get_group()
         head_rank = cpu_mesh.mesh[0].item()
-        is_lmdeploy_ep = self.rollout_cfg_info["backend"] == "pytorch" and self.rollout_cfg_info["ep"] > 1
         if self.rollout_url is None:
             self.logger.error(f"rank {self.rank} url in None, cannot update weights and skip")
             return
@@ -1096,9 +1092,7 @@ class UpdateWeighter:
                         group=cpu_group,
                     )
 
-        # LMDeploy EP starts one server per EP rank, and each server owns its
-        # own update endpoint. TP and SGLang still update through the engine head.
-        if dist.get_rank() == head_rank or is_lmdeploy_ep:
+        if dist.get_rank() == head_rank:
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.rollout_cfg_info['api_key']}",
