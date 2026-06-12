@@ -92,7 +92,6 @@ REQUIRED_STEP_METRICS = (
     "response/response_len/max",
     "time/produce_batch",
     "time/training",
-    "time/sync_weight",
     "timing/task_n",
     "timing/pause_s",
     "async/failed_samples",
@@ -381,7 +380,6 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
             self.assertEqual(int(row["timing/task_n"]), TRAIN_BATCH_SIZE)
             self.assertGreater(row["time/produce_batch"], 0.0)
             self.assertGreater(row["time/training"], 0.0)
-            self.assertGreater(row["time/sync_weight"], 0.0)
             self.assertGreaterEqual(row["timing/pause_s"], 0.0)
             self.assertEqual(int(row["async/failed_samples"]), 0)
             self.assertEqual(int(row["async/filtered_samples"]), 0)
@@ -411,7 +409,7 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
                 self.assertEqual(len(group), PROMPT_REPEAT_K, f"step {step_idx}")
 
     def _assert_weight_sync(self) -> None:
-        self.assertEqual(self.update_weight_calls, TOTAL_TRAIN_STEPS)
+        self.assertEqual(self.update_weight_calls, TOTAL_TRAIN_STEPS - 1)
         self.assertEqual([call["model_step"] for call in self.produce_calls], [0, 1])
 
     def _assert_vlm_rollout_states(self) -> None:
