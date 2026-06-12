@@ -16,12 +16,14 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+import httpx
+
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.rollout.controller import RolloutController
 from xtuner.v1.rl.rollout.sglang import SGLangWorker
 from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, RolloutHealthChecker
 from xtuner.v1.rl.rollout.worker import RolloutWorker
-from xtuner.v1.utils.httpx_utils import HttpRequestErrorType
+from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
 
 class _FakeRemoteMethod:
@@ -152,6 +154,45 @@ class TestSGLangWorker(unittest.TestCase):
 
 
 class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
+    def _build_partial_rollout_worker(self, *, eos_token: list[int] | None = None):
+        worker = RolloutWorker.__new__(RolloutWorker)
+        worker.receive_abort_request = threading.Event()
+        worker.enable_partial_rollout = True
+        worker.partial_rollout_handler = PartialRolloutHandler()
+        worker.server_url = "http://test"
+        worker.endpoints = {"generate": "generate", "v1/chat/completions": "v1/chat/completions"}
+        worker.config = SimpleNamespace(api_key="test", max_retry_per_sample=0)
+        worker.eos_token = eos_token or [999]
+        worker.logger = MagicMock()
+        worker._get_request_payload = MagicMock(
+            side_effect=lambda rollout_state: {
+                "input_ids": rollout_state.tokens,
+                "max_tokens": rollout_state.sample_params.max_tokens,
+            }
+        )
+        worker._safe_post_request = AsyncMock()
+        worker._safe_handle_response = AsyncMock()
+        return worker
+
+    def _build_mock_error_rollout_worker(
+        self,
+        *,
+        safe_post_result: HttpRequestResult,
+        safe_handle_response=None,
+    ):
+        worker = RolloutWorker.__new__(RolloutWorker)
+        worker.receive_abort_request = threading.Event()
+        worker.enable_partial_rollout = False
+        worker.server_url = "http://test"
+        worker.endpoints = {"generate": "generate", "v1/chat/completions": "v1/chat/completions"}
+        worker.config = SimpleNamespace(api_key="test", max_retry_per_sample=3)
+        worker.eos_token = [999]
+        worker.logger = MagicMock()
+        worker._get_request_payload = MagicMock(return_value={"input_ids": [1], "max_tokens": 128})
+        worker._safe_post_request = AsyncMock(return_value=safe_post_result)
+        worker._safe_handle_response = AsyncMock(side_effect=safe_handle_response)
+        return worker
+
     async def test_generate_returns_aborted_when_abort_flag_is_set(self):
         # worker 已经收到 abort 时，generate 应直接返回 ABORTED 状态，不再请求后端。
         worker = RolloutWorker.__new__(RolloutWorker)
@@ -221,6 +262,134 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result.response, response)
         response.raise_for_status.assert_called_once_with()
 
+    async def test_partial_rollout_eos_response_completes_without_backend_request(self):
+        # partial rollout 已以 EOS 结束时，应直接完成，不再请求推理后端。
+        worker = self._build_partial_rollout_worker(eos_token=[999])
+        rollout_state = RolloutState(
+            uid=1,
+            message=[],
+            prompt_ids=[10, 11],
+            response_ids=[101, 999],
+            sample_params=SampleParams(max_tokens=8, return_token_ids=True),
+            status=Status.ABORTED,
+        )
+
+        result = await worker.generate(rollout_state)
+
+        self.assertIs(result, rollout_state)
+        self.assertEqual(result.tokens, [10, 11, 101, 999])
+        self.assertEqual(result.finish_reason, "stop")
+        self.assertEqual(result.status, Status.COMPLETED)
+        self.assertEqual(result.response_ids, [101, 999])
+        worker._safe_post_request.assert_not_awaited()
+
+    async def test_partial_rollout_max_tokens_exhausted_completes_without_backend_request(self):
+        # partial rollout 已用完 max_tokens 时，应直接 length 完成，不再继续生成。
+        worker = self._build_partial_rollout_worker()
+        rollout_state = RolloutState(
+            uid=2,
+            message=[],
+            prompt_ids=[10, 11],
+            response_ids=[201, 202, 203],
+            sample_params=SampleParams(max_tokens=3, return_token_ids=True),
+            status=Status.ABORTED,
+        )
+
+        result = await worker.generate(rollout_state)
+
+        self.assertIs(result, rollout_state)
+        self.assertEqual(result.tokens, [10, 11, 201, 202, 203])
+        self.assertEqual(result.sample_params.max_tokens, 0)
+        self.assertEqual(result.finish_reason, "length")
+        self.assertEqual(result.status, Status.COMPLETED)
+        self.assertEqual(result.response_ids, [201, 202, 203])
+        worker._safe_post_request.assert_not_awaited()
+
+    async def test_parallel_mock_rollout_errors_return_failed_status_and_messages(self):
+        # 保留旧 test_mock_rollout.py 的 5 类错误语义，但去掉 Ray actor / placement group / tokenizer 依赖。
+        def request_error_result():
+            req = httpx.Request("POST", "http://test/generate")
+            error = httpx.RequestError("Mocked httpx request error", request=req)
+            return HttpRequestResult(
+                error_type=HttpRequestErrorType.from_exception(error),
+                exception=error,
+                url="http://test/generate",
+                payload={"input_ids": [1]},
+            )
+
+        def timeout_result():
+            error = httpx.TimeoutException("Mocked timeout error")
+            return HttpRequestResult(
+                error_type=HttpRequestErrorType.from_exception(error),
+                exception=error,
+                url="http://test/generate",
+                payload={"input_ids": [1]},
+            )
+
+        def client_error_result():
+            req = httpx.Request("POST", "http://test/generate")
+            response = httpx.Response(400, request=req)
+            error = httpx.HTTPStatusError("Mocked client error", request=req, response=response)
+            return HttpRequestResult(
+                error_type=HttpRequestErrorType.from_exception(error),
+                exception=error,
+                url="http://test/generate",
+                payload={"input_ids": [1]},
+            )
+
+        def server_error_result():
+            req = httpx.Request("POST", "http://test/generate")
+            response = httpx.Response(500, request=req)
+            error = httpx.HTTPStatusError("Mocked server error", request=req, response=response)
+            return HttpRequestResult(
+                error_type=HttpRequestErrorType.from_exception(error),
+                exception=error,
+                url="http://test/generate",
+                payload={"input_ids": [1]},
+            )
+
+        async def invalid_response(rollout_state, http_response):
+            rollout_state.status = Status.FAILED
+            return rollout_state
+
+        cases = [
+            ("timeout", timeout_result(), None, ("Request failed", "3")),
+            ("request_error", request_error_result(), None, ("Request failed", "3")),
+            ("client_error", client_error_result(), None, ("Client error",)),
+            ("server_error", server_error_result(), None, ("Server error",)),
+            (
+                "invalid_response",
+                HttpRequestResult(response=object()),
+                invalid_response,
+                ("Invalid rollout response", "3"),
+            ),
+        ]
+
+        async def run_case(case_name, safe_post_result, safe_handle_response, expected_messages):
+            worker = self._build_mock_error_rollout_worker(
+                safe_post_result=safe_post_result,
+                safe_handle_response=safe_handle_response,
+            )
+            result_state = await worker.generate(RolloutState(message=[{"role": "user", "content": "Hello!"}]))
+            self.assertEqual(
+                result_state.status,
+                Status.FAILED,
+                f"Expected rollout to fail due to {case_name}, but it succeeded.",
+            )
+            self.assertIsNotNone(
+                result_state.error_msg,
+                f"Expected an error message for {case_name} case, but got None.",
+            )
+            for expected in expected_messages:
+                self.assertIn(
+                    expected,
+                    result_state.error_msg,
+                    f"Expected error message to include {expected!r} for {case_name}, got: {result_state.error_msg}",
+                )
+
+        with patch("xtuner.v1.rl.rollout.worker.asyncio.sleep", new=AsyncMock()):
+            await asyncio.gather(*(run_case(*case) for case in cases))
+
 
 class TestRolloutHealthChecker(unittest.TestCase):
     def _build_checker(self, workers_info):
@@ -277,6 +446,89 @@ class TestRolloutHealthChecker(unittest.TestCase):
 
 
 class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
+    async def test_preprocess_and_postprocess_preserve_response_prefix(self):
+        # partial rollout 续写时应复用 prompt+历史 response，并把新 response token 追加到历史后面。
+        rollout_state = RolloutState(
+            uid=1,
+            message=[],
+            prompt_ids=[10, 11],
+            response="old",
+            response_ids=[101, 102],
+            logprobs=[0.1, 0.2],
+            sample_params=SampleParams(max_tokens=5, return_token_ids=True),
+            status=Status.ABORTED,
+        )
+        handler = PartialRolloutHandler()
+
+        out = handler.preprocess(rollout_state, max_tokens=5)
+        self.assertEqual(out.tokens, [10, 11, 101, 102])
+        self.assertEqual(out.sample_params.max_tokens, 3)
+
+        out = await handler.postprocess(
+            out,
+            response="new",
+            response_ids=[201, 202],
+            logprobs=[0.3, 0.4],
+            routed_experts=None,
+            finish_reason="stop",
+            status=Status.COMPLETED,
+            prompt_tokens=4,
+            completion_tokens=2,
+        )
+
+        self.assertEqual(out.response, "oldnew")
+        self.assertEqual(out.response_ids, [101, 102, 201, 202])
+        self.assertEqual(out.logprobs, [0.1, 0.2, 0.3, 0.4])
+        self.assertEqual(out.finish_reason, "stop")
+        self.assertEqual(out.status, Status.COMPLETED)
+
+    async def test_multi_round_partial_rollout_never_exceeds_max_tokens(self):
+        # 多轮 abort + continue 后，累计 response_ids 不应超过原始 max_tokens 预算。
+        max_tokens = 5
+        handler = PartialRolloutHandler()
+        rollout_state = RolloutState(
+            uid=2,
+            message=[],
+            prompt_ids=[10],
+            response="a",
+            response_ids=[101, 102],
+            logprobs=[0.1, 0.2],
+            sample_params=SampleParams(max_tokens=max_tokens, return_token_ids=True),
+            status=Status.ABORTED,
+        )
+
+        rollout_state = handler.preprocess(rollout_state, max_tokens=max_tokens)
+        self.assertEqual(rollout_state.sample_params.max_tokens, 3)
+        rollout_state = await handler.postprocess(
+            rollout_state,
+            response="b",
+            response_ids=[201, 202],
+            logprobs=[0.3, 0.4],
+            routed_experts=None,
+            finish_reason="abort",
+            status=Status.ABORTED,
+            prompt_tokens=3,
+            completion_tokens=2,
+        )
+        self.assertLessEqual(len(rollout_state.response_ids), max_tokens)
+
+        rollout_state = handler.preprocess(rollout_state, max_tokens=max_tokens)
+        self.assertEqual(rollout_state.sample_params.max_tokens, 1)
+        rollout_state = await handler.postprocess(
+            rollout_state,
+            response="c",
+            response_ids=[301],
+            logprobs=[0.5],
+            routed_experts=None,
+            finish_reason="stop",
+            status=Status.COMPLETED,
+            prompt_tokens=5,
+            completion_tokens=1,
+        )
+
+        self.assertEqual(rollout_state.response_ids, [101, 102, 201, 202, 301])
+        self.assertLessEqual(len(rollout_state.response_ids), max_tokens)
+
     async def test_postprocess_frees_old_routed_expert_refs_after_concat(self):
         # partial rollout 拼接 routed_experts 后，应释放历史和当前 ObjectRef，避免长期占用对象存储。
         class FakeObjectRef:
