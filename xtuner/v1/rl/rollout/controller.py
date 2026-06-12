@@ -448,9 +448,11 @@ class RolloutController:
             rank_bundle_idx_list,
             rank_to_dist_init_addr,
         )
-        # Backend builders own server layout differences: LMDeploy EP may launch
-        # one request server per EP rank; SGLang cross-node may launch one server per node.
-        engine_rank_mesh_array = [list(engine_spec.engine_ranks) for engine_spec in engine_launch_specs]
+        # Keep the public metadata mesh compatible with origin/main. Backends
+        # may expose a different update-weight mesh than their internal launch
+        # topology, e.g. LMDeploy EP has one logical engine but one public entry
+        # per request-serving EP rank.
+        engine_rank_mesh_array = worker_base_cls.build_metadata_engine_rank_mesh_array(engine_launch_specs)
 
         # Launch every server process described by the backend-specific specs.
         server_rank_to_url = dict(

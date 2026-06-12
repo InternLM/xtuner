@@ -711,6 +711,18 @@ class RolloutWorker(SingleAcceleratorWorker):
             known_worker_ranks=tuple(rank for rank, _ in rank_bundle_idx_list),
         )
 
+    @classmethod
+    def build_metadata_engine_rank_mesh_array(
+        cls,
+        engine_launch_specs: EngineLaunchSpecs,
+    ) -> list[list[int]]:
+        """Build the public engine mesh returned in rollout metadata.
+
+        By default, the public metadata mesh matches the logical engine topology. Backends with multiple request
+        servers per logical engine can override this to preserve their legacy update-weight mesh semantics.
+        """
+        return [list(engine_spec.engine_ranks) for engine_spec in engine_launch_specs]
+
     def _get_current_server_process_spec(
         self,
         engine_launch_spec: EngineLaunchSpec | None = None,
