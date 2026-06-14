@@ -12,20 +12,22 @@ SM_MARGIN = int(os.environ.get("XTUNER_SM_MARGIN", 0))
 
 
 def get_cuda_autotune_config():
-    return [
-        triton.Config({"BLOCK_N": 64, "BLOCK_K": 256, "GROUP_M": 6}, num_stages=3, num_warps=8),
-        triton.Config({"BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 6}, num_stages=3, num_warps=8),
-        triton.Config({"BLOCK_N": 64, "BLOCK_K": 256, "GROUP_M": 8}, num_stages=3, num_warps=8),
-        triton.Config({"BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 8}, num_stages=3, num_warps=8),
-        triton.Config({"BLOCK_N": 64, "BLOCK_K": 256, "GROUP_M": 10}, num_stages=3, num_warps=8),
-        triton.Config({"BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 10}, num_stages=3, num_warps=8),
-        triton.Config({"BLOCK_N": 64, "BLOCK_K": 256, "GROUP_M": 14}, num_stages=3, num_warps=8),
-        triton.Config({"BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 14}, num_stages=3, num_warps=8),
-        triton.Config({"BLOCK_N": 64, "BLOCK_K": 256, "GROUP_M": 18}, num_stages=3, num_warps=8),
-        triton.Config({"BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 18}, num_stages=3, num_warps=8),
-        triton.Config({"BLOCK_N": 64, "BLOCK_K": 256, "GROUP_M": 22}, num_stages=3, num_warps=8),
-        triton.Config({"BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 22}, num_stages=3, num_warps=8),
-    ]
+    configs = []
+    # Existing extreme-aspect tiles (good when N or K is large).
+    for gm in (6, 8, 10, 14, 18, 22):
+        configs.append(triton.Config({"BLOCK_N": 64, "BLOCK_K": 256, "GROUP_M": gm}, num_stages=3, num_warps=8))
+        configs.append(triton.Config({"BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": gm}, num_stages=3, num_warps=8))
+    # Square / mid-aspect tiles — sweet spot when both N and K are mid-sized.
+    # Specifically helps expert_tp=4 (per-rank N=384 for w1w3, K=192 for w2): with the only
+    # available BLOCK_N=256 / BLOCK_K=256 above, N=384 wastes the second tile and K=192 only
+    # gets 1 inner-loop iteration → num_stages=3 pipeline can't fill. BLOCK_*=128 lets these
+    # shapes tile cleanly (384/128=3, 192/128=2).
+    for gm in (6, 8, 10, 14):
+        configs.append(triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": gm}, num_stages=3, num_warps=8))
+        configs.append(triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": gm}, num_stages=2, num_warps=8))
+        configs.append(triton.Config({"BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": gm}, num_stages=3, num_warps=8))
+        configs.append(triton.Config({"BLOCK_N": 64, "BLOCK_K": 128, "GROUP_M": gm}, num_stages=3, num_warps=8))
+    return configs
 
 
 @triton.jit
@@ -57,6 +59,7 @@ def m_grouped_gemm_bKmajor_kernel(
     m_indices_pad,
     M_pad_ptr,
     M,
+    B_ROWS,
     N: tl.constexpr,
     K: tl.constexpr,
     dtype_a: tl.constexpr,
@@ -80,6 +83,35 @@ def m_grouped_gemm_bKmajor_kernel(
     num_pid_n = tl.cdiv(N, BLOCK_N)
     num_tiles = num_pid_m * num_pid_n
 
+    a_ptr = A.to(tl.pointer_type(dtypeA))
+    b_ptr = B.to(tl.pointer_type(dtypeB))
+    c_ptr = C.to(tl.pointer_type(dtypeC))
+
+    # Hoist A/B descriptors with STATIC shapes so they're loop-invariant; this lets
+    # the outer tile-scheduling loop be software-pipelined. The previous per-tile
+    # construction with dynamic ``group_end`` / ``(group + 1) * N`` was rejected by
+    # Triton's pipeliner ("ttng.tensormap_create op pipeliner doesn't know how to
+    # predicate this op"), forcing ``num_stages=1`` on the outer loop and serializing
+    # descriptor creation with GEMM compute — a real cost at high group count (e.g.
+    # expert_tp=4 doubles the per-block descriptor cycles vs expert_tp=2).
+    #
+    # Correctness with static shapes: A tile rows past ``group_end`` get the *next*
+    # group's tokens (instead of zero from OOB masking). The corresponding output
+    # rows are filtered by the masked ``tl.store`` below, so the polluted values
+    # are never written. Same logic for B's overflow columns past ``(group+1)*N``.
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr,
+        shape=[M, K],
+        strides=[K, 1],
+        block_shape=[BLOCK_M, BLOCK_K],
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr,
+        shape=[B_ROWS, K],
+        strides=[K, 1],
+        block_shape=[BLOCK_N, BLOCK_K],
+    )
+
     for tile_id in tl.range(start_pid, num_tiles, BLOCKS):
         pid_m, pid_n = grouped_launch(tile_id, M_pad, N, BLOCK_M, BLOCK_N, GROUP_M)
 
@@ -93,30 +125,6 @@ def m_grouped_gemm_bKmajor_kernel(
         offs_bn = (pid_n * BLOCK_N).to(tl.int32)
         offs_k = 0
 
-        a_ptr = A.to(tl.pointer_type(dtypeA))
-        b_ptr = B.to(tl.pointer_type(dtypeB))
-        c_ptr = C.to(tl.pointer_type(dtypeC))
-
-        a_desc = tl.make_tensor_descriptor(
-            a_ptr,
-            shape=[group_end, K],
-            strides=[K, 1],
-            block_shape=[BLOCK_M, BLOCK_K],
-        )
-
-        b_desc = tl.make_tensor_descriptor(
-            b_ptr,
-            shape=[(group + 1) * N, K],
-            strides=[K, 1],
-            block_shape=[BLOCK_N, BLOCK_K],
-        )
-        c_desc = tl.make_tensor_descriptor(
-            c_ptr,
-            shape=[group_end, N],
-            strides=[N, 1],
-            block_shape=[BLOCK_M, BLOCK_N],
-        )
-
         accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
             a = a_desc.load([group_start + offs_am, offs_k])
@@ -129,7 +137,17 @@ def m_grouped_gemm_bKmajor_kernel(
         c = accumulator.to(dtypeC)
         offs_cm = group_start
         offs_cn = (pid_n * BLOCK_N).to(tl.int32)
-        c_desc.store([offs_cm, offs_cn], c)
+
+        # Replaces the per-tile TMA C descriptor + ``c_desc.store``. With A/B descriptors
+        # hoisted, ``c_desc`` was the only remaining per-tile ``tensormap_create``; the
+        # pipeliner rejects it, so we mask explicitly here. C is one BLOCK_M x BLOCK_N
+        # tile, much smaller than A/B loads, so losing TMA store hurts less than losing
+        # outer-loop pipelining did.
+        offs_m_range = offs_cm + tl.arange(0, BLOCK_M)
+        offs_n_range = offs_cn + tl.arange(0, BLOCK_N)
+        mask = (offs_m_range[:, None] < group_end) & (offs_n_range[None, :] < N)
+        c_ptrs = c_ptr + offs_m_range[:, None].to(tl.int64) * N + offs_n_range[None, :].to(tl.int64)
+        tl.store(c_ptrs, c, mask=mask)
 
 
 @triton.autotune(configs=get_cuda_autotune_config(), key=["N", "K"])
@@ -145,6 +163,7 @@ def m_grouped_gemm_bNmajor_kernel(
     m_indices_pad,
     M_pad_ptr,
     M,
+    B_ROWS,
     N: tl.constexpr,
     K: tl.constexpr,
     dtype_a: tl.constexpr,
@@ -168,6 +187,26 @@ def m_grouped_gemm_bNmajor_kernel(
     num_pid_n = tl.cdiv(N, BLOCK_N)
     num_tiles = num_pid_m * num_pid_n
 
+    a_ptr = A.to(tl.pointer_type(dtypeA))
+    b_ptr = B.to(tl.pointer_type(dtypeB))
+    c_ptr = C.to(tl.pointer_type(dtypeC))
+
+    # See the matching comment in ``m_grouped_gemm_bKmajor_kernel`` for why A and B
+    # descriptors are hoisted with static shapes (loop-invariant tensormap_create
+    # lets the outer tile loop pipeline) and why C is a masked ``tl.store``.
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr,
+        shape=[M, K],
+        strides=[K, 1],
+        block_shape=[BLOCK_M, BLOCK_K],
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr,
+        shape=[B_ROWS, N],
+        strides=[N, 1],
+        block_shape=[BLOCK_K, BLOCK_N],
+    )
+
     for tile_id in tl.range(start_pid, num_tiles, BLOCKS):
         pid_m, pid_n = grouped_launch(tile_id, M_pad, N, BLOCK_M, BLOCK_N, GROUP_M)
 
@@ -181,29 +220,6 @@ def m_grouped_gemm_bNmajor_kernel(
         offs_bn = (pid_n * BLOCK_N).to(tl.int32)
         offs_k = 0
         offs_bk = 0
-        a_ptr = A.to(tl.pointer_type(dtypeA))
-        b_ptr = B.to(tl.pointer_type(dtypeB))
-        c_ptr = C.to(tl.pointer_type(dtypeC))
-
-        a_desc = tl.make_tensor_descriptor(
-            a_ptr,
-            shape=[group_end, K],
-            strides=[K, 1],
-            block_shape=[BLOCK_M, BLOCK_K],
-        )
-
-        b_desc = tl.make_tensor_descriptor(
-            b_ptr,
-            shape=[(group + 1) * K, N],
-            strides=[N, 1],
-            block_shape=[BLOCK_K, BLOCK_N],
-        )
-        c_desc = tl.make_tensor_descriptor(
-            c_ptr,
-            shape=[group_end, N],
-            strides=[N, 1],
-            block_shape=[BLOCK_M, BLOCK_N],
-        )
 
         accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
@@ -216,9 +232,13 @@ def m_grouped_gemm_bNmajor_kernel(
 
         c = accumulator.to(dtypeC)
         offs_cm = group_start
-
         offs_cn = (pid_n * BLOCK_N).to(tl.int32)
-        c_desc.store([offs_cm, offs_cn], c)
+
+        offs_m_range = offs_cm + tl.arange(0, BLOCK_M)
+        offs_n_range = offs_cn + tl.arange(0, BLOCK_N)
+        mask = (offs_m_range[:, None] < group_end) & (offs_n_range[None, :] < N)
+        c_ptrs = c_ptr + offs_m_range[:, None].to(tl.int64) * N + offs_n_range[None, :].to(tl.int64)
+        tl.store(c_ptrs, c, mask=mask)
 
 
 @triton.jit
@@ -301,6 +321,10 @@ def m_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: 
     triton.set_allocator(alloc_fn)
 
     m_grouped_gemm_kernel = m_grouped_gemm_bKmajor_kernel if trans_b else m_grouped_gemm_bNmajor_kernel
+    # Total row count of the flattened B view used by the hoisted descriptor.
+    # trans_b=True  → B is [num_groups, N, K] viewed as [num_groups * N, K]
+    # trans_b=False → B is [num_groups, K, N] viewed as [num_groups * K, N]
+    B_ROWS = num_groups * (N if trans_b else K)
 
     m_grouped_gemm_kernel[grid](
         A,
@@ -313,6 +337,7 @@ def m_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: 
         m_indices_pad,
         M_pad,
         M,
+        B_ROWS,
         N,
         K,
         dtype_a,
