@@ -178,6 +178,7 @@ class MoE(BaseModel):
     config: MoEConfig
     ep_mesh: DeviceMesh | None = None
     expert_tp_mesh: DeviceMesh | None = None
+    ep_tp_mesh: DeviceMesh | None = None
 
     def __init__(self, config: MoEConfig):
         super().__init__(config)
@@ -200,6 +201,11 @@ class MoE(BaseModel):
                 )
                 self.ep_mesh = _init_mesh[f"{self.config.mesh_prefix}.ep"]
                 self.expert_tp_mesh = _init_mesh[f"{self.config.mesh_prefix}.etp"]
+                # 2D (ep, etp) sub-mesh — needed by GroupedLinear for per-expert column-parallel weights
+                # so HF save can reconstruct the full tensor via `reconstruct_full_tensor`.
+                self.ep_tp_mesh = _init_mesh[
+                    f"{self.config.mesh_prefix}.ep", f"{self.config.mesh_prefix}.etp"
+                ]
             else:
                 _init_mesh = init_device_mesh(
                     DEVICE,
@@ -208,9 +214,11 @@ class MoE(BaseModel):
                 )
                 self.ep_mesh = _init_mesh[f"{self.config.mesh_prefix}.ep"]
                 self.expert_tp_mesh = None
+                self.ep_tp_mesh = None
         else:
             self.ep_mesh = None
             self.expert_tp_mesh = None
+            self.ep_tp_mesh = None
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, type=config.rms_norm_type)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
@@ -848,6 +856,7 @@ class MoE(BaseModel):
                     dispatcher=config.dispatcher,
                     ep_mesh=self.ep_mesh,
                     expert_tp_mesh=self.expert_tp_mesh,
+                    ep_tp_mesh=self.ep_tp_mesh,
                 )
                 if self.config.freeze_routers:
                     layers[str(layer_idx)].gate.requires_grad_(False)
@@ -913,6 +922,7 @@ class MoE(BaseModel):
                 dispatcher=config.dispatcher,
                 ep_mesh=self.ep_mesh,
                 expert_tp_mesh=self.expert_tp_mesh,
+                ep_tp_mesh=self.ep_tp_mesh,
             )
 
             # Wrap decoder layer in MTPLayer

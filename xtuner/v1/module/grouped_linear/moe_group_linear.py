@@ -8,6 +8,7 @@ from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
 from xtuner.v1.ops import group_gemm
+from xtuner.v1.utils.interleaved_shard import InterleavedShard
 
 
 GroupedLinearParallelStyle = Literal["column", "row"]
@@ -24,6 +25,8 @@ class GroupedLinear(nn.Module):
         ep_mesh: DeviceMesh | None = None,
         expert_tp_mesh: DeviceMesh | None = None,
         parallel_style: GroupedLinearParallelStyle | None = None,
+        ep_tp_mesh: DeviceMesh | None = None,
+        num_fused_projections: int = 1,
     ):
         super().__init__()
         self.in_features = in_features
@@ -62,12 +65,50 @@ class GroupedLinear(nn.Module):
             else:
                 raise ValueError(f"Unsupported parallel_style: {self.parallel_style}.")
 
-            # TODO: use DTensor instead of Tensor? for weight load?
-            weight = torch.empty(
-                self.local_num_routed_experts * self.local_out_features,
-                self.local_in_features,
-            )
-            self.weight = nn.Parameter(weight)
+            # When the caller provides the (ep, tp) 2D sub-mesh, wrap the weight in a DTensor so HF save / load
+            # know how this rank's slice maps back to the global tensor. Choice of placement depends on
+            # parallel_style:
+            #   * column-parallel: TP cuts `out_features` inside every local expert → use InterleavedShard
+            #     (per-expert column parallel). EP and TP both slice tensor dim 0.
+            #   * row-parallel:    TP cuts `in_features` → just Shard(1). EP still slices dim 0. Two different
+            #     tensor dims, no shard_order conflict.
+            # Without ep_tp_mesh we fall back to a plain tensor (legacy behavior); the param stays sharded but
+            # cannot be unsharded for HF save.
+            use_dtensor = ep_tp_mesh is not None and self.tp_size > 1
+            if use_dtensor:
+                assert ep_tp_mesh is not None  # for type narrowing
+                assert ep_tp_mesh.ndim == 2, (
+                    f"ep_tp_mesh must be a 2D (ep, tp) sub-mesh, got ndim={ep_tp_mesh.ndim}"
+                )
+                local = torch.empty(
+                    self.local_num_routed_experts * self.local_out_features,
+                    self.local_in_features,
+                )
+                if self.parallel_style == "column":
+                    # `from_local` (not `distribute_tensor`) — the latter goes through redistribute, which
+                    # crashes on the `(Shard, InterleavedShard)` combo (shard_order is None).
+                    # For a fused weight (e.g. fused_w1w3 packing gate_proj + up_proj per expert), the
+                    # per-rank dim has `local_experts * num_fused_projections` stripes — one per (expert,
+                    # fused projection). InterleavedShard must cut INSIDE each stripe so each TP rank ends
+                    # up with the same half of every projection. Passing `num_experts_per_ep` here instead
+                    # of `local_experts * num_fused_projections` swaps the fused projections between TP
+                    # ranks and silently corrupts ``silu(gate) * up``.
+                    num_local_stripes = self.local_num_routed_experts * num_fused_projections
+                    placements: tuple = (
+                        Shard(0),
+                        InterleavedShard(0, num_local_stripes=num_local_stripes),
+                    )
+                else:  # row
+                    placements = (Shard(0), Shard(1))
+                self.weight = nn.Parameter(
+                    DTensor.from_local(local, ep_tp_mesh, placements, run_check=False)
+                )
+            else:
+                weight = torch.empty(
+                    self.local_num_routed_experts * self.local_out_features,
+                    self.local_in_features,
+                )
+                self.weight = nn.Parameter(weight)
         else:
             weight = torch.empty(num_routed_experts * out_features, in_features)
             if self.ep_mesh is not None and self.ep_mesh.size() > 1:
@@ -109,6 +150,8 @@ def build_grouped_linear(
     expert_tp_mesh: DeviceMesh | None = None,
     parallel_style: GroupedLinearParallelStyle | None = None,
     float8_cfg: Float8Config | None = None,
+    ep_tp_mesh: DeviceMesh | None = None,
+    num_fused_projections: int = 1,
 ):
     """Build a grouped linear layer with optional float8 support."""
     if float8_cfg is None or float8_cfg.scaling_granularity_gemm is None:
@@ -120,6 +163,8 @@ def build_grouped_linear(
             ep_mesh=ep_mesh,
             expert_tp_mesh=expert_tp_mesh,
             parallel_style=parallel_style,
+            ep_tp_mesh=ep_tp_mesh,
+            num_fused_projections=num_fused_projections,
         )
     elif float8_cfg.scaling_granularity_grouped_gemm == ScalingGranularity.TILEWISE:
         if expert_tp_mesh is not None and expert_tp_mesh.size() > 1:

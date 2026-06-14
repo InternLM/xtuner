@@ -1,13 +1,12 @@
 import math
-from collections.abc import Callable
-from typing import Any, NamedTuple, cast
+from typing import NamedTuple
 
 import torch
 import torch.distributed as dist
-import torch.distributed.tensor._utils as dtensor_utils
 import torch.nn.functional as F
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.tensor.placement_types import _StridedShard
 
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils.device import get_device
@@ -74,13 +73,59 @@ def _dtensor_shards(tensor: DTensor) -> list[ShardDescriptor]:
 
 
 def _ordered_dtensor_placements(tensor: DTensor) -> list[tuple[int, object]]:
-    # PyTorch keeps this helper private and does not expose it in type stubs, but it is the same ordering logic used
-    # by `compute_local_shape_and_global_offset`. Access it dynamically so mypy does not reject the private symbol.
-    explicit_order_placements = cast(
-        Callable[[Any, Any], list[tuple[int, object]]],
-        getattr(dtensor_utils, "_explicit_order_placements"),
-    )
-    return explicit_order_placements(tensor.device_mesh.shape, tensor.placements)
+    # Return placements expanded into carving order: for each tensor dim that is sharded, emit one
+    # (mesh_dim, Shard(tensor_dim)) entry per mesh dim, listed in the order each mesh dim cuts the
+    # tensor. `_StridedShard` placements are normalized to plain `Shard` so downstream code can
+    # treat every entry as a contiguous slice on its current sub-tensor.
+    #
+    # Algorithm mirrors torch 2.10's `_maybe_convert_StridedShard_to_shard_order`: process
+    # placements right-to-left and, for each `_StridedShard(d, split_factor=sf)`, insert it into
+    # the carving order for its tensor dim at the position where the product of mesh sizes of
+    # already-inserted entries on its right equals `sf`. Plain `Shard` is treated as `sf == 1`,
+    # so it always slots into the outermost free position.
+    #
+    # We re-implement the algorithm here instead of importing torch's helper because the relevant
+    # PyTorch symbol changed across versions (`_explicit_order_placements` in <2.10,
+    # `DTensorSpec._normalize_placements_into_shard_order` in >=2.10) and both are private. Keeping
+    # the math local insulates LoadSpec from future PyTorch refactors.
+    mesh = tensor.device_mesh
+    placements = tensor.placements
+
+    tensor_dim_to_carving_order: dict[int, list[int]] = {}
+    for mesh_dim in reversed(range(len(placements))):
+        placement = placements[mesh_dim]
+        if not isinstance(placement, (Shard, _StridedShard)):
+            continue
+        tensor_dim = placement.dim
+        split_factor = placement.split_factor if isinstance(placement, _StridedShard) else 1
+        carving_order = tensor_dim_to_carving_order.setdefault(tensor_dim, [])
+
+        # Walk the existing carving order from outermost (index 0) inward, accumulating mesh sizes.
+        # The current placement slots in at the position where accumulated size equals split_factor.
+        accumulated = 1
+        inserted = False
+        for position in range(len(carving_order) + 1):
+            if accumulated == split_factor:
+                carving_order.insert(position, mesh_dim)
+                inserted = True
+                break
+            if position < len(carving_order):
+                accumulated *= mesh.size(carving_order[position])
+        if not inserted:
+            # No insertion point matched: split_factor is inconsistent with the cumulative mesh
+            # sizes of the other placements on this tensor dim. The placement is malformed for this
+            # mesh (PyTorch's algorithm would also reject it).
+            raise RuntimeError(
+                f"Cannot place {placement} at mesh dim {mesh_dim} into carving order for tensor "
+                f"dim {tensor_dim}: split_factor {split_factor} does not match any cumulative "
+                f"mesh size produced by the other placements on this dim."
+            )
+
+    ordered: list[tuple[int, object]] = []
+    for tensor_dim in sorted(tensor_dim_to_carving_order):
+        for mesh_dim in tensor_dim_to_carving_order[tensor_dim]:
+            ordered.append((mesh_dim, Shard(tensor_dim)))
+    return ordered
 
 
 class LoadSlice(BaseModel):
@@ -422,6 +467,12 @@ class LoadSpec(BaseModel):
     fused_dim: int | None = None
     shards: list[ShardDescriptor] = Field(default_factory=list)
     origin_shape: tuple[int, ...] | None = None
+    # When True, this tensor's layout cannot be described by the ``shards`` list — typically an
+    # ``InterleavedShard``-bearing DTensor whose spec has ``shard_order=None``. The HF save path
+    # must call :func:`xtuner.v1.utils.interleaved_shard.reconstruct_full_tensor` on the param at
+    # save time to materialize the global tensor, and treat the result as already-unsharded
+    # (i.e. ``shards`` is empty, no per-step all-gather work needed).
+    needs_full_reconstruct: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -465,13 +516,31 @@ class LoadSpec(BaseModel):
             LoadSpec: Spec derived from the runtime tensor layout.
         """
         global_hf_keys = list(hf_keys)
+        # Detect DTensors whose placements cannot be reduced to a carving-order ``Shard`` chain
+        # (e.g. weights with ``InterleavedShard`` at the rightmost mesh dim). For those,
+        # ``_dtensor_shards`` raises ``RuntimeError`` because no consistent ``split_factor``
+        # insertion exists. Mark the spec with ``needs_full_reconstruct=True`` and leave
+        # ``shards`` empty so the per-step all-gather pipeline treats the param as
+        # already-unsharded once the caller has materialized the global tensor.
+        #
+        # Implementation: try ``_dtensor_shards`` and fall back on ``RuntimeError``. This works
+        # on both torch 2.9 (no ``DTensorSpec.shard_order``) and torch 2.10+ (which has it).
+        shards: list[ShardDescriptor] = []
+        needs_full_reconstruct = False
+        if isinstance(tensor, DTensor):
+            try:
+                shards = _dtensor_shards(tensor)
+            except RuntimeError:
+                shards = []
+                needs_full_reconstruct = True
         return cls(
             name=name,
             global_hf_keys=global_hf_keys,
             global_shape=tuple(tensor.shape),
             fused_dim=0 if len(global_hf_keys) > 1 else None,
-            shards=_dtensor_shards(tensor) if isinstance(tensor, DTensor) else [],
+            shards=shards,
             origin_shape=origin_shape,
+            needs_full_reconstruct=needs_full_reconstruct,
         )
 
     def plan_hf_load(self) -> HFLoadPlan:

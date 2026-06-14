@@ -24,9 +24,19 @@ def init_params(param: torch.Tensor, init_fn: Callable[[torch.Tensor], torch.Ten
     device = param.device
 
     if isinstance(param, DTensor):
-        full_param = torch.empty_like(param.full_tensor(), device=device)
-        init_fn(full_param)
-        param.copy_(distribute_tensor(full_param, param.device_mesh, param.placements))
+        # DTensors with `_StridedShard` at the rightmost mesh dim (e.g. InterleavedShard for
+        # per-expert column-parallel MoE weights) cannot go through ``full_tensor()`` /
+        # ``distribute_tensor`` — both depend on ``redistribute`` which has no path for that
+        # layout. Initialize on the local tensor directly. This changes the random seed
+        # distribution vs. "init full then scatter" but is the only path that works.
+        from .interleaved_shard import has_interleaved_placement
+
+        if has_interleaved_placement(param):
+            init_fn(param._local_tensor)
+        else:
+            full_param = torch.empty_like(param.full_tensor(), device=device)
+            init_fn(full_param)
+            param.copy_(distribute_tensor(full_param, param.device_mesh, param.placements))
     else:
         init_fn(param)
 

@@ -964,7 +964,20 @@ class BaseModel(nn.Module):
         buffer_names = {self._clean_param_name(name) for name, _ in self.named_buffers()}
 
         for param, load_spec in params:
-            runtime_tensor = param._local_tensor if isinstance(param, DTensor) else param
+            # InterleavedShard-bearing DTensors (e.g. fused MoE column-parallel weights) have
+            # `shard_order=None`; their layout cannot be described by per-step ShardDescriptors.
+            # Materialize the global tensor up-front via `reconstruct_full_tensor` and treat the
+            # result as already-unsharded by the rest of the save pipeline (load_spec.shards is
+            # empty, so `unshard_tensors_for_hf_save` becomes a no-op for these items).
+            if load_spec.needs_full_reconstruct:
+                assert isinstance(param, DTensor), (
+                    f"needs_full_reconstruct=True implies a DTensor param, got {type(param).__name__}"
+                )
+                from xtuner.v1.utils.interleaved_shard import reconstruct_full_tensor
+
+                runtime_tensor = reconstruct_full_tensor(param)
+            else:
+                runtime_tensor = param._local_tensor if isinstance(param, DTensor) else param
             runtime_is_float8 = is_float8_weight(runtime_tensor)
             is_buffer = load_spec.name in buffer_names
             if runtime_tensor.is_floating_point() and not is_buffer:
@@ -1359,6 +1372,22 @@ class BaseModel(nn.Module):
         if missing_keys:
             return missing_keys
 
+        if load_spec.needs_full_reconstruct:
+            # InterleavedShard-style placements: this rank owns N contiguous "runs" of rows in
+            # the global tensor (one per local expert). Copy each run from the concatenated
+            # HF tensor to the matching slice of the local tensor.
+            assert isinstance(param, DTensor), (
+                f"needs_full_reconstruct=True implies a DTensor param, got {type(param).__name__}"
+            )
+            from xtuner.v1.utils.interleaved_shard import compute_runs
+
+            loaded_tensor = self._cat_safetensors(loaded_tensors, load_plan)
+            local = param._local_tensor  # type: ignore[union-attr]
+            for run in compute_runs(param):
+                loaded_slice = loaded_tensor.narrow(0, run.global_offset[0], run.local_size)
+                local.narrow(0, run.local_start, run.local_size).copy_(loaded_slice)
+            return []
+
         self.safetensors_to_params(
             loaded_tensors,
             local_tensor,
@@ -1428,7 +1457,7 @@ class BaseModel(nn.Module):
     def _compile_overwrite(self, func_name: str, compile_options: TorchCompileOption | None = None):
         """Overwrite a function in a module with a new function.
 
-        Args:
+:
             func_name (str): The name of the function to overwrite.
             new_func (FunctionType): The new function to use.
             module: The module containing the function to overwrite.
@@ -1540,7 +1569,17 @@ class BaseModel(nn.Module):
         ret = {}
         for name, param in module.state_dict().items():  # type: ignore[attr-defined]
             if isinstance(param, DTensor):
-                param = param.full_tensor()
+                from xtuner.v1.utils.interleaved_shard import (
+                    has_interleaved_placement,
+                    reconstruct_full_tensor,
+                )
+
+                if has_interleaved_placement(param):
+                    # `(Shard, InterleavedShard)`-style placements can't be redistributed; use the
+                    # explicit reconstruct path instead of `.full_tensor()`.
+                    param = reconstruct_full_tensor(param)
+                else:
+                    param = param.full_tensor()
             ret[name] = param
         return ret
 

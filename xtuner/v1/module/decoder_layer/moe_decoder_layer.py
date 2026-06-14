@@ -153,6 +153,7 @@ class MoEBlock(nn.Module):
         expert_tp_mesh: DeviceMesh | None = None,
         float8_cfg: Float8Config | None = None,
         moe_act_fn_cfg: MoEActFnConfig,
+        ep_tp_mesh: DeviceMesh | None = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -170,6 +171,8 @@ class MoEBlock(nn.Module):
             expert_tp_mesh=expert_tp_mesh,
             parallel_style="column",
             float8_cfg=float8_cfg,
+            ep_tp_mesh=ep_tp_mesh,
+            num_fused_projections=2,
         )
         self.fused_w2 = build_grouped_linear(
             self.intermediate_size,
@@ -180,6 +183,7 @@ class MoEBlock(nn.Module):
             expert_tp_mesh=expert_tp_mesh,
             parallel_style="row",
             float8_cfg=float8_cfg,
+            ep_tp_mesh=ep_tp_mesh,
         )
         self.moe_act = moe_act_fn_cfg.build()
 
@@ -221,9 +225,11 @@ class MoEDecoderLayer(nn.Module):
         dispatcher: Literal["deepep", "all2all", "agrs"] | None,
         ep_mesh: DeviceMesh | None = None,
         expert_tp_mesh: DeviceMesh | None = None,
+        ep_tp_mesh: DeviceMesh | None = None,
     ):
         super().__init__()
         self.ep_mesh = ep_mesh
+        self.ep_tp_mesh = ep_tp_mesh
         self.hidden_size = hidden_size
         self.n_routed_experts = n_routed_experts
         self.n_shared_experts = n_shared_experts
@@ -277,15 +283,18 @@ class MoEDecoderLayer(nn.Module):
             expert_tp_mesh=expert_tp_mesh,
             float8_cfg=float8_cfg,
             moe_act_fn_cfg=moe_act_fn_cfg,
+            ep_tp_mesh=ep_tp_mesh,
         )
         # TODO: (yehaochen) Maybe should be replaced by build_dispatcher
         process_group = ep_mesh.get_group() if ep_mesh is not None else None
         tp_group = expert_tp_mesh.get_group() if expert_tp_mesh is not None else None
+        ep_tp_group = ep_tp_mesh._flatten().get_group() if ep_tp_mesh is not None else None
         self.dispatcher = build_dispatcher(
             dispatcher=dispatcher,
             n_routed_experts=n_routed_experts,
             ep_group=process_group,
             tp_group=tp_group,
+            ep_tp_group=ep_tp_group,
             training_dtype="fp8" if float8_cfg is not None else "bf16",
             generate_dtype=generate_config.dtype if generate_config is not None else "bf16",
         )
