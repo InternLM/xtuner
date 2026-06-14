@@ -135,6 +135,7 @@ class GenericDispatcher(
         *,
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
         async_op: bool = False,
     ) -> PreDispatch: ...
 
@@ -257,6 +258,7 @@ class NaiveDispatcher(
         *,
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
         async_op: bool = False,
     ) -> NaivePreDispatchResult:
         if async_op:
