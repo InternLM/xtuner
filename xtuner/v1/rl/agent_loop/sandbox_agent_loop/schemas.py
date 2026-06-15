@@ -114,7 +114,7 @@ class EntryRecord(BaseModel):
     mode: str = "sync"
     status: StageStatus = StageStatus.PENDING
 
-    pid_file: str | None = None
+    pid: int | None = None
     rc_file: str | None = None
     stdout_file: str | None = None
     stderr_file: str | None = None
