@@ -26,9 +26,8 @@ class Judger:
         self,
         item: AgentRolloutItem,
         pool: SandboxPool,
-        record: StageRecord | None = None,
+        record: StageRecord,
     ) -> float:
-        record = record or item.judgers.setdefault(self.name, StageRecord(judger_name=self.name))
         try:
             sandbox_name = _judger_sandbox_name(self.stage, pool)
             client = await pool.get(sandbox_name, record=record)
@@ -54,53 +53,6 @@ class Judger:
             raise
 
 
-class ComposeJudger:
-    """Base class for custom composed judgers.
-
-    A composed judger is still a judger from the runner's point of view: it
-    exposes ``run(item, pool, record) -> float`` and owns its top-level record.
-    Child execution order, short-circuiting, and scoring policy belong in the
-    concrete ``run`` implementation instead of framework presets.
-    """
-
-    def __init__(
-        self,
-        judgers: list[Judger | dict[str, Any]],
-        *,
-        name: str = "validate",
-    ):
-        if not judgers:
-            raise ValueError("ComposeJudger.judgers is empty")
-        self.name = name
-        self.judgers = [create_object(judger) for judger in judgers]
-
-    async def run(
-        self,
-        item: AgentRolloutItem,
-        pool: SandboxPool,
-        record: StageRecord | None = None,
-    ) -> float:
-        raise NotImplementedError(f"{type(self).__name__}.run must implement composed judging")
-
-    def _fail(self, record: StageRecord, item: AgentRolloutItem) -> float:
-        record.status = StageStatus.FAILED
-        child_error = next(
-            (child.error for child in item.judgers.values() if child is not record and child.error is not None),
-            None,
-        )
-        record.error = (
-            record.error
-            or child_error
-            or RolloutError(
-                stage=self.name,
-                category="validate_failed",
-                type=type(self).__name__,
-                message="validate failed",
-            )
-        )
-        raise RuntimeError(record.error.message)
-
-
 def _judger_sandbox_name(stage: SandboxStage, pool: SandboxPool) -> str:
     name = stage.sandbox
     if not isinstance(name, str):
@@ -109,4 +61,4 @@ def _judger_sandbox_name(stage: SandboxStage, pool: SandboxPool) -> str:
     return name
 
 
-__all__ = ["ComposeJudger", "Judger"]
+__all__ = ["Judger"]

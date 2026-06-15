@@ -19,7 +19,7 @@ from typing import Any
 
 from lagent.utils import create_object
 
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.judger import ComposeJudger, Judger
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.judger import Judger
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import SandboxPool, SandboxStage
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
@@ -44,7 +44,7 @@ class Runner:
         *,
         pool: SandboxPool | dict[str, Any],
         infer: SandboxStage | dict[str, Any],
-        validate: Judger | ComposeJudger | dict[str, Any],
+        validate: Judger | dict[str, Any],
     ):
         # ``pool`` is stored as a *template*: pass a dict for normal use (a
         # fresh SandboxPool is built per ``run`` call), or pass an already-built
@@ -119,7 +119,7 @@ class Runner:
                 # ─── validate ───────────────────────────────────────────
                 t2 = time.monotonic()
                 with span(uid_obs, "validate", task_id=tid):
-                    validate_name = getattr(self.validate, "name", "validate")
+                    validate_name = self.validate.name
                     validate_record = item.judgers.setdefault(
                         validate_name,
                         StageRecord(judger_name=validate_name),
