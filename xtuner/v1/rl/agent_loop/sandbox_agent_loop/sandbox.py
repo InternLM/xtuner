@@ -329,9 +329,9 @@ class DetachedShellEntry:
         capture: EntryCapture | dict[str, Any],
         failure: EntryFailurePolicy | dict[str, Any] | None = None,
         handshake_timeout_sec: float = 60.0,
-        poll_interval_sec: float = 30.0,
+        poll_interval_sec: float = 60.0,
         pid_check_max_failures: int = 3,
-        pid_check_retry_interval_sec: float = 5.0,
+        pid_check_retry_interval_sec: float = 10.0,
         rc_wait_timeout_sec: float = 10.0,
         rc_poll_interval_sec: float = 1.0,
         output_wait_timeout_sec: float = 5.0,
@@ -478,6 +478,7 @@ class DetachedShellEntry:
                     poll_interval_sec=self.rc_poll_interval_sec,
                 )
                 if rc is None:
+                    sandbox_alive = await _sandbox_alive(client)
                     return EntryOutcome(
                         source="detach_exec",
                         reason="rc_missing",
@@ -487,6 +488,7 @@ class DetachedShellEntry:
                             "polls": polls,
                             "rc_wait_timeout_sec": self.rc_wait_timeout_sec,
                             "rc_poll_interval_sec": self.rc_poll_interval_sec,
+                            "sandbox_alive": sandbox_alive,
                         },
                         result=StageResult(
                             return_code=None,
@@ -503,6 +505,21 @@ class DetachedShellEntry:
             sleep_sec = min(poll, max(0.0, deadline - time.monotonic()))
             if sleep_sec > 0:
                 await asyncio.sleep(sleep_sec)
+
+        rc = await self._read_int_capture_file(client, entry.rc_file)
+        if rc is not None:
+            return _entry_completed_outcome(
+                source="detach_exec",
+                return_code=rc,
+                details={
+                    "pid": pid,
+                    "polls": polls,
+                    "timeout": self.timeout,
+                    "timeout_with_rc": True,
+                    "last_pid_check_error": last_error,
+                    "pid_check_failures": pid_check_failures,
+                },
+            )
 
         return EntryOutcome(
             source="detach_exec",
@@ -833,7 +850,7 @@ class SandboxPool:
         health_max_wait_sec: float = 600.0,
         health_poll_interval_sec: float = 2.0,
         creates_per_sec: float | None = 3.0,
-        creates_burst: int = 8,
+        creates_burst: int = 1,
         create_rate_limit_key: str = "xtuner.sandbox_agent_loop.sandbox_acquire",
     ):
         self._provider = create_object(provider)
@@ -1129,6 +1146,6 @@ def _entry_completed_outcome(
 
 
 def _outcome_error_category(outcome: EntryOutcome) -> str:
-    if outcome.reason in {"timeout", "sandbox_unreachable", "rc_missing"}:
+    if outcome.reason in {"timeout", "pid_monitor_error", "rc_missing"}:
         return outcome.reason
     return outcome.reason or "entry"
