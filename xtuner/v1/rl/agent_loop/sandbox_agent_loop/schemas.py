@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -52,6 +52,17 @@ class RolloutError(BaseModel):
     type: str | None = None
     message: str
     retryable: bool | None = None
+
+
+class AgentArtifacts(TypedDict, total=False):
+    """Canonical artifact keys produced by the infer stage.
+
+    ``AgentRolloutItem.artifacts`` remains an open dict because hooks may also
+    attach diagnostics such as daemon logs or captured entry output.
+    """
+
+    messages: list[dict[str, Any]]
+    response_message: dict[str, Any]
 
 
 class SelectedAgentRecord(BaseModel):
@@ -256,6 +267,7 @@ AgentRolloutItem.model_rebuild()
 
 __all__ = [
     "AgentRolloutItem",
+    "AgentArtifacts",
     "EntryOutcome",
     "EntryRecord",
     "RolloutError",

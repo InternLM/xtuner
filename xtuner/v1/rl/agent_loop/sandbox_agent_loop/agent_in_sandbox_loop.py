@@ -99,21 +99,14 @@ def _resolve_runner(pipeline: Any, session_id: str) -> Any:
 def _load_latest_trace_segment(
     artifacts: dict[str, Any], *, require_tools: bool = False
 ) -> tuple[list[dict[str, Any]], Any]:
-    raw_message = artifacts.get("message")
-    if raw_message is None:
-        return [], None
-    trace = json.loads(raw_message) if isinstance(raw_message, str) else raw_message
-    if isinstance(trace, list) and trace:
-        segment = trace[-1]
-        if not isinstance(segment, dict) or "messages" not in segment:
-            raise ValueError("Agent messages trace segment must contain messages.")
-        messages = segment["messages"]
-        tools = segment.get("tools", _MISSING)
-    elif isinstance(trace, dict):
-        messages = trace.get("messages")
-        tools = trace.get("tools", _MISSING)
-    else:
-        raise ValueError("Agent artifacts must contain a messages trace.")
+    trace = _load_messages_artifact(artifacts)
+    if not trace:
+        raise ValueError("Agent artifacts must contain at least one messages trace segment.")
+    segment = trace[-1]
+    if not isinstance(segment, dict) or "messages" not in segment:
+        raise ValueError("Agent messages trace segment must contain messages.")
+    messages = segment["messages"]
+    tools = segment.get("tools", _MISSING)
     if not isinstance(messages, list):
         raise TypeError("Agent messages trace must be a list.")
     if not all(isinstance(message, dict) for message in messages):
@@ -124,33 +117,73 @@ def _load_latest_trace_segment(
 
 
 def _load_eval_trace_segment(artifacts: dict[str, Any]) -> tuple[list[dict[str, Any]], Any]:
-    raw_message = artifacts.get("message")
-    if raw_message is None:
+    trace = _load_messages_artifact(artifacts, required=False)
+    if not trace:
         return [], None
-    try:
-        trace = json.loads(raw_message) if isinstance(raw_message, str) else raw_message
-    except json.JSONDecodeError:
-        return [], None
-    if isinstance(trace, list) and trace:
-        segment = trace[-1]
-        if not isinstance(segment, dict):
-            return [], None
-        messages = segment.get("messages") or []
-        tools = segment.get("tools")
-    elif isinstance(trace, dict):
-        messages = trace.get("messages") or []
-        tools = trace.get("tools")
-    else:
-        return [], None
+    segment = trace[-1]
+    if not isinstance(segment, dict):
+        raise TypeError("Agent messages trace segment must be a dict.")
+    messages = segment.get("messages") or []
+    tools = segment.get("tools")
     if not isinstance(messages, list):
-        return [], None
+        raise TypeError("Agent messages trace must be a list.")
     if not all(isinstance(message, dict) for message in messages):
-        return [], None
+        raise TypeError("Agent messages trace must contain only dict messages.")
     return messages, tools
+
+
+def _load_messages_artifact(artifacts: dict[str, Any], *, required: bool = True) -> list[dict[str, Any]] | None:
+    if "messages" not in artifacts:
+        if required:
+            raise ValueError("Agent artifacts must contain 'messages'.")
+        return None
+    trace = artifacts["messages"]
+    if not isinstance(trace, list):
+        raise TypeError("Agent artifact 'messages' must be a list.")
+    return trace
+
+
+def _response_text(artifacts: dict[str, Any], *, strict: bool = True) -> str:
+    if "response_message" not in artifacts:
+        return ""
+    response_message = artifacts["response_message"]
+    if not isinstance(response_message, dict):
+        if not strict:
+            return ""
+        raise TypeError("Agent artifact 'response_message' must be a dict.")
+    content = response_message.get("content")
+    if isinstance(content, str):
+        return content
+    if content is not None:
+        return str(content)
+    return ""
 
 
 def _to_json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _count_tool_turns(messages: list[dict[str, Any]]) -> int:
+    return sum(
+        1
+        for message in messages
+        if isinstance(message, dict)
+        and isinstance(message.get("tool_calls"), list)
+        and message["tool_calls"]
+    )
+
+
+def _extract_reward_payload(item: AgentRolloutItem) -> dict[str, Any] | None:
+    for record in item.judgers.values():
+        reward = record.metadata.get("reward")
+        if isinstance(reward, dict):
+            payload = dict(reward)
+            if item.reward is not None:
+                payload.setdefault("score", item.reward)
+            return payload
+    if item.reward is not None:
+        return {"score": item.reward}
+    return None
 
 
 class AgentInSandboxLoopConfig(AgentLoopConfig):
@@ -305,14 +338,33 @@ class AgentInSandboxLoop(AgentLoop):
             self._fill_eval_rollout_state(rollout_state, item)
             return
 
+        response_message_raw = item.artifacts.get("response_message") or {}
+        if item.status == RolloutStatus.COMPLETED and not isinstance(response_message_raw, dict):
+            raise TypeError("Agent artifact 'response_message' must be a dict.")
+        response_message = response_message_raw if isinstance(response_message_raw, dict) else {}
         rollout_state.status = Status.COMPLETED if item.status == RolloutStatus.COMPLETED else Status.FAILED
-        rollout_state.finish_reason = "stop" if item.status == RolloutStatus.COMPLETED else "error"
-        rollout_state.reward = {"score": item.reward} if item.reward is not None else None
+        rollout_state.finish_reason = str(
+            response_message.get("finish_reason") or ("stop" if item.status == RolloutStatus.COMPLETED else "error")
+        )
+        rollout_state.reward = _extract_reward_payload(item)
+        rollout_state.extra_fields["agent_status"] = item.status.value
+        rollout_state.extra_fields["agent_artifacts"] = item.artifacts
+        rollout_state.extra_fields["agent_judgers"] = {
+            name: record.model_dump(mode="json") for name, record in item.judgers.items()
+        }
+        finish_info = response_message.get("finish_info")
+        if isinstance(finish_info, dict) and finish_info:
+            rollout_state.extra_fields["agent_finish_info"] = finish_info
         if item.error is not None:
             rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
         if item.status != RolloutStatus.COMPLETED:
             return
 
+        extra_messages, extra_tools = _load_eval_trace_segment(item.artifacts)
+        if extra_messages:
+            rollout_state.extra_fields["agent_messages"] = extra_messages
+            rollout_state.extra_fields["agent_tools"] = extra_tools
+            rollout_state.extra_fields["agent_tool_turns"] = _count_tool_turns(extra_messages)
         messages, tools = _load_latest_trace_segment(item.artifacts, require_tools=True)
         if not messages:
             raise ValueError("Agent artifacts must contain at least one trainable messages trace.")
@@ -337,11 +389,16 @@ class AgentInSandboxLoop(AgentLoop):
         ]
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
+        rollout_state.response = _response_text(item.artifacts)
 
     def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
         is_success = item.status == RolloutStatus.COMPLETED
+        response_message_raw = item.artifacts.get("response_message") or {}
+        if is_success and not isinstance(response_message_raw, dict):
+            raise TypeError("Agent artifact 'response_message' must be a dict.")
+        response_message = response_message_raw if isinstance(response_message_raw, dict) else {}
         rollout_state.status = Status.COMPLETED
-        rollout_state.finish_reason = "stop" if is_success else "error"
+        rollout_state.finish_reason = str(response_message.get("finish_reason") or ("stop" if is_success else "error"))
         rollout_state.reward = {"score": item.reward if is_success and item.reward is not None else 0.0}
         rollout_state.input_ids = None
         rollout_state.labels = None
@@ -351,10 +408,23 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.response_mask = None
         rollout_state.response_model_steps = None
         rollout_state.extra_fields["agent_status"] = item.status.value
+        rollout_state.extra_fields["agent_artifacts"] = item.artifacts
+        rollout_state.extra_fields["agent_judgers"] = {
+            name: record.model_dump(mode="json") for name, record in item.judgers.items()
+        }
         if item.error is not None:
             rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
 
-        rollout_state.response = str(item.artifacts.get("agent_response") or "")
+        rollout_state.response = _response_text(item.artifacts, strict=is_success)
+        finish_info = response_message.get("finish_info")
+        if isinstance(finish_info, dict) and finish_info:
+            rollout_state.extra_fields["agent_finish_info"] = finish_info
+        if not is_success:
+            return
+
         messages, tools = _load_eval_trace_segment(item.artifacts)
         if messages:
             rollout_state.extra_fields["agent_trajectory"] = _to_json_safe({"messages": messages, "tools": tools})
+            rollout_state.extra_fields["agent_messages"] = messages
+            rollout_state.extra_fields["agent_tools"] = tools
+            rollout_state.extra_fields["agent_tool_turns"] = _count_tool_turns(messages)
