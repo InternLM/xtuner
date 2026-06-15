@@ -88,14 +88,13 @@ class DiagnosticFile:
     def __post_init__(self) -> None:
         if (self.path is None) == (self.entry_file is None):
             raise ValueError("DiagnosticFile requires exactly one of path= or entry_file=")
-        if self.entry_file is not None and self.entry_file not in {"pid", "rc", "stdout", "stderr"}:
-            raise ValueError("DiagnosticFile.entry_file must be one of: pid, rc, stdout, stderr")
+        if self.entry_file is not None and self.entry_file not in {"rc", "stdout", "stderr"}:
+            raise ValueError("DiagnosticFile.entry_file must be one of: rc, stdout, stderr")
 
     def resolve_path(self, entry: EntryRecord) -> str:
         if self.path is not None:
             return self.path
         entry_paths = {
-            "pid": entry.pid_file,
             "rc": entry.rc_file,
             "stdout": entry.stdout_file,
             "stderr": entry.stderr_file,
@@ -190,237 +189,13 @@ class EntryFailurePolicy:
         return outcome
 
 
-class EntryMonitorProbe:
-    """One configured monitor probe for a detached entry."""
-
-    def __init__(self, *, interval_sec: float):
-        self.interval_sec = interval_sec
-
-    async def probe(
-        self,
-        client: Any,
-        item: AgentRolloutItem,
-        entry: EntryRecord,
-        state: dict[str, Any],
-    ) -> EntryOutcome | None:
-        raise NotImplementedError
-
-    async def _download_file(self, client: Any, path: str, timeout_sec: float = 5.0) -> bytes | None:
-        if not path:
-            return None
-        try:
-            return await asyncio.wait_for(client.download_file(path), timeout=timeout_sec)
-        except Exception:
-            return None
-
-    async def _read_int_file(self, client: Any, path: str) -> int | None:
-        blob = await self._download_file(client, path)
-        if blob is None:
-            return None
-        try:
-            return int(blob.decode(errors="replace").strip())
-        except ValueError:
-            return None
-
-    async def _pid_alive(self, client: Any, pid: int, timeout_sec: float) -> bool | None:
-        try:
-            res = await exec_in(
-                client,
-                f"kill -0 {pid} 2>/dev/null && echo Y || echo N",
-                raise_on_error=False,
-                timeout_sec=timeout_sec,
-            )
-        except Exception:
-            return None
-        out = (res.get("stdout") or "").strip()
-        if "Y" in out:
-            return True
-        if "N" in out:
-            return False
-        return None
-
-
-class ReturnCodeFileCompletion(EntryMonitorProbe):
-    """Finish condition: the detached wrapper has written its rc file."""
-
-    def __init__(self, *, interval_sec: float = 2.0):
-        super().__init__(interval_sec=interval_sec)
-
-    async def probe(
-        self,
-        client: Any,
-        item: AgentRolloutItem,
-        entry: EntryRecord,
-        state: dict[str, Any],
-    ) -> EntryOutcome | None:
-        rc = await self._read_int_file(client, entry.rc_file or "")
-        if rc is None:
-            return None
-        get_logger().debug("[%s] entry %s finished rc=%s", item.id, entry.name, rc)
-        return EntryOutcome(
-            source=type(self).__name__,
-            reason="entry_completed" if rc == 0 else "entry_failed",
-            result=StageResult(return_code=rc, error=None if rc == 0 else f"return_code={rc}"),
-        )
-
-
-class SandboxHealthCheck(EntryMonitorProbe):
-    """Failure condition: the sandbox client health endpoint is unreachable."""
-
-    def __init__(self, *, interval_sec: float = 10.0, probe_timeout_sec: float = 10.0, fail_after: int = 3):
-        super().__init__(interval_sec=interval_sec)
-        self.probe_timeout_sec = probe_timeout_sec
-        self.fail_after = fail_after
-
-    async def probe(
-        self,
-        client: Any,
-        item: AgentRolloutItem,
-        entry: EntryRecord,
-        state: dict[str, Any],
-    ) -> EntryOutcome | None:
-        if await _sandbox_alive(client, self.probe_timeout_sec):
-            state["failures"] = 0
-            return None
-        failures = int(state.get("failures") or 0) + 1
-        state["failures"] = failures
-        if failures < self.fail_after:
-            return None
-        return EntryOutcome(
-            source=type(self).__name__,
-            reason="sandbox_unreachable",
-            retryable=True,
-            details={"failures": failures, "fail_after": self.fail_after},
-            result=StageResult(
-                return_code=None,
-                stderr=f"[{item.id}] sandbox unreachable while waiting for entry {entry.name}",
-                error="sandbox unreachable",
-            ),
-        )
-
-
-class EntryProcessHealthCheck(EntryMonitorProbe):
-    """Failure condition: the detached wrapper pid disappears before rc is written."""
-
-    def __init__(self, *, interval_sec: float = 10.0, probe_timeout_sec: float = 10.0, fail_after: int = 2):
-        super().__init__(interval_sec=interval_sec)
-        self.probe_timeout_sec = probe_timeout_sec
-        self.fail_after = fail_after
-
-    async def probe(
-        self,
-        client: Any,
-        item: AgentRolloutItem,
-        entry: EntryRecord,
-        state: dict[str, Any],
-    ) -> EntryOutcome | None:
-        pid = await self._read_int_file(client, entry.pid_file or "")
-        if pid is None:
-            missing_pid_file = int(state.get("missing_pid_file") or 0) + 1
-            state["missing_pid_file"] = missing_pid_file
-            if missing_pid_file < self.fail_after:
-                return None
-            rc = await self._read_int_file(client, entry.rc_file or "")
-            if rc is not None:
-                return EntryOutcome(
-                    source=type(self).__name__,
-                    reason="entry_completed" if rc == 0 else "entry_failed",
-                    result=StageResult(return_code=rc, error=None if rc == 0 else f"return_code={rc}"),
-                )
-            return EntryOutcome(
-                source=type(self).__name__,
-                reason="pid_file_missing",
-                retryable=True,
-                details={"missing_pid_file": missing_pid_file, "fail_after": self.fail_after},
-                result=StageResult(
-                    return_code=None,
-                    stderr=f"[{item.id}] entry {entry.name} pid file was not written",
-                    error="entry pid file missing",
-                ),
-            )
-        state["missing_pid_file"] = 0
-        alive = await self._pid_alive(client, pid, self.probe_timeout_sec)
-        if alive is True:
-            state["missing"] = 0
-            return None
-        if alive is not False:
-            return None
-        missing = int(state.get("missing") or 0) + 1
-        state["missing"] = missing
-        if missing < self.fail_after:
-            return None
-        rc = await self._read_int_file(client, entry.rc_file or "")
-        if rc is not None:
-            return EntryOutcome(
-                source=type(self).__name__,
-                reason="entry_completed" if rc == 0 else "entry_failed",
-                result=StageResult(return_code=rc, error=None if rc == 0 else f"return_code={rc}"),
-            )
-        return EntryOutcome(
-            source=type(self).__name__,
-            reason="pid_lost",
-            retryable=True,
-            details={"pid": pid, "missing": missing, "fail_after": self.fail_after},
-            result=StageResult(
-                return_code=None,
-                stderr=f"[{item.id}] entry {entry.name} pid {pid} gone without rc file",
-                error="entry pid lost",
-            ),
-        )
-
-
-class EntryMonitor:
-    """Run configured completion/health probes until one returns a result."""
-
-    def __init__(
-        self,
-        *,
-        timeout: int,
-        probes: list[EntryMonitorProbe | dict[str, Any]],
-    ):
-        self.timeout = timeout
-        self.probes = [create_object(probe) for probe in probes]
-        if not self.probes:
-            raise ValueError("EntryMonitor requires at least one probe")
-
-    async def wait(self, client: Any, item: AgentRolloutItem, entry: EntryRecord) -> EntryOutcome:
-        start = time.monotonic()
-        next_probe = [start for _ in self.probes]
-        states: list[dict] = [{} for _ in self.probes]
-
-        while True:
-            now = time.monotonic()
-            if now - start > self.timeout:
-                return EntryOutcome(
-                    source=type(self).__name__,
-                    reason="timeout",
-                    retryable=True,
-                    details={"timeout": self.timeout},
-                    result=StageResult(
-                        return_code=None,
-                        stderr=f"[{item.id}] entry {entry.name} exceeded max runtime {self.timeout}s",
-                        error=f"entry {entry.name} timed out",
-                    ),
-                )
-
-            for idx, probe in enumerate(self.probes):
-                if now < next_probe[idx]:
-                    continue
-                result = await probe.probe(client, item, entry, states[idx])
-                if result is not None:
-                    return result
-                next_probe[idx] = now + probe.interval_sec
-
-            sleep_until = min([*next_probe, start + self.timeout])
-            await asyncio.sleep(max(0.2, min(1.0, sleep_until - time.monotonic())))
-
-
 class EntryCapture:
     """Sandbox files written by a detached entry wrapper.
 
-    These files are the contract consumed by monitor probes and diagnostics:
-    ``pid`` and ``rc`` are used to observe completion, while ``stdout`` and
-    ``stderr`` capture the command output.
+    Client pid polling observes completion from ``execute(detach=True)``.
+    These files carry the shell result after that point. ``stdout`` and
+    ``stderr`` are copied into the same :class:`StageResult` shape used by
+    synchronous entries.
     """
 
     def __init__(self, *, root: str = "/tmp", prefix: str = "xt_entry"):
@@ -429,7 +204,6 @@ class EntryCapture:
 
     def bind(self, entry: EntryRecord) -> None:
         base = f"{self.root}/{self.prefix}_{entry.id}"
-        entry.pid_file = f"{base}.pid"
         entry.rc_file = f"{base}.rc"
         entry.stdout_file = f"{base}.stdout"
         entry.stderr_file = f"{base}.stderr"
@@ -493,15 +267,11 @@ class ShellEntry:
         )
         rc = _result_code(exec_res)
         stderr = exec_res.get("stderr") or ""
-        return EntryOutcome(
+        return _entry_completed_outcome(
             source="sync_exec",
-            reason="entry_completed" if rc == 0 else "entry_failed",
-            result=StageResult(
-                stdout=exec_res.get("stdout") or "",
-                stderr=stderr,
-                return_code=rc,
-                error=None if rc == 0 else f"return_code={rc}: {stderr[:400]}",
-            ),
+            return_code=rc,
+            stdout=exec_res.get("stdout") or "",
+            stderr=stderr,
         )
 
     def _new_record(self) -> EntryRecord:
@@ -540,7 +310,14 @@ class ShellEntry:
 
 
 class DetachedShellEntry:
-    """One detached shell entry using the capture/rc completion protocol."""
+    """One detached shell entry observed through client pid polling.
+
+    The sandbox wrapper writes stdout/stderr/rc files.  Completion is observed
+    by polling the detached pid returned by ``execute(detach=True)``.  Once the
+    pid is no longer running, stdout/stderr/rc are read with short retry
+    windows and normalized into the same :class:`StageResult` shape as
+    synchronous entries.
+    """
 
     def __init__(
         self,
@@ -550,9 +327,15 @@ class DetachedShellEntry:
         timeout: int = 600,
         env: dict[str, str] | None = None,
         capture: EntryCapture | dict[str, Any],
-        monitor: EntryMonitor | dict[str, Any],
         failure: EntryFailurePolicy | dict[str, Any] | None = None,
         handshake_timeout_sec: float = 60.0,
+        poll_interval_sec: float = 30.0,
+        pid_check_max_failures: int = 3,
+        pid_check_retry_interval_sec: float = 5.0,
+        rc_wait_timeout_sec: float = 10.0,
+        rc_poll_interval_sec: float = 1.0,
+        output_wait_timeout_sec: float = 5.0,
+        output_poll_interval_sec: float = 1.0,
     ):
         self.cmd = cmd
         self.name = name
@@ -560,8 +343,14 @@ class DetachedShellEntry:
         self.env = dict(env or {})
         self.failure = create_object(failure) if failure is not None else None
         self.capture = create_object(capture)
-        self.monitor = create_object(monitor)
         self.handshake_timeout_sec = handshake_timeout_sec
+        self.poll_interval_sec = poll_interval_sec
+        self.pid_check_max_failures = pid_check_max_failures
+        self.pid_check_retry_interval_sec = pid_check_retry_interval_sec
+        self.rc_wait_timeout_sec = rc_wait_timeout_sec
+        self.rc_poll_interval_sec = rc_poll_interval_sec
+        self.output_wait_timeout_sec = output_wait_timeout_sec
+        self.output_poll_interval_sec = output_poll_interval_sec
 
     async def run(
         self,
@@ -613,18 +402,18 @@ class DetachedShellEntry:
         entry: EntryRecord,
         env: dict[str, str],
     ) -> EntryOutcome:
-        assert entry.pid_file and entry.rc_file and entry.stdout_file and entry.stderr_file
-        pid_file = shlex.quote(entry.pid_file)
+        assert entry.rc_file and entry.stdout_file and entry.stderr_file
         rc_file = shlex.quote(entry.rc_file)
         stdout_file = shlex.quote(entry.stdout_file)
         stderr_file = shlex.quote(entry.stderr_file)
         wrapped = (
-            f"rm -f {pid_file} {rc_file} {stdout_file} {stderr_file}; "
-            f"echo $$ > {pid_file}; "
+            f"rm -f {rc_file} {stdout_file} {stderr_file}; "
             f"({self.cmd}) > {stdout_file} 2> {stderr_file}; "
-            f"echo $? > {rc_file}"
+            f"rc=$?; "
+            f"printf '%s\\n' \"$rc\" > {rc_file}; "
+            f'exit "$rc"'
         )
-        await exec_in(
+        launch_result = await exec_in(
             client,
             wrapped,
             env=env,
@@ -632,19 +421,176 @@ class DetachedShellEntry:
             raise_on_error=True,
             detach=True,
         )
-        return await self.monitor.wait(client, item, entry)
+        pid = int(launch_result["pid"])
+        entry.pid = pid
+        return await self._wait_with_pid_poll(client, item, entry, pid)
+
+    async def _wait_with_pid_poll(
+        self,
+        client: Any,
+        item: AgentRolloutItem,
+        entry: EntryRecord,
+        pid: int,
+    ) -> EntryOutcome:
+        is_pid_running = client.is_pid_running
+        deadline = time.monotonic() + self.timeout
+        poll = max(0.2, self.poll_interval_sec)
+        polls = 0
+        last_error: str | None = None
+        pid_check_failures = 0
+        while time.monotonic() <= deadline:
+            polls += 1
+            try:
+                running = await is_pid_running(pid)
+                last_error = None
+                pid_check_failures = 0
+            except httpx.HTTPError as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                pid_check_failures += 1
+                if pid_check_failures >= self.pid_check_max_failures:
+                    return EntryOutcome(
+                        source="detach_exec",
+                        reason="pid_monitor_error",
+                        retryable=True,
+                        details={
+                            "pid": pid,
+                            "polls": polls,
+                            "pid_check_failures": pid_check_failures,
+                            "pid_check_retry_interval_sec": self.pid_check_retry_interval_sec,
+                            "error": last_error,
+                        },
+                        result=StageResult(
+                            return_code=None,
+                            stderr=f"[{item.id}] entry {entry.name} failed to query pid {pid}: {last_error}",
+                            error="detached entry pid monitor failed",
+                        ),
+                    )
+                retry_sleep = min(self.pid_check_retry_interval_sec, max(0.0, deadline - time.monotonic()))
+                if retry_sleep > 0:
+                    await asyncio.sleep(retry_sleep)
+                continue
+
+            if not running:
+                rc = await self._wait_int_capture_file(
+                    client,
+                    entry.rc_file,
+                    timeout_sec=self.rc_wait_timeout_sec,
+                    poll_interval_sec=self.rc_poll_interval_sec,
+                )
+                if rc is None:
+                    return EntryOutcome(
+                        source="detach_exec",
+                        reason="rc_missing",
+                        retryable=True,
+                        details={
+                            "pid": pid,
+                            "polls": polls,
+                            "rc_wait_timeout_sec": self.rc_wait_timeout_sec,
+                            "rc_poll_interval_sec": self.rc_poll_interval_sec,
+                        },
+                        result=StageResult(
+                            return_code=None,
+                            stderr=f"[{item.id}] entry {entry.name} pid {pid} exited without rc file",
+                            error="detached entry rc missing",
+                        ),
+                    )
+                return _entry_completed_outcome(
+                    source="detach_exec",
+                    return_code=rc,
+                    details={"pid": pid, "polls": polls},
+                )
+
+            sleep_sec = min(poll, max(0.0, deadline - time.monotonic()))
+            if sleep_sec > 0:
+                await asyncio.sleep(sleep_sec)
+
+        return EntryOutcome(
+            source="detach_exec",
+            reason="timeout",
+            retryable=True,
+            details={
+                "pid": pid,
+                "polls": polls,
+                "timeout": self.timeout,
+                "last_pid_check_error": last_error,
+                "pid_check_failures": pid_check_failures,
+                "pid_check_retry_interval_sec": self.pid_check_retry_interval_sec,
+            },
+            result=StageResult(
+                return_code=None,
+                stderr=f"[{item.id}] entry {entry.name} pid {pid} exceeded max runtime {self.timeout}s",
+                error=f"entry {entry.name} timed out",
+            ),
+        )
+
+    async def _read_int_capture_file(self, client: Any, path: str | None) -> int | None:
+        if not path:
+            return None
+        blob = await self._read_capture_file(client, path)
+        if blob is None:
+            return None
+        try:
+            return int(blob.strip())
+        except ValueError:
+            return None
+
+    async def _wait_int_capture_file(
+        self,
+        client: Any,
+        path: str | None,
+        *,
+        timeout_sec: float,
+        poll_interval_sec: float,
+    ) -> int | None:
+        deadline = time.monotonic() + timeout_sec
+        poll = max(0.1, poll_interval_sec)
+        while time.monotonic() <= deadline:
+            value = await self._read_int_capture_file(client, path)
+            if value is not None:
+                return value
+            sleep_sec = min(poll, max(0.0, deadline - time.monotonic()))
+            if sleep_sec > 0:
+                await asyncio.sleep(sleep_sec)
+        return None
 
     async def _fill_output_files(self, client: Any, entry: EntryRecord, result: StageResult) -> None:
+        tasks = []
         if entry.stdout_file:
-            stdout = await self._read_capture_file(client, entry.stdout_file)
-            if stdout is not None:
-                result.stdout = stdout
+            tasks.append(
+                (
+                    "stdout",
+                    asyncio.create_task(self._wait_capture_file(client, entry.stdout_file)),
+                )
+            )
         if entry.stderr_file:
-            stderr = await self._read_capture_file(client, entry.stderr_file)
-            if stderr is not None:
-                result.stderr = stderr
+            tasks.append(
+                (
+                    "stderr",
+                    asyncio.create_task(self._wait_capture_file(client, entry.stderr_file)),
+                )
+            )
+        for name, task in tasks:
+            value = await task
+            if value is None:
+                continue
+            if name == "stdout":
+                result.stdout = value
+            else:
+                result.stderr = value
                 if result.return_code is not None and result.return_code > 0:
-                    result.error = f"return_code={result.return_code}: {stderr[:400]}"
+                    result.error = f"return_code={result.return_code}: {value[:400]}"
+
+    async def _wait_capture_file(self, client: Any, path: str) -> str | None:
+        deadline = time.monotonic() + self.output_wait_timeout_sec
+        poll = max(0.1, self.output_poll_interval_sec)
+        while time.monotonic() <= deadline:
+            value = await self._read_capture_file(client, path)
+            if value is not None:
+                return value
+            sleep_sec = min(poll, max(0.0, deadline - time.monotonic()))
+            if sleep_sec > 0:
+                await asyncio.sleep(sleep_sec)
+        return None
 
     async def _read_capture_file(self, client: Any, path: str, timeout_sec: float = 5.0) -> str | None:
         try:
@@ -1161,7 +1107,28 @@ def _result_code(exec_res: dict[str, Any]) -> int:
     return int(rc)
 
 
+def _entry_completed_outcome(
+    *,
+    source: str,
+    return_code: int,
+    stdout: str = "",
+    stderr: str = "",
+    details: dict[str, Any] | None = None,
+) -> EntryOutcome:
+    return EntryOutcome(
+        source=source,
+        reason="entry_completed" if return_code == 0 else "entry_failed",
+        details=details or {},
+        result=StageResult(
+            stdout=stdout,
+            stderr=stderr,
+            return_code=return_code,
+            error=None if return_code == 0 else f"return_code={return_code}: {stderr[:400]}",
+        ),
+    )
+
+
 def _outcome_error_category(outcome: EntryOutcome) -> str:
-    if outcome.reason in {"timeout", "sandbox_unreachable", "pid_lost", "pid_file_missing"}:
-        return "pid_lost" if outcome.reason == "pid_file_missing" else outcome.reason
+    if outcome.reason in {"timeout", "sandbox_unreachable", "rc_missing"}:
+        return outcome.reason
     return outcome.reason or "entry"
