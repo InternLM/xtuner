@@ -41,7 +41,6 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import (
     ShellEntry,
 )
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
-    AgentArtifacts,
     AgentRolloutItem,
     AgentSpec,
     RolloutError,
@@ -58,7 +57,6 @@ __all__ = [
     "AgentInSandboxLoop",
     "AgentInSandboxLoopConfig",
     "AgentSpec",
-    "AgentArtifacts",
     "AgentRolloutItem",
     "DiagnosticFile",
     "DetachedShellEntry",

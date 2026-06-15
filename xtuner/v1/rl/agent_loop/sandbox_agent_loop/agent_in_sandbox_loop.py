@@ -143,20 +143,33 @@ def _load_messages_artifact(artifacts: dict[str, Any], *, required: bool = True)
     return trace
 
 
-def _response_text(artifacts: dict[str, Any], *, strict: bool = True) -> str:
+def _response_message(artifacts: dict[str, Any], *, required: bool) -> dict[str, Any]:
     if "response_message" not in artifacts:
-        return ""
+        if required:
+            raise KeyError("Agent artifacts must contain 'response_message'.")
+        return {}
     response_message = artifacts["response_message"]
     if not isinstance(response_message, dict):
-        if not strict:
-            return ""
         raise TypeError("Agent artifact 'response_message' must be a dict.")
+    return response_message
+
+
+def _response_text(response_message: dict[str, Any]) -> str:
     content = response_message.get("content")
-    if isinstance(content, str):
-        return content
-    if content is not None:
-        return str(content)
-    return ""
+    if content is None:
+        return ""
+    if not isinstance(content, str):
+        raise TypeError("Agent response_message['content'] must be a string.")
+    return content
+
+
+def _finish_info(response_message: dict[str, Any]) -> dict[str, Any] | None:
+    finish_info = response_message.get("finish_info")
+    if finish_info is None:
+        return None
+    if not isinstance(finish_info, dict):
+        raise TypeError("Agent response_message['finish_info'] must be a dict.")
+    return finish_info or None
 
 
 def _to_json_safe(value: Any) -> Any:
@@ -167,9 +180,7 @@ def _count_tool_turns(messages: list[dict[str, Any]]) -> int:
     return sum(
         1
         for message in messages
-        if isinstance(message, dict)
-        and isinstance(message.get("tool_calls"), list)
-        and message["tool_calls"]
+        if isinstance(message, dict) and isinstance(message.get("tool_calls"), list) and message["tool_calls"]
     )
 
 
@@ -338,10 +349,7 @@ class AgentInSandboxLoop(AgentLoop):
             self._fill_eval_rollout_state(rollout_state, item)
             return
 
-        response_message_raw = item.artifacts.get("response_message") or {}
-        if item.status == RolloutStatus.COMPLETED and not isinstance(response_message_raw, dict):
-            raise TypeError("Agent artifact 'response_message' must be a dict.")
-        response_message = response_message_raw if isinstance(response_message_raw, dict) else {}
+        response_message = _response_message(item.artifacts, required=item.status == RolloutStatus.COMPLETED)
         rollout_state.status = Status.COMPLETED if item.status == RolloutStatus.COMPLETED else Status.FAILED
         rollout_state.finish_reason = str(
             response_message.get("finish_reason") or ("stop" if item.status == RolloutStatus.COMPLETED else "error")
@@ -352,8 +360,8 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.extra_fields["agent_judgers"] = {
             name: record.model_dump(mode="json") for name, record in item.judgers.items()
         }
-        finish_info = response_message.get("finish_info")
-        if isinstance(finish_info, dict) and finish_info:
+        finish_info = _finish_info(response_message)
+        if finish_info:
             rollout_state.extra_fields["agent_finish_info"] = finish_info
         if item.error is not None:
             rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
@@ -389,14 +397,11 @@ class AgentInSandboxLoop(AgentLoop):
         ]
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
-        rollout_state.response = _response_text(item.artifacts)
+        rollout_state.response = _response_text(response_message)
 
     def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
         is_success = item.status == RolloutStatus.COMPLETED
-        response_message_raw = item.artifacts.get("response_message") or {}
-        if is_success and not isinstance(response_message_raw, dict):
-            raise TypeError("Agent artifact 'response_message' must be a dict.")
-        response_message = response_message_raw if isinstance(response_message_raw, dict) else {}
+        response_message = _response_message(item.artifacts, required=is_success)
         rollout_state.status = Status.COMPLETED
         rollout_state.finish_reason = str(response_message.get("finish_reason") or ("stop" if is_success else "error"))
         rollout_state.reward = {"score": item.reward if is_success and item.reward is not None else 0.0}
@@ -415,9 +420,9 @@ class AgentInSandboxLoop(AgentLoop):
         if item.error is not None:
             rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
 
-        rollout_state.response = _response_text(item.artifacts, strict=is_success)
-        finish_info = response_message.get("finish_info")
-        if isinstance(finish_info, dict) and finish_info:
+        rollout_state.response = _response_text(response_message)
+        finish_info = _finish_info(response_message)
+        if finish_info:
             rollout_state.extra_fields["agent_finish_info"] = finish_info
         if not is_success:
             return

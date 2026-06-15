@@ -223,8 +223,7 @@ class ReadFileHook(Hook):
     async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
         try:
             blob = await client.download_file(self.path)
-            errors = "strict" if self.parse_json else self.errors
-            text = blob.decode(self.encoding, errors=errors)
+            text = blob.decode(self.encoding, errors=self.errors)
             item.artifacts[self.key] = json.loads(text) if self.parse_json else text
         except Exception as exc:
             if self.optional:
