@@ -18,6 +18,7 @@ import fnmatch
 import io
 import json
 import re
+import shlex
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -152,6 +153,84 @@ class ExecHook(Hook):
             env=self.env or {},
             timeout_sec=self.timeout,
             raise_on_error=not self.optional,
+        )
+
+
+@dataclass
+class SharedPathMapping:
+    source: str
+    target: str
+    contents: bool = False
+    optional: bool = False
+
+
+class LinkSharedPathHook(Hook):
+    """Create sandbox symlinks to files already staged on a shared mount.
+
+    ``source`` and ``target`` accept ``str.format`` placeholders for common
+    item fields: ``{id}``, ``{data_source}``, ``{task_root}``, ``{uid}``, and
+    ``{group_id}``.
+    """
+
+    name = "link_shared_path"
+
+    def __init__(self, mappings: list[dict | SharedPathMapping], *, timeout: int = 60):
+        self.mappings = [
+            mapping if isinstance(mapping, SharedPathMapping) else SharedPathMapping(**mapping)
+            for mapping in mappings
+        ]
+        self.timeout = timeout
+
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        commands = ["set -e"]
+        for mapping in self.mappings:
+            source = self._format(mapping.source, item)
+            target = self._format(mapping.target, item)
+            commands.append(self._link_command(source, target, contents=mapping.contents, optional=mapping.optional))
+        await exec_in(client, "\n".join(commands), timeout_sec=self.timeout, raise_on_error=True)
+
+    def _format(self, value: str, item: AgentRolloutItem) -> str:
+        fields = {
+            "id": item.id,
+            "data_source": item.data_source,
+            "task_root": item.task_root.as_posix() if item.task_root is not None else "",
+            "sandbox_task_dir": str(item.metadata.get("sandbox_task_dir") or ""),
+            "uid": "" if item.uid is None else str(item.uid),
+            "group_id": "" if item.group_id is None else str(item.group_id),
+        }
+        return value.format(**fields)
+
+    def _link_command(self, source: str, target: str, *, contents: bool, optional: bool) -> str:
+        src = shlex.quote(source)
+        dst = shlex.quote(target)
+        missing = "exit 0" if optional else f"echo 'missing shared path: {source}' >&2; exit 2"
+        if contents:
+            return "\n".join(
+                [
+                    f"if [ ! -d {src} ]; then {missing}; fi",
+                    f"mkdir -p {dst}",
+                    f"cd {src}",
+                    f"find . -type d -exec mkdir -p {dst}/{{}} \\;",
+                    (
+                        "find . -type f -exec sh -c "
+                        + shlex.quote(
+                            'src_root="$1"; dst_root="$2"; shift 2; '
+                            'for rel in "$@"; do '
+                            'mkdir -p "$dst_root/$(dirname "$rel")"; '
+                            'ln -sfn "$src_root/$rel" "$dst_root/$rel"; '
+                            'done'
+                        )
+                        + f" sh {src} {dst} {{}} +"
+                    ),
+                ]
+            )
+        return "\n".join(
+            [
+                f"if [ ! -e {src} ]; then {missing}; fi",
+                f"mkdir -p $(dirname {dst})",
+                f"rm -rf {dst}",
+                f"ln -s {src} {dst}",
+            ]
         )
 
 
@@ -424,6 +503,58 @@ class UploadChosenAgent(Hook):
             for path in root.rglob("*")
             if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
         ]
+
+
+class LinkChosenAgent(Hook):
+    """Link the selected agent template from a shared mount.
+
+    Reads ``record.agent`` populated by :class:`PickAgent`. The selected
+    record's ``template_root`` is interpreted as a path visible inside the
+    sandbox.
+    """
+
+    name = "link_chosen_agent"
+
+    def __init__(
+        self,
+        *,
+        target_dir: str,
+        config_dst: str | None = None,
+        timeout: int = 60,
+    ):
+        self.target_dir = target_dir.rstrip("/")
+        self.config_dst = config_dst
+        self.timeout = timeout
+
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        chosen = record.agent
+        if chosen is None:
+            raise RuntimeError("PickAgent must run before LinkChosenAgent")
+        template_root = chosen.template_root.rstrip("/")
+        agent_src = f"{template_root}/{chosen.name}"
+        agent_dst = f"{self.target_dir}/{chosen.name}"
+        commands = [
+            "set -e",
+            self._link_path(agent_src, agent_dst, expect_dir=True),
+        ]
+        if self.config_dst is not None:
+            config_src = f"{agent_src}/{chosen.config}"
+            commands.append(self._link_path(config_src, self.config_dst, expect_dir=False))
+        await exec_in(client, "\n".join(commands), timeout_sec=self.timeout, raise_on_error=True)
+
+    def _link_path(self, source: str, target: str, *, expect_dir: bool) -> str:
+        src = shlex.quote(source)
+        dst = shlex.quote(target)
+        test = "-d" if expect_dir else "-f"
+        kind = "directory" if expect_dir else "file"
+        return "\n".join(
+            [
+                f"if [ ! {test} {src} ]; then echo 'missing shared {kind}: {source}' >&2; exit 2; fi",
+                f"mkdir -p $(dirname {dst})",
+                f"rm -rf {dst}",
+                f"ln -s {src} {dst}",
+            ]
+        )
 
 
 class RunAgentInstallDeps(Hook):
