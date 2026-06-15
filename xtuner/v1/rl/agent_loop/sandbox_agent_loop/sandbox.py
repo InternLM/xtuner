@@ -35,6 +35,7 @@ from typing import Any, Mapping
 
 import httpx
 from lagent.utils import create_object
+from lagent.utils.rate_limiter import get_shared_async_token_bucket
 
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
@@ -885,12 +886,20 @@ class SandboxPool:
         max_attempts: int = 3,
         health_max_wait_sec: float = 600.0,
         health_poll_interval_sec: float = 2.0,
+        creates_per_sec: float | None = 3.0,
+        creates_burst: int = 8,
+        create_rate_limit_key: str = "xtuner.sandbox_agent_loop.sandbox_acquire",
     ):
         self._provider = create_object(provider)
         self._specs: dict[str, SandboxSpec] = {name: create_object(spec) for name, spec in specs.items()}
         self._max_attempts = max_attempts
         self._health_max_wait_sec = health_max_wait_sec
         self._health_poll_interval_sec = health_poll_interval_sec
+        self._create_limiter = (
+            get_shared_async_token_bucket(create_rate_limit_key, creates_per_sec, creates_burst)
+            if creates_per_sec is not None
+            else None
+        )
         self._clients: dict[str, Any] = {}
         self._env_ids: dict[str, str] = {}
         self._urls: dict[str, str | None] = {}
@@ -970,6 +979,8 @@ class SandboxPool:
                     create_kwargs["env_vars"] = spec.env_vars
                 if spec.resources:
                     create_kwargs["resources"] = spec.resources
+                if self._create_limiter is not None:
+                    await self._create_limiter.acquire()
                 client, env_id = await self._provider.create(
                     image_tag=spec.image,
                     ttl_seconds=spec.ttl_seconds,
@@ -1020,6 +1031,11 @@ class SandboxPool:
                 )
             await asyncio.sleep(self._health_poll_interval_sec)
         return False
+
+
+# ─────────────────────────────────────────────────────────────────
+# Low-level sandbox I/O
+# ─────────────────────────────────────────────────────────────────
 
 
 _VAR_RE = re.compile(r"\$(\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
