@@ -2,8 +2,8 @@
 
 Owns sandbox lifecycle, threads one :class:`AgentRolloutItem` through the
 stages (infer → validate), and fills the result fields in place. All real work
-is hook-driven (:class:`sandbox.SandboxStage` pre/entry/post) +
-:class:`validator.JudgerValidator`.
+is hook-driven (:class:`sandbox.SandboxStage` pre/entry/post) and the configured
+validation judger.
 
 ``dataset`` in the config provides either a :class:`Runner` object or a
 lagent-style runner config (``dict(type=Runner, ...)``), plus
@@ -19,14 +19,15 @@ from typing import Any
 
 from lagent.utils import create_object
 
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.judger import ComposeJudger, Judger
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import SandboxPool, SandboxStage
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
     RolloutError,
     RolloutStatus,
+    StageRecord,
 )
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.trace import span
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.validator import JudgerValidator
 from xtuner.v1.utils import get_logger
 
 
@@ -36,14 +37,14 @@ from xtuner.v1.utils import get_logger
 
 
 class Runner:
-    """Pairs one infer stage with one validator."""
+    """Pairs one infer stage with one validation judger."""
 
     def __init__(
         self,
         *,
         pool: SandboxPool | dict[str, Any],
         infer: SandboxStage | dict[str, Any],
-        validate: JudgerValidator | dict[str, Any],
+        validate: Judger | ComposeJudger | dict[str, Any],
     ):
         # ``pool`` is stored as a *template*: pass a dict for normal use (a
         # fresh SandboxPool is built per ``run`` call), or pass an already-built
@@ -57,7 +58,7 @@ class Runner:
         """Run one rollout sample and return the same item with result fields
         filled.
 
-        Each worker (SandboxStage / JudgerValidator / SandboxPool) writes its
+        Each worker (SandboxStage / Judger / SandboxPool) writes its
         own ``record.status`` / ``record.error``.  The runner only orchestrates
         and promotes the first stage error to ``item.error`` when something
         fails.
@@ -118,27 +119,21 @@ class Runner:
                 # ─── validate ───────────────────────────────────────────
                 t2 = time.monotonic()
                 with span(uid_obs, "validate", task_id=tid):
-                    score, failed = await self.validate.run(item, pool)
+                    validate_name = getattr(self.validate, "name", "validate")
+                    validate_record = item.judgers.setdefault(
+                        validate_name,
+                        StageRecord(judger_name=validate_name),
+                    )
+                    score = float(await self.validate.run(item, pool, validate_record))
                 t_validate = time.monotonic() - t2
                 item.reward = score
-                if failed:
-                    return self._fail(
-                        item,
-                        _first_judger_error(item)
-                        or RolloutError(
-                            stage="validate",
-                            category="validate_failed",
-                            type="JudgerValidator",
-                            message="all judgers failed" if not item.judgers else "validate failed",
-                        ),
-                    )
 
                 item.status = RolloutStatus.COMPLETED
                 return item
         except Exception as exc:
             promoted = (
                 item.infer.error
-                or _first_judger_error(item)
+                or _first_validate_error(item)
                 or RolloutError(
                     stage="runner",
                     category="runner_exception",
@@ -196,7 +191,7 @@ def _stage_sandbox_name(stage: SandboxStage, pool: SandboxPool) -> str:
     return name
 
 
-def _first_judger_error(item: AgentRolloutItem) -> RolloutError | None:
+def _first_validate_error(item: AgentRolloutItem) -> RolloutError | None:
     for record in item.judgers.values():
         if record.error is not None:
             return record.error
