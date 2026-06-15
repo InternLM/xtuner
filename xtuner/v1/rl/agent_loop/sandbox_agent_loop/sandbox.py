@@ -729,6 +729,8 @@ class SandboxStage:
                     return result
 
             await self._run_phase("post", self.post, client, item, record, stage_label)
+            if record.status != StageStatus.FAILED:
+                record.status = StageStatus.COMPLETED
             return result
         except Exception as exc:
             if record.status != StageStatus.FAILED:
@@ -824,6 +826,13 @@ class SandboxStage:
         hook_name = getattr(hook, "name", hook.__class__.__name__)
         task_id = item.id
         done = False
+        hook_record: dict[str, Any] = {
+            "phase": phase,
+            "hook": hook_name,
+            "status": StageStatus.RUNNING.value,
+            "started_at": started,
+        }
+        record.metadata.setdefault("hooks", []).append(hook_record)
 
         async def warn_if_stuck() -> None:
             await asyncio.sleep(stuck_warn_sec)
@@ -835,11 +844,21 @@ class SandboxStage:
         warn_task = asyncio.create_task(warn_if_stuck()) if stuck_warn_sec > 0 else None
         try:
             await hook(client, item, record)
+            hook_record["status"] = StageStatus.COMPLETED.value
+        except Exception as exc:
+            hook_record["status"] = StageStatus.FAILED.value
+            hook_record["error"] = {
+                "type": type(exc).__name__,
+                "message": str(exc),
+            }
+            raise
         finally:
             done = True
             if warn_task is not None:
                 warn_task.cancel()
             elapsed = time.monotonic() - started
+            hook_record["finished_at"] = time.monotonic()
+            hook_record["duration_sec"] = elapsed
             if elapsed > 1:
                 get_logger().debug(f"[{task_id}] hook done phase={phase} hook={hook_name} took={elapsed:.1f}s")
 
