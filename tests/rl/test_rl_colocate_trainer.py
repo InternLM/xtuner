@@ -138,6 +138,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer._benchmark_training_samples = 0
         trainer._benchmark_training_tokens = 0
         trainer._save_trajectories = MagicMock()
+        trainer._release_trace_store = MagicMock()
         trainer._sync_weights_and_save = MagicMock(
             side_effect=lambda train_step, step_timer_dict: train_step % trainer._sync_weights_interval == 0
         )
