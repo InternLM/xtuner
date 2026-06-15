@@ -12,6 +12,7 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import (
     AgentInSandboxLoopConfig,
 )
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.hooks import (
+    ConfigurePackageSources,
     DownloadHook,
     ExecHook,
     InstallLagent,
@@ -58,6 +59,7 @@ __all__ = [
     "AgentInSandboxLoopConfig",
     "AgentSpec",
     "AgentRolloutItem",
+    "ConfigurePackageSources",
     "DiagnosticFile",
     "DetachedShellEntry",
     "DownloadHook",

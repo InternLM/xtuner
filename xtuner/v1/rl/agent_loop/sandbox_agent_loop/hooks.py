@@ -18,6 +18,7 @@ import fnmatch
 import io
 import json
 import re
+import shlex
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -153,6 +154,90 @@ class ExecHook(Hook):
             timeout_sec=self.timeout,
             raise_on_error=not self.optional,
         )
+
+
+class ConfigurePackageSources(Hook):
+    """Configure internal package mirrors for pip, conda, and apt."""
+
+    name = "configure_package_sources"
+
+    def __init__(
+        self,
+        *,
+        pypi_index_url: str = "http://10.140.52.16:8081/repository/pypi/simple",
+        pypi_trusted_host: str = "10.140.52.16",
+        conda_base_url: str = "http://10.140.52.16:8081/repository/conda",
+        ubuntu_mirror_url: str = "http://10.140.52.16:8081/repository/ubuntu/",
+        configure_pip: bool = True,
+        configure_conda: bool = True,
+        configure_apt: bool = True,
+        timeout: int = 60,
+    ):
+        self.pypi_index_url = pypi_index_url
+        self.pypi_trusted_host = pypi_trusted_host
+        self.conda_base_url = conda_base_url.rstrip("/")
+        self.ubuntu_mirror_url = ubuntu_mirror_url.rstrip("/") + "/"
+        self.configure_pip = configure_pip
+        self.configure_conda = configure_conda
+        self.configure_apt = configure_apt
+        self.timeout = timeout
+
+    async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
+        commands = ["set -e"]
+        if self.configure_pip:
+            commands.append(
+                "\n".join(
+                    [
+                        "mkdir -p /etc",
+                        "cat > /etc/pip.conf <<'EOF'",
+                        "[global]",
+                        f"index-url = {self.pypi_index_url}",
+                        f"trusted-host = {self.pypi_trusted_host}",
+                        "EOF",
+                    ]
+                )
+            )
+        if self.configure_conda:
+            commands.append(
+                "\n".join(
+                    [
+                        "mkdir -p /root",
+                        "cat > /root/.condarc <<'EOF'",
+                        "channels:",
+                        "  - defaults",
+                        "show_channel_urls: true",
+                        "default_channels:",
+                        f"  - {self.conda_base_url}/pkgs/main",
+                        f"  - {self.conda_base_url}/pkgs/r",
+                        f"  - {self.conda_base_url}/pkgs/msys2",
+                        "custom_channels:",
+                        f"  conda-forge: {self.conda_base_url}/cloud",
+                        "EOF",
+                    ]
+                )
+            )
+        if self.configure_apt:
+            mirror = shlex.quote(self.ubuntu_mirror_url)
+            commands.append(
+                "\n".join(
+                    [
+                        "if [ -r /etc/os-release ]; then",
+                        "  . /etc/os-release",
+                        "  if [ \"${ID:-}\" = ubuntu ] && [ -n \"${VERSION_CODENAME:-}\" ]; then",
+                        "    mkdir -p /etc/apt/sources.list.d",
+                        "    cat > /etc/apt/sources.list.d/ubuntu.sources <<EOF",
+                        "Types: deb",
+                        f"URIs: {mirror}",
+                        "Suites: ${VERSION_CODENAME} ${VERSION_CODENAME}-updates ${VERSION_CODENAME}-backports ${VERSION_CODENAME}-security",
+                        "Components: main restricted universe multiverse",
+                        "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg",
+                        "EOF",
+                        "  fi",
+                        "fi",
+                    ]
+                )
+            )
+        await exec_in(client, "\n".join(commands), timeout_sec=self.timeout, raise_on_error=True)
 
 
 class DownloadHook(Hook):
@@ -447,7 +532,7 @@ class RunAgentInstallDeps(Hook):
         script = f"{self.workspace}/agent/{chosen.name}/install-deps.sh"
         await exec_in(
             client,
-            f'[ -f "{script}" ] && bash "{script}" || true',
+            f'if [ -f "{script}" ]; then bash "{script}"; fi',
             timeout_sec=self.timeout,
             raise_on_error=True,
         )
