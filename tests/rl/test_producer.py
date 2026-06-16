@@ -565,6 +565,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sampled_statuses, [[Status.EXPIRED, Status.ABORTED], [Status.EXPIRED, Status.ABORTED]])
         completed = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
         self.assertEqual(sorted(group[0].message_uid for group in completed), [900, 901])
+        self.assertTrue(all(group[0].seq_staleness == 0 for group in completed))
 
     async def test_async_produce_strategy_fails_fast_on_invalid_progress(self):
         # 验证 progress 缺少当前 task key 时 fail fast，避免静默用 0 掩盖调度状态损坏。

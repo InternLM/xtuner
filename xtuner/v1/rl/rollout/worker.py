@@ -32,7 +32,6 @@ from xtuner.v1.rl.utils import (
     AutoAcceleratorWorkers,
     CPUResourcesConfig,
     SingleAcceleratorWorker,
-    free_object_refs,
     get_eos_token,
     register_cpu_resources,
 )
@@ -679,6 +678,7 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
+        request_max_tokens = rollout_state.sample_params.max_tokens
         try:
             # TODO(@duanyanhui):
             # 1. support claude format input
@@ -692,8 +692,6 @@ class RolloutWorker(SingleAcceleratorWorker):
 
             uid = rollout_state.uid
             sample_params: SampleParams = rollout_state.sample_params
-            max_tokens = sample_params.max_tokens
-            enable_partial_rollout = self.enable_partial_rollout
             if sample_params.return_token_ids:
                 endpoint_url = f"{self.server_url}/{self.endpoints['generate']}"
             else:
@@ -704,14 +702,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 "Authorization": f"Bearer {self.config.api_key}",
             }
 
-            if enable_partial_rollout:
-                rollout_state = self.partial_rollout_handler.preprocess(rollout_state, max_tokens)
-            elif rollout_state.status == Status.ABORTED:
-                # ABORTED samples can be replayed; without partial rollout, rerun from the original prompt.
-                rollout_state = reset_rollout_response(rollout_state)
-                rollout_state.sample_params = rollout_state.sample_params.model_copy(update={"max_tokens": max_tokens})
-                rollout_state.status = Status.INIT
-            payload = self._get_request_payload(rollout_state)
+            rollout_state, payload = self._prepare_request_payload(rollout_state, request_max_tokens)
             max_retries = self.config.max_retry_per_sample
 
             # 早退逻辑 1：检查是否已被标记为完成
@@ -721,15 +712,15 @@ class RolloutWorker(SingleAcceleratorWorker):
 
             # 早退逻辑 2：检测输入是否还需要 generation (安全获取变量)
             input_ids = payload.get("input_ids", [])
-            max_tokens = cast(int, payload.get("max_tokens"))
+            payload_max_tokens = cast(int, payload.get("max_tokens"))
 
             last_id = input_ids[-1] if len(input_ids) > 0 else "None"
-            is_max_tokens_zero = max_tokens is not None and max_tokens <= 0
+            is_max_tokens_zero = payload_max_tokens is not None and payload_max_tokens <= 0
             is_eos_reached = len(input_ids) > 0 and input_ids[-1] in self.eos_token
 
             if is_max_tokens_zero or is_eos_reached:
                 self.logger.debug(
-                    f"No generation needed for request {uid}: max_tokens={max_tokens} or last input_id={last_id} is in eos_token."
+                    f"No generation needed for request {uid}: max_tokens={payload_max_tokens} or last input_id={last_id} is in eos_token."
                 )
                 finish_reason = "stop" if is_eos_reached else "length"
                 # 对于是否开 partial rollout 的情况都直接标记为完成并返回，因为本轮 rollout 未开始，也不需要拼接
@@ -748,8 +739,16 @@ class RolloutWorker(SingleAcceleratorWorker):
                     if self.receive_abort_request.is_set():
                         rollout_state.finish_reason = "abort"
                         rollout_state.status = Status.ABORTED
+                        rollout_state.sample_params = rollout_state.sample_params.model_copy(
+                            update={"max_tokens": request_max_tokens}
+                        )
                         return rollout_state
-                    if rollout_state.status in [Status.COMPLETED, Status.ABORTED]:
+                    if rollout_state.status == Status.COMPLETED:
+                        return rollout_state
+                    if rollout_state.status == Status.ABORTED:
+                        rollout_state.sample_params = rollout_state.sample_params.model_copy(
+                            update={"max_tokens": request_max_tokens}
+                        )
                         return rollout_state
 
                     if is_last_attempt:
@@ -765,9 +764,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                     self.logger.warning(
                         f"Invalid rollout response for request {uid}, retrying {attempt + 1}/{max_retries}."
                     )
-                    if isinstance(rollout_state.routed_experts, ray.ObjectRef):
-                        free_object_refs([rollout_state.routed_experts])
-                        rollout_state.routed_experts = None
+                    rollout_state, payload = self._prepare_request_payload(
+                        rollout_state, request_max_tokens, discard_response=True
+                    )
                     await asyncio.sleep(0.1)
                     continue
 
@@ -776,6 +775,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                     # Case 2.1: The request was aborted due to an signal set by `receive_abort_request`
                     rollout_state.finish_reason = "abort"
                     rollout_state.status = update_status_from_finish_reason("abort")
+                    rollout_state.sample_params = rollout_state.sample_params.model_copy(
+                        update={"max_tokens": request_max_tokens}
+                    )
                     return rollout_state
 
                 if http_result.is_client_error:
@@ -813,9 +815,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                     self.logger.warning(
                         f"rollout request {uid} to {http_result.url} failed due to retryable error {http_result.error_type} with {http_result.error_msg}, retrying {attempt + 1}/{max_retries}."
                     )
-                    if isinstance(rollout_state.routed_experts, ray.ObjectRef):
-                        free_object_refs([rollout_state.routed_experts])
-                        rollout_state.routed_experts = None
+                    rollout_state, payload = self._prepare_request_payload(
+                        rollout_state, request_max_tokens, discard_response=True
+                    )
                     await asyncio.sleep(0.1)
                     continue
 
@@ -826,9 +828,50 @@ class RolloutWorker(SingleAcceleratorWorker):
                     )
             return rollout_state
         finally:
-            if rollout_state.status == Status.FAILED and isinstance(rollout_state.routed_experts, ray.ObjectRef):
-                free_object_refs([rollout_state.routed_experts])
-                rollout_state.routed_experts = None
+            if rollout_state.status == Status.FAILED:
+                error_msg = rollout_state.error_msg
+                status = rollout_state.status
+                reset_rollout_response(rollout_state)
+                rollout_state.status = status
+                rollout_state.error_msg = error_msg
+                rollout_state.sample_params = rollout_state.sample_params.model_copy(
+                    update={"max_tokens": request_max_tokens}
+                )
+
+    def _prepare_request_payload(
+        self,
+        rollout_state: RolloutState,
+        request_max_tokens: int,
+        *,
+        discard_response: bool = False,
+    ) -> tuple[RolloutState, dict]:
+        """Prepare rollout state and payload for one generation request.
+
+        Args:
+            discard_response: Only used by retry paths. When true, the previous
+                request's response is considered incomplete or invalid, so any
+                response/logprob/routed-expert state already attached to
+                ``rollout_state`` must be discarded before rebuilding the
+                payload from the original prompt and the request entry
+                ``max_tokens``.
+        """
+        if discard_response:
+            rollout_state = reset_rollout_response(rollout_state)
+            rollout_state.sample_params = rollout_state.sample_params.model_copy(
+                update={"max_tokens": request_max_tokens}
+            )
+            rollout_state.status = Status.INIT
+        elif not self.enable_partial_rollout and rollout_state.status == Status.ABORTED:
+            # ABORTED samples can be replayed; without partial rollout, rerun from the original prompt.
+            rollout_state = reset_rollout_response(rollout_state)
+            rollout_state.sample_params = rollout_state.sample_params.model_copy(
+                update={"max_tokens": request_max_tokens}
+            )
+            rollout_state.status = Status.INIT
+
+        if self.enable_partial_rollout:
+            rollout_state = self.partial_rollout_handler.preprocess(rollout_state, request_max_tokens)
+        return rollout_state, self._get_request_payload(rollout_state)
 
     def _launch_server(self):
         """Launch the inference server as a separate process or Ray task.

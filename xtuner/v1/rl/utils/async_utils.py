@@ -1,9 +1,13 @@
 import asyncio
+import os
 from asyncio import AbstractEventLoop, Task
 from typing import Any, Callable, Coroutine, List, Optional
 
+from xtuner.v1.utils.logger import get_logger
+
 
 _ASYNCIO_RUN_LOOP: AbstractEventLoop | None = None
+logger = get_logger()
 
 
 def handle_task_exception(task: Task):
@@ -125,4 +129,23 @@ def asyncio_run(coro: Coroutine, loop: Optional[AbstractEventLoop] = None) -> An
         loop = _get_default_asyncio_loop()
     if loop.is_running():
         raise RuntimeError("asyncio_run does not support being called from a running event loop.")
-    return loop.run_until_complete(coro)
+
+    watchdog = None
+    try:
+        from .asyncio_diagnostics import install_asyncio_diagnostics, start_asyncio_run_watchdog
+
+        if install_asyncio_diagnostics(loop):
+            watchdog = start_asyncio_run_watchdog(loop=loop)
+    except Exception as exc:
+        if os.getenv("XTUNER_ASYNCIO_DIAGNOSTICS"):
+            logger.warning(f"[AsyncioDiag] failed to start asyncio diagnostics: {type(exc).__name__}: {exc}")
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        try:
+            from .asyncio_diagnostics import stop_asyncio_run_watchdog
+
+            stop_asyncio_run_watchdog(watchdog)
+        except Exception as exc:
+            if os.getenv("XTUNER_ASYNCIO_DIAGNOSTICS"):
+                logger.warning(f"[AsyncioDiag] failed to stop asyncio diagnostics: {type(exc).__name__}: {exc}")

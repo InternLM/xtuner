@@ -4,8 +4,6 @@ import asyncio
 import copy
 import importlib
 import json
-import os
-import time
 import traceback
 import uuid
 from typing import Any, Literal
@@ -24,8 +22,6 @@ from .schemas import AgentRolloutItem, RolloutStatus
 
 
 _MISSING = object()
-_DEFAULT_SANDBOX_CREATES_PER_SEC = 3.0
-_DEFAULT_SANDBOX_CREATES_BURST = 8
 
 
 def _import_from_path(path: str) -> Any:
@@ -42,50 +38,6 @@ def _inject_session_id(runner_cfg: dict[str, Any], session_id: str) -> None:
             entry.setdefault("env", {})["XTUNER_SESSION_ID"] = session_id
 
 
-def _env_float(names: tuple[str, ...], default: float | None = None) -> float | None:
-    for name in names:
-        value = os.environ.get(name)
-        if value is not None and value != "":
-            return float(value)
-    return default
-
-
-def _env_int(names: tuple[str, ...], default: int | None = None) -> int | None:
-    for name in names:
-        value = os.environ.get(name)
-        if value is not None and value != "":
-            return int(value)
-    return default
-
-
-class _TokenBucket:
-    """Pace sandbox rollout starts from the long-lived agent loop."""
-
-    def __init__(self, rate_per_sec: float, capacity: int):
-        if rate_per_sec <= 0:
-            raise ValueError("rate_per_sec must be > 0")
-        if capacity <= 0:
-            raise ValueError("capacity must be > 0")
-        self._rate = float(rate_per_sec)
-        self._capacity = float(capacity)
-        self._tokens = float(capacity)
-        self._last = time.monotonic()
-        self._lock = asyncio.Lock()
-
-    async def acquire(self) -> None:
-        async with self._lock:
-            now = time.monotonic()
-            self._tokens = min(self._capacity, self._tokens + (now - self._last) * self._rate)
-            self._last = now
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return
-            wait = (1.0 - self._tokens) / self._rate
-            self._tokens = 0.0
-            self._last = now + wait
-        await asyncio.sleep(wait)
-
-
 def _resolve_runner(pipeline: Any, session_id: str) -> Any:
     if isinstance(pipeline, str):
         pipeline = _import_from_path(pipeline)
@@ -99,21 +51,14 @@ def _resolve_runner(pipeline: Any, session_id: str) -> Any:
 def _load_latest_trace_segment(
     artifacts: dict[str, Any], *, require_tools: bool = False
 ) -> tuple[list[dict[str, Any]], Any]:
-    raw_message = artifacts.get("message")
-    if raw_message is None:
-        return [], None
-    trace = json.loads(raw_message) if isinstance(raw_message, str) else raw_message
-    if isinstance(trace, list) and trace:
-        segment = trace[-1]
-        if not isinstance(segment, dict) or "messages" not in segment:
-            raise ValueError("Agent messages trace segment must contain messages.")
-        messages = segment["messages"]
-        tools = segment.get("tools", _MISSING)
-    elif isinstance(trace, dict):
-        messages = trace.get("messages")
-        tools = trace.get("tools", _MISSING)
-    else:
-        raise ValueError("Agent artifacts must contain a messages trace.")
+    trace = _load_messages_artifact(artifacts)
+    if not trace:
+        raise ValueError("Agent artifacts must contain at least one messages trace segment.")
+    segment = trace[-1]
+    if not isinstance(segment, dict) or "messages" not in segment:
+        raise ValueError("Agent messages trace segment must contain messages.")
+    messages = segment["messages"]
+    tools = segment.get("tools", _MISSING)
     if not isinstance(messages, list):
         raise TypeError("Agent messages trace must be a list.")
     if not all(isinstance(message, dict) for message in messages):
@@ -124,33 +69,84 @@ def _load_latest_trace_segment(
 
 
 def _load_eval_trace_segment(artifacts: dict[str, Any]) -> tuple[list[dict[str, Any]], Any]:
-    raw_message = artifacts.get("message")
-    if raw_message is None:
+    trace = _load_messages_artifact(artifacts, required=False)
+    if not trace:
         return [], None
-    try:
-        trace = json.loads(raw_message) if isinstance(raw_message, str) else raw_message
-    except json.JSONDecodeError:
-        return [], None
-    if isinstance(trace, list) and trace:
-        segment = trace[-1]
-        if not isinstance(segment, dict):
-            return [], None
-        messages = segment.get("messages") or []
-        tools = segment.get("tools")
-    elif isinstance(trace, dict):
-        messages = trace.get("messages") or []
-        tools = trace.get("tools")
-    else:
-        return [], None
+    segment = trace[-1]
+    if not isinstance(segment, dict):
+        raise TypeError("Agent messages trace segment must be a dict.")
+    messages = segment.get("messages") or []
+    tools = segment.get("tools")
     if not isinstance(messages, list):
-        return [], None
+        raise TypeError("Agent messages trace must be a list.")
     if not all(isinstance(message, dict) for message in messages):
-        return [], None
+        raise TypeError("Agent messages trace must contain only dict messages.")
     return messages, tools
+
+
+def _load_messages_artifact(artifacts: dict[str, Any], *, required: bool = True) -> list[dict[str, Any]] | None:
+    if "messages" not in artifacts:
+        if required:
+            raise ValueError("Agent artifacts must contain 'messages'.")
+        return None
+    trace = artifacts["messages"]
+    if not isinstance(trace, list):
+        raise TypeError("Agent artifact 'messages' must be a list.")
+    return trace
+
+
+def _response_message(artifacts: dict[str, Any], *, required: bool) -> dict[str, Any]:
+    if "response_message" not in artifacts:
+        if required:
+            raise KeyError("Agent artifacts must contain 'response_message'.")
+        return {}
+    response_message = artifacts["response_message"]
+    if not isinstance(response_message, dict):
+        raise TypeError("Agent artifact 'response_message' must be a dict.")
+    return response_message
+
+
+def _response_text(response_message: dict[str, Any]) -> str:
+    content = response_message.get("content")
+    if content is None:
+        return ""
+    if not isinstance(content, str):
+        raise TypeError("Agent response_message['content'] must be a string.")
+    return content
+
+
+def _finish_info(response_message: dict[str, Any]) -> dict[str, Any] | None:
+    finish_info = response_message.get("finish_info")
+    if finish_info is None:
+        return None
+    if not isinstance(finish_info, dict):
+        raise TypeError("Agent response_message['finish_info'] must be a dict.")
+    return finish_info or None
 
 
 def _to_json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _count_tool_turns(messages: list[dict[str, Any]]) -> int:
+    return sum(
+        1
+        for message in messages
+        if isinstance(message, dict) and isinstance(message.get("tool_calls"), list) and message["tool_calls"]
+    )
+
+
+def _extract_reward_payload(item: AgentRolloutItem) -> dict[str, Any] | None:
+    for record in item.judgers.values():
+        reward = record.metadata.get("reward")
+        if isinstance(reward, dict):
+            payload = dict(reward)
+            if item.reward is not None:
+                payload.setdefault("score", item.reward)
+            return payload
+    if item.reward is not None:
+        return {"score": item.reward}
+    return None
 
 
 class AgentInSandboxLoopConfig(AgentLoopConfig):
@@ -164,8 +160,6 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     """
 
     max_concurrent_samples: int | None = None
-    sandbox_creates_per_sec: float | None = None
-    sandbox_creates_burst: int | None = None
     mode: Literal["train", "eval"] = "train"
 
     def build_local(
@@ -178,8 +172,6 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
             judger=judger,
             logger=logger,
             max_concurrent_samples=self.max_concurrent_samples,
-            sandbox_creates_per_sec=self.sandbox_creates_per_sec,
-            sandbox_creates_burst=self.sandbox_creates_burst,
             mode=self.mode,
         )
 
@@ -193,8 +185,6 @@ class AgentInSandboxLoop(AgentLoop):
         judger: Judger | None = None,
         logger=None,
         max_concurrent_samples: int | None = None,
-        sandbox_creates_per_sec: float | None = None,
-        sandbox_creates_burst: int | None = None,
         mode: Literal["train", "eval"] = "train",
     ):
         if hf_checkpoint is None:
@@ -202,59 +192,7 @@ class AgentInSandboxLoop(AgentLoop):
         super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
         self.max_concurrent_samples = max_concurrent_samples
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
-        self.sandbox_creates_per_sec = self._resolve_sandbox_creates_per_sec(sandbox_creates_per_sec)
-        self.sandbox_creates_burst = (
-            self._resolve_sandbox_creates_burst(sandbox_creates_burst)
-            if self.sandbox_creates_per_sec is not None
-            else None
-        )
-        self._sandbox_create_limiter = (
-            _TokenBucket(self.sandbox_creates_per_sec, self.sandbox_creates_burst)
-            if self.sandbox_creates_per_sec is not None
-            and self.sandbox_creates_per_sec > 0
-            and self.sandbox_creates_burst is not None
-            else None
-        )
-        if self._sandbox_create_limiter is not None:
-            self.logger.info(
-                "[AgentInSandboxLoop] sandbox rollout start rate limit: "
-                f"{self.sandbox_creates_per_sec:.2f}/s burst={self.sandbox_creates_burst}"
-            )
         self.mode = mode
-
-    @staticmethod
-    def _resolve_sandbox_creates_per_sec(value: float | None) -> float | None:
-        if value is None:
-            value = _env_float(
-                (
-                    "SANDBOX_AGENT_LOOP_CREATES_PER_SEC",
-                    "SANDBOX_CREATES_PER_SEC",
-                    "GATEWAY_CREATES_PER_SEC",
-                ),
-                _DEFAULT_SANDBOX_CREATES_PER_SEC,
-            )
-        if value is not None and value <= 0:
-            return None
-        return value
-
-    @staticmethod
-    def _resolve_sandbox_creates_burst(value: int | None) -> int:
-        if value is None:
-            value = _env_int(
-                (
-                    "SANDBOX_AGENT_LOOP_CREATES_BURST",
-                    "SANDBOX_CREATES_BURST",
-                    "GATEWAY_CREATES_BURST",
-                ),
-                _DEFAULT_SANDBOX_CREATES_BURST,
-            )
-        if value is None or value <= 0:
-            raise ValueError("sandbox_creates_burst must be > 0 when sandbox create rate limiting is enabled.")
-        return value
-
-    async def _throttle_sandbox_create(self) -> None:
-        if self._sandbox_create_limiter is not None:
-            await self._sandbox_create_limiter.acquire()
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> RolloutState:
@@ -279,7 +217,6 @@ class AgentInSandboxLoop(AgentLoop):
                 rollout_state.uid = uuid.uuid4().int
             rollout_item.uid = rollout_state.uid
             rollout_item.group_id = rollout_state.message_uid
-            await self._throttle_sandbox_create()
             result = await self._run_item(rollout_item)
             await self._fill_rollout_state(rollout_state, result)
             return rollout_state
@@ -305,14 +242,30 @@ class AgentInSandboxLoop(AgentLoop):
             self._fill_eval_rollout_state(rollout_state, item)
             return
 
+        response_message = _response_message(item.artifacts, required=item.status == RolloutStatus.COMPLETED)
         rollout_state.status = Status.COMPLETED if item.status == RolloutStatus.COMPLETED else Status.FAILED
-        rollout_state.finish_reason = "stop" if item.status == RolloutStatus.COMPLETED else "error"
-        rollout_state.reward = {"score": item.reward} if item.reward is not None else None
+        rollout_state.finish_reason = str(
+            response_message.get("finish_reason") or ("stop" if item.status == RolloutStatus.COMPLETED else "error")
+        )
+        rollout_state.reward = _extract_reward_payload(item)
+        rollout_state.extra_fields["agent_status"] = item.status.value
+        rollout_state.extra_fields["agent_artifacts"] = item.artifacts
+        rollout_state.extra_fields["agent_judgers"] = {
+            name: record.model_dump(mode="json") for name, record in item.judgers.items()
+        }
+        finish_info = _finish_info(response_message)
+        if finish_info:
+            rollout_state.extra_fields["agent_finish_info"] = finish_info
         if item.error is not None:
             rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
         if item.status != RolloutStatus.COMPLETED:
             return
 
+        extra_messages, extra_tools = _load_eval_trace_segment(item.artifacts)
+        if extra_messages:
+            rollout_state.extra_fields["agent_messages"] = extra_messages
+            rollout_state.extra_fields["agent_tools"] = extra_tools
+            rollout_state.extra_fields["agent_tool_turns"] = _count_tool_turns(extra_messages)
         messages, tools = _load_latest_trace_segment(item.artifacts, require_tools=True)
         if not messages:
             raise ValueError("Agent artifacts must contain at least one trainable messages trace.")
@@ -337,11 +290,13 @@ class AgentInSandboxLoop(AgentLoop):
         ]
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
+        rollout_state.response = _response_text(response_message)
 
     def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
         is_success = item.status == RolloutStatus.COMPLETED
+        response_message = _response_message(item.artifacts, required=is_success)
         rollout_state.status = Status.COMPLETED
-        rollout_state.finish_reason = "stop" if is_success else "error"
+        rollout_state.finish_reason = str(response_message.get("finish_reason") or ("stop" if is_success else "error"))
         rollout_state.reward = {"score": item.reward if is_success and item.reward is not None else 0.0}
         rollout_state.input_ids = None
         rollout_state.labels = None
@@ -351,10 +306,23 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.response_mask = None
         rollout_state.response_model_steps = None
         rollout_state.extra_fields["agent_status"] = item.status.value
+        rollout_state.extra_fields["agent_artifacts"] = item.artifacts
+        rollout_state.extra_fields["agent_judgers"] = {
+            name: record.model_dump(mode="json") for name, record in item.judgers.items()
+        }
         if item.error is not None:
             rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
 
-        rollout_state.response = str(item.artifacts.get("agent_response") or "")
+        rollout_state.response = _response_text(response_message)
+        finish_info = _finish_info(response_message)
+        if finish_info:
+            rollout_state.extra_fields["agent_finish_info"] = finish_info
+        if not is_success:
+            return
+
         messages, tools = _load_eval_trace_segment(item.artifacts)
         if messages:
             rollout_state.extra_fields["agent_trajectory"] = _to_json_safe({"messages": messages, "tools": tools})
+            rollout_state.extra_fields["agent_messages"] = messages
+            rollout_state.extra_fields["agent_tools"] = tools
+            rollout_state.extra_fields["agent_tool_turns"] = _count_tool_turns(messages)
