@@ -199,7 +199,7 @@ class DownloadHook(Hook):
 
 
 class ReadFileHook(Hook):
-    """Read a sandbox text file and store its content in ``item.artifacts``."""
+    """Read a sandbox file and store its content in ``item.artifacts``."""
 
     name = "read_file"
 
@@ -210,18 +210,21 @@ class ReadFileHook(Hook):
         *,
         encoding: str = "utf-8",
         errors: str = "replace",
+        parse_json: bool = False,
         optional: bool = False,
     ):
         self.path = path
         self.key = key
         self.encoding = encoding
         self.errors = errors
+        self.parse_json = parse_json
         self.optional = optional
 
     async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
         try:
             blob = await client.download_file(self.path)
-            item.artifacts[self.key] = blob.decode(self.encoding, errors=self.errors)
+            text = blob.decode(self.encoding, errors=self.errors)
+            item.artifacts[self.key] = json.loads(text) if self.parse_json else text
         except Exception as exc:
             if self.optional:
                 get_logger().warning("read_file %s (key=%r) failed: %s", self.path, self.key, exc)
