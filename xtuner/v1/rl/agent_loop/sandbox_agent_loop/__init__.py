@@ -4,7 +4,7 @@ This module keeps project configs readable:
 
     from xtuner.v1.rl.agent_loop.sandbox_agent_loop import Runner, SandboxStage
 
-    runner = dict(type=Runner, infer=dict(type=SandboxStage, ...))
+    runner = dict(type=Runner, infer=dict(type=SandboxStage, ...), validate=...)
 """
 
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import (
@@ -23,6 +23,7 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.hooks import (
     UploadChosenAgent,
     UploadHook,
 )
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.judger import Judger
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.runner import Runner
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import (
     DetachedShellEntry,
@@ -45,7 +46,6 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     StageResult,
     StageStatus,
 )
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.validator import Judger, JudgerValidator
 
 
 __all__ = [
@@ -63,7 +63,6 @@ __all__ = [
     "Hook",
     "InstallLagent",
     "Judger",
-    "JudgerValidator",
     "ParseJudgerStdout",
     "PickAgent",
     "ReadFileHook",
