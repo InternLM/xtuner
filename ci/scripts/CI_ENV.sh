@@ -7,6 +7,7 @@ export VIDEO_ROOT=${CI_SHARE_DATA}/images
 export QWEN3_4B_PATH=${CI_SHARE_MODEL}/Qwen3-4B-Instruct-2507
 export ROLLOUT_DATA_PATH=${CI_SHARE_DATA}/gsm8k/train.jsonl
 export GEO3K_TRAIN_DATA_PATH=${CI_SHARE_DATA}/geometry3k/train.jsonl
+export GEO3K_LONGTAIL_DATA_PATH=${CI_SHARE_DATA}/geometry3k/geometry3k_longtail_96.jsonl
 export GEO3K_MEDIA_ROOT=${CI_SHARE_DATA}/geometry3k/
 export DEEPSEEK_V3_PATH=${CI_SHARE_MODEL}/DeepSeek-V3.1
 export GPT_OSS_MINI_PATH=${CI_SHARE_MODEL}/gpt-oss-20b-bf16

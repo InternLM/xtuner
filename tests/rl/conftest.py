@@ -1,13 +1,12 @@
-"""PR-fast import hygiene.
+"""Import hygiene for isolated lightweight RL test runs.
 
-The tests in this directory exercise RL state machines and trainer control
-flow with fakes. They should not require model kernels, dataset builders, or
-real training workers during collection.
+Most tests in this directory should use real imports. The stubs below are only
+installed when pytest is invoked with explicit lightweight test files, so they do
+not affect the real 2-step training check or full ``pytest tests/rl`` collection.
 """
 
 from __future__ import annotations
 
-import os
 import sys
 import types
 from pathlib import Path
@@ -16,20 +15,23 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 
-# PR-fast Ray tests start their own local clusters. Disable Ray's uv runtime-env
-# hook by default because it can inspect sandbox parent processes and fail before
-# the test logic runs.
-os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
-
-_PR_FAST_DIR = Path(__file__).resolve().parent
-
-
-def _is_relative_to(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-    except ValueError:
-        return False
-    return True
+_RL_TEST_DIR = Path(__file__).resolve().parent
+_LIGHTWEIGHT_TEST_FILES = {
+    "test_cpu_pg.py",
+    "test_multi_task_agent_loop_manager.py",
+    "test_pending_tasks.py",
+    "test_prepare_train_data.py",
+    "test_produce_progress.py",
+    "test_producer.py",
+    "test_replay_buffer.py",
+    "test_rl_colocate_trainer.py",
+    "test_rl_disaggregated_trainer.py",
+    "test_rollout_config_dist_port_base_patch.py",
+    "test_rollout_logic.py",
+    "test_single_turn_agent_loop.py",
+    "test_staleness_policy.py",
+    "test_utils.py",
+}
 
 
 def _pytest_invocation_paths() -> list[Path]:
@@ -46,7 +48,10 @@ def _pytest_invocation_paths() -> list[Path]:
 
 def _should_install_import_stubs() -> bool:
     paths = _pytest_invocation_paths()
-    return bool(paths) and all(_is_relative_to(path, _PR_FAST_DIR) for path in paths)
+    return bool(paths) and all(
+        path.is_file() and path.parent == _RL_TEST_DIR and path.name in _LIGHTWEIGHT_TEST_FILES
+        for path in paths
+    )
 
 
 def _new_module(name: str) -> types.ModuleType:
@@ -66,7 +71,7 @@ def _install_dataset_stubs() -> None:
         model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
         def build(self, *args: Any, **kwargs: Any):
-            raise RuntimeError("PR-fast tests should provide fake dataloaders explicitly.")
+            raise RuntimeError("Lightweight RL tests should provide fake dataloaders explicitly.")
 
     class Dataloader:
         pass
@@ -173,8 +178,8 @@ def _install_rl_trainer_worker_stubs() -> None:
     sys.modules.setdefault("xtuner.v1.rl.trainer.worker", worker_mod)
 
 
-# These stubs are only safe for isolated PR-fast runs. Full RL collection also
-# imports real smoke and integration tests, which require the real modules.
+# These stubs are only safe for isolated lightweight runs. Full RL collection
+# also imports real training tests, which require the real modules.
 if _should_install_import_stubs():
     _install_dataset_stubs()
     _install_train_trainer_stub()
