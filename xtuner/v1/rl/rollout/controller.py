@@ -307,8 +307,8 @@ class RolloutController:
                 self.health_manager.resume()
 
     def continue_generation(self):
-        self.health_manager.resume()
         self._broadcast_to_active_workers("continue_generation")
+        self.health_manager.resume()
 
     def offload(self):
         self._broadcast_to_active_workers("offload")

@@ -11,7 +11,13 @@ from transformers import AutoConfig, AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.utils import XTUNER_DETERMINISTIC
 
-from .worker import EngineLaunchSpec, EngineLaunchSpecs, RolloutConfig, RolloutWorker, ServerProcessSpec
+from .worker import (
+    EngineLaunchSpec,
+    EngineLaunchSpecs,
+    RolloutConfig,
+    RolloutWorker,
+    ServerProcessSpec,
+)
 
 
 class SGLangWorker(RolloutWorker):
@@ -240,7 +246,10 @@ class SGLangWorker(RolloutWorker):
 
     def check_health(self) -> bool:
         try:
-            response = requests.get(f"{self.server_url}/{self.endpoints['health']}", timeout=5.0)
+            response = requests.get(
+                f"{self.server_url}/{self.endpoints['health']}",
+                timeout=self.config.health_check_timeout_seconds,
+            )
             return response.status_code == 200
         except requests.RequestException as e:
             self.logger.error(f"Health check failed for server {self.server_url}: {e}")

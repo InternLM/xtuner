@@ -366,6 +366,21 @@ class RolloutConfig(BaseModel):
             help="Interval in seconds between rollout worker health checks.",
         ),
     ] = 30.0
+    # LMDeploy /health returns an EngineHealthMonitor snapshot. The monitor's
+    # backend probe timeout defaults to 10s and its poll interval defaults to
+    # 12s, so XTuner's HTTP read timeout needs to be longer than 10s to avoid
+    # turning a slow but informative /health response into a client-side
+    # timeout.
+    health_check_timeout_seconds: Annotated[
+        float,
+        Parameter(
+            group=infer_group,
+            help=(
+                "HTTP timeout in seconds for rollout worker health check requests. "
+                "The default is longer than LMDeploy's 10s backend health probe timeout."
+            ),
+        ),
+    ] = 15.0
     health_check_failure_threshold: Annotated[
         int,
         Parameter(
@@ -902,10 +917,26 @@ class RolloutWorker(SingleAcceleratorWorker):
                 "Content-Type": "application/json; charset=utf-8",
                 "Authorization": f"Bearer {self.config.api_key}",
             }
+            health_url = f"{self.server_url}/{self.endpoints['health_generate']}"
             response = requests.get(
-                f"{self.server_url}/{self.endpoints['health_generate']}", headers=headers, timeout=5.0
+                health_url,
+                headers=headers,
+                timeout=self.config.health_check_timeout_seconds,
             )
-            return response.status_code == 200
+            if response.status_code == 200:
+                return True
+            health_message = ""
+            try:
+                payload = response.json()
+                if isinstance(payload, dict) and payload.get("message"):
+                    health_message = f", message={payload['message']!r}"
+            except ValueError:
+                pass
+            self.logger.warning(
+                f"Health check returned non-200 for server {health_url}: "
+                f"status_code={response.status_code}{health_message}"
+            )
+            return False
         except requests.RequestException as e:
             self.logger.error(f"Health check failed for server {self.server_url}: {e}")
             return False

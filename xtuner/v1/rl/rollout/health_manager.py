@@ -354,18 +354,20 @@ class RolloutHealthManager:
             if self._stop_event.is_set():
                 break
 
-            if not self._pause_event.is_set() and not self._stop_event.is_set():
-                try:
-                    self.run_once()
-                except RuntimeError:
-                    if self._is_stopping():
-                        break
-                    logger.exception("RolloutHealthManager run_once failed.")
-                except Exception:
-                    logger.exception("RolloutHealthManager run_once failed.")
-
             if self._stop_event.wait(self._check_interval):
                 break
+
+            if self._pause_event.is_set() or self._stop_event.is_set():
+                continue
+
+            try:
+                self.run_once()
+            except RuntimeError:
+                if self._is_stopping():
+                    break
+                logger.exception("RolloutHealthManager run_once failed.")
+            except Exception:
+                logger.exception("RolloutHealthManager run_once failed.")
 
     def _snapshot_worker_groups(self) -> dict[tuple[int, ...], _WorkerGroupSnapshot]:
         """Group worker snapshots by lifecycle group so recovery operates on
