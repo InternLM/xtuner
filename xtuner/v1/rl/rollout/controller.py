@@ -3,7 +3,7 @@ import math
 import os
 import threading
 from dataclasses import dataclass
-from typing import Dict, List, Optional, TypeAlias, TypedDict
+from typing import Dict, List, TypeAlias, TypedDict
 from uuid import uuid4
 
 import ray
@@ -125,25 +125,15 @@ class RolloutController:
         self.config = infer_config
         self.num_gpus_per_engine = self.config.num_gpus_per_engine
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
-        self.engine_rank_mesh_array: List[List[int]] = []
-        self.worker_server_urls_map: dict[int, str] = {}
-        # Active rollout workers keep the origin/main meaning: workers that accept rollout requests.
-        self.rank2info: dict[int, WorkerInfo] = {}
-        # All launched server-process workers; populated by _init_workers and
-        # used by health recovery and shutdown.
-        self.server_process_rank2info: dict[int, WorkerInfo] = {}
-        (
-            self.engine_rank_mesh_array,
-            self.worker_server_urls_map,
-            self.rank2info,
-            self.server_process_rank2info,
-        ) = self._init_workers(placement_group)
+        self.engine_rank_mesh_array: List[List[int]]
+        self.server_process_rank2info: dict[int, WorkerInfo]
+        self.engine_rank_mesh_array, self.server_process_rank2info = self._init_workers(placement_group)
         self.worker_info_lock = threading.RLock()
         # The timeout for the environment to wait for the rollout controller's response.
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
-        self.router = SessionRouter(self.rank2info, worker_infos_lock=self.worker_info_lock)
+        self.router = SessionRouter(self.server_process_rank2info, worker_infos_lock=self.worker_info_lock)
         self.health_manager = RolloutHealthManager(
             config=self.config,
             workers_info=self.server_process_rank2info,
@@ -162,16 +152,25 @@ class RolloutController:
         worker_session_url_dict: dict[int, str] = {}
         worker_session_urls_status: dict[str, bool] = {}
         with self.worker_info_lock:
-            worker_server_urls_status = {info.url: info.is_active() for info in self.rank2info.values()}
-            for rank, info in self.rank2info.items():
+            request_entrypoint_rank2info = {
+                rank: info for rank, info in self.server_process_rank2info.items() if info.is_request_entrypoint
+            }
+            worker_server_urls_map = {rank: info.url for rank, info in request_entrypoint_rank2info.items()}
+            worker_server_urls_status = {info.url: info.is_active() for info in request_entrypoint_rank2info.values()}
+            active_session_urls_by_rank = {
+                rank: info.session_url for rank, info in request_entrypoint_rank2info.items()
+            }
+            for rank, info in request_entrypoint_rank2info.items():
                 if info.session_url is None:
                     continue
                 worker_session_url_dict[rank] = info.session_url
                 worker_session_urls_status[info.session_url] = info.is_active()
+            self.logger.info(f"Rollout worker server URLs: {worker_server_urls_map}")
+            self.logger.info(f"Rollout worker session server URLs: {active_session_urls_by_rank}")
 
         rollout_metadata: RolloutWorkerMetadata = {
             "engine_rank_mesh_array": self.engine_rank_mesh_array,
-            "server_url_dict": self.worker_server_urls_map,
+            "server_url_dict": worker_server_urls_map,
             "rollout_config": self.config,
             "worker_server_urls_status": worker_server_urls_status,
             "worker_session_url_dict": worker_session_url_dict,
@@ -304,6 +303,9 @@ class RolloutController:
                 )
         finally:
             if not health_manager_was_paused:
+                # Only resume when this method paused the background checker.
+                # If the caller entered with health checks already paused
+                # (for example before rollout offload), preserve that state.
                 self.health_manager.resume()
 
     def continue_generation(self):
@@ -382,21 +384,7 @@ class RolloutController:
             },
         )(worker_base_cls)
 
-    def _get_rank_by_actor(self, actor: RolloutWorker) -> Optional[int]:
-        """Get rank by actor object.
-
-        Args:
-            actor: The RolloutWorker actor object.
-
-        Returns:
-            The rank of the worker, or None if not found.
-        """
-        for rank, info in self.rank2info.items():
-            if info.actor == actor:
-                return rank
-        return None
-
-    def _init_workers(self, placement_group: PlacementGroup):
+    def _init_workers(self, placement_group: PlacementGroup) -> tuple[List[List[int]], dict[int, WorkerInfo]]:
         """Initializes and configures the pool of RolloutWorker actors.
 
         This method follows the same high-level flow as the legacy implementation:
@@ -405,9 +393,8 @@ class RolloutController:
         expose request-entrypoint server URLs to rollout traffic.
 
         Returns:
-            A tuple of `engine_rank_mesh_array`, `worker_server_urls_map`,
-            active `workers_info`, and all server-process workers for lifecycle
-            management.
+            A tuple of `engine_rank_mesh_array` and all server-process workers
+            for lifecycle management.
         """
         worker_base_cls = self._get_worker_base_cls()
         worker_cls = self._build_remote_worker_cls(worker_base_cls)
@@ -481,20 +468,12 @@ class RolloutController:
                     is_request_entrypoint=server_process.accepts_rollout_requests,
                 )
 
-        worker_server_urls_map = {
-            rank: info.url for rank, info in server_process_workers_info.items() if info.is_request_entrypoint
-        }
-        workers_info = {rank: info for rank, info in server_process_workers_info.items() if info.is_request_entrypoint}
-
-        active_session_urls_by_rank = {rank: info.session_url for rank, info in workers_info.items()}
         self.logger.info(
             f"Rollout server-process worker URLs: {[info.url for info in server_process_workers_info.values()]}"
         )
-        self.logger.info(f"Rollout worker server URLs: {worker_server_urls_map}")
-        self.logger.info(f"Rollout worker session server URLs: {active_session_urls_by_rank}")
         lifecycle_groups = sorted({info.lifecycle_group_ranks for info in server_process_workers_info.values()})
         self.logger.info(f"Rollout worker lifecycle groups: {lifecycle_groups}")
-        return engine_rank_mesh_array, worker_server_urls_map, workers_info, server_process_workers_info
+        return engine_rank_mesh_array, server_process_workers_info
 
 
 RayRolloutController = ray.remote(RolloutController)
