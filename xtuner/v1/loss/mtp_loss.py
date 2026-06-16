@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
@@ -60,6 +60,7 @@ class MTPLossConfig(CELossConfig):
 
     mtp_depth: int
     detach_mtp_lm_head_weight: bool = False
+    mask_type: Optional[str] = None
 
     @property
     def loss_ctx_cls(self) -> type["MTPLossContext"]:
@@ -167,6 +168,12 @@ class MTPLossContext(LMHeadLossContext):
             head_weight = head_weight.detach()
             head_bias = head_bias.detach() if head_bias is not None else None
         # Dispatch to eager_mode/chunk_mode via base class, which calls loss_fn per chunk
+
+        mask_type = self.loss_cfg.mask_type
+        if mask_type == "v1":
+            self.process_loss_weight_v1()
+        elif mask_type is not None:
+            raise NotImplementedError(f"Unknown MTP Loss Mask Type: {mask_type}")
         return super().forward(hidden_states, head_weight, head_bias)
 
     def loss_fn(
@@ -214,3 +221,34 @@ class MTPLossContext(LMHeadLossContext):
         )
 
         return kl_loss, (None, {})
+
+    def process_loss_weight_v1(self):
+        layer_idx = self.loss_cfg.mtp_depth - 1
+        shifted_labels = self.loss_kwargs.shifted_labels
+        loss_weight = self.loss_kwargs.loss_weight
+        sum_loss_weight = loss_weight.sum()
+
+        easy_to_use = torch.cat(
+            [
+                shifted_labels,
+                torch.zeros((shifted_labels.size(0), 1), dtype=shifted_labels.dtype, device=shifted_labels.device),
+            ],
+            dim=-1,
+        )
+
+        # TODO: digit and dot token config
+        is_digit = torch.where(easy_to_use < 25, easy_to_use > 14, 0)
+        is_dot = torch.where(easy_to_use == 13, 1, 0)
+        is_digit_or_dot = is_digit | is_dot
+
+        mask = is_digit_or_dot.clone()
+        for i in range(layer_idx + 1):
+            mask |= torch.roll(is_digit_or_dot, shifts=i + 1, dims=-1)
+
+        mtp_mask = mask.bool()[:, :-1]
+
+        loss_weight[mtp_mask == 0.0] = 0.0
+        if loss_weight.sum().item() != 0:
+            loss_weight = loss_weight * sum_loss_weight / loss_weight.sum()
+
+        self.loss_kwargs.loss_weight = loss_weight

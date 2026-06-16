@@ -45,8 +45,10 @@ class MTPConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    name: Annotated[str, Parameter(group="model")]
     num_layers: Annotated[int, Parameter(group="model")]
     share_weights: Annotated[bool, Parameter(group="model")] = False
     detach_mtp_lm_head_weight: Annotated[bool, Parameter(group="model")] = False
     detach_mtp_inputs: Annotated[bool, Parameter(group="model")] = False
     loss_scaling_factor: Annotated[float, Parameter(group="model")] = 0.1
+    mask_type: Annotated[str | None, Parameter(group="model")]
