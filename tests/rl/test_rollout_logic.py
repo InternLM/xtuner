@@ -19,7 +19,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
-from xtuner.v1.rl.rollout.controller import RolloutController
+from xtuner.v1.rl.rollout.controller import RolloutController, WorkerInfo
+from xtuner.v1.rl.rollout.health_manager import RolloutHealthManager
 from xtuner.v1.rl.rollout.sglang import SGLangWorker
 from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, WorkerLifecycleState
 from xtuner.v1.rl.rollout.worker import RolloutWorker
