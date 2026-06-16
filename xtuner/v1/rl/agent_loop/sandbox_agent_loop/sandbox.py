@@ -49,6 +49,7 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
 )
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.trace import span
 from xtuner.v1.utils import get_logger
+from xtuner.v1.utils.retry_utils import poll_sandbox_health, retry_sandbox_acquire
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -826,6 +827,10 @@ async def _sandbox_alive(client: Any, timeout_sec: float = 5.0) -> bool:
 # ─────────────────────────────────────────────────────────────────
 
 
+class _UnhealthySandboxError(RuntimeError):
+    pass
+
+
 class SandboxPool:
     """Per-run sandbox client pool: lazily acquires + caches clients by name.
 
@@ -873,7 +878,7 @@ class SandboxPool:
         self.validate_name(name)
         spec = self._specs[name]
         try:
-            client, env_id = await self._acquire_ready(spec)
+            client, env_id = await self._acquire_ready(spec, name=name)
         except Exception as exc:
             if record is not None:
                 record.status = StageStatus.FAILED
@@ -931,30 +936,24 @@ class SandboxPool:
                 return str(val)
         return None
 
-    async def _acquire_ready(self, spec: SandboxSpec) -> tuple[Any, str]:
-        last_err: Exception | None = None
-        for attempt in range(1, self._max_attempts + 1):
-            try:
-                create_kwargs: dict[str, Any] = {}
-                if spec.key:
-                    create_kwargs["key"] = spec.key
-                if spec.env_vars:
-                    create_kwargs["env_vars"] = spec.env_vars
-                if spec.resources:
-                    create_kwargs["resources"] = spec.resources
-                if self._create_limiter is not None:
-                    await self._create_limiter.acquire()
-                client, env_id = await self._provider.create(
-                    image_tag=spec.image,
-                    ttl_seconds=spec.ttl_seconds,
-                    **create_kwargs,
-                )
-            except Exception as exc:
-                last_err = exc
-                await asyncio.sleep(min(2**attempt, 8))
-                continue
+    async def _acquire_ready(self, spec: SandboxSpec, *, name: str | None = None) -> tuple[Any, str]:
+        async def _attempt_once() -> tuple[Any, str]:
+            create_kwargs: dict[str, Any] = {}
+            if spec.key:
+                create_kwargs["key"] = spec.key
+            if spec.env_vars:
+                create_kwargs["env_vars"] = spec.env_vars
+            if spec.resources:
+                create_kwargs["resources"] = spec.resources
+            if self._create_limiter is not None:
+                await self._create_limiter.acquire()
+            client, env_id = await self._provider.create(
+                image_tag=spec.image,
+                ttl_seconds=spec.ttl_seconds,
+                **create_kwargs,
+            )
 
-            if await self._wait_healthy(client):
+            if await self._wait_healthy(client, name=name):
                 return client, env_id
 
             try:
@@ -971,29 +970,46 @@ class SandboxPool:
                     f"aclose of unhealthy sandbox env_id={env_id} failed:\n"
                     f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
                 )
-            last_err = RuntimeError(f"sandbox {env_id} unhealthy")
+            raise _UnhealthySandboxError(f"sandbox {env_id} unhealthy")
 
-        last_err_msg = (
-            "".join(traceback.format_exception(type(last_err), last_err, last_err.__traceback__)).rstrip()
-            if last_err is not None
-            else "unknown"
+        retryer = retry_sandbox_acquire(
+            attempts=self._max_attempts,
+            unhealthy_exceptions=(_UnhealthySandboxError,),
+            logger=get_logger(),
+            sandbox_name=name,
+            sleep=asyncio.sleep,
         )
-        raise RuntimeError(f"could not acquire a healthy sandbox after {self._max_attempts} attempts: {last_err_msg}")
+        try:
+            return await retryer(_attempt_once)
+        except Exception as exc:
+            last_err_msg = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()
+            raise RuntimeError(
+                f"could not acquire a healthy sandbox after {self._max_attempts} attempts: {last_err_msg}"
+            ) from exc
 
-    async def _wait_healthy(self, client: Any) -> bool:
-        deadline = time.monotonic() + self._health_max_wait_sec
-        while time.monotonic() < deadline:
+    async def _wait_healthy(self, client: Any, *, name: str | None = None) -> bool:
+        async def _poll_once() -> bool:
             try:
                 h = await client.health_check()
-                if h.get("ok"):
-                    return True
+                return bool(h.get("ok"))
             except Exception as exc:
                 get_logger().debug(
                     "health poll error:\n"
                     f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
                 )
-            await asyncio.sleep(self._health_poll_interval_sec)
-        return False
+                return False
+
+        if self._health_max_wait_sec <= 0:
+            return False
+
+        retryer = poll_sandbox_health(
+            max_wait_seconds=self._health_max_wait_sec,
+            wait_seconds=self._health_poll_interval_sec,
+            logger=get_logger(),
+            sandbox_name=name,
+            sleep=asyncio.sleep,
+        )
+        return await retryer(_poll_once)
 
 
 # ─────────────────────────────────────────────────────────────────

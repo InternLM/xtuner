@@ -17,7 +17,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.rollout.controller import RolloutController
 from xtuner.v1.rl.rollout.sglang import SGLangWorker
@@ -180,6 +179,9 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
         safe_post_result: HttpRequestResult,
         safe_handle_response=None,
     ):
+        async def passthrough_response(rollout_state, http_response):
+            return rollout_state
+
         worker = RolloutWorker.__new__(RolloutWorker)
         worker.receive_abort_request = threading.Event()
         worker.enable_partial_rollout = False
@@ -190,7 +192,7 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
         worker.logger = MagicMock()
         worker._get_request_payload = MagicMock(return_value={"input_ids": [1], "max_tokens": 128})
         worker._safe_post_request = AsyncMock(return_value=safe_post_result)
-        worker._safe_handle_response = AsyncMock(side_effect=safe_handle_response)
+        worker._safe_handle_response = AsyncMock(side_effect=safe_handle_response or passthrough_response)
         return worker
 
     async def test_generate_returns_aborted_when_abort_flag_is_set(self):
@@ -348,21 +350,11 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
                 payload={"input_ids": [1]},
             )
 
-        async def invalid_response(rollout_state, http_response):
-            rollout_state.status = Status.FAILED
-            return rollout_state
-
         cases = [
             ("timeout", timeout_result(), None, ("Request failed", "3")),
             ("request_error", request_error_result(), None, ("Request failed", "3")),
             ("client_error", client_error_result(), None, ("Client error",)),
             ("server_error", server_error_result(), None, ("Server error",)),
-            (
-                "invalid_response",
-                HttpRequestResult(response=object()),
-                invalid_response,
-                ("Invalid rollout response", "3"),
-            ),
         ]
 
         async def run_case(case_name, safe_post_result, safe_handle_response, expected_messages):
@@ -389,6 +381,87 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
 
         with patch("xtuner.v1.rl.rollout.worker.asyncio.sleep", new=AsyncMock()):
             await asyncio.gather(*(run_case(*case) for case in cases))
+
+    async def test_generate_attempt_counts_for_retryable_and_non_retryable_errors(self):
+        # max_retry_per_sample=3 表示首轮请求 + 3 次 retry；非 retryable HTTP 错误不应重试。
+        def timeout_result():
+            error = httpx.TimeoutException("Mocked timeout error")
+            return HttpRequestResult(
+                error_type=HttpRequestErrorType.from_exception(error),
+                exception=error,
+                url="http://test/generate",
+                payload={"input_ids": [1]},
+            )
+
+        def client_error_result():
+            req = httpx.Request("POST", "http://test/generate")
+            response = httpx.Response(400, request=req)
+            error = httpx.HTTPStatusError("Mocked client error", request=req, response=response)
+            return HttpRequestResult(
+                error_type=HttpRequestErrorType.from_exception(error),
+                exception=error,
+                url="http://test/generate",
+                payload={"input_ids": [1]},
+            )
+
+        def server_error_result():
+            req = httpx.Request("POST", "http://test/generate")
+            response = httpx.Response(500, request=req)
+            error = httpx.HTTPStatusError("Mocked server error", request=req, response=response)
+            return HttpRequestResult(
+                error_type=HttpRequestErrorType.from_exception(error),
+                exception=error,
+                url="http://test/generate",
+                payload={"input_ids": [1]},
+            )
+
+        for safe_post_result, expected_calls in (
+            (timeout_result(), 4),
+            (client_error_result(), 1),
+            (server_error_result(), 1),
+        ):
+            worker = self._build_mock_error_rollout_worker(safe_post_result=safe_post_result)
+            await worker.generate(RolloutState(message=[{"role": "user", "content": "Hello!"}]))
+            self.assertEqual(worker._safe_post_request.await_count, expected_calls)
+
+    async def test_generate_retries_invalid_response_for_configured_attempts(self):
+        # invalid response 回到 response handler 内判定；handler 抛 retryable 异常后由 Tenacity 重试。
+        from xtuner.v1.rl.rollout import worker as rollout_worker
+
+        async def invalid_response(rollout_state, http_response):
+            raise rollout_worker._RetryableInvalidRolloutResponseError("missing finish_reason")
+
+        worker = self._build_mock_error_rollout_worker(
+            safe_post_result=HttpRequestResult(response=object()),
+            safe_handle_response=invalid_response,
+        )
+
+        result_state = await worker.generate(RolloutState(message=[{"role": "user", "content": "Hello!"}]))
+
+        self.assertEqual(worker._safe_post_request.await_count, 4)
+        self.assertEqual(worker._safe_handle_response.await_count, 4)
+        self.assertEqual(result_state.status, Status.FAILED)
+        self.assertIn("missing finish_reason", result_state.error_msg)
+
+    async def test_generate_retries_response_handler_failed_status_for_backwards_compatibility(self):
+        # Some rollout backends still signal invalid responses by returning
+        # Status.FAILED instead of raising the retryable invalid-response error.
+        async def failed_response(rollout_state, http_response):
+            rollout_state.status = Status.FAILED
+            rollout_state.error_msg = "handler returned incomplete token data"
+            return rollout_state
+
+        worker = self._build_mock_error_rollout_worker(
+            safe_post_result=HttpRequestResult(response=object()),
+            safe_handle_response=failed_response,
+        )
+
+        result_state = await worker.generate(RolloutState(message=[{"role": "user", "content": "Hello!"}]))
+
+        self.assertEqual(worker._safe_post_request.await_count, 4)
+        self.assertEqual(worker._safe_handle_response.await_count, 4)
+        self.assertEqual(result_state.status, Status.FAILED)
+        self.assertIn("handler returned incomplete token data", result_state.error_msg)
 
 
 class TestRolloutHealthChecker(unittest.TestCase):

@@ -37,6 +37,7 @@ from xtuner.v1.rl.utils import (
 )
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
+from xtuner.v1.utils.retry_utils import retry_rollout_request
 
 from .session_server import SessionServerActor
 from .utils import ROLLOUT_RAY_GET_TIMEOUT, PartialRolloutHandler
@@ -48,6 +49,20 @@ if TYPE_CHECKING:
 
 infer_group = Group("inference", help="Inference worker configuration.")
 ROLLOUT_CONCURRENCY_GROUP_GENERATE = "generate"
+
+
+class _RetryableRolloutRequestError(Exception):
+    def __init__(self, http_result: HttpRequestResult) -> None:
+        super().__init__(
+            f"retryable rollout request error {http_result.error_type} with message: {http_result.error_msg}"
+        )
+        self.http_result = http_result
+
+
+class _RetryableInvalidRolloutResponseError(Exception):
+    def __init__(self, reason: str = "Invalid rollout response") -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class RolloutConfig(BaseModel):
@@ -728,8 +743,14 @@ class RolloutWorker(SingleAcceleratorWorker):
                 rollout_state.status = Status.COMPLETED
                 return rollout_state
 
-            for attempt in range(max_retries + 1):
-                is_last_attempt = attempt == max_retries
+            def _prepare_before_retry(retry_state):
+                nonlocal rollout_state, payload
+                rollout_state, payload = self._prepare_request_payload(
+                    rollout_state, request_max_tokens, discard_response=True
+                )
+
+            async def _attempt_once() -> None:
+                nonlocal rollout_state
                 http_result = await self._safe_post_request(endpoint_url, headers=headers, payload=payload)
 
                 # Case 1: HTTP Request is Successful
@@ -742,33 +763,19 @@ class RolloutWorker(SingleAcceleratorWorker):
                         rollout_state.sample_params = rollout_state.sample_params.model_copy(
                             update={"max_tokens": request_max_tokens}
                         )
-                        return rollout_state
+                        return
                     if rollout_state.status == Status.COMPLETED:
-                        return rollout_state
+                        return
                     if rollout_state.status == Status.ABORTED:
                         rollout_state.sample_params = rollout_state.sample_params.model_copy(
                             update={"max_tokens": request_max_tokens}
                         )
-                        return rollout_state
+                        return
 
-                    if is_last_attempt:
-                        # Case 1.2: Invalid rollout response and no retries left, so we return FAILED
-                        self.logger.warning(
-                            f"Invalid rollout response for request {uid} after {max_retries} attempts, marking as FAILED."
-                        )
-                        rollout_state.status = Status.FAILED
-                        rollout_state.error_msg = f"Invalid rollout response after {max_retries} attempts."
-                        return rollout_state
-
-                    # Case 1.3: Invalid rollout response but we have retries left
-                    self.logger.warning(
-                        f"Invalid rollout response for request {uid}, retrying {attempt + 1}/{max_retries}."
+                    error_msg = rollout_state.error_msg or "response handler returned without completing or aborting"
+                    raise _RetryableInvalidRolloutResponseError(
+                        f"response handler returned status {rollout_state.status.value}: {error_msg}"
                     )
-                    rollout_state, payload = self._prepare_request_payload(
-                        rollout_state, request_max_tokens, discard_response=True
-                    )
-                    await asyncio.sleep(0.1)
-                    continue
 
                 # Case 2: Error occurred during HTTP Request
                 if http_result.error_type == HttpRequestErrorType.REQUEST_ABORTED:
@@ -778,7 +785,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     rollout_state.sample_params = rollout_state.sample_params.model_copy(
                         update={"max_tokens": request_max_tokens}
                     )
-                    return rollout_state
+                    return
 
                 if http_result.is_client_error:
                     # Case 2.2: A non-retryable client error occurred (such as 4xx HTTP status)
@@ -789,7 +796,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                         f"Client error {http_result.error_type} with message: {http_result.error_msg}"
                     )
                     rollout_state.status = Status.FAILED
-                    return rollout_state
+                    return
 
                 if http_result.is_server_error:
                     # Case 2.3: A non-retryable server error occurred (such as 5xx HTTP status)
@@ -800,32 +807,48 @@ class RolloutWorker(SingleAcceleratorWorker):
                         f"Server error {http_result.error_type} with message: {http_result.error_msg}"
                     )
                     rollout_state.status = Status.FAILED
-                    return rollout_state
+                    return
 
                 # Case 3: Retryable error occurred during HTTP Request
                 if http_result.is_retryable:
-                    if is_last_attempt:
-                        self.logger.warning(
-                            f"rollout request {uid} to {http_result.url} failed after {max_retries} attempts due to retryable error {http_result.error_type} with {http_result.error_msg}"
-                        )
-                        rollout_state.error_msg = f"Request failed after {max_retries} attempts due to retryable error {http_result.error_type} with message: {http_result.error_msg}"
-                        rollout_state.status = Status.FAILED
-                        return rollout_state
-
-                    self.logger.warning(
-                        f"rollout request {uid} to {http_result.url} failed due to retryable error {http_result.error_type} with {http_result.error_msg}, retrying {attempt + 1}/{max_retries}."
-                    )
-                    rollout_state, payload = self._prepare_request_payload(
-                        rollout_state, request_max_tokens, discard_response=True
-                    )
-                    await asyncio.sleep(0.1)
-                    continue
+                    raise _RetryableRolloutRequestError(http_result)
 
                 # Case 4: Unknown error occurred during HTTP Request and stop the rollout
                 if http_result.is_unknown_error:
                     raise RuntimeError(
                         f"Unexpected error during rollout request {uid} to {http_result.url}: {http_result.exception}"
                     )
+
+                return
+
+            retryer = retry_rollout_request(
+                attempts=max_retries + 1,
+                retry_exceptions=(
+                    _RetryableRolloutRequestError,
+                    _RetryableInvalidRolloutResponseError,
+                ),
+                logger=self.logger,
+                request_uid=uid,
+                before_retry=_prepare_before_retry,
+                sleep=asyncio.sleep,
+            )
+            try:
+                await retryer(_attempt_once)
+            except _RetryableInvalidRolloutResponseError as e:
+                self.logger.warning(
+                    f"Invalid rollout response for request {uid} after {max_retries} attempts, marking as FAILED. Last error: {e.reason}"
+                )
+                rollout_state.status = Status.FAILED
+                rollout_state.error_msg = f"Invalid rollout response after {max_retries} attempts: {e.reason}"
+                return rollout_state
+            except _RetryableRolloutRequestError as e:
+                http_result = e.http_result
+                self.logger.warning(
+                    f"rollout request {uid} to {http_result.url} failed after {max_retries} attempts due to retryable error {http_result.error_type} with {http_result.error_msg}"
+                )
+                rollout_state.error_msg = f"Request failed after {max_retries} attempts due to retryable error {http_result.error_type} with message: {http_result.error_msg}"
+                rollout_state.status = Status.FAILED
+                return rollout_state
             return rollout_state
         finally:
             if rollout_state.status == Status.FAILED:
@@ -1018,14 +1041,15 @@ class RolloutWorker(SingleAcceleratorWorker):
                         self.logger.warning(
                             f"finish_reason is missing in response meta_info when waiting for aborted message {uid}, defaulting to 'abort'. Response: {response}"
                         )
+                        rollout_state.error_msg = "Missing finish_reason in response meta_info"
+                        return rollout_state
                     else:
-                        rollout_state.finish_reason = "error"
-                        rollout_state.status = Status.FAILED
                         self.logger.warning(
-                            f"finish_reason is missing in response meta_info for message {uid}, defaulting to 'error'. Response: {response}"
+                            f"finish_reason is missing in response meta_info for message {uid}. Response: {response}"
                         )
-                    rollout_state.error_msg = "Missing finish_reason in response meta_info"
-                    return rollout_state
+                        raise _RetryableInvalidRolloutResponseError(
+                            f"Missing finish_reason in response meta_info for message {uid}"
+                        )
                 returned_response = response.get("text", "")
                 # 获取response_ids && respoonse_ids
                 if (
@@ -1070,17 +1094,11 @@ class RolloutWorker(SingleAcceleratorWorker):
                     if validation_errors:
                         error_msg = f"Incomplete rollout data for msg {uid}: {', '.join(validation_errors)}"
                         self.logger.error(error_msg)
-                        rollout_state.routed_experts = routed_experts
-                        rollout_state.status = Status.FAILED
-                        rollout_state.error_msg = error_msg
-                        return rollout_state
+                        raise _RetryableInvalidRolloutResponseError(error_msg)
                 elif rollout_status == Status.FAILED:
                     error_msg = f"Rollout failed for msg {uid} with finish_reason {finish_reason}"
                     self.logger.error(error_msg)
-                    rollout_state.routed_experts = routed_experts
-                    rollout_state.status = Status.FAILED
-                    rollout_state.error_msg = error_msg
-                    return rollout_state
+                    raise _RetryableInvalidRolloutResponseError(error_msg)
 
                 if self.enable_partial_rollout:
                     prompt_tokens = response["meta_info"]["prompt_tokens"]
@@ -1104,6 +1122,8 @@ class RolloutWorker(SingleAcceleratorWorker):
                     rollout_state.finish_reason = finish_reason
                     rollout_state.status = rollout_status
                 return rollout_state
+            except _RetryableInvalidRolloutResponseError:
+                raise
             except KeyError as e:
                 response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
                 error_msg = f"Missing expected key {e} in response {response_for_log} for {uid}"
@@ -1134,15 +1154,20 @@ class RolloutWorker(SingleAcceleratorWorker):
                 finish_reason = response["choices"][0]["finish_reason"]
                 rollout_status = update_status_from_finish_reason(finish_reason)
                 if rollout_status == Status.COMPLETED and not returned_response:
-                    self.logger.error(f"Empty response text for msg {uid} with finish_reason {finish_reason}")
-                    rollout_state.status = Status.FAILED
-                    rollout_state.error_msg = "Empty response text"
-                    return rollout_state
+                    error_msg = f"Empty response text for msg {uid} with finish_reason {finish_reason}"
+                    self.logger.error(error_msg)
+                    raise _RetryableInvalidRolloutResponseError(error_msg)
+                if rollout_status == Status.FAILED:
+                    error_msg = f"Rollout failed for msg {uid} with finish_reason {finish_reason}"
+                    self.logger.error(error_msg)
+                    raise _RetryableInvalidRolloutResponseError(error_msg)
 
                 rollout_state.response = returned_response
                 rollout_state.finish_reason = finish_reason
                 rollout_state.status = rollout_status
                 return rollout_state
+            except _RetryableInvalidRolloutResponseError:
+                raise
             except KeyError as e:
                 response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
                 error_msg = f"Missing expected key {e} in response {response_for_log} for {uid}"

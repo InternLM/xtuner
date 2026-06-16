@@ -17,6 +17,7 @@ transformers_stream_generator
 opencv-python-headless
 pydantic
 tensorboard
+tenacity
 xxhash
 imageio
 timm

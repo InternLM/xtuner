@@ -43,6 +43,7 @@ dependencies = [
   "opencv-python-headless<=4.12.0.88",
   "pydantic",
   "tensorboard",
+  "tenacity",
   "xxhash",
   "imageio",
   "timm",

@@ -6,6 +6,7 @@ import ray
 from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.utils import get_logger
+from xtuner.v1.utils.retry_utils import retry_trace_store_bootstrap
 
 
 _STORE_NAME = "rollout_trace_store"
@@ -334,6 +335,19 @@ class RolloutTraceStore:
         return [self.objects[key] for key in keys if key in self.objects]
 
 
+def _create_or_lookup_store_once():
+    try:
+        return RolloutTraceStore.options(
+            name=_STORE_NAME,
+            namespace=_STORE_NAMESPACE,
+        ).remote()
+    except ValueError as exc:
+        try:
+            return ray.get_actor(_STORE_NAME, namespace=_STORE_NAMESPACE)
+        except ValueError:
+            raise exc from None
+
+
 def get_store():
     """Process-local cached handle to the singleton store actor.
 
@@ -355,28 +369,18 @@ def get_store():
     except ValueError:
         pass
 
-    import time as _time
-
-    for attempt in range(10):
-        try:
-            _handle_cache = RolloutTraceStore.options(
-                name=_STORE_NAME,
-                namespace=_STORE_NAMESPACE,
-            ).remote()
-            return _handle_cache
-        except ValueError as exc:
-            try:
-                _handle_cache = ray.get_actor(_STORE_NAME, namespace=_STORE_NAMESPACE)
-                return _handle_cache
-            except ValueError:
-                get_logger().debug(f"RolloutTraceStore bootstrap retry {attempt}: {exc}")
-                _time.sleep(0.2 * (attempt + 1))
-                continue
-
-    raise RuntimeError(
-        f"RolloutTraceStore: failed to acquire named actor "
-        f"{_STORE_NAME!r} in namespace {_STORE_NAMESPACE!r} after retries"
-    )
+    try:
+        retryer = retry_trace_store_bootstrap(
+            logger=get_logger(),
+            sleep=time.sleep,
+        )
+        _handle_cache = retryer(_create_or_lookup_store_once)
+        return _handle_cache
+    except ValueError as exc:
+        raise RuntimeError(
+            f"RolloutTraceStore: failed to acquire named actor "
+            f"{_STORE_NAME!r} in namespace {_STORE_NAMESPACE!r} after retries"
+        ) from exc
 
 
 # reasoning rl may be not initialized
