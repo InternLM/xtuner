@@ -17,7 +17,7 @@ import ray
 import requests  # type: ignore[import-untyped]
 from cyclopts import Group, Parameter
 from packaging.version import Version
-from pydantic import BaseModel, ConfigDict, PrivateAttr
+from pydantic import BaseModel, ConfigDict
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from typing_extensions import Annotated
 
@@ -103,6 +103,26 @@ class EngineLaunchSpec:
 
 
 EngineLaunchSpecs: TypeAlias = tuple[EngineLaunchSpec, ...]
+
+
+def get_rollout_worker_base_cls(config: "RolloutConfig") -> type["RolloutWorker"]:
+    if config.rollout_backend == "lmdeploy":
+        from .lmdeploy import LMDeployWorker
+
+        return LMDeployWorker
+    elif config.rollout_backend == "vllm":
+        from .vllm import vLLMWorker
+
+        return vLLMWorker
+    elif config.rollout_backend == "sglang":
+        from .sglang import SGLangWorker
+
+        return SGLangWorker
+    else:
+        raise NotImplementedError(
+            f"Rollout backend is not supported: {config.rollout_backend}. "
+            "Please set XTUNER_USE_LMDEPLOY or XTUNER_USE_VLLM or XTUNER_USE_SGLANG environment variable."
+        )
 
 
 class RolloutConfig(BaseModel):
@@ -388,7 +408,6 @@ class RolloutConfig(BaseModel):
             help="Number of consecutive health check failures required before marking a worker inactive.",
         ),
     ] = 3
-    _logged_server_urls_per_engine: bool = PrivateAttr(default=False)
 
     @property
     def rollout_backend(self) -> str:
@@ -406,50 +425,25 @@ class RolloutConfig(BaseModel):
         return backend
 
     @property
-    def server_urls_per_engine(self) -> int:
-        # server_urls_per_engine is introduced for lmdeploy ep settings
-        # for now only lmdeploy pytorch backend with ep > 1 requires multiple server urls per engine
-        if self.rollout_backend == "lmdeploy" and self.expert_parallel_size > 1:
-            # when expert parallelism is used, lmdeploy requires `expert_parallel_size` server instances per engine
-            if not self._logged_server_urls_per_engine:
-                self._logged_server_urls_per_engine = True
-                get_logger().info(
-                    f"Setting server_urls_per_engine={self.expert_parallel_size} due to expert parallelism in LMDeploy."
-                )
-            return self.expert_parallel_size
-        else:
-            return 1
-
-    @property
     def num_gpus_per_engine(self) -> int:
         return self.expert_parallel_size if self.expert_parallel_size > 1 else self.tensor_parallel_size
 
-    def get_active_servers_count(self, num_rollout_workers: int) -> tuple[int, int]:
-        """Calculate the number of active servers and nodes per engine."""
-        # NOTE: Since different inference engines have different launch methods,
-        # the number of nodes contained in each engine is not consistent.
-        # For example, sglang requires starting an inference engine for each node,
-        # while lmdeploy and vllm do not. Therefore, calculate active servers from the rollout config.
-        nodes_per_engine = (
-            1
-            if self.rollout_cross_node_comm or self.num_gpus_per_engine < self.gpus_per_node
-            else self.num_gpus_per_engine // self.gpus_per_node
+    @property
+    def generate_concurrency_per_instance(self) -> int:
+        assert self.rollout_max_batch_size_per_instance is not None, (
+            "rollout_max_batch_size_per_instance must be set before computing generate concurrency."
         )
-        active_servers_count = max(
-            1,
-            int((num_rollout_workers // self.num_gpus_per_engine) * nodes_per_engine * self.server_urls_per_engine),
-        )
-        return active_servers_count, nodes_per_engine
+        return math.ceil(self.rollout_max_batch_size_per_instance * self.allow_over_concurrency_ratio)
 
     def get_controller_generate_concurrency(self, placement_group: "PlacementGroup") -> int:
-        active_worker_count, _ = self.get_active_servers_count(len(placement_group.bundle_specs))
-        assert self.rollout_max_batch_size_per_instance is not None, (
-            "rollout_max_batch_size_per_instance must be set before building RolloutController."
+        worker_base_cls = get_rollout_worker_base_cls(self)
+        sorted_bundle_idxs, _, _, _ = AutoAcceleratorWorkers.get_spmd_info(placement_group)
+        rank_bundle_idx_list = [(rank, bundle_idx) for rank, bundle_idx in enumerate(sorted_bundle_idxs)]
+        engine_launch_specs = worker_base_cls.build_engine_launch_specs(self, rank_bundle_idx_list)
+        request_entrypoint_count = sum(
+            len(engine_spec.request_entrypoint_servers) for engine_spec in engine_launch_specs
         )
-        concurrency_per_worker = math.ceil(
-            self.rollout_max_batch_size_per_instance * self.allow_over_concurrency_ratio
-        )
-        generate_max_concurrency = active_worker_count * concurrency_per_worker
+        generate_max_concurrency = request_entrypoint_count * self.generate_concurrency_per_instance
         return generate_max_concurrency
 
     def model_post_init(self, __context: Any) -> None:
@@ -564,10 +558,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.engine_rank_mesh_array: list[list[int]] = []
         self.engine_launch_spec: EngineLaunchSpec | None = None
         # http_concurrency is calculated based on the max batch size per engine and the total number of engines
-        assert config.rollout_max_batch_size_per_instance, (
-            "rollout_max_batch_size_per_instance must be set in RolloutConfig"
-        )
-        http_concurrency = math.ceil(config.rollout_max_batch_size_per_instance * config.allow_over_concurrency_ratio)
+        http_concurrency = config.generate_concurrency_per_instance
         limits = httpx.Limits(max_connections=http_concurrency, max_keepalive_connections=100)
         self.client = httpx.AsyncClient(limits=limits, timeout=self.config.rollout_timeout)
         self.server_task = None

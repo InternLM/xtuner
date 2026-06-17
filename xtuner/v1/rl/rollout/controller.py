@@ -1,6 +1,4 @@
 import asyncio
-import math
-import os
 import threading
 from dataclasses import dataclass
 from typing import Dict, List, TypeAlias, TypedDict
@@ -24,6 +22,7 @@ from .worker import (
     ROLLOUT_CONCURRENCY_GROUP_GENERATE,
     RolloutConfig,
     RolloutWorker,
+    get_rollout_worker_base_cls,
 )
 
 
@@ -193,14 +192,10 @@ class RolloutController:
         return tool_call_parser, reasoning_parser
 
     def get_generate_concurrency(self) -> int:
-        assert self.config.rollout_max_batch_size_per_instance is not None, (
-            "rollout_max_batch_size_per_instance must be set before building AgentLoop."
+        request_entrypoint_count = sum(
+            1 for info in self.server_process_rank2info.values() if info.is_request_entrypoint
         )
-        concurrency_per_worker = math.ceil(
-            self.config.rollout_max_batch_size_per_instance * self.config.allow_over_concurrency_ratio
-        )
-        active_worker_count = len(self.health_manager.snapshot_active_workers(request_entrypoint_only=True))
-        return active_worker_count * concurrency_per_worker
+        return request_entrypoint_count * self.config.generate_concurrency_per_instance
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
@@ -350,33 +345,13 @@ class RolloutController:
         results = ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
         return results
 
-    def _get_worker_base_cls(self):
-        if os.environ.get("XTUNER_USE_LMDEPLOY") == "1":
-            from .lmdeploy import LMDeployWorker
-
-            return LMDeployWorker
-        elif os.environ.get("XTUNER_USE_VLLM") == "1":
-            from .vllm import vLLMWorker
-
-            return vLLMWorker
-        elif os.environ.get("XTUNER_USE_SGLANG") == "1":
-            from .sglang import SGLangWorker
-
-            return SGLangWorker
-        else:
-            raise NotImplementedError(
-                "Rollout backend is not supported."
-                "Please set XTUNER_USE_LMDEPLOY or XTUNER_USE_VLLM"
-                " or XTUNER_USE_SGLANG environment variable."
-            )
-
     def _build_remote_worker_cls(self, worker_base_cls):
         assert self.config.rollout_max_batch_size_per_instance is not None, (
             "rollout_max_batch_size_per_instance must be set before building RolloutWorker."
         )
         worker_generate_max_concurrency = max(
             1000,  # Ray async actor default max_concurrency.
-            math.ceil(self.config.rollout_max_batch_size_per_instance * self.config.allow_over_concurrency_ratio),
+            self.config.generate_concurrency_per_instance,
         )
         return ray.remote(
             concurrency_groups={
@@ -396,7 +371,7 @@ class RolloutController:
             A tuple of `engine_rank_mesh_array` and all server-process workers
             for lifecycle management.
         """
-        worker_base_cls = self._get_worker_base_cls()
+        worker_base_cls = get_rollout_worker_base_cls(self.config)
         worker_cls = self._build_remote_worker_cls(worker_base_cls)
 
         # Create workers from placement group.
