@@ -3,6 +3,7 @@ import tempfile
 import unittest
 
 import ray
+import requests
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
@@ -90,7 +91,6 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
             gpu_memory_utilization=float(os.environ.get("ROLLOUT_GPU_MEMORY_UTILIZATION", "0.5")),
         )
 
-        # model_cfg = Qwen3Dense4BConfig()
         model_cfg = Qwen3VLDense4BConfig()
         optim_cfg = AdamWConfig(lr=5e-7, foreach=False)
         fsdp_cfg = FSDPConfig(ep_size=1)
@@ -116,6 +116,25 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
             sp_size=1,
             pack_max_length=1024,
         )
+
+    def _check_sglang_weights(self, rollout_controller, action):
+        info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
+        active_urls = [
+            url
+            for url, is_active in info_dict["worker_server_urls_status"].items()
+            if is_active
+        ]
+        self.assertGreater(len(active_urls), 0)
+        results = []
+        for url in active_urls:
+            response = requests.post(
+                f"{url}/weights_checker",
+                json={"action": action},
+                timeout=300,
+            )
+            response.raise_for_status()
+            results.append(response.json())
+        return results
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "sglang backend is not enabled")
     def test_sglang_disaggregated_update_weight_and_generate(self):
@@ -147,6 +166,41 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
         self.assertEqual(res_update_weight.response, res_baseline.response)
         ray.get(rollout_controller.shutdown.remote(), timeout=60)
+
+    @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "sglang backend is not enabled")
+    def test_sglang_disaggregated_update_weight_equal_after_reset(self):
+        # This test verifies SGLang rollout weight update correctness with a parameter-only check.
+        # The SGLang parameter-only WeightChecker actions are implemented in 
+        # https://github.com/PengchengShi00/sglang/commit/05e89d63b5a1a80671b267ff4494ad950b2aba75.
+        # Flow: snapshot_parameters -> reset_parameters -> update_weights -> compare_parameters.
+        TrainingWorker = ray.remote(
+            runtime_env={
+                "env_vars": {
+                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                    "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                }
+            },
+        )(BaseTrainingWorker)
+        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(
+            TrainingWorker, self.worker_cfg, self.train_pg
+        )
+        ray.get([worker.test_all_reduce.remote() for worker in train_workers])
+        train_controller = TrainingController(workers=train_workers)
+
+        self.rollout_cfg.skip_load_weights = False
+        rollout_controller = self.rollout_cfg.build(self.rollout_pg)
+
+        try:
+            self._check_sglang_weights(rollout_controller, action="snapshot_parameters")
+            self._check_sglang_weights(rollout_controller, action="reset_parameters")
+
+            info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
+            train_controller.update_rollout_info(info_dict, train_rollout_mode="disaggregated")
+            train_controller.update_weights()
+
+            self._check_sglang_weights(rollout_controller, action="compare_parameters")
+        finally:
+            ray.get(rollout_controller.shutdown.remote(), timeout=60)
 
     @unittest.skipIf(
         os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0",

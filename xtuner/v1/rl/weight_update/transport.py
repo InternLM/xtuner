@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import socket
@@ -197,6 +198,8 @@ class LMDeployIPCBackendAdapter(IPCBackendAdapter):
         self.endpoints["update_weights"] = "update_weights"
 
         try:
+            model_runner = importlib.import_module("lmdeploy.utils")
+            getattr(model_runner, "FlattenedTensorBucket")
             self.use_flattened_tensor_bucket = True
         except Exception:
             self.use_flattened_tensor_bucket = False
@@ -339,7 +342,9 @@ class SGLangIPCBackendAdapter(IPCBackendAdapter):
         super().__init__(rollout_tp=rollout_tp)
 
         try:
-            from sglang.srt.model_executor.model_runner import FlattenedTensorBucket
+            model_runner = importlib.import_module("sglang.srt.model_executor.model_runner")
+            getattr(model_runner, "FlattenedTensorBucket")
+
             self.use_flattened_tensor_bucket = True
         except Exception:
             self.use_flattened_tensor_bucket = False
