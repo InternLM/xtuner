@@ -574,7 +574,6 @@ class BaseRLTrainer:
         self._init_train_state(cfg)
         self._init_train_worker_config(cfg, log_dir)
         self._init_rollout_config(cfg, log_dir)
-        self._ensure_rollout_http_concurrency(cfg)
         self._init_runtime_flags(cfg)
         self._advantage_estimator = cfg.advantage_estimator_config.build()
         self._cpu_resource_manager: CPUResourceManager | None = None
@@ -660,18 +659,21 @@ class BaseRLTrainer:
             )
         self._rollout_config = cfg.rollout_config
 
-    def _ensure_rollout_http_concurrency(self, cfg: BaseRLTrainerConfig) -> None:
+    def _ensure_rollout_http_concurrency(
+        self,
+        cfg: BaseRLTrainerConfig,
+        rollout_pg,
+    ) -> None:
         rollout_max_batch_size = cfg.rollout_config.rollout_max_batch_size_per_instance
         if rollout_max_batch_size is None or rollout_max_batch_size <= 0:
             return
 
-        if isinstance(cfg, RLDisaggregatedTrainerConfig):
-            rollout_worker_count = cfg.rollout_resources.num_workers
-        elif isinstance(cfg, RLColocateTrainerConfig):
-            rollout_worker_count = cfg.resources.num_workers
-        else:
-            rollout_worker_count = 1
-        active_rollout_worker_count, _ = cfg.rollout_config.get_active_servers_count(rollout_worker_count)
+        current_http_concurrency = math.ceil(rollout_max_batch_size * cfg.rollout_config.allow_over_concurrency_ratio)
+        if current_http_concurrency <= 0:
+            return
+
+        total_generate_concurrency = cfg.rollout_config.get_controller_generate_concurrency(rollout_pg)
+        active_rollout_worker_count = total_generate_concurrency // current_http_concurrency
         if active_rollout_worker_count <= 0:
             return
 
@@ -690,7 +692,6 @@ class BaseRLTrainer:
             )
 
         required_http_concurrency = math.ceil(scheduled_http_requests / active_rollout_worker_count)
-        current_http_concurrency = math.ceil(rollout_max_batch_size * cfg.rollout_config.allow_over_concurrency_ratio)
         if current_http_concurrency >= required_http_concurrency:
             return
 
@@ -929,7 +930,7 @@ class BaseRLTrainer:
         # 共卡训练前切换资源：检查 rollout -> offload rollout -> onload train。
         if offload_rollout_before_train:
             ray.get(
-                self.rollout_controller.check_and_recover_workers.remote(),
+                self.rollout_controller.check_and_shutdown_inactive_workers.remote(),
                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
             )
             ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
@@ -1589,6 +1590,7 @@ class RLColocateTrainer(BaseRLTrainer):
         self._cpu_resource_manager = CPUResourceManager(self._pg)
         self._cpu_resource_manager.log_initial_snapshot()
         set_cpu_resource_manager(self._cpu_resource_manager)
+        self._ensure_rollout_http_concurrency(cfg, self._pg)
 
         if self._debug_rollout:
             if self._rollout_config.skip_load_weights:
@@ -1773,8 +1775,18 @@ class RLColocateTrainer(BaseRLTrainer):
         timer_name = "sync_weight" if should_sync_weights else "switch_to_rollout"
         with timer(timer_name, step_timer_dict):
             if should_sync_weights:
-                bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
-                ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+                ray.get(
+                    self.rollout_controller.restart_inactive_workers.remote(),
+                    timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+                )
+                bind_train_rollout(
+                    train_controller=self.train_controller,
+                    rollout_controller=self.rollout_controller,
+                )
+                ray.get(
+                    self.rollout_controller.onload_weights.remote(),
+                    timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+                )
                 self.train_controller.update_weights()
                 self.logger.info("Rollout workers update weights successfully in colocate mode")
                 self.train_controller.offload(target="model")
@@ -1801,6 +1813,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         self._cpu_resource_manager = CPUResourceManager([self._train_pg, self._rollout_pg])
         self._cpu_resource_manager.log_initial_snapshot()
         set_cpu_resource_manager(self._cpu_resource_manager)
+        self._ensure_rollout_http_concurrency(cfg, self._rollout_pg)
         self.train_controller = self._train_worker_cfg.build(self._train_pg)
         self.rollout_controller = self._rollout_config.build(self._rollout_pg)
         if _trainer_config_needs_routed_api_proxy(cfg):

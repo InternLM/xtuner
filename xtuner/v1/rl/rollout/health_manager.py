@@ -3,6 +3,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -126,6 +127,17 @@ class RolloutHealthManager:
         self._pause_event.clear()
         logger.info("RolloutHealthManager resumed.")
 
+    @contextmanager
+    def _pause_background_checks_if_needed(self):
+        was_paused = self.is_paused()
+        if not was_paused:
+            self.pause()
+        try:
+            yield
+        finally:
+            if not was_paused:
+                self.resume()
+
     def snapshot_workers(self) -> dict[int, WorkerSnapshot]:
         """Return immutable worker state for callers that only need to query
         rollout workers."""
@@ -153,105 +165,127 @@ class RolloutHealthManager:
             if worker.active and (not request_entrypoint_only or worker.is_request_entrypoint)
         ]
 
-    def recover_failed_workers(self) -> dict[int, bool]:
-        """Synchronously restart inactive or incomplete worker groups and
-        return per-rank recovery results."""
-        if self._is_stopping():
-            message = "RolloutHealthManager is stopped; reject recovery."
-            logger.warning(message)
-            raise RuntimeError(message)
+    def restart_inactive_workers(self) -> dict[int, bool]:
+        """Synchronously restart inactive groups before the next sync-step
+        weight update."""
+        with self._pause_background_checks_if_needed():
+            with self._operation_lock:
+                worker_groups = self._snapshot_worker_groups()
+                failed_groups = []
+                for group in worker_groups.values():
+                    is_incomplete = len(group.workers) != len(group.ranks)
+                    has_non_active_workers = any(not worker.active for worker in group.workers)
+                    if is_incomplete or has_non_active_workers:
+                        failed_groups.append(group)
+                if not failed_groups:
+                    logger.info("No failed rollout workers detected during recovery.")
+                    return {}
 
-        with self._operation_lock:
-            worker_groups = self._snapshot_worker_groups()
-            failed_groups = []
-            for group in worker_groups.values():
-                is_incomplete = len(group.workers) != len(group.ranks)
-                if is_incomplete or any(not worker.active for worker in group.workers):
-                    failed_groups.append(group)
-            if not failed_groups:
-                logger.info("No failed rollout workers detected during recovery.")
-                return {}
+                for group in sorted(failed_groups, key=lambda group: group.ranks):
+                    failed_ranks = sorted(worker.rank for worker in group.workers if not worker.active)
+                    existing_ranks = {worker.rank for worker in group.workers}
+                    missing_ranks = sorted(rank for rank in group.ranks if rank not in existing_ranks)
+                    if missing_ranks:
+                        logger.error(
+                            f"Detected incomplete rollout worker group: group_ranks={group.ranks}, "
+                            f"missing_ranks={missing_ranks}, failed_ranks={failed_ranks}."
+                        )
+                    elif len(group.ranks) > 1:
+                        related_restart_ranks = [rank for rank in group.ranks if rank not in failed_ranks]
+                        logger.warning(
+                            f"Detected failed rollout worker ranks={failed_ranks}; "
+                            f"restart_group_ranks={group.ranks}, related_restart_ranks={related_restart_ranks}."
+                        )
+                    else:
+                        logger.warning(f"Detected failed rollout worker rank={failed_ranks[0]}. Initiating recovery.")
 
-            for group in sorted(failed_groups, key=lambda group: group.ranks):
-                failed_ranks = sorted(worker.rank for worker in group.workers if not worker.active)
-                existing_ranks = {worker.rank for worker in group.workers}
-                missing_ranks = sorted(rank for rank in group.ranks if rank not in existing_ranks)
-                if missing_ranks:
-                    logger.error(
-                        f"Detected incomplete rollout worker group: group_ranks={group.ranks}, "
-                        f"missing_ranks={missing_ranks}, failed_ranks={failed_ranks}."
-                    )
-                elif len(group.ranks) > 1:
-                    related_restart_ranks = [rank for rank in group.ranks if rank not in failed_ranks]
-                    logger.warning(
-                        f"Detected failed rollout worker ranks={failed_ranks}; "
-                        f"restart_group_ranks={group.ranks}, related_restart_ranks={related_restart_ranks}."
-                    )
-                else:
-                    logger.warning(f"Detected failed rollout worker rank={failed_ranks[0]}. Initiating recovery.")
+                for group in failed_groups:
+                    self._set_group_lifecycle_state(group.ranks, WorkerLifecycleState.RECOVERING)
 
-            for group in failed_groups:
-                self._set_group_lifecycle_state(group.ranks, WorkerLifecycleState.RECOVERING)
+                results: dict[int, bool] = {}
+                sorted_failed_groups = sorted(failed_groups, key=lambda group: group.ranks)
+                if self._is_stopping():
+                    for group in sorted_failed_groups:
+                        self._set_group_lifecycle_state(group.ranks, WorkerLifecycleState.INACTIVE)
+                        for rank in group.ranks:
+                            results[rank] = False
+                    return results
 
-            results: dict[int, bool] = {}
-            sorted_failed_groups = sorted(failed_groups, key=lambda group: group.ranks)
-            if self._is_stopping():
-                for group in sorted_failed_groups:
-                    self._set_group_lifecycle_state(group.ranks, WorkerLifecycleState.INACTIVE)
-                    for rank in group.ranks:
-                        results[rank] = False
-                return results
+                logger.info(
+                    f"Restarting rollout worker groups in parallel: "
+                    f"group_ranks={[group.ranks for group in sorted_failed_groups]}, "
+                    f"max_parallel_groups={ROLLOUT_RECOVERY_MAX_PARALLEL_GROUPS}."
+                )
+                group_recovery_results: dict[tuple[int, ...], bool] = {}
+                max_workers = min(len(sorted_failed_groups), max(1, ROLLOUT_RECOVERY_MAX_PARALLEL_GROUPS))
+                with ThreadPoolExecutor(
+                    max_workers=max_workers,
+                    thread_name_prefix="rollout-recovery",
+                ) as pool:
+                    future_to_group = {
+                        pool.submit(
+                            self._restart_worker_group,
+                            group,
+                        ): group
+                        for group in sorted_failed_groups
+                    }
+                    for future in as_completed(future_to_group):
+                        group = future_to_group[future]
+                        try:
+                            group_recovery_results[group.ranks] = future.result()
+                        except Exception:
+                            logger.exception(f"Failed to restart rollout worker group ranks={group.ranks}.")
+                            group_recovery_results[group.ranks] = False
 
-            logger.info(
-                f"Restarting rollout worker groups in parallel: "
-                f"group_ranks={[group.ranks for group in sorted_failed_groups]}, "
-                f"max_parallel_groups={ROLLOUT_RECOVERY_MAX_PARALLEL_GROUPS}."
-            )
-            group_recovery_results: dict[tuple[int, ...], bool] = {}
-            max_workers = min(len(sorted_failed_groups), max(1, ROLLOUT_RECOVERY_MAX_PARALLEL_GROUPS))
-            with ThreadPoolExecutor(
-                max_workers=max_workers,
-                thread_name_prefix="rollout-recovery",
-            ) as pool:
-                future_to_group = {
-                    pool.submit(self._restart_worker_group, group): group for group in sorted_failed_groups
-                }
-                for future in as_completed(future_to_group):
-                    group = future_to_group[future]
-                    try:
-                        group_recovery_results[group.ranks] = future.result()
-                    except Exception:
-                        logger.exception(f"Failed to restart rollout worker group ranks={group.ranks}.")
-                        group_recovery_results[group.ranks] = False
+                if self._is_stopping():
+                    for group in sorted_failed_groups:
+                        is_recovered = group_recovery_results.get(group.ranks, False)
+                        if is_recovered:
+                            self._shutdown_worker_group(group, wait_server_down=False, best_effort=True)
+                        self._set_group_lifecycle_state(group.ranks, WorkerLifecycleState.INACTIVE)
+                        for rank in group.ranks:
+                            results[rank] = False
+                    return results
 
-            if self._is_stopping():
                 for group in sorted_failed_groups:
                     is_recovered = group_recovery_results.get(group.ranks, False)
-                    if is_recovered:
-                        self._shutdown_worker_group(group, wait_server_down=False, best_effort=True)
-                    self._set_group_lifecycle_state(group.ranks, WorkerLifecycleState.INACTIVE)
                     for rank in group.ranks:
-                        results[rank] = False
+                        results[rank] = is_recovered
+
+                    if is_recovered:
+                        self._set_group_lifecycle_state(group.ranks, WorkerLifecycleState.ACTIVE)
+                    else:
+                        self._set_group_lifecycle_state(group.ranks, WorkerLifecycleState.INACTIVE)
                 return results
 
-            for group in sorted_failed_groups:
-                is_recovered = group_recovery_results.get(group.ranks, False)
-                for rank in group.ranks:
-                    results[rank] = is_recovered
+    def check_and_shutdown_inactive_workers(self) -> dict[int, bool]:
+        """Fail-fast health-check active workers, mark failures inactive, and
+        shut down every non-active group so shared resources can be reused by
+        training."""
+        with self._pause_background_checks_if_needed():
+            self._check_active_workers_and_mark_failed_groups(fail_fast=True)
+            with self._operation_lock:
+                worker_groups = self._snapshot_worker_groups()
+                inactive_groups = []
+                for group in worker_groups.values():
+                    is_incomplete = len(group.workers) != len(group.ranks)
+                    has_non_active_workers = any(
+                        worker.lifecycle_state is not WorkerLifecycleState.ACTIVE for worker in group.workers
+                    )
+                    if is_incomplete or has_non_active_workers:
+                        inactive_groups.append(group)
 
-                next_lifecycle_state = WorkerLifecycleState.ACTIVE if is_recovered else WorkerLifecycleState.INACTIVE
-                self._set_group_lifecycle_state(group.ranks, next_lifecycle_state)
-            return results
+                if not inactive_groups:
+                    logger.info("No failed rollout workers detected during shutdown barrier.")
+                    return {}
 
-    def check_and_recover_workers(self) -> dict[int, bool]:
-        """Run an explicit health check and recover failed worker groups.
-
-        This barrier runs immediately before resource transitions (for example rollout offload / train onload). Any
-        worker that fails this last health check should be recovered right away instead of waiting for the background
-        consecutive-failure threshold.
-        """
-        self._check_active_workers_and_mark_failed_groups(fail_fast=True)
-        return self.recover_failed_workers()
+                results: dict[int, bool] = {}
+                for group in sorted(inactive_groups, key=lambda group: group.ranks):
+                    self._set_group_lifecycle_state(group.ranks, WorkerLifecycleState.INACTIVE)
+                    is_shutdown = self._shutdown_worker_group(group, wait_server_down=True, best_effort=False)
+                    for rank in group.ranks:
+                        results[rank] = is_shutdown
+                return results
 
     def run_once(self) -> None:
         logger.debug("RolloutHealthManager running health checks for all workers.")
@@ -260,10 +294,11 @@ class RolloutHealthManager:
             return
 
         if checked_active_count == 0:
-            logger.warning("No active rollout workers before health check. Initiating recovery.")
+            logger.error("No active rollout workers before health check. All rollout workers are inactive.")
         else:
-            logger.warning("All rollout workers failed after health check. Initiating recovery.")
-        self.recover_failed_workers()
+            logger.error("All rollout workers failed after health check. All rollout workers are inactive.")
+        # TODO(duanyanhui): Propagate this fatal rollout-dead state to the
+        # trainer and abort training immediately instead of only logging here.
 
     def _is_stopping(self) -> bool:
         """Return whether the health manager is stopping or already stopped."""
@@ -277,8 +312,6 @@ class RolloutHealthManager:
 
         if not workers_to_check:
             return 0
-
-        logger.info(f"RolloutHealthManager health check triggered: active_worker_count={len(workers_to_check)}.")
 
         check_results = self._check_workers_health(workers_to_check, fail_fast=fail_fast)
 
@@ -439,8 +472,11 @@ class RolloutHealthManager:
                 shutdown_succeeded = False
         return best_effort or shutdown_succeeded
 
-    def _restart_worker_group(self, group: _WorkerGroupSnapshot) -> bool:
-        """Shutdown, init, health-check, and inference-check one complete
+    def _restart_worker_group(
+        self,
+        group: _WorkerGroupSnapshot,
+    ) -> bool:
+        """Shutdown, restart with empty-init, and health-check one complete
         worker group."""
         if not group.workers or len(group.workers) != len(group.ranks):
             logger.error(f"Cannot restart incomplete rollout worker group: ranks={group.ranks}.")
@@ -454,6 +490,13 @@ class RolloutHealthManager:
             return False
 
         try:
+            ray.get(
+                [
+                    worker.actor.set_skip_load_weights.remote(True)  # type: ignore[attr-defined]
+                    for worker in group.workers
+                ],
+                timeout=ROLLOUT_RAY_GET_TIMEOUT,
+            )
             init_results = ray.get(
                 [
                     # init() reuses the immutable launch spec cached on each actor
@@ -501,59 +544,25 @@ class RolloutHealthManager:
                 self._shutdown_worker_group(group, wait_server_down=False, best_effort=True)
                 return False
 
-            generate_not_ready_urls = self._check_worker_group_generate_ready_after_restart(group)
-            if generate_not_ready_urls:
-                logger.error(
-                    f"Restarted rollout worker group ranks={group.ranks} has request-serving endpoints not "
-                    f"generate-ready: {generate_not_ready_urls}."
-                )
-                self._shutdown_worker_group(group, wait_server_down=False, best_effort=True)
-                return False
-
             logger.info(f"Successfully restarted rollout worker group ranks={group.ranks}.")
             return True
         except Exception as e:
             logger.error(f"Failed to restart rollout worker group ranks={group.ranks}: {e}")
             self._shutdown_worker_group(group, wait_server_down=False, best_effort=True)
             return False
-
-    def _check_worker_group_generate_ready_after_restart(
-        self,
-        group: _WorkerGroupSnapshot,
-        *,
-        max_attempts: int = 60,
-        retry_interval_seconds: float = 5.0,
-    ) -> list[str]:
-        """Check generate readiness through request-serving backend
-        endpoints."""
-        request_workers = [worker for worker in group.workers if worker.is_request_entrypoint]
-        pending_workers = {worker.rank: worker for worker in request_workers}
-        for attempt in range(1, max_attempts + 1):
-            for rank, worker in list(pending_workers.items()):
-                try:
-                    is_generate_ready = ray.get(
-                        worker.actor.check_health_generate.remote(),  # type: ignore[attr-defined]
-                        timeout=60,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Restarted rollout worker rank={worker.rank} generate readiness check failed "
-                        f"attempt={attempt}/{max_attempts}, url={worker.url}: {e}"
-                    )
-                    continue
-
-                if is_generate_ready:
-                    del pending_workers[rank]
-                else:
-                    logger.warning(
-                        f"Restarted rollout worker rank={worker.rank} generate readiness check returned false "
-                        f"attempt={attempt}/{max_attempts}, url={worker.url}."
-                    )
-            if not pending_workers:
-                return []
-            if attempt < max_attempts:
-                time.sleep(retry_interval_seconds)
-        return [worker.url for worker in pending_workers.values()]
+        finally:
+            try:
+                ray.get(
+                    [
+                        worker.actor.restore_skip_load_weights.remote()  # type: ignore[attr-defined]
+                        for worker in group.workers
+                    ],
+                    timeout=ROLLOUT_RAY_GET_TIMEOUT,
+                )
+            except Exception:
+                logger.exception(
+                    f"Failed to restore rollout worker skip_load_weights after restart: group_ranks={group.ranks}."
+                )
 
 
 def shutdown_worker(

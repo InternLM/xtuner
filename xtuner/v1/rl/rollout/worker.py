@@ -548,6 +548,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 Defaults to "GPU".
         """
         self.config = config
+        self._default_skip_load_weights = config.skip_load_weights
         self.rank = rank
         self.master_addr = master_addr  # ray master
         self.master_port = master_port
@@ -775,6 +776,12 @@ class RolloutWorker(SingleAcceleratorWorker):
         self._launch_server()
         self._start_session_server()
         return (self.rank, self.server_url)
+
+    def set_skip_load_weights(self, skip_load_weights: bool) -> None:
+        self.config = self.config.model_copy(update={"skip_load_weights": skip_load_weights})
+
+    def restore_skip_load_weights(self) -> None:
+        self.config = self.config.model_copy(update={"skip_load_weights": self._default_skip_load_weights})
 
     def init_dist_port(self) -> str:
         """Initialize distributed communication ports.

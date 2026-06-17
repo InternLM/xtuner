@@ -278,30 +278,32 @@ class RolloutController:
         if failed_worker_urls:
             self.logger.warning(f"Abort request failed: worker_urls={failed_worker_urls}")
 
-    async def check_and_recover_workers(self):
-        """Run an explicit rollout worker health check and recovery barrier."""
-        health_manager_was_paused = self.health_manager.is_paused()
-        if not health_manager_was_paused:
-            self.health_manager.pause()
-        try:
-            await asyncio.to_thread(self.health_manager.check_and_recover_workers)
-            inactive_workers = [
-                f"rank={worker.rank}, url={worker.url}"
-                for worker in self.health_manager.snapshot_workers().values()
-                if not worker.active
-            ]
-            if inactive_workers:
-                raise RuntimeError(
-                    "inactive rollout workers after recovery: "
-                    + ", ".join(inactive_workers)
-                    + ". Refusing to continue because rollout worker resources may still be held."
-                )
-        finally:
-            if not health_manager_was_paused:
-                # Only resume when this method paused the background checker.
-                # If the caller entered with health checks already paused
-                # (for example before rollout offload), preserve that state.
-                self.health_manager.resume()
+    async def check_and_shutdown_inactive_workers(self):
+        """Run a fail-fast health barrier and shut down failed groups so
+        training can reuse shared rollout resources."""
+        shutdown_results = await asyncio.to_thread(self.health_manager.check_and_shutdown_inactive_workers)
+        failed_shutdown_workers = [
+            f"rank={rank}, url={self.health_manager.snapshot_workers()[rank].url}"
+            for rank, is_shutdown in shutdown_results.items()
+            if not is_shutdown
+        ]
+        if failed_shutdown_workers:
+            raise RuntimeError(
+                "failed to shut down inactive rollout workers before training: " + ", ".join(failed_shutdown_workers)
+            )
+
+    async def restart_inactive_workers(self):
+        """Restart inactive groups before a sync-step weight update."""
+        await asyncio.to_thread(self.health_manager.restart_inactive_workers)
+        inactive_workers = [
+            f"rank={worker.rank}, url={worker.url}"
+            for worker in self.health_manager.snapshot_workers().values()
+            if not worker.active
+        ]
+        if inactive_workers:
+            raise RuntimeError(
+                "inactive rollout workers before sync-step weight update: " + ", ".join(inactive_workers)
+            )
 
     def continue_generation(self):
         self._broadcast_to_active_workers("continue_generation")
@@ -331,19 +333,9 @@ class RolloutController:
         )
 
     def _broadcast_to_active_workers(self, method_name: str, **kwargs):
-        """Helper function to call a method on all active workers.
-
-        Args:
-            method_name (str): The name of the method to call.
-            block (bool): Whether to block until the call completes.
-
-        Returns:
-            A list of futures if `block` is False, otherwise a list of results.
-        """
-        active_workers = self.health_manager.snapshot_active_workers()
-        futures = [getattr(worker.actor, method_name).remote(**kwargs) for worker in active_workers]
-        results = ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
-        return results
+        workers = self.health_manager.snapshot_active_workers()
+        futures = [getattr(worker.actor, method_name).remote(**kwargs) for worker in workers]
+        return ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
 
     def _build_remote_worker_cls(self, worker_base_cls):
         assert self.config.rollout_max_batch_size_per_instance is not None, (
