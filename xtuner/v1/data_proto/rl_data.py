@@ -131,6 +131,54 @@ class RolloutState(BaseModel):
     extra_fields: dict[str, Any] = {}
 
 
+def free_rollout_state_refs(rollout_state: RolloutState) -> None:
+    from ray import ObjectRef
+
+    from xtuner.v1.rl.utils.ray_utils import free_object_refs
+
+    refs: list[ObjectRef] = []
+
+    routed_experts = rollout_state.routed_experts
+    if isinstance(routed_experts, ObjectRef):
+        refs.append(routed_experts)
+    elif isinstance(routed_experts, list):
+        refs.extend(routed_experts)
+
+    mm_info = rollout_state.mm_info
+    if mm_info is not None:
+        pixel_values = mm_info.get("pixel_values")
+        if isinstance(pixel_values, ObjectRef):
+            refs.append(pixel_values)
+
+    def collect_extra_field_refs(value: Any) -> None:
+        if isinstance(value, ObjectRef):
+            refs.append(value)
+            return
+        if isinstance(value, dict):
+            for item in value.values():
+                collect_extra_field_refs(item)
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                collect_extra_field_refs(item)
+
+    collect_extra_field_refs(rollout_state.extra_fields)
+    free_object_refs(refs)
+
+
+def discard_rollout_state(rollout_state: RolloutState) -> RolloutState:
+    """Release heavy references and clear fields before dropping a rollout."""
+
+    free_rollout_state_refs(rollout_state)
+
+    for field_name, field in type(rollout_state).model_fields.items():
+        if field.is_required():
+            setattr(rollout_state, field_name, None)
+        else:
+            setattr(rollout_state, field_name, field.get_default(call_default_factory=True))
+    return rollout_state
+
+
 def update_status_from_finish_reason(finish_reason: str | None) -> Status:
     """Updates the internal status based on the inference engine's finish
     reason.
@@ -172,11 +220,12 @@ def update_status_from_finish_reason(finish_reason: str | None) -> Status:
 def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
     routed_experts = getattr(rollout_state, "routed_experts", None)
     if routed_experts is not None:
-        import ray
-        from ray import ObjectRef as RayObjectRef
+        from ray import ObjectRef
 
-        if isinstance(routed_experts, RayObjectRef):
-            ray.internal.free([routed_experts], local_only=False)
+        from xtuner.v1.rl.utils.ray_utils import free_object_refs
+
+        if isinstance(routed_experts, (ObjectRef, list)):
+            free_object_refs(routed_experts)
         rollout_state.routed_experts = None
     prompt_ids = getattr(rollout_state, "prompt_ids", None)
     rollout_state.tokens = list(prompt_ids) if prompt_ids is not None else None

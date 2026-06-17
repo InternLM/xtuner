@@ -1,6 +1,7 @@
 import atexit
 import signal
 import subprocess
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional, cast
 
 import ray
@@ -90,8 +91,20 @@ def get_ray_accelerator() -> "AcceleratorType":
     return cast("AcceleratorType", accelerator)
 
 
-def free_object_refs(refs: list[ObjectRef]) -> None:
-    valid_refs = [ref for ref in refs if isinstance(ref, ObjectRef)]
+def free_object_refs(refs: ObjectRef | Iterable[ObjectRef]) -> None:
+    if isinstance(refs, ObjectRef):
+        refs = [refs]
+
+    seen: set[int] = set()
+    valid_refs = []
+    for ref in refs:
+        if not isinstance(ref, ObjectRef):
+            continue
+        ref_id = id(ref)
+        if ref_id in seen:
+            continue
+        seen.add(ref_id)
+        valid_refs.append(ref)
     if not valid_refs:
         return
 
