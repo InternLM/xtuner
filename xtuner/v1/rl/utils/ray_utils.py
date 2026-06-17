@@ -95,15 +95,15 @@ def free_object_refs(refs: ObjectRef | Iterable[ObjectRef]) -> None:
     if isinstance(refs, ObjectRef):
         refs = [refs]
 
-    seen: set[int] = set()
+    seen: set[str] = set()
     valid_refs = []
     for ref in refs:
         if not isinstance(ref, ObjectRef):
             continue
-        ref_id = id(ref)
-        if ref_id in seen:
+        ref_key = ref.hex()
+        if ref_key in seen:
             continue
-        seen.add(ref_id)
+        seen.add(ref_key)
         valid_refs.append(ref)
     if not valid_refs:
         return

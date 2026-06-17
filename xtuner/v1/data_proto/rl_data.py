@@ -173,9 +173,8 @@ def discard_rollout_state(rollout_state: RolloutState) -> RolloutState:
 
     for field_name, field in type(rollout_state).model_fields.items():
         if field.is_required():
-            setattr(rollout_state, field_name, None)
-        else:
-            setattr(rollout_state, field_name, field.get_default(call_default_factory=True))
+            continue
+        setattr(rollout_state, field_name, field.get_default(call_default_factory=True))
     return rollout_state
 
 

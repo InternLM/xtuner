@@ -47,6 +47,8 @@ class DisaggProduceProgress:
     raw_rewards_count: dict[str, int] = field(default_factory=dict)
     produced_samples: dict[str, int] = field(default_factory=dict)
     produced_tokens: dict[str, int] = field(default_factory=dict)
+    failed_samples: dict[str, int] = field(default_factory=dict)
+    filtered_samples: dict[str, int] = field(default_factory=dict)
     produce_time_s: float = 0.0
 
     @classmethod
@@ -59,6 +61,8 @@ class DisaggProduceProgress:
             raw_rewards_count={task_name: 0 for task_name in task_names},
             produced_samples={task_name: 0 for task_name in task_names},
             produced_tokens={task_name: 0 for task_name in task_names},
+            failed_samples={task_name: 0 for task_name in task_names},
+            filtered_samples={task_name: 0 for task_name in task_names},
         )
 
     def ensure_target_upto(
@@ -104,6 +108,15 @@ class DisaggProduceProgress:
         self.produced_samples[task_name] += samples
         self.produced_tokens[task_name] += tokens
 
+    def add_discarded(self, task_name: str, status: Status, *, samples: int = 1) -> None:
+        if status == Status.FAILED:
+            self.failed_samples[task_name] += samples
+            return
+        if status == Status.FILTERED:
+            self.filtered_samples[task_name] += samples
+            return
+        raise ValueError(f"Discarded status must be FAILED or FILTERED, got {status}.")
+
     def add_produce_time(self, elapsed_s: float) -> None:
         self.produce_time_s += elapsed_s
 
@@ -118,6 +131,13 @@ class DisaggProduceProgress:
         produce_time_s = self.produce_time_s
         self.produce_time_s = 0.0
         return produce_time_s
+
+    def consume_discarded(self, task_name: str) -> tuple[int, int]:
+        failed = self.failed_samples[task_name]
+        filtered = self.filtered_samples[task_name]
+        self.failed_samples[task_name] = 0
+        self.filtered_samples[task_name] = 0
+        return failed, filtered
 
     def consume_raw_rewards(self, task_name: str) -> tuple[float, int]:
         rewards_sum = self.raw_rewards_sum[task_name]
@@ -137,6 +157,8 @@ class DisaggProduceProgress:
             "raw_rewards_count": dict(self.raw_rewards_count),
             "produced_samples": dict(self.produced_samples),
             "produced_tokens": dict(self.produced_tokens),
+            "failed_samples": dict(self.failed_samples),
+            "filtered_samples": dict(self.filtered_samples),
             "produce_time_s": self.produce_time_s,
         }
 
@@ -160,6 +182,14 @@ class DisaggProduceProgress:
         )
         produced_samples_state = state.get("produced_samples", {})
         produced_tokens_state = state.get("produced_tokens", {})
+        failed_samples_state = state.get(
+            "failed_samples",
+            state.get("failed_groups", state.get("discarded_failed_groups", {})),
+        )
+        filtered_samples_state = state.get(
+            "filtered_samples",
+            state.get("filtered_groups", state.get("discarded_filtered_groups", {})),
+        )
         self.produced_samples.clear()
         self.produced_samples.update(
             {task_name: int(produced_samples_state.get(task_name, 0)) for task_name in task_names}
@@ -167,6 +197,14 @@ class DisaggProduceProgress:
         self.produced_tokens.clear()
         self.produced_tokens.update(
             {task_name: int(produced_tokens_state.get(task_name, 0)) for task_name in task_names}
+        )
+        self.failed_samples.clear()
+        self.failed_samples.update(
+            {task_name: int(failed_samples_state.get(task_name, 0)) for task_name in task_names}
+        )
+        self.filtered_samples.clear()
+        self.filtered_samples.update(
+            {task_name: int(filtered_samples_state.get(task_name, 0)) for task_name in task_names}
         )
         self.produce_time_s = float(state.get("produce_time_s", 0.0))
 

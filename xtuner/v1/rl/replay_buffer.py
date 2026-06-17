@@ -13,7 +13,6 @@ from pydantic import BaseModel, ConfigDict
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
-    discard_rollout_state,
     get_group_status,
     refresh_seq_staleness,
     reset_rollout_response,
@@ -461,11 +460,6 @@ class ReplayBuffer:
         stale_threshold: int | None = None,
     ) -> None:
         if not items:
-            return
-        status = get_group_status(items)
-        if status in (Status.FAILED, Status.FILTERED):
-            for item in items:
-                discard_rollout_state(item)
             return
         if model_step is not None:
             for item in items:
