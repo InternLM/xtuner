@@ -213,10 +213,10 @@ class AgentInSandboxLoop(AgentLoop):
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         try:
             rollout_item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
-            if rollout_state.uid is None:
-                rollout_state.uid = uuid.uuid4().int
-            rollout_item.uid = rollout_state.uid
-            rollout_item.group_id = rollout_state.message_uid
+            if rollout_state.rollout_id is None:
+                rollout_state.rollout_id = uuid.uuid4().int
+            rollout_item.uid = rollout_state.rollout_id
+            rollout_item.group_id = rollout_state.group_id
             result = await self._run_item(rollout_item)
             await self._fill_rollout_state(rollout_state, result)
             return rollout_state
@@ -269,7 +269,7 @@ class AgentInSandboxLoop(AgentLoop):
         messages, tools = _load_latest_trace_segment(item.artifacts, require_tools=True)
         if not messages:
             raise ValueError("Agent artifacts must contain at least one trainable messages trace.")
-        session_id = rollout_state.uid
+        session_id = rollout_state.rollout_id
 
         trace_store = get_store()
         text = self.tokenizer.apply_chat_template(

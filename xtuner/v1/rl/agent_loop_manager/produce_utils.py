@@ -164,7 +164,7 @@ class BaseProduceContext:
             for item in group:
                 if item.reward is None or "score" not in item.reward:
                     logger.warning(
-                        f"Missing reward score in item (uid: {item.uid}) of completed group for task {self.task_name}. This item will be skipped in reward statistics."
+                        f"Missing reward score in item (rollout_id: {item.rollout_id}) of completed group for task {self.task_name}. This item will be skipped in reward statistics."
                     )
                     continue
                 rewards_sum += float(item.reward["score"])  # type: ignore[index]

@@ -151,7 +151,7 @@ class AgentInLocalhostLoop(AgentLoop):
         except asyncio.TimeoutError:
             self.logger.warning(
                 f"[AgentInLocalhostLoop] sample timed out after {self.sample_timeout_s:.1f}s "
-                f"(uid={rollout_state.uid}, group_id={rollout_state.message_uid})."
+                f"(rollout_id={rollout_state.rollout_id}, group_id={rollout_state.group_id})."
             )
             return self._fail_rollout_state(
                 rollout_state,
@@ -172,10 +172,10 @@ class AgentInLocalhostLoop(AgentLoop):
 
     async def _generate_sample_impl(self, rollout_state: RolloutState) -> RolloutState:
         item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
-        if rollout_state.uid is None:
-            rollout_state.uid = uuid.uuid4().int
-        item.uid = rollout_state.uid
-        item.group_id = rollout_state.message_uid
+        if rollout_state.rollout_id is None:
+            rollout_state.rollout_id = uuid.uuid4().int
+        item.uid = rollout_state.rollout_id
+        item.group_id = rollout_state.group_id
         result = await self._run_item(item)
         await self._fill_rollout_state(rollout_state, result)
         return rollout_state
@@ -188,8 +188,8 @@ class AgentInLocalhostLoop(AgentLoop):
         error_msg: str,
         agent_status: str,
     ) -> RolloutState:
-        if rollout_state.uid is None:
-            rollout_state.uid = uuid.uuid4().int
+        if rollout_state.rollout_id is None:
+            rollout_state.rollout_id = uuid.uuid4().int
         rollout_state.status = Status.COMPLETED if self.mode == "eval" else Status.FAILED
         rollout_state.finish_reason = finish_reason
         if self.mode == "eval":
@@ -243,7 +243,7 @@ class AgentInLocalhostLoop(AgentLoop):
             add_generation_prompt=False,
         )
         prompt_text = text[:-1] if text.endswith("\n") else text
-        data = await get_store().export_training_trace.remote(str(rollout_state.uid), prompt_text)
+        data = await get_store().export_training_trace.remote(str(rollout_state.rollout_id), prompt_text)
 
         rollout_state.input_ids = data["input_ids"]
         rollout_state.labels = data["labels"]

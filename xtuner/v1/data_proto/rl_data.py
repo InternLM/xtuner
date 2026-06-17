@@ -85,7 +85,8 @@ class RolloutState(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     # --- 数据 ---
-    message_uid: int | None = None  # 通过计算原始的message的哈希值得到的id，一组的数据为同一个prompt_id
+    # Samples generated from the same prompt share one group_id.
+    group_id: int | None = None
     message: list[dict[str, Any]]  # dataset输出，需要在AgentLoop中转换成input_ids
     prompt_ids: list[int] | None = None  # 原始 prompt的token ids
     num_tokens: int | None = None
@@ -95,7 +96,8 @@ class RolloutState(BaseModel):
     reward_model: dict[str, Any] | None = None
 
     # --- InferEngine 输入 ---
-    session_uid: int | None = None
+    # Used to route a multi-turn inference session to the same rollout worker.
+    session_id: int | None = None
     tokens: list[int] | None = None  # 每一次推理引擎的实际输入
     tools: list | None = None
     tool_choice: str | dict[str, Any] | None = None
@@ -123,7 +125,8 @@ class RolloutState(BaseModel):
     reward: dict[str, Any] | None = None
 
     #  --- 状态 ---
-    uid: int | None = None
+    # Per-rollout identity. Different K-rollouts from the same prompt should have different rollout_id values.
+    rollout_id: int | None = None
     task_name: str | None = None
     status: Status = Status.INIT
     error_msg: str | None = None
@@ -269,7 +272,7 @@ def update_expired_status(samples: list[RolloutState], stale_threshold: int) -> 
     for sample in samples:
         if sample.status == Status.ABORTED and sample.seq_staleness >= stale_threshold:
             logger.debug(
-                f"Sample {sample.uid} (seq_staleness: {sample.seq_staleness}) exceeded threshold ({stale_threshold}). Triggering group expiration."
+                f"Sample {sample.rollout_id} (seq_staleness: {sample.seq_staleness}) exceeded threshold ({stale_threshold}). Triggering group expiration."
             )
             is_group_expired = True
             break  # 一旦发现过期，直接跳出，无需检查剩余样本

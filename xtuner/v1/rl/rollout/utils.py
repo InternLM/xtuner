@@ -287,7 +287,7 @@ class PartialRolloutHandler:
         rollout_state.sample_params = rollout_state.sample_params.copy(update={"max_tokens": remaining_tokens})
 
         self.logger.debug(
-            f"[PartialRolloutHandler] Sample {rollout_state.uid} continue rollout | Remaining tokens allowed: {remaining_tokens} | Status: {rollout_state.status} | Prompt len: {prompt_len} | Response len: {response_len} | Staleness: {rollout_state.seq_staleness} | Total tokens: {len(rollout_state.tokens)}"
+            f"[PartialRolloutHandler] Sample {rollout_state.rollout_id} continue rollout | Remaining tokens allowed: {remaining_tokens} | Status: {rollout_state.status} | Prompt len: {prompt_len} | Response len: {response_len} | Staleness: {rollout_state.seq_staleness} | Total tokens: {len(rollout_state.tokens)}"
         )
         return rollout_state
 

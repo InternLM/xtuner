@@ -180,7 +180,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
     def test_fit_persists_checkpoint_for_completed_model_step(self):
         # 验证 checkpoint 以 fit 完成的 model_step 为准，并通过 async manager.save 落盘。
-        train_sample = SimpleNamespace(message_uid=1, uid=1)
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1)
         manager = _FakeManager([ProduceBatchResult(rollout_states=[[train_sample]])])
         manager.save = AsyncMock()
         trainer = self._make_trainer(manager)
@@ -212,7 +212,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
     def test_fit_retries_same_step_after_empty_expired_skip(self):
         # 验证空 expired batch 只同步上一版模型，不推进 train_step，并重试同一步。
-        train_sample = SimpleNamespace(message_uid=1, uid=1)
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1)
         manager = _FakeManager(
             [
                 ProduceBatchResult(rollout_states=[], status=ProduceBatchStatus.EXPIRED_BATCH),
@@ -238,7 +238,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
     def test_fit_trains_non_empty_expired_batch_then_syncs_current_step(self):
         # 验证非空 expired batch 仍会训练，并用当前完成的 model_step 恢复 producer。
-        train_sample = SimpleNamespace(message_uid=1, uid=1)
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1)
         manager = _FakeManager(
             [ProduceBatchResult(rollout_states=[[train_sample]], status=ProduceBatchStatus.EXPIRED_BATCH)]
         )
@@ -253,7 +253,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
     def test_fit_keeps_background_producer_running_while_training_blocks(self):
         # 验证非共卡训练阻塞在同步训练 batch 时，后台 producer 仍能继续调度。
-        train_sample = SimpleNamespace(message_uid=1, uid=1)
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1)
         training_started = threading.Event()
         producer_ticked = threading.Event()
         manager = _TickingManager(
@@ -280,7 +280,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
     def test_fit_observes_background_producer_failure_before_training_waited_batch(self):
         # 后台 producer 异常是终止性失败；前台 get_batch 还在等待时必须立刻暴露，不能先训练随后才失败。
-        train_sample = SimpleNamespace(message_uid=1, uid=1)
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1)
         manager = _FailingProducerManager([ProduceBatchResult(rollout_states=[[train_sample]])])
         trainer = self._make_trainer(manager)
 
@@ -292,9 +292,9 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
     def test_fit_runs_eval_before_reset_and_stops_producer(self):
         # 验证 eval 在 producer 恢复前执行，避免生产侧提前抢占 rollout 资源。
-        # 确定性排序依赖 RolloutState 的 message_uid 和 uid，测试用轻量对象模拟即可。
-        train_sample = SimpleNamespace(message_uid=1, uid=1)
-        eval_sample = SimpleNamespace(message_uid=2, uid=2)
+        # 确定性排序依赖 RolloutState 的 group_id 和 rollout_id，测试用轻量对象模拟即可。
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1)
+        eval_sample = SimpleNamespace(group_id=2, rollout_id=2)
         manager = _FakeManager(
             [ProduceBatchResult(rollout_states=[[train_sample]], status=ProduceBatchStatus.NORMAL)]
         )

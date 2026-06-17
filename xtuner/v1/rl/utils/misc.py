@@ -121,7 +121,7 @@ def gather_logprobs(logits, shifted_labels):
 
 def sort_rollout_state_for_deterministic(data_groups: list[list[RolloutState]]) -> list[list[RolloutState]]:
     def sort_key(sample: RolloutState) -> tuple[int, int]:
-        return (sample.message_uid or 0, sample.uid or 0)
+        return (sample.group_id or 0, sample.rollout_id or 0)
 
     sorted_groups = [sorted(group, key=sort_key) for group in data_groups]
     sorted_groups.sort(key=lambda group: min((sort_key(item) for item in group), default=(-1, -1)))
