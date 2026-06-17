@@ -11,6 +11,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
+from xtuner.v1.utils import XTUNER_DETERMINISTIC
 from xtuner.v1.utils.logger import get_logger
 
 
@@ -104,9 +105,10 @@ class _DatasetSampler:
             rollout_id = rollout_id_base + item_idx
             new_data.group_id = group_id
             new_data.rollout_id = rollout_id
-            # Deprecated compatibility fields for downstream libraries.
-            # TODO: remove after callers migrate to group_id / rollout_id.
-            new_data.message_uid = group_id
+            if XTUNER_DETERMINISTIC:
+                new_data.session_id = rollout_id
+            # Deprecated compatibility field for downstream libraries.
+            # TODO: remove after callers migrate to rollout_id.
             new_data.uid = rollout_id
             group_data.append(new_data)
         self._consumed_samples += 1
