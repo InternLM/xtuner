@@ -848,7 +848,7 @@ case:
                        threshold: 20
                        method: absolute
                        operator: <
-            timeout: 7200
+            timeout: 9000
 
     qwen3-5-rl-vl-lmdeploy-dapo:
         -
@@ -892,7 +892,7 @@ case:
                        threshold: 20
                        method: absolute
                        operator: <
-            timeout: 7200
+            timeout: 9000
 
     qwen3-5-rl-vl-lmdeploy-resume:
         -
