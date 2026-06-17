@@ -101,8 +101,13 @@ class _DatasetSampler:
         group_data = []
         for item_idx in range(self.prompt_repeat_k):
             new_data = copy.deepcopy(data)
+            rollout_id = rollout_id_base + item_idx
             new_data.group_id = group_id
-            new_data.rollout_id = rollout_id_base + item_idx
+            new_data.rollout_id = rollout_id
+            # Deprecated compatibility fields for downstream libraries.
+            # TODO: remove after callers migrate to group_id / rollout_id.
+            new_data.message_uid = group_id
+            new_data.uid = rollout_id
             group_data.append(new_data)
         self._consumed_samples += 1
         return cast(list[RolloutState], group_data)

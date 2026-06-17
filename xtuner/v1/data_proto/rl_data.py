@@ -87,6 +87,9 @@ class RolloutState(BaseModel):
     # --- 数据 ---
     # Samples generated from the same prompt share one group_id.
     group_id: int | None = None
+    # Deprecated compatibility field for downstream libraries.
+    # TODO: remove after callers migrate to ``group_id``.
+    message_uid: int | None = None
     message: list[dict[str, Any]]  # dataset输出，需要在AgentLoop中转换成input_ids
     prompt_ids: list[int] | None = None  # 原始 prompt的token ids
     num_tokens: int | None = None
@@ -127,11 +130,25 @@ class RolloutState(BaseModel):
     #  --- 状态 ---
     # Per-rollout identity. Different K-rollouts from the same prompt should have different rollout_id values.
     rollout_id: int | None = None
+    # Deprecated compatibility field for downstream libraries.
+    # TODO: remove after callers migrate to ``rollout_id``.
+    uid: int | None = None
     task_name: str | None = None
     status: Status = Status.INIT
     error_msg: str | None = None
     position_ids: np.ndarray | None = None
     extra_fields: dict[str, Any] = {}
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.group_id is None:
+            self.group_id = self.message_uid
+        else:
+            self.message_uid = self.group_id
+
+        if self.rollout_id is None:
+            self.rollout_id = self.uid
+        else:
+            self.uid = self.rollout_id
 
 
 def update_status_from_finish_reason(finish_reason: str | None) -> Status:
