@@ -49,8 +49,8 @@ async def _run_agentloop(dataset: Any, item: AgentRolloutItem, agent_loop: Agent
         num_tokens=len(prompt_ids),
         data_source={item.data_source: 1.0},
         reward_model=item.reward_model or {"style": item.data_source},
-        uid=item.uid,
-        message_uid=item.group_id,
+        rollout_id=item.uid,
+        group_id=item.group_id,
         extra_fields={"rollout_item": item},
     )
     result = await agent_loop.generate_sample(rollout_state)

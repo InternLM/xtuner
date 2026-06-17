@@ -102,7 +102,7 @@ class _FakeRolloutController:
         rollout_state.status = Status.COMPLETED
         rollout_state.response = "ok"
         rollout_state.response_ids = [100, 101]
-        reward_score = 1.0 if int(rollout_state.uid) % 2 == 0 else 0.5
+        reward_score = 1.0 if int(rollout_state.rollout_id) % 2 == 0 else 0.5
         rollout_state.reward = {"score": reward_score}
         return rollout_state
 

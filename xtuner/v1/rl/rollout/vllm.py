@@ -374,7 +374,7 @@ class vLLMWorker(RolloutWorker):
         raise NotImplementedError
 
     async def _handle_non_stream_response(self, rollout_state: RolloutState, response) -> RolloutState:
-        uid = rollout_state.uid or rollout_state.message_uid
+        uid = rollout_state.rollout_id or rollout_state.group_id
         sample_params = rollout_state.sample_params
         last_token_ids: list[int] = []
         last_logprobs: list[float] = []

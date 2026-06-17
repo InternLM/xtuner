@@ -89,7 +89,7 @@ class _FakeRolloutController:
         rollout_state.status = Status.COMPLETED
         rollout_state.response = "ok"
         rollout_state.response_ids = [100, 101]
-        rollout_state.reward = {"score": 1.0 if int(rollout_state.uid or 0) % 2 == 0 else 0.5}
+        rollout_state.reward = {"score": 1.0 if int(rollout_state.rollout_id or 0) % 2 == 0 else 0.5}
         return rollout_state
 
 
@@ -306,8 +306,8 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
         manager = self._build_disagg_async_manager()
         buffered_group = [
             RolloutState(
-                uid=9000 + idx,
-                message_uid=90,
+                rollout_id=9000 + idx,
+                group_id=90,
                 message=[{"role": "user", "content": "buffered"}],
                 prompt_ids=[1, 2, 3],
                 response="ok",

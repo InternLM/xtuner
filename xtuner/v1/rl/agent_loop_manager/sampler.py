@@ -1,7 +1,6 @@
 import copy
 from pathlib import Path
 from typing import Iterator, Optional, cast
-from uuid import uuid4
 
 import ray
 import torch
@@ -97,19 +96,20 @@ class _DatasetSampler:
             data = cast(RolloutState, next(self.dataloader_iter)[0])
             data = put_to_ray(data)
 
-        if XTUNER_DETERMINISTIC:
-            message_uid = self._consumed_samples
-            uid_base = self._consumed_samples * self.prompt_repeat_k
+        group_id = self._consumed_samples
+        rollout_id_base = self._consumed_samples * self.prompt_repeat_k
 
         group_data = []
         for item_idx in range(self.prompt_repeat_k):
             new_data = copy.deepcopy(data)
+            rollout_id = rollout_id_base + item_idx
+            new_data.group_id = group_id
+            new_data.rollout_id = rollout_id
             if XTUNER_DETERMINISTIC:
-                new_data.message_uid = message_uid
-                new_data.uid = uid_base + item_idx
-                new_data.session_uid = new_data.uid
-            else:
-                new_data.uid = uuid4().int
+                new_data.session_id = rollout_id
+            # Deprecated compatibility field for downstream libraries.
+            # TODO: remove after callers migrate to rollout_id.
+            new_data.uid = rollout_id
             group_data.append(new_data)
         self._consumed_samples += 1
         return cast(list[RolloutState], group_data)

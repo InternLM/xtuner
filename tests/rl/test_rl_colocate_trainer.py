@@ -39,9 +39,9 @@ from xtuner.v1.train.rl_trainer import RLColocateTrainer, RLThroughputBenchmark
 class _FakeRolloutState:
     def __init__(self, uid: int):
         self.id = uid
-        self.uid = str(uid)
-        self.message_uid = uid
-        self.session_uid = uid
+        self.rollout_id = str(uid)
+        self.group_id = uid
+        self.session_id = uid
         self.status = Status.INIT
         self.finish_reason = None
         self.seq_staleness = 0
@@ -227,7 +227,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         async def _produce_batch(batch_size, train_step, *, model_step):
             produce_calls.append((batch_size, train_step, model_step))
             return ProduceBatchResult(
-                rollout_states=[[SimpleNamespace(message_uid=train_step, uid=train_step)]]
+                rollout_states=[[SimpleNamespace(group_id=train_step, rollout_id=train_step)]]
             )
 
         trainer = self._make_trainer(
@@ -302,8 +302,8 @@ class TestRLColocateTrainer(unittest.TestCase):
         # 验证 debug_train 通过 fit() 读取落盘 batch，并只推进训练流程。
         debug_dir = Path(self.temp_dir.name) / "debug_train"
         debug_dir.mkdir()
-        torch.save([[SimpleNamespace(uid=1, message_uid=1)]], debug_dir / "debug_rollout_1.pt")
-        torch.save([[SimpleNamespace(uid=2, message_uid=2)]], debug_dir / "debug_rollout_2.pt")
+        torch.save([[SimpleNamespace(rollout_id=1, group_id=1)]], debug_dir / "debug_rollout_1.pt")
+        torch.save([[SimpleNamespace(rollout_id=2, group_id=2)]], debug_dir / "debug_rollout_2.pt")
 
         trainer = self._make_trainer(MagicMock(), total_train_steps=2)
         trainer._debug_train = True
@@ -333,7 +333,7 @@ class TestRLColocateTrainer(unittest.TestCase):
 
         trainer.fit()
 
-        self.assertEqual([(step, batch[0][0].uid) for step, batch in captured_batches], [(1, 1), (2, 2)])
+        self.assertEqual([(step, batch[0][0].rollout_id) for step, batch in captured_batches], [(1, 1), (2, 2)])
         self.assertEqual(trainer._cur_step, 2)
 
     def test_debug_rollout_fit_serializes_object_refs_and_debug_train_fit_restores_them(self):
