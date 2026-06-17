@@ -2,7 +2,7 @@
 import os
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, List, Literal, Self, Sequence, TypedDict, cast
+from typing import TYPE_CHECKING, Annotated, Literal, Self, Sequence, TypedDict, cast
 
 import torch
 import torch.distributed as dist
@@ -36,7 +36,7 @@ from xtuner.v1.loss import (
     ZLossConfig,
     ZLossContext,
 )
-from xtuner.v1.loss.mtp_loss import MTPLossConfig
+from xtuner.v1.loss.mtp_loss import MTPLossConfig, SciMTPLossConfig
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     BaseModel,
@@ -58,7 +58,7 @@ from xtuner.v1.module import (
 )
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
-from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
+from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer, SciMTPConfig
 from xtuner.v1.utils import (
     get_device,
     get_logger,
@@ -151,7 +151,7 @@ class MoEConfig(TransformerConfig):
     router_compute_dtype: Literal["float32", "native"] = "float32"
     moe_bias: bool = False
     moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig()
-    mtp_config: List[MTPConfig] | None = None
+    mtp_config: list[MTPConfig] | MTPConfig | None = None
     freeze_routers: bool = False
     router_async_offload: bool = False
     aux_loss_cfg: AuxLossConfig = AuxLossConfig()
@@ -186,6 +186,11 @@ class MoE(BaseModel):
 
     def __init__(self, config: MoEConfig):
         super().__init__(config)
+
+        # Normalize mtp_config to always be a list or None for consistent handling
+        if config.mtp_config is not None and not isinstance(config.mtp_config, list):
+            config.mtp_config = [config.mtp_config]
+
         if config.ep_size is not None and config.ep_size > 1:
             world_size = dist.get_world_size()
             self.ep_mesh = init_device_mesh(
@@ -342,17 +347,25 @@ class MoE(BaseModel):
             # Each MTP depth needs its own loss context
             for mtp_config in self.config.mtp_config:
                 for mtp_idx in range(mtp_config.num_layers):
-                    mtp_loss_cfg = MTPLossConfig(
-                        **self.config.lm_loss_cfg.model_dump(),
-                        mtp_depth=mtp_idx + 1,
-                        detach_mtp_lm_head_weight=mtp_config.detach_mtp_lm_head_weight,
-                        mask_type=mtp_config.mask_type,
-                    )
+                    # Create the appropriate loss config based on mtp_config type
+                    if isinstance(mtp_config, SciMTPConfig):
+                        mtp_loss_cfg = SciMTPLossConfig(
+                            **self.config.lm_loss_cfg.model_dump(),
+                            mtp_depth=mtp_idx + 1,
+                            detach_mtp_lm_head_weight=mtp_config.detach_mtp_lm_head_weight,
+                            mask_type=mtp_config.mask_type,
+                        )
+                    else:
+                        mtp_loss_cfg = MTPLossConfig(
+                            **self.config.lm_loss_cfg.model_dump(),
+                            mtp_depth=mtp_idx + 1,
+                            detach_mtp_lm_head_weight=mtp_config.detach_mtp_lm_head_weight,
+                        )
                     # MTP needs to shift labels multiple times. Since rebuild the `shifted_labels` in data_batch
                     mtp_loss_ctx_list = self._build_loss_ctx(mtp_loss_cfg, _data_batch, sp_mesh)
                     if mtp_loss_ctx_list is not None:
-                        mtp_loss_ctx_list = MTPLossContext.build_batches(  # type: ignore[assignment]
-                            cast(list[MTPLossContext], mtp_loss_ctx_list),  # type: ignore[arg-type]
+                        mtp_loss_ctx_list = type(mtp_loss_ctx_list[0]).build_batches(  # type: ignore[assignment]
+                            mtp_loss_ctx_list,  # type: ignore[arg-type]
                             cu_seq_lens_list=cu_seq_lens_list,
                             sp_mesh=sp_mesh,
                         )
@@ -625,6 +638,10 @@ class MoE(BaseModel):
             if mtp_losses_dict:
                 output["mtp_loss"] = mtp_losses_dict
 
+        mtp_loss = 0
+        for mtp_loss_name, mtp_loss in output["mtp_loss"].items():
+            mtp_loss += mtp_loss
+
         # Apply final norm to all micro-batches
         cat_hidden_states = torch.cat(hidden_states_list, dim=1)
         cat_hidden_states = self.norm(cat_hidden_states)
@@ -636,7 +653,7 @@ class MoE(BaseModel):
         loss, (logits, extra_info) = self.lm_head(cat_hidden_states, cast(LMHeadLossContext, cat_loss_ctx))
 
         # Aggregate losses (mean across micro-batches)
-        output["loss"] = loss.sum()
+        output["loss"] = loss.sum() + mtp_loss
         moe_extra_info = ModelForwardExtraLogInfo()
         if extra_info:
             moe_extra_info.append(extra_info)
@@ -676,7 +693,6 @@ class MoE(BaseModel):
         output,
         layer_hidden_states,
         position_embeddings,
-        seq_ctx,
         balancing_ctx,
         z_ctx,
         mtp_seq_ctx,
@@ -855,13 +871,16 @@ class MoE(BaseModel):
                     output=output,
                     layer_hidden_states=layer_hidden_states,
                     position_embeddings=position_embeddings,
-                    seq_ctx=seq_ctx,
                     balancing_ctx=balancing_ctx,
                     z_ctx=z_ctx,
                     mtp_seq_ctx=mtp_seq_ctx,
                     mtp_loss_ctx_dict=mtp_loss_ctx_dict,
                     keep_router=keep_router,
                 )
+
+        # add mtp_loss to loss
+        for mtp_loss_name, mtp_loss in output["mtp_loss"].items():
+            output["loss"] += mtp_loss
 
         split_aux_output = self.aux_loss.finalize(
             balancing_ctx=balancing_ctx,

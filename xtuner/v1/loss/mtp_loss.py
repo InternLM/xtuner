@@ -60,7 +60,6 @@ class MTPLossConfig(CELossConfig):
 
     mtp_depth: int
     detach_mtp_lm_head_weight: bool = False
-    mask_type: Optional[str] = None
 
     @property
     def loss_ctx_cls(self) -> type["MTPLossContext"]:
@@ -69,9 +68,9 @@ class MTPLossConfig(CELossConfig):
     @property
     def _loss_kwargs_cls(self) -> type["MTPLossKwargs"]:
         return MTPLossKwargs
-
-    def build(self, data: dict, sp_mesh: DeviceMesh | None = None) -> "MTPLossContext | None":
-        """Build MTPLossContext from data dict.
+    
+    def _process_loss_kwargs(self, data: dict, sp_mesh: DeviceMesh | None = None) -> torch.Tensor:
+        """Process loss_kwargs for MTP Loss.
 
         Rolls ``shifted_labels`` (and optionally ``logprobs``) by
         ``-mtp_depth`` positions (per-sequence, respecting packed-sequence
@@ -86,8 +85,7 @@ class MTPLossConfig(CELossConfig):
             sp_mesh (DeviceMesh | None): Sequence parallel mesh.
 
         Returns:
-            MTPLossContext | None: Built loss context, or ``None`` if
-                ``shifted_labels`` is not present in ``data``.
+            torch.Tensor: loss_kwargs
         """
         # TODO: Should move the common utils function to public package to avoid from circular import.
         from xtuner.v1.module.mtp.utils import roll_packed_tensor
@@ -136,7 +134,83 @@ class MTPLossConfig(CELossConfig):
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
 
+        return loss_kwargs
+
+    def build(self, data: dict, sp_mesh: DeviceMesh | None = None) -> "MTPLossContext | None":
+        """Build MTPLossContext from data dict.
+
+        Rolls ``shifted_labels`` (and optionally ``logprobs``) by
+        ``-mtp_depth`` positions (per-sequence, respecting packed-sequence
+        boundaries) before constructing the loss context. The roll is performed
+        on the full sequence prior to any sequence-parallel split so that
+        boundary positions and ``cu_seq_lens`` are always consistent.
+
+        Args:
+            data (dict): Data dict containing loss-related fields.
+                Required keys: ``shifted_labels``, ``seq_ctx``.
+                Optional keys: ``logprobs``.
+            sp_mesh (DeviceMesh | None): Sequence parallel mesh.
+
+        Returns:
+            MTPLossContext | None: Built loss context, or ``None`` if
+                ``shifted_labels`` is not present in ``data``.
+        """
+
+        if "shifted_labels" not in data:
+            return None
+
+        loss_kwargs = self._process_loss_kwargs(data, sp_mesh)
         return MTPLossContext(self, loss_kwargs)
+
+
+class SciMTPLossConfig(MTPLossConfig):
+    """Loss configuration for Multi-Token Prediction (MTP).
+
+    Extends ``MTPLossConfig`` with a ``mask_type`` field that controls how to mask
+    ``loss_kwargs`` when calculating loss.
+
+    Args:
+        mtp_depth (int): 1-indexed MTP layer depth. The first MTP layer uses
+            ``mtp_depth=1`` (shift=-1 on top of the existing label shift).
+        detach_mtp_lm_head_weight (bool): Whether to detach the LM head weight.
+            This is used in RL training. Default is False.
+    """
+
+    mask_type: Optional[str] = None
+
+    @property
+    def loss_ctx_cls(self) -> type["SciMTPLossContext"]:
+        return SciMTPLossContext
+
+    @property
+    def _loss_kwargs_cls(self) -> type["MTPLossKwargs"]:
+        return MTPLossKwargs
+
+    def build(self, data: dict, sp_mesh: DeviceMesh | None = None) -> "SciMTPLossContext | None":
+        """Build SciMTPLossContext from data dict.
+
+        Rolls ``shifted_labels`` (and optionally ``logprobs``) by
+        ``-mtp_depth`` positions (per-sequence, respecting packed-sequence
+        boundaries) before constructing the loss context. The roll is performed
+        on the full sequence prior to any sequence-parallel split so that
+        boundary positions and ``cu_seq_lens`` are always consistent.
+
+        Args:
+            data (dict): Data dict containing loss-related fields.
+                Required keys: ``shifted_labels``, ``seq_ctx``.
+                Optional keys: ``logprobs``.
+            sp_mesh (DeviceMesh | None): Sequence parallel mesh.
+
+        Returns:
+            SciMTPLossContext | None: Built loss context, or ``None`` if
+                ``shifted_labels`` is not present in ``data``.
+        """
+
+        if "shifted_labels" not in data:
+            return None
+
+        loss_kwargs = self._process_loss_kwargs(data, sp_mesh)
+        return SciMTPLossContext(self, loss_kwargs)
 
 
 class MTPLossContext(LMHeadLossContext):
@@ -168,12 +242,6 @@ class MTPLossContext(LMHeadLossContext):
             head_weight = head_weight.detach()
             head_bias = head_bias.detach() if head_bias is not None else None
         # Dispatch to eager_mode/chunk_mode via base class, which calls loss_fn per chunk
-
-        mask_type = self.loss_cfg.mask_type
-        if mask_type == "v1":
-            self.process_loss_weight_v1()
-        elif mask_type is not None:
-            raise NotImplementedError(f"Unknown MTP Loss Mask Type: {mask_type}")
         return super().forward(hidden_states, head_weight, head_bias)
 
     def loss_fn(
@@ -221,6 +289,40 @@ class MTPLossContext(LMHeadLossContext):
         )
 
         return kl_loss, (None, {})
+
+
+class SciMTPLossContext(MTPLossContext):
+    """Loss context for Science Multi-Token Prediction (MTP).
+
+    Supports two modes:
+    - **CE mode** (default): Standard cross-entropy loss on rolled labels.
+      Used during SFT/pretraining.
+    - **KL mode**: When ``logprobs`` is available (RL training),
+      computes KL divergence between MTP's log-probabilities and the
+      rolled rollout log-probabilities.
+
+    Both modes support chunk mode for memory-efficient computation via the
+    base class's ``forward() → eager_mode()/chunk_mode() → loss_fn()`` dispatch.
+
+    Args:
+        loss_cfg (MTPLossConfig): The MTP loss configuration.
+        loss_kwargs (MTPLossKwargs): Pre-rolled keyword arguments for loss
+            computation.
+    """
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        head_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
+        mask_type = self.loss_cfg.mask_type
+        if mask_type == "v1":
+            self.process_loss_weight_v1()
+        elif mask_type is not None:
+            raise NotImplementedError(f"Unknown MTP Loss Mask Type: {mask_type}")
+
+        return super().forward(hidden_states, head_weight, head_bias)
 
     def process_loss_weight_v1(self):
         layer_idx = self.loss_cfg.mtp_depth - 1
