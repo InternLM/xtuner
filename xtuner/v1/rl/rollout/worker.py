@@ -515,7 +515,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.eos_token: List[int] = [eos_token] if isinstance(eos_token, int) else eos_token
         self.receive_abort_request = threading.Event()
         self.dist_init_addr: str = ""
-        self.serverl_url: str = ""
+        self.server_url: str = ""
         self.partial_rollout_handler = PartialRolloutHandler()
         self.enable_partial_rollout: bool = False
 
@@ -666,7 +666,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 "Authorization": f"Bearer {self.config.api_key}",
             }
             response = requests.get(
-                f"{self.server_url}/{self.endpoints['health_generate']}", headers=headers, timeout=5.0
+                f"{self.server_url}/{self.endpoints['health_generate']}", headers=headers, timeout=10.0
             )
             return response.status_code == 200
         except requests.RequestException as e:
