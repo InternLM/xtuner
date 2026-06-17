@@ -138,31 +138,32 @@ def free_rollout_state_refs(rollout_state: RolloutState) -> None:
 
     refs: list[ObjectRef] = []
 
-    routed_experts = rollout_state.routed_experts
-    if isinstance(routed_experts, ObjectRef):
-        refs.append(routed_experts)
-    elif isinstance(routed_experts, list):
-        refs.extend(routed_experts)
-
-    mm_info = rollout_state.mm_info
-    if mm_info is not None:
-        pixel_values = mm_info.get("pixel_values")
-        if isinstance(pixel_values, ObjectRef):
-            refs.append(pixel_values)
-
-    def collect_extra_field_refs(value: Any) -> None:
+    def clear_object_refs(value: Any) -> Any:
         if isinstance(value, ObjectRef):
             refs.append(value)
-            return
+            return None
+        if isinstance(value, BaseModel):
+            for field_name in type(value).model_fields:
+                field_value = getattr(value, field_name)
+                cleared_value = clear_object_refs(field_value)
+                if cleared_value is not field_value:
+                    setattr(value, field_name, cleared_value)
+            return value
         if isinstance(value, dict):
-            for item in value.values():
-                collect_extra_field_refs(item)
-            return
-        if isinstance(value, (list, tuple, set)):
-            for item in value:
-                collect_extra_field_refs(item)
+            for key, item in value.items():
+                value[key] = clear_object_refs(item)
+            return value
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                value[index] = clear_object_refs(item)
+            return value
+        if isinstance(value, tuple):
+            return tuple(clear_object_refs(item) for item in value)
+        if isinstance(value, set):
+            return {clear_object_refs(item) for item in value}
+        return value
 
-    collect_extra_field_refs(rollout_state.extra_fields)
+    clear_object_refs(rollout_state)
     free_object_refs(refs)
 
 

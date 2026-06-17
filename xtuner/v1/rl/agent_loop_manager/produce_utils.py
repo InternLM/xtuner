@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, runtime_checkable
 
 import ray
 import tqdm
@@ -27,6 +27,11 @@ from xtuner.v1.rl.utils import (
 from xtuner.v1.utils import get_logger
 
 from .sampler import Sampler
+
+
+if TYPE_CHECKING:
+    from .disagg_producer import DisaggProduceProgress
+    from .producer import ProduceProgress
 
 
 logger = get_logger()
@@ -117,7 +122,7 @@ class BaseProduceContext:
     task_name: str
     train_step: int
     model_step: int
-    progress: Any
+    progress: "ProduceProgress | DisaggProduceProgress"
     is_valid_sample_fn: IsValidSampleFn = default_is_valid_sample_fn
     stale_threshold: int | None = None
 
@@ -338,7 +343,11 @@ def _fill_leftover_counts(result: ProduceBatchResult, status_counts: dict[Status
     result.filtered_samples = status_counts.get(Status.FILTERED, 0)
 
 
-def _merge_discarded_counts(result: ProduceBatchResult, progress: Any, task_name: str) -> None:
+def _merge_discarded_counts(
+    result: ProduceBatchResult,
+    progress: "ProduceProgress | DisaggProduceProgress",
+    task_name: str,
+) -> None:
     discarded_failed, discarded_filtered = progress.consume_discarded(task_name)
     result.failed_samples += discarded_failed
     result.filtered_samples += discarded_filtered
@@ -523,7 +532,7 @@ def build_produce_batch_result(
     task_batch_sizes: dict[str, int],
     batch_by_task: dict[str, list[list[RolloutState]]],
     leftover_counts: dict[str, dict[Status, int]],
-    progress: Any,
+    progress: "ProduceProgress | DisaggProduceProgress",
     pause_time_s: float,
 ) -> ProduceBatchResult:
     if len(task_runners) == 1:
@@ -575,7 +584,7 @@ async def take_train_batch(
     logger,
     manager_name: str,
     task_batch_sizes: dict[str, int],
-    progress: Any,
+    progress: "ProduceProgress | DisaggProduceProgress",
     pause_time_s: float = 0.0,
 ) -> ProduceBatchResult:
     batch_by_task, consumed_counts = await replay_buffer.take_batch(task_batch_sizes)
