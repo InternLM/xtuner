@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from __future__ import annotations
+
 import os
 import types
 from pathlib import Path
@@ -58,7 +60,7 @@ from xtuner.v1.module import (
 )
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
-from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer, SciMTPConfig
+from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
 from xtuner.v1.utils import (
     get_device,
     get_logger,
@@ -347,20 +349,18 @@ class MoE(BaseModel):
             # Each MTP depth needs its own loss context
             for mtp_config in self.config.mtp_config:
                 for mtp_idx in range(mtp_config.num_layers):
-                    # Create the appropriate loss config based on mtp_config type
-                    if isinstance(mtp_config, SciMTPConfig):
-                        mtp_loss_cfg = SciMTPLossConfig(
-                            **self.config.lm_loss_cfg.model_dump(),
-                            mtp_depth=mtp_idx + 1,
-                            detach_mtp_lm_head_weight=mtp_config.detach_mtp_lm_head_weight,
-                            mask_type=mtp_config.mask_type,
-                        )
+                    # Get loss_cfg from mtp_config, or create a default one if not provided
+                    if mtp_config.loss_cfg is not None:
+                        # Create a copy to avoid modifying the original config
+                        mtp_loss_cfg = mtp_config.loss_cfg.model_copy()
                     else:
+                        # Create default MTPLossConfig from model's lm_loss_cfg
                         mtp_loss_cfg = MTPLossConfig(
                             **self.config.lm_loss_cfg.model_dump(),
-                            mtp_depth=mtp_idx + 1,
                             detach_mtp_lm_head_weight=mtp_config.detach_mtp_lm_head_weight,
                         )
+                    # Bind mtp_depth to current layer index
+                    mtp_loss_cfg.bind_mtp_depth(mtp_idx + 1)
                     # MTP needs to shift labels multiple times. Since rebuild the `shifted_labels` in data_batch
                     mtp_loss_ctx_list = self._build_loss_ctx(mtp_loss_cfg, _data_batch, sp_mesh)
                     if mtp_loss_ctx_list is not None:

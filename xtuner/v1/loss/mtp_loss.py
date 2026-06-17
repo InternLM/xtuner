@@ -53,13 +53,21 @@ class MTPLossConfig(CELossConfig):
 
     Args:
         mtp_depth (int): 1-indexed MTP layer depth. The first MTP layer uses
-            ``mtp_depth=1`` (shift=-1 on top of the existing label shift).
+            ``mtp_depth=1`` (shift=-1 on top of the existing label shift). Default: 1.
         detach_mtp_lm_head_weight (bool): Whether to detach the LM head weight.
             This is used in RL training. Default is False.
     """
 
-    mtp_depth: int
+    mtp_depth: int = 1
     detach_mtp_lm_head_weight: bool = False
+
+    def bind_mtp_depth(self, idx: int) -> None:
+        """Bind MTP depth to the given index.
+
+        Args:
+            idx (int): 1-indexed MTP layer depth to bind.
+        """
+        self.mtp_depth = idx
 
     @property
     def loss_ctx_cls(self) -> type["MTPLossContext"]:
