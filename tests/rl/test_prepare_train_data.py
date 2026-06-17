@@ -44,7 +44,7 @@ class TestPrepareTrainData(unittest.TestCase):
         self,
         *,
         uid: int = 1,
-        message_uid: int = 1,
+        group_id: int = 1,
         prompt_ids: list[int] | None = None,
         response_ids: list[int] | torch.Tensor | None = None,
         logprobs: list[float] | None = None,
@@ -58,9 +58,9 @@ class TestPrepareTrainData(unittest.TestCase):
         extra_fields: dict | None = None,
     ) -> RolloutState:
         return RolloutState(
-            uid=uid,
-            message_uid=message_uid,
-            message=[{"role": "user", "content": f"prompt {message_uid}"}],
+            rollout_id=uid,
+            group_id=group_id,
+            message=[{"role": "user", "content": f"prompt {group_id}"}],
             prompt_ids=prompt_ids if prompt_ids is not None else [10, 11, 12],
             response=response,
             response_ids=response_ids if response_ids is not None else [20, 21, 22],

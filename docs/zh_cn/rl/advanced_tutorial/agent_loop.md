@@ -72,7 +72,7 @@ AgentLoop 输入和输出都是 `RolloutState`。如果后续使用预置 `RLTra
 - `prompt_ids`：tokenized prompt，通常由 RL tokenize function 写入。
 - `reward_model`：标签信息，例如 `{"ground_truth": ...}`，供 Judger 使用。
 - `sample_params`：会在 `generate_group()` 中被 AgentLoop 的默认采样参数覆盖。
-- `task_name`、`uid`、`session_uid` 等调度字段。
+- `task_name`、`rollout_id`、`session_id` 等调度字段。
 
 生成前，AgentLoop 需要确保：
 

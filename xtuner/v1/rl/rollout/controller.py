@@ -177,11 +177,11 @@ class RolloutController:
         if XTUNER_DETERMINISTIC:
             sample_params = rollout_state.sample_params.model_copy(deep=True)
             sample_params.sampling_seed = self.config.random_seed + (
-                (rollout_state.uid or 0) - (rollout_state.message_uid or 0)
+                (rollout_state.rollout_id or 0) - (rollout_state.group_id or 0)
             )
             rollout_state.sample_params = sample_params
 
-        session_id = rollout_state.session_uid if rollout_state.session_uid is not None else uuid4().int
+        session_id = rollout_state.session_id if rollout_state.session_id is not None else uuid4().int
         worker = await self.router.get_worker(session_id)
         if worker is None:
             rollout_state.status = Status.FAILED

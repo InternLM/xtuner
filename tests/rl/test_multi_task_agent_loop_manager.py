@@ -105,8 +105,8 @@ class _FailingProduceStrategy:
 
 
 class _FakeRolloutState:
-    def __init__(self, uid: str, group_generate_time_s: float):
-        self.uid = uid
+    def __init__(self, rollout_id: str, group_generate_time_s: float):
+        self.rollout_id = rollout_id
         self.extra_fields = {GROUP_GENERATE_TIME_KEY: group_generate_time_s}
 
 

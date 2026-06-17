@@ -23,10 +23,10 @@ class _RemoteGenerate:
 
     async def remote(self, rollout_state: RolloutState):
         self.calls.append(rollout_state)
-        rollout_state.status = self.statuses_by_uid[rollout_state.uid]
+        rollout_state.status = self.statuses_by_uid[rollout_state.rollout_id]
         if rollout_state.status == Status.COMPLETED:
-            rollout_state.response = f"response {rollout_state.uid}"
-            rollout_state.response_ids = [rollout_state.uid or 0]
+            rollout_state.response = f"response {rollout_state.rollout_id}"
+            rollout_state.response_ids = [rollout_state.rollout_id or 0]
             rollout_state.finish_reason = "stop"
         elif rollout_state.status == Status.ABORTED:
             rollout_state.finish_reason = "abort"
@@ -42,7 +42,7 @@ class _BatchJudger:
     async def batch_judge(self, rollout_states):
         self.calls.append(rollout_states)
         for state in rollout_states:
-            state.reward = {"score": float(state.uid)}
+            state.reward = {"score": float(state.rollout_id)}
         return rollout_states
 
 
@@ -55,8 +55,8 @@ class _SlowJudger:
 class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
     def _state(self, uid: int) -> RolloutState:
         return RolloutState(
-            uid=uid,
-            message_uid=uid,
+            rollout_id=uid,
+            group_id=uid,
             message=[{"role": "user", "content": f"prompt {uid}"}],
             prompt_ids=[uid],
             tokens=None,
@@ -87,9 +87,9 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
 
         result = await loop.generate_group(samples)
 
-        self.assertEqual([state.uid for state in result], [1, 2])
+        self.assertEqual([state.rollout_id for state in result], [1, 2])
         self.assertEqual(len(judger.calls), 1)
-        self.assertEqual([state.uid for state in judger.calls[0]], [1, 2])
+        self.assertEqual([state.rollout_id for state in judger.calls[0]], [1, 2])
         self.assertEqual([state.reward for state in result], [{"score": 1.0}, {"score": 2.0}])
         self.assertTrue(all(state.sample_params == loop.sample_params for state in result))
 
@@ -101,7 +101,7 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
 
         result = await loop.generate_group(samples)
 
-        self.assertEqual([state.uid for state in result], [1, 2])
+        self.assertEqual([state.rollout_id for state in result], [1, 2])
         self.assertEqual([state.status for state in result], [Status.COMPLETED, Status.ABORTED])
         self.assertEqual(judger.calls, [])
         self.assertTrue(all(state.reward is None for state in result))
@@ -114,7 +114,7 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
 
         result = await loop.generate_group(samples)
 
-        self.assertEqual([state.uid for state in result], [1, 2])
+        self.assertEqual([state.rollout_id for state in result], [1, 2])
         self.assertEqual([state.status for state in result], [Status.COMPLETED, Status.FAILED])
         self.assertEqual(judger.calls, [])
         self.assertTrue(all(state.reward is None for state in result))
@@ -130,7 +130,7 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
             loop._judger_pause_event.set()
             result = await task
 
-        self.assertEqual([state.uid for state in result], [1, 2])
+        self.assertEqual([state.rollout_id for state in result], [1, 2])
         self.assertTrue(all(state.status == Status.ABORTED for state in result))
         self.assertTrue(all(state.finish_reason == "abort" for state in result))
         self.assertTrue(all(state.reward is None for state in result))

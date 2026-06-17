@@ -56,8 +56,8 @@ def make_rollout_state(
     response_ids = list(response_ids) if response_ids is not None else [uid + 10]
     logprobs = list(logprobs) if logprobs is not None else [0.1 for _ in response_ids]
     return RolloutState(
-        uid=uid,
-        message_uid=uid,
+        rollout_id=uid,
+        group_id=uid,
         message=[{"role": "user", "content": f"prompt {uid}"}],
         prompt_ids=prompt_ids,
         tokens=list(tokens) if tokens is not None else list(prompt_ids),
@@ -77,7 +77,7 @@ def make_rollout_state(
 
 
 def group_uids(groups: list[list[RolloutState]]) -> list[list[int]]:
-    return [[state.uid for state in group] for group in groups]
+    return [[state.rollout_id for state in group] for group in groups]
 
 
 async def save_and_resume(
@@ -236,7 +236,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 assert await replay_buffer.count("task", Status.ABORTED) == 0
                 assert await replay_buffer.count("task", Status.EXPIRED) == 2
                 expired = await replay_buffer.get(2, "task", Status.EXPIRED)
-                assert {state.uid for group in expired for state in group} == {1, 2}
+                assert {state.rollout_id for group in expired for state in group} == {1, 2}
 
                 filtered_buffer = replay_buffer_config_cls().build()
                 await filtered_buffer.put([make_rollout_state(3, response_model_steps=[1])], "task")
@@ -256,8 +256,8 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 assert await filtered_buffer.count("task", Status.EXPIRED) == 1
                 completed = await filtered_buffer.get(1, "task", Status.COMPLETED)
                 expired = await filtered_buffer.get(1, "task", Status.EXPIRED)
-                assert completed[0][0].uid == 3
-                assert expired[0][0].uid == 4
+                assert completed[0][0].rollout_id == 3
+                assert expired[0][0].rollout_id == 4
 
     async def test_sync_get_returns_fifo_order(self):
         # Sync replay 用于共卡按需生产，策略契约是同 task/status 下严格按入库顺序消费。
@@ -331,7 +331,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         # save/resume 应保留真实 RolloutState 字段，不再用 MockState.input_ids 代表训练样本内容。
         def state_signature(state: RolloutState) -> tuple:
             return (
-                state.uid,
+                state.rollout_id,
                 tuple(state.prompt_ids or []),
                 tuple(state.response_ids or []),
                 tuple(state.response_model_steps or []),

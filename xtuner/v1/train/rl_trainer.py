@@ -1398,8 +1398,8 @@ class BaseRLTrainer:
                 response_len = len(response_ids)
                 trajectory_items.append(
                     {
-                        "uid": data.uid,
-                        "message_uid": data.message_uid,
+                        "rollout_id": data.rollout_id,
+                        "group_id": data.group_id,
                         "task_name": data.task_name,
                         "data_source": data.data_source,
                         "status": data.status.value if hasattr(data.status, "value") else str(data.status),
@@ -1461,8 +1461,8 @@ class BaseRLTrainer:
                     ground_truth = data.reward_model.get("ground_truth")
                 trajectory_items.append(
                     {
-                        "uid": data.uid,
-                        "message_uid": data.message_uid,
+                        "rollout_id": data.rollout_id,
+                        "group_id": data.group_id,
                         "task_name": data.task_name,
                         "data_source": data.data_source,
                         "status": data.status.value if hasattr(data.status, "value") else str(data.status),
