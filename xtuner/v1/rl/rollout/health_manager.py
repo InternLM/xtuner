@@ -244,8 +244,13 @@ class RolloutHealthManager:
             return results
 
     def check_and_recover_workers(self) -> dict[int, bool]:
-        """Run an explicit health check and recover failed worker groups."""
-        self._check_active_workers_and_mark_failed_groups()
+        """Run an explicit health check and recover failed worker groups.
+
+        This barrier runs immediately before resource transitions (for example rollout offload / train onload). Any
+        worker that fails this last health check should be recovered right away instead of waiting for the background
+        consecutive-failure threshold.
+        """
+        self._check_active_workers_and_mark_failed_groups(fail_fast=True)
         return self.recover_failed_workers()
 
     def run_once(self) -> None:
@@ -264,7 +269,7 @@ class RolloutHealthManager:
         """Return whether the health manager is stopping or already stopped."""
         return self._stopped or (self._stop_event is not None and self._stop_event.is_set())
 
-    def _check_active_workers_and_mark_failed_groups(self) -> int:
+    def _check_active_workers_and_mark_failed_groups(self, *, fail_fast: bool = False) -> int:
         """Health-check active workers and mark any failed lifecycle group
         inactive."""
         with self._operation_lock:
@@ -273,7 +278,9 @@ class RolloutHealthManager:
         if not workers_to_check:
             return 0
 
-        check_results = self._check_workers_health(workers_to_check)
+        logger.info(f"RolloutHealthManager health check triggered: active_worker_count={len(workers_to_check)}.")
+
+        check_results = self._check_workers_health(workers_to_check, fail_fast=fail_fast)
 
         failed_groups: set[tuple[int, ...]] = set()
         for worker, is_healthy in zip(workers_to_check, check_results):
@@ -294,9 +301,9 @@ class RolloutHealthManager:
 
         return len(workers_to_check)
 
-    def _check_workers_health(self, workers_to_check: list[WorkerSnapshot]) -> list[bool]:
+    def _check_workers_health(self, workers_to_check: list[WorkerSnapshot], *, fail_fast: bool = False) -> list[bool]:
         """Run periodic check_health probes concurrently."""
-        if self._check_failure_threshold <= 0:
+        if self._check_failure_threshold <= 0 and not fail_fast:
             return [False for _ in workers_to_check]
 
         async def check_one_worker(worker: WorkerSnapshot) -> bool:
@@ -328,6 +335,13 @@ class RolloutHealthManager:
                 else:
                     failure_count = self._worker_health_failure_counts.get(worker.rank, 0) + 1
                     self._worker_health_failure_counts[worker.rank] = failure_count
+                    if fail_fast:
+                        logger.warning(
+                            f"Worker {worker.rank} failed explicit health check and will be marked inactive "
+                            f"immediately: {failure_count}/{self._check_failure_threshold}."
+                        )
+                        keep_active_by_rank[worker.rank] = False
+                        continue
                     if failure_count >= self._check_failure_threshold:
                         logger.warning(
                             f"Worker {worker.rank} reached health check failure threshold: "

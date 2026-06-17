@@ -24,7 +24,18 @@ __all__ = [
     "PartialRolloutHandler",
     "SessionRouter",
     "WorkerLifecycleState",
+    "format_response_body_preview",
 ]
+
+
+def format_response_body_preview(response: Any, limit: int = 512) -> str:
+    try:
+        body = response.text
+    except Exception as e:  # pragma: no cover - response.text access normally does not fail
+        return f"<unavailable: {e}>"
+    if len(body) <= limit:
+        return repr(body)
+    return f"{body[:limit]!r}...(truncated, total_len={len(body)})"
 
 
 class WorkerLifecycleState(str, Enum):
