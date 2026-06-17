@@ -1,7 +1,6 @@
 import copy
 from pathlib import Path
 from typing import Iterator, Optional, cast
-from uuid import uuid4
 
 import ray
 import torch
@@ -12,7 +11,6 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
-from xtuner.v1.utils import XTUNER_DETERMINISTIC
 from xtuner.v1.utils.logger import get_logger
 
 
@@ -98,17 +96,13 @@ class _DatasetSampler:
             data = put_to_ray(data)
 
         group_id = self._consumed_samples
-        if XTUNER_DETERMINISTIC:
-            rollout_id_base = self._consumed_samples * self.prompt_repeat_k
+        rollout_id_base = self._consumed_samples * self.prompt_repeat_k
 
         group_data = []
         for item_idx in range(self.prompt_repeat_k):
             new_data = copy.deepcopy(data)
             new_data.group_id = group_id
-            if XTUNER_DETERMINISTIC:
-                new_data.rollout_id = rollout_id_base + item_idx
-            else:
-                new_data.rollout_id = uuid4().int
+            new_data.rollout_id = rollout_id_base + item_idx
             group_data.append(new_data)
         self._consumed_samples += 1
         return cast(list[RolloutState], group_data)
