@@ -182,14 +182,8 @@ class DisaggProduceProgress:
         )
         produced_samples_state = state.get("produced_samples", {})
         produced_tokens_state = state.get("produced_tokens", {})
-        failed_samples_state = state.get(
-            "failed_samples",
-            state.get("failed_groups", state.get("discarded_failed_groups", {})),
-        )
-        filtered_samples_state = state.get(
-            "filtered_samples",
-            state.get("filtered_groups", state.get("discarded_filtered_groups", {})),
-        )
+        failed_samples_state = state.get("failed_samples", {})
+        filtered_samples_state = state.get("filtered_samples", {})
         self.produced_samples.clear()
         self.produced_samples.update(
             {task_name: int(produced_samples_state.get(task_name, 0)) for task_name in task_names}
