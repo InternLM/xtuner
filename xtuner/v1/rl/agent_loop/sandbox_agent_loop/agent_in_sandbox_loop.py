@@ -213,9 +213,9 @@ class AgentInSandboxLoop(AgentLoop):
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         try:
             rollout_item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
-            if rollout_state.rollout_id is None:
-                rollout_state.rollout_id = uuid.uuid4().int
-            rollout_item.uid = rollout_state.rollout_id
+            if rollout_state.session_id is None:
+                rollout_state.session_id = uuid.uuid4().int
+            rollout_item.uid = rollout_state.session_id
             rollout_item.group_id = rollout_state.group_id
             result = await self._run_item(rollout_item)
             await self._fill_rollout_state(rollout_state, result)
@@ -269,7 +269,6 @@ class AgentInSandboxLoop(AgentLoop):
         messages, tools = _load_latest_trace_segment(item.artifacts, require_tools=True)
         if not messages:
             raise ValueError("Agent artifacts must contain at least one trainable messages trace.")
-        session_id = rollout_state.rollout_id
 
         trace_store = get_store()
         text = self.tokenizer.apply_chat_template(
@@ -279,7 +278,7 @@ class AgentInSandboxLoop(AgentLoop):
             add_generation_prompt=False,
         )
         prompt_text = text[:-1] if text.endswith("\n") else text
-        data = await trace_store.export_training_trace.remote(str(session_id), prompt_text)
+        data = await trace_store.export_training_trace.remote(str(rollout_state.session_id), prompt_text)
 
         rollout_state.input_ids = data["input_ids"]
         rollout_state.labels = data["labels"]
