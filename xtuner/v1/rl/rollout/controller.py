@@ -127,6 +127,9 @@ class RolloutController:
         self.engine_rank_mesh_array: List[List[int]]
         self.server_process_rank2info: dict[int, WorkerInfo]
         self.engine_rank_mesh_array, self.server_process_rank2info = self._init_workers(placement_group)
+        # Cache the exact controller concurrency chosen at build time so
+        # downstream components observe the same limit as the Ray actor.
+        self._generate_concurrency = self.config.get_controller_generate_concurrency(placement_group)
         self.worker_info_lock = threading.RLock()
         # The timeout for the environment to wait for the rollout controller's response.
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
@@ -167,6 +170,7 @@ class RolloutController:
             self.logger.info(f"Rollout worker server URLs: {worker_server_urls_map}")
             self.logger.info(f"Rollout worker session server URLs: {active_session_urls_by_rank}")
 
+        # TODO(@duanyanhui): provide an unified structure that combines server URLs and session URLs
         rollout_metadata: RolloutWorkerMetadata = {
             "engine_rank_mesh_array": self.engine_rank_mesh_array,
             "server_url_dict": worker_server_urls_map,
@@ -192,10 +196,7 @@ class RolloutController:
         return tool_call_parser, reasoning_parser
 
     def get_generate_concurrency(self) -> int:
-        request_entrypoint_count = sum(
-            1 for info in self.server_process_rank2info.values() if info.is_request_entrypoint
-        )
-        return request_entrypoint_count * self.config.generate_concurrency_per_instance
+        return self._generate_concurrency
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
@@ -281,29 +282,11 @@ class RolloutController:
     async def check_and_shutdown_inactive_workers(self):
         """Run a fail-fast health barrier and shut down failed groups so
         training can reuse shared rollout resources."""
-        shutdown_results = await asyncio.to_thread(self.health_manager.check_and_shutdown_inactive_workers)
-        failed_shutdown_workers = [
-            f"rank={rank}, url={self.health_manager.snapshot_workers()[rank].url}"
-            for rank, is_shutdown in shutdown_results.items()
-            if not is_shutdown
-        ]
-        if failed_shutdown_workers:
-            raise RuntimeError(
-                "failed to shut down inactive rollout workers before training: " + ", ".join(failed_shutdown_workers)
-            )
+        await asyncio.to_thread(self.health_manager.check_and_shutdown_inactive_workers)
 
     async def restart_inactive_workers(self):
         """Restart inactive groups before a sync-step weight update."""
         await asyncio.to_thread(self.health_manager.restart_inactive_workers)
-        inactive_workers = [
-            f"rank={worker.rank}, url={worker.url}"
-            for worker in self.health_manager.snapshot_workers().values()
-            if not worker.active
-        ]
-        if inactive_workers:
-            raise RuntimeError(
-                "inactive rollout workers before sync-step weight update: " + ", ".join(inactive_workers)
-            )
 
     def continue_generation(self):
         self._broadcast_to_active_workers("continue_generation")

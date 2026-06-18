@@ -1491,10 +1491,6 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.check_flag = False
 
     @abstractmethod
-    def check_health_generate(self) -> bool:
-        raise NotImplementedError("check_health_generate must be implemented by rollout worker subclasses.")
-
-    @abstractmethod
     def _get_request_payload(self, rollout_state: RolloutState) -> dict:
         """Abstract method to create a generation request.
 

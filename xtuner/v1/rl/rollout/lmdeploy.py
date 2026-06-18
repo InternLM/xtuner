@@ -10,7 +10,6 @@ from ray.util.placement_group import placement_group_table
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 
-from .utils import format_response_body_preview
 from .worker import EngineLaunchSpec, EngineLaunchSpecs, RolloutConfig, RolloutWorker, ServerProcessSpec
 
 
@@ -205,36 +204,6 @@ class LMDeployWorker(RolloutWorker):
     def onload_kvcache(self):
         """Onloads the KV cache by waking up the model."""
         return self._wake_up(tags=["kv_cache"])
-
-    def check_health_generate(self) -> bool:
-        try:
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.config.api_key}",
-            }
-            response = requests.post(
-                f"{self.server_url}/{self.endpoints['v1/chat/completions']}",
-                headers=headers,
-                json={
-                    "model": self.config.model_name,
-                    "messages": [{"role": "user", "content": "ping"}],
-                    "max_tokens": 1,
-                    "temperature": 0,
-                    "stream": False,
-                },
-                timeout=30.0,
-            )
-            if response.status_code == 200:
-                return True
-            response_body = format_response_body_preview(response)
-            self.logger.warning(
-                f"LMDeploy generate health check returned non-200 for server {self.server_url}: "
-                f"status_code={response.status_code}, response_body={response_body}"
-            )
-            return False
-        except requests.RequestException as e:
-            self.logger.error(f"LMDeploy generate health check failed for server {self.server_url}: {e}")
-            return False
 
     def _get_request_payload(self, rollout_state: RolloutState) -> dict:
         tools = rollout_state.tools

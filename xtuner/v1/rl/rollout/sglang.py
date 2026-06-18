@@ -255,22 +255,6 @@ class SGLangWorker(RolloutWorker):
             self.logger.error(f"Health check failed for server {self.server_url}: {e}")
             return False
 
-    def check_health_generate(self) -> bool:
-        try:
-            headers = {
-                "Content-Type": "application/json; charset=utf-8",
-                "Authorization": f"Bearer {self.config.api_key}",
-            }
-            response = requests.get(
-                f"{self.server_url}/{self.endpoints['health_generate']}",
-                headers=headers,
-                timeout=30.0,
-            )
-            return response.status_code == 200
-        except requests.RequestException as e:
-            self.logger.error(f"SGLang generate health check failed for server {self.server_url}: {e}")
-            return False
-
     def flush_cache(self):
         """Flush the cache of the server."""
         # TODO: 支持 tp
