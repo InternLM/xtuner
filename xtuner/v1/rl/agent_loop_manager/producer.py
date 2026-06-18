@@ -40,6 +40,8 @@ class ProduceProgress:
     raw_rewards_count: dict[str, int] = field(default_factory=dict)
     produced_samples: dict[str, int] = field(default_factory=dict)
     produced_tokens: dict[str, int] = field(default_factory=dict)
+    failed_samples: dict[str, int] = field(default_factory=dict)
+    filtered_samples: dict[str, int] = field(default_factory=dict)
     produce_time_s: float = 0.0
 
     @classmethod
@@ -55,6 +57,8 @@ class ProduceProgress:
             raw_rewards_count={task_name: 0 for task_name in task_names},
             produced_samples={task_name: 0 for task_name in task_names},
             produced_tokens={task_name: 0 for task_name in task_names},
+            failed_samples={task_name: 0 for task_name in task_names},
+            filtered_samples={task_name: 0 for task_name in task_names},
         )
 
     def add_raw_rewards(self, task_name: str, rewards_sum: float, rewards_count: int) -> None:
@@ -64,6 +68,15 @@ class ProduceProgress:
     def add_produced(self, task_name: str, samples: int, tokens: int) -> None:
         self.produced_samples[task_name] += samples
         self.produced_tokens[task_name] += tokens
+
+    def add_discarded(self, task_name: str, status: Status, *, samples: int = 1) -> None:
+        if status == Status.FAILED:
+            self.failed_samples[task_name] += samples
+            return
+        if status == Status.FILTERED:
+            self.filtered_samples[task_name] += samples
+            return
+        raise ValueError(f"Discarded status must be FAILED or FILTERED, got {status}.")
 
     def add_produce_time(self, elapsed_s: float) -> None:
         self.produce_time_s += elapsed_s
@@ -79,6 +92,13 @@ class ProduceProgress:
         produce_time_s = self.produce_time_s
         self.produce_time_s = 0.0
         return produce_time_s
+
+    def consume_discarded(self, task_name: str) -> tuple[int, int]:
+        failed = self.failed_samples[task_name]
+        filtered = self.filtered_samples[task_name]
+        self.failed_samples[task_name] = 0
+        self.filtered_samples[task_name] = 0
+        return failed, filtered
 
     def consume_raw_rewards(self, task_name: str) -> tuple[float, int]:
         rewards_sum = self.raw_rewards_sum[task_name]

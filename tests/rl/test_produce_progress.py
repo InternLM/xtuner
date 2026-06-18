@@ -18,6 +18,7 @@ Bad Tests:
 
 import unittest
 
+from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop_manager import DisaggProduceProgress, ProduceProgress
 
 
@@ -123,10 +124,16 @@ class TestProduceProgress(unittest.TestCase):
         progress.add_raw_rewards("task_a", 1.25, 2)
         progress.add_produced("task_a", samples=3, tokens=30)
         progress.add_produce_time(0.5)
+        progress.add_produced("task_a", samples=1, tokens=0)
+        progress.add_discarded("task_a", Status.FAILED)
+        progress.add_produced("task_a", samples=1, tokens=0)
+        progress.add_discarded("task_a", Status.FILTERED)
 
         self.assertEqual(progress.consume_raw_rewards("task_a"), (1.25, 2))
-        self.assertEqual(progress.consume_produced("task_a"), (3, 30))
+        self.assertEqual(progress.consume_produced("task_a"), (5, 30))
         self.assertEqual(progress.consume_produce_time(), 0.5)
+        self.assertEqual(progress.consume_discarded("task_a"), (1, 1))
         self.assertEqual(progress.consume_raw_rewards("task_a"), (0.0, 0))
         self.assertEqual(progress.consume_produced("task_a"), (0, 0))
         self.assertEqual(progress.consume_produce_time(), 0.0)
+        self.assertEqual(progress.consume_discarded("task_a"), (0, 0))

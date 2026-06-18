@@ -1309,8 +1309,8 @@ class BaseRLTrainer:
         all_scalars["async/completed_samples"] = produce_result.leftover_completed
         all_scalars["async/aborted_samples"] = produce_result.leftover_aborted
         all_scalars["async/expired_samples"] = produce_result.leftover_expired
-        all_scalars["async/failed_samples"] = produce_result.leftover_failed
-        all_scalars["async/filtered_samples"] = produce_result.leftover_filtered
+        all_scalars["async/failed_samples"] = produce_result.failed_samples
+        all_scalars["async/filtered_samples"] = produce_result.filtered_samples
 
         if train_info:
             data_info = train_info.get("data_info", {})

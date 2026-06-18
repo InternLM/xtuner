@@ -327,8 +327,8 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
                     "rollout_groups": len(result.rollout_states),
                     "leftover_completed": result.leftover_completed,
                     "leftover_aborted": result.leftover_aborted,
-                    "leftover_failed": result.leftover_failed,
-                    "leftover_filtered": result.leftover_filtered,
+                    "failed_samples": result.failed_samples,
+                    "filtered_samples": result.filtered_samples,
                     "leftover_expired": result.leftover_expired,
                 }
             )
@@ -401,8 +401,8 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
                 sent_groups + previous_leftover_completed_groups,
                 f"step {step_idx}",
             )
-            self.assertEqual(result.leftover_failed, 0, f"step {step_idx}")
-            self.assertEqual(result.leftover_filtered, 0, f"step {step_idx}")
+            self.assertEqual(result.failed_samples, 0, f"step {step_idx}")
+            self.assertEqual(result.filtered_samples, 0, f"step {step_idx}")
             self.assertEqual(result.leftover_expired, 0, f"step {step_idx}")
             previous_leftover_completed_groups = result.leftover_completed
             for group in result.rollout_states:
