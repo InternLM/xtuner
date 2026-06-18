@@ -65,7 +65,8 @@ class UpdateWeighter:
         rollout_config: RolloutConfig,
         worker_server_urls_status: dict[str, bool],
         train_rollout_mode: TrainRolloutMode,
-        api_server_url: str | None = None,
+        worker_session_url_dict: ServiceUrlMap | None = None,
+        worker_session_urls_status: dict[str, bool] | None = None,
     ):
         """Update the rollout information for the training worker."""
 
