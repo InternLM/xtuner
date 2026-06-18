@@ -13,13 +13,13 @@ set -u
 #   OUT_ROOT=/path/to/debug_output \
 #   SMAPS_TOP_N=30 \
 #   RAY_STATE_LIST_LIMIT=100 \
-#   bash .dev_scripts/ray_debug_snapshot.sh
+#   bash .dev_scripts/debug_rl_snapshot.sh
 #
 # Long-running tmux loop:
 #
 #   while true; do
 #     WORK_DIR=/path/to/ray/work_dir OUT_ROOT=/path/to/debug_output \
-#       bash .dev_scripts/ray_debug_snapshot.sh
+#       bash .dev_scripts/debug_rl_snapshot.sh
 #     sleep 180
 #   done
 #
