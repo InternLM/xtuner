@@ -402,12 +402,12 @@ class TestRolloutHealthManager(unittest.TestCase):
         workers_info = {0: worker_info}
         manager = self._build_manager(workers_info, failure_threshold=2)
 
-        manager._check_active_workers_and_mark_failed_groups()
+        manager._check_and_deactivate_failed_worker_groups()
 
         self.assertTrue(worker_info.is_active())
         self.assertEqual(actor.check_health.calls, [()])
 
-        manager._check_active_workers_and_mark_failed_groups()
+        manager._check_and_deactivate_failed_worker_groups()
 
         self.assertFalse(worker_info.is_active())
         self.assertEqual(worker_info.lifecycle_state, WorkerLifecycleState.INACTIVE)
@@ -425,7 +425,7 @@ class TestRolloutHealthManager(unittest.TestCase):
         }
         manager = self._build_manager(workers_info)
 
-        checked_count = manager._check_active_workers_and_mark_failed_groups()
+        checked_count = manager._check_and_deactivate_failed_worker_groups()
 
         self.assertEqual(checked_count, 0)
         self.assertEqual(actor.check_health.calls, [])

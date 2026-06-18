@@ -148,13 +148,18 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
 
         trainer.rollout_controller = SimpleNamespace(
-            check_and_recover_workers=SimpleNamespace(
-                remote=MagicMock(return_value="rollout_ready_for_training")
+            check_and_shutdown_inactive_workers=SimpleNamespace(
+                remote=MagicMock(return_value="rollout_inactive_workers_shutdown")
             ),
             offload=SimpleNamespace(remote=MagicMock(return_value="rollout_offloaded")),
+            restart_inactive_workers=SimpleNamespace(remote=MagicMock(return_value="rollout_restarted")),
+            onload_weights=SimpleNamespace(remote=MagicMock(return_value="weights_loaded")),
+            onload_kvcache=SimpleNamespace(remote=MagicMock(return_value="kvcache_loaded")),
         )
         trainer.train_controller = SimpleNamespace(
             onload=MagicMock(return_value="train_onloaded"),
+            offload=MagicMock(return_value="train_offloaded"),
+            update_weights=MagicMock(return_value="weights_updated"),
             fit=MagicMock(
                 return_value=[
                     {
@@ -229,7 +234,7 @@ class TestRLColocateTrainer(unittest.TestCase):
             )
 
         trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch))
-        trainer.rollout_controller.check_and_recover_workers.remote.side_effect = RuntimeError(
+        trainer.rollout_controller.check_and_shutdown_inactive_workers.remote.side_effect = RuntimeError(
             "inactive rollout workers after recovery"
         )
 
@@ -240,7 +245,7 @@ class TestRLColocateTrainer(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "inactive rollout workers"):
                 trainer.fit()
 
-        trainer.rollout_controller.check_and_recover_workers.remote.assert_called_once_with()
+        trainer.rollout_controller.check_and_shutdown_inactive_workers.remote.assert_called_once_with()
         trainer.rollout_controller.offload.remote.assert_not_called()
         trainer.train_controller.onload.assert_not_called()
         trainer.train_controller.fit.assert_not_called()
