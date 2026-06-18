@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from __future__ import annotations
 
+import copy
 import os
 import types
 from pathlib import Path
@@ -359,10 +360,13 @@ class MoE(BaseModel):
                             **self.config.lm_loss_cfg.model_dump(),
                             detach_mtp_lm_head_weight=mtp_config.detach_mtp_lm_head_weight,
                         )
-                    # Bind mtp_depth to current layer index
-                    mtp_loss_cfg.bind_mtp_depth(mtp_idx + 1)
+
+                    # copy data_batch to insert mtp_depth
+                    _new_data_batch = copy.copy(_data_batch)
+                    for _data in _new_data_batch:
+                        _data["mtp_depth"] = mtp_idx + 1
                     # MTP needs to shift labels multiple times. Since rebuild the `shifted_labels` in data_batch
-                    mtp_loss_ctx_list = self._build_loss_ctx(mtp_loss_cfg, _data_batch, sp_mesh)
+                    mtp_loss_ctx_list = self._build_loss_ctx(mtp_loss_cfg, _new_data_batch, sp_mesh)
                     if mtp_loss_ctx_list is not None:
                         mtp_loss_ctx_list = type(mtp_loss_ctx_list[0]).build_batches(  # type: ignore[assignment]
                             mtp_loss_ctx_list,  # type: ignore[arg-type]
