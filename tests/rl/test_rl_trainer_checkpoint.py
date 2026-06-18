@@ -204,6 +204,7 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             return controller
 
         with (
+            patch("ray.get", side_effect=lambda obj, timeout=None: obj),
             patch("xtuner.v1.rl.utils.ray_accelerator_worker.ray.is_initialized", return_value=True),
             patch(
                 "xtuner.v1.rl.utils.ray_accelerator_worker.ray.available_resources",
@@ -217,6 +218,12 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             patch("xtuner.v1.train.rl_trainer.BaseRLTrainer._release_trace_store", return_value=None),
             patch.object(WorkerConfig, "build", autospec=True, side_effect=build_train_controller),
             patch.object(RolloutConfig, "build", autospec=True, side_effect=build_rollout_controller),
+            patch.object(
+                RolloutConfig,
+                "get_controller_generate_concurrency",
+                autospec=True,
+                side_effect=lambda rollout_cfg, placement_group: rollout_cfg.generate_concurrency_per_instance,
+            ),
         ):
             yield runtime
 
@@ -321,6 +328,7 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             auto_resume=auto_resume,
             checkpoint_interval=1,
             checkpoint_maxkeep=None,
+            checkpoint_no_save_replay_buffer=True,
             hf_interval=-1,
             seed=42,
             exp_tracker="jsonl",
@@ -361,6 +369,7 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             auto_resume=auto_resume,
             checkpoint_interval=1,
             checkpoint_maxkeep=None,
+            checkpoint_no_save_replay_buffer=True,
             hf_interval=-1,
             seed=42,
             exp_tracker="jsonl",

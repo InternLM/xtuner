@@ -52,7 +52,6 @@ class _FakeRolloutState:
         self.extra_fields = {}
         self.response_model_steps = []
 
-
 class _FakeSampler:
     def __init__(self):
         self._next_id = 0
@@ -229,9 +228,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         # 验证共卡训练进入训练前必须先通过 rollout phase-switch barrier；
         # 失败时不能 onload 训练。
         async def _produce_batch(batch_size, train_step, *, model_step):
-            return ProduceBatchResult(
-                rollout_states=[[SimpleNamespace(message_uid=train_step, uid=train_step)]]
-            )
+            return ProduceBatchResult(rollout_states=[[_FakeRolloutState(train_step)]])
 
         trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch))
         trainer.rollout_controller.check_and_shutdown_inactive_workers.remote.side_effect = RuntimeError(
@@ -257,9 +254,7 @@ class TestRLColocateTrainer(unittest.TestCase):
 
         async def _produce_batch(batch_size, train_step, *, model_step):
             produce_calls.append((batch_size, train_step, model_step))
-            return ProduceBatchResult(
-                rollout_states=[[SimpleNamespace(group_id=train_step, rollout_id=train_step)]]
-            )
+            return ProduceBatchResult(rollout_states=[[_FakeRolloutState(train_step)]])
 
         trainer = self._make_trainer(
             SimpleNamespace(produce_batch=_produce_batch),
