@@ -18,7 +18,9 @@ import fnmatch
 import io
 import json
 import re
+import shlex
 import tarfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -448,12 +450,17 @@ class RunAgentInstallDeps(Hook):
         if chosen is None:
             raise RuntimeError("PickAgent must run before RunAgentInstallDeps")
         script = f"{self.workspace}/agent/{chosen.name}/install-deps.sh"
-        await exec_in(
-            client,
-            f'[ -f "{script}" ] && bash "{script}" || true',
-            timeout_sec=self.timeout,
-            raise_on_error=True,
-        )
+        script_q = shlex.quote(script)
+        t0 = time.monotonic()
+        try:
+            await exec_in(
+                client,
+                f"if [ -f {script_q} ]; then bash {script_q}; fi",
+                timeout_sec=self.timeout,
+                raise_on_error=True,
+            )
+        finally:
+            record.metadata["install_agent_time_s"] = time.monotonic() - t0
 
 
 # ─────────────────────────────────────────────────────────────────
