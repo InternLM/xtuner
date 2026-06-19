@@ -873,7 +873,7 @@ class SandboxPool:
         self.validate_name(name)
         spec = self._specs[name]
         try:
-            client, env_id = await self._acquire_ready(spec)
+            client, env_id = await self._acquire_ready(spec, record=record)
         except Exception as exc:
             if record is not None:
                 record.status = StageStatus.FAILED
@@ -931,9 +931,12 @@ class SandboxPool:
                 return str(val)
         return None
 
-    async def _acquire_ready(self, spec: SandboxSpec) -> tuple[Any, str]:
+    async def _acquire_ready(self, spec: SandboxSpec, *, record: StageRecord | None = None) -> tuple[Any, str]:
         last_err: Exception | None = None
+        t_ready: float | None = None
         for attempt in range(1, self._max_attempts + 1):
+            if record is not None:
+                record.metadata["sandbox_create_attempts"] = attempt
             try:
                 create_kwargs: dict[str, Any] = {}
                 if spec.key:
@@ -943,7 +946,16 @@ class SandboxPool:
                 if spec.resources:
                     create_kwargs["resources"] = spec.resources
                 if self._create_limiter is not None:
+                    t_limit = time.monotonic()
                     await self._create_limiter.acquire()
+                    if record is not None:
+                        record.metadata["sandbox_acquire_rate_limit_wait_s"] = (
+                            record.metadata.get("sandbox_acquire_rate_limit_wait_s", 0.0)
+                            + time.monotonic()
+                            - t_limit
+                        )
+                if t_ready is None:
+                    t_ready = time.monotonic()
                 client, env_id = await self._provider.create(
                     image_tag=spec.image,
                     ttl_seconds=spec.ttl_seconds,
@@ -954,7 +966,10 @@ class SandboxPool:
                 await asyncio.sleep(min(2**attempt, 8))
                 continue
 
-            if await self._wait_healthy(client):
+            healthy = await self._wait_healthy(client)
+            if healthy:
+                if record is not None and t_ready is not None:
+                    record.metadata["sandbox_create_to_ready_time_s"] = time.monotonic() - t_ready
                 return client, env_id
 
             try:
@@ -1043,7 +1058,11 @@ async def exec_in(
     result = await client.execute(command, cwd, timeout_sec, detach)
     rc = _result_code(result)
     if raise_on_error and rc != 0:
-        raise RuntimeError(f"command failed (return_code={rc}): {command}\nstderr: {result.get('stderr', '')}")
+        raise RuntimeError(
+            f"command failed (return_code={rc}): {command}\n"
+            f"stdout: {result.get('stdout', '')}\n"
+            f"stderr: {result.get('stderr', '')}"
+        )
     return result
 
 

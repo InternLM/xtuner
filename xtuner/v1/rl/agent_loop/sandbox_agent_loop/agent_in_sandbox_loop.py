@@ -128,6 +128,12 @@ def _to_json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
 
+def _selected_agent(item: AgentRolloutItem) -> dict[str, Any] | None:
+    if item.infer.agent is None:
+        return None
+    return item.infer.agent.model_dump(mode="json")
+
+
 def _count_tool_turns(messages: list[dict[str, Any]]) -> int:
     return sum(
         1
@@ -249,7 +255,11 @@ class AgentInSandboxLoop(AgentLoop):
         )
         rollout_state.reward = _extract_reward_payload(item)
         rollout_state.extra_fields["agent_status"] = item.status.value
-        rollout_state.extra_fields["agent_artifacts"] = item.artifacts
+        selected_agent = _selected_agent(item)
+        if selected_agent is not None:
+            rollout_state.extra_fields["agent_name"] = selected_agent.get("name")
+            rollout_state.extra_fields["agent_selected"] = _to_json_safe(selected_agent)
+        rollout_state.extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
         rollout_state.extra_fields["agent_judgers"] = {
             name: record.model_dump(mode="json") for name, record in item.judgers.items()
         }
@@ -305,7 +315,11 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.response_mask = None
         rollout_state.response_model_steps = None
         rollout_state.extra_fields["agent_status"] = item.status.value
-        rollout_state.extra_fields["agent_artifacts"] = item.artifacts
+        selected_agent = _selected_agent(item)
+        if selected_agent is not None:
+            rollout_state.extra_fields["agent_name"] = selected_agent.get("name")
+            rollout_state.extra_fields["agent_selected"] = _to_json_safe(selected_agent)
+        rollout_state.extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
         rollout_state.extra_fields["agent_judgers"] = {
             name: record.model_dump(mode="json") for name, record in item.judgers.items()
         }
@@ -321,7 +335,6 @@ class AgentInSandboxLoop(AgentLoop):
 
         messages, tools = _load_eval_trace_segment(item.artifacts)
         if messages:
-            rollout_state.extra_fields["agent_trajectory"] = _to_json_safe({"messages": messages, "tools": tools})
             rollout_state.extra_fields["agent_messages"] = messages
             rollout_state.extra_fields["agent_tools"] = tools
             rollout_state.extra_fields["agent_tool_turns"] = _count_tool_turns(messages)
