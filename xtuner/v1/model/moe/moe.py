@@ -691,69 +691,6 @@ class MoE(BaseModel):
 
         return MoEModelOutputs(**output, logits=logits)
 
-    def _mtp_forward(
-        self,
-        mtp_config: MTPConfig,
-        output,
-        layer_hidden_states,
-        position_embeddings,
-        balancing_ctx,
-        z_ctx,
-        mtp_seq_ctx,
-        mtp_loss_ctx_dict,
-        keep_router: bool,
-    ):
-        # MTP uses its own mask; main mask's non-pad indices do not apply.
-        name = mtp_config.name
-        mtp_nonpad_indices = torch.nonzero(mtp_seq_ctx.mask, as_tuple=True)[1]
-        mtp_non_pad_token = mtp_nonpad_indices.numel()
-        mtp_num_tokens_global, mtp_z_world_size = self._z_loss_dist_token_count(
-            z_ctx, mtp_non_pad_token, mtp_seq_ctx.mask.device
-        )
-
-        # Forward through MTP block
-        mtp_outputs = self.mtp_block[name](
-            layer_hidden_states,
-            embed_tokens_fn=self.embed_tokens,
-            position_embeddings=position_embeddings,
-            seq_ctx=mtp_seq_ctx,
-        )
-
-        # Compute MTP losses for each depth
-        mtp_losses = torch.tensor(0.0, device=DEVICE)
-        mtp_loss_ctx_list = mtp_loss_ctx_dict[name]
-        for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
-            mtp_hidden_states, mtp_router_results, mtp_router_weights = mtp_hidden
-
-            if keep_router:
-                output["router_logits"][f"{name}_mtp_layer{idx}"] = mtp_router_results
-                output["router_weights"][f"{name}_mtp_layer{idx}"] = mtp_router_weights
-            # Inject this MTP layer's z-loss before lm_head so backward through mtp_loss
-            # traverses the AuxLossScaler node and releases this layer's logsumexp activations.
-            mtp_hidden_states = self.aux_loss.accumulate(
-                selected_router_weights=mtp_router_weights.index_select(0, mtp_nonpad_indices)
-                .contiguous()
-                .float(),
-                selected_router_logits=mtp_router_results.index_select(0, mtp_nonpad_indices).contiguous().float(),
-                hidden_states=mtp_hidden_states,
-                balancing_ctx=balancing_ctx,
-                z_ctx=z_ctx,
-                num_tokens_local=mtp_non_pad_token,
-                num_tokens_global=mtp_num_tokens_global,
-                world_size=mtp_z_world_size,
-            )
-            mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
-            mtp_losses += mtp_loss
-
-        # Average MTP losses across depths and scale
-        mtp_losses = mtp_losses / len(mtp_loss_ctx_list)
-        scaled_mtp_loss = mtp_losses * mtp_config.loss_scaling_factor  # type: ignore
-
-        # Add to total loss
-        output["mtp_loss"][name] = scaled_mtp_loss
-
-        return scaled_mtp_loss
-
     def _forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
@@ -870,17 +807,53 @@ class MoE(BaseModel):
             )
 
             for mtp_config in self.config.mtp_config:
-                self._mtp_forward(
-                    mtp_config=mtp_config,
-                    output=output,
-                    layer_hidden_states=layer_hidden_states,
-                    position_embeddings=position_embeddings,
-                    balancing_ctx=balancing_ctx,
-                    z_ctx=z_ctx,
-                    mtp_seq_ctx=mtp_seq_ctx,
-                    mtp_loss_ctx_dict=mtp_loss_ctx_dict,
-                    keep_router=keep_router,
+                name = mtp_config.name
+                mtp_nonpad_indices = torch.nonzero(mtp_seq_ctx.mask, as_tuple=True)[1]
+                mtp_non_pad_token = mtp_nonpad_indices.numel()
+                mtp_num_tokens_global, mtp_z_world_size = self._z_loss_dist_token_count(
+                    z_ctx, mtp_non_pad_token, mtp_seq_ctx.mask.device
                 )
+
+                # Forward through MTP block
+                mtp_outputs = self.mtp_block[name](
+                    layer_hidden_states,
+                    embed_tokens_fn=self.embed_tokens,
+                    position_embeddings=position_embeddings,
+                    seq_ctx=mtp_seq_ctx,
+                )
+
+                # Compute MTP losses for each depth
+                mtp_losses = torch.tensor(0.0, device=DEVICE)
+                mtp_loss_ctx_list = mtp_loss_ctx_dict[name]
+                for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
+                    mtp_hidden_states, mtp_router_results, mtp_router_weights = mtp_hidden
+
+                    if keep_router:
+                        output["router_logits"][f"{name}_mtp_layer{idx}"] = mtp_router_results
+                        output["router_weights"][f"{name}_mtp_layer{idx}"] = mtp_router_weights
+                    # Inject this MTP layer's z-loss before lm_head so backward through mtp_loss
+                    # traverses the AuxLossScaler node and releases this layer's logsumexp activations.
+                    mtp_hidden_states = self.aux_loss.accumulate(
+                        selected_router_weights=mtp_router_weights.index_select(0, mtp_nonpad_indices)
+                        .contiguous()
+                        .float(),
+                        selected_router_logits=mtp_router_results.index_select(0, mtp_nonpad_indices).contiguous().float(),
+                        hidden_states=mtp_hidden_states,
+                        balancing_ctx=balancing_ctx,
+                        z_ctx=z_ctx,
+                        num_tokens_local=mtp_non_pad_token,
+                        num_tokens_global=mtp_num_tokens_global,
+                        world_size=mtp_z_world_size,
+                    )
+                    mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
+                    mtp_losses += mtp_loss
+
+                # Average MTP losses across depths and scale
+                mtp_losses = mtp_losses / len(mtp_loss_ctx_list)
+                scaled_mtp_loss = mtp_losses * mtp_config.loss_scaling_factor  # type: ignore
+
+                # Add to total loss
+                output["mtp_loss"][name] = scaled_mtp_loss
 
         # add mtp_loss to loss
         for mtp_loss_name, mtp_loss in output["mtp_loss"].items():
