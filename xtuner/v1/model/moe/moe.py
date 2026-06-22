@@ -1162,13 +1162,13 @@ class MoE(BaseModel):
             global_mtp_idx = 0  # Track global MTP layer index across all mtp_configs
             for mtp_name in self.mtp_block.keys():
                 mtp_block = self.mtp_block[mtp_name]
-                mtp_config = next((cfg for cfg in self.config.mtp_config if cfg.name == mtp_name), None)  # type: ignore
+                mtp_config = mtp_block.mtp_config
                 for local_mtp_idx, mtp_layer in enumerate(mtp_block.layers):
                     if self._should_recompute(None, mtp_idx=global_mtp_idx) or (
                         mtp_config is not None and mtp_config.share_weights
                     ):  # share mtp head must recompute
                         mtp_layer = checkpoint_wrapper(mtp_layer, checkpoint_impl=CheckpointImpl.REENTRANT)
-                    mtp_block.layers[local_mtp_idx] = mtp_layer
+                        mtp_block.layers[local_mtp_idx] = mtp_layer
 
                     reshard_after_forward = global_mtp_idx != total_mtp_layers - 1
                     self._fully_shard(
