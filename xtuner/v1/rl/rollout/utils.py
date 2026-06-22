@@ -1,9 +1,6 @@
 import asyncio
-import threading
 import time
 from collections import OrderedDict
-from enum import Enum
-from itertools import cycle
 from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
@@ -16,7 +13,7 @@ from xtuner.v1.utils import get_logger
 
 
 if TYPE_CHECKING:
-    from .controller import WorkerInfo
+    from .worker_registry import RolloutWorkerRegistry
 
 logger = get_logger()
 
@@ -24,7 +21,6 @@ __all__ = [
     "format_response_body_preview",
     "PartialRolloutHandler",
     "SessionRouter",
-    "WorkerLifecycleState",
 ]
 
 
@@ -38,32 +34,21 @@ def format_response_body_preview(response: Any, limit: int = 512) -> str:
     return f"{body[:limit]!r}...(truncated, total_len={len(body)})"
 
 
-class WorkerLifecycleState(str, Enum):
-    # Can serve rollout generation and control requests.
-    ACTIVE = "active"
-    # Not serving rollout requests; the rollout server may still hold resources.
-    INACTIVE = "inactive"
-    # Temporarily owned by recovery shutdown/init/check_health.
-    RECOVERING = "recovering"
-
-
 class SessionRouter:
     def __init__(
         self,
-        worker_infos: dict[int, "WorkerInfo"],
-        worker_infos_lock: Optional[threading.RLock] = None,
+        registry: "RolloutWorkerRegistry",
         max_sessions: int = 10000,
         max_idle_seconds: Optional[float] = 3600.0,
     ):
-        self._worker_infos = worker_infos
-        self._worker_infos_lock = worker_infos_lock
+        self._registry = registry
         self._max_sessions = max_sessions
         self._max_idle = max_idle_seconds
 
         # OrderedDict: key=session_id -> value=(worker_rank, last_used_ts)
         self._map: OrderedDict[int, tuple[int, float]] = OrderedDict()
 
-        self._worker_cycler = cycle(worker_infos.keys())
+        self._round_robin_cursor = 0
         self._lock = asyncio.Lock()
         self.logger = get_logger()
 
@@ -89,19 +74,12 @@ class SessionRouter:
             self._map.popitem(last=False)
 
     def _choose_next_active_worker(self) -> tuple[int, Any]:
-        n = len(self._worker_infos)
-        for _ in range(n):
-            rank = next(self._worker_cycler)
-            if self._worker_infos_lock is None:
-                info = self._worker_infos[rank]
-                if info and info.is_active() and info.is_request_entrypoint:
-                    return rank, info.actor
-            else:
-                with self._worker_infos_lock:
-                    info = self._worker_infos[rank]
-                    if info and info.is_active() and info.is_request_entrypoint:
-                        return rank, info.actor
-        return -1, None
+        candidates = self._registry.active_entrypoints()
+        if not candidates:
+            return -1, None
+        worker = candidates[self._round_robin_cursor % len(candidates)]
+        self._round_robin_cursor += 1
+        return worker.rank, worker.actor
 
     async def get_worker(self, session_id: int) -> Optional[Any]:
         async with self._lock:
@@ -109,12 +87,8 @@ class SessionRouter:
 
             if session_id in self._map:
                 worker_rank, _ = self._map.pop(session_id)
-                if self._worker_infos_lock is None:
-                    info = self._worker_infos.get(worker_rank)
-                else:
-                    with self._worker_infos_lock:
-                        info = self._worker_infos.get(worker_rank)
-                if info and info.is_active() and info.is_request_entrypoint:
+                info = self._registry.active_entrypoint_by_rank(worker_rank)
+                if info is not None:
                     self._map[session_id] = (worker_rank, self._now())
                     return info.actor
 

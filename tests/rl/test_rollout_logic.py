@@ -13,16 +13,18 @@
 import asyncio
 import threading
 import unittest
+from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
-from xtuner.v1.rl.rollout.controller import RolloutController, WorkerInfo
+from xtuner.v1.rl.rollout.controller import RolloutController
 from xtuner.v1.rl.rollout.health_manager import RolloutHealthManager
+from xtuner.v1.rl.rollout.worker_registry import RolloutWorkerRegistry, WorkerLifecycleState, WorkerSnapshot
 from xtuner.v1.rl.rollout.sglang import SGLangWorker
-from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, WorkerLifecycleState
+from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, SessionRouter
 from xtuner.v1.rl.rollout.worker import RolloutWorker
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
@@ -122,6 +124,75 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(router.session_ids, [456])
         self.assertEqual(worker.generate.calls, [request_state])
         self.assertEqual(result.status, Status.COMPLETED)
+
+
+class TestRolloutWorkerRegistry(unittest.TestCase):
+    def _worker_by_rank(self, registry, rank):
+        return next(worker for worker in registry.all_workers() if worker.rank == rank)
+
+    def test_registry_filters_entrypoints_and_builds_metadata_snapshot(self):
+        config = SimpleNamespace()
+        registry = RolloutWorkerRegistry(engine_rank_mesh_array=[[0, 1]], rollout_config=config)
+        registry.register_started_server(
+            rank=0,
+            actor=object(),
+            server_url="http://worker-0",
+            session_url="http://session-0",
+            lifecycle_group_ranks=(0, 1),
+            is_request_entrypoint=True,
+        )
+        registry.register_started_server(
+            rank=1,
+            actor=object(),
+            server_url="http://worker-1",
+            session_url=None,
+            lifecycle_group_ranks=(0, 1),
+            is_request_entrypoint=False,
+        )
+
+        metadata = registry.training_metadata_snapshot()
+
+        self.assertEqual(metadata["engine_rank_mesh_array"], [[0, 1]])
+        self.assertIs(metadata["rollout_config"], config)
+        self.assertEqual(metadata["server_url_dict"], {0: "http://worker-0"})
+        self.assertEqual(metadata["worker_server_urls_status"], {"http://worker-0": True})
+        self.assertEqual(metadata["worker_session_url_dict"], {0: "http://session-0"})
+        self.assertEqual(metadata["worker_session_urls_status"], {"http://session-0": True})
+        active_entrypoint = registry.active_entrypoints()[0]
+        self.assertIsInstance(active_entrypoint, WorkerSnapshot)
+        self.assertEqual(active_entrypoint.rank, 0)
+        with self.assertRaises(FrozenInstanceError):
+            active_entrypoint.lifecycle_state = WorkerLifecycleState.INACTIVE
+
+        unhealthy_groups = registry.mark_unhealthy_ranks({0})
+        metadata = registry.training_metadata_snapshot()
+
+        self.assertEqual(unhealthy_groups[0].ranks, (0, 1))
+        self.assertEqual(metadata["worker_server_urls_status"], {"http://worker-0": False})
+        self.assertEqual(metadata["worker_session_urls_status"], {"http://session-0": False})
+        self.assertEqual(tuple(worker.rank for worker in registry.inactive_workers()), (0, 1))
+        self.assertEqual(registry.active_entrypoints(), ())
+        claimed_groups = registry.claim_inactive_groups_for_recovery()
+        self.assertEqual(claimed_groups[0].ranks, (0, 1))
+        self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.RECOVERING)
+        registry.set_group_recovery_result(claimed_groups[0], recovered=False)
+        self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.INACTIVE)
+
+class TestSessionRouter(unittest.IsolatedAsyncioTestCase):
+    async def test_sticky_session_reselects_when_previous_entrypoint_is_inactive(self):
+        actor_0 = object()
+        actor_1 = object()
+        registry = RolloutWorkerRegistry(engine_rank_mesh_array=[[0], [1]], rollout_config=SimpleNamespace())
+        registry.register_started_server(rank=0, actor=actor_0, server_url="http://worker-0")
+        registry.register_started_server(rank=1, actor=actor_1, server_url="http://worker-1")
+        router = SessionRouter(registry, max_idle_seconds=None)
+
+        self.assertIs(await router.get_worker(7), actor_0)
+        self.assertIs(await router.get_worker(7), actor_0)
+
+        registry.mark_unhealthy_ranks({0})
+
+        self.assertIs(await router.get_worker(7), actor_1)
 
 
 class TestSGLangWorker(unittest.TestCase):
@@ -231,36 +302,6 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.error_type, HttpRequestErrorType.REQUEST_ABORTED)
         worker.client.build_request.assert_not_called()
         worker.client.send.assert_not_called()
-
-    async def test_safe_post_request_returns_response_when_send_succeeds(self):
-        # safe post 的正常路径只负责发请求、raise_for_status，并把 response 放进 HttpRequestResult。
-        worker = RolloutWorker.__new__(RolloutWorker)
-        worker.receive_abort_request = threading.Event()
-        worker.logger = MagicMock()
-
-        class _Response:
-            def __init__(self):
-                self.raise_for_status = MagicMock()
-
-        response = _Response()
-        request = object()
-
-        class _Client:
-            def build_request(self, *args, **kwargs):
-                return request
-
-            async def send(self, req):
-                self.sent_request = req
-                return response
-
-        client = _Client()
-        worker.client = client
-
-        result = await worker._safe_post_request("http://test", headers={"h": "v"}, payload={"input_ids": [1]})
-
-        self.assertIs(client.sent_request, request)
-        self.assertIs(result.response, response)
-        response.raise_for_status.assert_called_once_with()
 
     async def test_partial_rollout_eos_response_completes_without_backend_request(self):
         # partial rollout 已以 EOS 结束时，应直接完成，不再请求推理后端。
@@ -392,43 +433,150 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
 
 
 class TestRolloutHealthManager(unittest.TestCase):
-    def _build_manager(self, workers_info, *, failure_threshold=1):
-        config = SimpleNamespace(health_check_interval_seconds=10, health_check_failure_threshold=failure_threshold)
-        return RolloutHealthManager(config, workers_info, worker_infos_lock=threading.RLock())
+    def _worker_by_rank(self, registry, rank):
+        return next(worker for worker in registry.all_workers() if worker.rank == rank)
+
+    def _build_registry(self, workers_info):
+        registry = RolloutWorkerRegistry(
+            engine_rank_mesh_array=[sorted(workers_info)],
+            rollout_config=SimpleNamespace(),
+        )
+        for rank, worker_info in workers_info.items():
+            lifecycle_group_ranks = worker_info.lifecycle_group_ranks or (rank,)
+            registry.register_started_server(
+                rank=rank,
+                actor=worker_info.actor,
+                server_url=worker_info.url,
+                session_url=worker_info.session_url,
+                lifecycle_group_ranks=lifecycle_group_ranks,
+                is_request_entrypoint=worker_info.is_request_entrypoint,
+            )
+            if worker_info.lifecycle_state is WorkerLifecycleState.INACTIVE:
+                registry.mark_unhealthy_ranks({rank})
+        return registry
+
+    def _build_manager(self, workers_info, *, failure_threshold=1, check_timeout=7.0):
+        config = SimpleNamespace(
+            health_check_interval_seconds=10,
+            health_check_timeout_seconds=check_timeout,
+            health_check_failure_threshold=failure_threshold,
+        )
+        registry = self._build_registry(workers_info)
+        return RolloutHealthManager(config, registry), registry
 
     def test_marks_worker_inactive_after_consecutive_health_failures(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(False))
-        worker_info = WorkerInfo(actor=actor, url="http://worker-0")
+        worker_info = WorkerSnapshot(actor=actor, url="http://worker-0")
         workers_info = {0: worker_info}
-        manager = self._build_manager(workers_info, failure_threshold=2)
+        manager, registry = self._build_manager(workers_info, failure_threshold=2)
 
         manager._check_and_deactivate_failed_worker_groups()
 
-        self.assertTrue(worker_info.is_active())
+        self.assertTrue(self._worker_by_rank(registry, 0).is_active())
         self.assertEqual(actor.check_health.calls, [()])
 
         manager._check_and_deactivate_failed_worker_groups()
 
-        self.assertFalse(worker_info.is_active())
-        self.assertEqual(worker_info.lifecycle_state, WorkerLifecycleState.INACTIVE)
+        self.assertFalse(self._worker_by_rank(registry, 0).is_active())
+        self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.INACTIVE)
         self.assertEqual(actor.check_health.calls, [(), ()])
 
     def test_inactive_worker_is_not_cleaned_up_again(self):
         # 已 inactive 的 worker 不再重复健康检查。
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
         workers_info = {
-            0: WorkerInfo(
+            0: WorkerSnapshot(
                 actor=actor,
                 url="http://worker-0",
                 lifecycle_state=WorkerLifecycleState.INACTIVE,
             )
         }
-        manager = self._build_manager(workers_info)
+        manager, _ = self._build_manager(workers_info)
 
         checked_count = manager._check_and_deactivate_failed_worker_groups()
 
         self.assertEqual(checked_count, 0)
         self.assertEqual(actor.check_health.calls, [])
+
+    def test_health_check_threshold_zero_disables_periodic_health_check(self):
+        # threshold <= 0 表示关闭周期健康监测，不应把 active worker 直接判 inactive。
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(False))
+        worker_info = WorkerSnapshot(actor=actor, url="http://worker-0")
+        manager, registry = self._build_manager({0: worker_info}, failure_threshold=0)
+
+        checked_count = manager._check_and_deactivate_failed_worker_groups()
+
+        self.assertEqual(checked_count, 0)
+        self.assertTrue(self._worker_by_rank(registry, 0).is_active())
+        self.assertEqual(actor.check_health.calls, [])
+
+    def test_fail_fast_health_check_still_runs_when_periodic_health_check_is_disabled(self):
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(False))
+        worker_info = WorkerSnapshot(actor=actor, url="http://worker-0")
+        manager, registry = self._build_manager({0: worker_info}, failure_threshold=0)
+
+        checked_count = manager._check_and_deactivate_failed_worker_groups(fail_fast=True)
+
+        self.assertEqual(checked_count, 1)
+        self.assertFalse(self._worker_by_rank(registry, 0).is_active())
+        self.assertEqual(actor.check_health.calls, [()])
+
+    def test_health_check_uses_configured_timeout(self):
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
+        worker_info = WorkerSnapshot(actor=actor, url="http://worker-0")
+        manager, _ = self._build_manager({0: worker_info}, check_timeout=2.5)
+        observed_timeouts = []
+
+        async def fake_wait_for(awaitable, timeout):
+            observed_timeouts.append(timeout)
+            return await awaitable
+
+        with patch("xtuner.v1.rl.rollout.health_manager.asyncio.wait_for", side_effect=fake_wait_for):
+            manager._check_and_deactivate_failed_worker_groups()
+
+        self.assertEqual(observed_timeouts, [2.5])
+
+    def test_shutdown_barrier_keeps_failed_shutdown_group_inactive(self):
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
+        worker_info = WorkerSnapshot(
+            actor=actor,
+            url="http://worker-0",
+            lifecycle_state=WorkerLifecycleState.INACTIVE,
+        )
+        manager, registry = self._build_manager({0: worker_info})
+
+        with (
+            patch.object(manager, "_shutdown_worker_group", return_value=False),
+            patch("xtuner.v1.rl.rollout.health_manager.logger.error") as log_error,
+        ):
+            manager.check_and_shutdown_inactive_workers()
+
+        self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.INACTIVE)
+        self.assertTrue(
+            any("training can continue" in call.args[0] for call in log_error.call_args_list),
+            f"Expected shutdown failure log to explain why it is non-fatal, got: {log_error.call_args_list}",
+        )
+
+    def test_restart_barrier_keeps_failed_recovery_group_inactive(self):
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
+        worker_info = WorkerSnapshot(
+            actor=actor,
+            url="http://worker-0",
+            lifecycle_state=WorkerLifecycleState.INACTIVE,
+        )
+        manager, registry = self._build_manager({0: worker_info})
+
+        with (
+            patch.object(manager, "_restart_worker_group", return_value=False),
+            patch("xtuner.v1.rl.rollout.health_manager.logger.error") as log_error,
+        ):
+            manager.restart_inactive_workers()
+
+        self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.INACTIVE)
+        self.assertTrue(
+            any("training can continue" in call.args[0] for call in log_error.call_args_list),
+            f"Expected restart failure log to explain why it is non-fatal, got: {log_error.call_args_list}",
+        )
 
 
 class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):

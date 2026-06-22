@@ -1,7 +1,5 @@
 import asyncio
-import threading
-from dataclasses import dataclass
-from typing import Dict, List, TypeAlias, TypedDict
+from typing import TypeAlias
 from uuid import uuid4
 
 import ray
@@ -17,87 +15,13 @@ from .health_manager import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthManager
 from .parser.factory import build_reasoning_parser, build_tool_call_parser
 from .parser.reasoning_parser import ReasoningParser
 from .parser.tool_parser import ToolCallParser
-from .utils import SessionRouter, WorkerLifecycleState
+from .utils import SessionRouter
 from .worker import (
     ROLLOUT_CONCURRENCY_GROUP_GENERATE,
     RolloutConfig,
-    RolloutWorker,
     get_rollout_worker_base_cls,
 )
-
-
-@dataclass(init=False)
-class WorkerInfo:
-    """Controller-owned state record for one rollout server process."""
-
-    actor: RolloutWorker
-    url: str
-    session_url: str | None = None
-    lifecycle_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE
-    lifecycle_group_ranks: tuple[int, ...] = ()
-    # True only for server processes that receive rollout requests. Non-entrypoint
-    # server processes are still tracked for health, recovery, and shutdown.
-    is_request_entrypoint: bool = True
-
-    def __init__(
-        self,
-        actor: RolloutWorker,
-        url: str,
-        session_url: str | None = None,
-        lifecycle_state: WorkerLifecycleState | str | None = None,
-        lifecycle_group_ranks: tuple[int, ...] = (),
-        is_request_entrypoint: bool = True,
-    ):
-        self.actor = actor
-        self.url = url
-        self.session_url = session_url
-        self.lifecycle_group_ranks = lifecycle_group_ranks
-        self.is_request_entrypoint = is_request_entrypoint
-        if lifecycle_state is not None:
-            self.lifecycle_state = WorkerLifecycleState(lifecycle_state)
-        else:
-            self.lifecycle_state = WorkerLifecycleState.ACTIVE
-
-    def is_active(self) -> bool:
-        return self.lifecycle_state is WorkerLifecycleState.ACTIVE
-
-
-class RolloutWorkerMetadata(TypedDict):
-    """Metadata for rollout workers and their configuration.
-
-    This data structure encapsulates all necessary information about the rollout worker infrastructure, including
-    engine mesh, server addresses, and worker status. Used for communication between training processes and rollout
-    workers.
-    """
-
-    # TODO(@duanyanhui): combine server_url_dict, worker_server_urls_status, worker_session_url_dict, and worker_session_urls_status into a single dict keyed by rank or URL to avoid potential inconsistencies.
-    # 推理引擎的拓扑结构，每个子列表代表一个推理引擎包含的所有 worker ranks
-    # 例如：[[0, 1, 2, 3], [4, 5, 6, 7]] 表示有 2 个推理引擎，每个引擎包含 4 个 workers
-    # 用于确定分布式推理的并行组划分
-    engine_rank_mesh_array: List[List[int]]
-
-    # worker rank 到服务器 URL 的映射字典，用于训练进程与 rollout workers 通信
-    # 键：worker 的 rank ID
-    # 值：对应的 request entrypoint 服务器地址
-    server_url_dict: Dict[int, str]
-
-    # Rollout 配置对象，包含推理引擎的所有配置参数
-    # 包括：并行策略（TP/EP）、超时设置、后端类型（LMDeploy/vLLM/SGLang）等
-    rollout_config: RolloutConfig
-
-    # 每个 worker 服务器 URL 的当前活跃状态
-    # 键：服务器 URL 字符串
-    # 值：布尔值，True 表示该 worker 处于活跃状态，False 表示已失效或停用
-    worker_server_urls_status: Dict[str, bool]
-
-    # worker rank -> SessionServer proxy URL. These are the externally
-    # registered URLs for routedapiproxy; server_url_dict keeps the original
-    # worker URLs for trainer-side weight update / backend control paths.
-    worker_session_url_dict: Dict[int, str]
-
-    # SessionServer URL -> active status. This mirrors worker_server_urls_status
-    # but is keyed by the proxy URL that external traffic uses.
-    worker_session_urls_status: Dict[str, bool]
+from .worker_registry import RolloutWorkerMetadata, RolloutWorkerRegistry
 
 
 # Keep this as a Ray actor because Ray AgentLoop actors need a shared, cross-process handle to the same controller
@@ -124,22 +48,18 @@ class RolloutController:
         self.config = infer_config
         self.num_gpus_per_engine = self.config.num_gpus_per_engine
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
-        self.engine_rank_mesh_array: List[List[int]]
-        self.server_process_rank2info: dict[int, WorkerInfo]
-        self.engine_rank_mesh_array, self.server_process_rank2info = self._init_workers(placement_group)
+        self.registry = self._init_workers(placement_group)
         # Cache the exact controller concurrency chosen at build time so
         # downstream components observe the same limit as the Ray actor.
         self._generate_concurrency = self.config.get_controller_generate_concurrency(placement_group)
-        self.worker_info_lock = threading.RLock()
         # The timeout for the environment to wait for the rollout controller's response.
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
-        self.router = SessionRouter(self.server_process_rank2info, worker_infos_lock=self.worker_info_lock)
+        self.router = SessionRouter(self.registry)
         self.health_manager = RolloutHealthManager(
             config=self.config,
-            workers_info=self.server_process_rank2info,
-            worker_infos_lock=self.worker_info_lock,
+            registry=self.registry,
         )
         self.health_manager.start()
         self._tool_call_parser, self._reasoning_parser = self._build_output_parsers()
@@ -151,34 +71,9 @@ class RolloutController:
             dict: A dictionary containing the engine mesh list, server URL
                 dictionary, and the rollout configuration.
         """
-        worker_session_url_dict: dict[int, str] = {}
-        worker_session_urls_status: dict[str, bool] = {}
-        with self.worker_info_lock:
-            request_entrypoint_rank2info = {
-                rank: info for rank, info in self.server_process_rank2info.items() if info.is_request_entrypoint
-            }
-            worker_server_urls_map = {rank: info.url for rank, info in request_entrypoint_rank2info.items()}
-            worker_server_urls_status = {info.url: info.is_active() for info in request_entrypoint_rank2info.values()}
-            active_session_urls_by_rank = {
-                rank: info.session_url for rank, info in request_entrypoint_rank2info.items()
-            }
-            for rank, info in request_entrypoint_rank2info.items():
-                if info.session_url is None:
-                    continue
-                worker_session_url_dict[rank] = info.session_url
-                worker_session_urls_status[info.session_url] = info.is_active()
-            self.logger.info(f"Rollout worker server URLs: {worker_server_urls_map}")
-            self.logger.info(f"Rollout worker session server URLs: {active_session_urls_by_rank}")
-
-        # TODO(@duanyanhui): provide an unified structure that combines server URLs and session URLs
-        rollout_metadata: RolloutWorkerMetadata = {
-            "engine_rank_mesh_array": self.engine_rank_mesh_array,
-            "server_url_dict": worker_server_urls_map,
-            "rollout_config": self.config,
-            "worker_server_urls_status": worker_server_urls_status,
-            "worker_session_url_dict": worker_session_url_dict,
-            "worker_session_urls_status": worker_session_urls_status,
-        }
+        rollout_metadata = self.registry.training_metadata_snapshot()
+        self.logger.info(f"Rollout worker server URLs: {rollout_metadata['server_url_dict']}")
+        self.logger.info(f"Rollout worker session server URLs: {rollout_metadata['worker_session_url_dict']}")
         return rollout_metadata
 
     def _build_output_parsers(self) -> tuple[ToolCallParser | None, ReasoningParser | None]:
@@ -250,7 +145,7 @@ class RolloutController:
 
     def set_enable_partial_rollout(self, enable: bool) -> None:
         """Propagate enable_partial_rollout flag to all active workers."""
-        active_workers = self.health_manager.snapshot_active_workers()
+        active_workers = self.registry.active_workers()
         ray.get(
             [
                 worker.actor.set_enable_partial_rollout.remote(enable)  # type: ignore[attr-defined]
@@ -260,7 +155,7 @@ class RolloutController:
 
     def pause_generation(self):
         self.health_manager.pause()
-        active_workers = self.health_manager.snapshot_active_workers()
+        active_workers = self.registry.active_workers()
         futures = [
             worker.actor.pause_generation.remote()  # type: ignore[attr-defined]
             for worker in active_workers
@@ -308,15 +203,14 @@ class RolloutController:
     def shutdown(self):
         """Shut down all rollout workers tracked by the controller."""
         self.health_manager.stop()
-        with self.worker_info_lock:
-            actors = [info.actor for info in self.server_process_rank2info.values()]
+        actors = self.registry.all_actors()
         ray.get(
             [actor.shutdown.remote(stop_session_server=True) for actor in actors],  # type: ignore[attr-defined]
             timeout=ROLLOUT_RAY_GET_TIMEOUT,
         )
 
     def _broadcast_to_active_workers(self, method_name: str, **kwargs):
-        workers = self.health_manager.snapshot_active_workers()
+        workers = self.registry.active_workers()
         futures = [getattr(worker.actor, method_name).remote(**kwargs) for worker in workers]
         return ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
 
@@ -334,7 +228,7 @@ class RolloutController:
             },
         )(worker_base_cls)
 
-    def _init_workers(self, placement_group: PlacementGroup) -> tuple[List[List[int]], dict[int, WorkerInfo]]:
+    def _init_workers(self, placement_group: PlacementGroup) -> RolloutWorkerRegistry:
         """Initializes and configures the pool of RolloutWorker actors.
 
         This method follows the same high-level flow as the legacy implementation:
@@ -343,8 +237,8 @@ class RolloutController:
         expose request-entrypoint server URLs to rollout traffic.
 
         Returns:
-            A tuple of `engine_rank_mesh_array` and all server-process workers
-            for lifecycle management.
+            A registry containing all server-process workers and the public
+            training metadata mesh.
         """
         worker_base_cls = get_rollout_worker_base_cls(self.config)
         worker_cls = self._build_remote_worker_cls(worker_base_cls)
@@ -402,7 +296,10 @@ class RolloutController:
             )
         )
 
-        server_process_workers_info: dict[int, WorkerInfo] = {}
+        registry = RolloutWorkerRegistry(
+            engine_rank_mesh_array=engine_rank_mesh_array,
+            rollout_config=self.config,
+        )
         for engine_spec in engine_launch_specs:
             for server_process in engine_spec.server_processes:
                 rank = server_process.worker_rank
@@ -410,20 +307,20 @@ class RolloutController:
                 session_url = session_url_by_rank.get(rank)
                 if server_process.accepts_rollout_requests and session_url is None:
                     raise RuntimeError(f"Rollout worker rank={rank} did not return session server URL during init.")
-                server_process_workers_info[rank] = WorkerInfo(
+                registry.register_started_server(
+                    rank=rank,
                     actor=rank_to_actor[rank],
-                    url=url,
+                    server_url=url,
                     session_url=session_url,
                     lifecycle_group_ranks=engine_spec.server_worker_ranks,
                     is_request_entrypoint=server_process.accepts_rollout_requests,
                 )
 
-        self.logger.info(
-            f"Rollout server-process worker URLs: {[info.url for info in server_process_workers_info.values()]}"
-        )
-        lifecycle_groups = sorted({info.lifecycle_group_ranks for info in server_process_workers_info.values()})
+        server_process_workers_info = registry.all_workers()
+        self.logger.info(f"Rollout server-process worker URLs: {[info.url for info in server_process_workers_info]}")
+        lifecycle_groups = sorted({info.lifecycle_group_ranks for info in server_process_workers_info})
         self.logger.info(f"Rollout worker lifecycle groups: {lifecycle_groups}")
-        return engine_rank_mesh_array, server_process_workers_info
+        return registry
 
 
 RayRolloutController = ray.remote(RolloutController)
