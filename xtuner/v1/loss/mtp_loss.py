@@ -148,10 +148,9 @@ class SciMTPLossConfig(MTPLossConfig):
     ``loss_kwargs`` when calculating loss.
 
     Args:
-        mtp_depth (int): 1-indexed MTP layer depth. The first MTP layer uses
-            ``mtp_depth=1`` (shift=-1 on top of the existing label shift).
         detach_mtp_lm_head_weight (bool): Whether to detach the LM head weight.
             This is used in RL training. Default is False.
+        mask_type (str | None): Mask method when calculating Science MTP.
     """
 
     mask_type: Optional[str] = None
@@ -243,13 +242,13 @@ class MTPLossContext(LMHeadLossContext):
 
         return kl_loss, (None, {})
 
-    def bind_mtp_depth(self, idx: int, sp_mesh: DeviceMesh | None = None) -> None:
+    def bind_mtp_depth(self, depth: int) -> None:
         """Bind MTP depth to the given index.
 
         Args:
             idx (int): 1-indexed MTP layer depth to bind.
         """
-        self.mtp_depth = idx
+        self.mtp_depth = depth
 
 
 class SciMTPLossContext(MTPLossContext):
