@@ -577,6 +577,7 @@ class MoE(BaseModel):
 
         assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
 
+        total_mtp_loss = 0
         if self.mtp_block is not None:
             assert self.config.mtp_config is not None
 
@@ -642,9 +643,8 @@ class MoE(BaseModel):
             if mtp_losses_dict:
                 output["mtp_loss"] = mtp_losses_dict
 
-        mtp_loss = 0
-        for mtp_loss_name, mtp_loss in output["mtp_loss"].items():
-            mtp_loss += mtp_loss
+            for mtp_loss_name, mtp_loss in output["mtp_loss"].items():
+                total_mtp_loss += mtp_loss
 
         # Apply final norm to all micro-batches
         cat_hidden_states = torch.cat(hidden_states_list, dim=1)
@@ -657,7 +657,7 @@ class MoE(BaseModel):
         loss, (logits, extra_info) = self.lm_head(cat_hidden_states, cast(LMHeadLossContext, cat_loss_ctx))
 
         # Aggregate losses (mean across micro-batches)
-        output["loss"] = loss.sum() + mtp_loss
+        output["loss"] = loss.sum() + total_mtp_loss
         moe_extra_info = ModelForwardExtraLogInfo()
         if extra_info:
             moe_extra_info.append(extra_info)
@@ -855,9 +855,9 @@ class MoE(BaseModel):
                 # Add to total loss
                 output["mtp_loss"][name] = scaled_mtp_loss
 
-        # add mtp_loss to loss
-        for mtp_loss_name, mtp_loss in output["mtp_loss"].items():
-            output["loss"] += mtp_loss
+            # add mtp_loss to loss
+            for mtp_loss_name, mtp_loss in output["mtp_loss"].items():
+                output["loss"] += mtp_loss
 
         split_aux_output = self.aux_loss.finalize(
             balancing_ctx=balancing_ctx,
