@@ -210,7 +210,7 @@ class MoE(BaseModel):
         self.layers = self.build_layers(config)
         self.rotary_emb = self.build_rotary_embedding(config)
         self.embed_tokens = self.build_embeddings(config)
-        self.mtp_block = self.build_mtp_block_dict(config) if config.mtp_config is not None else None
+        self.mtp_block = self.build_mtp_block_list(config) if config.mtp_config is not None else None
 
         self.fp32_layers = [self.rotary_emb]
 
@@ -600,11 +600,12 @@ class MoE(BaseModel):
             mtp_losses_dict: dict[str, torch.Tensor] = {}
 
             # Loop through each mtp_config
-            for mtp_config in self.config.mtp_config:
+            for mtp_block in self.mtp_block:
+                mtp_config = mtp_block.mtp_config
                 name = mtp_config.name
 
                 # Get the MTP block for this config by name
-                mtp_outputs_per_mb = self.mtp_block[name](
+                mtp_outputs_per_mb = mtp_block(
                     *hidden_states_list,
                     embed_tokens_fn=self.embed_tokens,
                     position_embeddings=position_embeddings_list,
@@ -806,7 +807,8 @@ class MoE(BaseModel):
                 inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
             )
 
-            for mtp_config in self.config.mtp_config:
+            for mtp_block in self.mtp_block:
+                mtp_config = mtp_block.mtp_config
                 name = mtp_config.name
                 mtp_nonpad_indices = torch.nonzero(mtp_seq_ctx.mask, as_tuple=True)[1]
                 mtp_non_pad_token = mtp_nonpad_indices.numel()
@@ -815,7 +817,7 @@ class MoE(BaseModel):
                 )
 
                 # Forward through MTP block
-                mtp_outputs = self.mtp_block[name](
+                mtp_outputs = mtp_block(
                     layer_hidden_states,
                     embed_tokens_fn=self.embed_tokens,
                     position_embeddings=position_embeddings,
@@ -950,24 +952,26 @@ class MoE(BaseModel):
         layers.__class__.__repr__ = module_dict_repr  # type: ignore[method-assign]
         return layers
 
-    def build_mtp_block_dict(self, config):
-        mtp_block_dict = nn.ModuleDict()
+    def build_mtp_block_list(self, config):
+        mtp_block_list = []
         layer_idx_offset = 0  # Cumulative offset for layer indices across all mtp_configs
+        mtp_name_list = []
 
         for mtp_config in config.mtp_config:
             if mtp_config.name not in ("normal", "sci"):
                 raise ValueError(f"Expected mtp keys to be either `normal` or `sci`, but got `{mtp_config.name}`")
-            if mtp_config.name in mtp_block_dict.keys():
+            if mtp_config.name in mtp_name_list:
                 raise ValueError(f"Duplicate mtp name: `{mtp_config.name}`")
 
+            mtp_name_list.append(mtp_config.name)
             # Build the MTP block with the current offset
-            mtp_block_dict[mtp_config.name] = self.build_mtp_block(config, mtp_config, layer_idx_offset)
+            mtp_block_list.append(self.build_mtp_block(config, mtp_config, layer_idx_offset))
 
             # Update offset: number of physical layers for this mtp_config
             num_physical_layer = 1 if mtp_config.share_weights else mtp_config.num_layers
             layer_idx_offset += num_physical_layer
 
-        return mtp_block_dict
+        return nn.ModuleList(mtp_block_list)
 
     def build_mtp_block(self, config: MoEConfig, mtp_config: MTPConfig, layer_idx_offset: int) -> MTPBlock:
         """Build MTP block with MoE decoder layers.
@@ -1158,10 +1162,10 @@ class MoE(BaseModel):
 
         # Shard MTP block if it exists
         if self.mtp_block is not None:
-            total_mtp_layers = sum([len(mtp_block.layers) for mtp_name, mtp_block in self.mtp_block.items()])
+            total_mtp_layers = sum([len(mtp_block.layers) for mtp_block in self.mtp_block])
             global_mtp_idx = 0  # Track global MTP layer index across all mtp_configs
-            for mtp_name in self.mtp_block.keys():
-                mtp_block = self.mtp_block[mtp_name]
+            mtp_block_layers = []
+            for mtp_block in self.mtp_block:
                 mtp_config = mtp_block.mtp_config
                 for local_mtp_idx, mtp_layer in enumerate(mtp_block.layers):
                     if self._should_recompute(None, mtp_idx=global_mtp_idx) or (
@@ -1183,16 +1187,13 @@ class MoE(BaseModel):
                         layer_next.set_modules_to_forward_prefetch([mtp_layer])  # type: ignore
                     global_mtp_idx += 1
 
-             # Set up prefetch chains across all MTP blocks
-            if self.config.mtp_config is not None:
-                mtp_block_layers = []
-                for mtp_config in self.config.mtp_config:
-                    mtp_block_layers.extend(list(self.mtp_block[mtp_config.name].layers))
-                for prev_mtp_layer, next_mtp_layer in zip(
-                    mtp_block_layers[:-1],
-                    mtp_block_layers[1:],
-                ):
-                    prev_mtp_layer.set_modules_to_forward_prefetch([next_mtp_layer])  # type: ignore
+                mtp_block_layers.extend(list(mtp_block.layers))
+
+            for prev_mtp_layer, next_mtp_layer in zip(
+                mtp_block_layers[:-1],
+                mtp_block_layers[1:],
+            ):
+                prev_mtp_layer.set_modules_to_forward_prefetch([next_mtp_layer])  # type: ignore
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,

@@ -47,14 +47,15 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
         if key.startswith("mtp_block."):
 
             # Extract MTP name from mtp_block.{mtp_name}.{rest}
-            match = re.match(r"mtp_block\.(normal|sci)\.(.*)", key)
+            match = re.match(r"mtp_block\.(\d+)\.(.*)", key)
             if not match:
                 raise ValueError(
                     f"Invalid mtp_block key format: {key}. "
-                    f"Expected 'mtp_block.normal.*' or 'mtp_block.sci.*'"
+                    f"Expected 'mtp_block.{{idx}}.*"
                 )
 
-            mtp_name = match.group(1)
+            mtp_idx = int(match.group(1))
+            mtp_name = self.config.mtp_config[mtp_idx].name
             key = match.group(2)
 
             # Handle MTP layer-specific parameters
