@@ -21,7 +21,7 @@ float8_cfg = Float8Config(
     scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
 )
 
-moe_cfg = Qwen3MoE30BA3Config(float8_cfg=float8_cfg, ep_size=8, compile_cfg=False, balancing_loss_cfg=None)
+moe_cfg = Qwen3MoE30BA3Config(float8_cfg=float8_cfg, ep_size=8, compile_cfg=False)
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
