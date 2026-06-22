@@ -950,9 +950,7 @@ class SandboxPool:
                     await self._create_limiter.acquire()
                     if record is not None:
                         record.metadata["sandbox_acquire_rate_limit_wait_s"] = (
-                            record.metadata.get("sandbox_acquire_rate_limit_wait_s", 0.0)
-                            + time.monotonic()
-                            - t_limit
+                            record.metadata.get("sandbox_acquire_rate_limit_wait_s", 0.0) + time.monotonic() - t_limit
                         )
                 if t_ready is None:
                     t_ready = time.monotonic()
