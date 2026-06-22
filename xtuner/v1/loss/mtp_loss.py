@@ -246,7 +246,7 @@ class MTPLossContext(LMHeadLossContext):
         """Bind MTP depth to the given index.
 
         Args:
-            idx (int): 1-indexed MTP layer depth to bind.
+            depth (int): 1-indexed MTP layer depth to bind.
         """
         self.mtp_depth = depth
 
