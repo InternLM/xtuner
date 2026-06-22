@@ -1185,6 +1185,7 @@ class MoE(BaseModel):
 
         # Shard MTP block if it exists
         if self.mtp_block is not None:
+            total_mtp_layers = sum([len(mtp_block.layers) for mtp_name, mtp_block in self.mtp_block.items()])
             global_mtp_idx = 0  # Track global MTP layer index across all mtp_configs
             for mtp_name in self.mtp_block.keys():
                 mtp_block = self.mtp_block[mtp_name]
@@ -1196,7 +1197,7 @@ class MoE(BaseModel):
                         mtp_layer = checkpoint_wrapper(mtp_layer, checkpoint_impl=CheckpointImpl.REENTRANT)
                     mtp_block.layers[local_mtp_idx] = mtp_layer
 
-                    reshard_after_forward = local_mtp_idx != len(mtp_block.layers) - 1
+                    reshard_after_forward = global_mtp_idx != total_mtp_layers - 1
                     self._fully_shard(
                         mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                         mp_policy=mp_policy,
