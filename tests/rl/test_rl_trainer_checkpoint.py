@@ -130,8 +130,9 @@ class _FakeTrainController:
     def set_train_rollout_mode(self, mode: str):
         self.train_rollout_mode = mode
 
-    def update_rollout_info(self, info):
+    def update_rollout_info(self, info, train_rollout_mode):
         self.rollout_info = info
+        self.train_rollout_mode = train_rollout_mode
 
     def onload(self, target="all"):
         return f"onload:{target}"
