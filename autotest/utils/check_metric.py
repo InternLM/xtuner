@@ -17,6 +17,13 @@ MEMORY_GRADIENT_MIN_SLOPE_GB = 1e-4
 MEMORY_GRADIENT_MIN_REL_DRIFT = 0.00015
 MEMORY_GRADIENT_RESUME_DROP_GB = 0.005
 
+# RL tracker lines: mini-batch logs vs per-RL-step summary (see rl_trainer._log_step).
+RL_STEP_SUMMARY_MARKER = "response/rewards/mean"
+RL_PERCENTILE_METRICS: dict[str, int] = {
+    "response/response_len/mean": 80,
+    "response/rewards/mean": 80,
+}
+
 
 def extract_value(file, metrics):
     metric_all = {metric: [] for metric in metrics}
@@ -30,6 +37,73 @@ def extract_value(file, metrics):
             total_step += 1
 
     return total_step, metric_all
+
+
+def extract_rl_value(file, metrics):
+    """Extract metrics from RL step-summary lines only (ignore mini-batch
+    rows)."""
+    metric_all = {metric: [] for metric in metrics}
+    total_step = 0
+    with open(file) as f:
+        for line in f:
+            record = json.loads(line)
+            if RL_STEP_SUMMARY_MARKER not in record:
+                continue
+            total_step += 1
+            for metric in metrics:
+                if metric in record:
+                    metric_all[metric].append(record[metric])
+    return total_step, metric_all
+
+
+def _step_errors(base_vals: list[float], cur_vals: list[float], method: str) -> list[float]:
+    errors: list[float] = []
+    for base_val, cur_val in zip(base_vals, cur_vals):
+        if method == "absolute":
+            errors.append(abs(cur_val - base_val))
+        elif method == "relative":
+            if abs(base_val) < 1e-10:
+                errors.append(float("inf") if abs(cur_val) > 1e-10 else 0.0)
+            else:
+                errors.append(abs(cur_val - base_val) / abs(base_val))
+        else:
+            raise ValueError(f"Unknown method: {method}")
+    return errors
+
+
+def _percentile_error_passes(
+    base_vals: list[float],
+    cur_vals: list[float],
+    *,
+    method: str,
+    threshold: float,
+    operator: str,
+    percentile: int,
+) -> tuple[bool, float, str]:
+    errors = _step_errors(base_vals, cur_vals, method)
+    agg_error = float(np.percentile(errors, percentile))
+    if operator == "<":
+        passed = agg_error < threshold
+    elif operator == "<=":
+        passed = agg_error <= threshold
+    else:
+        raise ValueError(f"Unknown operator: {operator}")
+    detail = f"p{percentile}={agg_error:.6f} (max={max(errors):.6f})"
+    return passed, agg_error, detail
+
+
+def _format_rl_metric_failure(
+    metric: str,
+    *,
+    method: str,
+    operator: str,
+    threshold: float,
+    detail: str,
+) -> str:
+    return (
+        f"{metric} aggregated error does not satisfy threshold {threshold} "
+        f"(method: {method}, operator: {operator}, {detail})"
+    )
 
 
 def _split_memory_segments(values: np.ndarray) -> list[np.ndarray]:
@@ -174,11 +248,11 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
 
     metric_list = [item["metric"] for item in check_metrics_list]
 
-    base_steps, base_metrics = extract_value(base_path, metric_list)
-    cur_steps, cur_metrics = extract_value(cur_path, metric_list)
+    base_steps, base_metrics = extract_rl_value(base_path, metric_list)
+    cur_steps, cur_metrics = extract_rl_value(cur_path, metric_list)
 
     assert cur_steps == base_steps, (
-        f"current steps is not equal to base steps, current steps: {cur_steps}, base steps: {base_steps}"
+        f"current RL steps is not equal to base RL steps, current steps: {cur_steps}, base steps: {base_steps}"
     )
 
     check_metric_dict = {item["metric"]: item["threshold"] for item in check_metrics_list}
@@ -191,21 +265,53 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
         threshold = config["threshold"]
         method = config["method"]
         operator = config["operator"]
+        percentile = config.get("aggregate")
+        if percentile is None and metric in RL_PERCENTILE_METRICS:
+            percentile = RL_PERCENTILE_METRICS[metric]
+
+        base_vals = base_metrics[metric]
+        cur_vals = cur_metrics[metric]
+        if not base_vals and not cur_vals:
+            logger.warning(f"Skip {metric}: absent in both baseline and current RL step summaries.")
+            continue
+        if len(base_vals) != len(cur_vals):
+            fail_metric[metric] = (
+                f"{metric} step count mismatch after RL step-summary extraction: "
+                f"baseline={len(base_vals)}, current={len(cur_vals)}"
+            )
+            continue
 
         max_error = 0.0
         max_error_idx = 0
         check_flag = True
 
-        for idx, (base_val, cur_val) in enumerate(zip(base_metrics[metric], cur_metrics[metric])):
-            if method == "absolute":
-                error = round(abs(cur_val - base_val), 5)
-            elif method == "relative":
-                if abs(base_val) < 1e-10:
-                    error = float("inf") if abs(cur_val) > 1e-10 else 0.0
-                else:
-                    error = round(abs(cur_val - base_val) / abs(base_val), 5)
+        if percentile is not None:
+            check_flag, agg_error, detail = _percentile_error_passes(
+                base_vals,
+                cur_vals,
+                method=method,
+                threshold=threshold,
+                operator=operator,
+                percentile=int(percentile),
+            )
+            if not check_flag:
+                fail_metric[metric] = _format_rl_metric_failure(
+                    metric,
+                    method=method,
+                    operator=operator,
+                    threshold=threshold,
+                    detail=detail,
+                )
             else:
-                raise ValueError(f"Unknown method: {method}")
+                logger.info(
+                    f"✓ {metric} check passed ({detail}, method: {method}, operator: {operator}, "
+                    f"threshold: {threshold})"
+                )
+            continue
+
+        for idx, (base_val, cur_val) in enumerate(zip(base_vals, cur_vals)):
+            errors = _step_errors([base_val], [cur_val], method)
+            error = round(errors[0], 5)
 
             if error > max_error:
                 max_error = error
