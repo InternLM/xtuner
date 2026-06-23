@@ -74,6 +74,24 @@ def _extract_output_logprobs(choice: dict, output_token_ids: list[int]) -> list[
 
 
 _SESSION_SERVER_ONLY_KEYS = {"session_id"}
+_OPENAI_REASONING_DELTA_KEYS = ("reasoning_content", "reasoning", "thinking")
+
+
+def _extract_openai_reasoning_delta(delta: dict[str, Any]) -> Optional[str]:
+    for key in _OPENAI_REASONING_DELTA_KEYS:
+        value = delta.get(key)
+        if value:
+            return value if isinstance(value, str) else json.dumps(value, sort_keys=True, ensure_ascii=False)
+    return None
+
+
+def _normalize_openai_response_reasoning(response_data: dict[str, Any]) -> None:
+    for choice in response_data.get("choices", []):
+        message = choice.get("message")
+        if isinstance(message, dict):
+            reasoning_content = _extract_openai_reasoning_delta(message)
+            if reasoning_content:
+                message["reasoning_content"] = reasoning_content
 
 
 def _bool_request_value(value: Any, default: bool = False) -> bool:
@@ -468,6 +486,7 @@ class SessionServer:
 
             if response_data is not None:
                 try:
+                    _normalize_openai_response_reasoning(response_data)
                     for c in response_data.get("choices", []):
                         if c.get("message") and isinstance(c["message"].get("content"), str):
                             c["message"]["content"] = c["message"]["content"].replace(self.stop_word, "")
@@ -577,10 +596,11 @@ class SessionServer:
                     assistant_choice["output_token_logprobs"].extend(choice["output_token_logprobs"])
 
                 # Check reasoning content
-                if delta.get("reasoning_content"):
+                reasoning_delta = _extract_openai_reasoning_delta(delta)
+                if reasoning_delta:
                     assistant_msg = message["choices"][0]["message"]
                     assistant_msg["reasoning_content"] = (
-                        assistant_msg.get("reasoning_content", "") + delta["reasoning_content"]
+                        assistant_msg.get("reasoning_content", "") + reasoning_delta
                     )
 
                 # Check tool calls
