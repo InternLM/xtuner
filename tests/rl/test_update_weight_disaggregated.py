@@ -167,7 +167,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         self.assertEqual(res_update_weight.response, res_baseline.response)
         ray.get(rollout_controller.shutdown.remote(), timeout=60)
 
-    @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "sglang backend is not enabled")
+    @unittest.skip("skip sglang parameter-only weight check test until the parameter-check-only patch is applied")
     def test_sglang_disaggregated_update_weight_equal_after_reset(self):
         # This test verifies SGLang rollout weight update correctness with a parameter-only check.
         # The SGLang parameter-only WeightChecker actions are implemented in 
@@ -202,10 +202,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         finally:
             ray.get(rollout_controller.shutdown.remote(), timeout=60)
 
-    @unittest.skipIf(
-        os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0",
-        "lmdeploy backend is not enabled",
-    )
+    @unittest.skip("skip lmdeploy disaggregated update-weight generation test until PR4638 is merged")
     def test_lmdeploy_disaggregated_update_weight_and_generate(self):
         TrainingWorker = ray.remote(
             runtime_env={
