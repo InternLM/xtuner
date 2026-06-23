@@ -52,7 +52,6 @@ class _FakeRolloutState:
         self.extra_fields = {}
         self.response_model_steps = []
 
-
 class _FakeSampler:
     def __init__(self):
         self._next_id = 0
@@ -148,13 +147,18 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
 
         trainer.rollout_controller = SimpleNamespace(
-            ensure_workers_healthy_before_training=SimpleNamespace(
-                remote=MagicMock(return_value="rollout_ready_for_training")
+            check_and_shutdown_inactive_workers=SimpleNamespace(
+                remote=MagicMock(return_value="rollout_inactive_workers_shutdown")
             ),
             offload=SimpleNamespace(remote=MagicMock(return_value="rollout_offloaded")),
+            restart_inactive_workers=SimpleNamespace(remote=MagicMock(return_value="rollout_restarted")),
+            onload_weights=SimpleNamespace(remote=MagicMock(return_value="weights_loaded")),
+            onload_kvcache=SimpleNamespace(remote=MagicMock(return_value="kvcache_loaded")),
         )
         trainer.train_controller = SimpleNamespace(
             onload=MagicMock(return_value="train_onloaded"),
+            offload=MagicMock(return_value="train_offloaded"),
+            update_weights=MagicMock(return_value="weights_updated"),
             fit=MagicMock(
                 return_value=[
                     {
@@ -220,15 +224,37 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer.train_controller.fit.assert_not_called()
         self.assertEqual(trainer._cur_step, 0)
 
+    def test_fit_does_not_onload_train_when_rollout_training_barrier_fails(self):
+        # 验证共卡训练进入训练前必须先通过 rollout phase-switch barrier；
+        # 失败时不能 onload 训练。
+        async def _produce_batch(batch_size, train_step, *, model_step):
+            return ProduceBatchResult(rollout_states=[[_FakeRolloutState(train_step)]])
+
+        trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch))
+        trainer.rollout_controller.check_and_shutdown_inactive_workers.remote.side_effect = RuntimeError(
+            "inactive rollout workers after recovery"
+        )
+
+        with (
+            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "inactive rollout workers"):
+                trainer.fit()
+
+        trainer.rollout_controller.check_and_shutdown_inactive_workers.remote.assert_called_once_with()
+        trainer.rollout_controller.offload.remote.assert_not_called()
+        trainer.train_controller.onload.assert_not_called()
+        trainer.train_controller.fit.assert_not_called()
+        self.assertEqual(trainer._cur_step, 0)
+
     def test_fit_uses_sync_interval_and_passes_rollout_model_step(self):
         # 验证 rollout 看到的是按 sync interval 推进后的 model_step。
         produce_calls = []
 
         async def _produce_batch(batch_size, train_step, *, model_step):
             produce_calls.append((batch_size, train_step, model_step))
-            return ProduceBatchResult(
-                rollout_states=[[SimpleNamespace(group_id=train_step, rollout_id=train_step)]]
-            )
+            return ProduceBatchResult(rollout_states=[[_FakeRolloutState(train_step)]])
 
         trainer = self._make_trainer(
             SimpleNamespace(produce_batch=_produce_batch),
