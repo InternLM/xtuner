@@ -1704,7 +1704,7 @@ class RLColocateTrainer(BaseRLTrainer):
                 bind_train_rollout(
                     train_controller=self.train_controller,
                     rollout_controller=self.rollout_controller,
-                    train_rollout_mode="colocate"
+                    train_rollout_mode="colocate",
                 )
                 ray.get(
                     self.rollout_controller.onload_weights.remote(),
