@@ -181,9 +181,9 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
             expert_parallel_size=2,
             gpu_memory_utilization=0.8,
             context_length=MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH,
-            # Keep this comfortably above the per-server request concurrency
-            # required by train_batch_size * prompt_repeat_k * (1 + over_sample_threshold) / 8 servers.
             rollout_max_batch_size_per_instance=128,
+            # Deprecated compatibility option; fixed rollout constants now
+            # keep Ray/httpx from queueing before the inference engine.
             allow_over_concurrency_ratio=1.0,
             enable_return_routed_experts=True,
             extra_rollout_config={

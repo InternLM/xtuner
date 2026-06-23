@@ -659,51 +659,6 @@ class BaseRLTrainer:
             )
         self._rollout_config = cfg.rollout_config
 
-    def _ensure_rollout_http_concurrency(
-        self,
-        cfg: BaseRLTrainerConfig,
-        rollout_pg,
-    ) -> None:
-        rollout_max_batch_size = cfg.rollout_config.rollout_max_batch_size_per_instance
-        if rollout_max_batch_size is None or rollout_max_batch_size <= 0:
-            return
-
-        current_http_concurrency = math.ceil(rollout_max_batch_size * cfg.rollout_config.allow_over_concurrency_ratio)
-        if current_http_concurrency <= 0:
-            return
-
-        total_generate_concurrency = cfg.rollout_config.get_controller_generate_concurrency(rollout_pg)
-        active_rollout_worker_count = total_generate_concurrency // current_http_concurrency
-        if active_rollout_worker_count <= 0:
-            return
-
-        tasks = cfg.agent_loop_manager_cfg.tasks
-        task_cfgs = tasks if isinstance(tasks, list) else [tasks]
-        total_weight = sum(task.weight for task in task_cfgs)
-        if total_weight <= 0:
-            return
-
-        scheduled_http_requests = 0.0
-        for task in task_cfgs:
-            task_batch_size = cfg.train_batch_size * task.weight / total_weight
-            over_sample_threshold = float(getattr(task.produce_strategy_config, "over_sample_threshold", 0.0))
-            scheduled_http_requests += (
-                task_batch_size * task.sampler_config.prompt_repeat_k * (1 + over_sample_threshold)
-            )
-
-        required_http_concurrency = math.ceil(scheduled_http_requests / active_rollout_worker_count)
-        if current_http_concurrency >= required_http_concurrency:
-            return
-
-        new_ratio = required_http_concurrency / rollout_max_batch_size
-        cfg.rollout_config.allow_over_concurrency_ratio = new_ratio
-        self.logger.warning(
-            "Increasing rollout_config.allow_over_concurrency_ratio because httpx max_connections is smaller "
-            "than the expected per-worker rollout request concurrency: "
-            f"max_connections={current_http_concurrency}, "
-            f"required_connections={required_http_concurrency}"
-        )
-
     def _init_runtime_flags(self, cfg: BaseRLTrainerConfig) -> None:
         self._enable_evaluate = cfg.enable_evaluate
         self._enable_initial_evaluate = cfg.enable_initial_evaluate and cfg.enable_evaluate
@@ -1597,7 +1552,6 @@ class RLColocateTrainer(BaseRLTrainer):
         self._cpu_resource_manager = CPUResourceManager(self._pg)
         self._cpu_resource_manager.log_initial_snapshot()
         set_cpu_resource_manager(self._cpu_resource_manager)
-        self._ensure_rollout_http_concurrency(cfg, self._pg)
 
         if self._debug_rollout:
             if self._rollout_config.skip_load_weights:
@@ -1820,7 +1774,6 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         self._cpu_resource_manager = CPUResourceManager([self._train_pg, self._rollout_pg])
         self._cpu_resource_manager.log_initial_snapshot()
         set_cpu_resource_manager(self._cpu_resource_manager)
-        self._ensure_rollout_http_concurrency(cfg, self._rollout_pg)
         self.train_controller = self._train_worker_cfg.build(self._train_pg)
         self.rollout_controller = self._rollout_config.build(self._rollout_pg)
         if _trainer_config_needs_routed_api_proxy(cfg):
