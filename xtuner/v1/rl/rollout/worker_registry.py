@@ -205,15 +205,17 @@ class RolloutWorkerRegistry:
         group: WorkerGroup,
         *,
         recovered: bool,
-    ) -> None:
+    ) -> WorkerGroup | None:
         """Apply the final lifecycle state for a completed group recovery
-        attempt."""
+        attempt and return the updated group snapshot."""
         with self._lock:
             lifecycle_state = WorkerLifecycleState.ACTIVE if recovered else WorkerLifecycleState.INACTIVE
             for rank in group.ranks:
                 worker = self._workers.get(rank)
                 if worker is not None:
                     self._workers[rank] = replace(worker, lifecycle_state=lifecycle_state)
+            worker_groups = _build_worker_groups(self._workers.values())
+            return worker_groups.get(group.ranks)
 
     def training_metadata_snapshot(self) -> RolloutWorkerMetadata:
         """Build the legacy trainer/update-weight metadata from one registry

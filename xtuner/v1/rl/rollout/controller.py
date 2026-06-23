@@ -16,6 +16,7 @@ from .health_manager import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthManager
 from .parser.factory import build_reasoning_parser, build_tool_call_parser
 from .parser.reasoning_parser import ReasoningParser
 from .parser.tool_parser import ToolCallParser
+from .proxy_manager import RolloutProxyManager
 from .utils import SessionRouter
 from .worker import (
     ROLLOUT_CONCURRENCY_GROUP_GENERATE,
@@ -55,9 +56,14 @@ class RolloutController:
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
         self.router = SessionRouter(self.registry)
+        self.proxy_manager: RolloutProxyManager | None = None
+        if self.config.enable_proxy:
+            self.proxy_manager = RolloutProxyManager(self.config)
+            self.register_active_workers_to_proxy()
         self.health_manager = RolloutHealthManager(
             config=self.config,
             registry=self.registry,
+            worker_lifecycle_listeners=[self.proxy_manager] if self.proxy_manager is not None else None,
         )
         self.health_manager.start()
         self._tool_call_parser, self._reasoning_parser = self._build_output_parsers()
@@ -73,6 +79,15 @@ class RolloutController:
         self.logger.info(f"Rollout worker server URLs: {rollout_metadata['server_url_dict']}")
         self.logger.info(f"Rollout worker session server URLs: {rollout_metadata['worker_session_url_dict']}")
         return rollout_metadata
+
+    def register_active_workers_to_proxy(self) -> None:
+        assert self.proxy_manager is not None, "Proxy manager must be initialized"
+        session_urls = sorted(
+            worker.session_url
+            for worker in self.registry.active_entrypoints()
+            if worker.session_url is not None
+        )
+        self.proxy_manager.replace_registered_session_urls(session_urls)
 
     def _build_output_parsers(self) -> tuple[ToolCallParser | None, ReasoningParser | None]:
         tool_call_parser = None

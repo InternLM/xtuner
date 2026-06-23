@@ -411,6 +411,13 @@ class RolloutConfig(BaseModel):
             help="Number of consecutive health check failures required before marking a worker inactive.",
         ),
     ] = 3
+    enable_proxy: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Register rollout session servers to routed API proxy and keep registrations in sync with health.",
+        ),
+    ] = False
 
     @property
     def rollout_backend(self) -> str:
