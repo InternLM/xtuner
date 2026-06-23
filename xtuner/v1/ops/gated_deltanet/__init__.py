@@ -19,11 +19,6 @@ XTuner path (compile-friendly custom_op wraps + seq_idx-aware kernel dispatch).
 
 import os
 
-from fla.ops.gated_delta_rule import chunk_gated_delta_rule as _hf_chunk_gated_delta_rule
-
-from .causal_conv1d import causal_conv1d_fn as _xtuner_causal_conv1d_fn
-from .chunk_gated_delta_rule import chunk_gated_delta_rule as _xtuner_chunk_gated_delta_rule
-
 
 _TRUTHY = {"true", "1", "yes", "on"}
 
@@ -45,11 +40,17 @@ def _hf_causal_conv1d_adapter(x, weight, bias, activation, seq_idx):
 
 def get_chunk_gated_delta_rule_fn():
     if _hf_impl_enabled():
+        from fla.ops.gated_delta_rule import chunk_gated_delta_rule as _hf_chunk_gated_delta_rule
+
         return _hf_chunk_gated_delta_rule
+    from .chunk_gated_delta_rule import chunk_gated_delta_rule as _xtuner_chunk_gated_delta_rule
+
     return _xtuner_chunk_gated_delta_rule
 
 
 def get_causal_conv1d_fn():
     if _hf_impl_enabled():
         return _hf_causal_conv1d_adapter
+    from .causal_conv1d import causal_conv1d_fn as _xtuner_causal_conv1d_fn
+
     return _xtuner_causal_conv1d_fn

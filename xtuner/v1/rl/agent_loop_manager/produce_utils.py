@@ -4,13 +4,18 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, runtime_checkable
 
 import ray
 import tqdm
 from mmengine.dist import get_rank
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status, get_group_status, reset_rollout_response
+from xtuner.v1.data_proto.rl_data import (
+    RolloutState,
+    Status,
+    discard_rollout_state,
+    get_group_status,
+)
 from xtuner.v1.rl.agent_loop import AgentLoopSpec
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.utils import (
@@ -22,6 +27,11 @@ from xtuner.v1.rl.utils import (
 from xtuner.v1.utils import get_logger
 
 from .sampler import Sampler
+
+
+if TYPE_CHECKING:
+    from .disagg_producer import DisaggProduceProgress
+    from .producer import ProduceProgress
 
 
 logger = get_logger()
@@ -112,7 +122,7 @@ class BaseProduceContext:
     task_name: str
     train_step: int
     model_step: int
-    progress: Any
+    progress: "ProduceProgress | DisaggProduceProgress"
     is_valid_sample_fn: IsValidSampleFn = default_is_valid_sample_fn
     stale_threshold: int | None = None
 
@@ -155,26 +165,37 @@ class BaseProduceContext:
         return result
 
     async def put_generated_group(self, group: list[RolloutState]) -> bool:
-        # 只有 COMPLETED group 需要业务过滤；ABORTED / EXPIRED 保留原状态。
-        is_completed = get_group_status(group) == Status.COMPLETED
         produced_tokens = sum(len(item.response_ids) for item in group if item.response_ids is not None)
-        if is_completed:
+        initial_status = get_group_status(group)
+        discard_status: Status | None = None
+
+        if initial_status == Status.COMPLETED:
             rewards_sum = 0.0
             rewards_count = 0
             for item in group:
                 if item.reward is None or "score" not in item.reward:
                     logger.warning(
-                        f"Missing reward score in item (uid: {item.uid}) of completed group for task {self.task_name}. This item will be skipped in reward statistics."
+                        f"Missing reward score in item (rollout_id: {item.rollout_id}) of completed group for task {self.task_name}. This item will be skipped in reward statistics."
                     )
                     continue
                 rewards_sum += float(item.reward["score"])  # type: ignore[index]
                 rewards_count += 1
             self.progress.add_raw_rewards(self.task_name, rewards_sum, rewards_count)
-            is_valid = self.is_valid_sample_fn(group)
-            if not is_valid:
-                for item in group:
-                    item.status = Status.FILTERED
-                    reset_rollout_response(item)
+
+            if not self.is_valid_sample_fn(group):
+                discard_status = Status.FILTERED
+        elif initial_status == Status.FAILED:
+            discard_status = Status.FAILED
+
+        if discard_status is not None:
+            # 失败样本和业务过滤样本都不进入 replay buffer。
+            self.progress.add_produced(self.task_name, samples=len(group), tokens=produced_tokens)
+            self.progress.add_discarded(self.task_name, discard_status, samples=len(group))
+            for item in group:
+                discard_rollout_state(item)
+            return False
+
+        # ABORTED / EXPIRED 保持可重试状态；COMPLETED 也可能在 put 时因 staleness 转成 EXPIRED。
         await self.replay_buffer.put(
             group,
             self.task_name,
@@ -183,9 +204,8 @@ class BaseProduceContext:
             stale_threshold=self.stale_threshold,
         )
         self.progress.add_produced(self.task_name, samples=len(group), tokens=produced_tokens)
-        # replay_buffer.put 可能因 staleness 把 group 转为 EXPIRED。
-        is_completed = get_group_status(group) == Status.COMPLETED
-        return is_completed
+        final_status = get_group_status(group)
+        return final_status == Status.COMPLETED
 
 
 @dataclass
@@ -204,8 +224,8 @@ class ProduceBatchResult:
         leftover_completed (int): Number of completed groups remaining in the replay buffer after this batch.
         leftover_aborted (int): Number of aborted groups remaining in the replay buffer.
         leftover_expired (int): Number of expired groups remaining in the replay buffer.
-        leftover_failed (int): Number of failed groups remaining in the replay buffer.
-        leftover_filtered (int): Number of filtered groups remaining in the replay buffer.
+        failed_samples (int): Number of failed samples observed in the current produce window, including replay-buffer leftovers and samples discarded before insertion.
+        filtered_samples (int): Number of filtered samples observed in the current produce window, including replay-buffer leftovers and samples discarded before insertion.
         raw_rewards_sum (float): Sum of rewards produced before replay-buffer insertion for the current window.
         raw_rewards_count (int): Number of reward-bearing samples included in ``raw_rewards_sum``.
         produced_samples (int): Number of rollout samples produced in the current produce window.
@@ -222,13 +242,14 @@ class ProduceBatchResult:
     group_gen_p99_s: float | None = None
     group_gen_p99_p50_ratio: float | None = None
     group_gen_pause_time_s: float | None = None
-    # leftover samples remaining in replay buffer after batch retrieval
+    # leftover buffer counts after batch retrieval
     leftover_init: int = 0
     leftover_completed: int = 0
     leftover_aborted: int = 0
     leftover_expired: int = 0
-    leftover_failed: int = 0
-    leftover_filtered: int = 0
+    # failed / filtered are produce-window sample counts, not pure buffer leftover snapshots
+    failed_samples: int = 0
+    filtered_samples: int = 0
     # rewards produced during the current produce window, including completed and filtered groups.
     raw_rewards_sum: float = 0.0
     raw_rewards_count: int = 0
@@ -318,8 +339,18 @@ def _fill_leftover_counts(result: ProduceBatchResult, status_counts: dict[Status
     result.leftover_completed = status_counts.get(Status.COMPLETED, 0)
     result.leftover_aborted = status_counts.get(Status.ABORTED, 0)
     result.leftover_expired = status_counts.get(Status.EXPIRED, 0)
-    result.leftover_failed = status_counts.get(Status.FAILED, 0)
-    result.leftover_filtered = status_counts.get(Status.FILTERED, 0)
+    result.failed_samples = status_counts.get(Status.FAILED, 0)
+    result.filtered_samples = status_counts.get(Status.FILTERED, 0)
+
+
+def _merge_discarded_counts(
+    result: ProduceBatchResult,
+    progress: "ProduceProgress | DisaggProduceProgress",
+    task_name: str,
+) -> None:
+    discarded_failed, discarded_filtered = progress.consume_discarded(task_name)
+    result.failed_samples += discarded_failed
+    result.filtered_samples += discarded_filtered
 
 
 def allocate_task_batch_sizes(
@@ -410,8 +441,8 @@ def aggregate_task_results(
     leftover_completed = 0
     leftover_aborted = 0
     leftover_expired = 0
-    leftover_failed = 0
-    leftover_filtered = 0
+    failed_samples = 0
+    filtered_samples = 0
     total_group_count = 0
     weighted_group_mean_sum = 0.0
     weighted_group_p50_sum = 0.0
@@ -431,8 +462,8 @@ def aggregate_task_results(
         leftover_completed += result.leftover_completed
         leftover_aborted += result.leftover_aborted
         leftover_expired += result.leftover_expired
-        leftover_failed += result.leftover_failed
-        leftover_filtered += result.leftover_filtered
+        failed_samples += result.failed_samples
+        filtered_samples += result.filtered_samples
         raw_rewards_sum += result.raw_rewards_sum
         raw_rewards_count += result.raw_rewards_count
         produced_samples += result.produced_samples
@@ -452,8 +483,8 @@ def aggregate_task_results(
         leftover_completed=leftover_completed,
         leftover_aborted=leftover_aborted,
         leftover_expired=leftover_expired,
-        leftover_failed=leftover_failed,
-        leftover_filtered=leftover_filtered,
+        failed_samples=failed_samples,
+        filtered_samples=filtered_samples,
         raw_rewards_sum=raw_rewards_sum,
         raw_rewards_count=raw_rewards_count,
         produced_samples=produced_samples,
@@ -490,8 +521,8 @@ def log_buffer_counts(
             f"leftover_completed={task_counts.get(Status.COMPLETED, 0)}, "
             f"leftover_aborted={task_counts.get(Status.ABORTED, 0)}, "
             f"leftover_expired={task_counts.get(Status.EXPIRED, 0)}, "
-            f"leftover_failed={task_counts.get(Status.FAILED, 0)}, "
-            f"leftover_filtered={task_counts.get(Status.FILTERED, 0)}"
+            f"buffer_failed_groups={task_counts.get(Status.FAILED, 0)}, "
+            f"buffer_filtered_groups={task_counts.get(Status.FILTERED, 0)}"
         )
 
 
@@ -501,7 +532,7 @@ def build_produce_batch_result(
     task_batch_sizes: dict[str, int],
     batch_by_task: dict[str, list[list[RolloutState]]],
     leftover_counts: dict[str, dict[Status, int]],
-    progress: Any,
+    progress: "ProduceProgress | DisaggProduceProgress",
     pause_time_s: float,
 ) -> ProduceBatchResult:
     if len(task_runners) == 1:
@@ -518,6 +549,7 @@ def build_produce_batch_result(
             produce_time_s=produce_time_s,
         )
         _fill_leftover_counts(result, leftover_counts.get(task.task_name, {}))
+        _merge_discarded_counts(result, progress, task.task_name)
         _fill_group_timing_stats(result, result.rollout_states, pause_time_s=pause_time_s)
         return result
 
@@ -534,6 +566,7 @@ def build_produce_batch_result(
             produced_tokens=produced_tokens,
         )
         _fill_leftover_counts(result, leftover_counts.get(task.task_name, {}))
+        _merge_discarded_counts(result, progress, task.task_name)
         task_results[task.task_name] = result
 
     ordered_tasks = sorted(task_runners, key=lambda task: (task.task_name, task.order))
@@ -551,7 +584,7 @@ async def take_train_batch(
     logger,
     manager_name: str,
     task_batch_sizes: dict[str, int],
-    progress: Any,
+    progress: "ProduceProgress | DisaggProduceProgress",
     pause_time_s: float = 0.0,
 ) -> ProduceBatchResult:
     batch_by_task, consumed_counts = await replay_buffer.take_batch(task_batch_sizes)

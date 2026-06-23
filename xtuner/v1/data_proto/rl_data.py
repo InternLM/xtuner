@@ -85,7 +85,8 @@ class RolloutState(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     # --- 数据 ---
-    message_uid: int | None = None  # 通过计算原始的message的哈希值得到的id，一组的数据为同一个prompt_id
+    # Samples generated from the same prompt share one group_id.
+    group_id: int | None = None
     message: list[dict[str, Any]]  # dataset输出，需要在AgentLoop中转换成input_ids
     prompt_ids: list[int] | None = None  # 原始 prompt的token ids
     num_tokens: int | None = None
@@ -95,7 +96,8 @@ class RolloutState(BaseModel):
     reward_model: dict[str, Any] | None = None
 
     # --- InferEngine 输入 ---
-    session_uid: int | None = None
+    # Used to route a multi-turn inference session to the same rollout worker.
+    session_id: int | None = None
     tokens: list[int] | None = None  # 每一次推理引擎的实际输入
     tools: list | None = None
     tool_choice: str | dict[str, Any] | None = None
@@ -123,12 +125,70 @@ class RolloutState(BaseModel):
     reward: dict[str, Any] | None = None
 
     #  --- 状态 ---
+    # Per-rollout identity. Different K-rollouts from the same prompt should have different rollout_id values.
+    rollout_id: int | None = None
+    # Deprecated compatibility field for downstream libraries.
+    # TODO: remove after callers migrate to ``rollout_id``.
     uid: int | None = None
     task_name: str | None = None
     status: Status = Status.INIT
     error_msg: str | None = None
     position_ids: np.ndarray | None = None
     extra_fields: dict[str, Any] = {}
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.rollout_id is None:
+            self.rollout_id = self.uid
+        else:
+            self.uid = self.rollout_id
+
+
+def free_rollout_state_refs(rollout_state: RolloutState) -> None:
+    from ray import ObjectRef
+
+    from xtuner.v1.rl.utils.ray_utils import free_object_refs
+
+    refs: list[ObjectRef] = []
+
+    def clear_object_refs(value: Any) -> Any:
+        if isinstance(value, ObjectRef):
+            refs.append(value)
+            return None
+        if isinstance(value, BaseModel):
+            for field_name in type(value).model_fields:
+                field_value = getattr(value, field_name)
+                cleared_value = clear_object_refs(field_value)
+                if cleared_value is not field_value:
+                    setattr(value, field_name, cleared_value)
+            return value
+        if isinstance(value, dict):
+            for key, item in value.items():
+                value[key] = clear_object_refs(item)
+            return value
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                value[index] = clear_object_refs(item)
+            return value
+        if isinstance(value, tuple):
+            return tuple(clear_object_refs(item) for item in value)
+        if isinstance(value, set):
+            return {clear_object_refs(item) for item in value}
+        return value
+
+    clear_object_refs(rollout_state)
+    free_object_refs(refs)
+
+
+def discard_rollout_state(rollout_state: RolloutState) -> RolloutState:
+    """Release heavy references and clear fields before dropping a rollout."""
+
+    free_rollout_state_refs(rollout_state)
+
+    for field_name, field in type(rollout_state).model_fields.items():
+        if field.is_required():
+            continue
+        setattr(rollout_state, field_name, field.get_default(call_default_factory=True))
+    return rollout_state
 
 
 def update_status_from_finish_reason(finish_reason: str | None) -> Status:
@@ -172,11 +232,12 @@ def update_status_from_finish_reason(finish_reason: str | None) -> Status:
 def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
     routed_experts = getattr(rollout_state, "routed_experts", None)
     if routed_experts is not None:
-        import ray
-        from ray import ObjectRef as RayObjectRef
+        from ray import ObjectRef
 
-        if isinstance(routed_experts, RayObjectRef):
-            ray.internal.free([routed_experts], local_only=False)
+        from xtuner.v1.rl.utils.ray_utils import free_object_refs
+
+        if isinstance(routed_experts, (ObjectRef, list)):
+            free_object_refs(routed_experts)
         rollout_state.routed_experts = None
     prompt_ids = getattr(rollout_state, "prompt_ids", None)
     rollout_state.tokens = list(prompt_ids) if prompt_ids is not None else None
@@ -269,7 +330,7 @@ def update_expired_status(samples: list[RolloutState], stale_threshold: int) -> 
     for sample in samples:
         if sample.status == Status.ABORTED and sample.seq_staleness >= stale_threshold:
             logger.debug(
-                f"Sample {sample.uid} (seq_staleness: {sample.seq_staleness}) exceeded threshold ({stale_threshold}). Triggering group expiration."
+                f"Sample {sample.rollout_id} (seq_staleness: {sample.seq_staleness}) exceeded threshold ({stale_threshold}). Triggering group expiration."
             )
             is_group_expired = True
             break  # 一旦发现过期，直接跳出，无需检查剩余样本

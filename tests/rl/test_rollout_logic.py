@@ -71,11 +71,11 @@ class _FakeRolloutWorker:
 
 
 class TestRolloutController(unittest.IsolatedAsyncioTestCase):
-    def _state(self, uid: int, session_uid: int) -> RolloutState:
+    def _state(self, uid: int, session_id: int) -> RolloutState:
         return RolloutState(
-            uid=uid,
-            message_uid=uid,
-            session_uid=session_uid,
+            rollout_id=uid,
+            group_id=uid,
+            session_id=session_id,
             message=[{"role": "user", "content": f"prompt {uid}"}],
             prompt_ids=[uid],
             status=Status.INIT,
@@ -94,7 +94,7 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
 
     async def test_generate_fails_fast_when_no_active_worker(self):
         # router 找不到 active worker 时，controller 应直接把原样本标成 FAILED，避免请求悬挂。
-        state = self._state(uid=1, session_uid=123)
+        state = self._state(uid=1, session_id=123)
         router = _FakeRolloutRouter(worker=None)
         controller = self._build_controller(router)
 
@@ -107,9 +107,9 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.error_msg, "No active rollout worker available.")
 
     async def test_generate_routes_to_active_worker(self):
-        # 有 active worker 时，controller 要按 session_uid 路由，并返回 worker 的 rollout 结果。
-        request_state = self._state(uid=1, session_uid=456)
-        returned_state = self._state(uid=1, session_uid=456)
+        # 有 active worker 时，controller 要按 session_id 路由，并返回 worker 的 rollout 结果。
+        request_state = self._state(uid=1, session_id=456)
+        returned_state = self._state(uid=1, session_id=456)
         returned_state.status = Status.COMPLETED
         worker = _FakeRolloutWorker(returned_state)
         router = _FakeRolloutRouter(worker=worker)
@@ -266,7 +266,7 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
         # partial rollout 已以 EOS 结束时，应直接完成，不再请求推理后端。
         worker = self._build_partial_rollout_worker(eos_token=[999])
         rollout_state = RolloutState(
-            uid=1,
+            rollout_id=1,
             message=[],
             prompt_ids=[10, 11],
             response_ids=[101, 999],
@@ -287,7 +287,7 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
         # partial rollout 已用完 max_tokens 时，应直接 length 完成，不再继续生成。
         worker = self._build_partial_rollout_worker()
         rollout_state = RolloutState(
-            uid=2,
+            rollout_id=2,
             message=[],
             prompt_ids=[10, 11],
             response_ids=[201, 202, 203],
@@ -449,7 +449,7 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
     async def test_preprocess_and_postprocess_preserve_response_prefix(self):
         # partial rollout 续写时应复用 prompt+历史 response，并把新 response token 追加到历史后面。
         rollout_state = RolloutState(
-            uid=1,
+            rollout_id=1,
             message=[],
             prompt_ids=[10, 11],
             response="old",
@@ -487,7 +487,7 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
         max_tokens = 5
         handler = PartialRolloutHandler()
         rollout_state = RolloutState(
-            uid=2,
+            rollout_id=2,
             message=[],
             prompt_ids=[10],
             response="a",

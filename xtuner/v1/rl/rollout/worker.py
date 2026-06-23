@@ -690,7 +690,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 rollout_state.status = Status.ABORTED
                 return rollout_state
 
-            uid = rollout_state.uid
+            uid = rollout_state.rollout_id
             sample_params: SampleParams = rollout_state.sample_params
             if sample_params.return_token_ids:
                 endpoint_url = f"{self.server_url}/{self.endpoints['generate']}"
@@ -995,7 +995,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             return result
 
     async def _safe_handle_response(self, rollout_state: RolloutState, http_response: httpx.Response) -> RolloutState:
-        uid = rollout_state.message_uid
+        uid = rollout_state.group_id
 
         sample_params = rollout_state.sample_params
         is_token_out = sample_params.return_token_ids

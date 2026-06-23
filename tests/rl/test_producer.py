@@ -22,7 +22,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, discard_rollout_state
 from xtuner.v1.rl.agent_loop_manager import (
     AsyncProduceStrategyConfig,
     DisaggAsyncProduceStrategyConfig,
@@ -34,6 +34,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     SamplerConfig,
     SyncProduceStrategyConfig,
 )
+from xtuner.v1.rl.agent_loop_manager.produce_utils import _TaskRunner, build_produce_batch_result
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 
 
@@ -45,8 +46,8 @@ def make_rollout_state(
     reward_score: float | None = None,
 ) -> RolloutState:
     return RolloutState(
-        uid=uid,
-        message_uid=uid,
+        rollout_id=uid,
+        group_id=uid,
         message=[{"role": "user", "content": f"prompt {uid}"}],
         prompt_ids=[uid],
         tokens=[uid],
@@ -109,7 +110,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         sleep_by_id = sleep_by_id or {}
 
         async def mock_gen(rs, **kwargs):
-            await asyncio.sleep(sleep_by_id.get(rs[0].message_uid, 0.0))
+            await asyncio.sleep(sleep_by_id.get(rs[0].group_id, 0.0))
             for r in rs:
                 r.seq_staleness = kwargs.get("model_step", kwargs.get("train_step", 0))
                 r.status = Status.COMPLETED
@@ -246,7 +247,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
 
         # 场景 A: ReplayBuffer 为空，从 Dataloader 拿
         data = await sampler.sample(task_name)
-        self.assertEqual(data[0].message_uid, 0)
+        self.assertEqual(data[0].group_id, 0)
 
         # 场景 B: ReplayBuffer 有多个候选状态，按列表顺序优先拿
         aborted_item = make_rollout_state(999, status=Status.ABORTED)
@@ -255,14 +256,29 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         await self.replay_buffer.put([expired_item], task_name)
 
         data = await sampler.sample(task_name, group_status=[Status.EXPIRED, Status.ABORTED])
-        self.assertEqual(data[0].message_uid, 1000)
+        self.assertEqual(data[0].group_id, 1000)
 
         data = await sampler.sample(task_name, group_status=[Status.EXPIRED, Status.ABORTED])
-        self.assertEqual(data[0].message_uid, 999)
+        self.assertEqual(data[0].group_id, 999)
 
         # 场景 C: ReplayBuffer 对应状态都为空，回退到 Dataloader
         data = await sampler.sample(task_name, group_status=[Status.EXPIRED, Status.ABORTED])
-        self.assertEqual(data[0].message_uid, 1)
+        self.assertEqual(data[0].group_id, 1)
+
+    async def test_discard_rollout_state_keeps_required_fields_valid(self):
+        # 验证 discard 不破坏 RolloutState 的必填字段契约，同时释放可丢弃的重字段。
+        item = make_rollout_state(42, status=Status.COMPLETED, reward_score=1.0)
+        item.routed_experts = MagicMock()
+        item.extra_fields = {"large": [1, 2, 3]}
+
+        discarded = discard_rollout_state(item)
+
+        self.assertEqual(discarded.message, [{"role": "user", "content": "prompt 42"}])
+        self.assertEqual(discarded.status, Status.INIT)
+        self.assertIsNone(discarded.response)
+        self.assertIsNone(discarded.response_ids)
+        self.assertIsNone(discarded.routed_experts)
+        self.assertEqual(discarded.extra_fields, {})
 
     async def test_put_generated_group_only_validates_completed_group(self):
         # 验证 ProduceContext 只对 completed group 执行业务过滤，aborted group 保持可重试状态。
@@ -284,15 +300,37 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
 
         completed_group = [make_rollout_state(1, status=Status.COMPLETED)]
         self.assertFalse(await ctx.put_generated_group(completed_group))
-        self.assertEqual(completed_group[0].status, Status.FILTERED)
+        self.assertIsNone(completed_group[0].uid)
 
         aborted_group = [make_rollout_state(2, status=Status.ABORTED)]
         self.assertFalse(await ctx.put_generated_group(aborted_group))
         self.assertEqual(aborted_group[0].status, Status.ABORTED)
 
+        failed_group = [make_rollout_state(3, status=Status.FAILED)]
+        self.assertFalse(await ctx.put_generated_group(failed_group))
+
         self.assertEqual(valid_checked_statuses, [[Status.COMPLETED]])
-        self.assertEqual(await self.replay_buffer.count(task_name, Status.FILTERED), 1)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.FILTERED), 0)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.FAILED), 0)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.ABORTED), 1)
+
+        result = build_produce_batch_result(
+            task_runners=[
+                _TaskRunner(
+                    task_name=task_name,
+                    agent_loop=self._build_agent_loop(),
+                    produce_strategy=strategy,
+                    sampler=self._build_sampler(),
+                )
+            ],
+            task_batch_sizes={task_name: 0},
+            batch_by_task={task_name: []},
+            leftover_counts={task_name: {}},
+            progress=ctx.progress,
+            pause_time_s=0.0,
+        )
+        self.assertEqual(result.failed_samples, 1)
+        self.assertEqual(result.filtered_samples, 1)
 
     async def test_put_generated_group_records_raw_rewards_before_filtering(self):
         # 验证 raw reward 在过滤前统计，filtered group 仍能贡献生成侧 reward 指标。
@@ -316,10 +354,27 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertFalse(await ctx.put_generated_group(completed_group))
 
-        self.assertEqual([item.status for item in completed_group], [Status.FILTERED, Status.FILTERED])
+        self.assertTrue(all(item.uid is None for item in completed_group))
         self.assertEqual(ctx.progress.consume_raw_rewards(task_name), (1.0, 2))
         self.assertEqual(ctx.progress.consume_raw_rewards(task_name), (0.0, 0))
-        self.assertEqual(await self.replay_buffer.count(task_name, Status.FILTERED), 1)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.FILTERED), 0)
+
+        result = build_produce_batch_result(
+            task_runners=[
+                _TaskRunner(
+                    task_name=task_name,
+                    agent_loop=self._build_agent_loop(),
+                    produce_strategy=strategy,
+                    sampler=self._build_sampler(),
+                )
+            ],
+            task_batch_sizes={task_name: 0},
+            batch_by_task={task_name: []},
+            leftover_counts={task_name: {}},
+            progress=ctx.progress,
+            pause_time_s=0.0,
+        )
+        self.assertEqual(result.filtered_samples, 2)
 
     async def test_sync_produce_strategy(self):
         # 验证同步生产策略会生产指定数量的 completed rollout group 并写入 replay buffer。
@@ -345,19 +400,19 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # 验证：ReplayBuffer 中应该有 2 条 COMPLETED 数据
         final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
         self.assertEqual(len(final_data), 2)
-        self.assertEqual(final_data[0][0].message_uid, 0)
-        self.assertEqual(final_data[1][0].message_uid, 1)
+        self.assertEqual(final_data[0][0].group_id, 0)
+        self.assertEqual(final_data[1][0].group_id, 1)
 
     async def test_sync_produce_strategy_refills_after_filtered_and_aborted_groups(self):
         # 验证 filtered / aborted group 不占用 completed quota，sync producer 会继续补齐训练 batch。
         task_name = "test_sync_refill"
 
         def is_valid_sample_fn(samples):
-            return samples[0].message_uid != 0
+            return samples[0].group_id != 0
 
         async def mock_gen(rs, **kwargs):
             for r in rs:
-                if r.message_uid == 1:
+                if r.group_id == 1:
                     r.status = Status.ABORTED
                     r.response = ""
                     r.response_ids = []
@@ -386,8 +441,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         await strategy.produce_batch(ctx)
         completed = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
         self.assertEqual(len(completed), 2)
-        self.assertEqual(sorted(group[0].message_uid for group in completed), [2, 3])
-        self.assertEqual(await self.replay_buffer.count(task_name, Status.FILTERED), 1)
+        self.assertEqual(sorted(group[0].group_id for group in completed), [2, 3])
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.FILTERED), 0)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.ABORTED), 1)
 
     async def test_async_produce_strategy_oversamples_and_retries_aborted_groups(self):
@@ -403,7 +458,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             nonlocal call_count
             call_count += 1
             for r in rs:
-                if r.message_uid == 999:
+                if r.group_id == 999:
                     r.seq_staleness = 5
                 else:
                     r.seq_staleness = call_count
@@ -434,7 +489,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # 验证：ReplayBuffer 中应该有 4 条 COMPLETED 数据。
         final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
         self.assertEqual(len(final_data), 4)
-        self.assertEqual(sorted(group[0].message_uid for group in final_data), [0, 1, 2, 999])
+        self.assertEqual(sorted(group[0].group_id for group in final_data), [0, 1, 2, 999])
 
     async def test_async_produce_strategy_accepts_context_entrypoint(self):
         # 验证 AsyncProduceStrategy 通过 ProduceContext public 入口完成一次最小生产。
@@ -564,7 +619,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # tail-batch 模式在本轮优先走 EXPIRED pool，并且不使用 over-sample 额外发射。
         self.assertEqual(sampled_statuses, [[Status.EXPIRED, Status.ABORTED], [Status.EXPIRED, Status.ABORTED]])
         completed = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
-        self.assertEqual(sorted(group[0].message_uid for group in completed), [900, 901])
+        self.assertEqual(sorted(group[0].group_id for group in completed), [900, 901])
         self.assertTrue(all(group[0].seq_staleness == 0 for group in completed))
 
     async def test_async_produce_strategy_fails_fast_on_invalid_progress(self):
@@ -721,7 +776,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
 
         final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
         self.assertEqual(len(final_data), 1)
-        self.assertEqual(final_data[0][0].message_uid, 0)
+        self.assertEqual(final_data[0][0].group_id, 0)
         for group in final_data:
             self.assertIn("group_generate_time_s", group[0].extra_fields)
             self.assertGreater(group[0].extra_fields["group_generate_time_s"], 0.0)

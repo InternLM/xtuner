@@ -105,8 +105,8 @@ class _FailingProduceStrategy:
 
 
 class _FakeRolloutState:
-    def __init__(self, uid: str, group_generate_time_s: float):
-        self.uid = uid
+    def __init__(self, rollout_id: str, group_generate_time_s: float):
+        self.rollout_id = rollout_id
         self.extra_fields = {GROUP_GENERATE_TIME_KEY: group_generate_time_s}
 
 
@@ -252,8 +252,8 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.leftover_completed, 1)
         self.assertEqual(result.leftover_aborted, 2)
         self.assertEqual(result.leftover_expired, 0)
-        self.assertEqual(result.leftover_failed, 0)
-        self.assertEqual(result.leftover_filtered, 0)
+        self.assertEqual(result.failed_samples, 0)
+        self.assertEqual(result.filtered_samples, 0)
         self.assertIn("task_a", result.task_results)
         self.assertIn("task_b", result.task_results)
         self.assertIn("task_c", result.task_results)

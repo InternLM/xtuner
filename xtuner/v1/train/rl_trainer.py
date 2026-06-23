@@ -1309,8 +1309,8 @@ class BaseRLTrainer:
         all_scalars["async/completed_samples"] = produce_result.leftover_completed
         all_scalars["async/aborted_samples"] = produce_result.leftover_aborted
         all_scalars["async/expired_samples"] = produce_result.leftover_expired
-        all_scalars["async/failed_samples"] = produce_result.leftover_failed
-        all_scalars["async/filtered_samples"] = produce_result.leftover_filtered
+        all_scalars["async/failed_samples"] = produce_result.failed_samples
+        all_scalars["async/filtered_samples"] = produce_result.filtered_samples
 
         if train_info:
             data_info = train_info.get("data_info", {})
@@ -1398,8 +1398,8 @@ class BaseRLTrainer:
                 response_len = len(response_ids)
                 trajectory_items.append(
                     {
-                        "uid": data.uid,
-                        "message_uid": data.message_uid,
+                        "rollout_id": data.rollout_id,
+                        "group_id": data.group_id,
                         "task_name": data.task_name,
                         "data_source": data.data_source,
                         "status": data.status.value if hasattr(data.status, "value") else str(data.status),
@@ -1461,8 +1461,8 @@ class BaseRLTrainer:
                     ground_truth = data.reward_model.get("ground_truth")
                 trajectory_items.append(
                     {
-                        "uid": data.uid,
-                        "message_uid": data.message_uid,
+                        "rollout_id": data.rollout_id,
+                        "group_id": data.group_id,
                         "task_name": data.task_name,
                         "data_source": data.data_source,
                         "status": data.status.value if hasattr(data.status, "value") else str(data.status),
