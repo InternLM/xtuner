@@ -12,7 +12,7 @@ ROLLOUT_HTTP_MAX_CONNECTIONS = 100_000
 # Ray actor method concurrency cap for rollout generate paths. This is
 # intentionally far above expected producer fan-out so RolloutController and
 # RolloutWorker actors do not become the queueing point.
-ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY = 100_000_000
+ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY = 1_000_000
 
 # Agent-loop actors should also avoid adding an independent queue in front of
 # rollout generation. Producer pending limits remain the effective fan-out

@@ -432,6 +432,15 @@ class RolloutConfig(BaseModel):
         return self.expert_parallel_size if self.expert_parallel_size > 1 else self.tensor_parallel_size
 
     def model_post_init(self, __context: Any) -> None:
+        default_allow_over_concurrency_ratio = type(self).model_fields["allow_over_concurrency_ratio"].default
+        if self.allow_over_concurrency_ratio != default_allow_over_concurrency_ratio:
+            get_logger().warning(
+                "rollout_config.allow_over_concurrency_ratio is deprecated and no longer controls runtime "
+                "rollout concurrency. The configured value "
+                f"{self.allow_over_concurrency_ratio} will be ignored; fixed rollout concurrency caps from "
+                "xtuner.v1.rl.rollout.constants are used instead."
+            )
+
         if self.model_name is None:
             model_name_from_config = None
             config_json_path = Path(self.model_path) / "config.json"
