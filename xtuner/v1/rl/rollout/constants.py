@@ -1,8 +1,7 @@
 """Rollout-wide constants.
 
-Producer strategies control the real rollout fan-out with their scheduled
-pending task targets. These large caps keep Ray actors and HTTP client pools
-from introducing extra queues before requests reach the inference engine.
+Producer strategies control the real rollout fan-out with their scheduled pending task targets. These large caps keep
+Ray actors and HTTP client pools from introducing extra queues before requests reach the inference engine.
 """
 
 # Per-rollout-worker HTTP connection cap. httpx does not pre-open these
