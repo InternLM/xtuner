@@ -14,7 +14,8 @@ if TYPE_CHECKING:
 
 
 class RolloutProxyManager(RolloutWorkerLifecycleListener):
-    """Keep routed API proxy registrations in sync with rollout worker lifecycle."""
+    """Keep routed API proxy registrations in sync with rollout worker
+    lifecycle."""
 
     _CHECK_ATTEMPTS = 5
     _CHECK_INTERVAL_SECONDS = 3.0

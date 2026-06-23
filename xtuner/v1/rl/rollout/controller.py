@@ -83,9 +83,7 @@ class RolloutController:
     def register_active_workers_to_proxy(self) -> None:
         assert self.proxy_manager is not None, "Proxy manager must be initialized"
         session_urls = sorted(
-            worker.session_url
-            for worker in self.registry.active_entrypoints()
-            if worker.session_url is not None
+            worker.session_url for worker in self.registry.active_entrypoints() if worker.session_url is not None
         )
         self.proxy_manager.replace_registered_session_urls(session_urls)
 
