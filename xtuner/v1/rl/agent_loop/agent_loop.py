@@ -34,6 +34,7 @@ class AgentLoopConfig(ABC, BaseModel):
     sample_params: SampleParams | None = None
     cpu_resources: CPUResourcesConfig | None = None
     enable_batch_judge: bool = False
+    requires_rollout_proxy: bool = False
 
     def build(self, rollout_controller, judger: Judger | None = None, logger=None) -> AgentLoopSpec:
         if self.cpu_resources is None:

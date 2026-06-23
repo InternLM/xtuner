@@ -72,6 +72,27 @@ def _to_cpu_tensor(value: np.ndarray | None, *, dtype: torch.dtype | None = None
     return torch.as_tensor(value, dtype=dtype, device="cpu")
 
 
+def _agent_loop_manager_requires_rollout_proxy(
+    cfg: AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None,
+) -> bool:
+    # TODO: This is a temporary hardcoded adapter over current AgentLoopManagerConfig shapes.
+    # Prefer moving this behind a manager-level capability method/property when the config API is cleaned up.
+    if cfg is None:
+        return False
+    tasks = getattr(cfg, "tasks", None)
+    if tasks is None:
+        agent_loop_config = getattr(cfg, "agent_loop_config", None)
+        return bool(getattr(agent_loop_config, "requires_rollout_proxy", False))
+    task_cfgs = tasks if isinstance(tasks, list) else [tasks]
+    return any(bool(getattr(task.agent_loop_config, "requires_rollout_proxy", False)) for task in task_cfgs)
+
+
+def _trainer_config_requires_rollout_proxy(cfg: "BaseRLTrainerConfig") -> bool:
+    return _agent_loop_manager_requires_rollout_proxy(
+        cfg.agent_loop_manager_cfg
+    ) or _agent_loop_manager_requires_rollout_proxy(cfg.eval_agent_loop_manager_cfg)
+
+
 def check_fa3():
     if os.environ.get("XTUNER_USE_FA3", "0") != "1":
         return
@@ -547,6 +568,7 @@ class BaseRLTrainer:
         self._init_train_state(cfg)
         self._init_train_worker_config(cfg, log_dir)
         self._init_rollout_config(cfg, log_dir)
+        self._ensure_rollout_proxy_config(cfg)
         self._init_runtime_flags(cfg)
         self._advantage_estimator = cfg.advantage_estimator_config.build()
         self._cpu_resource_manager: CPUResourceManager | None = None
@@ -631,6 +653,11 @@ class BaseRLTrainer:
                 f"Skip load rollout weights due to resume from checkpoint {self._load_checkpoint_cfg.checkpoint_path}"
             )
         self._rollout_config = cfg.rollout_config
+
+    def _ensure_rollout_proxy_config(self, cfg: BaseRLTrainerConfig) -> None:
+        if not _trainer_config_requires_rollout_proxy(cfg):
+            return
+        self._rollout_config.enable_proxy = True
 
     def _init_runtime_flags(self, cfg: BaseRLTrainerConfig) -> None:
         self._enable_evaluate = cfg.enable_evaluate

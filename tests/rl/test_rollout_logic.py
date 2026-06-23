@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import httpx
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.rl.agent_loop import AgentLoopConfig
 from xtuner.v1.rl.rollout.controller import RolloutController
 from xtuner.v1.rl.rollout.health_manager import RolloutHealthManager
 from xtuner.v1.rl.rollout.proxy_manager import RolloutProxyManager
@@ -28,6 +29,7 @@ from xtuner.v1.rl.rollout.sglang import SGLangWorker
 from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, SessionRouter
 from xtuner.v1.rl.rollout.worker import RolloutWorker
 from xtuner.v1.rl.utils.misc import delete_from_routedapiproxy
+from xtuner.v1.train.rl_trainer import BaseRLTrainer, _agent_loop_manager_requires_rollout_proxy
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
 
@@ -72,6 +74,53 @@ class _FakeRolloutWorkerGenerate:
 class _FakeRolloutWorker:
     def __init__(self, returned_state):
         self.generate = _FakeRolloutWorkerGenerate(returned_state)
+
+
+class _ProxyRequiredAgentLoopConfig(AgentLoopConfig):
+    hf_checkpoint: str = "fake"
+    requires_rollout_proxy: bool = True
+
+    def build_local(self, rollout_controller, judger=None, logger=None):
+        raise NotImplementedError
+
+
+class _ProxyOptionalAgentLoopConfig(AgentLoopConfig):
+    hf_checkpoint: str = "fake"
+
+    def build_local(self, rollout_controller, judger=None, logger=None):
+        raise NotImplementedError
+
+
+class TestAgentLoopProxyRequirement(unittest.TestCase):
+    def test_agent_loop_manager_proxy_requirement_uses_config_declaration(self):
+        requires_proxy_manager = SimpleNamespace(
+            tasks=[
+                SimpleNamespace(agent_loop_config=_ProxyOptionalAgentLoopConfig()),
+                SimpleNamespace(agent_loop_config=_ProxyRequiredAgentLoopConfig()),
+            ]
+        )
+        optional_proxy_manager = SimpleNamespace(
+            tasks=SimpleNamespace(agent_loop_config=_ProxyOptionalAgentLoopConfig())
+        )
+
+        self.assertTrue(_agent_loop_manager_requires_rollout_proxy(requires_proxy_manager))
+        self.assertFalse(_agent_loop_manager_requires_rollout_proxy(optional_proxy_manager))
+
+    def test_trainer_auto_enables_rollout_proxy_when_agent_loop_requires_it(self):
+        trainer = BaseRLTrainer.__new__(BaseRLTrainer)
+        trainer._rollout_config = SimpleNamespace(enable_proxy=False)
+        trainer.logger = MagicMock()
+        cfg = SimpleNamespace(
+            agent_loop_manager_cfg=SimpleNamespace(
+                tasks=SimpleNamespace(agent_loop_config=_ProxyRequiredAgentLoopConfig())
+            ),
+            eval_agent_loop_manager_cfg=None,
+        )
+
+        trainer._ensure_rollout_proxy_config(cfg)
+
+        self.assertTrue(trainer._rollout_config.enable_proxy)
+        trainer.logger.info.assert_called_once()
 
 
 class TestRolloutController(unittest.IsolatedAsyncioTestCase):
@@ -151,12 +200,13 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
 
         controller.proxy_manager.replace_registered_session_urls.assert_called_once_with(["http://session-0"])
 
-    def test_register_active_workers_to_proxy_noop_without_proxy_manager(self):
+    def test_register_active_workers_to_proxy_requires_proxy_manager(self):
         controller = RolloutController.__new__(RolloutController)
         controller.registry = RolloutWorkerRegistry(engine_rank_mesh_array=[], rollout_config=SimpleNamespace())
         controller.proxy_manager = None
 
-        controller.register_active_workers_to_proxy()
+        with self.assertRaisesRegex(AssertionError, "Proxy manager must be initialized"):
+            controller.register_active_workers_to_proxy()
 
 
 class TestRolloutProxyManager(unittest.TestCase):
