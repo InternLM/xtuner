@@ -81,11 +81,17 @@ class RolloutController:
         return rollout_metadata
 
     def register_active_workers_to_proxy(self) -> None:
-        assert self.proxy_manager is not None, "Proxy manager must be initialized"
+        if self.proxy_manager is None:
+            return
         session_urls = sorted(
             worker.session_url for worker in self.registry.active_entrypoints() if worker.session_url is not None
         )
         self.proxy_manager.replace_registered_session_urls(session_urls)
+
+    def validate_registered_workers_to_proxy(self) -> None:
+        if self.proxy_manager is None:
+            return
+        self.proxy_manager.validate_registered_session_urls()
 
     def _build_output_parsers(self) -> tuple[ToolCallParser | None, ReasoningParser | None]:
         tool_call_parser = None

@@ -194,8 +194,8 @@ class RolloutHealthManager:
                         recovered_groups.append(updated_group or group)
                     if not is_recovered:
                         failed_recovery_groups.append(group)
-            for group in recovered_groups:
-                self._notify_worker_group_recovered(group)
+                for group in recovered_groups:
+                    self._notify_worker_group_recovered(group)
             inactive_workers = [
                 f"rank={worker.rank}, url={worker.url}" for worker in self._registry.inactive_workers()
             ]
@@ -283,9 +283,11 @@ class RolloutHealthManager:
             with self._operation_lock:
                 if not self._is_stopping():
                     failed_groups = self._registry.mark_unhealthy_ranks(failed_ranks)
-        for group in failed_groups:
-            logger.warning(f"Rollout worker group ranks={group.ranks} failed health check. Marking as inactive.")
-            self._notify_worker_group_inactive(group)
+                    for group in failed_groups:
+                        logger.warning(
+                            f"Rollout worker group ranks={group.ranks} failed health check. Marking as inactive."
+                        )
+                        self._notify_worker_group_inactive(group)
 
         return len(workers_to_check)
 

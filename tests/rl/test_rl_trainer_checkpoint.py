@@ -96,6 +96,7 @@ class _FakeRolloutController:
         self.onload_kvcache = _RemoteMethod(return_value="kvcache_loaded")
         self.get_rollout_metadata = _RemoteMethod(return_value={"server_url_dict": {}})
         self.set_enable_partial_rollout = _RemoteMethod(return_value=None)
+        self.validate_registered_workers_to_proxy = _RemoteMethod(return_value=None)
 
     def _generate(self, rollout_state):
         # 生成侧只补齐训练真正需要的可观察 rollout 结果，不加载真实推理服务。

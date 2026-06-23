@@ -1582,6 +1582,10 @@ class RLColocateTrainer(BaseRLTrainer):
             self._fit_debug_train()
             return
 
+        ray.get(
+            self.rollout_controller.validate_registered_workers_to_proxy.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT
+        )
+
         if self._enable_initial_evaluate and not self._debug_rollout:
             asyncio_run(self._run_initial_evaluate())
 
@@ -1819,6 +1823,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         if self._cur_step >= self._total_train_steps:
             self.logger.info(f"Train steps {self._total_train_steps} reached, stop training")
             return
+
+        await self.rollout_controller.validate_registered_workers_to_proxy.remote()  # type: ignore[attr-defined]
 
         if self._enable_initial_evaluate:
             await self._run_initial_evaluate()

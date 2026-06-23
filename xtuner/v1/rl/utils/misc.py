@@ -245,8 +245,8 @@ def get_eos_token(model_path: str) -> int | List[int]:
     return eos_token_id
 
 
-def register_to_routedapiproxy(model_name: str, api_server_url: str) -> dict:
-    url = "http://s-20260104203038-22bhb-decode.ailab-evalservice.svc:4000/v1/models/new"
+def register_to_routedapiproxy(admin_url: str, model_name: str, api_server_url: str) -> dict:
+    url = f"{admin_url.rstrip('/')}/v1/models/new"
     payload = {
         "model_name": model_name,
         "api_key": "sk-admin",
@@ -258,13 +258,11 @@ def register_to_routedapiproxy(model_name: str, api_server_url: str) -> dict:
     }
     resp = requests.post(url, json=payload, headers=headers, timeout=30)
     resp.raise_for_status()
-    result = resp.json()
-    print(f"registered to routedapiproxy: {result}")
-    return result
+    return resp.json()
 
 
-def delete_from_routedapiproxy(model_name: str, api_server_url: str | None = None) -> None:
-    url = "http://s-20260104203038-22bhb-decode.ailab-evalservice.svc:4000/v1/models/delete"
+def delete_from_routedapiproxy(admin_url: str, model_name: str, api_server_url: str | None = None) -> None:
+    url = f"{admin_url.rstrip('/')}/v1/models/delete"
     payload = {
         "model_name": model_name,
     }
@@ -276,7 +274,6 @@ def delete_from_routedapiproxy(model_name: str, api_server_url: str | None = Non
     }
     resp = requests.post(url, json=payload, headers=headers, timeout=30)
     resp.raise_for_status()
-    print(f"deleted from routedapiproxy: {resp.json()}")
 
 
 TIMEOUT = 120
@@ -309,21 +306,29 @@ def check_chat_completions(base_url: str, model: str) -> bool:
         "temperature": 0.0,
         "extra_body": {"spaces_between_special_tokens": False},
     }
-    print(f"========================POST {url}================================")
+    print(f"[RoutedProxyCheck] START url={url} model={model}", flush=True)
     t0 = time.time()
     try:
         result = _post(url, payload)
         elapsed = time.time() - t0
         content = result["choices"][0]["message"]["content"]
         usage = result.get("usage", {})
-        print(f"      Response ({elapsed:.2f}s): {content!r}")
-        print(f"      Usage: {usage}")
-        print("      ✓ Chat completions endpoint OK.")
+        print(
+            f"[RoutedProxyCheck] OK url={url} model={model} elapsed={elapsed:.2f}s response={content!r} usage={usage}",
+            flush=True,
+        )
         return True
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        print(f"      ✗ Failed ({time.time() - t0:.2f}s): HTTP {e.code} {e.reason}: {body[:2000]}")
+        print(
+            f"[RoutedProxyCheck] FAILED url={url} model={model} elapsed={time.time() - t0:.2f}s "
+            f"HTTP {e.code} {e.reason}: {body[:2000]}",
+            flush=True,
+        )
         return False
     except Exception as e:
-        print(f"      ✗ Failed ({time.time() - t0:.2f}s): {e}")
+        print(
+            f"[RoutedProxyCheck] FAILED url={url} model={model} elapsed={time.time() - t0:.2f}s error={e}",
+            flush=True,
+        )
         return False

@@ -2,7 +2,11 @@ import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from xtuner.v1.rl.utils.misc import check_chat_completions, delete_from_routedapiproxy, register_to_routedapiproxy
+from xtuner.v1.rl.utils.misc import (
+    check_chat_completions,
+    delete_from_routedapiproxy,
+    register_to_routedapiproxy,
+)
 from xtuner.v1.utils import get_logger
 
 from .health_manager import RolloutWorkerLifecycleListener
@@ -22,19 +26,30 @@ class RolloutProxyManager(RolloutWorkerLifecycleListener):
 
     def __init__(self, config: "RolloutConfig"):
         self._model_name = config.model_name
+        self._routed_proxy_url = config.routed_proxy_url
+        self._routed_proxy_admin_url = config.routed_proxy_admin_url
         self._registered_session_urls: set[str] = set()
         self._logger = get_logger(log_dir=config.worker_log_dir, tag="RolloutProxyManager")
 
     def replace_registered_session_urls(self, session_urls: Iterable[str]) -> None:
         model_name = self._get_model_name()
-        delete_from_routedapiproxy(model_name)
+        delete_from_routedapiproxy(self._routed_proxy_admin_url, model_name)
         self._registered_session_urls.clear()
         self._logger.info(f"Deleted routed API proxy registrations for model {model_name}.")
 
         unique_session_urls = sorted(set(session_urls))
+        register_result = None
         for session_url in unique_session_urls:
-            self._register_session_url(session_url, raise_on_error=True)
-        self._logger.info(f"Registered {len(unique_session_urls)} rollout session servers to routed API proxy.")
+            register_result = self._register_session_url(session_url, raise_on_error=True, log_success=False)
+        self._logger.info(
+            f"Registered {len(unique_session_urls)} rollout session servers to routed API proxy. "
+            f"session_urls={unique_session_urls}, proxy_result={register_result}"
+        )
+
+    def validate_registered_session_urls(self) -> None:
+        if not self._registered_session_urls:
+            return
+        self._validate_routed_proxy()
 
     def on_worker_group_inactive(self, group: "WorkerGroup") -> None:
         """Remove inactive request entrypoints from routed API proxy."""
@@ -48,32 +63,33 @@ class RolloutProxyManager(RolloutWorkerLifecycleListener):
             if worker.is_request_entrypoint:
                 self._register_session_url(worker.session_url)
 
-    def _register_session_url(self, session_url: str | None, *, raise_on_error: bool = False) -> None:
+    def _register_session_url(
+        self,
+        session_url: str | None,
+        *,
+        raise_on_error: bool = False,
+        log_success: bool = True,
+    ) -> dict | None:
         if session_url is None or session_url in self._registered_session_urls:
-            return
+            return None
         model_name = self._get_model_name()
-        registered_remotely = False
         try:
-            register_to_routedapiproxy(model_name, session_url)
-            registered_remotely = True
-            self._validate_session_url(session_url)
+            result = register_to_routedapiproxy(self._routed_proxy_admin_url, model_name, session_url)
             self._registered_session_urls.add(session_url)
-            self._logger.info(f"Registered rollout session server to routed API proxy: {session_url}")
+            if log_success:
+                self._logger.info(f"Registered rollout session server to routed API proxy: {session_url}")
+            return result
         except Exception:
             self._logger.exception(f"Failed to register rollout session server to routed API proxy: {session_url}")
-            if registered_remotely:
-                try:
-                    delete_from_routedapiproxy(model_name, session_url)
-                except Exception:
-                    self._logger.exception(f"Failed to rollback routed API proxy registration: {session_url}")
             if raise_on_error:
                 raise
+            return None
 
     def _delete_session_url(self, session_url: str | None, *, raise_on_error: bool = False) -> None:
         if session_url is None or session_url not in self._registered_session_urls:
             return
         try:
-            delete_from_routedapiproxy(self._get_model_name(), session_url)
+            delete_from_routedapiproxy(self._routed_proxy_admin_url, self._get_model_name(), session_url)
             self._registered_session_urls.discard(session_url)
             self._logger.info(f"Deleted rollout session server from routed API proxy: {session_url}")
         except Exception:
@@ -86,15 +102,18 @@ class RolloutProxyManager(RolloutWorkerLifecycleListener):
             raise ValueError("RolloutConfig.model_name must be set when enable_proxy=True.")
         return self._model_name
 
-    def _validate_session_url(self, session_url: str) -> None:
+    def _validate_routed_proxy(self) -> None:
         model_name = self._get_model_name()
+        self._logger.info(
+            f"Validating routed API proxy chat completions: url={self._routed_proxy_url}, model={model_name}"
+        )
         for attempt in range(1, self._CHECK_ATTEMPTS + 1):
-            if check_chat_completions(session_url, model_name):
+            if check_chat_completions(self._routed_proxy_url, model_name):
                 return
             if attempt < self._CHECK_ATTEMPTS:
                 self._logger.warning(
-                    f"check chat completions failed for {session_url}, "
+                    f"check chat completions failed for routed API proxy {self._routed_proxy_url}, "
                     f"retrying {attempt}/{self._CHECK_ATTEMPTS - 1} after {self._CHECK_INTERVAL_SECONDS}s"
                 )
                 time.sleep(self._CHECK_INTERVAL_SECONDS)
-        raise RuntimeError(f"check chat completions failed for registered rollout session server: {session_url}")
+        raise RuntimeError(f"check chat completions failed for routed API proxy: {self._routed_proxy_url}")

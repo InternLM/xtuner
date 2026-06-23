@@ -154,6 +154,7 @@ class TestRLColocateTrainer(unittest.TestCase):
             restart_inactive_workers=SimpleNamespace(remote=MagicMock(return_value="rollout_restarted")),
             onload_weights=SimpleNamespace(remote=MagicMock(return_value="weights_loaded")),
             onload_kvcache=SimpleNamespace(remote=MagicMock(return_value="kvcache_loaded")),
+            validate_registered_workers_to_proxy=SimpleNamespace(remote=MagicMock(return_value=None)),
         )
         trainer.train_controller = SimpleNamespace(
             onload=MagicMock(return_value="train_onloaded"),

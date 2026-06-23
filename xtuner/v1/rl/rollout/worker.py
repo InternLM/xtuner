@@ -418,6 +418,20 @@ class RolloutConfig(BaseModel):
             help="Register rollout session servers to routed API proxy and keep registrations in sync with health.",
         ),
     ] = False
+    routed_proxy_url: Annotated[
+        str,
+        Parameter(
+            group=infer_group,
+            help="Routed API proxy base URL used to validate proxy chat completions after registration.",
+        ),
+    ] = "http://s-20260104203038-22bhb.ailab-evalservice.pjh-service.org.cn"
+    routed_proxy_admin_url: Annotated[
+        str,
+        Parameter(
+            group=infer_group,
+            help="Routed API proxy admin base URL used for model registration and deletion.",
+        ),
+    ] = "http://s-20260104203038-22bhb-decode.ailab-evalservice.svc:4000"
 
     @property
     def rollout_backend(self) -> str:
