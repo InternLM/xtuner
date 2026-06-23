@@ -153,7 +153,6 @@ rollout_config = RolloutConfig(
     context_length=max_response_length,
     enable_return_routed_experts=True,
     rollout_max_batch_size_per_instance=128,
-    allow_over_concurrency_ratio=2.0,
     rollout_timeout=1200,
     session_server_timeout=1200,
     health_check_interval_seconds=300.0,

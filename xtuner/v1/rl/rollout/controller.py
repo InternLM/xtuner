@@ -10,6 +10,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
+from .constants import ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
 from .health_manager import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthManager
 from .utils import SessionRouter
 from .worker import (
@@ -45,9 +46,6 @@ class RolloutController:
         self.num_gpus_per_engine = self.config.num_gpus_per_engine
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
         self.registry = self._init_workers(placement_group)
-        # Cache the exact controller concurrency chosen at build time so
-        # downstream components observe the same limit as the Ray actor.
-        self._generate_concurrency = self.config.get_controller_generate_concurrency(placement_group)
         # The timeout for the environment to wait for the rollout controller's response.
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
@@ -70,9 +68,6 @@ class RolloutController:
         self.logger.info(f"Rollout worker server URLs: {rollout_metadata['server_url_dict']}")
         self.logger.info(f"Rollout worker session server URLs: {rollout_metadata['worker_session_url_dict']}")
         return rollout_metadata
-
-    def get_generate_concurrency(self) -> int:
-        return self._generate_concurrency
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
@@ -183,13 +178,9 @@ class RolloutController:
         assert self.config.rollout_max_batch_size_per_instance is not None, (
             "rollout_max_batch_size_per_instance must be set before building RolloutWorker."
         )
-        worker_generate_max_concurrency = max(
-            1000,  # Ray async actor default max_concurrency.
-            self.config.generate_concurrency_per_instance,
-        )
         return ray.remote(
             concurrency_groups={
-                ROLLOUT_CONCURRENCY_GROUP_GENERATE: worker_generate_max_concurrency,
+                ROLLOUT_CONCURRENCY_GROUP_GENERATE: ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY,
             },
         )(worker_base_cls)
 

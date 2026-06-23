@@ -25,3 +25,23 @@ def test_rollout_config_default_dist_port_base_is_staggered(monkeypatch):
     assert second.dist_port_base == base + 24
     assert explicit.dist_port_base == 45678
     assert third.dist_port_base == base + 48
+
+
+def test_rollout_config_warns_for_deprecated_allow_over_concurrency_ratio(monkeypatch):
+    monkeypatch.delenv("XTUNER_USE_SGLANG", raising=False)
+    monkeypatch.delenv("XTUNER_USE_VLLM", raising=False)
+    monkeypatch.setenv("XTUNER_USE_LMDEPLOY", "1")
+
+    warnings = []
+
+    class _FakeLogger:
+        def warning(self, message):
+            warnings.append(message)
+
+    monkeypatch.setattr("xtuner.v1.rl.rollout.worker.get_logger", lambda *args, **kwargs: _FakeLogger())
+
+    _build_rollout_config(allow_over_concurrency_ratio=2.0)
+
+    assert len(warnings) == 1
+    assert "allow_over_concurrency_ratio is deprecated" in warnings[0]
+    assert "will be ignored" in warnings[0]
