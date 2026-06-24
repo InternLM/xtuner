@@ -60,6 +60,7 @@ class UpdateWeighter:
         weight_update_host: str | None = None,
         weight_update_port: int | None = None,
         worker_session_url_dict: ServiceUrlMap | None = None,
+        worker_session_urls_status: dict[str, bool] | None = None,
     ):
         """Update the rollout information for the training worker."""
 

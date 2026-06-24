@@ -127,9 +127,17 @@ class _FakeTrainController:
         self.update_weights_count = 0
         self.rollout_info = None
 
-    def update_rollout_info(self, info, train_rollout_mode):
+    def update_rollout_info(
+            self,
+            info,
+            train_rollout_mode,
+            weight_update_host,
+            weight_update_port
+        ):
         self.rollout_info = info
         self.train_rollout_mode = train_rollout_mode
+        self.weight_update_host = weight_update_host
+        self.weight_update_port = weight_update_port
 
     def onload(self, target="all"):
         return f"onload:{target}"
