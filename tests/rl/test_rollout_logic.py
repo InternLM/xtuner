@@ -139,8 +139,6 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
         controller.config = SimpleNamespace(rollout_timeout=1.0, random_seed=0)
         controller.timeout_multiplier = 1.0
         controller.router = router
-        controller._tool_call_parser = None
-        controller._reasoning_parser = None
         controller.logger = MagicMock()
         return controller
 

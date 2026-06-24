@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -68,21 +69,8 @@ TOTAL_TRAIN_STEPS = 2
 MAX_PROMPT_LENGTH = 4096
 MAX_RESPONSE_LENGTH = 2048
 PACK_MAX_LENGTH = 8192
-MISMATCH_KL_MAX = float(
-    os.environ.get(
-        "XTUNER_TRAIN_2STEP_MISMATCH_KL_MAX",
-        os.environ.get("XTUNER_PR_REAL_SMOKE_MISMATCH_KL_MAX", "0.005"),
-    )
-)
-MISMATCH_K3_KL_MAX = float(
-    os.environ.get(
-        "XTUNER_TRAIN_2STEP_MISMATCH_K3_KL_MAX",
-        os.environ.get("XTUNER_PR_REAL_SMOKE_MISMATCH_K3_KL_MAX", "0.005"),
-    )
-)
-RUN_ROOT = Path(
-    os.environ.get("XTUNER_TRAIN_2STEP_RUN_ROOT", os.environ.get("XTUNER_PR_REAL_SMOKE_RUN_ROOT", "."))
-).resolve()
+MISMATCH_KL_MAX = 0.005
+MISMATCH_K3_KL_MAX = 0.005
 
 REQUIRED_STEP_METRICS = (
     "mismatch/mismatch_kl",
@@ -111,9 +99,12 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
         if not DATA_PATH.exists():
             raise FileNotFoundError(f"Long-tail training dataset does not exist: {DATA_PATH}")
 
-        self.temp_dir = RUN_ROOT / f"{EXPERIMENT_NAME}_{time.strftime('%Y%m%d%H%M%S')}_{os.getpid()}"
-        self.temp_dir.mkdir(parents=True, exist_ok=False)
-        print(f"qwen35 vl moe async train 2-step work dir: {self.temp_dir}")
+        self.temp_dir = tempfile.TemporaryDirectory(
+            prefix=f"{EXPERIMENT_NAME}_{time.strftime('%Y%m%d%H%M%S')}_{os.getpid()}_",
+        )
+        self.addCleanup(self.temp_dir.cleanup)
+        self.temp_dir_path = Path(self.temp_dir.name)
+        print(f"qwen35 vl moe async train 2-step temp dir: {self.temp_dir_path}")
         self.produce_calls: list[dict[str, Any]] = []
         self.produce_results: list[ProduceBatchResult] = []
         self.update_weight_calls = 0
@@ -137,7 +128,7 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
             self._restore_env()
 
     def test_qwen35_vl_moe_async_train_2step_and_metrics(self):
-        work_dir = Path(self.temp_dir) / "work_dir"
+        work_dir = self.temp_dir_path / "work_dir"
         work_dir.mkdir(parents=True, exist_ok=True)
 
         start_s = time.perf_counter()
