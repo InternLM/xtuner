@@ -167,6 +167,7 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
 
     max_concurrent_samples: int | None = None
     mode: Literal["train", "eval"] = "train"
+    requires_rollout_proxy: bool = True
 
     def build_local(
         self, rollout_controller: RolloutController | None = None, judger: Judger | None = None, logger=None
