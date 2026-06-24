@@ -144,6 +144,10 @@ class RolloutConfig(BaseModel):
         gpu_memory_utilization (float): GPU memory utilization ratio. Defaults to 0.85.
         random_seed (int): Random seed for reproducible generation. Defaults to 1024.
         rollout_cross_node_comm (bool): Enable cross-node communication. Defaults to False.
+        weight_update_host (Optional[str]): Host used by train rank 0 to initialize the external NCCL weight update
+            group. Defaults to None.
+        weight_update_port (Optional[int]): Port used by train rank 0 to initialize the external NCCL weight update
+            group. Defaults to 30000.
         rollout_max_batch_size_per_instance (int): Maximum batch size for the rollout worker. If not set, it
             will be determined automatically based on `context_length`. Defaults to 512.
         allow_over_concurrency_ratio (float): Deprecated compatibility option. Rollout runtime concurrency is
@@ -223,6 +227,26 @@ class RolloutConfig(BaseModel):
             help="Base port number for distributed communication among rollout workers.",
         ),
     ] = 25000
+    weight_update_host: Annotated[
+        Optional[str],
+        Parameter(
+            group=infer_group,
+            help=(
+                "Host used by train rank 0 to initialize the external NCCL weight update group. "
+                "Only used for NCCL weight update."
+            ),
+        ),
+    ] = None
+    weight_update_port: Annotated[
+        Optional[int],
+        Parameter(
+            group=infer_group,
+            help=(
+                "Port used by train rank 0 to initialize the external NCCL weight update group. "
+                "Only used for NCCL weight update."
+            ),
+        ),
+    ] = 30000
     rollout_max_batch_size_per_instance: Annotated[
         Optional[int],
         Parameter(

@@ -91,13 +91,16 @@ class WeightIterator:
             if should_gather_train_ep_shards and model_ep_size > 1:
                 assert model.ep_mesh is not None
                 ep_group = model.ep_mesh.get_group()
-                gathered_tensors = [torch.empty_like(fused_full_tensor) for _ in range(model_ep_size)]
-                dist.all_gather(
-                    gathered_tensors,
-                    fused_full_tensor.contiguous(),
-                    group=ep_group,
+
+                output = torch.empty(
+                    *fused_full_tensor.shape[:dim],
+                    fused_full_tensor.shape[dim] * model_ep_size,
+                    *fused_full_tensor.shape[dim + 1 :],
+                    dtype=fused_full_tensor.dtype,
+                    device=fused_full_tensor.device,
                 )
-                fused_full_tensor = torch.cat(gathered_tensors, dim=dim)
+                dist.all_gather_into_tensor(output, fused_full_tensor.contiguous(), group=ep_group)
+                fused_full_tensor = output
 
             num_split = len(hf_keys)
             hf_tensor_size = fused_full_tensor.shape[dim] / num_split

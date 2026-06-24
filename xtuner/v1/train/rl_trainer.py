@@ -110,10 +110,20 @@ def bind_train_rollout(
     train_controller: TrainingController,
     rollout_controller: RolloutControllerProxy,
     train_rollout_mode: TrainRolloutMode | str,
+    weight_update_host: str | None = None,
+    weight_update_port: int | None = None,
 ) -> None:
     """Bind the training and rollout workers for update weights."""
-    info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())  # type: ignore[attr-defined]
-    train_controller.update_rollout_info(info_dict, train_rollout_mode=train_rollout_mode)
+    info_dict = ray.get(
+        rollout_controller.get_rollout_metadata.remote(),  # type: ignore[attr-defined]
+        timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+    )
+    train_controller.update_rollout_info(
+        info_dict,
+        train_rollout_mode=train_rollout_mode,
+        weight_update_host=weight_update_host,
+        weight_update_port=weight_update_port,
+    )
     return
 
 
@@ -1752,6 +1762,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             train_controller=self.train_controller,
             rollout_controller=self.rollout_controller,
             train_rollout_mode="disaggregated",
+            weight_update_host=self._rollout_config.weight_update_host,
+            weight_update_port=self._rollout_config.weight_update_port,
         )
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:

@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, cast
 
 import requests
 import torch
@@ -521,21 +521,25 @@ class SGLangNCCLBackendAdapter(NCCLBackendAdapter):
             ) from e
 
         state_dict = batch.state_dict
-        weight_names = list(state_dict.keys())
-        weight_tensors = [
-            tensor.detach().to(device=DEVICE, non_blocking=True).contiguous() for tensor in state_dict.values()
-        ]
-        payload = {
-            "names": weight_names,
-            "dtypes": [str(tensor.dtype).replace("torch.", "") for tensor in weight_tensors],
-            "shapes": [list(tensor.shape) for tensor in weight_tensors],
-            "group_name": group_name,
-            "load_format": "flattened_bucket",
-        }
-        flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=list(zip(weight_names, weight_tensors)))
-        flattened_tensor = flattened_tensor_bucket.get_flattened_tensor()
+        finished = batch.finished
+        if not finished:
+            weight_names = list(state_dict.keys())
+            weight_tensors = [
+                tensor.detach().to(device=DEVICE, non_blocking=True).contiguous() for tensor in state_dict.values()
+            ]
+            payload = {
+                "names": weight_names,
+                "dtypes": [str(tensor.dtype).replace("torch.", "") for tensor in weight_tensors],
+                "shapes": [list(tensor.shape) for tensor in weight_tensors],
+                "group_name": group_name,
+                "load_format": "flattened_bucket",
+            }
+            flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=list(zip(weight_names, weight_tensors)))
+            flattened_tensor = flattened_tensor_bucket.get_flattened_tensor()
 
-        return payload, flattened_tensor, weight_names
+            return payload, flattened_tensor, weight_names
+        else:
+            return None, None, None
 
     def build_request(
         self,
@@ -558,8 +562,9 @@ class LMDeployNCCLBackendAdapter(NCCLBackendAdapter):
             ) from e
 
         state_dict = batch.state_dict
+        finished = batch.finished
         # Pytorch backend will send empty state_dict when finished.
-        if state_dict is not None:
+        if not finished:
             weight_names = list(state_dict.keys())
             weight_tensors = [
                 tensor.detach().to(device=DEVICE, non_blocking=True).contiguous() for tensor in state_dict.values()
@@ -626,6 +631,7 @@ class NCCLWeightTransport(WeightTransport):
         return self.train_update_sync_group
 
     def get_weight_update_address(self) -> tuple[str, int]:
+        # NCCL 会建立通信组 [train 0 + all rollout rank] 来进行broadcast，这里需要获得可用ip和port
         host = self.rollout_info.weight_update_host
         if not host:
             try:
@@ -636,10 +642,8 @@ class NCCLWeightTransport(WeightTransport):
                 host = socket.gethostbyname(socket.gethostname())
 
         port = self.rollout_info.weight_update_port
-        if port is None:
-            port = self.rollout_info.weight_update_port_base + self.rank
 
-        return host, port
+        return cast(str, host), cast(int, port)
 
     def ensure_nccl_weight_update_group(self):
         """Create the NCCL weight update group if it has not been
@@ -756,36 +760,37 @@ class NCCLWeightTransport(WeightTransport):
         assert self.executor is not None
         assert self.group_name is not None
         payload, flattened_tensor, weight_names = self._adapter.build_weight_update_payload(batch, self.group_name)
-        request = self._adapter.build_request(payload)
-        # Notify rollout engines first so they can join the external NCCL group and
-        # prepare receive buffers described by names/dtypes/shapes.
-        update_futures = [
-            self.executor.submit(
-                self.post_json,
-                url,
-                request.endpoint,
-                request.body,
-                api_key=self.rollout_info.api_key,
-            )
-            for url in self.engine_urls
-        ]
-        if flattened_tensor is not None:
-            # LMDeploy send empty payload finally.
-            # Send the flattened weight tensor through the external NCCL group.
-            dist.broadcast(flattened_tensor, src=0, group=self.group)
-            DEVICE_MODULE.synchronize()
-        # Wait for rollout engines to finish loading weights and validate
-        # backend-specific update results.
-        for update_future in update_futures:
-            result = update_future.result()
-            self.hook_compare_test_sent_and_received_weight_hash(
-                result,
-                names=weight_names,
-            )
-            assert result.get("success", True), (
-                f"update_weights_from_distributed failed: {result.get('message', result)}"
-            )
-        dist.barrier(group=train_sync_group)
+        if payload is not None:
+            request = self._adapter.build_request(payload)
+            # Notify rollout engines first so they can join the external NCCL group and
+            # prepare receive buffers described by names/dtypes/shapes.
+            update_futures = [
+                self.executor.submit(
+                    self.post_json,
+                    url,
+                    request.endpoint,
+                    request.body,
+                    api_key=self.rollout_info.api_key,
+                )
+                for url in self.engine_urls
+            ]
+            if flattened_tensor is not None:
+                # LMDeploy send empty payload finally.
+                # Send the flattened weight tensor through the external NCCL group.
+                dist.broadcast(flattened_tensor, src=0, group=self.group)
+                DEVICE_MODULE.synchronize()
+            # Wait for rollout engines to finish loading weights and validate
+            # backend-specific update results.
+            for update_future in update_futures:
+                result = update_future.result()
+                self.hook_compare_test_sent_and_received_weight_hash(
+                    result,
+                    names=weight_names,
+                )
+                assert result.get("success", True), (
+                    f"update_weights_from_distributed failed: {result.get('message', result)}"
+                )
+            dist.barrier(group=train_sync_group)
 
     @staticmethod
     def _init_external_process_group(

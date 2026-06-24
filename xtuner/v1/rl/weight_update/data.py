@@ -17,8 +17,8 @@ WeightTransportType: TypeAlias = Literal["ipc", "nccl"]  # Supported weight tran
 
 @dataclass
 class RolloutWeightUpdateInfo:
+    # Common rollout metadata.
     api_key: list[str] | str | None = None
-    rollout_device_mesh: DeviceMesh | None = None
     rollout_url: str | None = None
     backend: RolloutBackend | None = None
     tp: int = 1
@@ -27,14 +27,16 @@ class RolloutWeightUpdateInfo:
     transport_type: WeightTransportType | None = None
     rollout_cfg_info: dict = field(default_factory=dict)
     endpoints: dict[str, str] = field(default_factory=lambda: {"update_weights": "update_weights"})
+
+    # Colocated rollout metadata.
+    rollout_device_mesh: DeviceMesh | None = None
     rollout_engine_rank_mesh_array: DeviceMeshRaw = field(default_factory=list)
+
+    # Disaggregated rollout metadata.
     rollout_server_url_dict: ServiceUrlMap = field(default_factory=dict)
     worker_server_urls_status: dict[str, bool] = field(default_factory=dict)
-
-    # Used for external weight update NCCL group communication.
     weight_update_host: str | None = None
     weight_update_port: int | None = None
-    weight_update_port_base: int = 37000
 
 
 @dataclass

@@ -48,7 +48,7 @@ from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, finalize_train_policy_metrics, kl_penalty
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
-from xtuner.v1.rl.weight_update import TrainRolloutMode, UpdateWeighter
+from xtuner.v1.rl.weight_update import UpdateWeighter
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
@@ -279,10 +279,6 @@ class TrainingWorker(SingleAcceleratorWorker):
     @ray_method
     def update_rollout_info(self, *args, **kwargs):
         return self.update_weighter.update_rollout_info(*args, **kwargs)
-
-    @ray_method
-    def set_train_rollout_mode(self, train_rollout_mode: TrainRolloutMode):
-        return self.update_weighter.set_train_rollout_mode(train_rollout_mode)
 
     @ray_method
     def update_weights(self):
