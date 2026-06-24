@@ -154,6 +154,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue")),
             onload_weights=SimpleNamespace(remote=MagicMock(return_value="onload_weights")),
             onload_kvcache=SimpleNamespace(remote=MagicMock(return_value="onload_kvcache")),
+            validate_registered_workers_to_proxy=SimpleNamespace(remote=AsyncMock(return_value=None)),
         )
         return trainer
 

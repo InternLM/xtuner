@@ -12,6 +12,7 @@ from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
 from .constants import ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
 from .health_manager import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthManager
+from .proxy_manager import RolloutProxyManager
 from .utils import SessionRouter
 from .worker import (
     ROLLOUT_CONCURRENCY_GROUP_GENERATE,
@@ -51,9 +52,14 @@ class RolloutController:
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
         self.router = SessionRouter(self.registry)
+        self.proxy_manager: RolloutProxyManager | None = None
+        if self.config.enable_proxy:
+            self.proxy_manager = RolloutProxyManager(self.config)
+            self.register_active_workers_to_proxy()
         self.health_manager = RolloutHealthManager(
             config=self.config,
             registry=self.registry,
+            worker_lifecycle_listeners=[self.proxy_manager] if self.proxy_manager is not None else None,
         )
         self.health_manager.start()
 
@@ -68,6 +74,19 @@ class RolloutController:
         self.logger.info(f"Rollout worker server URLs: {rollout_metadata['server_url_dict']}")
         self.logger.info(f"Rollout worker session server URLs: {rollout_metadata['worker_session_url_dict']}")
         return rollout_metadata
+
+    def register_active_workers_to_proxy(self) -> None:
+        if self.proxy_manager is None:
+            return
+        session_urls = sorted(
+            worker.session_url for worker in self.registry.active_entrypoints() if worker.session_url is not None
+        )
+        self.proxy_manager.replace_registered_session_urls(session_urls)
+
+    def validate_registered_workers_to_proxy(self) -> None:
+        if self.proxy_manager is None:
+            return
+        self.proxy_manager.validate_registered_session_urls()
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:

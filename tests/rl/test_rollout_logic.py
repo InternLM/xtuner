@@ -15,17 +15,21 @@ import threading
 import unittest
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import httpx
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.rl.agent_loop import AgentLoopConfig
 from xtuner.v1.rl.rollout.controller import RolloutController
 from xtuner.v1.rl.rollout.health_manager import RolloutHealthManager
+from xtuner.v1.rl.rollout.proxy_manager import RolloutProxyManager
 from xtuner.v1.rl.rollout.worker_registry import RolloutWorkerRegistry, WorkerLifecycleState, WorkerSnapshot
 from xtuner.v1.rl.rollout.sglang import SGLangWorker
 from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, SessionRouter
 from xtuner.v1.rl.rollout.worker import RolloutWorker
+from xtuner.v1.rl.utils.misc import delete_from_routedapiproxy
+from xtuner.v1.train.rl_trainer import BaseRLTrainer, _agent_loop_manager_requires_rollout_proxy
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
 
@@ -70,6 +74,52 @@ class _FakeRolloutWorkerGenerate:
 class _FakeRolloutWorker:
     def __init__(self, returned_state):
         self.generate = _FakeRolloutWorkerGenerate(returned_state)
+
+
+class _ProxyRequiredAgentLoopConfig(AgentLoopConfig):
+    hf_checkpoint: str = "fake"
+    requires_rollout_proxy: bool = True
+
+    def build_local(self, rollout_controller, judger=None, logger=None):
+        raise NotImplementedError
+
+
+class _ProxyOptionalAgentLoopConfig(AgentLoopConfig):
+    hf_checkpoint: str = "fake"
+
+    def build_local(self, rollout_controller, judger=None, logger=None):
+        raise NotImplementedError
+
+
+class TestAgentLoopProxyRequirement(unittest.TestCase):
+    def test_agent_loop_manager_proxy_requirement_uses_config_declaration(self):
+        requires_proxy_manager = SimpleNamespace(
+            tasks=[
+                SimpleNamespace(agent_loop_config=_ProxyOptionalAgentLoopConfig()),
+                SimpleNamespace(agent_loop_config=_ProxyRequiredAgentLoopConfig()),
+            ]
+        )
+        optional_proxy_manager = SimpleNamespace(
+            tasks=SimpleNamespace(agent_loop_config=_ProxyOptionalAgentLoopConfig())
+        )
+
+        self.assertTrue(_agent_loop_manager_requires_rollout_proxy(requires_proxy_manager))
+        self.assertFalse(_agent_loop_manager_requires_rollout_proxy(optional_proxy_manager))
+
+    def test_trainer_auto_enables_rollout_proxy_when_agent_loop_requires_it(self):
+        trainer = BaseRLTrainer.__new__(BaseRLTrainer)
+        trainer._rollout_config = SimpleNamespace(enable_proxy=False)
+        trainer.logger = MagicMock()
+        cfg = SimpleNamespace(
+            agent_loop_manager_cfg=SimpleNamespace(
+                tasks=SimpleNamespace(agent_loop_config=_ProxyRequiredAgentLoopConfig())
+            ),
+            eval_agent_loop_manager_cfg=None,
+        )
+
+        trainer._ensure_rollout_proxy_config(cfg)
+
+        self.assertTrue(trainer._rollout_config.enable_proxy)
 
 
 class TestRolloutController(unittest.IsolatedAsyncioTestCase):
@@ -122,6 +172,188 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(router.session_ids, [456])
         self.assertEqual(worker.generate.calls, [request_state])
         self.assertEqual(result.status, Status.COMPLETED)
+
+    def test_register_active_workers_to_proxy_delegates_active_session_urls(self):
+        controller = RolloutController.__new__(RolloutController)
+        controller.registry = RolloutWorkerRegistry(engine_rank_mesh_array=[[0], [1]], rollout_config=SimpleNamespace())
+        controller.registry.register_started_server(
+            rank=0,
+            actor=object(),
+            server_url="http://worker-0",
+            session_url="http://session-0",
+            is_request_entrypoint=True,
+        )
+        controller.registry.register_started_server(
+            rank=1,
+            actor=object(),
+            server_url="http://worker-1",
+            session_url="http://session-1",
+            is_request_entrypoint=True,
+        )
+        controller.registry.mark_unhealthy_ranks({1})
+        controller.proxy_manager = MagicMock()
+
+        controller.register_active_workers_to_proxy()
+
+        controller.proxy_manager.replace_registered_session_urls.assert_called_once_with(["http://session-0"])
+
+    def test_register_active_workers_to_proxy_noops_without_proxy_manager(self):
+        controller = RolloutController.__new__(RolloutController)
+        controller.registry = RolloutWorkerRegistry(engine_rank_mesh_array=[], rollout_config=SimpleNamespace())
+        controller.proxy_manager = None
+
+        controller.register_active_workers_to_proxy()
+
+    def test_validate_registered_workers_to_proxy_delegates_proxy_validation(self):
+        controller = RolloutController.__new__(RolloutController)
+        controller.proxy_manager = MagicMock()
+
+        controller.validate_registered_workers_to_proxy()
+
+        controller.proxy_manager.validate_registered_session_urls.assert_called_once_with()
+
+
+class TestRolloutProxyManager(unittest.TestCase):
+    _ROUTED_PROXY_URL = "http://routed-proxy"
+    _ROUTED_PROXY_ADMIN_URL = "http://routed-proxy-admin"
+
+    def _build_manager(self):
+        config = SimpleNamespace(
+            model_name="test-model",
+            routed_proxy_url=self._ROUTED_PROXY_URL,
+            routed_proxy_admin_url=self._ROUTED_PROXY_ADMIN_URL,
+            worker_log_dir=None,
+        )
+        return RolloutProxyManager(config)
+
+    def test_replace_registered_session_urls_replaces_proxy_registrations(self):
+        manager = self._build_manager()
+
+        with (
+            patch("xtuner.v1.rl.rollout.proxy_manager.delete_from_routedapiproxy") as delete_proxy,
+            patch("xtuner.v1.rl.rollout.proxy_manager.register_to_routedapiproxy") as register_proxy,
+            patch("xtuner.v1.rl.rollout.proxy_manager.check_chat_completions") as check_chat_completions,
+        ):
+            manager.replace_registered_session_urls(["http://session-1", "http://session-0", "http://session-1"])
+
+        delete_proxy.assert_called_once_with(self._ROUTED_PROXY_ADMIN_URL, "test-model")
+        check_chat_completions.assert_not_called()
+        self.assertEqual(
+            register_proxy.call_args_list,
+            [
+                call(self._ROUTED_PROXY_ADMIN_URL, "test-model", "http://session-0"),
+                call(self._ROUTED_PROXY_ADMIN_URL, "test-model", "http://session-1"),
+            ],
+        )
+
+    def test_validate_registered_session_urls_checks_routed_proxy_url(self):
+        manager = self._build_manager()
+        manager._registered_session_urls = {"http://session-0"}
+
+        with (
+            patch("xtuner.v1.rl.rollout.proxy_manager.check_chat_completions", return_value=True) as check_chat,
+            patch("xtuner.v1.rl.rollout.proxy_manager.time.sleep"),
+        ):
+            manager.validate_registered_session_urls()
+
+        check_chat.assert_called_once_with(self._ROUTED_PROXY_URL, "test-model")
+
+    def test_validate_registered_session_urls_raises_when_proxy_validation_fails(self):
+        manager = self._build_manager()
+        manager._registered_session_urls = {"http://session-0"}
+
+        with (
+            patch("xtuner.v1.rl.rollout.proxy_manager.check_chat_completions", return_value=False) as check_chat,
+            patch("xtuner.v1.rl.rollout.proxy_manager.time.sleep"),
+            self.assertRaisesRegex(RuntimeError, "routed API proxy"),
+        ):
+            manager.validate_registered_session_urls()
+
+        check_chat.assert_has_calls([call(self._ROUTED_PROXY_URL, "test-model")] * manager._CHECK_ATTEMPTS)
+
+    def test_validate_registered_session_urls_noops_without_registrations(self):
+        manager = self._build_manager()
+
+        with patch("xtuner.v1.rl.rollout.proxy_manager.check_chat_completions") as check_chat:
+            manager.validate_registered_session_urls()
+
+        check_chat.assert_not_called()
+
+    def test_delete_and_register_session_url_use_single_url_payload(self):
+        manager = self._build_manager()
+        manager._registered_session_urls = {"http://session-0"}
+
+        with (
+            patch("xtuner.v1.rl.rollout.proxy_manager.delete_from_routedapiproxy") as delete_proxy,
+            patch("xtuner.v1.rl.rollout.proxy_manager.register_to_routedapiproxy") as register_proxy,
+            patch("xtuner.v1.rl.rollout.proxy_manager.check_chat_completions", return_value=True),
+        ):
+            manager._delete_session_url("http://session-0")
+            manager._register_session_url("http://session-0")
+
+        delete_proxy.assert_called_once_with(self._ROUTED_PROXY_ADMIN_URL, "test-model", "http://session-0")
+        register_proxy.assert_called_once_with(self._ROUTED_PROXY_ADMIN_URL, "test-model", "http://session-0")
+
+    def test_inactive_lifecycle_listener_deletes_entrypoint_session_urls(self):
+        manager = self._build_manager()
+        manager._delete_session_url = MagicMock()
+        manager._register_session_url = MagicMock()
+        entrypoint = WorkerSnapshot(
+            rank=0,
+            actor=object(),
+            url="http://worker-0",
+            session_url="http://session-0",
+            is_request_entrypoint=True,
+        )
+        non_entrypoint = WorkerSnapshot(
+            rank=1,
+            actor=object(),
+            url="http://worker-1",
+            session_url="http://session-1",
+            is_request_entrypoint=False,
+        )
+        worker_group = SimpleNamespace(workers=(entrypoint, non_entrypoint))
+
+        manager.on_worker_group_inactive(worker_group)
+
+        manager._delete_session_url.assert_called_once_with("http://session-0")
+        manager._register_session_url.assert_not_called()
+
+    def test_recovered_lifecycle_listener_registers_entrypoint_session_urls_without_validation(self):
+        manager = self._build_manager()
+        manager._register_session_url = MagicMock()
+        worker_group = SimpleNamespace(
+            workers=(
+                WorkerSnapshot(
+                    rank=0,
+                    actor=object(),
+                    url="http://worker-0",
+                    session_url="http://session-0",
+                    is_request_entrypoint=True,
+                ),
+            )
+        )
+
+        manager.on_worker_group_recovered(worker_group)
+
+        manager._register_session_url.assert_called_once_with("http://session-0")
+
+
+class TestRoutedApiProxyUtils(unittest.TestCase):
+    def test_delete_from_routedapiproxy_includes_api_base_when_provided(self):
+        response = MagicMock()
+        response.json.return_value = {"ok": True}
+
+        with patch("xtuner.v1.rl.utils.misc.requests.post", return_value=response) as post:
+            delete_from_routedapiproxy("http://proxy-admin", "test-model", "http://session-0")
+
+        post.assert_called_once()
+        self.assertEqual(post.call_args.args[0], "http://proxy-admin/v1/models/delete")
+        self.assertEqual(
+            post.call_args.kwargs["json"],
+            {"model_name": "test-model", "api_base": "http://session-0"},
+        )
+        response.raise_for_status.assert_called_once_with()
 
 
 class TestRolloutWorkerRegistry(unittest.TestCase):
@@ -453,31 +685,79 @@ class TestRolloutHealthManager(unittest.TestCase):
                 registry.mark_unhealthy_ranks({rank})
         return registry
 
-    def _build_manager(self, workers_info, *, failure_threshold=1, check_timeout=7.0):
+    def _build_manager(
+        self,
+        workers_info,
+        *,
+        failure_threshold=1,
+        check_timeout=7.0,
+        worker_lifecycle_listeners=None,
+    ):
         config = SimpleNamespace(
             health_check_interval_seconds=10,
             health_check_timeout_seconds=check_timeout,
             health_check_failure_threshold=failure_threshold,
         )
         registry = self._build_registry(workers_info)
-        return RolloutHealthManager(config, registry), registry
+        return (
+            RolloutHealthManager(
+                config,
+                registry,
+                worker_lifecycle_listeners=worker_lifecycle_listeners,
+            ),
+            registry,
+        )
 
     def test_marks_worker_inactive_after_consecutive_health_failures(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(False))
         worker_info = WorkerSnapshot(actor=actor, url="http://worker-0")
         workers_info = {0: worker_info}
-        manager, registry = self._build_manager(workers_info, failure_threshold=2)
+        inactive_groups = []
+        listener = SimpleNamespace(
+            on_worker_group_inactive=inactive_groups.append,
+            on_worker_group_recovered=MagicMock(),
+        )
+        manager, registry = self._build_manager(
+            workers_info,
+            failure_threshold=2,
+            worker_lifecycle_listeners=[listener],
+        )
 
         manager._check_and_deactivate_failed_worker_groups()
 
         self.assertTrue(self._worker_by_rank(registry, 0).is_active())
         self.assertEqual(actor.check_health.calls, [()])
+        self.assertEqual(inactive_groups, [])
 
         manager._check_and_deactivate_failed_worker_groups()
 
         self.assertFalse(self._worker_by_rank(registry, 0).is_active())
         self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.INACTIVE)
         self.assertEqual(actor.check_health.calls, [(), ()])
+        self.assertEqual([group.ranks for group in inactive_groups], [(0,)])
+
+    def test_inactive_listener_runs_under_operation_lock(self):
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(False))
+        worker_info = WorkerSnapshot(actor=actor, url="http://worker-0")
+        lock_acquired_by_listener = []
+        manager, _ = self._build_manager({0: worker_info}, failure_threshold=1)
+
+        def on_worker_group_inactive(group):
+            acquired = manager._operation_lock.acquire(blocking=False)
+            lock_acquired_by_listener.append(acquired)
+            if acquired:
+                manager._operation_lock.release()
+
+        manager._worker_lifecycle_listeners = (
+            SimpleNamespace(
+                on_worker_group_inactive=on_worker_group_inactive,
+                on_worker_group_recovered=MagicMock(),
+            ),
+        )
+
+        manager._check_and_deactivate_failed_worker_groups()
+
+        self.assertEqual(lock_acquired_by_listener, [False])
 
     def test_inactive_worker_is_not_cleaned_up_again(self):
         # 已 inactive 的 worker 不再重复健康检查。
@@ -575,6 +855,59 @@ class TestRolloutHealthManager(unittest.TestCase):
             any("training can continue" in call.args[0] for call in log_error.call_args_list),
             f"Expected restart failure log to explain why it is non-fatal, got: {log_error.call_args_list}",
         )
+
+    def test_restart_barrier_notifies_recovered_group_after_success(self):
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
+        worker_info = WorkerSnapshot(
+            actor=actor,
+            url="http://worker-0",
+            session_url="http://session-0",
+            lifecycle_state=WorkerLifecycleState.INACTIVE,
+        )
+        recovered_groups = []
+        listener = SimpleNamespace(
+            on_worker_group_inactive=MagicMock(),
+            on_worker_group_recovered=recovered_groups.append,
+        )
+        manager, registry = self._build_manager(
+            {0: worker_info},
+            worker_lifecycle_listeners=[listener],
+        )
+
+        with patch.object(manager, "_restart_worker_group", return_value=True):
+            manager.restart_inactive_workers()
+
+        self.assertTrue(self._worker_by_rank(registry, 0).is_active())
+        self.assertEqual([group.ranks for group in recovered_groups], [(0,)])
+        self.assertTrue(all(worker.is_active() for worker in recovered_groups[0].workers))
+
+    def test_recovered_listener_runs_under_operation_lock(self):
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
+        worker_info = WorkerSnapshot(
+            actor=actor,
+            url="http://worker-0",
+            lifecycle_state=WorkerLifecycleState.INACTIVE,
+        )
+        lock_acquired_by_listener = []
+        manager, _ = self._build_manager({0: worker_info})
+
+        def on_worker_group_recovered(group):
+            acquired = manager._operation_lock.acquire(blocking=False)
+            lock_acquired_by_listener.append(acquired)
+            if acquired:
+                manager._operation_lock.release()
+
+        manager._worker_lifecycle_listeners = (
+            SimpleNamespace(
+                on_worker_group_inactive=MagicMock(),
+                on_worker_group_recovered=on_worker_group_recovered,
+            ),
+        )
+
+        with patch.object(manager, "_restart_worker_group", return_value=True):
+            manager.restart_inactive_workers()
+
+        self.assertEqual(lock_acquired_by_listener, [False])
 
 
 class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
