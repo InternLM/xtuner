@@ -87,7 +87,7 @@ class UpdateWeighter:
             self.rollout_info.rollout_engine_rank_mesh_array = [
                 [int(rank) for rank in ranks] for ranks in engine_rank_mesh_array
             ]
-
+            self._ensure_rollout_device_mesh()
         elif self.rollout_info.transport_type == "nccl":
             # Disaggregated rollout metadata.
             self.rollout_info.rollout_server_url_dict = {int(rank): url for rank, url in server_url_dict.items()}
@@ -146,7 +146,6 @@ class UpdateWeighter:
         self.rollout_info.train_rollout_mode = mode
         if mode == "colocate":
             self.rollout_info.transport_type = "ipc"
-            self._ensure_rollout_device_mesh()
         elif mode == "disaggregated":
             self.rollout_info.transport_type = "nccl"
 
