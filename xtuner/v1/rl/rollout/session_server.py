@@ -408,12 +408,6 @@ class SessionServer:
             messages = orig_req_body["messages"]
             tools = orig_req_body.get("tools", None)
 
-        if output_token_ids is None:
-            raise RuntimeError(
-                "SessionServer response has no output_ids; cannot export a training trace for this assistant turn."
-            )
-        output_logprobs = _extract_output_logprobs(output_token_logprobs, output_token_ids)
-
         if isinstance(assistant_msg.get("content"), (str, list)):
             assistant_msg["content"], _ = _strip_stop_word(assistant_msg["content"], self.stop_word)
         for msg in messages:
@@ -425,6 +419,12 @@ class SessionServer:
             canonicalize_messages_for_chat_template(messages), tools=tools, add_generation_prompt=True, tokenize=False
         )
         try:
+            if output_token_ids is None:
+                raise RuntimeError(
+                    "SessionServer response has no output_ids; cannot export a training trace for this assistant turn."
+                )
+            output_logprobs = _extract_output_logprobs(output_token_logprobs, output_token_ids)
+
             full_messages = [*messages, assistant_msg]
             new_prompt = (
                 self.tokenizer.apply_chat_template(
