@@ -1573,6 +1573,12 @@ class RLColocateTrainer(BaseRLTrainer):
         self.logger.info("Rollout workers updated weights from train workers.")
 
     def fit(self):
+        try:
+            self._fit()
+        finally:
+            self._exp_tracker.close()
+
+    def _fit(self):
         self.logger.info("Start RL training")
         if self._cur_step >= self._total_train_steps:
             self.logger.info(f"Train steps {self._total_train_steps} reached, stop training")
@@ -1583,7 +1589,8 @@ class RLColocateTrainer(BaseRLTrainer):
             return
 
         ray.get(
-            self.rollout_controller.validate_registered_workers_to_proxy.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT
+            self.rollout_controller.validate_registered_workers_to_proxy.remote(),
+            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
         )
 
         if self._enable_initial_evaluate and not self._debug_rollout:
@@ -1788,7 +1795,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
     def fit(self):
         # 对外同步 fit；内部用 async loop 组织 producer/consumer。
-        return asyncio_run(self._fit())
+        try:
+            return asyncio_run(self._fit())
+        finally:
+            self._exp_tracker.close()
 
     async def _get_batch_or_raise_producer_failure(
         self,
