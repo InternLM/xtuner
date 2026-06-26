@@ -52,6 +52,7 @@ from xtuner.v1.rl.utils import (
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
+from xtuner.v1.rl.weight_update.data import TrainRolloutMode
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -108,13 +109,21 @@ def check_fa3():
 def bind_train_rollout(
     train_controller: TrainingController,
     rollout_controller: RolloutControllerProxy,
+    train_rollout_mode: TrainRolloutMode | str,
+    weight_update_host: str | None = None,
+    weight_update_port: int | None = None,
 ) -> None:
     """Bind the training and rollout workers for update weights."""
     info_dict = ray.get(
         rollout_controller.get_rollout_metadata.remote(),  # type: ignore[attr-defined]
         timeout=RL_TRAINER_RAY_GET_TIMEOUT,
     )
-    train_controller.update_rollout_info(info_dict)
+    train_controller.update_rollout_info(
+        info_dict,
+        train_rollout_mode=train_rollout_mode,
+        weight_update_host=weight_update_host,
+        weight_update_port=weight_update_port,
+    )
     return
 
 
@@ -1549,14 +1558,17 @@ class RLColocateTrainer(BaseRLTrainer):
         self.train_controller.offload(target="all")
 
         self.rollout_controller = self._rollout_config.build(self._pg)
-        bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+        bind_train_rollout(
+            train_controller=self.train_controller,
+            rollout_controller=self.rollout_controller,
+            train_rollout_mode="colocate",
+        )
 
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)
         if checkpoint_path is not None:
             asyncio_run(self._resume_agent_loop_manager(checkpoint_path))
 
-        self.train_controller.set_train_rollout_mode("colocate")
         self._cpu_resource_manager.log_registered_summary()
 
         if self._rollout_config.skip_load_weights:
@@ -1709,6 +1721,7 @@ class RLColocateTrainer(BaseRLTrainer):
                 bind_train_rollout(
                     train_controller=self.train_controller,
                     rollout_controller=self.rollout_controller,
+                    train_rollout_mode="colocate",
                 )
                 ray.get(
                     self.rollout_controller.onload_weights.remote(),
@@ -1752,8 +1765,13 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                     "In disaggregated mode, should_continue_fn must be default, "
                     "because it does not allow early stopping in production."
                 )
-        bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
-        self.train_controller.set_train_rollout_mode("disaggregated")
+        bind_train_rollout(
+            train_controller=self.train_controller,
+            rollout_controller=self.rollout_controller,
+            train_rollout_mode="disaggregated",
+            weight_update_host=self._rollout_config.weight_update_host,
+            weight_update_port=self._rollout_config.weight_update_port,
+        )
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
@@ -1941,7 +1959,11 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         # TODO: 非共卡需要额外加健康检查恢复worker的逻辑，共卡是在训练之前恢复，但是非共卡不需要在训练之前恢复,挂掉就恢复或者更新权重前恢复，需要评估一下哪种方式更合理。
         with timer("sync_weight", step_timer_dict):
-            bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+            bind_train_rollout(
+                train_controller=self.train_controller,
+                rollout_controller=self.rollout_controller,
+                train_rollout_mode="disaggregated",
+            )
             self.update_weights()
 
     def update_weights(self):
