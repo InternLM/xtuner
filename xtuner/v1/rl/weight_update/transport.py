@@ -14,6 +14,7 @@ import requests
 import torch
 import torch.distributed as dist
 from packaging.version import parse as parse_version
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.distributed_c10d import (
     Backend,
     PrefixStore,
@@ -39,7 +40,9 @@ DEVICE_MODULE = get_torch_device_module()
 
 @dataclass
 class WeightUpdateRequest:
+    # HTTP endpoint on the rollout server that should receive this update.
     endpoint: str
+    # JSON body sent to the rollout backend adapter endpoint.
     body: dict[str, Any]
 
 
@@ -60,7 +63,7 @@ class WeightTransport(ABC):
         self._adapter: WeightTransportAdapter | None = None
 
         self.rollout_url = self.rollout_info.rollout_url
-        if self.rollout_url is None:
+        if self.rollout_url is None and self.rollout_info.transport_type == "ipc":
             self.logger.error(f"rank {self.rank} url in None, cannot update weights and skip")
 
     @staticmethod
@@ -431,9 +434,12 @@ class IPCWeightTransport(WeightTransport):
         self.config = config
         self._adapter = self._build_adapter()
 
-        assert self.rollout_info.rollout_device_mesh is not None
-        self.rollout_device_mesh = self.rollout_info.rollout_device_mesh
-        self.cpu_mesh = self.rollout_info.rollout_device_mesh["engine_parallel"]
+        self.ipc_update_device_mesh = DeviceMesh(
+            "cpu",
+            mesh=[list(ranks) for ranks in self.rollout_info.ipc_rank_mesh],
+            mesh_dim_names=("engine_instance", "engine_parallel"),
+        )
+        self.cpu_mesh = self.ipc_update_device_mesh["engine_parallel"]
         self.cpu_group = self.cpu_mesh.get_group()
         self.head_rank = int(self.cpu_mesh.mesh[0].item())
 
@@ -652,36 +658,8 @@ class NCCLWeightTransport(WeightTransport):
         if self.group is not None:
             return
 
-        # Map rollout rank to its engine size.
-        rank_to_engine_size = {
-            int(rank): len(engine_ranks)
-            for engine_ranks in self.rollout_info.rollout_engine_rank_mesh_array
-            for rank in engine_ranks
-        }
-
-        # Deduplicate rollout engine URLs while keeping the first rank associated
-        # with each URL as the representative rank for that engine.
-        url_to_rank: dict[str, int] = {}
-        for rank, url in sorted(
-            self.rollout_info.rollout_server_url_dict.items(),
-            key=lambda item: int(item[0]),
-        ):
-            if url:
-                url_to_rank.setdefault(url, int(rank))
-
-        # Collect the representative rank, URL, and engine size needed to create
-        # the NCCL weight update process group.
-        engine_info = [
-            (
-                rank,
-                url,
-                rank_to_engine_size.get(
-                    rank,
-                    max(self.rollout_info.tp, self.rollout_info.ep),
-                ),
-            )
-            for url, rank in url_to_rank.items()
-        ]
+        # RolloutWeightUpdateInfo owns the runtime target projection.
+        engine_info = self.rollout_info.nccl_engine_infos
 
         if not engine_info:
             self.logger.error("No active rollout engine url, cannot init sglang weight update group")

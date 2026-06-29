@@ -81,6 +81,7 @@ class SGLangWorker(RolloutWorker):
                         worker_rank=server_rank,
                         placement_group_bundle_idxs=engine_bundle_idxs[node_bundle_start:node_bundle_end],
                         accepts_rollout_requests=node_rank == 0,
+                        weight_update_ranks=engine_ranks if node_rank == 0 else (),
                         node_rank=node_rank,
                         nnodes=nnodes,
                     )
@@ -94,7 +95,6 @@ class SGLangWorker(RolloutWorker):
             )
         return RolloutTopology(
             engines=tuple(engines),
-            training_engine_mesh=tuple(tuple(engine.engine_ranks) for engine in engines),
         )
 
     def _get_request_payload(self, rollout_state: RolloutState) -> dict:

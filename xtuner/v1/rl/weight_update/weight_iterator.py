@@ -194,14 +194,16 @@ class WeightIterator:
 
         if train_enable_ep:
             if self.rollout_info.train_rollout_mode == "colocate" and self.rollout_info.ep > 1:
-                rollout_device_mesh = self.rollout_info.rollout_device_mesh
-                assert rollout_device_mesh is not None
+                target_ep_rank = self.rollout_info.ipc_engine_parallel_rank
+                target_ep_size = self.rollout_info.ipc_engine_parallel_size
+                assert target_ep_rank is not None, "IPC rollout target for current train rank is not resolved."
+                assert target_ep_size is not None, "IPC rollout target size for current train rank is not resolved."
                 # Colocated IPC can send only the expert slice needed by the local rollout
                 # EP rank
                 fused_gen = self._rl_get_fused_ep_hf_param(
                     model,
-                    target_ep_rank=rollout_device_mesh["engine_parallel"].get_coordinate()[0],
-                    target_ep_size=rollout_device_mesh["engine_parallel"].size(),
+                    target_ep_rank=target_ep_rank,
+                    target_ep_size=target_ep_size,
                     bucket_size=bucket_size,
                     should_gather_train_ep_shards=should_gather_train_ep_shards,
                 )
@@ -251,7 +253,6 @@ class WeightIterator:
     @torch.no_grad()
     def iter_layer_batches(self):
         """Update the model weights."""
-        assert self.rollout_info.rollout_device_mesh is not None
 
         model = self._engine.model
         DEVICE_MODULE.empty_cache()

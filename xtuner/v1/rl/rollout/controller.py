@@ -8,6 +8,7 @@ from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
+from xtuner.v1.rl.weight_update.data import RolloutWeightUpdateTarget
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
 from .constants import ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
@@ -63,13 +64,9 @@ class RolloutController:
         )
         self.health_manager.start()
 
-    def get_rollout_metadata(self) -> dict:
-        """Get information about the current rollout setup.
-
-        Returns:
-            Legacy trainer/update-weight rollout metadata dictionary.
-        """
-        return self.registry.metadata().to_legacy()
+    def get_weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
+        """Return rollout endpoints that can receive weight update requests."""
+        return self.registry.weight_update_targets()
 
     def register_active_workers_to_proxy(self) -> None:
         if self.proxy_manager is None:
@@ -211,8 +208,7 @@ class RolloutController:
         URLs to rollout traffic.
 
         Returns:
-            A registry containing all server-process workers and the public
-            training metadata mesh.
+            A registry containing all server-process workers and runtime state.
         """
         worker_base_cls = get_rollout_worker_base_cls(self.config)
         worker_cls = self._build_remote_worker_cls(worker_base_cls)
@@ -256,7 +252,7 @@ class RolloutController:
                 ]
             )
         )
-        registry = RolloutWorkerRegistry(rollout_topology=rollout_topology, rollout_config=self.config)
+        registry = RolloutWorkerRegistry(rollout_topology=rollout_topology)
         for init_result in init_results:
             if rollout_topology.is_request_entrypoint_rank(init_result.rank) and init_result.session_url is None:
                 raise RuntimeError(
@@ -269,12 +265,10 @@ class RolloutController:
                 session_url=init_result.session_url,
             )
 
-        rollout_metadata = registry.metadata()
-        legacy_metadata = rollout_metadata.to_legacy()
         self.logger.info(
             "Rollout worker registry snapshot: "
-            f"server_urls={legacy_metadata['server_url_dict']}, "
-            f"session_urls={legacy_metadata['worker_session_url_dict']}, "
+            f"weight_update_targets={registry.weight_update_targets()}, "
+            f"active_entrypoints={registry.active_entrypoints()}, "
             f"server_process_urls={[worker.url for worker in registry.all_workers()]}, "
             f"lifecycle_groups={registry.lifecycle_groups()}"
         )

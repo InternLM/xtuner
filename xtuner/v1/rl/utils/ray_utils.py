@@ -159,6 +159,10 @@ def register_cleanup():
 def bind_train_rollout(
     train_workers,
     rollout_controller,
+    rollout_config,
+    train_rollout_mode,
+    weight_update_host=None,
+    weight_update_port=None,
 ) -> None:
     """Bind the training and rollout workers for updating weights.
 
@@ -170,6 +174,17 @@ def bind_train_rollout(
         train_workers: A list of training worker actors.
         rollout_controller: The rollout controller actor.
     """
-    info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())  # type: ignore[attr-defined]
-    ray.get([worker.update_rollout_info.remote(**info_dict) for worker in train_workers])  # type: ignore[attr-defined]
+    targets = ray.get(rollout_controller.get_weight_update_targets.remote())  # type: ignore[attr-defined]
+    ray.get(
+        [
+            worker.bind_rollout_weight_update.remote(
+                targets=targets,
+                rollout_config=rollout_config,
+                train_rollout_mode=train_rollout_mode,
+                weight_update_host=weight_update_host,
+                weight_update_port=weight_update_port,
+            )
+            for worker in train_workers
+        ]
+    )  # type: ignore[attr-defined]
     return

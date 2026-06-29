@@ -1,9 +1,7 @@
 from .data import (
-    DeviceMeshRaw,
     RolloutBackend,
-    RolloutEngineInfo,
     RolloutWeightUpdateInfo,
-    ServiceUrlMap,
+    RolloutWeightUpdateTarget,
     TrainRolloutMode,
     WeightTransportType,
     WeightUpdateBatch,
@@ -24,18 +22,16 @@ from .weight_iterator import WeightIterator
 
 
 __all__ = [
-    "DeviceMeshRaw",
     "IPCBackendAdapter",
     "IPCWeightTransport",
     "LMDeployIPCBackendAdapter",
     "NCCLBackendAdapter",
     "NCCLWeightTransport",
     "RolloutBackend",
-    "RolloutEngineInfo",
+    "RolloutWeightUpdateTarget",
     "RolloutWeightUpdateInfo",
     "SGLangIPCBackendAdapter",
     "SGLangNCCLBackendAdapter",
-    "ServiceUrlMap",
     "TrainRolloutMode",
     "UpdateWeighter",
     "WeightIterator",

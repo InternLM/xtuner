@@ -109,17 +109,19 @@ def check_fa3():
 def bind_train_rollout(
     train_controller: TrainingController,
     rollout_controller: RolloutControllerProxy,
+    rollout_config: RolloutConfig,
     train_rollout_mode: TrainRolloutMode | str,
     weight_update_host: str | None = None,
     weight_update_port: int | None = None,
 ) -> None:
     """Bind the training and rollout workers for update weights."""
-    info_dict = ray.get(
-        rollout_controller.get_rollout_metadata.remote(),  # type: ignore[attr-defined]
+    targets = ray.get(
+        rollout_controller.get_weight_update_targets.remote(),  # type: ignore[attr-defined]
         timeout=RL_TRAINER_RAY_GET_TIMEOUT,
     )
-    train_controller.update_rollout_info(
-        info_dict,
+    train_controller.bind_rollout_weight_update(
+        targets=targets,
+        rollout_config=rollout_config,
         train_rollout_mode=train_rollout_mode,
         weight_update_host=weight_update_host,
         weight_update_port=weight_update_port,
@@ -1561,6 +1563,7 @@ class RLColocateTrainer(BaseRLTrainer):
         bind_train_rollout(
             train_controller=self.train_controller,
             rollout_controller=self.rollout_controller,
+            rollout_config=self._rollout_config,
             train_rollout_mode="colocate",
         )
 
@@ -1721,6 +1724,7 @@ class RLColocateTrainer(BaseRLTrainer):
                 bind_train_rollout(
                     train_controller=self.train_controller,
                     rollout_controller=self.rollout_controller,
+                    rollout_config=self._rollout_config,
                     train_rollout_mode="colocate",
                 )
                 ray.get(
@@ -1768,6 +1772,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         bind_train_rollout(
             train_controller=self.train_controller,
             rollout_controller=self.rollout_controller,
+            rollout_config=self._rollout_config,
             train_rollout_mode="disaggregated",
             weight_update_host=self._rollout_config.weight_update_host,
             weight_update_port=self._rollout_config.weight_update_port,
@@ -1962,6 +1967,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             bind_train_rollout(
                 train_controller=self.train_controller,
                 rollout_controller=self.rollout_controller,
+                rollout_config=self._rollout_config,
                 train_rollout_mode="disaggregated",
             )
             self.update_weights()

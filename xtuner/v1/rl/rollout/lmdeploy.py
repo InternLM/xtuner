@@ -111,6 +111,7 @@ class LMDeployWorker(RolloutWorker):
                             RolloutServerProcess(
                                 worker_rank=engine_ranks[0],
                                 placement_group_bundle_idxs=engine_bundle_idxs,
+                                weight_update_ranks=engine_ranks,
                             ),
                         ),
                     )
@@ -133,25 +134,14 @@ class LMDeployWorker(RolloutWorker):
                             RolloutServerProcess(
                                 worker_rank=server_rank,
                                 placement_group_bundle_idxs=(bundle_idx,),
+                                weight_update_ranks=(server_rank,),
                             )
                             for server_rank, bundle_idx in engine_meta
                         ),
                     )
                 )
 
-        training_engine_mesh: list[tuple[int, ...]] = []
-        for engine in engines:
-            entrypoint_processes = tuple(
-                process for process in engine.server_processes if process.accepts_rollout_requests
-            )
-            if len(entrypoint_processes) == 1:
-                training_engine_mesh.append(tuple(engine.engine_ranks))
-            else:
-                training_engine_mesh.extend((process.worker_rank,) for process in entrypoint_processes)
-        return RolloutTopology(
-            engines=tuple(engines),
-            training_engine_mesh=tuple(training_engine_mesh),
-        )
+        return RolloutTopology(engines=tuple(engines))
 
     def offload(self):
         """Offloads the model weights and KV cache."""

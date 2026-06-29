@@ -3,16 +3,16 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
+    from xtuner.v1.rl.weight_update.data import RolloutWeightUpdateTarget
+
     from .rollout_topology import RolloutTopology
-    from .worker import RolloutConfig, RolloutWorker
+    from .worker import RolloutWorker
 
 __all__ = [
-    "RolloutWorkerEndpointMetadata",
-    "RolloutWorkerMetadata",
     "RolloutWorkerRegistry",
     "WorkerGroup",
     "WorkerLifecycleState",
@@ -33,11 +33,17 @@ class WorkerLifecycleState(str, Enum):
 class WorkerSnapshot:
     """Read-only snapshot for one rollout server process."""
 
+    # Worker rank that owns the runtime snapshot.
     rank: int
+    # Ray actor handle for the rollout worker.
     actor: RolloutWorker
+    # Base URL of the rollout server process.
     url: str
+    # Session server URL used only by proxy/session routing.
     session_url: str | None = None
+    # Whether this worker can receive rollout generation requests.
     is_request_entrypoint: bool = True
+    # Current lifecycle state observed by registry and health manager.
     lifecycle_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE
 
     def is_active(self) -> bool:
@@ -46,53 +52,10 @@ class WorkerSnapshot:
 
 @dataclass(frozen=True)
 class WorkerGroup:
+    # Worker ranks that share one lifecycle action.
     ranks: tuple[int, ...]
+    # Runtime snapshots for registered workers in this lifecycle group.
     workers: tuple[WorkerSnapshot, ...]
-
-
-@dataclass(frozen=True)
-class RolloutWorkerEndpointMetadata:
-    """URL and lifecycle state for one request-serving rollout endpoint."""
-
-    rank: int
-    server_url: str
-    session_url: str | None
-    lifecycle_state: WorkerLifecycleState
-
-    @property
-    def is_active(self) -> bool:
-        return self.lifecycle_state is WorkerLifecycleState.ACTIVE
-
-
-@dataclass(frozen=True)
-class RolloutWorkerMetadata:
-    """Structured rollout worker metadata consumed by trainer/update-weight
-    code."""
-
-    rollout_config: RolloutConfig
-    training_engine_mesh: tuple[tuple[int, ...], ...]
-    request_endpoints: tuple[RolloutWorkerEndpointMetadata, ...]
-
-    def to_legacy(self) -> dict[str, Any]:
-        """Serialize to the current trainer-facing rollout metadata dict."""
-        return {
-            "engine_rank_mesh_array": [list(engine_ranks) for engine_ranks in self.training_engine_mesh],
-            "server_url_dict": {endpoint.rank: endpoint.server_url for endpoint in self.request_endpoints},
-            "rollout_config": self.rollout_config,
-            "worker_server_urls_status": {
-                endpoint.server_url: endpoint.is_active for endpoint in self.request_endpoints
-            },
-            "worker_session_url_dict": {
-                endpoint.rank: endpoint.session_url
-                for endpoint in self.request_endpoints
-                if endpoint.session_url is not None
-            },
-            "worker_session_urls_status": {
-                endpoint.session_url: endpoint.is_active
-                for endpoint in self.request_endpoints
-                if endpoint.session_url is not None
-            },
-        }
 
 
 class RolloutWorkerRegistry:
@@ -103,11 +66,9 @@ class RolloutWorkerRegistry:
         self,
         *,
         rollout_topology: RolloutTopology,
-        rollout_config: RolloutConfig,
     ):
         """Initialize an empty registry with the rollout topology."""
         self._rollout_topology = rollout_topology
-        self._rollout_config = rollout_config
         self._workers: dict[int, WorkerSnapshot] = {}
         self._lock = threading.RLock()
 
@@ -242,21 +203,24 @@ class RolloutWorkerRegistry:
             worker_groups = self._build_worker_groups()
             return worker_groups.get(group.ranks)
 
-    def metadata(self) -> RolloutWorkerMetadata:
-        """Build trainer/update-weight metadata from one registry snapshot."""
+    def weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
+        """Return weight-update targets resolved with current runtime state."""
+        from xtuner.v1.rl.weight_update.data import RolloutWeightUpdateTarget
+
         with self._lock:
-            request_endpoints = tuple(
-                RolloutWorkerEndpointMetadata(
-                    rank=worker.rank,
-                    server_url=worker.url,
-                    session_url=worker.session_url,
-                    lifecycle_state=worker.lifecycle_state,
+            targets: list[RolloutWeightUpdateTarget] = []
+            for server in self._rollout_topology.weight_update_endpoint_processes():
+                worker = self._workers.get(server.worker_rank)
+                if worker is None:
+                    raise RuntimeError(
+                        f"Rollout weight update endpoint rank={server.worker_rank} has not been registered."
+                    )
+                targets.append(
+                    RolloutWeightUpdateTarget(
+                        endpoint_rank=server.worker_rank,
+                        update_ranks=server.weight_update_ranks,
+                        server_url=worker.url,
+                        lifecycle_state=worker.lifecycle_state.value,
+                    )
                 )
-                for worker in self.all_workers()
-                if worker.is_request_entrypoint
-            )
-            return RolloutWorkerMetadata(
-                rollout_config=self._rollout_config,
-                training_engine_mesh=self._rollout_topology.training_engine_mesh,
-                request_endpoints=request_endpoints,
-            )
+            return tuple(sorted(targets, key=lambda target: target.endpoint_rank))
