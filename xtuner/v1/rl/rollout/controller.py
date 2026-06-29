@@ -19,7 +19,7 @@ from .worker import (
     RolloutConfig,
     get_rollout_worker_base_cls,
 )
-from .worker_registry import RolloutWorkerMetadata, RolloutWorkerRegistry
+from .worker_registry import RolloutWorkerRegistry
 
 
 # Keep this as a Ray actor because Ray AgentLoop actors need a shared, cross-process handle to the same controller
@@ -63,17 +63,13 @@ class RolloutController:
         )
         self.health_manager.start()
 
-    def get_rollout_metadata(self) -> RolloutWorkerMetadata:
+    def get_rollout_metadata(self) -> dict:
         """Get information about the current rollout setup.
 
         Returns:
-            dict: A dictionary containing the engine mesh list, server URL
-                dictionary, and the rollout configuration.
+            Legacy trainer/update-weight rollout metadata dictionary.
         """
-        rollout_metadata = self.registry.training_metadata_snapshot()
-        self.logger.info(f"Rollout worker server URLs: {rollout_metadata['server_url_dict']}")
-        self.logger.info(f"Rollout worker session server URLs: {rollout_metadata['worker_session_url_dict']}")
-        return rollout_metadata
+        return self.registry.metadata().to_legacy()
 
     def register_active_workers_to_proxy(self) -> None:
         if self.proxy_manager is None:
@@ -203,13 +199,16 @@ class RolloutController:
             },
         )(worker_base_cls)
 
-    def _init_workers(self, placement_group: PlacementGroup) -> RolloutWorkerRegistry:
+    def _init_workers(
+        self,
+        placement_group: PlacementGroup,
+    ) -> RolloutWorkerRegistry:
         """Initializes and configures the pool of RolloutWorker actors.
 
         This method follows the same high-level flow as the legacy implementation:
-        create workers, initialize worker-local ports, build engine groups,
-        select workers that launch rollout servers, launch servers, and
-        expose request-entrypoint server URLs to rollout traffic.
+        create workers, initialize worker-local ports, build the bound rollout
+        topology, launch rollout servers, and expose request-entrypoint server
+        URLs to rollout traffic.
 
         Returns:
             A registry containing all server-process workers and the public
@@ -222,79 +221,63 @@ class RolloutController:
         workers, rank_bundle_idx_list = AutoAcceleratorWorkers.from_placement_group(
             worker_cls, self.config, placement_group
         )
-        rank_to_actor = {rank: worker for (rank, _), worker in zip(rank_bundle_idx_list, workers)}
-
-        # Reserve worker-local ports for all actors first. build_engine_launch_specs
-        # uses the returned addresses to bind each ServerProcessSpec to its
-        # logical engine rendezvous address; only server-process owners call init().
-        rank_to_dist_init_addr = {
-            rank: dist_init_addr
-            for (rank, _), dist_init_addr in zip(
-                rank_bundle_idx_list,
-                ray.get([worker.init_dist_port.remote() for worker in workers]),  # type: ignore[attr-defined]
-            )
+        dist_init_results = ray.get(
+            [
+                worker.init_dist_port.remote()  # type: ignore[attr-defined]
+                for worker in workers
+            ]
+        )
+        rank_to_worker = {
+            rank: worker for worker, (rank, _dist_init_addr) in zip(workers, dist_init_results, strict=True)
         }
+        rank_to_dist_init_addr = dict(dist_init_results)
 
-        # Build engine groups and server-process specs from the rank/bundle mapping.
-        engine_launch_specs = worker_base_cls.build_engine_launch_specs(
+        rollout_topology = worker_base_cls.build_rollout_topology(
             self.config,
             rank_bundle_idx_list,
             rank_to_dist_init_addr,
         )
-        # Keep the public metadata mesh compatible with origin/main. Backends
-        # may expose a different update-weight mesh than their internal launch
-        # topology, e.g. LMDeploy EP has one logical engine but one public entry
-        # per request-serving EP rank.
-        engine_rank_mesh_array = worker_base_cls.build_metadata_engine_rank_mesh_array(engine_launch_specs)
+        server_launch_specs = rollout_topology.server_launch_specs()
+        server_workers = tuple(
+            (launch_spec, rank_to_worker[launch_spec.worker_rank]) for launch_spec in server_launch_specs
+        )
 
-        # Launch every server process described by the backend-specific specs.
-        server_rank_to_url = dict(
+        ray.get(
+            [
+                worker.bind_server_launch_spec.remote(launch_spec)  # type: ignore[attr-defined]
+                for launch_spec, worker in server_workers
+            ]
+        )
+        init_results = tuple(
             ray.get(
                 [
-                    rank_to_actor[server_process.worker_rank].init.remote(  # type: ignore[attr-defined]
-                        engine_launch_spec=engine_spec,
-                    )
-                    for engine_spec in engine_launch_specs
-                    for server_process in engine_spec.server_processes
+                    worker.init.remote()  # type: ignore[attr-defined]
+                    for _launch_spec, worker in server_workers
                 ]
             )
         )
-        session_url_by_rank = dict(
-            ray.get(
-                [
-                    (
-                        rank_to_actor[server_process.worker_rank].get_session_server_info.remote()  # type: ignore[attr-defined]
-                    )
-                    for engine_spec in engine_launch_specs
-                    for server_process in engine_spec.server_processes
-                ]
-            )
-        )
-
-        registry = RolloutWorkerRegistry(
-            engine_rank_mesh_array=engine_rank_mesh_array,
-            rollout_config=self.config,
-        )
-        for engine_spec in engine_launch_specs:
-            for server_process in engine_spec.server_processes:
-                rank = server_process.worker_rank
-                url = server_rank_to_url[rank]
-                session_url = session_url_by_rank.get(rank)
-                if server_process.accepts_rollout_requests and session_url is None:
-                    raise RuntimeError(f"Rollout worker rank={rank} did not return session server URL during init.")
-                registry.register_started_server(
-                    rank=rank,
-                    actor=rank_to_actor[rank],
-                    server_url=url,
-                    session_url=session_url,
-                    lifecycle_group_ranks=engine_spec.server_worker_ranks,
-                    is_request_entrypoint=server_process.accepts_rollout_requests,
+        registry = RolloutWorkerRegistry(rollout_topology=rollout_topology, rollout_config=self.config)
+        for init_result in init_results:
+            if rollout_topology.is_request_entrypoint_rank(init_result.rank) and init_result.session_url is None:
+                raise RuntimeError(
+                    f"Rollout worker rank={init_result.rank} did not return session server URL during init."
                 )
+            registry.register_started_server(
+                rank=init_result.rank,
+                actor=rank_to_worker[init_result.rank],
+                server_url=init_result.server_url,
+                session_url=init_result.session_url,
+            )
 
-        server_process_workers_info = registry.all_workers()
-        self.logger.info(f"Rollout server-process worker URLs: {[info.url for info in server_process_workers_info]}")
-        lifecycle_groups = sorted({info.lifecycle_group_ranks for info in server_process_workers_info})
-        self.logger.info(f"Rollout worker lifecycle groups: {lifecycle_groups}")
+        rollout_metadata = registry.metadata()
+        legacy_metadata = rollout_metadata.to_legacy()
+        self.logger.info(
+            "Rollout worker registry snapshot: "
+            f"server_urls={legacy_metadata['server_url_dict']}, "
+            f"session_urls={legacy_metadata['worker_session_url_dict']}, "
+            f"server_process_urls={[worker.url for worker in registry.all_workers()]}, "
+            f"lifecycle_groups={registry.lifecycle_groups()}"
+        )
         return registry
 
 

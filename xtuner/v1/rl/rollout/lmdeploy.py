@@ -1,6 +1,6 @@
 import os
 from argparse import Namespace
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
 
 import numpy as np
 import ray
@@ -10,7 +10,8 @@ from ray.util.placement_group import placement_group_table
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 
-from .worker import EngineLaunchSpec, EngineLaunchSpecs, RolloutConfig, RolloutWorker, ServerProcessSpec
+from .rollout_topology import RolloutEngine, RolloutServerProcess, RolloutTopology
+from .worker import RolloutConfig, RolloutWorker
 
 
 SHARED_STORE = "shared_store"
@@ -80,118 +81,77 @@ class LMDeployWorker(RolloutWorker):
         self.lmdeploy_actor = None
 
     @classmethod
-    def build_engine_launch_specs(
+    def build_rollout_topology(
         cls,
         config: RolloutConfig,
         rank_bundle_idx_list: list[tuple[int, int]],
-        rank_to_dist_init_addr: dict[int, str] | None = None,
-    ) -> EngineLaunchSpecs:
-        """Build LMDeploy server launch layout.
-
-        LMDeploy EP starts one request-serving server per EP rank.
-
-        Example with expert_parallel_size=2:
-        rank_bundle_idx_list is [(0, 0), (1, 1), (2, 2), (3, 3)].
-        rank identifies the rollout worker; bundle idx identifies the Ray
-        placement-group bundle that owns the GPU resource.
-
-        If rank_to_dist_init_addr is:
-            {0: "addr0", 1: "addr1", 2: "addr2", 3: "addr3"}
-
-        The launch specs are:
-            EngineLaunchSpec(
-                engine_ranks=(0, 1),
-                server_processes=(
-                    ServerProcessSpec(
-                        worker_rank=0,
-                        placement_group_bundle_idxs=(0,),
-                        dist_init_addr="addr0",
-                    ),
-                    ServerProcessSpec(
-                        worker_rank=1,
-                        placement_group_bundle_idxs=(1,),
-                        dist_init_addr="addr0",
-                    ),
-                ),
-            )
-            EngineLaunchSpec(
-                engine_ranks=(2, 3),
-                server_processes=(
-                    ServerProcessSpec(
-                        worker_rank=2,
-                        placement_group_bundle_idxs=(2,),
-                        dist_init_addr="addr2",
-                    ),
-                    ServerProcessSpec(
-                        worker_rank=3,
-                        placement_group_bundle_idxs=(3,),
-                        dist_init_addr="addr2",
-                    ),
-                ),
-            )
-
-        Each EP rank launches a server process, so server_worker_ranks is the
-        same as engine_ranks, and every server accepts rollout requests.
-        """
-        if config.expert_parallel_size <= 1:
-            return RolloutWorker.build_engine_launch_specs(
-                config,
-                rank_bundle_idx_list,
-                rank_to_dist_init_addr,
-            )
-
-        ep_size = config.expert_parallel_size
+        rank_to_dist_init_addr: Mapping[int, str],
+    ) -> RolloutTopology:
+        """Build LMDeploy rollout topology with bound engine dist-init
+        addresses."""
+        engines: list[RolloutEngine] = []
         num_workers = len(rank_bundle_idx_list)
-        if num_workers % ep_size != 0:
-            raise ValueError(f"num_rollout_workers={num_workers} must be divisible by expert_parallel_size={ep_size}.")
-
-        engine_launch_specs: list[EngineLaunchSpec] = []
-        for engine_start in range(0, num_workers, ep_size):
-            engine_meta = rank_bundle_idx_list[engine_start : engine_start + ep_size]
-            engine_ranks = tuple(rank for rank, _ in engine_meta)
-            engine_dist_init_addr = None if rank_to_dist_init_addr is None else rank_to_dist_init_addr[engine_ranks[0]]
-            # LMDeploy EP launches one server process for each EP rank. Each
-            # server owns exactly one placement-group bundle, and every server
-            # can be used as a rollout request entrypoint.
-            engine_launch_specs.append(
-                EngineLaunchSpec(
-                    engine_ranks=engine_ranks,
-                    server_processes=tuple(
-                        ServerProcessSpec(
-                            worker_rank=server_rank,
-                            placement_group_bundle_idxs=(bundle_idx,),
-                            dist_init_addr=engine_dist_init_addr,
-                        )
-                        for server_rank, bundle_idx in engine_meta
-                    ),
+        if config.expert_parallel_size <= 1:
+            num_gpus_per_engine = config.num_gpus_per_engine
+            if num_workers % num_gpus_per_engine != 0:
+                raise ValueError(
+                    f"num_rollout_workers={num_workers} must be divisible by "
+                    f"num_gpus_per_engine={num_gpus_per_engine}."
                 )
+            for engine_start in range(0, num_workers, num_gpus_per_engine):
+                engine_meta = rank_bundle_idx_list[engine_start : engine_start + num_gpus_per_engine]
+                engine_ranks = tuple(rank for rank, _ in engine_meta)
+                engine_bundle_idxs = tuple(bundle_idx for _, bundle_idx in engine_meta)
+                dist_init_addr_owner_rank = engine_ranks[0]
+                engines.append(
+                    RolloutEngine(
+                        engine_ranks=engine_ranks,
+                        dist_init_addr=rank_to_dist_init_addr[dist_init_addr_owner_rank],
+                        server_processes=(
+                            RolloutServerProcess(
+                                worker_rank=engine_ranks[0],
+                                placement_group_bundle_idxs=engine_bundle_idxs,
+                            ),
+                        ),
+                    )
+                )
+        else:
+            ep_size = config.expert_parallel_size
+            if num_workers % ep_size != 0:
+                raise ValueError(
+                    f"num_rollout_workers={num_workers} must be divisible by expert_parallel_size={ep_size}."
+                )
+            for engine_start in range(0, num_workers, ep_size):
+                engine_meta = rank_bundle_idx_list[engine_start : engine_start + ep_size]
+                engine_ranks = tuple(rank for rank, _ in engine_meta)
+                dist_init_addr_owner_rank = engine_ranks[0]
+                engines.append(
+                    RolloutEngine(
+                        engine_ranks=engine_ranks,
+                        dist_init_addr=rank_to_dist_init_addr[dist_init_addr_owner_rank],
+                        server_processes=tuple(
+                            RolloutServerProcess(
+                                worker_rank=server_rank,
+                                placement_group_bundle_idxs=(bundle_idx,),
+                            )
+                            for server_rank, bundle_idx in engine_meta
+                        ),
+                    )
+                )
+
+        training_engine_mesh: list[tuple[int, ...]] = []
+        for engine in engines:
+            entrypoint_processes = tuple(
+                process for process in engine.server_processes if process.accepts_rollout_requests
             )
-        return cls.validate_engine_launch_specs(
-            tuple(engine_launch_specs),
-            known_worker_ranks=tuple(rank for rank, _ in rank_bundle_idx_list),
-        )
-
-    @classmethod
-    def build_metadata_engine_rank_mesh_array(
-        cls,
-        engine_launch_specs: EngineLaunchSpecs,
-    ) -> list[list[int]]:
-        """Keep LMDeploy EP metadata compatible with origin/main.
-
-        Pure EP uses one request-serving server per EP rank. The logical engine topology is still stored in
-        EngineLaunchSpec.engine_ranks for dp_rank and lifecycle operations, but update_weighter expects the public
-        metadata mesh to contain one single-rank entry per request server.
-        """
-        metadata_engine_rank_mesh_array: list[list[int]] = []
-        for engine_spec in engine_launch_specs:
-            request_entrypoint_servers = engine_spec.request_entrypoint_servers
-            if len(request_entrypoint_servers) > 1:
-                metadata_engine_rank_mesh_array.extend(
-                    [server_process.worker_rank] for server_process in request_entrypoint_servers
-                )
+            if len(entrypoint_processes) == 1:
+                training_engine_mesh.append(tuple(engine.engine_ranks))
             else:
-                metadata_engine_rank_mesh_array.append(list(engine_spec.engine_ranks))
-        return metadata_engine_rank_mesh_array
+                training_engine_mesh.extend((process.worker_rank,) for process in entrypoint_processes)
+        return RolloutTopology(
+            engines=tuple(engines),
+            training_engine_mesh=tuple(training_engine_mesh),
+        )
 
     def offload(self):
         """Offloads the model weights and KV cache."""
@@ -342,7 +302,7 @@ class LMDeployWorker(RolloutWorker):
             "NPU": "ascend",
         }
 
-        extra_config = self.config.extra_rollout_config or dict()
+        extra_config = self.config.extra_rollout_config
         lmdeploy_config_kwargs = {
             k.replace("lmdeploy_", ""): v for k, v in extra_config.items() if k.startswith("lmdeploy_")
         }
@@ -383,14 +343,13 @@ class LMDeployWorker(RolloutWorker):
         if backend == "pytorch" and self.config.max_prefill_token_num:
             extra_engine_config["max_prefill_token_num"] = self.config.max_prefill_token_num
 
+        assert self.server_launch_spec is not None
         dp_rank = 0
         if backend == "pytorch":
             # currently only support ep > 1 and tp == 1 / ep == 1 and tp > 1
             assert ep_size == 1 or tp_size == 1
             if ep_size > 1:
-                engine_launch_spec = self.engine_launch_spec
-                assert engine_launch_spec is not None
-                dp_rank = engine_launch_spec.engine_ranks.index(self.rank)
+                dp_rank = self.server_launch_spec.engine_rank
 
         backend_config = (
             PytorchEngineConfig(
@@ -413,7 +372,10 @@ class LMDeployWorker(RolloutWorker):
             else TurbomindEngineConfig(
                 tp=tp_size,
                 max_batch_size=self.config.rollout_max_batch_size_per_instance,
-                devices=[bundle_idxs % self.config.gpus_per_node for bundle_idxs in self.engine_bundle_idxs],
+                devices=[
+                    bundle_idx % self.config.gpus_per_node
+                    for bundle_idx in self.server_launch_spec.placement_group_bundle_idxs
+                ],
                 empty_init=self.config.skip_load_weights,
                 session_len=self.config.context_length,
                 model_format="fp8" if self.config.enable_float8 else None,
@@ -431,7 +393,9 @@ class LMDeployWorker(RolloutWorker):
             env = {
                 "LMDEPLOY_RAY_EXTERNAL_NS": ray_runtime_ctx.namespace,
                 "LMDEPLOY_RAY_EXTERNAL_PG_NAME": current_pg_name,
-                "LMDEPLOY_RAY_EXTERNAL_PG_BUNDLES": ",".join(map(str, self.engine_bundle_idxs)),
+                "LMDEPLOY_RAY_EXTERNAL_PG_BUNDLES": ",".join(
+                    map(str, self.server_launch_spec.placement_group_bundle_idxs)
+                ),
             }
 
             if self.accelerator == "NPU":
@@ -444,7 +408,7 @@ class LMDeployWorker(RolloutWorker):
                 )
 
             if tp_size > 1:
-                dist_addr, dist_port = self.dist_init_addr.split(":")[:2]
+                dist_addr, dist_port = self.server_launch_spec.dist_init_addr.split(":")[:2]
                 env.update(
                     {
                         "LMDEPLOY_DIST_MASTER_ADDR": dist_addr,
@@ -452,7 +416,7 @@ class LMDeployWorker(RolloutWorker):
                     }
                 )
             elif ep_size > 1:
-                dist_addr, dist_port = self.dist_init_addr.split(":")[:2]
+                dist_addr, dist_port = self.server_launch_spec.dist_init_addr.split(":")[:2]
                 if speculative_num_draft_tokens is not None:
                     deepep_max_tokens_per_rank = max_batch_size * (1 + speculative_num_draft_tokens)
                 else:

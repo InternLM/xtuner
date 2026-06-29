@@ -1,6 +1,6 @@
 import base64
 import os
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Mapping, Union
 
 import numpy as np
 import ray
@@ -11,13 +11,8 @@ from transformers import AutoConfig, AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.utils import XTUNER_DETERMINISTIC
 
-from .worker import (
-    EngineLaunchSpec,
-    EngineLaunchSpecs,
-    RolloutConfig,
-    RolloutWorker,
-    ServerProcessSpec,
-)
+from .rollout_topology import RolloutEngine, RolloutServerProcess, RolloutTopology
+from .worker import RolloutConfig, RolloutWorker
 
 
 class SGLangWorker(RolloutWorker):
@@ -49,53 +44,14 @@ class SGLangWorker(RolloutWorker):
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
 
     @classmethod
-    def build_engine_launch_specs(
+    def build_rollout_topology(
         cls,
         config: RolloutConfig,
         rank_bundle_idx_list: list[tuple[int, int]],
-        rank_to_dist_init_addr: dict[int, str] | None = None,
-    ) -> EngineLaunchSpecs:
-        """Build SGLang server launch layout.
-
-        SGLang starts one server per node in a logical engine. Only node 0 is
-        used as the rollout request entrypoint.
-
-        Example with expert_parallel_size=16 and gpus_per_node=8:
-        rank_bundle_idx_list is:
-            [(0, 0), (1, 1), ..., (15, 15)]
-
-        If rank_to_dist_init_addr is:
-            {0: "addr0", 1: "addr1", ..., 15: "addr15"}
-
-        The launch spec is:
-            EngineLaunchSpec(
-                engine_ranks=(0, 1, 2, 3, 4, 5, 6, 7,
-                              8, 9, 10, 11, 12, 13, 14, 15),
-                server_processes=(
-                    ServerProcessSpec(
-                        worker_rank=0,
-                        placement_group_bundle_idxs=(0, 1, 2, 3, 4, 5, 6, 7),
-                        dist_init_addr="addr0",
-                        accepts_rollout_requests=True,
-                        node_rank=0,
-                        nnodes=2,
-                    ),
-                    ServerProcessSpec(
-                        worker_rank=8,
-                        placement_group_bundle_idxs=(8, 9, 10, 11, 12, 13, 14, 15),
-                        dist_init_addr="addr0",
-                        accepts_rollout_requests=False,
-                        node_rank=1,
-                        nnodes=2,
-                    ),
-                ),
-            )
-
-        SGLang starts one server per node, so server_worker_ranks is (0, 8).
-        Only the node-0 server accepts rollout requests.
-        """
+        rank_to_dist_init_addr: Mapping[int, str],
+    ) -> RolloutTopology:
         num_workers = len(rank_bundle_idx_list)
-        num_gpus_per_engine = cls._get_num_gpus_per_engine(config)
+        num_gpus_per_engine = config.num_gpus_per_engine
         if num_workers % num_gpus_per_engine != 0:
             raise ValueError(
                 f"num_rollout_workers={num_workers} must be divisible by num_gpus_per_engine={num_gpus_per_engine}."
@@ -106,7 +62,7 @@ class SGLangWorker(RolloutWorker):
             )
 
         nnodes = max(1, num_gpus_per_engine // config.gpus_per_node)
-        engine_launch_specs: list[EngineLaunchSpec] = []
+        engines = []
         for engine_start in range(0, num_workers, num_gpus_per_engine):
             engine_meta = rank_bundle_idx_list[engine_start : engine_start + num_gpus_per_engine]
             engine_ranks = tuple(rank for rank, _ in engine_meta)
@@ -115,30 +71,30 @@ class SGLangWorker(RolloutWorker):
             # first rank of each node owns that node's bundles, while only node
             # 0 is exposed as the rollout request entrypoint.
             server_ranks = engine_ranks[:: config.gpus_per_node]
-            engine_dist_init_addr = None if rank_to_dist_init_addr is None else rank_to_dist_init_addr[server_ranks[0]]
-            server_processes: list[ServerProcessSpec] = []
+            dist_init_addr_owner_rank = server_ranks[0]
+            server_processes = []
             for node_rank, server_rank in enumerate(server_ranks):
                 node_bundle_start = node_rank * config.gpus_per_node
                 node_bundle_end = node_bundle_start + config.gpus_per_node
                 server_processes.append(
-                    ServerProcessSpec(
+                    RolloutServerProcess(
                         worker_rank=server_rank,
                         placement_group_bundle_idxs=engine_bundle_idxs[node_bundle_start:node_bundle_end],
-                        dist_init_addr=engine_dist_init_addr,
                         accepts_rollout_requests=node_rank == 0,
                         node_rank=node_rank,
                         nnodes=nnodes,
                     )
                 )
-            engine_launch_specs.append(
-                EngineLaunchSpec(
+            engines.append(
+                RolloutEngine(
                     engine_ranks=engine_ranks,
+                    dist_init_addr=rank_to_dist_init_addr[dist_init_addr_owner_rank],
                     server_processes=tuple(server_processes),
                 )
             )
-        return cls.validate_engine_launch_specs(
-            tuple(engine_launch_specs),
-            known_worker_ranks=tuple(rank for rank, _ in rank_bundle_idx_list),
+        return RolloutTopology(
+            engines=tuple(engines),
+            training_engine_mesh=tuple(tuple(engine.engine_ranks) for engine in engines),
         )
 
     def _get_request_payload(self, rollout_state: RolloutState) -> dict:
@@ -325,7 +281,7 @@ class SGLangWorker(RolloutWorker):
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         from sglang.srt.server_args import ServerArgs
 
-        extra_config = self.config.extra_rollout_config or dict()
+        extra_config = self.config.extra_rollout_config
         sglang_config_kwargs = {
             k.replace("sglang_", ""): v for k, v in extra_config.items() if k.startswith("sglang_")
         }
@@ -338,13 +294,7 @@ class SGLangWorker(RolloutWorker):
         )
         tp_size = num_gpus_per_engine if self.config.expert_parallel_size > 1 else self.config.tensor_parallel_size
         ep_size = num_gpus_per_engine if self.config.expert_parallel_size > 1 else self.config.expert_parallel_size
-        server_process_spec = self._get_current_server_process_spec()
-        nnodes = (
-            server_process_spec.nnodes
-            if server_process_spec is not None
-            else max(1, num_gpus_per_engine // self.config.gpus_per_node)
-        )
-        node_rank = server_process_spec.node_rank if server_process_spec is not None else 0
+        assert self.server_launch_spec is not None
         assigned_gpu_id = int(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
 
         # SGLang 0.5.10 默认启用的 Piecewise CUDA Graph 在启动 warmup compile 阶段会报错。sglang的文档提到这个功能还是实验功能，可能还不太稳定(https://sgl-project-sglang-93.mintlify.app/optimization/cuda-graph#bug-report)。暂时先通过disable_piecewise_cuda_graph=True关掉改功能
@@ -354,11 +304,11 @@ class SGLangWorker(RolloutWorker):
             host=self.host,
             port=self.server_port,
             nccl_port=self.nccl_port,
-            dist_init_addr=self.dist_init_addr,
+            dist_init_addr=self.server_launch_spec.dist_init_addr,
             base_gpu_id=assigned_gpu_id,
             gpu_id_step=1,
-            nnodes=nnodes,
-            node_rank=node_rank,
+            nnodes=self.server_launch_spec.nnodes,
+            node_rank=self.server_launch_spec.node_rank,
             skip_server_warmup=True,
             mem_fraction_static=self.config.gpu_memory_utilization,
             enable_memory_saver=True,
