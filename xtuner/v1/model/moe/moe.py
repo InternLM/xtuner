@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
 import types
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Self, Sequence, TypedDict, cast
 
@@ -130,6 +131,28 @@ class MoELossContextDict(TypedDict):
     balancing: BalancingLossContext | None
     z_loss: ZLossContext | None
     mtp: list[BaseLossContext] | None
+
+
+@dataclass
+class _MoEForwardState:
+    """Per-forward bookkeeping shared by the embed / layers / head stages of a single
+    ``seq_ctx`` forward.
+
+    Computed once in :meth:`MoE._prepare_forward` and threaded through the stage helpers so that
+    aux-loss ``accumulate`` (run per decoder layer) and ``finalize`` (run after the head) operate on
+    the same accumulator contexts and the same non-padding bookkeeping. Splitting the forward into
+    stages lets pipeline parallel run only a subset of stages on each rank while preserving identical
+    semantics for the non-split (``pp_size == 1``) path.
+    """
+
+    output: dict
+    keep_router: bool
+    balancing_ctx: list[BalancingLossContext] | BalancingLossContext | None
+    z_ctx: list[ZLossContext] | ZLossContext | None
+    nonpad_indices: torch.Tensor
+    non_pad_token: int
+    num_tokens_global: torch.Tensor | None
+    z_world_size: int
 
 
 class MoEConfig(TransformerConfig):
@@ -651,26 +674,20 @@ class MoE(BaseModel):
         loss_ctx: MoELossContextDict | None,
         return_router_logits: bool = False,
     ) -> MoEModelOutputs:
-        input_ids = seq_ctx.input_ids
-        position_ids = seq_ctx.position_ids
+        # The forward is split into embed / layers / head stages so pipeline parallel can run only a
+        # subset of stages on each rank; this orchestrator runs all three for the non-split path.
+        state = self._prepare_forward(seq_ctx, loss_ctx, return_router_logits)
+        hidden_states = self._embed_step(seq_ctx)
+        hidden_states, position_embeddings = self._layers_step(hidden_states, seq_ctx, state)
+        return self._head_step(hidden_states, position_embeddings, seq_ctx, loss_ctx, state)
 
-        if input_ids is not None:
-            hidden_states = self.embed_tokens(input_ids)
-        else:
-            assert seq_ctx.inputs_embeds is not None, "inputs_embeds should not be None when input_ids is None"
-            # The clone here is mainly for ActivationOffload. The current offload implementation modifies
-            # the input tensor in-place, causing subsequent accesses to input_embeds to get a tensor with
-            # empty storage and trigger errors. So we clone here to ensure later accesses to input_embeds
-            # won't fail. However, there are two remaining caveats:
-            # 1. The extra clone may introduce a slight performance overhead.
-            # 2. hidden_states itself still cannot be reused, as offload will leave it with empty storage.
-            hidden_states = seq_ctx.inputs_embeds.clone()
-
-        # create position embeddings to be shared across the decoder layers
-        assert position_ids is not None
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-        output: dict = {}  # type: ignore
+    def _prepare_forward(
+        self,
+        seq_ctx: SequenceContext,
+        loss_ctx: MoELossContextDict | None,
+        return_router_logits: bool,
+    ) -> _MoEForwardState:
+        output: dict = {}
         if self.config.return_hidden_states:
             output["hidden_states"] = []
 
@@ -690,8 +707,53 @@ class MoE(BaseModel):
         nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
         non_pad_token = nonpad_indices.numel()
         num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
+        return _MoEForwardState(
+            output=output,
+            keep_router=keep_router,
+            balancing_ctx=balancing_ctx,
+            z_ctx=z_ctx,
+            nonpad_indices=nonpad_indices,
+            non_pad_token=non_pad_token,
+            num_tokens_global=num_tokens_global,
+            z_world_size=z_world_size,
+        )
 
-        for idx, decoder_layer in self.layers.items():
+    def _embed_step(self, seq_ctx: SequenceContext) -> torch.Tensor:
+        input_ids = seq_ctx.input_ids
+        if input_ids is not None:
+            hidden_states = self.embed_tokens(input_ids)
+        else:
+            assert seq_ctx.inputs_embeds is not None, "inputs_embeds should not be None when input_ids is None"
+            # The clone here is mainly for ActivationOffload. The current offload implementation modifies
+            # the input tensor in-place, causing subsequent accesses to input_embeds to get a tensor with
+            # empty storage and trigger errors. So we clone here to ensure later accesses to input_embeds
+            # won't fail. However, there are two remaining caveats:
+            # 1. The extra clone may introduce a slight performance overhead.
+            # 2. hidden_states itself still cannot be reused, as offload will leave it with empty storage.
+            hidden_states = seq_ctx.inputs_embeds.clone()
+        return hidden_states
+
+    def _layers_step(
+        self,
+        hidden_states: torch.Tensor,
+        seq_ctx: SequenceContext,
+        state: _MoEForwardState,
+        layer_indices: list[str] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        # Position embeddings are a pure function of position_ids and are recomputed per stage from
+        # the incoming hidden_states (rather than threaded across stages) so each pipeline stage stays
+        # self-contained. ``layer_indices`` selects this stage's contiguous layer range; None = all.
+        assert seq_ctx.position_ids is not None
+        position_embeddings = self.rotary_emb(hidden_states, seq_ctx.position_ids)
+
+        output = state.output
+        keep_router = state.keep_router
+        if layer_indices is None:
+            layer_items = list(self.layers.items())
+        else:
+            layer_items = [(idx, self.layers[idx]) for idx in layer_indices]
+
+        for idx, decoder_layer in layer_items:
             if int(idx) < self.config.first_k_dense_replace:
                 hidden_states = decoder_layer(
                     hidden_states,
@@ -724,18 +786,33 @@ class MoE(BaseModel):
                     output["router_logits"][f"layer{idx}"] = self._maybe_offload_router(router_results)
                     output["router_weights"][f"layer{idx}"] = self._maybe_offload_router(router_weights)
                 hidden_states = self.aux_loss.accumulate(
-                    selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
-                    selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
+                    selected_router_weights=router_weights.index_select(0, state.nonpad_indices).contiguous().float(),
+                    selected_router_logits=router_results.index_select(0, state.nonpad_indices).contiguous().float(),
                     hidden_states=hidden_states,
-                    balancing_ctx=balancing_ctx,
-                    z_ctx=z_ctx,
-                    num_tokens_local=non_pad_token,
-                    num_tokens_global=num_tokens_global,
-                    world_size=z_world_size,
+                    balancing_ctx=state.balancing_ctx,
+                    z_ctx=state.z_ctx,
+                    num_tokens_local=state.non_pad_token,
+                    num_tokens_global=state.num_tokens_global,
+                    world_size=state.z_world_size,
                 )
 
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
+
+        return hidden_states, position_embeddings
+
+    def _head_step(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        seq_ctx: SequenceContext,
+        loss_ctx: MoELossContextDict | None,
+        state: _MoEForwardState,
+    ) -> MoEModelOutputs:
+        output = state.output
+        keep_router = state.keep_router
+        balancing_ctx = state.balancing_ctx
+        z_ctx = state.z_ctx
 
         layer_hidden_states = hidden_states
         hidden_states = self.norm(hidden_states)
@@ -753,6 +830,9 @@ class MoE(BaseModel):
             and loss_ctx is not None
             and (mtp_loss_ctx_list := loss_ctx.get("mtp")) is not None
         ):
+            input_ids = seq_ctx.input_ids
+            position_ids = seq_ctx.position_ids
+            assert position_ids is not None
             mtp_seq_ctx = seq_ctx.copy(
                 input_ids=input_ids.clone() if input_ids is not None else None,
                 position_ids=position_ids.clone(),
@@ -808,7 +888,7 @@ class MoE(BaseModel):
         split_aux_output = self.aux_loss.finalize(
             balancing_ctx=balancing_ctx,
             z_ctx=z_ctx,
-            non_pad_token=non_pad_token,
+            non_pad_token=state.non_pad_token,
         )
         balancing_loss, z_loss, tokens_per_expert_global = split_aux_output
         if balancing_loss is not None:
