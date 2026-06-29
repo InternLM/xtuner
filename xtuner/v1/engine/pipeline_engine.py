@@ -148,6 +148,19 @@ class PPEngine:
     def from_hf(self, hf_path, strict: bool = False):
         self.model.from_hf(hf_path=hf_path, strict=strict)
 
+    def save_hf(self, hf_dir, save_dtype: torch.dtype = torch.bfloat16):
+        """Save the model in HuggingFace format.
+
+        Each pipeline stage writes its own parameters; the per-stage shards are merged into one
+        ``model.safetensors.index.json`` covering the full model (the model save path gathers the
+        weight map across all ranks).
+
+        Args:
+            hf_dir (str | Path): Destination directory.
+            save_dtype (torch.dtype): Dtype to cast parameters to when saving.
+        """
+        self.model.save_hf(hf_dir, save_dtype=save_dtype)
+
     def train_step(self, data_batches: list[ModelItem]) -> dict:
         """Run one optimizer-step worth of microbatches through the pipeline schedule.
 

@@ -461,6 +461,10 @@ class MoE(BaseModel):
             del self.lm_head
             self.mtp_block = None
 
+        # Mark the model as a pipeline-stage subset so checkpoint save/load handles the partial key set.
+        if num_stages > 1:
+            self._pipeline_split = True
+
     def pipeline_forward(
         self,
         stage_input: torch.Tensor | None,
@@ -642,8 +646,9 @@ class MoE(BaseModel):
                         d2h_stream=self.offload_stream,
                         block_idx=layer_idx - self.config.first_k_dense_replace,
                         group="text",
-                        custom_check_fn=lambda x: x.data_ptr()
-                        in [hidden_states.data_ptr() for hidden_states in hidden_states_list],
+                        custom_check_fn=lambda x: (
+                            x.data_ptr() in [hidden_states.data_ptr() for hidden_states in hidden_states_list]
+                        ),
                         prefetch=True,
                         reserve_pin_memory=True,
                     ):

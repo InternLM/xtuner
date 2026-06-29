@@ -543,6 +543,11 @@ class BaseModel(nn.Module):
     # stage) do not deadlock against stages that never enter them.
     dp_group: "ProcessGroup | None" = None
 
+    # Set by ``split_for_pipeline``: the model holds only its pipeline stage's parameters, so checkpoint
+    # save/load must treat the model as a subset of the full model (each stage saves its own keys; the
+    # checkpoint legitimately contains other stages' keys on load).
+    _pipeline_split: bool = False
+
     FSDP_SHARD_DIM = 0
 
     def __init__(self, config: XTunerBaseModelConfig):
@@ -1482,23 +1487,35 @@ class BaseModel(nn.Module):
                     else:
                         all_hf_keys = hf_keys
 
-                    current_rank = dist.get_rank()
+                    if self._pipeline_split:
+                        # Under pipeline parallel a fused tensor is owned only by the stage that holds
+                        # this layer, so the save must be distributed across that stage's ranks, not the
+                        # whole world (other ranks never iterate this load_spec and would silently drop
+                        # their slice). The saving ranks are exactly load_spec.group (the ep group); with
+                        # ep_size == 1 (group is None) the single owning rank saves all keys.
+                        num_savers = load_spec.group.size() if load_spec.group is not None else 1
+                        saver_idx = dist.get_rank(load_spec.group) if load_spec.group is not None else 0
+                        key_per_rank = len(all_hf_keys) / num_savers
+                        start = int(saver_idx * key_per_rank)
+                        end = int(start + key_per_rank)
+                    else:
+                        current_rank = dist.get_rank()
 
-                    expected_fused_save_ranks = self._get_ranks_to_save_fused_tensor(len(all_hf_keys))
-                    hardcode_fused_save_ranks = list(
-                        range(min((dist.get_world_size(), self.config.hf_save_cfg.max_save_rank)))
-                    )
+                        expected_fused_save_ranks = self._get_ranks_to_save_fused_tensor(len(all_hf_keys))
+                        hardcode_fused_save_ranks = list(
+                            range(min((dist.get_world_size(), self.config.hf_save_cfg.max_save_rank)))
+                        )
 
-                    key_per_rank = len(all_hf_keys) / len(hardcode_fused_save_ranks)
-                    # assert key_per_rank.is_integer(), (
-                    #     f"XTuner Internal Error, size of all_hf_keys: {len(all_hf_keys)},  "
-                    #     f"size of `fused_save_ranks` {len(fused_save_ranks)}"
-                    # )
-                    if not key_per_rank.is_integer():
-                        key_per_rank = len(all_hf_keys) / len(expected_fused_save_ranks)
+                        key_per_rank = len(all_hf_keys) / len(hardcode_fused_save_ranks)
+                        # assert key_per_rank.is_integer(), (
+                        #     f"XTuner Internal Error, size of all_hf_keys: {len(all_hf_keys)},  "
+                        #     f"size of `fused_save_ranks` {len(fused_save_ranks)}"
+                        # )
+                        if not key_per_rank.is_integer():
+                            key_per_rank = len(all_hf_keys) / len(expected_fused_save_ranks)
 
-                    start = int(current_rank * key_per_rank)
-                    end = int(start + key_per_rank)
+                        start = int(current_rank * key_per_rank)
+                        end = int(start + key_per_rank)
 
                     _hf_key_list = all_hf_keys[start:end]
 
@@ -1747,6 +1764,17 @@ class BaseModel(nn.Module):
             + math.ceil(fused_size / bucket_size)
         )
 
+    def _is_others_save_rank(self) -> bool:
+        if not dist.is_initialized():
+            return True
+        # Under pipeline parallel each stage holds a different subset of the replicated ("others")
+        # parameters, so one representative per stage must save them: the first rank of the stage's
+        # data-parallel group. Without pipeline parallel those parameters are replicated everywhere, so
+        # a single global rank suffices.
+        if self.dp_group is not None:
+            return dist.get_rank(group=self.dp_group) == 0
+        return dist.get_rank() == 0
+
     def _iter_hf_save_chunks(
         self,
         save_dtype: torch.dtype = torch.bfloat16,
@@ -1771,7 +1799,7 @@ class BaseModel(nn.Module):
             device=device,
         )
 
-        is_others_save_rank = not dist.is_initialized() or dist.get_rank() == 0
+        is_others_save_rank = self._is_others_save_rank()
         save_rank = dist.get_rank() if dist.is_initialized() else 0
 
         saved_names: set[str] = set()
@@ -1963,7 +1991,7 @@ class BaseModel(nn.Module):
         same_gen = self._get_same_hf_param(self._group_param_by_load_spec(LoadEnum.SAME), dtype=save_dtype)
         fused_gen = self._get_fused_hf_param(self._group_param_by_load_spec(LoadEnum.FUSED), dtype=save_dtype)
 
-        is_others_save_rank = not dist.is_initialized() or dist.get_rank() == 0
+        is_others_save_rank = self._is_others_save_rank()
 
         # Tell me why! why! old cao! @HIT-cwh
         # mp_context = multiprocessing.get_context("fork")
@@ -2070,12 +2098,14 @@ class BaseModel(nn.Module):
         expected_hf_keys: set[str] = set(chain(*map(self.to_hf_key_list, self.state_dict())))
         expected_keys = set(self.state_dict())
 
-        if strict and matched_hf_keys != expected_hf_keys:
+        if strict:
             _missing_keys = expected_hf_keys - matched_hf_keys
             if _missing_keys:
                 raise RuntimeError(f"Missing keys in checkpoint: {_missing_keys}. ")
+            # A pipeline stage owns only a subset of the model, so the checkpoint legitimately contains
+            # the other stages' keys; only an unsplit model should treat extra keys as an error.
             unexpected_keys = matched_hf_keys - expected_hf_keys
-            if unexpected_keys:
+            if unexpected_keys and not self._pipeline_split:
                 raise RuntimeError(f"Unexpected keys in checkpoint: {unexpected_keys}. ")
 
         missing_keys: set[str] = set()
