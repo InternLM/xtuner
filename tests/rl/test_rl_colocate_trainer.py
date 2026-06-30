@@ -79,6 +79,10 @@ def _build_fake_rollout_controller():
     return rollout_ctl
 
 
+def _ray_get_none_ref():
+    return ray.put(None) if ray.is_initialized() else None
+
+
 def _build_fake_agent_loop():
     rollout_ctl = _build_fake_rollout_controller()
     agent_loop = MagicMock()
@@ -154,6 +158,7 @@ class TestRLColocateTrainer(unittest.TestCase):
             restart_inactive_workers=SimpleNamespace(remote=MagicMock(return_value="rollout_restarted")),
             onload_weights=SimpleNamespace(remote=MagicMock(return_value="weights_loaded")),
             onload_kvcache=SimpleNamespace(remote=MagicMock(return_value="kvcache_loaded")),
+            validate_registered_workers_to_proxy=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
         )
         trainer.train_controller = SimpleNamespace(
             onload=MagicMock(return_value="train_onloaded"),

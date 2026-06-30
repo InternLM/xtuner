@@ -1,6 +1,5 @@
 import asyncio
 import json
-import math
 import os
 import random
 import re
@@ -53,7 +52,7 @@ from xtuner.v1.rl.utils import (
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
-from xtuner.v1.rl.utils.misc import check_chat_completions, delete_from_routedapiproxy, register_to_routedapiproxy
+from xtuner.v1.rl.weight_update.data import TrainRolloutMode
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -67,36 +66,32 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 
-def _is_routed_agent_loop_config(agent_loop_config: Any) -> bool:
-    config_type = type(agent_loop_config)
-    return config_type.__name__ in {
-        "AgentInLocalhostLoopConfig",
-        "AgentInSandboxLoopConfig",
-    } and config_type.__module__.startswith("xtuner.v1.rl.agent_loop.")
-
-
-def _agent_loop_manager_needs_routed_api_proxy(cfg: AgentLoopManagerConfig | None) -> bool:
-    if cfg is None:
-        return False
-    tasks = getattr(cfg, "tasks", None)
-    if tasks is None:
-        agent_loop_config = getattr(cfg, "agent_loop_config", None)
-        return _is_routed_agent_loop_config(agent_loop_config)
-    task_cfgs = tasks if isinstance(tasks, list) else [tasks]
-    return any(_is_routed_agent_loop_config(task.agent_loop_config) for task in task_cfgs)
-
-
-def _trainer_config_needs_routed_api_proxy(cfg: "BaseRLTrainerConfig") -> bool:
-    return _agent_loop_manager_needs_routed_api_proxy(
-        cfg.agent_loop_manager_cfg
-    ) or _agent_loop_manager_needs_routed_api_proxy(cfg.eval_agent_loop_manager_cfg)
-
-
 def _to_cpu_tensor(value: np.ndarray | None, *, dtype: torch.dtype | None = None) -> torch.Tensor | None:
     if value is None:
         return None
     assert isinstance(value, np.ndarray), f"Expected np.ndarray, got {type(value)}"
     return torch.as_tensor(value, dtype=dtype, device="cpu")
+
+
+def _agent_loop_manager_requires_rollout_proxy(
+    cfg: AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None,
+) -> bool:
+    # TODO: This is a temporary hardcoded adapter over current AgentLoopManagerConfig shapes.
+    # Prefer moving this behind a manager-level capability method/property when the config API is cleaned up.
+    if cfg is None:
+        return False
+    tasks = getattr(cfg, "tasks", None)
+    if tasks is None:
+        agent_loop_config = getattr(cfg, "agent_loop_config", None)
+        return bool(getattr(agent_loop_config, "requires_rollout_proxy", False))
+    task_cfgs = tasks if isinstance(tasks, list) else [tasks]
+    return any(bool(getattr(task.agent_loop_config, "requires_rollout_proxy", False)) for task in task_cfgs)
+
+
+def _trainer_config_requires_rollout_proxy(cfg: "BaseRLTrainerConfig") -> bool:
+    return _agent_loop_manager_requires_rollout_proxy(
+        cfg.agent_loop_manager_cfg
+    ) or _agent_loop_manager_requires_rollout_proxy(cfg.eval_agent_loop_manager_cfg)
 
 
 def check_fa3():
@@ -114,13 +109,21 @@ def check_fa3():
 def bind_train_rollout(
     train_controller: TrainingController,
     rollout_controller: RolloutControllerProxy,
+    train_rollout_mode: TrainRolloutMode | str,
+    weight_update_host: str | None = None,
+    weight_update_port: int | None = None,
 ) -> None:
     """Bind the training and rollout workers for update weights."""
     info_dict = ray.get(
         rollout_controller.get_rollout_metadata.remote(),  # type: ignore[attr-defined]
         timeout=RL_TRAINER_RAY_GET_TIMEOUT,
     )
-    train_controller.update_rollout_info(info_dict)
+    train_controller.update_rollout_info(
+        info_dict,
+        train_rollout_mode=train_rollout_mode,
+        weight_update_host=weight_update_host,
+        weight_update_port=weight_update_port,
+    )
     return
 
 
@@ -574,6 +577,7 @@ class BaseRLTrainer:
         self._init_train_state(cfg)
         self._init_train_worker_config(cfg, log_dir)
         self._init_rollout_config(cfg, log_dir)
+        self._ensure_rollout_proxy_config(cfg)
         self._init_runtime_flags(cfg)
         self._advantage_estimator = cfg.advantage_estimator_config.build()
         self._cpu_resource_manager: CPUResourceManager | None = None
@@ -659,50 +663,10 @@ class BaseRLTrainer:
             )
         self._rollout_config = cfg.rollout_config
 
-    def _ensure_rollout_http_concurrency(
-        self,
-        cfg: BaseRLTrainerConfig,
-        rollout_pg,
-    ) -> None:
-        rollout_max_batch_size = cfg.rollout_config.rollout_max_batch_size_per_instance
-        if rollout_max_batch_size is None or rollout_max_batch_size <= 0:
+    def _ensure_rollout_proxy_config(self, cfg: BaseRLTrainerConfig) -> None:
+        if not _trainer_config_requires_rollout_proxy(cfg):
             return
-
-        current_http_concurrency = math.ceil(rollout_max_batch_size * cfg.rollout_config.allow_over_concurrency_ratio)
-        if current_http_concurrency <= 0:
-            return
-
-        total_generate_concurrency = cfg.rollout_config.get_controller_generate_concurrency(rollout_pg)
-        active_rollout_worker_count = total_generate_concurrency // current_http_concurrency
-        if active_rollout_worker_count <= 0:
-            return
-
-        tasks = cfg.agent_loop_manager_cfg.tasks
-        task_cfgs = tasks if isinstance(tasks, list) else [tasks]
-        total_weight = sum(task.weight for task in task_cfgs)
-        if total_weight <= 0:
-            return
-
-        scheduled_http_requests = 0.0
-        for task in task_cfgs:
-            task_batch_size = cfg.train_batch_size * task.weight / total_weight
-            over_sample_threshold = float(getattr(task.produce_strategy_config, "over_sample_threshold", 0.0))
-            scheduled_http_requests += (
-                task_batch_size * task.sampler_config.prompt_repeat_k * (1 + over_sample_threshold)
-            )
-
-        required_http_concurrency = math.ceil(scheduled_http_requests / active_rollout_worker_count)
-        if current_http_concurrency >= required_http_concurrency:
-            return
-
-        new_ratio = required_http_concurrency / rollout_max_batch_size
-        cfg.rollout_config.allow_over_concurrency_ratio = new_ratio
-        self.logger.warning(
-            "Increasing rollout_config.allow_over_concurrency_ratio because httpx max_connections is smaller "
-            "than the expected per-worker rollout request concurrency: "
-            f"max_connections={current_http_concurrency}, "
-            f"required_connections={required_http_concurrency}"
-        )
+        self._rollout_config.enable_proxy = True
 
     def _init_runtime_flags(self, cfg: BaseRLTrainerConfig) -> None:
         self._enable_evaluate = cfg.enable_evaluate
@@ -1568,46 +1532,6 @@ class BaseRLTrainer:
         self._global_train_step += len(workers_log_item[0]["train_metrics"])
 
 
-def add_apiproxy(self):
-    info_dict = ray.get(self.rollout_controller.get_rollout_metadata.remote())
-    model_name = info_dict["rollout_config"].model_name
-
-    def _check_chat_completions_with_retry(base_url: str, max_attempts: int = 5, interval: float = 3.0) -> bool:
-        for attempt in range(1, max_attempts + 1):
-            if check_chat_completions(base_url, model_name):
-                return True
-            if attempt < max_attempts:
-                self.logger.warning(
-                    f"check chat completions failed for {base_url}, "
-                    f"retrying {attempt}/{max_attempts - 1} after {interval}s"
-                )
-                time.sleep(interval)
-        return False
-
-    delete_from_routedapiproxy(model_name)
-    self.logger.info(f"deleted {model_name} from routedapiproxy")
-    self.logger.info("registering to routedapiproxy")
-
-    worker_session_url_dict = info_dict["worker_session_url_dict"]
-    worker_session_urls_status = info_dict["worker_session_urls_status"]
-    for _, worker_session_url in sorted(worker_session_url_dict.items()):
-        if not worker_session_urls_status.get(worker_session_url, False):
-            continue
-        register_to_routedapiproxy(model_name, worker_session_url)
-
-        # test server url
-        recheck_status_orig = _check_chat_completions_with_retry(worker_session_url)
-        if not recheck_status_orig:
-            raise ValueError(f"check chat completions failed for {worker_session_url}")
-
-    # test routed url
-    routed_url = "http://s-20260104203038-22bhb.ailab-evalservice.pjh-service.org.cn/v1"
-    recheck_status_routed = _check_chat_completions_with_retry(routed_url)
-    if not recheck_status_routed:
-        raise ValueError(f"check chat completions failed for {routed_url}")
-    self.logger.info("registered to routedapiproxy")
-
-
 class RLColocateTrainer(BaseRLTrainer):
     _META_PATH = ".xtuner_rl_colocate_trainer"
     agent_loop_manager: AgentLoopManager
@@ -1622,7 +1546,6 @@ class RLColocateTrainer(BaseRLTrainer):
         self._cpu_resource_manager = CPUResourceManager(self._pg)
         self._cpu_resource_manager.log_initial_snapshot()
         set_cpu_resource_manager(self._cpu_resource_manager)
-        self._ensure_rollout_http_concurrency(cfg, self._pg)
 
         if self._debug_rollout:
             if self._rollout_config.skip_load_weights:
@@ -1631,8 +1554,6 @@ class RLColocateTrainer(BaseRLTrainer):
                 )
                 self._rollout_config.skip_load_weights = False
             self.rollout_controller = self._rollout_config.build(self._pg)
-            if _trainer_config_needs_routed_api_proxy(cfg):
-                add_apiproxy(self)
 
             replay_buffer = cfg.replay_buffer_config.build()
             self._build_agent_loop_components(cfg, replay_buffer)
@@ -1662,21 +1583,21 @@ class RLColocateTrainer(BaseRLTrainer):
         self.train_controller.offload(target="all")
 
         self.rollout_controller = self._rollout_config.build(self._pg)
-        bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+        bind_train_rollout(
+            train_controller=self.train_controller,
+            rollout_controller=self.rollout_controller,
+            train_rollout_mode="colocate",
+        )
 
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)
         if checkpoint_path is not None:
             asyncio_run(self._resume_agent_loop_manager(checkpoint_path))
 
-        self.train_controller.set_train_rollout_mode("colocate")
         self._cpu_resource_manager.log_registered_summary()
 
         if self._rollout_config.skip_load_weights:
             self._sync_weights_from_train_workers()
-
-        if _trainer_config_needs_routed_api_proxy(cfg):
-            add_apiproxy(self)
 
     def _sync_weights_from_train_workers(self) -> None:
         self.logger.info("Rollout workers skip load weights, update weights from train workers.")
@@ -1689,6 +1610,12 @@ class RLColocateTrainer(BaseRLTrainer):
         self.logger.info("Rollout workers updated weights from train workers.")
 
     def fit(self):
+        try:
+            self._fit()
+        finally:
+            self._exp_tracker.close()
+
+    def _fit(self):
         self.logger.info("Start RL training")
         if self._cur_step >= self._total_train_steps:
             self.logger.info(f"Train steps {self._total_train_steps} reached, stop training")
@@ -1697,6 +1624,11 @@ class RLColocateTrainer(BaseRLTrainer):
         if self._debug_train:
             self._fit_debug_train()
             return
+
+        ray.get(
+            self.rollout_controller.validate_registered_workers_to_proxy.remote(),
+            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+        )
 
         if self._enable_initial_evaluate and not self._debug_rollout:
             asyncio_run(self._run_initial_evaluate())
@@ -1814,6 +1746,7 @@ class RLColocateTrainer(BaseRLTrainer):
                 bind_train_rollout(
                     train_controller=self.train_controller,
                     rollout_controller=self.rollout_controller,
+                    train_rollout_mode="colocate",
                 )
                 ray.get(
                     self.rollout_controller.onload_weights.remote(),
@@ -1845,11 +1778,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         self._cpu_resource_manager = CPUResourceManager([self._train_pg, self._rollout_pg])
         self._cpu_resource_manager.log_initial_snapshot()
         set_cpu_resource_manager(self._cpu_resource_manager)
-        self._ensure_rollout_http_concurrency(cfg, self._rollout_pg)
         self.train_controller = self._train_worker_cfg.build(self._train_pg)
         self.rollout_controller = self._rollout_config.build(self._rollout_pg)
-        if _trainer_config_needs_routed_api_proxy(cfg):
-            add_apiproxy(self)
 
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)
@@ -1860,8 +1790,13 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                     "In disaggregated mode, should_continue_fn must be default, "
                     "because it does not allow early stopping in production."
                 )
-        bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
-        self.train_controller.set_train_rollout_mode("disaggregated")
+        bind_train_rollout(
+            train_controller=self.train_controller,
+            rollout_controller=self.rollout_controller,
+            train_rollout_mode="disaggregated",
+            weight_update_host=self._rollout_config.weight_update_host,
+            weight_update_port=self._rollout_config.weight_update_port,
+        )
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
@@ -1903,7 +1838,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
     def fit(self):
         # 对外同步 fit；内部用 async loop 组织 producer/consumer。
-        return asyncio_run(self._fit())
+        try:
+            return asyncio_run(self._fit())
+        finally:
+            self._exp_tracker.close()
 
     async def _get_batch_or_raise_producer_failure(
         self,
@@ -1938,6 +1876,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         if self._cur_step >= self._total_train_steps:
             self.logger.info(f"Train steps {self._total_train_steps} reached, stop training")
             return
+
+        await self.rollout_controller.validate_registered_workers_to_proxy.remote()  # type: ignore[attr-defined]
 
         if self._enable_initial_evaluate:
             await self._run_initial_evaluate()
@@ -2044,7 +1984,11 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         # TODO: 非共卡需要额外加健康检查恢复worker的逻辑，共卡是在训练之前恢复，但是非共卡不需要在训练之前恢复,挂掉就恢复或者更新权重前恢复，需要评估一下哪种方式更合理。
         with timer("sync_weight", step_timer_dict):
-            bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+            bind_train_rollout(
+                train_controller=self.train_controller,
+                rollout_controller=self.rollout_controller,
+                train_rollout_mode="disaggregated",
+            )
             self.update_weights()
 
     def update_weights(self):

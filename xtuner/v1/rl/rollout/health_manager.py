@@ -4,9 +4,10 @@ import asyncio
 import os
 import threading
 import time
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import ray
 
@@ -27,7 +28,14 @@ __all__ = [
     "HEALTH_MANAGER_STOP_JOIN_TIMEOUT",
     "ROLLOUT_RAY_GET_TIMEOUT",
     "RolloutHealthManager",
+    "RolloutWorkerLifecycleListener",
 ]
+
+
+class RolloutWorkerLifecycleListener(Protocol):
+    def on_worker_group_inactive(self, group: WorkerGroup) -> None: ...
+
+    def on_worker_group_recovered(self, group: WorkerGroup) -> None: ...
 
 
 class RolloutHealthManager:
@@ -42,8 +50,10 @@ class RolloutHealthManager:
         self,
         config: RolloutConfig,
         registry: RolloutWorkerRegistry,
+        worker_lifecycle_listeners: Iterable[RolloutWorkerLifecycleListener] | None = None,
     ):
         self._registry = registry
+        self._worker_lifecycle_listeners = tuple(worker_lifecycle_listeners or ())
         self._check_interval = config.health_check_interval_seconds
         self._check_timeout_seconds = config.health_check_timeout_seconds
         self._check_failure_threshold = config.health_check_failure_threshold
@@ -174,14 +184,18 @@ class RolloutHealthManager:
                     return
 
                 failed_recovery_groups: list[WorkerGroup] = []
+                recovered_groups: list[WorkerGroup] = []
                 for group in sorted_failed_groups:
                     is_recovered = group_recovery_results.get(group.ranks, False)
-                    self._registry.set_group_recovery_result(group, recovered=is_recovered)
+                    updated_group = self._registry.set_group_recovery_result(group, recovered=is_recovered)
                     if is_recovered:
                         for rank in group.ranks:
                             self._worker_health_failure_counts.pop(rank, None)
+                        recovered_groups.append(updated_group or group)
                     if not is_recovered:
                         failed_recovery_groups.append(group)
+                for group in recovered_groups:
+                    self._notify_worker_group_recovered(group)
             inactive_workers = [
                 f"rank={worker.rank}, url={worker.url}" for worker in self._registry.inactive_workers()
             ]
@@ -269,10 +283,33 @@ class RolloutHealthManager:
             with self._operation_lock:
                 if not self._is_stopping():
                     failed_groups = self._registry.mark_unhealthy_ranks(failed_ranks)
-        for group in failed_groups:
-            logger.warning(f"Rollout worker group ranks={group.ranks} failed health check. Marking as inactive.")
+                    for group in failed_groups:
+                        logger.warning(
+                            f"Rollout worker group ranks={group.ranks} failed health check. Marking as inactive."
+                        )
+                        self._notify_worker_group_inactive(group)
 
         return len(workers_to_check)
+
+    def _notify_worker_group_inactive(self, group: WorkerGroup) -> None:
+        for listener in self._worker_lifecycle_listeners:
+            try:
+                listener.on_worker_group_inactive(group)
+            except Exception:
+                logger.exception(
+                    f"Rollout worker inactive listener failed: "
+                    f"listener={type(listener).__name__}, group_ranks={group.ranks}"
+                )
+
+    def _notify_worker_group_recovered(self, group: WorkerGroup) -> None:
+        for listener in self._worker_lifecycle_listeners:
+            try:
+                listener.on_worker_group_recovered(group)
+            except Exception:
+                logger.exception(
+                    f"Rollout worker recovered listener failed: "
+                    f"listener={type(listener).__name__}, group_ranks={group.ranks}"
+                )
 
     def _check_workers_health(self, workers_to_check: list[WorkerSnapshot], *, fail_fast: bool = False) -> list[bool]:
         """Run periodic check_health probes concurrently."""

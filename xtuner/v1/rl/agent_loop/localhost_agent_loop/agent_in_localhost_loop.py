@@ -84,6 +84,7 @@ class AgentInLocalhostLoopConfig(AgentLoopConfig):
     max_concurrent_samples: int | None = None
     sample_timeout_s: float | None = None
     mode: Literal["train", "eval"] = "train"
+    requires_rollout_proxy: bool = True
 
     def build_local(
         self,

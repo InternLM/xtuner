@@ -1,7 +1,6 @@
 import asyncio
 import copy
 import json
-import math
 import multiprocessing
 import os
 import threading
@@ -39,6 +38,7 @@ from xtuner.v1.rl.utils import (
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
+from .constants import ROLLOUT_HTTP_MAX_CONNECTIONS, ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
 from .health_manager import ROLLOUT_RAY_GET_TIMEOUT
 from .session_server import SessionServerActor
 from .utils import PartialRolloutHandler
@@ -144,10 +144,14 @@ class RolloutConfig(BaseModel):
         gpu_memory_utilization (float): GPU memory utilization ratio. Defaults to 0.85.
         random_seed (int): Random seed for reproducible generation. Defaults to 1024.
         rollout_cross_node_comm (bool): Enable cross-node communication. Defaults to False.
+        weight_update_host (Optional[str]): Host used by train rank 0 to initialize the external NCCL weight update
+            group. Defaults to None.
+        weight_update_port (Optional[int]): Port used by train rank 0 to initialize the external NCCL weight update
+            group. Defaults to 30000.
         rollout_max_batch_size_per_instance (int): Maximum batch size for the rollout worker. If not set, it
             will be determined automatically based on `context_length`. Defaults to 512.
-        allow_over_concurrency_ratio (float): Factor to allow over-concurrency in HTTP requests for the
-            rollout worker to improve GPU utilization. Defaults to 1.2.
+        allow_over_concurrency_ratio (float): Deprecated compatibility option. Rollout runtime concurrency is
+            controlled by fixed caps in xtuner.v1.rl.rollout.constants. Defaults to 1.2.
         tensor_parallel_size (int): GPUs per inference engine (tensor parallelism). Defaults to 1.
         expert_parallel_size (int): Experts per inference engine (expert parallelism). Defaults to 1.
         enable_chunked_prefill (bool): Enable chunked prefill for memory efficiency. Defaults to False.
@@ -223,6 +227,26 @@ class RolloutConfig(BaseModel):
             help="Base port number for distributed communication among rollout workers.",
         ),
     ] = 25000
+    weight_update_host: Annotated[
+        Optional[str],
+        Parameter(
+            group=infer_group,
+            help=(
+                "Host used by train rank 0 to initialize the external NCCL weight update group. "
+                "Only used for NCCL weight update."
+            ),
+        ),
+    ] = None
+    weight_update_port: Annotated[
+        Optional[int],
+        Parameter(
+            group=infer_group,
+            help=(
+                "Port used by train rank 0 to initialize the external NCCL weight update group. "
+                "Only used for NCCL weight update."
+            ),
+        ),
+    ] = 30000
     rollout_max_batch_size_per_instance: Annotated[
         Optional[int],
         Parameter(
@@ -234,7 +258,10 @@ class RolloutConfig(BaseModel):
         float,
         Parameter(
             group=infer_group,
-            help="Factor to allow over concurrency in the http request for rollout worker to improve GPU utilization.",
+            help=(
+                "Deprecated compatibility option. Rollout runtime concurrency is controlled by fixed caps in "
+                "xtuner.v1.rl.rollout.constants."
+            ),
         ),
     ] = 1.2
     tensor_parallel_size: Annotated[
@@ -315,20 +342,6 @@ class RolloutConfig(BaseModel):
             help="Context length for the rollout worker.",
         ),
     ] = None
-    tool_call_parser: Annotated[
-        Literal["none", "qwen3", "qwen3p5"],
-        Parameter(
-            group=infer_group,
-            help='Structured tool-call parser to apply to rollout output. Use "none" to disable parsing, "qwen3" to enable Qwen3 tool-call parsing, or "qwen3p5" to enable Qwen3.5 coder-style tool-call parsing.',
-        ),
-    ] = "none"
-    reasoning_parser: Annotated[
-        Literal["none", "qwen3"],
-        Parameter(
-            group=infer_group,
-            help='Reasoning parser to apply to rollout output. Use "none" to disable parsing or "qwen3" to enable Qwen3 <think> parsing.',
-        ),
-    ] = "none"
     enable_float8: Annotated[
         bool,
         Parameter(
@@ -408,6 +421,27 @@ class RolloutConfig(BaseModel):
             help="Number of consecutive health check failures required before marking a worker inactive.",
         ),
     ] = 3
+    enable_proxy: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Register rollout session servers to routed API proxy and keep registrations in sync with health.",
+        ),
+    ] = False
+    routed_proxy_url: Annotated[
+        str,
+        Parameter(
+            group=infer_group,
+            help="Routed API proxy base URL used to validate proxy chat completions after registration.",
+        ),
+    ] = "http://s-20260104203038-22bhb.ailab-evalservice.pjh-service.org.cn"
+    routed_proxy_admin_url: Annotated[
+        str,
+        Parameter(
+            group=infer_group,
+            help="Routed API proxy admin base URL used for model registration and deletion.",
+        ),
+    ] = "http://s-20260104203038-22bhb-decode.ailab-evalservice.svc:4000"
 
     @property
     def rollout_backend(self) -> str:
@@ -428,25 +462,16 @@ class RolloutConfig(BaseModel):
     def num_gpus_per_engine(self) -> int:
         return self.expert_parallel_size if self.expert_parallel_size > 1 else self.tensor_parallel_size
 
-    @property
-    def generate_concurrency_per_instance(self) -> int:
-        assert self.rollout_max_batch_size_per_instance is not None, (
-            "rollout_max_batch_size_per_instance must be set before computing generate concurrency."
-        )
-        return math.ceil(self.rollout_max_batch_size_per_instance * self.allow_over_concurrency_ratio)
-
-    def get_controller_generate_concurrency(self, placement_group: "PlacementGroup") -> int:
-        worker_base_cls = get_rollout_worker_base_cls(self)
-        sorted_bundle_idxs, _, _, _ = AutoAcceleratorWorkers.get_spmd_info(placement_group)
-        rank_bundle_idx_list = [(rank, bundle_idx) for rank, bundle_idx in enumerate(sorted_bundle_idxs)]
-        engine_launch_specs = worker_base_cls.build_engine_launch_specs(self, rank_bundle_idx_list)
-        request_entrypoint_count = sum(
-            len(engine_spec.request_entrypoint_servers) for engine_spec in engine_launch_specs
-        )
-        generate_max_concurrency = request_entrypoint_count * self.generate_concurrency_per_instance
-        return generate_max_concurrency
-
     def model_post_init(self, __context: Any) -> None:
+        default_allow_over_concurrency_ratio = type(self).model_fields["allow_over_concurrency_ratio"].default
+        if self.allow_over_concurrency_ratio != default_allow_over_concurrency_ratio:
+            get_logger().warning(
+                "rollout_config.allow_over_concurrency_ratio is deprecated and no longer controls runtime "
+                "rollout concurrency. The configured value "
+                f"{self.allow_over_concurrency_ratio} will be ignored; fixed rollout concurrency caps from "
+                "xtuner.v1.rl.rollout.constants are used instead."
+            )
+
         if self.model_name is None:
             model_name_from_config = None
             config_json_path = Path(self.model_path) / "config.json"
@@ -506,12 +531,10 @@ class RolloutConfig(BaseModel):
             name="rollout_controller",
             cpu_resources=CPUResourcesConfig(num_workers=num_workers),
         )
-        generate_max_concurrency = self.get_controller_generate_concurrency(placement_group)
-        get_logger().info(f"Calculated RolloutController generate concurrency: {generate_max_concurrency}")
         return (
             ray.remote(
                 concurrency_groups={
-                    ROLLOUT_CONCURRENCY_GROUP_GENERATE: generate_max_concurrency,
+                    ROLLOUT_CONCURRENCY_GROUP_GENERATE: ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY,
                 },
             )(RolloutController)
             .options(num_cpus=num_workers)
@@ -558,8 +581,10 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.endpoints: dict[str, str] = dict()
         self.engine_rank_mesh_array: list[list[int]] = []
         self.engine_launch_spec: EngineLaunchSpec | None = None
-        # http_concurrency is calculated based on the max batch size per engine and the total number of engines
-        http_concurrency = config.generate_concurrency_per_instance
+        # Keep this deliberately large so requests do not queue in the
+        # RolloutWorker/httpx client; the inference engine owns rollout request
+        # scheduling and queueing.
+        http_concurrency = ROLLOUT_HTTP_MAX_CONNECTIONS
         limits = httpx.Limits(max_connections=http_concurrency, max_keepalive_connections=100)
         self.client = httpx.AsyncClient(limits=limits, timeout=self.config.rollout_timeout)
         self.server_task = None

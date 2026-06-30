@@ -41,7 +41,7 @@ jobs:
           else
             while IFS= read -r file; do
               case "$file" in
-                xtuner/v1/rl/*)
+                tests/rl/*|xtuner/v1/rl/*)
                   ;;
                 *)
                   only_rl=false

@@ -73,6 +73,16 @@ class _RemoteMethod:
         return _run()
 
 
+class _AwaitableValue:
+    def __init__(self, value=None):
+        self.value = value
+
+    def __await__(self):
+        if False:
+            yield None
+        return self.value
+
+
 class _FakeCPUResourceManager:
     def __init__(self, accelerator_placement_groups=None):
         self.accelerator_placement_groups = accelerator_placement_groups
@@ -96,6 +106,7 @@ class _FakeRolloutController:
         self.onload_kvcache = _RemoteMethod(return_value="kvcache_loaded")
         self.get_rollout_metadata = _RemoteMethod(return_value={"server_url_dict": {}})
         self.set_enable_partial_rollout = _RemoteMethod(return_value=None)
+        self.validate_registered_workers_to_proxy = _RemoteMethod(return_value=_AwaitableValue(None))
 
     def _generate(self, rollout_state):
         # 生成侧只补齐训练真正需要的可观察 rollout 结果，不加载真实推理服务。
@@ -116,11 +127,17 @@ class _FakeTrainController:
         self.update_weights_count = 0
         self.rollout_info = None
 
-    def set_train_rollout_mode(self, mode: str):
-        self.train_rollout_mode = mode
-
-    def update_rollout_info(self, info):
+    def update_rollout_info(
+            self,
+            info,
+            train_rollout_mode,
+            weight_update_host,
+            weight_update_port
+        ):
         self.rollout_info = info
+        self.train_rollout_mode = train_rollout_mode
+        self.weight_update_host = weight_update_host
+        self.weight_update_port = weight_update_port
 
     def onload(self, target="all"):
         return f"onload:{target}"
@@ -218,12 +235,6 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             patch("xtuner.v1.train.rl_trainer.BaseRLTrainer._release_trace_store", return_value=None),
             patch.object(WorkerConfig, "build", autospec=True, side_effect=build_train_controller),
             patch.object(RolloutConfig, "build", autospec=True, side_effect=build_rollout_controller),
-            patch.object(
-                RolloutConfig,
-                "get_controller_generate_concurrency",
-                autospec=True,
-                side_effect=lambda rollout_cfg, placement_group: rollout_cfg.generate_concurrency_per_instance,
-            ),
         ):
             yield runtime
 

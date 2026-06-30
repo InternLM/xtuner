@@ -1,10 +1,15 @@
+import re
 import time
 import traceback
 from typing import Any, Dict, Optional
 
 from clusterx.config import CLUSTER
 from clusterx.launcher import CLUSTER_MAPPING
-from clusterx.launcher.base import JobStatus
+from clusterx.launcher.base import JobSchema, JobStatus
+
+
+JOB_LOOKUP_RETRY_INTERVAL_S = 5
+JOB_LOOKUP_RETRY_TIMES = 6
 
 
 class ClusterTaskExecutor:
@@ -36,9 +41,9 @@ class ClusterTaskExecutor:
 
         all_command.append(command)
         run_command = "; ".join(all_command)
+        job_name = "-".join([task_config["type"], task_config["case_name"], task_config["run_id"]])
 
         try:
-            job_name = "-".join([task_config["type"], task_config["case_name"], task_config["run_id"]])
             params = self.params_cls(
                 job_name=job_name,
                 cmd=run_command,
@@ -50,13 +55,22 @@ class ClusterTaskExecutor:
                 num_nodes=resource.get("num_nodes", 1),
                 image=resource.get("image", None),
                 no_env=resource.get("no_env", True),
-                image_pull_policy=resource.get("image_pull_policy","Always"),
+                image_pull_policy=resource.get("image_pull_policy", "Always"),
             )
 
             job_schema = self.cluster.run(params)
         except Exception as e:
             traceback.print_exc()
-            raise RuntimeError(f"clusterx job {job_name} start fail, task config is {task_config}, exception is: {e}")
+            job_schema = self._lookup_job_schema(job_name)
+            if job_schema is None:
+                raise RuntimeError(
+                    f"clusterx job {job_name} start fail and lookup found no matching job, "
+                    f"task config is {task_config}, exception is: {e}"
+                )
+            print(
+                f"clusterx job {job_name} submit error recovered via lookup: "
+                f"job_id={job_schema.job_id}, status={job_schema.status}, original exception: {e}"
+            )
 
         start_time = time.time()
         run_start_time = None
@@ -68,7 +82,7 @@ class ClusterTaskExecutor:
             if status in [JobStatus.SUCCEEDED]:
                 run_time = time.time() - run_start_time
                 if run_time >= timeout:
-                    return False, f'Task succeeded, but run time is {run_time}, exceeding then {timeout}'
+                    return False, f"Task succeeded, but run time is {run_time}, exceeding then {timeout}"
                 else:
                     return True, "Task succeeded"
             elif status in [JobStatus.FAILED, JobStatus.STOPPED]:
@@ -90,6 +104,66 @@ class ClusterTaskExecutor:
                     f"Pool timeout: jobname {job_name}, {timeout} seconds, task {job_schema.job_id} status is {status}"
                 )
             time.sleep(10)
+
+    @staticmethod
+    def _job_name_matches(candidate: str | None, job_name: str) -> bool:
+        if not candidate:
+            return False
+        return candidate == job_name or candidate.startswith(f"{job_name}-")
+
+    def _pick_latest_job(self, jobs: list[JobSchema]) -> JobSchema:
+        return max(jobs, key=lambda job: job.job_id or job.job_name or "")
+
+    def _lookup_job_schema_once(self, job_name: str) -> JobSchema | None:
+        try:
+            return self.cluster.get_job_info(job_name)
+        except Exception:
+            pass
+
+        name_regex = rf"^{re.escape(job_name)}(-.*)?$"
+        try:
+            jobs = self.cluster.list_jobs(regex=name_regex, num=50)
+            if jobs:
+                return self._pick_latest_job(jobs)
+        except Exception as e:
+            print(f"list_jobs lookup for {job_name} failed: {e}")
+
+        client = getattr(self.cluster, "client", None)
+        get_job_name = getattr(self.cluster, "_get_job_name", None)
+        if client is not None and get_job_name is not None:
+            try:
+                matched_names = [
+                    get_job_name(job)
+                    for job in (client.list() or [])
+                    if self._job_name_matches(get_job_name(job), job_name)
+                ]
+                if matched_names:
+                    return self.cluster.get_job_info(max(matched_names))
+            except Exception as e:
+                print(f"brainpp client list lookup for {job_name} failed: {e}")
+
+        try:
+            jobs = self.cluster.list_jobs(num=100)
+            matched = [job for job in jobs if self._job_name_matches(job.job_id, job_name)]
+            if matched:
+                return self._pick_latest_job(matched)
+        except Exception as e:
+            print(f"generic list_jobs lookup for {job_name} failed: {e}")
+
+        return None
+
+    def _lookup_job_schema(self, job_name: str) -> JobSchema | None:
+        for attempt in range(1, JOB_LOOKUP_RETRY_TIMES + 1):
+            job_schema = self._lookup_job_schema_once(job_name)
+            if job_schema is not None:
+                return job_schema
+            if attempt < JOB_LOOKUP_RETRY_TIMES:
+                print(
+                    f"Job {job_name} not found on attempt {attempt}/{JOB_LOOKUP_RETRY_TIMES}, "
+                    f"retry in {JOB_LOOKUP_RETRY_INTERVAL_S}s"
+                )
+                time.sleep(JOB_LOOKUP_RETRY_INTERVAL_S)
+        return None
 
     def get_task_status(self, job_id: str) -> Optional[JobStatus]:
         try:

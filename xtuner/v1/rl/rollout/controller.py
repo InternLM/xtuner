@@ -6,15 +6,13 @@ import ray
 from ray.actor import ActorProxy
 from ray.util.placement_group import PlacementGroup
 
-from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
+from .constants import ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
 from .health_manager import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthManager
-from .parser.factory import build_reasoning_parser, build_tool_call_parser
-from .parser.reasoning_parser import ReasoningParser
-from .parser.tool_parser import ToolCallParser
+from .proxy_manager import RolloutProxyManager
 from .utils import SessionRouter
 from .worker import (
     ROLLOUT_CONCURRENCY_GROUP_GENERATE,
@@ -49,20 +47,21 @@ class RolloutController:
         self.num_gpus_per_engine = self.config.num_gpus_per_engine
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
         self.registry = self._init_workers(placement_group)
-        # Cache the exact controller concurrency chosen at build time so
-        # downstream components observe the same limit as the Ray actor.
-        self._generate_concurrency = self.config.get_controller_generate_concurrency(placement_group)
         # The timeout for the environment to wait for the rollout controller's response.
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
         self.router = SessionRouter(self.registry)
+        self.proxy_manager: RolloutProxyManager | None = None
+        if self.config.enable_proxy:
+            self.proxy_manager = RolloutProxyManager(self.config)
+            self.register_active_workers_to_proxy()
         self.health_manager = RolloutHealthManager(
             config=self.config,
             registry=self.registry,
+            worker_lifecycle_listeners=[self.proxy_manager] if self.proxy_manager is not None else None,
         )
         self.health_manager.start()
-        self._tool_call_parser, self._reasoning_parser = self._build_output_parsers()
 
     def get_rollout_metadata(self) -> RolloutWorkerMetadata:
         """Get information about the current rollout setup.
@@ -76,22 +75,18 @@ class RolloutController:
         self.logger.info(f"Rollout worker session server URLs: {rollout_metadata['worker_session_url_dict']}")
         return rollout_metadata
 
-    def _build_output_parsers(self) -> tuple[ToolCallParser | None, ReasoningParser | None]:
-        tool_call_parser = None
-        reasoning_parser = None
+    def register_active_workers_to_proxy(self) -> None:
+        if self.proxy_manager is None:
+            return
+        session_urls = sorted(
+            worker.session_url for worker in self.registry.active_entrypoints() if worker.session_url is not None
+        )
+        self.proxy_manager.replace_registered_session_urls(session_urls)
 
-        if self.config.tool_call_parser != "none":
-            tool_call_parser = build_tool_call_parser(self.config.tool_call_parser)
-
-        if self.config.reasoning_parser != "none":
-            tokenizer_path = self.config.tokenizer_path or self.config.model_path
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-            reasoning_parser = build_reasoning_parser(self.config.reasoning_parser, tokenizer)
-
-        return tool_call_parser, reasoning_parser
-
-    def get_generate_concurrency(self) -> int:
-        return self._generate_concurrency
+    def validate_registered_workers_to_proxy(self) -> None:
+        if self.proxy_manager is None:
+            return
+        self.proxy_manager.validate_registered_session_urls()
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
@@ -115,7 +110,6 @@ class RolloutController:
                 response_ref,
                 timeout=self.config.rollout_timeout * self.timeout_multiplier,
             )
-            self._apply_output_parsers(response_rollout_state)
             return response_rollout_state
         except asyncio.TimeoutError:
             self.logger.error(
@@ -127,21 +121,6 @@ class RolloutController:
                 f"Rollout request timed out after {self.config.rollout_timeout * self.timeout_multiplier} seconds."
             )
             return rollout_state
-
-    def _apply_output_parsers(self, rollout_state: RolloutState) -> None:
-        """Apply tool-call and reasoning parsers to the rollout state in-
-        place."""
-        if self._tool_call_parser is not None:
-            parsed = self._tool_call_parser.parse(rollout_state)
-            rollout_state.tool_calls = parsed.tool_calls
-            rollout_state.response = parsed.remaining_text or None
-        if self._reasoning_parser is not None:
-            parsed_reasoning = self._reasoning_parser.parse(rollout_state)
-            rollout_state.response = parsed_reasoning.remaining_text
-            if parsed_reasoning.reasoning_text:
-                rollout_state.extra_fields["reasoning_text"] = parsed_reasoning.reasoning_text
-            else:
-                rollout_state.extra_fields.pop("reasoning_text", None)
 
     def set_enable_partial_rollout(self, enable: bool) -> None:
         """Propagate enable_partial_rollout flag to all active workers."""
@@ -218,13 +197,9 @@ class RolloutController:
         assert self.config.rollout_max_batch_size_per_instance is not None, (
             "rollout_max_batch_size_per_instance must be set before building RolloutWorker."
         )
-        worker_generate_max_concurrency = max(
-            1000,  # Ray async actor default max_concurrency.
-            self.config.generate_concurrency_per_instance,
-        )
         return ray.remote(
             concurrency_groups={
-                ROLLOUT_CONCURRENCY_GROUP_GENERATE: worker_generate_max_concurrency,
+                ROLLOUT_CONCURRENCY_GROUP_GENERATE: ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY,
             },
         )(worker_base_cls)
 
