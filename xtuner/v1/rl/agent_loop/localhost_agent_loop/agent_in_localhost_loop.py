@@ -85,6 +85,7 @@ class AgentInLocalhostLoopConfig(AgentLoopConfig):
     sample_timeout_s: float | None = None
     mode: Literal["train", "eval"] = "train"
     requires_rollout_proxy: bool = True
+    process_advantage_builder: str | None = None
 
     def build_local(
         self,
@@ -101,6 +102,7 @@ class AgentInLocalhostLoopConfig(AgentLoopConfig):
             max_concurrent_samples=self.max_concurrent_samples,
             sample_timeout_s=self.sample_timeout_s,
             mode=self.mode,
+            process_advantage_builder=self.process_advantage_builder,
         )
 
 
@@ -117,6 +119,7 @@ class AgentInLocalhostLoop(AgentLoop):
         max_concurrent_samples: int | None = None,
         sample_timeout_s: float | None = None,
         mode: Literal["train", "eval"] = "train",
+        process_advantage_builder: str | None = None,
     ):
         if hf_checkpoint is None:
             raise ValueError("hf_checkpoint must be provided for AgentInLocalhostLoop.")
@@ -125,6 +128,9 @@ class AgentInLocalhostLoop(AgentLoop):
         self.sample_timeout_s = sample_timeout_s
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
         self.mode = mode
+        self.process_advantage_builder = (
+            _import_from_path(process_advantage_builder) if process_advantage_builder is not None else None
+        )
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> RolloutState:
@@ -246,6 +252,16 @@ class AgentInLocalhostLoop(AgentLoop):
 
         rollout_state.input_ids = data["input_ids"]
         rollout_state.labels = data["labels"]
+        rollout_state.extra_fields["agent_trace_segments"] = data.get("segments", [])
+        if self.process_advantage_builder is not None:
+            rollout_state.advantage_weight, process_adv_summary = self.process_advantage_builder(
+                segment["messages"],
+                data["labels"],
+                data.get("segments"),
+            )
+            rollout_state.extra_fields["process_adv"] = process_adv_summary
+        else:
+            rollout_state.advantage_weight = None
         rollout_state.response_ids = [
             token_id for token_id, label in zip(data["input_ids"][1:], data["labels"][1:]) if label != -100
         ]
@@ -267,6 +283,7 @@ class AgentInLocalhostLoop(AgentLoop):
         rollout_state.routed_experts = None
         rollout_state.response_mask = None
         rollout_state.response_model_steps = None
+        rollout_state.advantage_weight = None
         rollout_state.extra_fields["agent_status"] = item.status.value
         if item.error is not None:
             rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"

@@ -1010,6 +1010,11 @@ class BaseRLTrainer:
         response_len_list = []
         tool_turns_list: list[int] = []
         training_tokens = 0
+        process_adv_affected_samples = 0
+        process_adv_affected_tokens = 0
+        process_adv_affected_positive_tokens = 0
+        process_adv_weight_sum = 0.0
+        process_adv_alignment_mismatch = 0
 
         data_batches = []
 
@@ -1092,7 +1097,45 @@ class BaseRLTrainer:
                     response_len_list.append(response_len)
 
                     advatnages_val = sample_advantages[i]
-                    actual_advantages = [0.0 if label == -100 else advatnages_val for label in shifted_labels]
+                    advantage_weight = group[i].advantage_weight
+                    if advantage_weight is None:
+                        shifted_advantage_weight = [1.0] * len(shifted_labels)
+                    else:
+                        assert len(advantage_weight) == len(raw_input_ids), (
+                            f"{len(advantage_weight)} vs {len(raw_input_ids)}, data: {group[i]}"
+                        )
+                        shifted_advantage_weight = [float(weight) for weight in advantage_weight[1:]]
+
+                    process_adv_summary = group[i].extra_fields.get("process_adv")
+                    if isinstance(process_adv_summary, dict) and process_adv_summary.get("alignment_mismatch"):
+                        process_adv_alignment_mismatch += 1
+
+                    expand_to_token_advantages = getattr(
+                        self._advantage_estimator,
+                        "expand_to_token_advantages",
+                        None,
+                    )
+                    if expand_to_token_advantages is None:
+                        actual_advantages = [0.0 if label == -100 else advatnages_val for label in shifted_labels]
+                        token_advantage_info = {}
+                    else:
+                        actual_advantages, token_advantage_info = expand_to_token_advantages(
+                            base_advantage=advatnages_val,
+                            rollout_state=group[i],
+                            shifted_labels=shifted_labels,
+                            shifted_advantage_weight=shifted_advantage_weight,
+                        )
+                    assert len(actual_advantages) == len(shifted_labels), (
+                        f"{len(actual_advantages)} vs {len(shifted_labels)}, data: {group[i]}"
+                    )
+                    affected_tokens = int(token_advantage_info.get("affected_tokens", 0) or 0)
+                    if affected_tokens:
+                        process_adv_affected_samples += int(token_advantage_info.get("affected_samples", 1) or 1)
+                        process_adv_affected_tokens += affected_tokens
+                        process_adv_weight_sum += float(token_advantage_info.get("weight_sum", 0.0) or 0.0)
+                        process_adv_affected_positive_tokens += int(
+                            token_advantage_info.get("affected_positive_adv_tokens", 0) or 0
+                        )
                     advantages_list.extend(actual_advantages)
 
                     assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
@@ -1230,6 +1273,13 @@ class BaseRLTrainer:
             "prompt_len/min": prompt_len_t.min().item(),
             "prompt_len/max": prompt_len_t.max().item(),
         }
+        if process_adv_affected_tokens or process_adv_alignment_mismatch:
+            info_dict["process_adv/affected_samples"] = process_adv_affected_samples
+            info_dict["process_adv/affected_tokens"] = process_adv_affected_tokens
+            info_dict["process_adv/affected_positive_adv_tokens"] = process_adv_affected_positive_tokens
+            info_dict["process_adv/alignment_mismatch"] = process_adv_alignment_mismatch
+            if process_adv_affected_tokens:
+                info_dict["process_adv/weight_mean"] = process_adv_weight_sum / process_adv_affected_tokens
         if tool_turns_list:
             tool_turns_t = torch.tensor(tool_turns_list, dtype=torch.float32)
             info_dict["tool_turns/mean"] = tool_turns_t.mean().item()

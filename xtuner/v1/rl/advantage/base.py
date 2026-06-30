@@ -58,5 +58,23 @@ class AdvantageEstimator(ABC):
         """
         ...
 
+    def expand_to_token_advantages(
+        self,
+        *,
+        base_advantage: float,
+        rollout_state: Any,
+        shifted_labels: list[int],
+        shifted_advantage_weight: list[float] | None = None,
+    ) -> tuple[list[float], dict[str, Any]]:
+        """Expand a sample-level advantage to token-level advantages.
+
+        ``compute`` intentionally stays sample/session-level. This hook lets
+        downstream projects shape token credit after labels and optional
+        per-token weights are known by the trainer.
+        """
+
+        del rollout_state, shifted_advantage_weight
+        return [0.0 if label == -100 else base_advantage for label in shifted_labels], {}
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
