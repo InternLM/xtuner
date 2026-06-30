@@ -1969,6 +1969,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 rollout_controller=self.rollout_controller,
                 rollout_config=self._rollout_config,
                 train_rollout_mode="disaggregated",
+                weight_update_host=self._rollout_config.weight_update_host,
+                weight_update_port=self._rollout_config.weight_update_port,
             )
             self.update_weights()
 

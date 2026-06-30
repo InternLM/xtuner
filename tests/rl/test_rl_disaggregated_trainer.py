@@ -121,6 +121,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._benchmark_training_tokens = 0
         trainer._cpu_resource_manager = None
         trainer._train_worker_cfg = SimpleNamespace(pack_max_length=16)
+        trainer._rollout_config = SimpleNamespace(weight_update_host=None, weight_update_port=30000)
         trainer._meta = SimpleNamespace(
             latest_exp=SimpleNamespace(exp_dir=str(Path(self.temp_dir.name) / "exp")),
         )
@@ -254,6 +255,28 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer.train_controller.fit.assert_called_once()
         self.assertIn(("continue_produce", 1), manager.calls)
         self.assertEqual(trainer._cur_step, 1)
+
+    def test_fit_rebinds_weight_update_with_rollout_update_address(self):
+        # 验证非共卡后续同步权重时继续沿用 rollout config 中的 NCCL update 地址。
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1)
+        manager = _FakeManager([ProduceBatchResult(rollout_states=[[train_sample]])])
+        trainer = self._make_trainer(manager)
+        trainer._rollout_config = SimpleNamespace(weight_update_host="10.0.0.1", weight_update_port=23456)
+
+        with (
+            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.bind_train_rollout") as bind_train_rollout_mock,
+        ):
+            trainer.fit()
+
+        bind_train_rollout_mock.assert_called_once_with(
+            train_controller=trainer.train_controller,
+            rollout_controller=trainer.rollout_controller,
+            rollout_config=trainer._rollout_config,
+            train_rollout_mode="disaggregated",
+            weight_update_host="10.0.0.1",
+            weight_update_port=23456,
+        )
 
     def test_fit_keeps_background_producer_running_while_training_blocks(self):
         # 验证非共卡训练阻塞在同步训练 batch 时，后台 producer 仍能继续调度。
