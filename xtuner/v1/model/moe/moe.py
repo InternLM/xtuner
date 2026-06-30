@@ -1007,14 +1007,6 @@ class MoE(BaseModel):
         )
 
         layer_hidden_states = hidden_states
-        hidden_states = self.norm(hidden_states)
-
-        # Get LM loss context from dict
-        lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
-        loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
-        output["loss"] = loss
-        output["logits"] = logits
-        output["extra_info"] = extra_info
 
         # MTP forward pass and loss computation
         mtp_loss_ctx_list = loss_ctx.get("mtp") if loss_ctx is not None else None
@@ -1074,9 +1066,10 @@ class MoE(BaseModel):
 
             if mtp_tv_loss_ctx is not None:
                 # One joint call is required: the acceptance products in Eq. 13
-                # couple all recurrent MTP steps.
+                # couple all recurrent MTP steps. The main LM branch runs after MTP, so
+                # normalize the target states here.
                 mtp_losses, _ = self.lm_head(
-                    (hidden_states, draft_hidden_states),
+                    (self.norm(layer_hidden_states), draft_hidden_states),
                     cast(MTPE2ETVLossContext, mtp_tv_loss_ctx),
                 )
             else:
@@ -1092,6 +1085,17 @@ class MoE(BaseModel):
 
             # Add to total loss
             output["mtp_loss"] = scaled_mtp_loss
+
+        # Keep the main LM branch after MTP so the final normalized states, logits,
+        # and unsharded LM-head parameters are not resident across the whole MTP forward.
+        hidden_states = self.norm(layer_hidden_states)
+
+        # Get LM loss context from dict
+        lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
+        loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
+        output["loss"] = loss
+        output["logits"] = logits
+        output["extra_info"] = extra_info
 
         split_aux_output = self.aux_loss.finalize(
             balancing_ctx=balancing_ctx,
@@ -1493,36 +1497,53 @@ class MoE(BaseModel):
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.lm_head,
         )
-
         # Shard MTP block if it exists
         if self.mtp_block is not None:
+            assert self.config.mtp_config is not None
+            mtp_config = self.config.mtp_config
             for mtp_idx, mtp_layer in enumerate(self.mtp_block.layers):
-                if self._should_recompute(None, mtp_idx=mtp_idx) or (
-                    self.config.mtp_config is not None and self.config.mtp_config.share_weights
-                ):  # share mtp head must recompute
+                # One shared physical layer serves every logical MTP depth. Always
+                # checkpoint it to avoid retaining activations from all depths.
+                if self._should_recompute(None, mtp_idx=mtp_idx) or mtp_config.share_weights:
                     mtp_layer = apply_activation_checkpointing(
                         mtp_layer,
                         preserve_rng_state=checkpoint_preserve_rng_state,
                     )
                 self.mtp_block.layers[mtp_idx] = mtp_layer
 
-                reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1
                 self._fully_shard(
                     mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                     mp_policy=mp_policy,
-                    reshard_after_forward=reshard_after_forward,
+                    # Reuse the unsharded shared layer across logical depths. Explicit
+                    # resharding at the end of MTPBlock.forward is currently disabled and
+                    # can be enabled if keeping the shared layer unsharded causes excessive
+                    # peak memory usage.
+                    reshard_after_forward=not mtp_config.share_weights,
                     offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
                     module=mtp_layer,
                 )
-                if mtp_idx == 0:
-                    layer_next.set_modules_to_forward_prefetch([mtp_layer])  # type: ignore
-
-            if self.config.mtp_config is not None and self.config.mtp_config.num_layers > 0:
+            if mtp_config.num_layers > 0:
                 for prev_mtp_layer, next_mtp_layer in zip(
                     list(self.mtp_block.layers)[:-1],
                     list(self.mtp_block.layers)[1:],
                 ):
                     prev_mtp_layer.set_modules_to_forward_prefetch([next_mtp_layer])  # type: ignore
+
+            first_mtp_layer = self.mtp_block.layers[0]
+            last_decoder_layer = list(self.layers.values())[-1]
+            last_decoder_layer.set_modules_to_forward_prefetch([first_mtp_layer])  # type: ignore
+
+            # Non-shared MTP prefetches the LM head from its distinct final physical layer and
+            # overlaps the all-gather with the final logical depth. Shared-weight MTP has only
+            # one physical layer, so the same static hook fires at the first logical depth and
+            # keeps the full LM-head weight resident throughout the remaining MTP forward. Set
+            # disable_lm_head_prefetch=True to trade the overlap for lower memory residency in
+            # either mode and let the first MTP LM-head call unshard on demand.
+            if not mtp_config.disable_lm_head_prefetch:
+                self.mtp_block.layers[-1].set_modules_to_forward_prefetch([self.lm_head])  # type: ignore
+        else:
+            last_decoder_layer = list(self.layers.values())[-1]
+            last_decoder_layer.set_modules_to_forward_prefetch([self.norm, self.lm_head])  # type: ignore
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,

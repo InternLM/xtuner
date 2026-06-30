@@ -36,6 +36,8 @@ class MTPConfig(BaseModel):
             expected multi-step rejection-sampling acceptance length. Default: ``"ce"``.
         tv_loss_chunk_size (int): Number of token positions processed together when
             computing the exact full-vocabulary TV overlap. Default: 128.
+        disable_lm_head_prefetch (bool): Whether to disable prefetching of the LM head.
+            This would save memory in mtp forward in some case. Default is False.
 
     Example:
         >>> # In model config
@@ -58,3 +60,4 @@ class MTPConfig(BaseModel):
     loss_scaling_factor: Annotated[float, Parameter(group="model")] = 0.1
     loss_type: Annotated[Literal["ce", "e2e_tv"], Parameter(group="model")] = "ce"
     tv_loss_chunk_size: Annotated[int, Parameter(group="model")] = 128
+    disable_lm_head_prefetch: Annotated[bool, Parameter(group="model")] = False
