@@ -151,6 +151,7 @@ class WorkerConfig(BaseModel):
     profile_step: list[int] | int | None = None  # 1-based global RL train_step ids to profile.
     profile_time: bool = True
     profile_memory: bool = False
+    free_rollout_routed_experts_in_worker: bool = True  # 默认不需要用户配置
 
     # sft config
     sft_dataloader_cfg: DataloaderConfig | None = None
@@ -467,13 +468,17 @@ class TrainingWorker(SingleAcceleratorWorker):
                         raise ValueError(
                             f"Invalid rollout_routed_expert_refs type: {type(rollout_routed_expert_refs)}"
                         )
-                    # free obj store explicitly
-                    if self.sp_mesh is None or self.sp_mesh.size() == 1:
-                        ray.internal.free(rollout_routed_expert_refs, local_only=False)
-                    else:
-                        if self.sp_mesh.get_local_rank() == 0:
-                            # only free once of sp mesh
-                            to_free_routed_expert_refs.append(rollout_routed_expert_refs)
+                    # Some agent loops export routed-expert refs from the rollout trace store.
+                    # Those refs may be shared by multiple trainable segments and replicated
+                    # train workers, so they must be released by the trainer after all workers
+                    # finish consuming the batch.
+                    if self.config.free_rollout_routed_experts_in_worker:
+                        if self.sp_mesh is None or self.sp_mesh.size() == 1:
+                            ray.internal.free(rollout_routed_expert_refs, local_only=False)
+                        else:
+                            if self.sp_mesh.get_local_rank() == 0:
+                                # only free once of sp mesh
+                                to_free_routed_expert_refs.append(rollout_routed_expert_refs)
                     rollout_routed_expert = torch.as_tensor(rollout_routed_expert, dtype=torch.long)
                     rollout_routed_expert = rollout_routed_expert.reshape(
                         -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
@@ -501,7 +506,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             f"rollout_routed_experts.size(0) {seq_ctx.rollout_routed_experts.size(0)} != input_ids.size(1) {seq_ctx.input_ids.size(1)}"
         )
 
-        if self.sp_mesh is not None and self.sp_mesh.size() > 1:
+        if self.config.free_rollout_routed_experts_in_worker and self.sp_mesh is not None and self.sp_mesh.size() > 1:
             dist.barrier()
             for free_routed_expert_refs in to_free_routed_expert_refs:
                 ray.internal.free(free_routed_expert_refs, local_only=False)

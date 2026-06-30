@@ -94,6 +94,16 @@ def _trainer_config_requires_rollout_proxy(cfg: "BaseRLTrainerConfig") -> bool:
     ) or _agent_loop_manager_requires_rollout_proxy(cfg.eval_agent_loop_manager_cfg)
 
 
+# 在使用了 trace_store 情况下，我们不能提前释放 obj ref 而是由 _release_trace_store 统一释放
+# 这样可以确保一拆多情况下正确。判断逻辑和 rollout_proxy 一致。
+def _agent_loop_manager_uses_trace_store(
+    cfg: AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None,
+) -> bool:
+    # Agent loops that require the rollout proxy currently export train traces
+    # through RolloutTraceStore. Those trace refs are shared across segments.
+    return _agent_loop_manager_requires_rollout_proxy(cfg)
+
+
 def check_fa3():
     if os.environ.get("XTUNER_USE_FA3", "0") != "1":
         return
@@ -650,6 +660,8 @@ class BaseRLTrainer:
         if cfg.train_worker_cfg.seed is None:
             self.logger.warning(f"RLTrainer seed {cfg.seed} is used as train worker seed.")
             cfg.train_worker_cfg.seed = cfg.seed
+        if _agent_loop_manager_uses_trace_store(cfg.agent_loop_manager_cfg):
+            cfg.train_worker_cfg.free_rollout_routed_experts_in_worker = False
         cfg.train_worker_cfg.load_from = cfg.load_from
         cfg.train_worker_cfg.log_dir = log_dir
         self._train_worker_cfg = cfg.train_worker_cfg
@@ -1039,10 +1051,11 @@ class BaseRLTrainer:
                     cluster_index_by_key[cluster_key] = cluster_index
                     cluster_rewards.append(reward)
                     cluster_representatives.append(data)
+
+                    turns = data.extra_fields.get("agent_tool_turns")
+                    if isinstance(turns, int):
+                        tool_turns_list.append(turns)
                 sample_cluster_indices.append(cluster_index)
-                turns = data.extra_fields.get("agent_tool_turns")
-                if isinstance(turns, int):
-                    tool_turns_list.append(turns)
 
             rewards_list.extend(rewards)
             cluster_rewards_list.extend(cluster_rewards)
