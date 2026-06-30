@@ -1181,6 +1181,32 @@ class MoE(BaseModel):
 
         return loaded_keys, unloaded_keys, missing_keys
 
+    def apply_activation_checkpointing(self, recompute_ratio: float) -> None:
+        """Wrap decoder (and MTP) layers with activation checkpointing per ``recompute_ratio``.
+
+        Recomputation is independent of FSDP parameter sharding, so both the FSDP path and the
+        pipeline-parallel engine call this. Only the layers currently held by this module are wrapped (a
+        pipeline stage owns a subset), and the recompute decision uses the global layer index so the
+        policy stays consistent across stages.
+
+        Args:
+            recompute_ratio (float): Fraction of the model's layers (decoder + MTP) to recompute.
+        """
+        for layer_idx, layer in self.layers.items():
+            if self._should_recompute(layer_idx=int(layer_idx), mtp_idx=None, recompute_ratio=recompute_ratio):
+                self.layers[layer_idx] = checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
+
+        if self.mtp_block is not None:
+            # A shared-weight MTP head must always be recomputed, regardless of the ratio.
+            share_weights = self.config.mtp_config is not None and self.config.mtp_config.share_weights
+            for mtp_idx, mtp_layer in enumerate(self.mtp_block.layers):
+                if share_weights or self._should_recompute(
+                    layer_idx=None, mtp_idx=mtp_idx, recompute_ratio=recompute_ratio
+                ):
+                    self.mtp_block.layers[mtp_idx] = checkpoint_wrapper(
+                        mtp_layer, checkpoint_impl=CheckpointImpl.REENTRANT
+                    )
+
     @override
     def fully_shard(
         self,
@@ -1229,15 +1255,12 @@ class MoE(BaseModel):
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
 
+        # Activation checkpointing is independent of FSDP sharding (the pipeline engine reuses the same
+        # helper), so apply it up front and then shard the possibly-wrapped layers below.
+        self.apply_activation_checkpointing(self.fsdp_config.recompute_ratio)
+
         for layer_idx, layer in tqdm(self.layers.items(), desc="[FSDP Sharding]"):
             layer_idx = int(layer_idx)
-            if self._should_recompute(
-                layer_idx=layer_idx,
-                mtp_idx=None,
-            ):
-                layer = checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
-
-            self.layers[str(layer_idx)] = layer
             if layer_idx >= len(self.layers) - 1 and self.mtp_block is None:
                 reshard_after_forward = False
             else:
@@ -1284,11 +1307,8 @@ class MoE(BaseModel):
         # Shard MTP block if it exists
         if self.mtp_block is not None:
             for mtp_idx, mtp_layer in enumerate(self.mtp_block.layers):
-                if self._should_recompute(None, mtp_idx=mtp_idx) or (
-                    self.config.mtp_config is not None and self.config.mtp_config.share_weights
-                ):  # share mtp head must recompute
-                    mtp_layer = checkpoint_wrapper(mtp_layer, checkpoint_impl=CheckpointImpl.REENTRANT)
-                self.mtp_block.layers[mtp_idx] = mtp_layer
+                # Already wrapped (if needed) by apply_activation_checkpointing above.
+                mtp_layer = self.mtp_block.layers[mtp_idx]
 
                 reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1
                 self._fully_shard(
@@ -1497,6 +1517,7 @@ class MoE(BaseModel):
         self,
         layer_idx: int | None,
         mtp_idx: int | None,
+        recompute_ratio: float,
     ) -> bool:
         """Determine if a layer should use gradient checkpointing
         (recomputation).
@@ -1531,8 +1552,6 @@ class MoE(BaseModel):
             mtp_layers = 1 if self.config.mtp_config.share_weights else self.config.mtp_config.num_layers
         else:
             mtp_layers = 0
-        recompute_ratio = self.fsdp_config.recompute_ratio if self.fsdp_config is not None else 0.0
-
         total_layers = num_layers + mtp_layers
         num_recompute_layers = int(total_layers * recompute_ratio)
 

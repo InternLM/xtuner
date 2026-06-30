@@ -83,12 +83,14 @@ class PPEngine:
         pp_cfg: PipelineParallelConfig,
         ep_size: int = 1,
         param_dtype: torch.dtype = torch.bfloat16,
+        recompute_ratio: float = 0.0,
     ) -> None:
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
         self.pp_cfg = pp_cfg
         self.ep_size = ep_size
         self.param_dtype = param_dtype
+        self.recompute_ratio = recompute_ratio
 
         world_size = dist.get_world_size()
         if world_size != pp_cfg.pp_size * ep_size:
@@ -120,6 +122,10 @@ class PPEngine:
     def build_model(self) -> BaseModel:
         model = self.model_cfg.build()
         model.split_for_pipeline(self.pp_rank, self.num_stages, layer_split=self.pp_cfg.layer_split)
+        # Activation checkpointing is orthogonal to FSDP; apply the same per-layer recompute policy the
+        # FSDP path uses (only this stage's owned layers are wrapped, by global layer index).
+        if self.recompute_ratio > 0:
+            model.apply_activation_checkpointing(self.recompute_ratio)
         model = model.to(self.param_dtype).to(DEVICE)
         # Set parallel attributes after .to() so they live on the final module instance.
         # Enable expert parallel without FSDP: the model is built EP-aware (experts sharded across the

@@ -1145,6 +1145,7 @@ class Trainer:
                 pp_cfg=self._pp_config,
                 ep_size=fsdp_config.ep_size,
                 param_dtype=fsdp_config.param_dtype,
+                recompute_ratio=fsdp_config.recompute_ratio,
             )
         else:
             engine = TrainEngine(  # type: ignore
