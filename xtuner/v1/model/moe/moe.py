@@ -203,9 +203,7 @@ class MoE(BaseModel):
                 self.expert_tp_mesh = _init_mesh[f"{self.config.mesh_prefix}.etp"]
                 # 2D (ep, etp) sub-mesh — needed by GroupedLinear for per-expert column-parallel weights
                 # so HF save can reconstruct the full tensor via `reconstruct_full_tensor`.
-                self.ep_tp_mesh = _init_mesh[
-                    f"{self.config.mesh_prefix}.ep", f"{self.config.mesh_prefix}.etp"
-                ]
+                self.ep_tp_mesh = _init_mesh[f"{self.config.mesh_prefix}.ep", f"{self.config.mesh_prefix}.etp"]
             else:
                 _init_mesh = init_device_mesh(
                     DEVICE,
@@ -1179,13 +1177,6 @@ class MoE(BaseModel):
                         pass
                     else:
                         raise ValueError(f"Unsupported placement type {placement} in clip_grad_norm")
-
-            if self.config.expert_tp_size > 1 and ".experts" in name:
-                assert self.ep_mesh is not None and self.expert_tp_mesh is not None
-                # expert 参数的 EP / expert TP 分片不是 DTensor placement，
-                # norm square 需要显式跨这两个维度求和，clip 系数才是全局的。
-                dist.all_reduce(local_norm_squared, op=ReduceOp.SUM, group=self.ep_mesh.get_group())
-                dist.all_reduce(local_norm_squared, op=ReduceOp.SUM, group=self.expert_tp_mesh.get_group())
 
             total_norm_squared += local_norm_squared
 

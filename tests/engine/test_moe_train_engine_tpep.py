@@ -24,6 +24,7 @@ Strategy
 
 from __future__ import annotations
 
+import gc
 import os
 
 # 本测试关注 FSDP + EP + expert TP 的 loss/梯度校准。
@@ -318,6 +319,17 @@ def _get_param_grad(engine: TrainEngine, name_suffix: str) -> torch.Tensor:
     raise AssertionError(f"Cannot find parameter ending with {name_suffix}")
 
 
+def _get_local_param_grad(engine: TrainEngine, name_suffix: str) -> torch.Tensor:
+    for name, param in engine.model.named_parameters():
+        if _canonical_name(name).endswith(name_suffix):
+            grad = param.grad
+            assert grad is not None, f"Missing gradient for {name}"
+            if isinstance(grad, DTensor):
+                grad = grad.to_local()
+            return grad.detach().float().cpu()
+    raise AssertionError(f"Cannot find parameter ending with {name_suffix}")
+
+
 def _get_tpep_grouped_linear(engine: TrainEngine, module_suffix: str) -> GroupedLinear:
     for name, module in engine.model.named_modules():
         if _canonical_name(name).endswith(module_suffix):
@@ -351,6 +363,15 @@ def _copy_param_from_full(param: torch.nn.Parameter, full_tensor: torch.Tensor) 
         param.copy_(full_tensor)
 
 
+def _copy_param_from_local_shard(param: torch.nn.Parameter, local_shard: torch.Tensor) -> None:
+    if isinstance(param, DTensor):
+        # ExpertTP GroupedLinear 的 DTensor 参数以本 rank local shard 为真实写入单元；
+        # 避免对 InterleavedShard 走 full_tensor/redistribute 路径。
+        param.copy_(DTensor.from_local(local_shard, param.device_mesh, param.placements, run_check=False))
+    else:
+        param.copy_(local_shard)
+
+
 def _sync_engine_weights(engine_ref: TrainEngine, engine_tpep: TrainEngine) -> None:
     """Synchronize a non-TP reference model into the EP+TP model layout."""
     ref_params = dict(engine_ref.model.named_parameters())
@@ -368,10 +389,10 @@ def _sync_engine_weights(engine_ref: TrainEngine, engine_tpep: TrainEngine) -> N
             if isinstance(module, GroupedLinear) and getattr(module, "tp_enabled", False):
                 if param_name == "weight":
                     shard = _slice_tpep_weight(module, full_param, fused_gate_up="fused_w1w3" in module_name)
-                    _copy_param_from_full(param, shard)
+                    _copy_param_from_local_shard(param, shard)
                 elif param_name == "bias":
                     shard = _slice_tpep_bias(module, full_param)
-                    _copy_param_from_full(param, shard)
+                    _copy_param_from_local_shard(param, shard)
                 else:
                     raise RuntimeError(f"Unexpected GroupedLinear parameter: {name}.")
             else:
@@ -393,6 +414,25 @@ def _copy_matching_engine_weights(engine_src: TrainEngine, engine_dst: TrainEngi
             else:
                 src_tensor = _full_tensor(src_param).to(device=dst_param.device, dtype=dst_param.dtype)
                 dst_param.copy_(src_tensor)
+
+
+def _snapshot_local_engine_weights(engine: TrainEngine) -> dict[str, torch.Tensor]:
+    snapshot: dict[str, torch.Tensor] = {}
+    with torch.no_grad():
+        for name, param in engine.model.named_parameters():
+            local_param = param.to_local() if isinstance(param, DTensor) else param
+            snapshot[name] = local_param.detach().cpu().clone()
+    return snapshot
+
+
+def _copy_local_engine_weight_snapshot(snapshot: dict[str, torch.Tensor], engine: TrainEngine) -> None:
+    with torch.no_grad():
+        for name, param in engine.model.named_parameters():
+            local_param = snapshot[name].to(device=param.device, dtype=param.dtype)
+            if isinstance(param, DTensor):
+                param.copy_(DTensor.from_local(local_param, param.device_mesh, param.placements, run_check=False))
+            else:
+                param.copy_(local_param)
 
 
 def _slice_tpep_weight(grouped_linear: GroupedLinear, full_weight: torch.Tensor, *, fused_gate_up: bool) -> torch.Tensor:
@@ -432,7 +472,12 @@ def _slice_tpep_weight(grouped_linear: GroupedLinear, full_weight: torch.Tensor,
     else:
         raise RuntimeError(f"Unexpected grouped linear parallel style: {grouped_linear.parallel_style}.")
 
-    return expert_weight.reshape(grouped_linear.weight.shape)
+    weight_shape = (
+        grouped_linear.weight.to_local().shape
+        if isinstance(grouped_linear.weight, DTensor)
+        else grouped_linear.weight.shape
+    )
+    return expert_weight.reshape(weight_shape)
 
 
 def _slice_tpep_bias(grouped_linear: GroupedLinear, full_bias: torch.Tensor) -> torch.Tensor:
@@ -442,7 +487,12 @@ def _slice_tpep_bias(grouped_linear: GroupedLinear, full_bias: torch.Tensor) -> 
         out_start = grouped_linear.tp_rank * local_out_features
         out_end = out_start + local_out_features
         expert_bias = expert_bias[:, out_start:out_end]
-    return expert_bias.reshape(grouped_linear.bias.shape)
+    bias_shape = (
+        grouped_linear.bias.to_local().shape
+        if isinstance(grouped_linear.bias, DTensor)
+        else grouped_linear.bias.shape
+    )
+    return expert_bias.reshape(bias_shape)
 
 
 class TestMoETrainEngineExpertTPOnly(DeterministicDDPTestCase):
@@ -536,7 +586,7 @@ class TestMoETrainEngineExpertTPOnly(DeterministicDDPTestCase):
             ("layers.0.experts.fused_w2", False),
         ):
             ref_grad = _get_param_grad(engine_ref, f"{module_suffix}.weight")
-            etp_grad = _get_param_grad(engine_etp, f"{module_suffix}.weight")
+            etp_grad = _get_local_param_grad(engine_etp, f"{module_suffix}.weight")
             etp_module = _get_tpep_grouped_linear(engine_etp, module_suffix)
             expected_etp_grad = _slice_tpep_weight(etp_module, ref_grad, fused_gate_up=fused_gate_up)
             torch.testing.assert_close(
@@ -795,7 +845,7 @@ class TestMoETrainEngineTPEP(DeterministicDDPTestCase):
         _run_one_step(engine_ref, loss_cfg, input_ids, labels)
 
         ref_grad = _get_param_grad(engine_ref, "layers.0.experts.fused_w1w3.weight")
-        tpep_grad = _get_param_grad(engine_tpep, "layers.0.experts.fused_w1w3.weight")
+        tpep_grad = _get_local_param_grad(engine_tpep, "layers.0.experts.fused_w1w3.weight")
         tpep_module = _get_tpep_grouped_linear(engine_tpep, "layers.0.experts.fused_w1w3")
         expected_tpep_grad = _slice_tpep_weight(tpep_module, ref_grad, fused_gate_up=True)
 
@@ -926,20 +976,7 @@ class TestMoETrainEngineTPEP(DeterministicDDPTestCase):
 
         engine_ref = _build_engine(ep_size=ep_size, expert_tp_size=expert_tp_size)
         engine_ref.init_model_weights()
-
-        engine_domino = _build_engine(
-            ep_size=ep_size,
-            expert_tp_size=expert_tp_size,
-            intra_layer_micro_batch=2,
-        )
-        engine_domino.init_model_weights()
-        _copy_matching_engine_weights(engine_ref, engine_domino)
-
-        for layer in engine_domino.model.layers.values():
-            assert isinstance(layer.dispatcher, TorchAll2AllDispatcher)
-            assert not isinstance(layer.dispatcher, TorchAll2AllTPEPDispatcher)
-        collective_stages = _record_expert_tp_collective_stages(engine_domino)
-        dist.barrier()
+        initial_weights = _snapshot_local_engine_weights(engine_ref)
 
         device_obj = torch.device(device, dist.get_rank() % torch.cuda.device_count())
         batches = [
@@ -949,11 +986,29 @@ class TestMoETrainEngineTPEP(DeterministicDDPTestCase):
         _assert_rank_inputs_are_distinct(batches)
         loss_cfg = CELossConfig()
 
-        loss_domino = _run_train_step_items_without_clip(engine_domino, loss_cfg, batches)
-        norm_domino = engine_domino.clip_grad_norm(do_clip=False).detach().float().cpu()
-
         loss_ref = _run_train_step_items_without_clip(engine_ref, loss_cfg, batches)
         norm_ref = engine_ref.clip_grad_norm(do_clip=False).detach().float().cpu()
+        del engine_ref
+        gc.collect()
+        torch.cuda.empty_cache()
+        dist.barrier()
+
+        engine_domino = _build_engine(
+            ep_size=ep_size,
+            expert_tp_size=expert_tp_size,
+            intra_layer_micro_batch=2,
+        )
+        engine_domino.init_model_weights()
+        _copy_local_engine_weight_snapshot(initial_weights, engine_domino)
+
+        for layer in engine_domino.model.layers.values():
+            assert isinstance(layer.dispatcher, TorchAll2AllDispatcher)
+            assert not isinstance(layer.dispatcher, TorchAll2AllTPEPDispatcher)
+        collective_stages = _record_expert_tp_collective_stages(engine_domino)
+        dist.barrier()
+
+        loss_domino = _run_train_step_items_without_clip(engine_domino, loss_cfg, batches)
+        norm_domino = engine_domino.clip_grad_norm(do_clip=False).detach().float().cpu()
 
         _assert_domino_all2all_expert_tp_collective_stages(collective_stages)
         torch.testing.assert_close(
