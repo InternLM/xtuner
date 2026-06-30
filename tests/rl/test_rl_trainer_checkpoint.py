@@ -135,6 +135,7 @@ class _FakeTrainController:
         weight_transport_type,
         weight_update_host=None,
         weight_update_port=None,
+        disk_weight_path=None,
     ):
         self.rollout_info = {
             "targets": targets,
@@ -143,7 +144,7 @@ class _FakeTrainController:
         self.weight_transport_type = weight_transport_type
         self.weight_update_host = weight_update_host
         self.weight_update_port = weight_update_port
-
+        self.disk_weight_path = disk_weight_path
     def onload(self, target="all"):
         return f"onload:{target}"
 

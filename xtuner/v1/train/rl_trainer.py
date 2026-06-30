@@ -123,6 +123,7 @@ def bind_train_rollout(
     weight_transport_type: WeightTransportType | str,
     weight_update_host: str | None = None,
     weight_update_port: int | None = None,
+    disk_weight_path: str | None = None,
 ) -> None:
     """Bind the training and rollout workers for update weights."""
     targets = ray.get(
@@ -135,6 +136,7 @@ def bind_train_rollout(
         weight_transport_type=weight_transport_type,
         weight_update_host=weight_update_host,
         weight_update_port=weight_update_port,
+        disk_weight_path=disk_weight_path,
     )
     return
 

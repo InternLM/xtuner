@@ -418,6 +418,9 @@ class SGLangWorker(RolloutWorker):
         if self.config.context_length is not None:
             init_kwargs["context_length"] = self.config.context_length
 
+        if self.config.skip_load_weights and "load_format" not in sglang_config_kwargs:
+            init_kwargs["load_format"] = "dummy"
+
         sglang_server_args = ServerArgs(**init_kwargs)
 
         return sglang_server_args

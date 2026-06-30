@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 
 RolloutBackend: TypeAlias = Literal["sglang", "vllm", "pytorch", "turbomind"]  # Rollout inference backend.
-WeightTransportType: TypeAlias = Literal["ipc", "nccl"]  # Supported weight transport types.
+WeightTransportType: TypeAlias = Literal["ipc", "nccl", "disk"]  # Supported weight transport types.
 
 
 def _resolve_rollout_backend(rollout_config: RolloutConfig) -> RolloutBackend:
@@ -40,11 +40,15 @@ def _validate_transport_type(
     assert weight_transport_type is not None, "bind_rollout_weight_update() must set weight_transport_type."
 
     transport_type = weight_transport_type.lower()
-    if transport_type not in ("ipc", "nccl"):
-        raise ValueError(f"Unsupported weight_transport_type: {weight_transport_type!r}. Expected 'ipc' or 'nccl'.")
+    if transport_type not in ("ipc", "nccl", "disk"):
+        raise ValueError(
+            f"Unsupported weight_transport_type: {weight_transport_type!r}. Expected 'ipc', 'nccl' or 'disk'."
+        )
     transport_type = cast(WeightTransportType, transport_type)
     if transport_type == "nccl" and backend in ("vllm", "turbomind"):
         raise NotImplementedError(f"NCCL weight transport is not supported for {backend} backend.")
+    if transport_type == "disk" and backend != "sglang":
+        raise ValueError(f"Disk weight transport is not supported for {backend} backend.")
     return transport_type
 
 
@@ -86,6 +90,8 @@ class RolloutWeightUpdateInfo:
     weight_update_host: str | None = None
     # Optional port used by NCCL external weight update groups.
     weight_update_port: int | None = None
+    # Optional disk weight path used by disk weight transport.
+    disk_weight_path: str | None = None
 
     @classmethod
     def from_targets(
@@ -97,6 +103,7 @@ class RolloutWeightUpdateInfo:
         weight_transport_type: WeightTransportType | str,
         weight_update_host: str | None = None,
         weight_update_port: int | None = None,
+        disk_weight_path: str | None = None,
     ) -> RolloutWeightUpdateInfo:
         backend = _resolve_rollout_backend(rollout_config)
         tp = rollout_config.tensor_parallel_size
@@ -106,6 +113,8 @@ class RolloutWeightUpdateInfo:
             weight_transport_type=weight_transport_type,
             backend=backend,
         )
+        if transport_type == "disk" and not disk_weight_path:
+            raise ValueError("Disk weight transport requires disk_weight_path.")
         return cls(
             rollout_config=rollout_config,
             weight_update_targets=weight_update_targets,
@@ -114,6 +123,7 @@ class RolloutWeightUpdateInfo:
             backend=backend,
             weight_update_host=weight_update_host,
             weight_update_port=weight_update_port if weight_update_port is not None else 30000,
+            disk_weight_path=disk_weight_path,
         )
 
     @property

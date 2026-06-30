@@ -298,6 +298,7 @@ class TrainingController:
         weight_transport_type,
         weight_update_host=None,
         weight_update_port=None,
+        disk_weight_path=None,
     ):
         ray.get(
             [
@@ -307,6 +308,7 @@ class TrainingController:
                     weight_transport_type=weight_transport_type,
                     weight_update_host=weight_update_host,
                     weight_update_port=weight_update_port,
+                    disk_weight_path=disk_weight_path,
                 )
                 for worker in self.workers
             ]
