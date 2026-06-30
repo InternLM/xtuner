@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
-from typing import Literal
+from typing import Literal, TypeAlias
 
 # 本测试关注 DeepEP + ExpertTP 的真实 grouped-GEMM 训练路径；
 # 与既有 engine ExpertTP 测试一致，用 Cutlass 后端规避本地 Triton TMA 兼容性差异。
@@ -23,6 +23,7 @@ from xtuner.v1.module.dispatcher.torch_all2all import TorchAll2AllDispatcher
 from .test_moe_train_engine_tpep import (
     _build_tiny_moe_cfg,
     _copy_matching_engine_weights,
+    _get_local_param_grad,
     _get_param_grad,
     _get_tpep_grouped_linear,
     _make_engine_input,
@@ -36,6 +37,7 @@ from .test_moe_train_engine_tpep import (
 
 BF16_RTOL, BF16_ATOL = default_tolerances(torch.bfloat16)
 BF16_GRAD_ATOL = BF16_ATOL * 2
+TopKExpansion: TypeAlias = tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], bool, int]
 
 
 def _assert_bf16_training_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
@@ -71,24 +73,21 @@ def _build_engine(
     )
 
 
-def _record_deepep_expert_tp_collective_stages(
+def _record_deepep_expert_tp_domino_stages(
     engine: TrainEngine,
-) -> tuple[dict[str, list[str]], list[tuple[str, tuple[int, ...], bool]]]:
+) -> tuple[dict[str, list[str]], list[TopKExpansion]]:
     stages: dict[str, list[str]] = {
         "async_op_true": [],
-        "async_all_gather_rows": [],
-        "async_all_gather_row_metadata": [],
-        "async_all_gather_per_rank_metadata": [],
-        "async_reduce_scatter_rows_sum": [],
     }
-    row_gather_inputs: list[tuple[str, tuple[int, ...], bool]] = []
-    current_stage: list[str] = []
+    topk_expansions: list[TopKExpansion] = []
 
     for layer in engine.model.layers.values():
         dispatcher = layer.dispatcher
         assert isinstance(dispatcher, DeepEPDispatcher)
-        expert_tp = dispatcher._expert_tp
-        assert expert_tp is not None
+        assert dispatcher._tp_size > 1
+        assert dispatcher._process_group is not None
+        assert dispatcher._process_group.size() == dispatcher._ep_size * dispatcher._tp_size
+        assert dispatcher._virtual_n_experts == dispatcher._n_routed_experts * dispatcher._tp_size
 
         for stage_name in (
             "dispatch_preprocess",
@@ -100,46 +99,41 @@ def _record_deepep_expert_tp_collective_stages(
         ):
             original_stage = getattr(dispatcher, stage_name)
 
-            def stage_wrapper(*args, _original_stage=original_stage, _stage_name=stage_name, **kwargs):
+            def stage_wrapper(
+                *args,
+                _original_stage=original_stage,
+                _stage_name=stage_name,
+                _dispatcher=dispatcher,
+                **kwargs,
+            ):
                 if kwargs.get("async_op", False):
                     stages["async_op_true"].append(_stage_name)
-                current_stage.append(_stage_name)
-                try:
-                    return _original_stage(*args, **kwargs)
-                finally:
-                    current_stage.pop()
+                original_topk_ids = kwargs.get("topk_ids")
+                result = _original_stage(*args, **kwargs)
+
+                if _stage_name == "dispatch_preprocess":
+                    assert isinstance(original_topk_ids, torch.Tensor)
+                    # 中文注释：当前 DeePEP ExpertTP 不再有独立 _expert_tp helper；
+                    # dispatch_preprocess 会把物理 expert topK 扩展成 virtual expert topK。
+                    topk_expansions.append(
+                        (
+                            tuple(original_topk_ids.shape),
+                            tuple(result["topk_ids"].shape),
+                            tuple(result["topk_weights"].shape),
+                            result["topk_weights"].requires_grad,
+                            _dispatcher._tp_size,
+                        )
+                    )
+                return result
 
             setattr(dispatcher, stage_name, stage_wrapper)
 
-        for collective_name in (
-            "async_all_gather_rows",
-            "async_all_gather_row_metadata",
-            "async_all_gather_per_rank_metadata",
-            "async_reduce_scatter_rows_sum",
-        ):
-            original_collective = getattr(expert_tp, collective_name)
-
-            def collective_wrapper(
-                *args,
-                _original_collective=original_collective,
-                _collective_name=collective_name,
-                **kwargs,
-            ):
-                stage = current_stage[-1] if current_stage else "<outside>"
-                stages[_collective_name].append(stage)
-                if _collective_name == "async_all_gather_rows":
-                    tensor = args[0]
-                    row_gather_inputs.append((stage, tuple(tensor.shape[1:]), tensor.requires_grad))
-                return _original_collective(*args, **kwargs)
-
-            setattr(expert_tp, collective_name, collective_wrapper)
-
-    return stages, row_gather_inputs
+    return stages, topk_expansions
 
 
 def _assert_domino_deepep_expert_tp_collective_stages(
     stages: dict[str, list[str]],
-    row_gather_inputs: list[tuple[str, tuple[int, ...], bool]],
+    topk_expansions: list[TopKExpansion],
 ) -> None:
     assert set(stages["async_op_true"]) == {
         "dispatch_preprocess",
@@ -149,20 +143,15 @@ def _assert_domino_deepep_expert_tp_collective_stages(
         "combine",
         "combine_postprocess",
     }
-    assert stages["async_all_gather_rows"]
-    assert stages["async_all_gather_row_metadata"]
-    assert stages["async_all_gather_per_rank_metadata"]
-    assert stages["async_reduce_scatter_rows_sum"]
-    assert set(stages["async_all_gather_rows"]) == {"dispatch"}
-    assert set(stages["async_all_gather_row_metadata"]) == {"dispatch"}
-    assert set(stages["async_all_gather_per_rank_metadata"]) == {"dispatch"}
-    assert set(stages["async_reduce_scatter_rows_sum"]) == {"combine"}
-    # 中文注释：shape=(2,) 且 requires_grad=True 的 dispatch-stage row gather
-    # 对应 router topK weights 的可微 ExpertTP gather 路径。
-    assert any(
-        stage == "dispatch" and shape == (2,) and requires_grad
-        for stage, shape, requires_grad in row_gather_inputs
-    )
+    assert topk_expansions
+    for expansion in topk_expansions:
+        original_topk_shape, expanded_topk_shape, expanded_weight_shape, _, tp_size = expansion
+        assert expanded_topk_shape[:-1] == original_topk_shape[:-1]
+        assert expanded_topk_shape[-1] == original_topk_shape[-1] * tp_size
+        assert expanded_weight_shape == expanded_topk_shape
+    # 中文注释：checkpoint wrapper 的第一次 forward 可能在 no_grad 下记录到不可微扩展；
+    # 只要重算 forward 存在可微 topK weight 扩展，就覆盖了 DeepEP virtual TP 的 backward 路径。
+    assert any(expansion[3] for expansion in topk_expansions)
 
 
 @unittest.skipIf(
@@ -290,7 +279,7 @@ class TestMoETrainEngineDeepEPExpertTP(DeterministicDDPTestCase):
             ("layers.0.experts.fused_w2", False),
         ):
             ref_grad = _get_param_grad(engine_ref, f"{module_suffix}.weight")
-            deepep_grad = _get_param_grad(engine_deepep, f"{module_suffix}.weight")
+            deepep_grad = _get_local_param_grad(engine_deepep, f"{module_suffix}.weight")
             deepep_module = _get_tpep_grouped_linear(engine_deepep, module_suffix)
             expected_deepep_grad = _slice_tpep_weight(deepep_module, ref_grad, fused_gate_up=fused_gate_up)
             _assert_bf16_training_close(deepep_grad, expected_deepep_grad)
@@ -375,7 +364,7 @@ class TestMoETrainEngineDeepEPExpertTP(DeterministicDDPTestCase):
         )
         engine_domino.init_model_weights()
         _copy_matching_engine_weights(engine_ref, engine_domino)
-        stages, row_gather_inputs = _record_deepep_expert_tp_collective_stages(engine_domino)
+        stages, topk_expansions = _record_deepep_expert_tp_domino_stages(engine_domino)
         dist.barrier()
 
         device = torch.device("cuda", dist.get_rank() % torch.cuda.device_count())
@@ -393,7 +382,7 @@ class TestMoETrainEngineDeepEPExpertTP(DeterministicDDPTestCase):
         norm_ref = engine_ref.clip_grad_norm(do_clip=False).detach().float().cpu()
         gate_grad_ref = _get_param_grad(engine_ref, "layers.0.gate.weight")
 
-        _assert_domino_deepep_expert_tp_collective_stages(stages, row_gather_inputs)
+        _assert_domino_deepep_expert_tp_collective_stages(stages, topk_expansions)
         torch.testing.assert_close(
             torch.tensor(loss_domino),
             torch.tensor(loss_ref),
