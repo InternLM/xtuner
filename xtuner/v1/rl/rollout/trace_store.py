@@ -41,6 +41,31 @@ def _free_ray_refs(obj: Any):
             _free_ray_refs(v)
 
 
+def _common_prefix_len(left: str, right: str) -> int:
+    for idx, (left_ch, right_ch) in enumerate(zip(left, right)):
+        if left_ch != right_ch:
+            return idx
+    return min(len(left), len(right))
+
+
+def _compact_text(text: str, limit: int = 256) -> str:
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]} ... {text[-half:]}"
+
+
+def _mismatch_window(left: str, right: str, *, radius: int = 160) -> dict[str, Any]:
+    prefix_len = _common_prefix_len(left, right)
+    start = max(prefix_len - radius, 0)
+    end = prefix_len + radius
+    return {
+        "common_prefix_len": prefix_len,
+        "prompt_window": left[start:end],
+        "key_window": right[start:end],
+    }
+
+
 class TokenizedSegment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -306,8 +331,27 @@ class RolloutTraceStore:
         trie = self.get_or_create(session_id)
         key, nodes = trie.search(prompt_text, filter_none=True)
         if prompt_text != key:
+            session_keys = trie.keys()
+            key_summaries = [
+                {
+                    "idx": idx,
+                    "len": len(session_key),
+                    "text": _compact_text(session_key),
+                    "mismatch": _mismatch_window(prompt_text, session_key),
+                }
+                for idx, session_key in enumerate(session_keys[:8])
+            ]
+            debug_message = (
+                "[TraceStore] prompt mismatch "
+                f"session={session_id!r} prompt_len={len(prompt_text)} "
+                f"matched_len={len(key)} key_count={len(session_keys)} "
+                f"prompt={_compact_text(prompt_text)!r} key_summaries={key_summaries!r}"
+            )
+            get_logger().error(debug_message)
             raise ValueError(
-                f"Prompt text '{prompt_text}' does not match any trace key '{key}' in session '{session_id}'."
+                f"Prompt text does not match any trace key in session {session_id!r}: "
+                f"prompt_len={len(prompt_text)} matched_len={len(key)} key_count={len(session_keys)}. "
+                "See the logged '[TraceStore] prompt mismatch' report for the full diff."
             )
         trace: dict[str, list[Any]] = {"input_ids": [], "labels": [], "logprobs": [], "routed_experts": []}
         for node in nodes:

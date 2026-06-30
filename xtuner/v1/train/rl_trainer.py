@@ -94,6 +94,16 @@ def _trainer_config_requires_rollout_proxy(cfg: "BaseRLTrainerConfig") -> bool:
     ) or _agent_loop_manager_requires_rollout_proxy(cfg.eval_agent_loop_manager_cfg)
 
 
+# 在使用了 trace_store 情况下，我们不能提前释放 obj ref 而是由 _release_trace_store 统一释放
+# 这样可以确保一拆多情况下正确。判断逻辑和 rollout_proxy 一致。
+def _agent_loop_manager_uses_trace_store(
+    cfg: AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None,
+) -> bool:
+    # Agent loops that require the rollout proxy currently export train traces
+    # through RolloutTraceStore. Those trace refs are shared across segments.
+    return _agent_loop_manager_requires_rollout_proxy(cfg)
+
+
 def check_fa3():
     if os.environ.get("XTUNER_USE_FA3", "0") != "1":
         return
@@ -650,6 +660,8 @@ class BaseRLTrainer:
         if cfg.train_worker_cfg.seed is None:
             self.logger.warning(f"RLTrainer seed {cfg.seed} is used as train worker seed.")
             cfg.train_worker_cfg.seed = cfg.seed
+        if _agent_loop_manager_uses_trace_store(cfg.agent_loop_manager_cfg):
+            cfg.train_worker_cfg.free_rollout_routed_experts_in_worker = False
         cfg.train_worker_cfg.load_from = cfg.load_from
         cfg.train_worker_cfg.log_dir = log_dir
         self._train_worker_cfg = cfg.train_worker_cfg
@@ -989,6 +1001,10 @@ class BaseRLTrainer:
         raw_rewards_count: int = 0,
     ):
         rewards_list = []
+        # Per-session rewards for distribution metrics. Agentic sessions may split into several
+        # trainable segments that share one reward; counting that reward once per session keeps
+        # rewards/* from being weighted by segment count. rewards_list stays per-segment for counts.
+        cluster_rewards_list: list[float] = []
         advantages_list = []
         prompt_len_list = []
         response_len_list = []
@@ -1014,18 +1030,38 @@ class BaseRLTrainer:
                     f"Prompt ids cannot be None or empty in data: {group[0]}"
                 )
             rewards = []
+            # Agentic rollouts may split one model session into multiple trainable segments.
+            # Compute the group advantage once per session, then broadcast it back to each segment.
+            cluster_index_by_key: dict[Any, int] = {}
+            cluster_rewards: list[float] = []
+            cluster_representatives: list[RolloutState] = []
+            sample_cluster_indices: list[int] = []
             for data in group:
                 assert data.reward is not None and "score" in data.reward, (
                     f"Reward is missing or does not contain 'score' key in data: {data}"
                 )
-                rewards.append(data.reward["score"])
+                reward = float(data.reward["score"])
+                rewards.append(reward)
+                # session_id is only set by agentic loops / XTUNER_DETERMINISTIC; plain RL falls back
+                # to rollout_id, which the sampler always assigns. Segments of one session share a key.
+                cluster_key = data.session_id if data.session_id is not None else data.rollout_id
+                cluster_index = cluster_index_by_key.get(cluster_key)
+                if cluster_index is None:
+                    cluster_index = len(cluster_rewards)
+                    cluster_index_by_key[cluster_key] = cluster_index
+                    cluster_rewards.append(reward)
+                    cluster_representatives.append(data)
+                sample_cluster_indices.append(cluster_index)
+                # 有可能有重复，但是没有其他更好办法
                 turns = data.extra_fields.get("agent_tool_turns")
                 if isinstance(turns, int):
                     tool_turns_list.append(turns)
 
             rewards_list.extend(rewards)
-            rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
-            advantages = self._advantage_estimator.compute(rewards_tensor, group)
+            cluster_rewards_list.extend(cluster_rewards)
+            rewards_tensor = torch.tensor(cluster_rewards, dtype=torch.float32)
+            cluster_advantages = self._advantage_estimator.compute(rewards_tensor, cluster_representatives)
+            sample_advantages = [cluster_advantages[cluster_index].item() for cluster_index in sample_cluster_indices]
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
@@ -1055,7 +1091,7 @@ class BaseRLTrainer:
                     prompt_len_list.append(prompt_len)
                     response_len_list.append(response_len)
 
-                    advatnages_val = advantages[i].item()
+                    advatnages_val = sample_advantages[i]
                     actual_advantages = [0.0 if label == -100 else advatnages_val for label in shifted_labels]
                     advantages_list.extend(actual_advantages)
 
@@ -1131,7 +1167,7 @@ class BaseRLTrainer:
                 shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
                 # 根据 response_mask 计算新的 advantages
-                advatnages_val = advantages[i].item()
+                advatnages_val = sample_advantages[i]
                 actual_advantages = [advatnages_val] * len(prompt_ids) + [
                     0.0 if mask == 0 else advatnages_val for mask in response_mask
                 ]
@@ -1167,7 +1203,9 @@ class BaseRLTrainer:
         if not XTUNER_DETERMINISTIC:
             random.shuffle(data_batches)
 
-        rewards_t = torch.tensor(rewards_list).float() if rewards_list else torch.tensor([0.0]).float()
+        # rewards/* report the per-session reward distribution; batch_size/training_samples below
+        # still use rewards_list (per-segment) so counts reflect the actual training samples.
+        rewards_t = torch.tensor(cluster_rewards_list).float() if cluster_rewards_list else torch.tensor([0.0]).float()
         advantages_t = torch.tensor(advantages_list).float() if advantages_list else torch.tensor([0.0]).float()
         prompt_len_t = torch.tensor(prompt_len_list).float() if prompt_len_list else torch.tensor([0.0]).float()
         response_len_t = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
