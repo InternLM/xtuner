@@ -1051,11 +1051,11 @@ class BaseRLTrainer:
                     cluster_index_by_key[cluster_key] = cluster_index
                     cluster_rewards.append(reward)
                     cluster_representatives.append(data)
-
-                    turns = data.extra_fields.get("agent_tool_turns")
-                    if isinstance(turns, int):
-                        tool_turns_list.append(turns)
                 sample_cluster_indices.append(cluster_index)
+                # 有可能有重复，但是没有其他更好办法
+                turns = data.extra_fields.get("agent_tool_turns")
+                if isinstance(turns, int):
+                    tool_turns_list.append(turns)
 
             rewards_list.extend(rewards)
             cluster_rewards_list.extend(cluster_rewards)
