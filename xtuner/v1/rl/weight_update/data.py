@@ -10,9 +10,9 @@ from torch.distributed.device_mesh import DeviceMesh
 DeviceMeshRaw: TypeAlias = List[List[int]]  # A list of lists representing device mesh indices.
 ServiceUrlMap: TypeAlias = Dict[int, str]  # A dictionary mapping rollout ranks to their server URLs.
 RolloutEngineInfo: TypeAlias = list[tuple[int, str, int]]  # (rollout rank, server url, engine gpu count)
-TrainRolloutMode: TypeAlias = Literal["colocate", "disaggregated"]  # Train and rollout deployment mode.
 RolloutBackend: TypeAlias = Literal["sglang", "vllm", "pytorch", "turbomind"]  # Rollout inference backend.
-WeightTransportType: TypeAlias = Literal["ipc", "nccl"]  # Supported weight transport types.
+WeightTransportType: TypeAlias = Literal["ipc", "nccl", "disk"]  # Supported weight transport types.
+DiskUpdateUpstreamTransport: TypeAlias = Literal["ipc", "nccl"]  # How disk-loaded weights are delivered to rollout.
 
 
 @dataclass
@@ -23,7 +23,6 @@ class RolloutWeightUpdateInfo:
     backend: RolloutBackend | None = None
     tp: int = 1
     ep: int = 1
-    train_rollout_mode: TrainRolloutMode | None = None
     transport_type: WeightTransportType | None = None
     rollout_cfg_info: dict = field(default_factory=dict)
     endpoints: dict[str, str] = field(default_factory=lambda: {"update_weights": "update_weights"})
@@ -37,6 +36,10 @@ class RolloutWeightUpdateInfo:
     worker_server_urls_status: dict[str, bool] = field(default_factory=dict)
     weight_update_host: str | None = None
     weight_update_port: int | None = None
+
+    # Disk update metadata.
+    hf_weight_path: str | None = None
+    disk_update_upstream_transport: DiskUpdateUpstreamTransport | None = None
 
 
 @dataclass

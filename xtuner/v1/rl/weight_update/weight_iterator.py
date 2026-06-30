@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 from itertools import chain
+from pathlib import Path
 from typing import Any, cast
 
 import torch
 import torch.distributed as dist
 import tqdm
+from safetensors import safe_open
 from torch.distributed.tensor import DTensor
 
 from xtuner.v1.model.compose.base import BaseComposeConfig
@@ -38,7 +41,11 @@ class WeightIterator:
     def iter_batch_groups(self):
         # Export path depends on rollout protocol: turbomind consumes layer-wise batches,
         # compose models update submodules in order, and plain models use HF-style batches.
-        if self.rollout_info.train_rollout_mode == "colocate" and self.rollout_info.backend == "turbomind":
+        if self.rollout_info.transport_type == "disk" and self.rollout_info.backend != "sglang":
+            yield self.iter_disk_hf_batches(final_update=True)
+            return
+
+        if self.rollout_info.transport_type == "ipc" and self.rollout_info.backend == "turbomind":
             yield self.iter_layer_batches()
             return
 
@@ -190,10 +197,10 @@ class WeightIterator:
         )
 
         train_enable_ep = model.fsdp_config is not None and model.fsdp_config.ep_size > 1
-        should_gather_train_ep_shards = self.rollout_info.train_rollout_mode == "disaggregated" and train_enable_ep
+        should_gather_train_ep_shards = self.rollout_info.transport_type == "nccl" and train_enable_ep
 
         if train_enable_ep:
-            if self.rollout_info.train_rollout_mode == "colocate" and self.rollout_info.ep > 1:
+            if self.rollout_info.transport_type == "ipc" and self.rollout_info.ep > 1:
                 rollout_device_mesh = self.rollout_info.rollout_device_mesh
                 assert rollout_device_mesh is not None
                 # Colocated IPC can send only the expert slice needed by the local rollout
@@ -350,3 +357,62 @@ class WeightIterator:
             yield WeightUpdateBatch({}, finished=True)
 
         DEVICE_MODULE.empty_cache()
+
+    @torch.no_grad()
+    def iter_disk_hf_batches(self, final_update: bool = True):
+        hf_weight_path = self.rollout_info.hf_weight_path
+        if not hf_weight_path:
+            raise RuntimeError("Disk weight update requires rollout_info.hf_weight_path.")
+
+        loader = _HFCheckpointLoader(hf_weight_path)
+        bucket_size = int(self.config.update_weight_bucket_size_in_gb * 1024**3)
+
+        state_dict: dict[str, torch.Tensor] = {}
+        bucket_bytes = 0
+        for name, tensor in loader.iter_tensors():
+            tensor = tensor.to(device=DEVICE, non_blocking=True).contiguous()
+            tensor_bytes = tensor.numel() * tensor.element_size()
+
+            if state_dict and bucket_bytes + tensor_bytes > bucket_size:
+                yield WeightUpdateBatch(state_dict, finished=False)
+                state_dict = {}
+                bucket_bytes = 0
+
+            state_dict[name] = tensor
+            bucket_bytes += tensor_bytes
+
+        if state_dict:
+            yield WeightUpdateBatch(state_dict, finished=False)
+
+        if self.rollout_info.backend in ("pytorch", "vllm") and final_update:
+            yield WeightUpdateBatch({}, finished=True)
+
+        DEVICE_MODULE.empty_cache()
+
+
+class _HFCheckpointLoader:
+    def __init__(self, model_path: str | Path):
+        self.model_path = Path(model_path)
+        index_path = self.model_path / "model.safetensors.index.json"
+        single_path = self.model_path / "model.safetensors"
+
+        if index_path.exists():
+            with open(index_path) as f:
+                self.weight_map = json.load(f)["weight_map"]
+        elif single_path.exists():
+            with safe_open(single_path, framework="pt", device="cpu") as f:
+                self.weight_map = dict.fromkeys(f.keys(), single_path.name)
+        else:
+            raise FileNotFoundError(
+                f"Cannot find model.safetensors.index.json or model.safetensors in {self.model_path}"
+            )
+
+    def iter_tensors(self):
+        current_file = None
+        buffer = None
+        for name, filename in self.weight_map.items():
+            if filename != current_file:
+                buffer = safe_open(self.model_path / filename, framework="pt", device="cpu")
+                current_file = filename
+            assert buffer is not None
+            yield name, buffer.get_tensor(name)

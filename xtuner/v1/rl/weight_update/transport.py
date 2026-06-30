@@ -739,7 +739,7 @@ class NCCLWeightTransport(WeightTransport):
 
     def send(self, batch: WeightUpdateBatch) -> None:
         state_dict = batch.state_dict
-        if not state_dict:
+        if not state_dict and not batch.finished:
             return
 
         train_sync_group = self.get_train_update_sync_group()
@@ -860,3 +860,156 @@ class NCCLWeightTransport(WeightTransport):
         self.group_name = None
         self.engine_urls = []
         self.external_group_world_size = None
+
+
+class DiskBackendAdapter:
+    def update(self, weight_iterator: Any) -> None:
+        raise NotImplementedError
+
+    def teardown(self) -> None:
+        return
+
+
+class SGLangDiskBackendAdapter(DiskBackendAdapter):
+    def __init__(self, *, rank: int, rollout_info: RolloutWeightUpdateInfo):
+        self.rank = rank
+        self.rollout_info = rollout_info
+        self.executor: ThreadPoolExecutor | None = None
+
+    def build_request(self, hf_weight_path: str) -> WeightUpdateRequest:
+        # SGLang already owns the disk reload path. XTuner only needs to pass
+        # the HF checkpoint directory to the rollout server.
+        return WeightUpdateRequest(
+            endpoint="update_weights_from_disk",
+            body={
+                "model_path": hf_weight_path,
+                "load_format": "safetensors",
+                "abort_all_requests": True,
+                "flush_cache": True,
+            },
+        )
+
+    def update(self, weight_iterator: Any) -> None:
+        # SGLang consumes the checkpoint path on the rollout server side.
+        del weight_iterator
+
+        hf_weight_path = self.rollout_info.hf_weight_path
+        if not hf_weight_path:
+            raise RuntimeError("Disk weight update requires rollout_info.hf_weight_path from rollout_config.")
+
+        try:
+            if dist.get_rank() != 0:
+                dist.barrier()
+                return
+
+            target_urls = list(dict.fromkeys(url for url in self.rollout_info.rollout_server_url_dict.values() if url))
+            if not target_urls:
+                raise RuntimeError("Disk weight update requires at least one rollout server url.")
+            request = self.build_request(hf_weight_path)
+            self.executor = ThreadPoolExecutor(max_workers=max(1, len(target_urls)))
+            futures = [
+                self.executor.submit(
+                    WeightTransport.post_json,
+                    url,
+                    request.endpoint,
+                    request.body,
+                    api_key=self.rollout_info.api_key,
+                )
+                for url in target_urls
+            ]
+            for future in futures:
+                result = future.result()
+                assert result.get("success", True), f"disk weight update failed: {result.get('message', result)}"
+            dist.barrier()
+        finally:
+            self.teardown()
+            DEVICE_MODULE.empty_cache()
+
+    def teardown(self) -> None:
+        if self.executor is not None:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+            self.executor = None
+
+
+class LMDeployDiskBackendAdapter(DiskBackendAdapter):
+    def __init__(
+        self,
+        *,
+        rank: int,
+        logger: Any,
+        rollout_info: RolloutWeightUpdateInfo,
+        config: Any | None,
+        upstream_transport: str,
+    ):
+        self.upstream_transport = upstream_transport
+        self._batch_transport = self._build_batch_transport(
+            rank=rank,
+            logger=logger,
+            rollout_info=rollout_info,
+            config=config,
+        )
+
+    def _build_batch_transport(
+        self,
+        *,
+        rank: int,
+        logger: Any,
+        rollout_info: RolloutWeightUpdateInfo,
+        config: Any | None,
+    ) -> WeightTransport:
+        if self.upstream_transport == "ipc":
+            return IPCWeightTransport(
+                rank=rank,
+                logger=logger,
+                config=config,
+                rollout_info=rollout_info,
+            )
+        elif self.upstream_transport == "nccl":
+            return NCCLWeightTransport(rank=rank, logger=logger, rollout_info=rollout_info)
+        else:
+            raise ValueError(f"Unsupported disk weight update upstream transport: {self.upstream_transport!r}")
+
+    def update(self, weight_iterator: Any) -> None:
+        # WeightIterator.iter_batch_groups() switches disk mode to iter_disk_hf_batches().
+        # The underlying LMDeploy transport then uses the existing tensor update endpoints.
+        self._batch_transport.update(weight_iterator)
+
+    def teardown(self) -> None:
+        self._batch_transport.teardown()
+
+
+class DiskWeightTransport(WeightTransport):
+    _disk_adapter: DiskBackendAdapter
+
+    def __init__(self, *, rank: int, logger: Any, rollout_info: RolloutWeightUpdateInfo, config: Any | None = None):
+        super().__init__(rank=rank, logger=logger, rollout_info=rollout_info)
+        self.config = config
+        self._disk_adapter = self._build_adapter()
+
+    def _build_adapter(self) -> DiskBackendAdapter:
+        if self.backend == "sglang":
+            return SGLangDiskBackendAdapter(rank=self.rank, rollout_info=self.rollout_info)
+        elif self.backend == "pytorch":
+            upstream_transport = self.rollout_info.disk_update_upstream_transport or "ipc"
+            return LMDeployDiskBackendAdapter(
+                rank=self.rank,
+                logger=self.logger,
+                config=self.config,
+                rollout_info=self.rollout_info,
+                upstream_transport=upstream_transport,
+            )
+        raise ValueError(f"Unsupported disk weight update backend: {self.backend!r}")
+
+    def update(self, weight_iterator: Any) -> None:
+        self._disk_adapter.update(weight_iterator)
+
+    def send(self, batch: WeightUpdateBatch) -> None:
+        raise NotImplementedError("DiskWeightTransport bypasses WeightIterator batches.")
+
+    def after_update_all_groups(self) -> None:
+        self._disk_adapter.teardown()
+        DEVICE_MODULE.empty_cache()
+
+    def teardown(self) -> None:
+        self._disk_adapter.teardown()
+        super().teardown()

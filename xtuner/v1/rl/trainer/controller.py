@@ -290,12 +290,12 @@ class TrainingController:
             ray.get([worker.onload_optimizer.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
         return
 
-    def update_rollout_info(self, info_dict, train_rollout_mode, weight_update_host=None, weight_update_port=None):
+    def update_rollout_info(self, info_dict, weight_update_mode, weight_update_host=None, weight_update_port=None):
         ray.get(
             [
                 worker.update_rollout_info.remote(
                     **info_dict,
-                    train_rollout_mode=train_rollout_mode,
+                    weight_update_mode=weight_update_mode,
                     weight_update_host=weight_update_host,
                     weight_update_port=weight_update_port,
                 )

@@ -12,9 +12,9 @@ from .data import (
     RolloutBackend,
     RolloutWeightUpdateInfo,
     ServiceUrlMap,
-    TrainRolloutMode,
+    WeightTransportType,
 )
-from .transport import IPCWeightTransport, NCCLWeightTransport, WeightTransport
+from .transport import DiskWeightTransport, IPCWeightTransport, NCCLWeightTransport, WeightTransport
 from .weight_iterator import WeightIterator
 
 
@@ -56,7 +56,7 @@ class UpdateWeighter:
         server_url_dict: ServiceUrlMap,
         rollout_config: RolloutConfig,
         worker_server_urls_status: dict[str, bool],
-        train_rollout_mode: TrainRolloutMode,
+        weight_update_mode: WeightTransportType | str,
         weight_update_host: str | None = None,
         weight_update_port: int | None = None,
         worker_session_url_dict: ServiceUrlMap | None = None,
@@ -65,7 +65,7 @@ class UpdateWeighter:
         """Update the rollout information for the training worker."""
 
         self.rollout_info.backend = self._normalize_rollout_backend(rollout_config)
-        self.set_train_rollout_mode(train_rollout_mode=train_rollout_mode)
+        self.set_weight_update_mode(weight_update_mode=weight_update_mode)
 
         # Common rollout metadata.
         tp = rollout_config.tensor_parallel_size
@@ -74,6 +74,16 @@ class UpdateWeighter:
         self.rollout_info.tp = tp
         self.rollout_info.ep = ep
         self.rollout_info.api_key = rollout_config.api_key
+        extra_rollout_config = rollout_config.extra_rollout_config or dict()
+        # PSEUDO: the disk transport consumes the HF checkpoint path from rollout_config.
+        # A future RolloutConfig field can replace the extra_rollout_config fallback.
+        self.rollout_info.hf_weight_path = cast(
+            str | None, getattr(rollout_config, "hf_weight_path", None) or extra_rollout_config.get("hf_weight_path")
+        )
+        self.rollout_info.disk_update_upstream_transport = cast(
+            Any,
+            extra_rollout_config.get("disk_update_upstream_transport"),
+        )
         rollout_server_url = server_url_dict.get(self.rank, "")
         if not worker_server_urls_status.get(rollout_server_url, False):
             self.logger.error(f"Rollout server url {rollout_server_url} is not available.")
@@ -83,7 +93,6 @@ class UpdateWeighter:
 
         if self.rollout_info.transport_type == "ipc":
             # Colocated rollout metadata.
-            # rollout_device_mesh is created after train_rollout_mode is set.
             self.rollout_info.rollout_engine_rank_mesh_array = [
                 [int(rank) for rank in ranks] for ranks in engine_rank_mesh_array
             ]
@@ -94,12 +103,30 @@ class UpdateWeighter:
             self.rollout_info.worker_server_urls_status = worker_server_urls_status
             self.rollout_info.weight_update_host = weight_update_host
             self.rollout_info.weight_update_port = weight_update_port if weight_update_port is not None else 30000
+        elif self.rollout_info.transport_type == "disk":
+            # Disk update needs rollout URL metadata, and LMDeploy still needs to
+            # know whether the underlying transfer should mirror IPC or NCCL.
+            disk_update_upstream_transport = (self.rollout_info.disk_update_upstream_transport or "ipc").lower()
+            if disk_update_upstream_transport not in ("ipc", "nccl"):
+                raise ValueError(
+                    f"disk_update_upstream_transport must be 'ipc' or 'nccl', got {disk_update_upstream_transport!r}."
+                )
+            self.rollout_info.disk_update_upstream_transport = cast(Any, disk_update_upstream_transport)
+            self.rollout_info.rollout_engine_rank_mesh_array = [
+                [int(rank) for rank in ranks] for ranks in engine_rank_mesh_array
+            ]
+            self.rollout_info.rollout_server_url_dict = {int(rank): url for rank, url in server_url_dict.items()}
+            self.rollout_info.worker_server_urls_status = worker_server_urls_status
+            self.rollout_info.weight_update_host = weight_update_host
+            self.rollout_info.weight_update_port = weight_update_port if weight_update_port is not None else 30000
+            if disk_update_upstream_transport == "ipc":
+                self._ensure_rollout_device_mesh()
 
         new_transport_signature = self._build_transport_signature(
             engine_rank_mesh_array=engine_rank_mesh_array,
             server_url_dict=server_url_dict,
             worker_server_urls_status=worker_server_urls_status,
-            train_rollout_mode=train_rollout_mode,
+            weight_update_mode=self.rollout_info.transport_type,
             backend=self.rollout_info.backend,
             tp=tp,
             ep=ep,
@@ -131,24 +158,21 @@ class UpdateWeighter:
                 mesh_dim_names=("engine_instance", "engine_parallel"),
             )
 
-    def set_train_rollout_mode(self, train_rollout_mode: TrainRolloutMode | str):
-        assert train_rollout_mode is not None, "update_rollout_info() must set train_rollout_mode."
+    def set_weight_update_mode(self, weight_update_mode: WeightTransportType | str):
+        assert weight_update_mode is not None, "update_rollout_info() must set weight_update_mode."
 
         if self.rollout_info.backend is None:
             raise RuntimeError("rollout backend is not set. Please set rollout backend in update_rollout_info().")
 
-        mode = train_rollout_mode.lower()
-        if mode not in ("colocate", "disaggregated"):
+        mode = weight_update_mode.lower()
+        if mode not in ("ipc", "nccl", "disk"):
             raise ValueError(
-                f"Unsupported train_rollout_mode: {train_rollout_mode!r}. Expected 'colocate' or 'disaggregated'."
+                f"Unsupported weight_update_mode: {weight_update_mode!r}. Expected 'ipc', 'nccl' or 'disk'."
             )
-        mode = cast(TrainRolloutMode, mode)
-        self.rollout_info.train_rollout_mode = mode
-        if mode == "colocate":
-            self.rollout_info.transport_type = "ipc"
-        elif mode == "disaggregated":
-            self.rollout_info.transport_type = "nccl"
+        mode = cast(WeightTransportType, mode)
+        self.rollout_info.transport_type = mode
 
+        if mode == "nccl":
             backend = self.rollout_info.backend
             if backend == "vllm" or backend == "turbomind":
                 raise NotImplementedError(f"Disaggregated train-rollout mode is not supported for {backend} backend.")
@@ -172,6 +196,13 @@ class UpdateWeighter:
             )
         elif self.rollout_info.transport_type == "nccl":
             self._transport = NCCLWeightTransport(rank=self.rank, logger=self.logger, rollout_info=self.rollout_info)
+        elif self.rollout_info.transport_type == "disk":
+            self._transport = DiskWeightTransport(
+                rank=self.rank,
+                logger=self.logger,
+                config=self.config,
+                rollout_info=self.rollout_info,
+            )
         else:
             raise NotImplementedError
 
@@ -181,7 +212,7 @@ class UpdateWeighter:
         engine_rank_mesh_array: DeviceMeshRaw,
         server_url_dict: ServiceUrlMap,
         worker_server_urls_status: dict[str, bool],
-        train_rollout_mode: TrainRolloutMode,
+        weight_update_mode: WeightTransportType | None,
         backend: RolloutBackend,
         tp: int,
         ep: int,
@@ -197,7 +228,7 @@ class UpdateWeighter:
         )
 
         return (
-            train_rollout_mode,
+            weight_update_mode,
             backend,
             tp,
             ep,

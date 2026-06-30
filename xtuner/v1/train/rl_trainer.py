@@ -52,7 +52,6 @@ from xtuner.v1.rl.utils import (
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
-from xtuner.v1.rl.weight_update.data import TrainRolloutMode
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -119,7 +118,7 @@ def check_fa3():
 def bind_train_rollout(
     train_controller: TrainingController,
     rollout_controller: RolloutControllerProxy,
-    train_rollout_mode: TrainRolloutMode | str,
+    weight_update_mode: Literal["ipc", "nccl", "disk"] | str,
     weight_update_host: str | None = None,
     weight_update_port: int | None = None,
 ) -> None:
@@ -130,7 +129,7 @@ def bind_train_rollout(
     )
     train_controller.update_rollout_info(
         info_dict,
-        train_rollout_mode=train_rollout_mode,
+        weight_update_mode=weight_update_mode,
         weight_update_host=weight_update_host,
         weight_update_port=weight_update_port,
     )
@@ -1599,7 +1598,7 @@ class RLColocateTrainer(BaseRLTrainer):
         bind_train_rollout(
             train_controller=self.train_controller,
             rollout_controller=self.rollout_controller,
-            train_rollout_mode="colocate",
+            weight_update_mode="ipc",
         )
 
         replay_buffer = cfg.replay_buffer_config.build()
@@ -1759,7 +1758,7 @@ class RLColocateTrainer(BaseRLTrainer):
                 bind_train_rollout(
                     train_controller=self.train_controller,
                     rollout_controller=self.rollout_controller,
-                    train_rollout_mode="colocate",
+                    weight_update_mode="ipc",
                 )
                 ray.get(
                     self.rollout_controller.onload_weights.remote(),
@@ -1806,7 +1805,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         bind_train_rollout(
             train_controller=self.train_controller,
             rollout_controller=self.rollout_controller,
-            train_rollout_mode="disaggregated",
+            weight_update_mode="nccl",
             weight_update_host=self._rollout_config.weight_update_host,
             weight_update_port=self._rollout_config.weight_update_port,
         )
@@ -2000,7 +1999,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             bind_train_rollout(
                 train_controller=self.train_controller,
                 rollout_controller=self.rollout_controller,
-                train_rollout_mode="disaggregated",
+                weight_update_mode="nccl",
             )
             self.update_weights()
 
