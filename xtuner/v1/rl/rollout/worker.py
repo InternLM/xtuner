@@ -574,23 +574,31 @@ class RolloutWorker(SingleAcceleratorWorker):
     def set_enable_partial_rollout(self, enable: bool) -> None:
         self.enable_partial_rollout = enable
 
-    def bind_server_launch_spec(self, server_launch_spec: ServerLaunchSpec) -> None:
+    def _bind_server_launch_spec(self, server_launch_spec: ServerLaunchSpec) -> None:
         if server_launch_spec.worker_rank != self.rank:
             raise ValueError(
                 f"Server launch spec rank={server_launch_spec.worker_rank} does not match worker rank={self.rank}."
             )
         self.server_launch_spec = server_launch_spec
 
-    def init(
-        self,
-    ) -> RolloutWorkerInitResult:
+    def init(self, server_launch_spec: ServerLaunchSpec) -> RolloutWorkerInitResult:
+        """Bind the worker launch spec and initialize the rollout server."""
+        self._bind_server_launch_spec(server_launch_spec)
+        return self._init_server()
+
+    def reinit(self) -> RolloutWorkerInitResult:
+        """Reinitialize the rollout server using the previously bound launch
+        spec."""
+        return self._init_server()
+
+    def _init_server(self) -> RolloutWorkerInitResult:
         """Initialize the worker and launch the server.
 
         Returns:
             Startup result containing rank, server URL, and session URL.
         """
         if self.server_launch_spec is None:
-            raise RuntimeError("RolloutWorker.bind_server_launch_spec() must be called before init().")
+            raise RuntimeError("Rollout worker must bind a server launch spec before starting server.")
         self.receive_abort_request.clear()
         self._launch_server()
         self._start_session_server()
@@ -668,10 +676,10 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     def _start_session_server(self) -> None:
         """Start the per-worker SessionServer proxy."""
-        if self.session_server_actor is not None:
+        assert self.server_launch_spec is not None
+        if not self.server_launch_spec.accepts_rollout_requests or self.session_server_actor is not None:
             return
 
-        assert self.server_launch_spec is not None
         current_pg = ray.util.get_current_placement_group()
         scheduling_strategy = PlacementGroupSchedulingStrategy(
             placement_group=current_pg,
@@ -696,6 +704,10 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.session_server_actor.start.remote(),
             timeout=ROLLOUT_RAY_GET_TIMEOUT,
         )
+        if self.session_server_url is None:
+            raise RuntimeError(
+                f"Request-entrypoint rollout worker rank={self.rank} did not start session server during init."
+            )
 
     def _stop_session_server(self) -> None:
         if self.session_server_actor is not None:

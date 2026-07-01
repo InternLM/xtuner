@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -10,7 +11,7 @@ if TYPE_CHECKING:
     from xtuner.v1.rl.weight_update.data import RolloutWeightUpdateTarget
 
     from .rollout_topology import RolloutTopology
-    from .worker import RolloutWorker
+    from .worker import RolloutWorker, RolloutWorkerInitResult
 
 __all__ = [
     "RolloutWorkerRegistry",
@@ -72,26 +73,30 @@ class RolloutWorkerRegistry:
         self._workers: dict[int, WorkerSnapshot] = {}
         self._lock = threading.RLock()
 
-    def register_started_server(
+    def register_started_servers(
         self,
         *,
-        rank: int,
-        actor: RolloutWorker,
-        server_url: str,
-        session_url: str | None = None,
+        init_results: Iterable[RolloutWorkerInitResult],
+        workers_by_rank: Sequence[RolloutWorker],
         lifecycle_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE,
     ) -> None:
-        """Register one worker actor after its rollout server process has
-        started."""
+        """Register worker actors after their rollout server processes have
+        started.
+
+        workers_by_rank must be indexed by rollout worker rank; each init_result.rank is used to select the
+        corresponding actor.
+        """
         with self._lock:
-            self._workers[rank] = WorkerSnapshot(
-                rank=rank,
-                actor=actor,
-                url=server_url,
-                session_url=session_url,
-                is_request_entrypoint=self._rollout_topology.is_request_entrypoint_rank(rank),
-                lifecycle_state=lifecycle_state,
-            )
+            for init_result in init_results:
+                rank = init_result.rank
+                self._workers[rank] = WorkerSnapshot(
+                    rank=rank,
+                    actor=workers_by_rank[rank],
+                    url=init_result.server_url,
+                    session_url=init_result.session_url,
+                    is_request_entrypoint=self._rollout_topology.is_request_entrypoint_rank(rank),
+                    lifecycle_state=lifecycle_state,
+                )
 
     def all_workers(self) -> tuple[WorkerSnapshot, ...]:
         """Return a stable rank-ordered snapshot of all registered server-

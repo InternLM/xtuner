@@ -1,5 +1,5 @@
 import asyncio
-from typing import TypeAlias
+from typing import Any, TypeAlias
 from uuid import uuid4
 
 import ray
@@ -14,6 +14,7 @@ from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 from .constants import ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
 from .health_manager import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthManager
 from .proxy_manager import RolloutProxyManager
+from .rollout_topology import RolloutTopology
 from .utils import SessionRouter
 from .worker import (
     ROLLOUT_CONCURRENCY_GROUP_GENERATE,
@@ -196,6 +197,46 @@ class RolloutController:
             },
         )(worker_base_cls)
 
+    def _create_worker_actors(
+        self,
+        placement_group: PlacementGroup,
+    ) -> tuple[tuple[Any, ...], tuple[tuple[int, int], ...]]:
+        """Create rollout worker actors.
+
+        Returns workers_by_rank, which is indexed by rollout worker rank, and rank_bundle_indices, which maps worker
+        ranks to placement-group bundles.
+        """
+        worker_base_cls = get_rollout_worker_base_cls(self.config)
+        worker_cls = self._build_remote_worker_cls(worker_base_cls)
+        workers, rank_bundle_indices = AutoAcceleratorWorkers.from_placement_group(
+            worker_cls, self.config, placement_group
+        )
+        workers_by_rank = tuple(workers)
+        return workers_by_rank, tuple(rank_bundle_indices)
+
+    def _initialize_worker_ports_and_build_rollout_topology(
+        self,
+        workers_by_rank: tuple[Any, ...],
+        rank_bundle_indices: tuple[tuple[int, int], ...],
+    ) -> RolloutTopology:
+        """Initialize worker-local dist ports and build rollout topology.
+
+        This performs the Ray init_dist_port handshake before building the topology, so the returned layout is bound to
+        runtime worker addresses.
+        """
+        dist_init_results = ray.get(
+            [
+                worker.init_dist_port.remote()  # type: ignore[attr-defined]
+                for worker in workers_by_rank
+            ]
+        )
+        worker_base_cls = get_rollout_worker_base_cls(self.config)
+        return worker_base_cls.build_rollout_topology(
+            self.config,
+            list(rank_bundle_indices),
+            dict(dist_init_results),
+        )
+
     def _init_workers(
         self,
         placement_group: PlacementGroup,
@@ -210,60 +251,25 @@ class RolloutController:
         Returns:
             A registry containing all server-process workers and runtime state.
         """
-        worker_base_cls = get_rollout_worker_base_cls(self.config)
-        worker_cls = self._build_remote_worker_cls(worker_base_cls)
-
-        # Create workers from placement group.
-        workers, rank_bundle_idx_list = AutoAcceleratorWorkers.from_placement_group(
-            worker_cls, self.config, placement_group
-        )
-        dist_init_results = ray.get(
-            [
-                worker.init_dist_port.remote()  # type: ignore[attr-defined]
-                for worker in workers
-            ]
-        )
-        rank_to_worker = {
-            rank: worker for worker, (rank, _dist_init_addr) in zip(workers, dist_init_results, strict=True)
-        }
-        rank_to_dist_init_addr = dict(dist_init_results)
-
-        rollout_topology = worker_base_cls.build_rollout_topology(
-            self.config,
-            rank_bundle_idx_list,
-            rank_to_dist_init_addr,
-        )
-        server_launch_specs = rollout_topology.server_launch_specs()
-        server_workers = tuple(
-            (launch_spec, rank_to_worker[launch_spec.worker_rank]) for launch_spec in server_launch_specs
-        )
-
-        ray.get(
-            [
-                worker.bind_server_launch_spec.remote(launch_spec)  # type: ignore[attr-defined]
-                for launch_spec, worker in server_workers
-            ]
+        workers_by_rank, rank_bundle_indices = self._create_worker_actors(placement_group)
+        rollout_topology = self._initialize_worker_ports_and_build_rollout_topology(
+            workers_by_rank,
+            rank_bundle_indices,
         )
         init_results = tuple(
             ray.get(
                 [
-                    worker.init.remote()  # type: ignore[attr-defined]
-                    for _launch_spec, worker in server_workers
+                    workers_by_rank[launch_spec.worker_rank].init.remote(launch_spec)  # type: ignore[attr-defined]
+                    for launch_spec in rollout_topology.server_launch_specs()
                 ]
             )
         )
+
         registry = RolloutWorkerRegistry(rollout_topology=rollout_topology)
-        for init_result in init_results:
-            if rollout_topology.is_request_entrypoint_rank(init_result.rank) and init_result.session_url is None:
-                raise RuntimeError(
-                    f"Rollout worker rank={init_result.rank} did not return session server URL during init."
-                )
-            registry.register_started_server(
-                rank=init_result.rank,
-                actor=rank_to_worker[init_result.rank],
-                server_url=init_result.server_url,
-                session_url=init_result.session_url,
-            )
+        registry.register_started_servers(
+            init_results=init_results,
+            workers_by_rank=workers_by_rank,
+        )
 
         self.logger.info(
             "Rollout worker registry snapshot: "

@@ -486,9 +486,9 @@ class RolloutHealthManager:
             )
             init_results = ray.get(
                 [
-                    # init() reuses the server launch spec bound during
+                    # reinit() reuses the server launch spec bound during
                     # controller startup.
-                    worker.actor.init.remote()  # type: ignore[attr-defined]
+                    worker.actor.reinit.remote()  # type: ignore[attr-defined]
                     for worker in group.workers
                 ],
                 timeout=ROLLOUT_RAY_GET_TIMEOUT,

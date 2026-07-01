@@ -33,7 +33,7 @@ from xtuner.v1.rl.rollout.worker_registry import (
 )
 from xtuner.v1.rl.rollout.sglang import SGLangWorker
 from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, SessionRouter
-from xtuner.v1.rl.rollout.worker import RolloutWorker
+from xtuner.v1.rl.rollout.worker import RolloutWorker, RolloutWorkerInitResult
 from xtuner.v1.rl.utils.misc import delete_from_routedapiproxy
 from xtuner.v1.rl.weight_update.data import RolloutWeightUpdateInfo
 from xtuner.v1.train.rl_trainer import BaseRLTrainer, _agent_loop_manager_requires_rollout_proxy
@@ -45,8 +45,11 @@ class _FakeAsyncRemoteMethod:
         self.result = result
         self.calls = []
 
-    def remote(self):
-        self.calls.append(())
+    def remote(self, *args, **kwargs):
+        if kwargs:
+            self.calls.append((args, kwargs))
+        else:
+            self.calls.append(args)
 
         async def _result():
             if isinstance(self.result, Exception):
@@ -54,6 +57,31 @@ class _FakeAsyncRemoteMethod:
             return self.result
 
         return _result()
+
+
+def _register_started_servers(
+    registry,
+    entries,
+    *,
+    lifecycle_state=WorkerLifecycleState.ACTIVE,
+):
+    entries = tuple(entries)
+    workers_by_rank = [None] * (max((rank for rank, _actor, _server_url, _session_url in entries), default=-1) + 1)
+    init_results = []
+    for rank, actor, server_url, session_url in entries:
+        workers_by_rank[rank] = actor
+        init_results.append(
+            RolloutWorkerInitResult(
+                rank=rank,
+                server_url=server_url,
+                session_url=session_url,
+            )
+        )
+    registry.register_started_servers(
+        init_results=tuple(init_results),
+        workers_by_rank=tuple(workers_by_rank),
+        lifecycle_state=lifecycle_state,
+    )
 
 
 class _FakeRolloutRouter:
@@ -155,13 +183,18 @@ class TestRolloutTopologyAPI(unittest.TestCase):
 
     def _weight_update_targets(self, topology: RolloutTopology):
         registry = RolloutWorkerRegistry(rollout_topology=topology)
-        for spec in topology.server_launch_specs():
-            registry.register_started_server(
-                rank=spec.worker_rank,
-                actor=object(),
-                server_url=f"http://worker-{spec.worker_rank}",
-                session_url=f"http://session-{spec.worker_rank}",
-            )
+        _register_started_servers(
+            registry,
+            (
+                (
+                    spec.worker_rank,
+                    object(),
+                    f"http://worker-{spec.worker_rank}",
+                    f"http://session-{spec.worker_rank}",
+                )
+                for spec in topology.server_launch_specs()
+            ),
+        )
         return registry.weight_update_targets()
 
     def _rollout_info(self, *, config, targets, train_rank: int):
@@ -357,17 +390,12 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
     def test_register_active_workers_to_proxy_delegates_active_session_urls(self):
         controller = RolloutController.__new__(RolloutController)
         controller.registry = self._build_registry((0, 1))
-        controller.registry.register_started_server(
-            rank=0,
-            actor=object(),
-            server_url="http://worker-0",
-            session_url="http://session-0",
-        )
-        controller.registry.register_started_server(
-            rank=1,
-            actor=object(),
-            server_url="http://worker-1",
-            session_url="http://session-1",
+        _register_started_servers(
+            controller.registry,
+            (
+                (0, object(), "http://worker-0", "http://session-0"),
+                (1, object(), "http://worker-1", "http://session-1"),
+            ),
         )
         controller.registry.mark_unhealthy_ranks({1})
         controller.proxy_manager = MagicMock()
@@ -584,17 +612,12 @@ class TestRolloutWorkerRegistry(unittest.TestCase):
             ),
         )
         registry = RolloutWorkerRegistry(rollout_topology=runtime_layout)
-        registry.register_started_server(
-            rank=0,
-            actor=object(),
-            server_url="http://worker-0",
-            session_url="http://session-0",
-        )
-        registry.register_started_server(
-            rank=1,
-            actor=object(),
-            server_url="http://worker-1",
-            session_url=None,
+        _register_started_servers(
+            registry,
+            (
+                (0, object(), "http://worker-0", "http://session-0"),
+                (1, object(), "http://worker-1", None),
+            ),
         )
 
         active_entrypoint = registry.active_entrypoints()[0]
@@ -617,11 +640,9 @@ class TestRolloutWorkerRegistry(unittest.TestCase):
     def test_registry_projects_weight_update_targets_from_topology_and_runtime_state(self):
         runtime_layout = self._runtime_layout(engine_ranks=(0, 1))
         registry = RolloutWorkerRegistry(rollout_topology=runtime_layout)
-        registry.register_started_server(
-            rank=0,
-            actor=object(),
-            server_url="http://worker-0",
-            session_url="http://session-0",
+        _register_started_servers(
+            registry,
+            ((0, object(), "http://worker-0", "http://session-0"),),
         )
 
         targets = registry.weight_update_targets()
@@ -668,17 +689,12 @@ class TestSessionRouter(unittest.IsolatedAsyncioTestCase):
         registry = RolloutWorkerRegistry(
             rollout_topology=rollout_topology,
         )
-        registry.register_started_server(
-            rank=0,
-            actor=actor_0,
-            server_url="http://worker-0",
-            session_url="http://session-0",
-        )
-        registry.register_started_server(
-            rank=1,
-            actor=actor_1,
-            server_url="http://worker-1",
-            session_url="http://session-1",
+        _register_started_servers(
+            registry,
+            (
+                (0, actor_0, "http://worker-0", "http://session-0"),
+                (1, actor_1, "http://worker-1", "http://session-1"),
+            ),
         )
         router = SessionRouter(registry, max_idle_seconds=None)
 
@@ -783,6 +799,90 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.assertTrue(worker.receive_abort_request.is_set())
         worker._send_abort_request.assert_awaited_once_with()
+
+    def test_init_binds_launch_spec_and_skips_session_server_for_non_entrypoint(self):
+        topology = RolloutTopology(
+            engines=(
+                RolloutEngine(
+                    engine_ranks=(0, 1),
+                    dist_init_addr="host0:25000",
+                    server_processes=(
+                        RolloutServerProcess(
+                            worker_rank=0,
+                            placement_group_bundle_idxs=(0,),
+                            accepts_rollout_requests=True,
+                            weight_update_ranks=(0, 1),
+                        ),
+                        RolloutServerProcess(
+                            worker_rank=1,
+                            placement_group_bundle_idxs=(1,),
+                            accepts_rollout_requests=False,
+                            weight_update_ranks=(),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        launch_spec_by_rank = {spec.worker_rank: spec for spec in topology.server_launch_specs()}
+        worker = RolloutWorker.__new__(RolloutWorker)
+        worker.rank = 1
+        worker.server_launch_spec = None
+        worker.receive_abort_request = threading.Event()
+        worker.receive_abort_request.set()
+        worker.server_url = "http://worker-1"
+        worker.session_server_url = None
+        worker._launch_server = MagicMock()
+        worker.session_server_actor = None
+
+        result = worker.init(launch_spec_by_rank[1])
+
+        worker._launch_server.assert_called_once_with()
+        self.assertIsNone(worker.session_server_actor)
+        self.assertFalse(worker.receive_abort_request.is_set())
+        self.assertIs(worker.server_launch_spec, launch_spec_by_rank[1])
+        self.assertEqual(result.rank, 1)
+        self.assertEqual(result.server_url, "http://worker-1")
+        self.assertIsNone(result.session_url)
+
+    def test_reinit_reuses_bound_launch_spec(self):
+        topology = RolloutTopology(
+            engines=(
+                RolloutEngine(
+                    engine_ranks=(0,),
+                    dist_init_addr="host0:25000",
+                    server_processes=(
+                        RolloutServerProcess(
+                            worker_rank=0,
+                            placement_group_bundle_idxs=(0,),
+                            accepts_rollout_requests=True,
+                            weight_update_ranks=(0,),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        launch_spec = topology.server_launch_specs()[0]
+        worker = RolloutWorker.__new__(RolloutWorker)
+        worker.rank = 0
+        worker.server_launch_spec = launch_spec
+        worker.receive_abort_request = threading.Event()
+        worker.server_url = "http://worker-0"
+        worker.session_server_url = None
+        worker._launch_server = MagicMock()
+
+        def start_session_server():
+            worker.session_server_url = "http://session-0"
+
+        worker._start_session_server = MagicMock(side_effect=start_session_server)
+
+        result = worker.reinit()
+
+        worker._launch_server.assert_called_once_with()
+        worker._start_session_server.assert_called_once_with()
+        self.assertIs(worker.server_launch_spec, launch_spec)
+        self.assertEqual(result.rank, 0)
+        self.assertEqual(result.server_url, "http://worker-0")
+        self.assertEqual(result.session_url, "http://session-0")
 
     async def test_safe_post_request_returns_aborted_without_sending_when_abort_flag_is_set(self):
         # safe post 在发送前发现 abort flag 时，应直接返回 REQUEST_ABORTED，不再发 HTTP 请求。
@@ -954,14 +1054,19 @@ class TestRolloutHealthManager(unittest.TestCase):
         registry = RolloutWorkerRegistry(
             rollout_topology=rollout_topology,
         )
+        _register_started_servers(
+            registry,
+            (
+                (
+                    rank,
+                    worker_info.actor,
+                    worker_info.url,
+                    worker_info.session_url or f"http://session-{rank}",
+                )
+                for rank, worker_info in workers_info.items()
+            ),
+        )
         for rank, worker_info in workers_info.items():
-            registry.register_started_server(
-                rank=rank,
-                actor=worker_info.actor,
-                server_url=worker_info.url,
-                session_url=worker_info.session_url or f"http://session-{rank}",
-                lifecycle_state=worker_info.lifecycle_state,
-            )
             if worker_info.lifecycle_state is WorkerLifecycleState.INACTIVE:
                 registry.mark_unhealthy_ranks({rank})
         return registry
@@ -1165,6 +1270,48 @@ class TestRolloutHealthManager(unittest.TestCase):
         self.assertTrue(self._worker_by_rank(registry, 0).is_active())
         self.assertEqual([group.ranks for group in recovered_groups], [(0,)])
         self.assertTrue(all(worker.is_active() for worker in recovered_groups[0].workers))
+
+    def test_restart_worker_group_uses_reinit(self):
+        init_result = RolloutWorkerInitResult(
+            rank=0,
+            server_url="http://worker-0",
+            session_url="http://session-0",
+        )
+        actor = SimpleNamespace(
+            set_skip_load_weights=_FakeAsyncRemoteMethod(None),
+            init=_FakeAsyncRemoteMethod(init_result),
+            reinit=_FakeAsyncRemoteMethod(init_result),
+            check_health=_FakeAsyncRemoteMethod(True),
+            offload=_FakeAsyncRemoteMethod(None),
+            restore_skip_load_weights=_FakeAsyncRemoteMethod(None),
+        )
+        worker_info = WorkerSnapshot(
+            rank=0,
+            actor=actor,
+            url="http://worker-0",
+            session_url="http://session-0",
+            lifecycle_state=WorkerLifecycleState.INACTIVE,
+        )
+        manager, registry = self._build_manager({0: worker_info})
+        group = registry.claim_inactive_groups_for_recovery()[0]
+
+        def fake_ray_get(refs, timeout=None):
+            del timeout
+            return [asyncio.run(ref) for ref in refs]
+
+        with (
+            patch.object(manager, "_shutdown_worker_group", return_value=True),
+            patch("xtuner.v1.rl.rollout.health_manager.ray.get", side_effect=fake_ray_get),
+        ):
+            result = manager._restart_worker_group(group)
+
+        self.assertTrue(result)
+        self.assertEqual(actor.set_skip_load_weights.calls, [(True,)])
+        self.assertEqual(actor.reinit.calls, [()])
+        self.assertEqual(actor.init.calls, [])
+        self.assertEqual(actor.check_health.calls, [()])
+        self.assertEqual(actor.offload.calls, [()])
+        self.assertEqual(actor.restore_skip_load_weights.calls, [()])
 
     def test_recovered_listener_runs_under_operation_lock(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))

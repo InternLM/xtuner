@@ -57,6 +57,8 @@ class ServerLaunchSpec:
     dist_init_addr: str
     # Rank of this worker inside the logical inference engine.
     engine_rank: int
+    # Whether this server process can receive rollout generation requests.
+    accepts_rollout_requests: bool = True
     # Node index for multi-node backend launches.
     node_rank: int = 0
     # Number of nodes for multi-node backend launches.
@@ -160,6 +162,7 @@ class RolloutTopology:
                 placement_group_bundle_idxs=server.placement_group_bundle_idxs,
                 dist_init_addr=engine.dist_init_addr,
                 engine_rank=engine.engine_ranks.index(server.worker_rank),
+                accepts_rollout_requests=server.accepts_rollout_requests,
                 node_rank=server.node_rank,
                 nnodes=server.nnodes,
             )
