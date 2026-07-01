@@ -123,7 +123,7 @@ class _FakeTrainController:
         self.fit_steps: list[int] = []
         self.saved_checkpoints: list[Path] = []
         self.resume_checkpoint_paths: list[Path] = []
-        self.train_rollout_mode = None
+        self.weight_transport_type = None
         self.update_weights_count = 0
         self.rollout_info = None
 
@@ -132,7 +132,7 @@ class _FakeTrainController:
         *,
         targets,
         rollout_config,
-        train_rollout_mode,
+        weight_transport_type,
         weight_update_host=None,
         weight_update_port=None,
     ):
@@ -140,7 +140,7 @@ class _FakeTrainController:
             "targets": targets,
             "rollout_config": rollout_config,
         }
-        self.train_rollout_mode = train_rollout_mode
+        self.weight_transport_type = weight_transport_type
         self.weight_update_host = weight_update_host
         self.weight_update_port = weight_update_port
 

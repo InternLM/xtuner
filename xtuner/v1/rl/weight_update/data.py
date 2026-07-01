@@ -11,7 +11,6 @@ if TYPE_CHECKING:
     from xtuner.v1.rl.rollout.worker import RolloutConfig
 
 
-TrainRolloutMode: TypeAlias = Literal["colocate", "disaggregated"]  # Train and rollout deployment mode.
 RolloutBackend: TypeAlias = Literal["sglang", "vllm", "pytorch", "turbomind"]  # Rollout inference backend.
 WeightTransportType: TypeAlias = Literal["ipc", "nccl"]  # Supported weight transport types.
 
@@ -33,25 +32,20 @@ def _resolve_rollout_backend(rollout_config: RolloutConfig) -> RolloutBackend:
     return cast(RolloutBackend, backend)
 
 
-def _resolve_transport_type(
+def _validate_transport_type(
     *,
-    train_rollout_mode: TrainRolloutMode | str,
+    weight_transport_type: WeightTransportType | str,
     backend: RolloutBackend,
-) -> tuple[TrainRolloutMode, WeightTransportType]:
-    assert train_rollout_mode is not None, "bind_rollout_weight_update() must set train_rollout_mode."
+) -> WeightTransportType:
+    assert weight_transport_type is not None, "bind_rollout_weight_update() must set weight_transport_type."
 
-    mode = train_rollout_mode.lower()
-    if mode not in ("colocate", "disaggregated"):
-        raise ValueError(
-            f"Unsupported train_rollout_mode: {train_rollout_mode!r}. Expected 'colocate' or 'disaggregated'."
-        )
-    mode = cast(TrainRolloutMode, mode)
-    if mode == "colocate":
-        return mode, "ipc"
-
-    if backend == "vllm" or backend == "turbomind":
-        raise NotImplementedError(f"Disaggregated train-rollout mode is not supported for {backend} backend.")
-    return mode, "nccl"
+    transport_type = weight_transport_type.lower()
+    if transport_type not in ("ipc", "nccl"):
+        raise ValueError(f"Unsupported weight_transport_type: {weight_transport_type!r}. Expected 'ipc' or 'nccl'.")
+    transport_type = cast(WeightTransportType, transport_type)
+    if transport_type == "nccl" and backend in ("vllm", "turbomind"):
+        raise NotImplementedError(f"NCCL weight transport is not supported for {backend} backend.")
+    return transport_type
 
 
 @dataclass(frozen=True)
@@ -84,9 +78,7 @@ class RolloutWeightUpdateInfo:
     weight_update_targets: tuple[RolloutWeightUpdateTarget, ...]
     # Current train worker rank; used to derive the local weight update target.
     train_rank: int
-    # Deployment mode that decides which weight transport family is used.
-    train_rollout_mode: TrainRolloutMode
-    # Concrete transport selected from train_rollout_mode and rollout config.
+    # Weight transport protocol; also determines rollout weight export strategy.
     transport_type: WeightTransportType
     # Resolved rollout backend used by transports and iterators.
     backend: RolloutBackend
@@ -102,7 +94,7 @@ class RolloutWeightUpdateInfo:
         rollout_config: RolloutConfig,
         weight_update_targets: tuple[RolloutWeightUpdateTarget, ...],
         train_rank: int,
-        train_rollout_mode: TrainRolloutMode | str,
+        weight_transport_type: WeightTransportType | str,
         weight_update_host: str | None = None,
         weight_update_port: int | None = None,
     ) -> RolloutWeightUpdateInfo:
@@ -110,15 +102,14 @@ class RolloutWeightUpdateInfo:
         tp = rollout_config.tensor_parallel_size
         ep = rollout_config.expert_parallel_size
         assert tp == 1 or ep == 1, "Either tensor parallel size or engine parallel size must be 1."
-        mode, transport_type = _resolve_transport_type(
-            train_rollout_mode=train_rollout_mode,
+        transport_type = _validate_transport_type(
+            weight_transport_type=weight_transport_type,
             backend=backend,
         )
         return cls(
             rollout_config=rollout_config,
             weight_update_targets=weight_update_targets,
             train_rank=train_rank,
-            train_rollout_mode=mode,
             transport_type=transport_type,
             backend=backend,
             weight_update_host=weight_update_host,
@@ -187,7 +178,7 @@ class RolloutWeightUpdateInfo:
         )
         frozen_api_key = tuple(self.api_key) if isinstance(self.api_key, list) else self.api_key
         return (
-            self.train_rollout_mode,
+            self.transport_type,
             self.backend,
             self.tp,
             self.ep,

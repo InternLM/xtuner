@@ -159,7 +159,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         train_controller.bind_rollout_weight_update(
             targets=targets,
             rollout_config=self.rollout_cfg,
-            train_rollout_mode="disaggregated",
+            weight_transport_type="nccl",
         )
         train_controller.update_weights()
 
@@ -198,7 +198,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
             train_controller.bind_rollout_weight_update(
                 targets=targets,
                 rollout_config=self.rollout_cfg,
-                train_rollout_mode="disaggregated",
+                weight_transport_type="nccl",
             )
             train_controller.update_weights()
 
@@ -237,7 +237,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         train_controller.bind_rollout_weight_update(
             targets=targets,
             rollout_config=self.rollout_cfg,
-            train_rollout_mode="disaggregated",
+            weight_transport_type="nccl",
         )
         train_controller.update_weights()
 

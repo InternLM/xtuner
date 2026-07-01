@@ -7,7 +7,7 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from .data import (
     RolloutWeightUpdateInfo,
     RolloutWeightUpdateTarget,
-    TrainRolloutMode,
+    WeightTransportType,
 )
 from .transport import IPCWeightTransport, NCCLWeightTransport, WeightTransport
 from .weight_iterator import WeightIterator
@@ -34,7 +34,7 @@ class UpdateWeighter:
         *,
         targets: tuple[RolloutWeightUpdateTarget, ...],
         rollout_config: RolloutConfig,
-        train_rollout_mode: TrainRolloutMode,
+        weight_transport_type: WeightTransportType,
         weight_update_host: str | None = None,
         weight_update_port: int | None = None,
     ):
@@ -44,7 +44,7 @@ class UpdateWeighter:
             rollout_config=rollout_config,
             weight_update_targets=targets,
             train_rank=self.rank,
-            train_rollout_mode=train_rollout_mode,
+            weight_transport_type=weight_transport_type,
             weight_update_host=weight_update_host,
             weight_update_port=weight_update_port,
         )

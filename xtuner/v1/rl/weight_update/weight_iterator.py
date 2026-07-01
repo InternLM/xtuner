@@ -38,7 +38,7 @@ class WeightIterator:
     def iter_batch_groups(self):
         # Export path depends on rollout protocol: turbomind consumes layer-wise batches,
         # compose models update submodules in order, and plain models use HF-style batches.
-        if self.rollout_info.train_rollout_mode == "colocate" and self.rollout_info.backend == "turbomind":
+        if self.rollout_info.transport_type == "ipc" and self.rollout_info.backend == "turbomind":
             yield self.iter_layer_batches()
             return
 
@@ -190,10 +190,10 @@ class WeightIterator:
         )
 
         train_enable_ep = model.fsdp_config is not None and model.fsdp_config.ep_size > 1
-        should_gather_train_ep_shards = self.rollout_info.train_rollout_mode == "disaggregated" and train_enable_ep
+        should_gather_train_ep_shards = self.rollout_info.transport_type == "nccl" and train_enable_ep
 
         if train_enable_ep:
-            if self.rollout_info.train_rollout_mode == "colocate" and self.rollout_info.ep > 1:
+            if self.rollout_info.transport_type == "ipc" and self.rollout_info.ep > 1:
                 target_ep_rank = self.rollout_info.ipc_engine_parallel_rank
                 target_ep_size = self.rollout_info.ipc_engine_parallel_size
                 assert target_ep_rank is not None, "IPC rollout target for current train rank is not resolved."

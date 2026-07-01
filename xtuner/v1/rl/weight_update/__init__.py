@@ -2,7 +2,6 @@ from .data import (
     RolloutBackend,
     RolloutWeightUpdateInfo,
     RolloutWeightUpdateTarget,
-    TrainRolloutMode,
     WeightTransportType,
     WeightUpdateBatch,
 )
@@ -32,7 +31,6 @@ __all__ = [
     "RolloutWeightUpdateInfo",
     "SGLangIPCBackendAdapter",
     "SGLangNCCLBackendAdapter",
-    "TrainRolloutMode",
     "UpdateWeighter",
     "WeightIterator",
     "WeightTransportType",

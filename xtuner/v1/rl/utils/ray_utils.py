@@ -160,7 +160,7 @@ def bind_train_rollout(
     train_workers,
     rollout_controller,
     rollout_config,
-    train_rollout_mode,
+    weight_transport_type,
     weight_update_host=None,
     weight_update_port=None,
 ) -> None:
@@ -180,7 +180,7 @@ def bind_train_rollout(
             worker.bind_rollout_weight_update.remote(
                 targets=targets,
                 rollout_config=rollout_config,
-                train_rollout_mode=train_rollout_mode,
+                weight_transport_type=weight_transport_type,
                 weight_update_host=weight_update_host,
                 weight_update_port=weight_update_port,
             )

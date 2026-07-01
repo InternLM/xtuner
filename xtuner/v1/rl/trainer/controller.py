@@ -295,7 +295,7 @@ class TrainingController:
         *,
         targets,
         rollout_config,
-        train_rollout_mode,
+        weight_transport_type,
         weight_update_host=None,
         weight_update_port=None,
     ):
@@ -304,7 +304,7 @@ class TrainingController:
                 worker.bind_rollout_weight_update.remote(
                     targets=targets,
                     rollout_config=rollout_config,
-                    train_rollout_mode=train_rollout_mode,
+                    weight_transport_type=weight_transport_type,
                     weight_update_host=weight_update_host,
                     weight_update_port=weight_update_port,
                 )

@@ -202,7 +202,7 @@ class TestRolloutTopologyAPI(unittest.TestCase):
             rollout_config=config,
             weight_update_targets=targets,
             train_rank=train_rank,
-            train_rollout_mode="colocate",
+            weight_transport_type="ipc",
         )
 
     def test_rollout_topology_resolves_engine_dist_init_addr_when_created(self):

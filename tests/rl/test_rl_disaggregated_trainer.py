@@ -273,7 +273,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             train_controller=trainer.train_controller,
             rollout_controller=trainer.rollout_controller,
             rollout_config=trainer._rollout_config,
-            train_rollout_mode="disaggregated",
+            weight_transport_type="nccl",
             weight_update_host="10.0.0.1",
             weight_update_port=23456,
         )
