@@ -7,11 +7,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
-    Dict,
     Iterable,
     List,
     Sequence,
-    TypeAlias,
     TypedDict,
     cast,
 )
@@ -63,8 +61,6 @@ from xtuner.v1.utils import (
 from ..rollout_is import merge_rollout_is_metrics
 
 
-DeviceMeshRaw: TypeAlias = List[List[int]]  # A list of lists representing device mesh indices
-ServiceUrlMap: TypeAlias = Dict[int, str]  # A dictionary mapping service names to their URLs
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
@@ -278,8 +274,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
     @ray_method
-    def update_rollout_info(self, *args, **kwargs):
-        return self.update_weighter.update_rollout_info(*args, **kwargs)
+    def bind_rollout_weight_update(self, *args, **kwargs):
+        return self.update_weighter.bind_rollout_weight_update(*args, **kwargs)
 
     @ray_method
     def update_weights(self):

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import TYPE_CHECKING, Iterable, TypedDict
+from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
-    from .worker import RolloutConfig, RolloutWorker
+    from xtuner.v1.rl.weight_update.data import RolloutWeightUpdateTarget
+
+    from .rollout_topology import RolloutTopology
+    from .worker import RolloutWorker, RolloutWorkerInitResult
 
 __all__ = [
-    "RolloutWorkerMetadata",
     "RolloutWorkerRegistry",
     "WorkerGroup",
     "WorkerLifecycleState",
@@ -31,20 +34,18 @@ class WorkerLifecycleState(str, Enum):
 class WorkerSnapshot:
     """Read-only snapshot for one rollout server process."""
 
+    # Worker rank that owns the runtime snapshot.
+    rank: int
+    # Ray actor handle for the rollout worker.
     actor: RolloutWorker
+    # Base URL of the rollout server process.
     url: str
+    # Session server URL used only by proxy/session routing.
     session_url: str | None = None
-    lifecycle_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE
-    lifecycle_group_ranks: tuple[int, ...] = ()
+    # Whether this worker can receive rollout generation requests.
     is_request_entrypoint: bool = True
-    rank: int = -1
-
-    def __post_init__(self) -> None:
-        lifecycle_state = (
-            WorkerLifecycleState.ACTIVE if self.lifecycle_state is None else WorkerLifecycleState(self.lifecycle_state)
-        )
-        object.__setattr__(self, "lifecycle_state", lifecycle_state)
-        object.__setattr__(self, "lifecycle_group_ranks", tuple(self.lifecycle_group_ranks))
+    # Current lifecycle state observed by registry and health manager.
+    lifecycle_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE
 
     def is_active(self) -> bool:
         return self.lifecycle_state is WorkerLifecycleState.ACTIVE
@@ -52,35 +53,10 @@ class WorkerSnapshot:
 
 @dataclass(frozen=True)
 class WorkerGroup:
+    # Worker ranks that share one lifecycle action.
     ranks: tuple[int, ...]
+    # Runtime snapshots for registered workers in this lifecycle group.
     workers: tuple[WorkerSnapshot, ...]
-
-
-class RolloutWorkerMetadata(TypedDict):
-    """Legacy rollout worker metadata consumed by trainer/update-weight
-    code."""
-
-    engine_rank_mesh_array: list[list[int]]
-    server_url_dict: dict[int, str]
-    rollout_config: RolloutConfig
-    worker_server_urls_status: dict[str, bool]
-    worker_session_url_dict: dict[int, str]
-    worker_session_urls_status: dict[str, bool]
-
-
-def _build_worker_groups(workers: Iterable[WorkerSnapshot]) -> dict[tuple[int, ...], WorkerGroup]:
-    grouped_workers: dict[tuple[int, ...], list[WorkerSnapshot]] = {}
-    for worker in workers:
-        group_ranks = worker.lifecycle_group_ranks or (worker.rank,)
-        grouped_workers.setdefault(group_ranks, []).append(worker)
-
-    return {
-        group_ranks: WorkerGroup(
-            ranks=group_ranks,
-            workers=tuple(sorted(group_workers, key=lambda worker: worker.rank)),
-        )
-        for group_ranks, group_workers in grouped_workers.items()
-    }
 
 
 class RolloutWorkerRegistry:
@@ -90,37 +66,37 @@ class RolloutWorkerRegistry:
     def __init__(
         self,
         *,
-        engine_rank_mesh_array: list[list[int]],
-        rollout_config: RolloutConfig,
+        rollout_topology: RolloutTopology,
     ):
-        """Initialize an empty registry with the training-side metadata
-        projection."""
-        self._engine_rank_mesh_array = [list(engine_ranks) for engine_ranks in engine_rank_mesh_array]
-        self._rollout_config = rollout_config
+        """Initialize an empty registry with the rollout topology."""
+        self._rollout_topology = rollout_topology
         self._workers: dict[int, WorkerSnapshot] = {}
         self._lock = threading.RLock()
 
-    def register_started_server(
+    def register_started_servers(
         self,
         *,
-        rank: int,
-        actor: RolloutWorker,
-        server_url: str,
-        session_url: str | None = None,
-        lifecycle_group_ranks: tuple[int, ...] = (),
-        is_request_entrypoint: bool = True,
+        init_results: Iterable[RolloutWorkerInitResult],
+        workers_by_rank: Sequence[RolloutWorker],
+        lifecycle_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE,
     ) -> None:
-        """Register one worker actor after its rollout server process has
-        started."""
+        """Register worker actors after their rollout server processes have
+        started.
+
+        workers_by_rank must be indexed by rollout worker rank; each init_result.rank is used to select the
+        corresponding actor.
+        """
         with self._lock:
-            self._workers[rank] = WorkerSnapshot(
-                rank=rank,
-                actor=actor,
-                url=server_url,
-                session_url=session_url,
-                lifecycle_group_ranks=lifecycle_group_ranks or (rank,),
-                is_request_entrypoint=is_request_entrypoint,
-            )
+            for init_result in init_results:
+                rank = init_result.rank
+                self._workers[rank] = WorkerSnapshot(
+                    rank=rank,
+                    actor=workers_by_rank[rank],
+                    url=init_result.server_url,
+                    session_url=init_result.session_url,
+                    is_request_entrypoint=self._rollout_topology.is_request_entrypoint_rank(rank),
+                    lifecycle_state=lifecycle_state,
+                )
 
     def all_workers(self) -> tuple[WorkerSnapshot, ...]:
         """Return a stable rank-ordered snapshot of all registered server-
@@ -162,11 +138,28 @@ class RolloutWorkerRegistry:
                 return None
             return worker
 
+    def lifecycle_groups(self) -> tuple[tuple[int, ...], ...]:
+        """Return registered lifecycle groups in rank order."""
+        with self._lock:
+            return tuple(sorted(self._rollout_topology.lifecycle_groups()))
+
+    def _build_worker_groups(self) -> dict[tuple[int, ...], WorkerGroup]:
+        grouped_ranks = {
+            self._rollout_topology.lifecycle_group_for_server_rank(worker.rank) for worker in self._workers.values()
+        }
+        return {
+            group_ranks: WorkerGroup(
+                ranks=group_ranks,
+                workers=tuple(self._workers[rank] for rank in group_ranks if rank in self._workers),
+            )
+            for group_ranks in grouped_ranks
+        }
+
     def claim_inactive_groups_for_recovery(self) -> tuple[WorkerGroup, ...]:
         """Claim non-active worker groups by moving them to recovering
         state."""
         with self._lock:
-            worker_groups = _build_worker_groups(self._workers.values())
+            worker_groups = self._build_worker_groups()
             inactive_groups = [
                 group
                 for group in worker_groups.values()
@@ -184,16 +177,14 @@ class RolloutWorkerRegistry:
         """Mark every lifecycle group containing a failed rank as inactive."""
         with self._lock:
             failed_group_ranks = {
-                worker.lifecycle_group_ranks or (worker.rank,)
-                for rank, worker in self._workers.items()
-                if rank in ranks
+                self._rollout_topology.lifecycle_group_for_server_rank(rank) for rank in ranks if rank in self._workers
             }
             for group_ranks in failed_group_ranks:
                 for rank in group_ranks:
                     worker = self._workers.get(rank)
                     if worker is not None:
                         self._workers[rank] = replace(worker, lifecycle_state=WorkerLifecycleState.INACTIVE)
-            worker_groups = _build_worker_groups(self._workers.values())
+            worker_groups = self._build_worker_groups()
             return tuple(
                 worker_groups[group_ranks]
                 for group_ranks in sorted(failed_group_ranks)
@@ -214,29 +205,27 @@ class RolloutWorkerRegistry:
                 worker = self._workers.get(rank)
                 if worker is not None:
                     self._workers[rank] = replace(worker, lifecycle_state=lifecycle_state)
-            worker_groups = _build_worker_groups(self._workers.values())
+            worker_groups = self._build_worker_groups()
             return worker_groups.get(group.ranks)
 
-    def training_metadata_snapshot(self) -> RolloutWorkerMetadata:
-        """Build the legacy trainer/update-weight metadata from one registry
-        snapshot."""
-        with self._lock:
-            request_entrypoints = {rank: info for rank, info in self._workers.items() if info.is_request_entrypoint}
-            worker_server_urls_map = {rank: info.url for rank, info in request_entrypoints.items()}
-            worker_server_urls_status = {info.url: info.is_active() for info in request_entrypoints.values()}
-            worker_session_url_dict: dict[int, str] = {}
-            worker_session_urls_status: dict[str, bool] = {}
-            for rank, info in request_entrypoints.items():
-                if info.session_url is None:
-                    continue
-                worker_session_url_dict[rank] = info.session_url
-                worker_session_urls_status[info.session_url] = info.is_active()
+    def weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
+        """Return weight-update targets resolved with current runtime state."""
+        from xtuner.v1.rl.weight_update.data import RolloutWeightUpdateTarget
 
-            return {
-                "engine_rank_mesh_array": [list(engine_ranks) for engine_ranks in self._engine_rank_mesh_array],
-                "server_url_dict": worker_server_urls_map,
-                "rollout_config": self._rollout_config,
-                "worker_server_urls_status": worker_server_urls_status,
-                "worker_session_url_dict": worker_session_url_dict,
-                "worker_session_urls_status": worker_session_urls_status,
-            }
+        with self._lock:
+            targets: list[RolloutWeightUpdateTarget] = []
+            for server in self._rollout_topology.weight_update_endpoint_processes():
+                worker = self._workers.get(server.worker_rank)
+                if worker is None:
+                    raise RuntimeError(
+                        f"Rollout weight update endpoint rank={server.worker_rank} has not been registered."
+                    )
+                targets.append(
+                    RolloutWeightUpdateTarget(
+                        endpoint_rank=server.worker_rank,
+                        update_ranks=server.weight_update_ranks,
+                        server_url=worker.url,
+                        lifecycle_state=worker.lifecycle_state.value,
+                    )
+                )
+            return tuple(sorted(targets, key=lambda target: target.endpoint_rank))

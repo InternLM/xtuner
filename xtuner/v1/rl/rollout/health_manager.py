@@ -486,9 +486,9 @@ class RolloutHealthManager:
             )
             init_results = ray.get(
                 [
-                    # init() reuses the immutable launch spec cached on each actor
-                    # during controller startup, including placement bundles and dist addr.
-                    worker.actor.init.remote()  # type: ignore[attr-defined]
+                    # reinit() reuses the server launch spec bound during
+                    # controller startup.
+                    worker.actor.reinit.remote()  # type: ignore[attr-defined]
                     for worker in group.workers
                 ],
                 timeout=ROLLOUT_RAY_GET_TIMEOUT,
@@ -505,11 +505,11 @@ class RolloutHealthManager:
                 return False
 
             for worker, init_result in zip(group.workers, init_results):
-                init_rank, init_url = init_result
-                if init_rank != worker.rank or init_url != worker.url:
+                if init_result.rank != worker.rank or init_result.server_url != worker.url:
                     logger.error(
                         f"Rollout worker restart returned unexpected endpoint: rank={worker.rank}, "
-                        f"init_rank={init_rank}, expected_url={worker.url}, init_url={init_url}."
+                        f"init_rank={init_result.rank}, expected_url={worker.url}, "
+                        f"init_url={init_result.server_url}."
                     )
                     self._shutdown_worker_group(group, wait_server_down=False, best_effort=True)
                     return False

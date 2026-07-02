@@ -118,12 +118,8 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         )
 
     def _check_sglang_weights(self, rollout_controller, action):
-        info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
-        active_urls = [
-            url
-            for url, is_active in info_dict["worker_server_urls_status"].items()
-            if is_active
-        ]
+        targets = ray.get(rollout_controller.get_weight_update_targets.remote())
+        active_urls = [target.server_url for target in targets if target.is_active]
         self.assertGreater(len(active_urls), 0)
         results = []
         for url in active_urls:
@@ -159,8 +155,12 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         input_state = RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params)
         res_baseline = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
 
-        info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
-        train_controller.update_rollout_info(info_dict, train_rollout_mode="disaggregated")
+        targets = ray.get(rollout_controller.get_weight_update_targets.remote())
+        train_controller.bind_rollout_weight_update(
+            targets=targets,
+            rollout_config=self.rollout_cfg,
+            weight_transport_type="nccl",
+        )
         train_controller.update_weights()
 
         res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
@@ -194,8 +194,12 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
             self._check_sglang_weights(rollout_controller, action="snapshot_parameters")
             self._check_sglang_weights(rollout_controller, action="reset_parameters")
 
-            info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
-            train_controller.update_rollout_info(info_dict, train_rollout_mode="disaggregated")
+            targets = ray.get(rollout_controller.get_weight_update_targets.remote())
+            train_controller.bind_rollout_weight_update(
+                targets=targets,
+                rollout_config=self.rollout_cfg,
+                weight_transport_type="nccl",
+            )
             train_controller.update_weights()
 
             self._check_sglang_weights(rollout_controller, action="compare_parameters")
@@ -229,8 +233,12 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         input_state = RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params)
         res_baseline = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
 
-        info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
-        train_controller.update_rollout_info(info_dict, train_rollout_mode="disaggregated")
+        targets = ray.get(rollout_controller.get_weight_update_targets.remote())
+        train_controller.bind_rollout_weight_update(
+            targets=targets,
+            rollout_config=self.rollout_cfg,
+            weight_transport_type="nccl",
+        )
         train_controller.update_weights()
 
         res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
