@@ -63,8 +63,6 @@ class WeightTransport(ABC):
         self._adapter: WeightTransportAdapter | None = None
 
         self.rollout_url = self.rollout_info.rollout_url
-        if self.rollout_url is None and self.rollout_info.transport_type == "ipc":
-            self.logger.error(f"rank {self.rank} url in None, cannot update weights and skip")
 
     @staticmethod
     def post_json(url: str, endpoint: str, payload: dict, *, api_key=None) -> dict:
@@ -467,9 +465,11 @@ class IPCWeightTransport(WeightTransport):
         dist.barrier()
 
     def send(self, batch: WeightUpdateBatch) -> None:
-        if self.rollout_url is None:
-            self.logger.error(f"rank {self.rank} url in None, cannot update weights and skip")
+        ipc_update_target = self.rollout_info._ipc_update_target
+        assert ipc_update_target is not None, "IPC rollout target for current train rank is not resolved."
+        if not ipc_update_target.is_active:
             return
+        rollout_url = ipc_update_target.server_url
 
         DEVICE_MODULE.empty_cache()
         try:
@@ -481,7 +481,7 @@ class IPCWeightTransport(WeightTransport):
             if dist.get_rank() == self.head_rank:
                 request = self._adapter.build_request(batch, serialized_data)
                 self.post_json(
-                    self.rollout_url,
+                    rollout_url,
                     request.endpoint,
                     request.body,
                     api_key=self.rollout_info.api_key,
