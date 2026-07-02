@@ -287,12 +287,42 @@ class OffloadManager(metaclass=SingletonMeta):
     def empty(self):
         return len(self.items) == 0
 
-    def clear(self, key=None):
-        if key is None:
-            self.items.clear()
-        else:
-            self.assert_exist(key)
-            self.items.pop(key)
+    def clear(self, key=None, group=None, clear_pin_memory_cache: bool = False):
+        """Clear runtime offload state.
+
+        ``pin_memory_cache`` is kept by default because it is a reusable CPU
+        pinned-memory cache, not a live GPU activation reference.
+        """
+        if key is not None and group is not None:
+            raise ValueError("Only one of key or group can be specified")
+
+        if key is not None:
+            self.items.pop(key, None)
+            self.may_npu_tensors.pop(key, None)
+            if clear_pin_memory_cache:
+                self.pin_memory_cache.pop(key, None)
+            return
+
+        if group is not None:
+            prefix = f"{group}_"
+            for item_key in list(self.items.keys()):
+                if item_key.startswith(prefix):
+                    self.items.pop(item_key, None)
+            for item_key in list(self.may_npu_tensors.keys()):
+                if item_key.startswith(prefix):
+                    self.may_npu_tensors.pop(item_key, None)
+            self.getcnt.pop(group, None)
+            if clear_pin_memory_cache:
+                for item_key in list(self.pin_memory_cache.keys()):
+                    if item_key.startswith(prefix):
+                        self.pin_memory_cache.pop(item_key, None)
+            return
+
+        self.items.clear()
+        self.may_npu_tensors.clear()
+        self.getcnt.clear()
+        if clear_pin_memory_cache:
+            self.pin_memory_cache.clear()
 
     # event interface #
 

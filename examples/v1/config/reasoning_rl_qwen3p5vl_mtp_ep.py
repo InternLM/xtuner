@@ -61,6 +61,7 @@ hf_interval = 15
 checkpoint_interval = 50
 evaluate_step = 5
 enable_initial_evaluate = os.environ.get("ENABLE_INITIAL_EVALUATE", False)
+train_ep_size=4
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
@@ -89,7 +90,7 @@ rollout_config = RolloutConfig(
         lmdeploy_uvicorn_log_level="INFO",
         lmdeploy_speculative_algorithm='qwen3_5_mtp',
         # MTP draft tokens trade throughput for extra activation memory; try 3 if still tight.
-        lmdeploy_speculative_num_draft_tokens=4,
+        lmdeploy_speculative_num_draft_tokens=3,
     ),
     health_check_interval_seconds=300,
     health_check_failure_threshold=3,
@@ -207,13 +208,20 @@ judger_config = ComposedJudgerConfig(
     },
 )
 
+from xtuner.v1.float8 import Float8Config, ScalingGranularity
 # 5. train worker
 model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
-model_cfg.float8_cfg = None
-model_cfg.text_config.ep_size = 1
+float8_cfg = Float8Config(
+    scaling_granularity_gemm=None,
+    scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+)
+# model_cfg.float8_cfg = float8_cfg
+# model_cfg.float8_cfg = None
+model_cfg.text_config.ep_size = train_ep_size
 model_cfg.text_config.z_loss_cfg = None
 model_cfg.text_config.balancing_loss_cfg = None
 model_cfg.text_config.freeze_routers = True
+model_cfg.compile_cfg = None
 model_cfg.text_config.mtp_config = MTPConfig(
     num_layers=4, 
     loss_scaling_factor=1.0,
@@ -246,7 +254,7 @@ loss_cfg = GRPOLossConfig(
     ),
 )
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
-fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1, fp32_lm_head=True)
+fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=train_ep_size, fp32_lm_head=True)
 train_worker_cfg = WorkerConfig(
     model_cfg=model_cfg,
     load_from=model_path,

@@ -59,6 +59,7 @@ from xtuner.v1.utils import (
     ray_method,
     set_deterministic,
 )
+from xtuner.v1.utils.activation_offload import OffloadManager
 
 from ..rollout_is import merge_rollout_is_metrics
 
@@ -770,6 +771,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 train_step_info = self._engine.train_step(
                     data_batches=engine_input,
                 )
+                OffloadManager().clear()
             self.logger.debug(
                 f"Rank{self.rank} Rollout {rollout_idx} GlobalStep {global_train_step} "
                 f"train_step[{i}].engine_train_step elapsed={time.perf_counter() - train_step_begin:.4f}s"
