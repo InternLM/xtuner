@@ -88,7 +88,73 @@ class LMDeployWorker(RolloutWorker):
         rank_to_dist_init_addr: Mapping[int, str],
     ) -> RolloutTopology:
         """Build LMDeploy rollout topology with bound engine dist-init
-        addresses."""
+        addresses.
+
+        ``rank_bundle_idx_list`` stores ``(worker_rank, bundle_idx)`` pairs.
+
+        Example with ranks [(0, 0), (1, 1), (2, 2), (3, 3)] and addrs
+        {0: "addr0", 1: "addr1", 2: "addr2", 3: "addr3"}:
+
+        +------+------------------------------------------------------------------+
+        | Mode | RolloutEngine topology                                           |
+        +------+------------------------------------------------------------------+
+        | TP   | RolloutEngine(                                                   |
+        |      |     engine_ranks=(0, 1),                                         |
+        |      |     dist_init_addr="addr0",                                      |
+        |      |     server_processes=(                                           |
+        |      |         RolloutServerProcess(                                    |
+        |      |             worker_rank=0,                                       |
+        |      |             placement_group_bundle_idxs=(0, 1),                  |
+        |      |             weight_update_ranks=(0, 1),                          |
+        |      |         ),                                                       |
+        |      |     ),                                                           |
+        |      | )                                                                |
+        |      | RolloutEngine(                                                   |
+        |      |     engine_ranks=(2, 3),                                         |
+        |      |     dist_init_addr="addr2",                                      |
+        |      |     server_processes=(                                           |
+        |      |         RolloutServerProcess(                                    |
+        |      |             worker_rank=2,                                       |
+        |      |             placement_group_bundle_idxs=(2, 3),                  |
+        |      |             weight_update_ranks=(2, 3),                          |
+        |      |         ),                                                       |
+        |      |     ),                                                           |
+        |      | )                                                                |
+        +------+------------------------------------------------------------------+
+        | EP   | RolloutEngine(                                                   |
+        |      |     engine_ranks=(0, 1),                                         |
+        |      |     dist_init_addr="addr0",                                      |
+        |      |     server_processes=(                                           |
+        |      |         RolloutServerProcess(                                    |
+        |      |             worker_rank=0,                                       |
+        |      |             placement_group_bundle_idxs=(0,),                    |
+        |      |             weight_update_ranks=(0,),                            |
+        |      |         ),                                                       |
+        |      |         RolloutServerProcess(                                    |
+        |      |             worker_rank=1,                                       |
+        |      |             placement_group_bundle_idxs=(1,),                    |
+        |      |             weight_update_ranks=(1,),                            |
+        |      |         ),                                                       |
+        |      |     ),                                                           |
+        |      | )                                                                |
+        |      | RolloutEngine(                                                   |
+        |      |     engine_ranks=(2, 3),                                         |
+        |      |     dist_init_addr="addr2",                                      |
+        |      |     server_processes=(                                           |
+        |      |         RolloutServerProcess(                                    |
+        |      |             worker_rank=2,                                       |
+        |      |             placement_group_bundle_idxs=(2,),                    |
+        |      |             weight_update_ranks=(2,),                            |
+        |      |         ),                                                       |
+        |      |         RolloutServerProcess(                                    |
+        |      |             worker_rank=3,                                       |
+        |      |             placement_group_bundle_idxs=(3,),                    |
+        |      |             weight_update_ranks=(3,),                            |
+        |      |         ),                                                       |
+        |      |     ),                                                           |
+        |      | )                                                                |
+        +------+------------------------------------------------------------------+
+        """
         engines: list[RolloutEngine] = []
         num_workers = len(rank_bundle_idx_list)
         if config.expert_parallel_size <= 1:

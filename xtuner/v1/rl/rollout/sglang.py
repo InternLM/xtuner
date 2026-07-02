@@ -50,6 +50,77 @@ class SGLangWorker(RolloutWorker):
         rank_bundle_idx_list: list[tuple[int, int]],
         rank_to_dist_init_addr: Mapping[int, str],
     ) -> RolloutTopology:
+        """Build SGLang rollout topology with bound engine dist-init addresses.
+
+        The normal SGLang topology starts one server process for each logical
+        engine. Cross-node engines are the special case: SGLang starts one
+        server process per node, but only node 0 accepts rollout requests and
+        owns the weight-update endpoint.
+
+        Example with ``expert_parallel_size=2`` on one node:
+            RolloutTopology(
+                engines=(
+                    RolloutEngine(
+                        engine_ranks=(0, 1),
+                        dist_init_addr="addr0",
+                        server_processes=(
+                            RolloutServerProcess(
+                                worker_rank=0,
+                                placement_group_bundle_idxs=(0, 1),
+                                accepts_rollout_requests=True,
+                                weight_update_ranks=(0, 1),
+                                node_rank=0,
+                                nnodes=1,
+                            ),
+                        ),
+                    ),
+                    RolloutEngine(
+                        engine_ranks=(2, 3),
+                        dist_init_addr="addr2",
+                        server_processes=(
+                            RolloutServerProcess(
+                                worker_rank=2,
+                                placement_group_bundle_idxs=(2, 3),
+                                accepts_rollout_requests=True,
+                                weight_update_ranks=(2, 3),
+                                node_rank=0,
+                                nnodes=1,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+
+        Example with ``expert_parallel_size=16`` across two 8-GPU nodes:
+            RolloutTopology(
+                engines=(
+                    RolloutEngine(
+                        engine_ranks=(0, 1, 2, 3, 4, 5, 6, 7,
+                                      8, 9, 10, 11, 12, 13, 14, 15),
+                        dist_init_addr="addr0",
+                        server_processes=(
+                            RolloutServerProcess(
+                                worker_rank=0,
+                                placement_group_bundle_idxs=(0, 1, 2, 3, 4, 5, 6, 7),
+                                accepts_rollout_requests=True,
+                                weight_update_ranks=(0, 1, 2, 3, 4, 5, 6, 7,
+                                                     8, 9, 10, 11, 12, 13, 14, 15),
+                                node_rank=0,
+                                nnodes=2,
+                            ),
+                            RolloutServerProcess(
+                                worker_rank=8,
+                                placement_group_bundle_idxs=(8, 9, 10, 11, 12, 13, 14, 15),
+                                accepts_rollout_requests=False,
+                                weight_update_ranks=(),
+                                node_rank=1,
+                                nnodes=2,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        """
         num_workers = len(rank_bundle_idx_list)
         num_gpus_per_engine = config.num_gpus_per_engine
         if num_workers % num_gpus_per_engine != 0:
