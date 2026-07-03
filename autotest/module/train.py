@@ -41,7 +41,7 @@ class Train:
 
             if train_type == "sft":
                 command = (
-                    f"cd {current_dir}; pwd; {pip_package}; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
+                    f"sleep inf; cd {current_dir}; pwd; {pip_package}; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + cudnn_patch
                     + f"torchrun --nproc-per-node {nproc_per_node} --master_addr=${{MASTER_ADDR}} --master_port=${{MASTER_PORT}} --nnodes=${{WORLD_SIZE}} --node_rank=${{RANK}} "
                     + f"xtuner/v1/train/cli/{train_type}.py"
