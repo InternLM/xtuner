@@ -7,7 +7,7 @@ from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
-from xtuner.v1.data_proto.messages import ChatMessages, Qwen35ChatMessages
+from xtuner.v1.data_proto.messages import ChatMessages, Glm52ChatMessages, Qwen35ChatMessages
 from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
 from xtuner.v1.datasets.data_item import CacheItem, DataItem
 from xtuner.v1.utils import get_logger
@@ -49,6 +49,8 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
 
         if self.chat_template_name == "qwen3.5-vl":
             messages = Qwen35ChatMessages(messages=item, tools=tools)
+        elif self.chat_template_name == "glm5.2":
+            messages = Glm52ChatMessages(messages=item, tools=tools)
         else:
             messages = ChatMessages(messages=item, tools=tools)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
