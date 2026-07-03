@@ -78,6 +78,38 @@ def dsa_source_compute_layer(layer_idx: int, skip_topk_offset: int, topk_freq: i
     return source
 
 
+class LayerNorm(nn.Module):
+    weight: torch.Tensor
+    bias: torch.Tensor
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.bias = nn.Parameter(torch.zeros(hidden_size))
+        self.normalized_shape = (hidden_size,)
+        self.eps = eps
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if isinstance(self.weight, DTensor):
+            weight = self.weight.to_local()
+        else:
+            weight = self.weight
+
+        if isinstance(self.bias, DTensor):
+            bias = self.bias.to_local()
+        else:
+            bias = self.bias
+
+        return torch.nn.functional.layer_norm(hidden_states, self.normalized_shape, weight, bias, self.eps)
+
+    def init_weights(self):
+        self.weight.data.fill_(1.0)
+        self.bias.data.zero_()
+
+    def extra_repr(self):
+        return f"{self.normalized_shape}, eps={self.eps}"
+
+
 class DSAIndexer(nn.Module):
     def __init__(
         self,
@@ -96,7 +128,7 @@ class DSAIndexer(nn.Module):
         self.index_topk = index_topk
         self.wq_b = build_linear(q_lora_rank, index_n_heads * index_head_dim, bias=False)
         self.wk = build_linear(hidden_size, index_head_dim, bias=False)
-        self.k_norm = nn.LayerNorm(index_head_dim, eps=1e-6)
+        self.k_norm = LayerNorm(index_head_dim, eps=1e-6)
         self.weights_proj = build_linear(hidden_size, index_n_heads, bias=False)
 
     def forward(
@@ -298,6 +330,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         key_states = key_states.squeeze(0).unsqueeze(1).contiguous()
 
         topk_indices = self._get_topk_indices(hidden_states, q_resid, position_embeddings, seq_ctx)
+        # TODO: refactor below as MHA's `self.attn_impl_func: Callable[..., AttnOpOutputs] = get_attn_impl_fn(attn_impl)`
         raw_output, softmax_lse = torch_sparse_mla(
             query_states,
             key_states,

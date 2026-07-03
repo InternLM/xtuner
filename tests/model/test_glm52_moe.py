@@ -1,12 +1,19 @@
+import json
 import os
+import tempfile
 from pathlib import Path
 
+import parametrize
 import pytest
 import torch
+import torch.distributed as dist
+from safetensors import safe_open
+
 from transformers import AutoTokenizer
 from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as HFGlmMoeDsaConfig
-
-from xtuner._testing import load_glm52_hf_oracle_model
+from xtuner._testing import DeterministicDDPTestCase, load_glm52_hf_oracle_model
+from xtuner.v1.config import FSDPConfig
+from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import Glm52MoEConfig, get_model_config, get_model_config_from_hf
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.module.attention import DSAMLAConfig, MLAConfig
@@ -65,6 +72,18 @@ def _tiny_glm52_config() -> Glm52MoEConfig:
         num_nextn_predict_layers=1,
         compile_cfg=False,
     )
+
+
+def _build_lm_loss_ctx(input_ids: torch.Tensor, loss_mode: str = "eager"):
+    shift_input_ids = input_ids[:, :-1]
+    shifted_labels = input_ids[:, 1:]
+    seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to("cuda"),))
+
+    loss_cfg = CELossConfig(mode=loss_mode)
+    loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
+    assert loss_ctx is not None
+    loss_ctx = loss_cfg.loss_ctx_cls.build_batches([loss_ctx])[0]
+    return seq_ctx, loss_ctx
 
 
 def test_glm52_config_from_hf_preserves_native_v1_fields():
@@ -136,9 +155,7 @@ def test_glm52_key_mapping_covers_native_shell_and_dsa_indexer():
     assert model.to_hf_key_list("embed_tokens.weight") == ["model.embed_tokens.weight"]
     assert model.to_hf_key_list("norm.weight") == ["model.norm.weight"]
     assert model.to_hf_key_list("lm_head.weight") == ["lm_head.weight"]
-    assert model.to_hf_key_list("layers.0.self_attn.q_a_proj.weight") == [
-        "model.layers.0.self_attn.q_a_proj.weight"
-    ]
+    assert model.to_hf_key_list("layers.0.self_attn.q_a_proj.weight") == ["model.layers.0.self_attn.q_a_proj.weight"]
     assert model.to_hf_key_list("layers.0.mlp.gate_proj.weight") == ["model.layers.0.mlp.gate_proj.weight"]
     assert model.to_hf_key_list("layers.1.gate.weight") == ["model.layers.1.mlp.gate.weight"]
     assert model.to_hf_key_list("layers.1.gate.router.e_score_correction_bias") == [
@@ -242,3 +259,165 @@ def test_tiny_glm52_native_forward_matches_hf_numeric_oracle():
     finally:
         del model
         torch.cuda.empty_cache()
+
+
+class TestGlm52MoE(DeterministicDDPTestCase):
+    @parametrize.parametrize(
+        "device,dispatcher,ep_size,compile,tol,loss_mode",
+        [
+            ("cuda", "all2all", 8, False, 5e-2, "eager"),
+            ("cuda", None, 1, False, 5e-2, "eager"),
+            ("cuda", None, 1, False, 5e-2, "chunk"),
+        ],
+    )
+    def test_glm52_moe_run(self, device, dispatcher, ep_size, compile, tol, loss_mode):
+        self.create_pg(device)
+
+        tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
+        input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
+        hf_model = load_glm52_hf_oracle_model(GLM5_2_TINY_MOE_PATH)
+        try:
+            with torch.no_grad():
+                expected_loss = hf_model(input_ids=input_ids, labels=input_ids.clone(), use_cache=False).loss
+        finally:
+            del hf_model
+            torch.cuda.empty_cache()
+
+        with torch.device("meta"):
+            cfg = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
+            if not compile:
+                cfg.compile_cfg = False
+            cfg.dispatcher = dispatcher
+            cfg.ep_size = ep_size
+            model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
+
+        try:
+            model.from_hf(GLM5_2_TINY_MOE_PATH)
+            model.eval()
+
+            seq_ctx, loss_ctx = _build_lm_loss_ctx(input_ids, loss_mode=loss_mode)
+            with torch.no_grad():
+                output = model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
+
+            # See the logits oracle test above: HF expanded MLA and native
+            # absorbed MLA accumulate bf16 through different matmul orders.
+            self.assertTrue(torch.allclose(output["loss"], expected_loss.to(output["loss"].dtype), rtol=tol, atol=tol))
+        finally:
+            del model
+            torch.cuda.empty_cache()
+
+    @parametrize.parametrize(
+        "device,dispatcher,ep_size",
+        [
+            ("cuda", "all2all", 4),
+            ("cuda", "all2all", 8),
+            ("cuda", None, 1),
+        ],
+    )
+    def test_fsdp_accuracy(self, device, dispatcher, ep_size):
+        self.create_pg(device)
+
+        tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
+        input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
+        hf_model = load_glm52_hf_oracle_model(GLM5_2_TINY_MOE_PATH)
+        try:
+            with torch.no_grad():
+                expected_loss = hf_model(input_ids=input_ids, labels=input_ids.clone(), use_cache=False).loss
+        finally:
+            del hf_model
+            torch.cuda.empty_cache()
+
+        with torch.device("meta"):
+            cfg = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
+            cfg.compile_cfg = False
+            cfg.dispatcher = dispatcher
+            cfg.ep_size = ep_size
+            model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
+
+        fsdp_config = FSDPConfig(ep_size=ep_size, cpu_offload=False)
+        model.fully_shard(fsdp_config=fsdp_config)
+
+        try:
+            model.from_hf(GLM5_2_TINY_MOE_PATH)
+            model.eval()
+
+            seq_ctx, loss_ctx = _build_lm_loss_ctx(input_ids)
+            with torch.no_grad():
+                output = model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
+
+            self.assertTrue(
+                torch.allclose(output["loss"], expected_loss.to(output["loss"].dtype), rtol=5e-2, atol=5e-2)
+            )
+        finally:
+            del model
+            torch.cuda.empty_cache()
+
+    @parametrize.parametrize(
+        "device,dispatcher,ep_size",
+        [
+            ("cuda", None, 1),
+        ],
+    )
+    def test_save_hf(self, device, dispatcher, ep_size):
+        self.create_pg(device)
+
+        with torch.device("meta"):
+            cfg = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
+            cfg.compile_cfg = False
+            cfg.dispatcher = dispatcher
+            cfg.ep_size = ep_size
+            model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
+
+        fsdp_config = FSDPConfig(ep_size=ep_size, cpu_offload=False)
+        origin_fh_cache = {}
+        saved_fh_cache = {}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            syncdir = [tmpdir]
+            dist.broadcast_object_list(syncdir, src=0)
+            tmpdir = Path(syncdir[0])
+
+            model.fully_shard(fsdp_config=fsdp_config)
+            model.from_hf(GLM5_2_TINY_MOE_PATH)
+            model.save_hf(tmpdir)
+
+            origin_hf_path = Path(GLM5_2_TINY_MOE_PATH)
+            origin_index_path = origin_hf_path / "model.safetensors.index.json"
+            saved_index_path = tmpdir / "model.safetensors.index.json"
+
+            if dist.get_rank() == 0:
+                with open(origin_index_path) as f:
+                    origin_index = json.load(f)
+                with open(saved_index_path) as f:
+                    saved_index = json.load(f)
+
+                self.assertListEqual(
+                    sorted(origin_index["weight_map"]),
+                    sorted(saved_index["weight_map"]),
+                )
+
+                for key, origin_safetensor_name in origin_index["weight_map"].items():
+                    saved_safetensor_name = saved_index["weight_map"][key]
+
+                    if origin_safetensor_name not in origin_fh_cache:
+                        origin_fh_cache[origin_safetensor_name] = safe_open(
+                            str(origin_hf_path / origin_safetensor_name), framework="pt"
+                        )
+                    if saved_safetensor_name not in saved_fh_cache:
+                        saved_fh_cache[saved_safetensor_name] = safe_open(
+                            str(tmpdir / saved_safetensor_name), framework="pt"
+                        )
+
+                    origin_tensor = origin_fh_cache[origin_safetensor_name].get_tensor(key)
+                    saved_tensor = saved_fh_cache[saved_safetensor_name].get_tensor(key)
+                    self.assertTrue(torch.equal(origin_tensor, saved_tensor), f"tensor {key} is not equal")
+
+                safetensor_keys = []
+                for safetensor_path in tmpdir.glob("*.safetensors"):
+                    safetensor_keys.extend(saved_fh_cache[safetensor_path.name].keys())
+                    safetensor_keys.sort()
+                self.assertListEqual(safetensor_keys, sorted(saved_index["weight_map"]))
+        dist.barrier()
+
+    @property
+    def world_size(self) -> int:
+        return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8"))
