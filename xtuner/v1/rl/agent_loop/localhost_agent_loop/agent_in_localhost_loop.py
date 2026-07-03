@@ -39,6 +39,13 @@ def _resolve_runner(pipeline: Any) -> Any:
     return pipeline
 
 
+def _drop_failed_train_samples(samples: list[RolloutState], mode: Literal["train", "eval"]) -> list[RolloutState]:
+    if mode != "train":
+        return samples
+    filtered = [sample for sample in samples if sample.status != Status.FAILED]
+    return filtered or samples
+
+
 def _is_trace_key_mismatch(exc: Exception) -> bool:
     return "does not match any trace key" in str(exc)
 
@@ -139,7 +146,8 @@ class AgentInLocalhostLoop(AgentLoop):
             task = create_task(generate_one(state))
             tasks.append(task)
 
-        return await asyncio.gather(*tasks)
+        samples = await asyncio.gather(*tasks)
+        return _drop_failed_train_samples(samples, self.mode)
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         try:
