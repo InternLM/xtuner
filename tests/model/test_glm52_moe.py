@@ -4,7 +4,7 @@ from pathlib import Path
 from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as HFGlmMoeDsaConfig
 
 from xtuner.v1.model import Glm52MoEConfig, get_model_config, get_model_config_from_hf
-from xtuner.v1.module.attention import MLAConfig
+from xtuner.v1.module.attention import DSAMLAConfig, MLAConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 from xtuner.v1.utils.loader import HFCheckpointLoader
 
@@ -27,7 +27,7 @@ def _tiny_glm52_config() -> Glm52MoEConfig:
         hidden_size=16,
         intermediate_size=32,
         moe_intermediate_size=8,
-        attention=MLAConfig(
+        attention=DSAMLAConfig(
             num_attention_heads=2,
             head_dim=4,
             kv_lora_rank=4,
@@ -35,6 +35,10 @@ def _tiny_glm52_config() -> Glm52MoEConfig:
             qk_nope_head_dim=4,
             qk_rope_head_dim=4,
             v_head_dim=4,
+            index_topk=4,
+            index_head_dim=4,
+            index_n_heads=2,
+            indexer_types=["full", "shared", "shared"],
         ),
         hf_head_dim=4,
         qk_head_dim=8,
@@ -80,6 +84,7 @@ def test_glm52_config_from_hf_preserves_native_v1_fields():
     assert config.rope_parameters["rope_theta"] == hf_config.rope_parameters["rope_theta"]
     assert config.rope_parameters["rope_type"] == hf_config.rope_parameters["rope_type"]
 
+    assert isinstance(config.attention, DSAMLAConfig)
     assert isinstance(config.attention, MLAConfig)
     assert config.attention.num_attention_heads == hf_config.num_attention_heads
     assert config.num_key_value_heads == hf_config.num_key_value_heads
@@ -121,6 +126,7 @@ def test_glm52_config_from_hf_preserves_native_v1_fields():
 
 def test_glm52_key_mapping_covers_native_shell_and_dsa_indexer():
     model = _tiny_glm52_config().build()
+    model_keys = set(model.state_dict())
 
     assert model.to_hf_key_list("embed_tokens.weight") == ["model.embed_tokens.weight"]
     assert model.to_hf_key_list("norm.weight") == ["model.norm.weight"]
@@ -152,12 +158,11 @@ def test_glm52_key_mapping_covers_native_shell_and_dsa_indexer():
     assert model.to_hf_key_list("layers.1.shared_experts.gate_proj.weight") == [
         "model.layers.1.mlp.shared_experts.gate_proj.weight"
     ]
-    # TODO: Native DSA indexer modules are intentionally not built in this slice.
-    # This assertion documents the intended HF name until the later DSA issue makes
-    # indexer weights real state_dict entries and loads them through from_hf().
     assert model.to_hf_key_list("layers.1.self_attn.indexer.wq_b.weight") == [
         "model.layers.1.self_attn.indexer.wq_b.weight"
     ]
+    assert "layers.0.self_attn.indexer.wq_b.weight" in model_keys
+    assert "layers.1.self_attn.indexer.wq_b.weight" not in model_keys
 
 
 def test_tiny_glm52_hf_checkpoint_load_reports_loaded_missing_and_ignored_keys():
@@ -174,11 +179,12 @@ def test_tiny_glm52_hf_checkpoint_load_reports_loaded_missing_and_ignored_keys()
 
     assert config.num_hidden_layers == 4
     assert config.first_k_dense_replace == 3
+    assert "layers.0.self_attn.indexer.wq_b.weight" in loaded_keys
+    assert "layers.1.self_attn.indexer.wk.weight" in loaded_keys
+    assert "layers.2.self_attn.indexer.weights_proj.weight" in loaded_keys
+    assert "layers.3.self_attn.indexer.wq_b.weight" not in model.state_dict()
     assert "layers.3.experts.fused_w1w3.weight" in loaded_keys
     assert "layers.3.experts.fused_w2.weight" in loaded_keys
     assert unloaded_keys == set()
     assert missing_keys == set()
-    # TODO: Once the later DSA issue adds native indexer modules, these keys
-    # should move from ignored_hf_keys into the loaded shell.
-    assert ignored_hf_keys
-    assert all(".self_attn.indexer." in key for key in ignored_hf_keys)
+    assert ignored_hf_keys == set()

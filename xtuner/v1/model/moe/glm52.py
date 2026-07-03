@@ -8,7 +8,7 @@ from typing_extensions import Self
 
 from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as HFGlmMoeDsaConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
-from xtuner.v1.module.attention import MLAConfig
+from xtuner.v1.module.attention import DSAMLAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 
@@ -107,7 +107,7 @@ class Glm52MoEConfig(MoEConfig):
         default_factory=lambda: RopeParametersConfig(rope_theta=8000000.0)
     )
     hidden_act: str = "silu"
-    attention: MLAConfig = MLAConfig(
+    attention: MLAConfig = DSAMLAConfig(
         kv_lora_rank=512,
         q_lora_rank=2048,
         qk_nope_head_dim=192,
@@ -117,6 +117,12 @@ class Glm52MoEConfig(MoEConfig):
         num_attention_heads=64,
         qkv_bias=False,
         o_bias=False,
+        index_topk=2048,
+        index_head_dim=128,
+        index_n_heads=32,
+        index_topk_freq=4,
+        index_skip_topk_offset=3,
+        indexer_rope_interleave=True,
     )
     hf_head_dim: int = 192
     qk_head_dim: int = 256
@@ -175,7 +181,7 @@ class Glm52MoEConfig(MoEConfig):
             model_type=cfg.model_type,
             rope_parameters_cfg=rope_parameters_cfg,
             hidden_act=cfg.hidden_act,
-            attention=MLAConfig(
+            attention=DSAMLAConfig(
                 kv_lora_rank=cfg.kv_lora_rank,
                 q_lora_rank=cfg.q_lora_rank,
                 qk_nope_head_dim=cfg.qk_nope_head_dim,
@@ -186,6 +192,13 @@ class Glm52MoEConfig(MoEConfig):
                 qkv_bias=cfg.attention_bias,
                 o_bias=cfg.attention_bias,
                 dropout=cfg.attention_dropout,
+                index_topk=cfg.index_topk,
+                index_head_dim=cfg.index_head_dim,
+                index_n_heads=cfg.index_n_heads,
+                index_topk_freq=cfg.index_topk_freq,
+                index_skip_topk_offset=cfg.index_skip_topk_offset,
+                indexer_rope_interleave=cfg.indexer_rope_interleave,
+                indexer_types=cfg.indexer_types,
             ),
             hf_head_dim=cfg.head_dim,
             qk_head_dim=cfg.qk_head_dim,
