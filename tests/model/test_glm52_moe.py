@@ -1,9 +1,14 @@
 import os
 from pathlib import Path
 
+import pytest
+import torch
+from transformers import AutoTokenizer
 from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as HFGlmMoeDsaConfig
 
+from xtuner._testing import load_glm52_hf_oracle_model
 from xtuner.v1.model import Glm52MoEConfig, get_model_config, get_model_config_from_hf
+from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.module.attention import DSAMLAConfig, MLAConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 from xtuner.v1.utils.loader import HFCheckpointLoader
@@ -188,3 +193,52 @@ def test_tiny_glm52_hf_checkpoint_load_reports_loaded_missing_and_ignored_keys()
     assert unloaded_keys == set()
     assert missing_keys == set()
     assert ignored_hf_keys == set()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="tiny GLM-5.2 numeric oracle requires CUDA")
+def test_tiny_glm52_native_forward_matches_hf_numeric_oracle():
+    tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
+    input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
+
+    hf_model = load_glm52_hf_oracle_model(GLM5_2_TINY_MOE_PATH)
+    try:
+        with torch.no_grad():
+            hf_logits = hf_model(input_ids=input_ids, use_cache=False).logits.detach().cpu()
+    finally:
+        del hf_model
+        torch.cuda.empty_cache()
+
+    with torch.device("meta"):
+        config = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
+        config.compile_cfg = False
+        config.dispatcher = None
+        config.ep_size = 1
+        model = config.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
+
+    try:
+        model.from_hf(GLM5_2_TINY_MOE_PATH)
+        model.eval()
+
+        seq_ctx = SequenceContext.from_input_ids(input_ids=(input_ids,))
+
+        with torch.no_grad():
+            output = model(seq_ctx=seq_ctx, loss_ctx=None)
+
+        native_logits = output["logits"].detach().to(hf_logits.dtype).cpu()
+        # HF expands K/V and runs dense attention, while native uses absorbed MLA.
+        # They are mathematically equivalent, but bf16 accumulates in different
+        # matmul orders, so keep torch.testing's bf16 rtol and allow the observed
+        # logit-scale absolute drift from that accumulation difference.
+        torch.testing.assert_close(native_logits, hf_logits, rtol=1.6e-2, atol=1e-1)
+        assert seq_ctx.dsa_topk_indices is not None
+        assert sorted(seq_ctx.dsa_topk_indices) == [0, 1, 2]
+
+        seq_len = input_ids.numel()
+        for topk_indices in seq_ctx.dsa_topk_indices.values():
+            assert topk_indices.shape == (seq_len, 1, seq_len)
+            assert topk_indices.dtype == torch.int64
+            assert topk_indices.device.type == "cuda"
+            assert (topk_indices == -1).any()
+    finally:
+        del model
+        torch.cuda.empty_cache()

@@ -109,22 +109,24 @@ class DSAIndexer(nn.Module):
         bsz, seq_len, _ = hidden_states.shape
 
         q = self.wq_b(q_resid).view(bsz, seq_len, self.index_n_heads, self.index_head_dim)
-        q_nope, q_pe = torch.split(q, [self.index_head_dim - self.qk_rope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q_pe, q_nope = torch.split(q, [self.qk_rope_head_dim, self.index_head_dim - self.qk_rope_head_dim], dim=-1)
         q_pe = q_pe.transpose(1, 2)
 
         k = self.k_norm(self.wk(hidden_states))
-        k_nope, k_pe = torch.split(k, [self.index_head_dim - self.qk_rope_head_dim, self.qk_rope_head_dim], dim=-1)
+        k_pe, k_nope = torch.split(k, [self.qk_rope_head_dim, self.index_head_dim - self.qk_rope_head_dim], dim=-1)
         k_pe = k_pe.view(bsz, seq_len, 1, self.qk_rope_head_dim).transpose(1, 2)
 
+        # GLM-MoE-DSA applies interleaved RoPE in the indexer, matching HF PR #46842.
         cos, sin = position_embeddings
         q_pe, k_pe = mla_apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
         q_pe = q_pe.transpose(1, 2)
         k_pe = k_pe.transpose(1, 2).squeeze(2)
 
-        q = torch.cat([q_nope, q_pe], dim=-1)
-        k = torch.cat([k_nope, k_pe], dim=-1)
-        weights = self.weights_proj(hidden_states).float() * (self.index_n_heads**-0.5) * (self.index_head_dim**-0.5)
-        scores = torch.einsum("bshd,btd->bsht", q.float(), k.float())
+        q = torch.cat([q_pe, q_nope], dim=-1)
+        k = torch.cat([k_pe, k_nope], dim=-1)
+        weights = self.weights_proj(hidden_states).float() * (self.index_n_heads**-0.5)
+        scores = torch.einsum("bshd,btd->bsht", q.float(), k.float()) * (self.index_head_dim**-0.5)
+        scores = torch.relu(scores)
         index_scores = torch.einsum("bsht,bsh->bst", scores, weights)
 
         packed_mask = _packed_causal_mask(seq_ctx, seq_len, hidden_states.device)
