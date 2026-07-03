@@ -1083,7 +1083,6 @@ class MoE(BaseModel):
             # Both objectives are normalized over MTP depth internally; scale once.
             scaled_mtp_loss = mtp_losses * self.config.mtp_config.loss_scaling_factor  # type: ignore
 
-            # Add to total loss
             output["mtp_loss"] = scaled_mtp_loss
 
         # Keep the main LM branch after MTP so the final normalized states, logits,
