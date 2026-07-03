@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict
 from transformers import PreTrainedTokenizer
 from xtuner.v1.utils import IGNORE_INDEX
 
+from .qwen35_chat import get_offset_mapping
+
 
 _MEDIA_TYPES = {"image", "image_url", "video", "video_url", "audio", "audio_url", "input_audio"}
 
@@ -173,13 +175,17 @@ def render_glm52_chat(
         elif role == "assistant":
             content, reasoning_content = _assistant_content_and_reasoning(message)
             loss = bool(message.get("loss", True))
+            render_reasoning = reasoning_content is not None and (clear_thinking is False or index > last_user_index)
+            loss = loss and (reasoning_content is None or render_reasoning)
 
             append("<|assistant|>", False)
-            if reasoning_content is not None and (clear_thinking is False or index > last_user_index):
+            if render_reasoning:
+                assert reasoning_content is not None
                 append("<think>", False)
                 append(reasoning_content + "</think>", loss)
             else:
-                append("<think></think>", False)
+                append("<think>", False)
+                append("</think>", loss and enable_thinking is not False)
             if content.strip():
                 append(content.strip(), loss)
             if message.get("tool_calls"):
@@ -199,15 +205,41 @@ def render_glm52_chat(
 def _tokenize_with_loss_mask(
     tokenizer: PreTrainedTokenizer, text: str, loss_mask: list[bool]
 ) -> tuple[list[int], list[int]]:
-    encoded = tokenizer(text, return_offsets_mapping=True, add_special_tokens=False)
-    input_ids = encoded["input_ids"]
+    try:
+        encoded = tokenizer(text, return_offsets_mapping=True, add_special_tokens=False)
+        input_ids = encoded["input_ids"]
+        offset_mapping = encoded["offset_mapping"]
+    except Exception:
+        input_ids, offset_mapping = get_offset_mapping(tokenizer, text)
+
     labels = []
-    for token_id, (start, end) in zip(input_ids, encoded["offset_mapping"]):
+    for token_id, (start, end) in zip(input_ids, offset_mapping):
         if start == end or not any(loss_mask[start:end]):
             labels.append(IGNORE_INDEX)
         else:
             labels.append(token_id)
     return input_ids, labels
+
+
+def glm52_tokenize_fn_fastspeed(
+    tokenizer: PreTrainedTokenizer,
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+    add_generation_prompt: bool = False,
+    enable_thinking: bool | None = None,
+    reasoning_effort: str | None = None,
+    clear_thinking: bool | None = None,
+    **kwargs,
+) -> tuple[list[int], list[int]]:
+    text, loss_mask = render_glm52_chat(
+        messages,
+        tools=tools,
+        add_generation_prompt=add_generation_prompt,
+        enable_thinking=enable_thinking,
+        reasoning_effort=reasoning_effort,
+        clear_thinking=clear_thinking,
+    )
+    return _tokenize_with_loss_mask(tokenizer, text, loss_mask)
 
 
 def glm52_tokenize_fn_slowspeed(
@@ -220,6 +252,14 @@ def glm52_tokenize_fn_slowspeed(
     clear_thinking: bool | None = None,
     **kwargs,
 ) -> tuple[list[int], list[int]]:
+    """慢速 golden 参考实现：基于 token 级别前缀 diff 对齐 labels。
+
+    这份逻辑刻意保持和旧 `golden_tokenize_fn.py` 一致，用来校验 fast path：
+    1. 先渲染完整对话，得到唯一的 total_ids 参考序列。
+    2. 对每条需要 loss 的 assistant 消息，渲染其历史前缀并加 generation prompt。
+    3. 再渲染“历史 + 当前 assistant”，用 token 前缀差得到当前 assistant 应监督的 suffix。
+    4. 从上次命中位置开始在 total_ids 里顺序查找 suffix，找到后复制到 labels。
+    """
     hf_kwargs: dict[str, Any] = dict(
         tokenize=False,
         add_generation_prompt=add_generation_prompt,
@@ -233,33 +273,46 @@ def glm52_tokenize_fn_slowspeed(
         hf_kwargs["clear_thinking"] = clear_thinking
     hf_kwargs.update(kwargs)
 
-    text = tokenizer.apply_chat_template(messages, **hf_kwargs)
-    loss_mask = [False] * len(text)
+    full_text = tokenizer.apply_chat_template(messages, **hf_kwargs)
+    total_ids = tokenizer.encode(full_text, add_special_tokens=False)
+    labels = [IGNORE_INDEX] * len(total_ids)
 
-    last_user_index = -1
+    # 记录搜索起点，避免多轮对话里把后续 assistant 的 suffix 匹配到前面的同文案片段。
+    curr_ptr = 0
     for index, message in enumerate(messages):
-        if message.get("role") == "user":
-            last_user_index = index
-
-    cursor = 0
-    for index, message in enumerate(messages):
-        if message.get("role") != "assistant":
+        if message.get("role") != "assistant" or not message.get("loss", True):
             continue
-        assistant_start = text.find("<|assistant|>", cursor)
-        if assistant_start == -1:
-            raise ValueError("Could not align assistant message in GLM-5.2 chat template rendering.")
-        cursor = assistant_start + len("<|assistant|>")
-        for segment in _assistant_generated_segments(message, index, last_user_index, clear_thinking):
-            if not segment:
-                continue
-            start = text.find(segment, cursor)
-            if start == -1:
-                raise ValueError(f"Could not align assistant-generated segment in GLM-5.2 chat template: {segment!r}")
-            end = start + len(segment)
-            loss_mask[start:end] = [True] * (end - start)
-            cursor = end
 
-    return _tokenize_with_loss_mask(tokenizer, text, loss_mask)
+        # 历史前缀以 generation prompt 结束；prefix 之后的 token 才是当前 assistant 生成区间。
+        prompt_kwargs = dict(hf_kwargs)
+        prompt_kwargs["add_generation_prompt"] = True
+        prompt_kwargs["tools"] = tools if index == 0 else None
+        prefix_text = tokenizer.apply_chat_template(messages[:index], **prompt_kwargs)
+
+        # 当前截断渲染可能和 full render 不同，例如历史 thinking 会被模板清掉；是否能在 full
+        # render 中匹配上 suffix，正是 golden 语义的一部分。
+        message_kwargs = dict(hf_kwargs)
+        message_kwargs["add_generation_prompt"] = False
+        message_kwargs["tools"] = tools if index == 0 else None
+        message_text = tokenizer.apply_chat_template([m.copy() for m in messages[: index + 1]], **message_kwargs)
+
+        prefix_ids = tokenizer.encode(prefix_text, add_special_tokens=False)
+        message_ids = tokenizer.encode(message_text, add_special_tokens=False)
+        content_ids = message_ids[len(prefix_ids) :]
+        if not content_ids:
+            continue
+
+        # 在完整 token 序列中做 token 级绝对对齐，避免字符 offset 对特殊 token 的边界解释差异。
+        for start in range(curr_ptr, len(total_ids) - len(content_ids) + 1):
+            if total_ids[start : start + len(content_ids)] == content_ids:
+                labels[start : start + len(content_ids)] = content_ids
+                curr_ptr = start + len(content_ids)
+                break
+        else:
+            if index == len(messages) - 1:
+                raise ValueError("Could not align final assistant message in GLM-5.2 chat template rendering.")
+
+    return total_ids, labels
 
 
 class Glm52ChatMessages(BaseModel):
@@ -284,13 +337,14 @@ class Glm52ChatMessages(BaseModel):
             else:
                 self.messages.insert(0, {"role": "system", "content": chat_template.default_system})
 
-        text, loss_mask = render_glm52_chat(
+        input_ids, labels = glm52_tokenize_fn_fastspeed(
+            tokenizer,
             self.messages,
             tools=self.tools,
             add_generation_prompt=add_generation_prompt,
             enable_thinking=enable_thinking,
             reasoning_effort=reasoning_effort,
             clear_thinking=clear_thinking,
+            **kwargs,
         )
-        input_ids, labels = _tokenize_with_loss_mask(tokenizer, text, loss_mask)
         return {"input_ids": input_ids, "labels": labels}

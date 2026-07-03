@@ -38,6 +38,9 @@ def test_glm52_plain_text_matches_hf_rendering_and_slow_labels():
     assert tokenized["input_ids"] == expected_input_ids
     assert tokenized["input_ids"] == slow_input_ids
     assert tokenized["labels"] == slow_labels
+    assert tokenizer.decode([label for label in tokenized["labels"] if label != -100], skip_special_tokens=False) == (
+        "</think>Hi there."
+    )
     assert any(label != -100 for label in tokenized["labels"])
 
 
@@ -59,6 +62,28 @@ def test_glm52_reasoning_traces_are_supervised_but_template_scaffolding_is_maske
     assert tokenized["input_ids"] == slow_input_ids
     assert tokenized["labels"] == slow_labels
     assert all(not flag for flag in _label_flags_for_span(tokenizer, rendered, tokenized["labels"], "<think></think>"))
+    assert all(flag for flag in _label_flags_for_span(tokenizer, rendered, tokenized["labels"], "new trace</think>"))
+    assert all(flag for flag in _label_flags_for_span(tokenizer, rendered, tokenized["labels"], "Final answer."))
+
+
+def test_glm52_cleared_historical_thinking_turn_is_not_supervised():
+    tokenizer = AutoTokenizer.from_pretrained(GLM52_TOKENIZER, trust_remote_code=True)
+    tokenize_fn = OpenaiTokenizeFunctionConfig(chat_template="glm5.2").build(tokenizer)
+    messages = [
+        {"role": "user", "content": "Question one"},
+        {"role": "assistant", "reasoning_content": "old trace", "content": "Old answer."},
+        {"role": "user", "content": "Question two"},
+        {"role": "assistant", "reasoning_content": "new trace", "content": "Final answer."},
+    ]
+
+    tokenized = tokenize_fn({"messages": messages})
+    rendered = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+    slow_input_ids, slow_labels = glm52_tokenize_fn_slowspeed(tokenizer, messages)
+
+    assert "old trace" not in rendered
+    assert tokenized["input_ids"] == slow_input_ids
+    assert tokenized["labels"] == slow_labels
+    assert all(not flag for flag in _label_flags_for_span(tokenizer, rendered, tokenized["labels"], "Old answer."))
     assert all(flag for flag in _label_flags_for_span(tokenizer, rendered, tokenized["labels"], "new trace</think>"))
     assert all(flag for flag in _label_flags_for_span(tokenizer, rendered, tokenized["labels"], "Final answer."))
 
