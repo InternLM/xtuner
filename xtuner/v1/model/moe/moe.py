@@ -945,7 +945,6 @@ class MoE(BaseModel):
             mtp_losses = mtp_losses / len(mtp_loss_ctx_list)
             scaled_mtp_loss = mtp_losses * self.config.mtp_config.loss_scaling_factor  # type: ignore
 
-            # Add to total loss
             output["mtp_loss"] = scaled_mtp_loss
 
         # Keep the main LM branch after MTP so the final normalized states, logits,
