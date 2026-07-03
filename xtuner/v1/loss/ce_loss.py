@@ -193,7 +193,8 @@ class LMHeadLossContext(BaseLossContext):
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         # We do linear forward here to simplify the implementation of chunk loss (saving memory).
         logits = F.linear(hidden_states, head_weight, head_bias)
-        logits = logits.float()  # (bs, seq_len, vocab_size)
+        if DEVICE != "npu":
+            logits = logits.float()  # (bs, seq_len, vocab_size)
 
         shifted_labels = loss_kwargs.shifted_labels  # (bs, seq_len)
         loss_weight = loss_kwargs.loss_weight  # (bs, seq_len)
@@ -206,6 +207,15 @@ class LMHeadLossContext(BaseLossContext):
         rank_grad_tokens = (shifted_labels != self.loss_cfg.ignore_idx).sum()
         if rank_grad_tokens == 0:
             loss = logits.sum() * 0
+        elif DEVICE == "npu":
+            from .triton_npu_fused import fused_cross_entropy_loss
+
+            loss = fused_cross_entropy_loss(
+                logits,
+                loss_weight,
+                shifted_labels.to(torch.int32),
+                ignore_index=self.loss_cfg.ignore_idx,
+            )
         else:
             loss = F.cross_entropy(logits, shifted_labels, reduction="none", ignore_index=self.loss_cfg.ignore_idx)
             # Step 2.b in the loss calculation: sum the loss over all tokens
