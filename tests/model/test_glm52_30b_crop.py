@@ -1,13 +1,24 @@
 import json
+import os
 import subprocess
 import sys
+from itertools import chain
 from pathlib import Path
 
+import pytest
 import torch
 from safetensors.torch import save_file
 
 
 SCRIPT = Path("xtuner/tools/model_converters/make_glm52_30b_hf.py")
+GLM52_30B_MTP_PATH = Path(
+    os.environ.get("GLM5_2_30B_MTP_PATH", "/mnt/shared-storage-user/zhaopenghao/slime0701/ckpts/GLM-5.2-30B-MTP")
+)
+GLM52_30B_NO_MTP_PATH = Path(
+    os.environ.get(
+        "GLM5_2_30B_NO_MTP_PATH", "/mnt/shared-storage-user/zhaopenghao/slime0701/ckpts/GLM-5.2-30B-NoMTP"
+    )
+)
 
 
 def _write_fake_glm52_hf_checkpoint(path: Path) -> None:
@@ -118,3 +129,43 @@ def test_glm52_30b_without_mtp_crop_keeps_six_main_layers_and_disables_mtp(tmp_p
     assert "model.layers.6.eh_proj.weight" not in weight_map
     assert "model.layers.6.self_attn.indexer.wq_b.weight" not in weight_map
     assert "model.layers.8.eh_proj.weight" not in weight_map
+
+
+@pytest.mark.parametrize(
+    "path,num_layers,nextn",
+    [
+        (GLM52_30B_MTP_PATH, 5, 1),
+        (GLM52_30B_NO_MTP_PATH, 6, 0),
+    ],
+)
+def test_generated_glm52_30b_checkpoint_matches_xtuner_hf_keys(path, num_layers, nextn):
+    if not path.is_dir():
+        pytest.skip(f"{path} is not available")
+
+    from xtuner.v1.model import get_model_config_from_hf
+
+    config = json.loads((path / "config.json").read_text())
+    index = json.loads((path / "model.safetensors.index.json").read_text())
+    weight_keys = set(index["weight_map"])
+
+    assert config["num_hidden_layers"] == num_layers
+    assert config["num_nextn_predict_layers"] == nextn
+    assert len(config["mlp_layer_types"]) == num_layers
+    assert len(config["indexer_types"]) == num_layers + nextn
+    assert "shared" in config["indexer_types"]
+
+    with torch.device("meta"):
+        model_config = get_model_config_from_hf(path)
+        model_config.compile_cfg = False
+        model = model_config.build()
+    expected_keys = set(chain.from_iterable(model.to_hf_key_list(name) for name in model.state_dict()))
+
+    assert expected_keys == weight_keys
+    assert model_config.layers_type == ["full_attention"] * num_layers
+    if nextn:
+        assert f"model.layers.{num_layers}.eh_proj.weight" in weight_keys
+        assert f"model.layers.{num_layers}.self_attn.indexer.wq_b.weight" in weight_keys
+        assert model_config.mtp_config is not None
+    else:
+        assert not any(key.startswith(f"model.layers.{num_layers}.") for key in weight_keys)
+        assert model_config.mtp_config is None
