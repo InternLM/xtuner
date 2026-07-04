@@ -32,6 +32,7 @@ def _write_fake_glm52_hf_checkpoint(path: Path) -> None:
     for layer_idx in range(9):
         tensors[f"model.layers.{layer_idx}.input_layernorm.weight"] = torch.full((2,), layer_idx)
         tensors[f"model.layers.{layer_idx}.self_attn.q_a_proj.weight"] = torch.full((2, 2), layer_idx)
+        tensors[f"model.layers.{layer_idx}.self_attn.indexer.wq_b.weight"] = torch.full((2, 2), layer_idx)
     tensors["model.layers.8.eh_proj.weight"] = torch.full((2, 4), 8)
     tensors["model.layers.8.enorm.weight"] = torch.full((2,), 8)
     tensors["model.layers.8.hnorm.weight"] = torch.full((2,), 8)
@@ -86,11 +87,12 @@ def test_glm52_30b_with_mtp_crop_keeps_main_layers_and_remaps_final_mtp(tmp_path
     assert config["num_hidden_layers"] == 5
     assert config["num_nextn_predict_layers"] == 1
     assert config["mlp_layer_types"] == ["dense", "dense", "dense", "sparse", "sparse"]
-    assert config["indexer_types"] == ["full", "full", "full", "shared", "shared"]
+    assert config["indexer_types"] == ["full", "full", "full", "shared", "shared", "full"]
 
     assert "model.layers.4.input_layernorm.weight" in weight_map
     assert "model.layers.5.eh_proj.weight" in weight_map
     assert "model.layers.5.enorm.weight" in weight_map
+    assert "model.layers.5.self_attn.indexer.wq_b.weight" in weight_map
     assert "model.layers.8.eh_proj.weight" not in weight_map
     assert "model.layers.6.input_layernorm.weight" not in weight_map
     assert (save / "tokenizer_config.json").exists()
@@ -114,4 +116,5 @@ def test_glm52_30b_without_mtp_crop_keeps_six_main_layers_and_disables_mtp(tmp_p
     assert "model.layers.5.input_layernorm.weight" in weight_map
     assert "model.layers.6.input_layernorm.weight" not in weight_map
     assert "model.layers.6.eh_proj.weight" not in weight_map
+    assert "model.layers.6.self_attn.indexer.wq_b.weight" not in weight_map
     assert "model.layers.8.eh_proj.weight" not in weight_map

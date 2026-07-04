@@ -89,6 +89,13 @@ def _write_config(source: Path, target: Path, profile: CropProfile):
         if isinstance(config.get(key), list):
             config[key] = config[key][: profile.num_main_layers]
 
+    if profile.include_mtp and isinstance(config.get("indexer_types"), list):
+        # The original GLM-5.2 MTP layer is stored as model.layers.{num_hidden_layers}
+        # and carries its own DSA indexer weights. After remapping it after the cropped
+        # main stack, keep an explicit full indexer entry so XTuner builds the same
+        # parameter surface for strict HF loading/saving.
+        config["indexer_types"].append("full")
+
     (target / "config.json").write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n")
     return original_main_layers
 
