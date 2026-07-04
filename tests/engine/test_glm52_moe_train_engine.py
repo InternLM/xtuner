@@ -1,3 +1,4 @@
+import math
 import os
 import shutil
 import tempfile
@@ -28,6 +29,12 @@ from xtuner.v1.utils.device import get_device
 
 GLM5_2_TINY_MOE_PATH = Path(
     os.environ.get("GLM5_2_TINY_MOE_PATH", "/mnt/shared-storage-user/zhaopenghao/slime0701/ckpts/GLM-5.2-tiny-4L")
+)
+GLM5_2_30B_MTP_PATH = Path(
+    os.environ.get("GLM5_2_30B_MTP_PATH", "/mnt/shared-storage-user/zhaopenghao/slime0701/ckpts/GLM-5.2-30B-MTP")
+)
+GLM5_2_30B_NO_MTP_PATH = Path(
+    os.environ.get("GLM5_2_30B_NO_MTP_PATH", "/mnt/shared-storage-user/zhaopenghao/slime0701/ckpts/GLM-5.2-30B-NoMTP")
 )
 DEVICE = get_device()
 
@@ -102,6 +109,23 @@ def _build_tiny_checkpoint_engine(dispatcher: str | None, ep_size: int) -> Train
     return TrainEngine(model_cfg=cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg)
 
 
+def _build_30b_engine(load_from: Path, dispatcher: str | None, ep_size: int) -> TrainEngine:
+    cfg: Glm52MoEConfig = get_model_config_from_hf(load_from)
+    cfg.compile_cfg = False
+    cfg.dispatcher = dispatcher
+    cfg.ep_size = ep_size
+    cfg.lm_loss_cfg = CELossConfig(mode="chunk", chunk_size=1024)
+    assert isinstance(cfg.attention, DSAMLAConfig)
+    cfg.attention.sparse_mla_backend = "tilelang"
+
+    # The 32k smoke is already close to H200 memory limits. AdamW foreach
+    # materializes temporary tensor lists during step, so use the scalar path
+    # to validate the same optimizer update without the extra peak buffer.
+    optim_cfg = AdamWConfig(lr=1e-6, foreach=False)
+    fsdp_cfg = FSDPConfig(cpu_offload=False, ep_size=ep_size, torch_compile=False)
+    return TrainEngine(model_cfg=cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg)
+
+
 def _build_train_engine_input(tokenizer: AutoTokenizer, loss_cfg: CELossConfig) -> list[ModelItem]:
     text = "吃葡萄不吐葡萄皮。GLM-5.2 engine smoke."
     input_ids = tokenizer.encode(text, return_tensors="pt").view(1, -1)
@@ -118,6 +142,17 @@ def _build_train_engine_input(tokenizer: AutoTokenizer, loss_cfg: CELossConfig) 
     assert loss_ctx is not None
     loss_ctx = loss_cfg.loss_ctx_cls.build_batches([loss_ctx])[0]
     return [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
+
+
+def _build_30b_long_train_engine_input(engine: TrainEngine, seq_len: int = 32768) -> list[ModelItem]:
+    model_cfg = engine.model.config
+    input_ids = (torch.arange(seq_len).view(1, -1) % (model_cfg.vocab_size - 16)) + 8
+    labels = input_ids.clone()
+    seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
+    seq_ctx.num_padding = 0
+    data = {"seq_ctx": seq_ctx, "shifted_labels": labels}
+    loss_ctx = engine.model.build_loss_ctx_batch([data], sp_mesh=None)[0]
+    return [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
 
 
 def _local_tensor(value: torch.Tensor) -> torch.Tensor:
@@ -285,6 +320,45 @@ class TestGlm52MoEEngine(DeterministicDDPTestCase):
             dist.barrier()
             if dist.get_rank() == 0:
                 shutil.rmtree(syncdir[0], ignore_errors=True)
+            torch.cuda.empty_cache()
+
+    @property
+    def world_size(self) -> int:
+        return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8"))
+
+
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 8 and GLM5_2_30B_MTP_PATH.exists() and GLM5_2_30B_NO_MTP_PATH.exists(),
+    "requires at least 8 CUDA devices and generated GLM-5.2 30B MTP/no-MTP checkpoints",
+)
+class TestGlm5230BLongSequenceEngine(DeterministicDDPTestCase):
+    @parametrize.parametrize(
+        "device,load_from,expect_mtp",
+        [
+            ("cuda", GLM5_2_30B_NO_MTP_PATH, False),
+            ("cuda", GLM5_2_30B_MTP_PATH, True),
+        ],
+    )
+    def test_glm52_30b_engine_train_32k(self, device, load_from, expect_mtp):
+        self.create_pg(device)
+
+        engine = _build_30b_engine(load_from=load_from, dispatcher="all2all", ep_size=8)
+        assert (engine.model.config.mtp_config is not None) is expect_mtp
+        engine.from_hf(load_from, strict=True)
+
+        try:
+            loss_log = engine.train_step(_build_30b_long_train_engine_input(engine))["logs_info"]
+            grad_norm = engine.clip_grad_norm()
+            engine.step_optimizer(grad_norm)
+
+            assert math.isfinite(loss_log["reduced_llm_loss"])
+            assert math.isfinite(float(grad_norm))
+            if expect_mtp:
+                assert "reduced_mtp_loss" in loss_log
+                assert math.isfinite(loss_log["reduced_mtp_loss"])
+            else:
+                assert "reduced_mtp_loss" not in loss_log
+        finally:
             torch.cuda.empty_cache()
 
     @property
