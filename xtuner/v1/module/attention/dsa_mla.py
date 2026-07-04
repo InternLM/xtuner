@@ -344,7 +344,9 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         )
 
     def _is_skip_topk_layer(self) -> bool:
-        if self.indexer_types is not None and self.layer_idx < len(self.indexer_types):
+        if self.indexer_types is not None:
+            if self.layer_idx >= len(self.indexer_types):
+                return True
             return self.indexer_types[self.layer_idx] == "shared"
         if self.index_topk_freq <= 1:
             return False
@@ -352,7 +354,11 @@ class DSAMultiLatentAttention(MultiLatentAttention):
 
     def _source_compute_layer(self) -> int:
         if self.indexer_types is not None:
-            for idx in range(self.layer_idx, -1, -1):
+            # MTP layers sit after the main layer stack in XTuner/HF naming, while
+            # GLM's indexer_types only describes the main layers. They reuse the
+            # nearest preceding full indexer from the main stack.
+            start_idx = min(self.layer_idx, len(self.indexer_types) - 1)
+            for idx in range(start_idx, -1, -1):
                 if self.indexer_types[idx] == "full":
                     return idx
             raise ValueError(f"DSA shared layer {self.layer_idx} has no preceding full indexer layer.")

@@ -317,6 +317,24 @@ def test_dsa_attention_shares_topk_within_microbatch_only():
     assert set(other_seq_ctx.dsa_topk_indices) == {0}
 
 
+def test_dsa_attention_mtp_layer_reuses_last_main_full_indexer():
+    torch.manual_seed(0)
+    mtp_attn = _tiny_dsa_attention(indexer_types=["full", "full", "full", "shared", "shared"], layer_idx=5)
+    seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4, 5]]),), device="cpu")
+    position_embeddings = (torch.ones(1, 5, 2), torch.zeros(1, 5, 2))
+    source_topk = torch.full((5, 1, 4), -1, dtype=torch.int64)
+    for token_idx in range(5):
+        valid = torch.arange(token_idx + 1)[:4]
+        source_topk[token_idx, 0, : valid.numel()] = valid
+    seq_ctx.dsa_topk_indices = {2: source_topk}
+
+    attn_outputs = mtp_attn(torch.randn(1, 5, 4), position_embeddings, seq_ctx)
+
+    assert torch.isfinite(attn_outputs["projected_output"]).all()
+    assert set(seq_ctx.dsa_topk_indices) == {2}
+    assert seq_ctx.dsa_topk_indices[2] is source_topk
+
+
 def test_dsa_attention_shared_layer_fails_when_source_topk_is_missing():
     shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1)
     seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
