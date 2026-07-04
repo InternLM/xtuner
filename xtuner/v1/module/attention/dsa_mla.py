@@ -1,4 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import functools
+import subprocess
+import sys
 from typing import Literal
 
 import torch
@@ -60,6 +63,89 @@ def torch_sparse_mla(
         lses.append(torch.logsumexp(scores, dim=-1))
 
     return torch.cat(outputs, dim=1), torch.cat(lses, dim=1)
+
+
+def sparse_mla(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    scaling: float | None,
+    value_dim: int | None = None,
+    backend: Literal["torch", "tilelang"] = "torch",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if backend == "torch":
+        return torch_sparse_mla(q, kv, indices, scaling=scaling, value_dim=value_dim)
+    if backend != "tilelang":
+        raise ValueError(f"Unsupported SparseMLA backend: {backend}")
+
+    _validate_tilelang_sparse_mla_inputs(q, kv, indices, value_dim)
+    return _TileLangSparseMLAFunction.apply(q, kv, indices, scaling)
+
+
+def _validate_tilelang_sparse_mla_inputs(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    value_dim: int | None,
+) -> None:
+    if not q.is_cuda or not kv.is_cuda or not indices.is_cuda:
+        raise RuntimeError("TileLang SparseMLA requires q, kv, and indices to be CUDA tensors.")
+    if q.dtype != torch.bfloat16 or kv.dtype != torch.bfloat16:
+        raise RuntimeError("TileLang SparseMLA requires bfloat16 q and kv tensors.")
+    if q.ndim != 3 or kv.ndim != 3 or indices.ndim != 3:
+        raise RuntimeError("TileLang SparseMLA expects q=(S,H,D), kv=(S,K,D), indices=(S,K,topk).")
+    if q.shape[-1] != 576 or kv.shape[-1] != 576:
+        raise RuntimeError("TileLang SparseMLA supports GLM-5.2 DSA dim_plus_tail_dim=576 only.")
+    if value_dim not in (None, 512):
+        raise RuntimeError("TileLang SparseMLA supports value_dim=512 only.")
+    if indices.shape[-1] % 64 != 0:
+        raise RuntimeError("TileLang SparseMLA requires topk to be divisible by 64.")
+    if not q.is_contiguous() or not kv.is_contiguous() or not indices.is_contiguous():
+        raise RuntimeError("TileLang SparseMLA requires contiguous q, kv, and indices tensors.")
+
+
+class _TileLangSparseMLAFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, q: torch.Tensor, kv: torch.Tensor, indices: torch.Tensor, scaling: float | None):
+        from .ops.tilelang_sparse_mla_fwd import sparse_mla_fwd_interface
+
+        q = q.contiguous()
+        kv = kv.contiguous()
+        indices = indices.to(torch.int32).contiguous()
+        out, lse = sparse_mla_fwd_interface(q, kv, indices, sm_scale=scaling)
+        ctx.scaling = scaling
+        ctx.save_for_backward(q, kv, indices, out, lse)
+        # TileLang stores LSE in log2 space for its exp2-based backward. The public
+        # sparse_mla contract follows PyTorch's natural-log logsumexp.
+        return out, lse * 0.6931471805599453
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor, grad_lse: torch.Tensor):
+        from .ops.tilelang_sparse_mla_bwd import sparse_mla_bwd
+
+        q, kv, indices, out, lse = ctx.saved_tensors
+        dq, dkv = sparse_mla_bwd(q, kv, out, grad_output.contiguous(), indices, lse, sm_scale=ctx.scaling)
+        return dq, dkv, None, None
+
+
+@functools.cache
+def _tilelang_runtime_import_error() -> str | None:
+    result = subprocess.run(
+        [sys.executable, "-c", "import tilelang"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return None
+    return result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "unknown import failure"
+
+
+def _ensure_tilelang_runtime_available() -> None:
+    detail = _tilelang_runtime_import_error()
+    if detail is not None:
+        raise RuntimeError(f"TileLang SparseMLA runtime is unavailable: {detail}")
 
 
 def is_dsa_skip_topk_layer(layer_idx: int, skip_topk_offset: int, topk_freq: int) -> bool:
@@ -190,6 +276,7 @@ class DSAMLAConfig(MLAConfig):
     index_skip_topk_offset: int = 0
     indexer_rope_interleave: bool = True
     indexer_types: list[str] | None = None
+    sparse_mla_backend: Literal["torch", "tilelang"] = "torch"
 
     def build(
         self,
@@ -200,6 +287,9 @@ class DSAMLAConfig(MLAConfig):
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
     ) -> "DSAMultiLatentAttention":
+        if self.sparse_mla_backend == "tilelang":
+            _ensure_tilelang_runtime_available()
+
         return DSAMultiLatentAttention(
             **self.model_dump(),
             hidden_size=hidden_size,
@@ -222,6 +312,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         index_skip_topk_offset: int = 0,
         indexer_rope_interleave: bool = True,
         indexer_types: list[str] | None = None,
+        sparse_mla_backend: Literal["torch", "tilelang"] = "torch",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -233,6 +324,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         self.index_skip_topk_offset = index_skip_topk_offset
         self.indexer_rope_interleave = indexer_rope_interleave
         self.indexer_types = indexer_types
+        self.sparse_mla_backend = sparse_mla_backend
 
         if self.q_lora_rank is None:
             raise ValueError("DSA MLA requires q_lora_rank because the indexer consumes q_a_layernorm output.")
@@ -331,12 +423,13 @@ class DSAMultiLatentAttention(MultiLatentAttention):
 
         topk_indices = self._get_topk_indices(hidden_states, q_resid, position_embeddings, seq_ctx)
         # TODO: refactor below as MHA's `self.attn_impl_func: Callable[..., AttnOpOutputs] = get_attn_impl_fn(attn_impl)`
-        raw_output, softmax_lse = torch_sparse_mla(
+        raw_output, softmax_lse = sparse_mla(
             query_states,
             key_states,
             topk_indices,
             self.softmax_scale,
             value_dim=self.kv_lora_rank,
+            backend=self.sparse_mla_backend,
         )
         raw_output = torch.einsum("shm,hdm->shd", raw_output, w_vc)
         raw_output = raw_output.reshape(bsz, q_len, self.num_attention_heads * self.v_head_dim).contiguous()
