@@ -215,7 +215,7 @@ def test_dsa_attention_selects_tilelang_sparse_mla_backend_explicitly():
     seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4, 5]]),), device="cpu")
     position_embeddings = (torch.ones(1, 5, 2), torch.zeros(1, 5, 2))
 
-    with pytest.raises(RuntimeError, match="TileLang SparseMLA"):
+    with pytest.raises(RuntimeError, match="TileLang"):
         attn(hidden_states, position_embeddings, seq_ctx)
 
 

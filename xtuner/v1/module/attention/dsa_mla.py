@@ -206,12 +206,14 @@ class DSAIndexer(nn.Module):
         index_head_dim: int,
         index_n_heads: int,
         index_topk: int,
+        indexer_backend: Literal["torch", "tilelang"] = "torch",
     ):
         super().__init__()
         self.qk_rope_head_dim = qk_rope_head_dim
         self.index_head_dim = index_head_dim
         self.index_n_heads = index_n_heads
         self.index_topk = index_topk
+        self.indexer_backend = indexer_backend
         self.wq_b = build_linear(q_lora_rank, index_n_heads * index_head_dim, bias=False)
         self.wk = build_linear(hidden_size, index_head_dim, bias=False)
         self.k_norm = LayerNorm(index_head_dim, eps=1e-6)
@@ -243,17 +245,56 @@ class DSAIndexer(nn.Module):
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe, k_nope], dim=-1)
         weights = self.weights_proj(hidden_states).float() * (self.index_n_heads**-0.5)
+
+        with torch.no_grad():
+            if self.indexer_backend == "tilelang":
+                return self._tilelang_topk_indices(q, k, weights, seq_ctx)
+            return self._torch_topk_indices(q, k, weights, seq_ctx)
+
+    def _torch_topk_indices(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        weights: torch.Tensor,
+        seq_ctx: SequenceContext,
+    ) -> torch.Tensor:
+        _, seq_len, _, _ = q.shape
         scores = torch.einsum("bshd,btd->bsht", q.float(), k.float()) * (self.index_head_dim**-0.5)
         scores = torch.relu(scores)
         index_scores = torch.einsum("bsht,bsh->bst", scores, weights)
 
-        packed_mask = _packed_causal_mask(seq_ctx, seq_len, hidden_states.device)
+        packed_mask = _packed_causal_mask(seq_ctx, seq_len, q.device)
         index_scores = index_scores.masked_fill(~packed_mask.unsqueeze(0), float("-inf"))
 
         topk = min(self.index_topk, seq_len)
         topk_scores, topk_indices = index_scores.topk(topk, dim=-1)
         topk_indices = topk_indices.masked_fill(topk_scores == -torch.inf, -1)
         return topk_indices.squeeze(0).unsqueeze(1)
+
+    def _tilelang_topk_indices(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        weights: torch.Tensor,
+        seq_ctx: SequenceContext,
+    ) -> torch.Tensor:
+        from .ops.tilelang_indexer_fwd import indexer_fwd_interface
+
+        if q.dtype != torch.bfloat16 or k.dtype != torch.bfloat16:
+            raise RuntimeError("TileLang DSA indexer requires bfloat16 q and k tensors.")
+        if not q.is_cuda or not k.is_cuda or not weights.is_cuda:
+            raise RuntimeError("TileLang DSA indexer requires CUDA tensors.")
+
+        q = q.squeeze(0).contiguous()
+        k = k.squeeze(0).contiguous()
+        weights = (weights.squeeze(0) * (self.index_head_dim**-0.5)).contiguous()
+        starts, ends = _packed_causal_start_end(seq_ctx, q.shape[0], q.device)
+        logits = indexer_fwd_interface(q, k, weights, starts, ends, clean_logits=True)
+
+        topk = min(self.index_topk, q.shape[0])
+        topk_scores, topk_indices = logits.topk(topk, dim=-1)
+        topk_indices = topk_indices.masked_fill(topk_scores == -torch.inf, -1)
+        return topk_indices.to(torch.int64).unsqueeze(1)
 
 
 def _packed_causal_mask(seq_ctx: SequenceContext, seq_len: int, device: torch.device) -> torch.Tensor:
@@ -266,6 +307,17 @@ def _packed_causal_mask(seq_ctx: SequenceContext, seq_len: int, device: torch.de
         cols = torch.arange(start, end, device=device)
         mask[start:end, start:end] = cols.unsqueeze(0) <= rows.unsqueeze(1)
     return mask
+
+
+def _packed_causal_start_end(
+    seq_ctx: SequenceContext, seq_len: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    cu_seq_lens = seq_ctx.cu_seq_lens_q.to(device)
+    token_indices = torch.arange(seq_len, device=device)
+    seq_indices = torch.searchsorted(cu_seq_lens, token_indices, right=True) - 1
+    starts = cu_seq_lens[seq_indices]
+    ends = token_indices + 1
+    return starts.to(torch.int32), ends.to(torch.int32)
 
 
 class DSAMLAConfig(MLAConfig):
@@ -341,6 +393,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             index_head_dim=self.index_head_dim,
             index_n_heads=self.index_n_heads,
             index_topk=self.index_topk,
+            indexer_backend=self.sparse_mla_backend,
         )
 
     def _is_skip_topk_layer(self) -> bool:
