@@ -17,6 +17,7 @@ from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import Glm52MoEConfig, get_model_config, get_model_config_from_hf
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.module.attention import DSAMLAConfig, MLAConfig
+from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 from xtuner.v1.utils.loader import HFCheckpointLoader
 
@@ -144,8 +145,33 @@ def test_glm52_config_from_hf_preserves_native_v1_fields():
     assert config.indexer_rope_interleave == hf_config.indexer_rope_interleave
     assert config.indexer_types == hf_config.indexer_types
 
-    assert config.mtp_config is None
+    assert isinstance(config.mtp_config, MTPConfig)
+    assert config.mtp_config.num_layers == hf_config.num_nextn_predict_layers
+    assert config.num_nextn_predict_layers == hf_config.num_nextn_predict_layers
     assert config.model_dump()["num_key_value_heads"] == hf_config.num_key_value_heads
+
+
+def test_glm52_config_from_hf_preserves_cropped_30b_mtp(tmp_path):
+    hf_config = HFGlmMoeDsaConfig.from_pretrained(GLM5_2_MOE_PATH)
+    hf_config.num_hidden_layers = 5
+    hf_config.first_k_dense_replace = 3
+    hf_config.mlp_layer_types = hf_config.mlp_layer_types[:5]
+    hf_config.indexer_types = hf_config.indexer_types[:5]
+    hf_config.num_nextn_predict_layers = 1
+    hf_config.save_pretrained(tmp_path)
+
+    config = get_model_config_from_hf(tmp_path)
+
+    assert isinstance(config.mtp_config, MTPConfig)
+    assert config.mtp_config.num_layers == 1
+    assert config.num_nextn_predict_layers == 1
+    assert config.layers_type == [
+        "full_attention",
+        "full_attention",
+        "full_attention",
+        "full_attention",
+        "full_attention",
+    ]
 
 
 def test_glm52_key_mapping_covers_native_shell_and_dsa_indexer():

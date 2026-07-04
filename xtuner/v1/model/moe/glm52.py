@@ -9,6 +9,7 @@ from typing_extensions import Self
 from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as HFGlmMoeDsaConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import DSAMLAConfig, MLAConfig
+from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 
@@ -151,7 +152,7 @@ class Glm52MoEConfig(MoEConfig):
     indexer_rope_interleave: bool = True
     indexer_types: list[str] | None = None
     num_nextn_predict_layers: int | None = 1
-    mtp_config: None = None
+    mtp_config: MTPConfig | None = None
 
     @computed_field
     def num_key_value_heads(self) -> int:
@@ -226,7 +227,9 @@ class Glm52MoEConfig(MoEConfig):
             indexer_rope_interleave=cfg.indexer_rope_interleave,
             indexer_types=cfg.indexer_types,
             num_nextn_predict_layers=getattr(cfg, "num_nextn_predict_layers", None),
-            mtp_config=None,
+            mtp_config=MTPConfig(num_layers=cfg.num_nextn_predict_layers)
+            if getattr(cfg, "num_nextn_predict_layers", 0)
+            else None,
         )
 
     @property

@@ -42,8 +42,6 @@ class MLAConfig(BaseModel):
             projection layers. Defaults to False.
         o_bias (bool): Whether to use bias in the output projection layer.
             Defaults to False.
-        sliding_window (int | None): Size of the sliding window for local
-            attention. Use -1 to disable sliding window attention. Defaults to -1.
     """
 
     model_config = ConfigDict(title="Base attention config for xtuner", extra="forbid")
