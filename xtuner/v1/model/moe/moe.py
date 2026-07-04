@@ -288,9 +288,28 @@ class MoE(BaseModel):
         bias_update_speed = cast(NoAuxRouterConfig, self.config.router).router_bias_update_speed
         n_layer, _ = total_expert_counts_pre_iter.size()
 
-        for i_layer in range(n_layer):
-            # 前 l 层是 mlp 层，跳过
-            gate = cast(MoEDecoderLayer, self.layers[str(first_k_dense_replace + i_layer)]).gate
+        # AuxLoss accumulates MoE stats in forward order: main MoE layers first,
+        # then logical MTP depths. MTP layers live outside self.layers, so collect
+        # the matching NoAux gates explicitly before applying the layer-wise stats.
+        gates = []
+        for layer_idx, layer in self.layers.items():
+            if int(layer_idx) < first_k_dense_replace:
+                continue
+            gate = getattr(layer, "gate", None)
+            if gate is not None:
+                gates.append(gate)
+        if self.mtp_block is not None and self.config.mtp_config is not None:
+            for mtp_idx in range(self.config.mtp_config.num_layers):
+                mtp_layer_idx = 0 if self.config.mtp_config.share_weights else mtp_idx
+                decoder_layer = getattr(self.mtp_block.layers[mtp_layer_idx], "decoder_layer", None)
+                gate = getattr(decoder_layer, "gate", None)
+                if gate is not None:
+                    gates.append(gate)
+
+        if len(gates) != n_layer:
+            raise RuntimeError(f"MoE bias update expected {n_layer} routed layers, but found {len(gates)} gates.")
+
+        for i_layer, gate in enumerate(gates):
             e_score_correction_bias = cast(NoAuxRouter, gate.router).e_score_correction_bias
             expected_load = expected_loads[i_layer]
             current_loads = total_expert_counts_pre_iter[i_layer]

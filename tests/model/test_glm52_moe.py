@@ -295,6 +295,47 @@ def test_glm52_hf_checkpoint_loads_mtp_final_layer_keys(tmp_path):
         torch.testing.assert_close(model.state_dict()[model_key], expected)
 
 
+def test_glm52_update_bias_covers_main_and_mtp_moe_gates():
+    config = _tiny_glm52_config()
+    config.mtp_config = MTPConfig(num_layers=1)
+    model = config.build()
+    assert model.mtp_block is not None
+
+    main_router_1 = model.layers["1"].gate.router
+    main_router_2 = model.layers["2"].gate.router
+    mtp_router = model.mtp_block.layers[0].decoder_layer.gate.router
+    biases = [
+        main_router_1.e_score_correction_bias,
+        main_router_2.e_score_correction_bias,
+        mtp_router.e_score_correction_bias,
+    ]
+    for bias in biases:
+        bias.zero_()
+
+    device = biases[0].device
+    expert_counts = torch.tensor(
+        [
+            [2, 0, 1, 1],
+            [0, 2, 1, 1],
+            [1, 1, 2, 0],
+        ],
+        device=device,
+    )
+    model.update_bias(expert_counts, expert_counts.float().mean(dim=1))
+
+    update_speed = config.router.router_bias_update_speed
+    expected_biases = torch.tensor(
+        [
+            [-update_speed, update_speed, 0.0, 0.0],
+            [update_speed, -update_speed, 0.0, 0.0],
+            [0.0, 0.0, -update_speed, update_speed],
+        ],
+        device=device,
+    )
+    for bias, expected in zip(biases, expected_biases):
+        torch.testing.assert_close(bias, expected)
+
+
 def test_tiny_glm52_hf_checkpoint_load_reports_loaded_missing_and_ignored_keys():
     config = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
     config.compile_cfg = False
