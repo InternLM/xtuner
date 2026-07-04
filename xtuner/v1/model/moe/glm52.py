@@ -21,6 +21,16 @@ class Glm52MoE(MoE):
         if self.config.tie_word_embeddings and "lm_head" in key:
             key = key.replace("lm_head", "embed_tokens")
 
+        if key.startswith("mtp_block."):
+            match = re.match(r"mtp_block\.layers\.(\d+)\.(.+)", key)
+            assert match is not None, f"Unexpected GLM-5.2 MTP key: {key}"
+            mtp_layer_idx = self.config.num_hidden_layers + int(match.group(1))
+            key = f"layers.{mtp_layer_idx}.{match.group(2)}"
+            # GLM HF stores the MTP decoder as the next layer after the main stack.
+            # Only the MTP pre/post modules keep special names at that layer.
+            key = key.replace(".decoder_layer.", ".")
+            key = re.sub(r"layers\.(\d+)\.final_layernorm\.", r"layers.\1.shared_head.norm.", key)
+
         if "layers" in key or "embed_tokens" in key:
             key = "model." + key
 

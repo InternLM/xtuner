@@ -8,6 +8,7 @@ import pytest
 import torch
 import torch.distributed as dist
 from safetensors import safe_open
+from safetensors.torch import save_file
 
 from transformers import AutoTokenizer
 from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as HFGlmMoeDsaConfig
@@ -85,6 +86,17 @@ def _build_lm_loss_ctx(input_ids: torch.Tensor, loss_mode: str = "eager"):
     assert loss_ctx is not None
     loss_ctx = loss_cfg.loss_ctx_cls.build_batches([loss_ctx])[0]
     return seq_ctx, loss_ctx
+
+
+def _write_single_shard_hf_checkpoint(path: Path, tensors: dict[str, torch.Tensor]) -> None:
+    path.mkdir()
+    shard = "model-00001-of-00001.safetensors"
+    save_file(tensors, path / shard)
+    index = {
+        "metadata": {"total_size": sum(t.numel() * t.element_size() for t in tensors.values())},
+        "weight_map": {key: shard for key in tensors},
+    }
+    (path / "model.safetensors.index.json").write_text(json.dumps(index))
 
 
 def test_glm52_config_from_hf_preserves_native_v1_fields():
@@ -211,6 +223,76 @@ def test_glm52_key_mapping_covers_native_shell_and_dsa_indexer():
     ]
     assert "layers.0.self_attn.indexer.wq_b.weight" in model_keys
     assert "layers.1.self_attn.indexer.wq_b.weight" not in model_keys
+
+
+def test_glm52_key_mapping_covers_mtp_layer_as_hf_final_layer():
+    config = _tiny_glm52_config()
+    config.mtp_config = MTPConfig(num_layers=1)
+    model = config.build()
+
+    assert model.to_hf_key_list("mtp_block.layers.0.enorm.weight") == ["model.layers.3.enorm.weight"]
+    assert model.to_hf_key_list("mtp_block.layers.0.hnorm.weight") == ["model.layers.3.hnorm.weight"]
+    assert model.to_hf_key_list("mtp_block.layers.0.eh_proj.weight") == ["model.layers.3.eh_proj.weight"]
+    assert model.to_hf_key_list("mtp_block.layers.0.final_layernorm.weight") == [
+        "model.layers.3.shared_head.norm.weight"
+    ]
+    assert model.to_hf_key_list("mtp_block.layers.0.decoder_layer.self_attn.q_a_proj.weight") == [
+        "model.layers.3.self_attn.q_a_proj.weight"
+    ]
+    assert model.to_hf_key_list("mtp_block.layers.0.decoder_layer.gate.router.e_score_correction_bias") == [
+        "model.layers.3.mlp.gate.e_score_correction_bias"
+    ]
+    assert model.to_hf_key_list("mtp_block.layers.0.decoder_layer.experts.fused_w1w3.weight") == [
+        "model.layers.3.mlp.experts.0.gate_proj.weight",
+        "model.layers.3.mlp.experts.0.up_proj.weight",
+        "model.layers.3.mlp.experts.1.gate_proj.weight",
+        "model.layers.3.mlp.experts.1.up_proj.weight",
+        "model.layers.3.mlp.experts.2.gate_proj.weight",
+        "model.layers.3.mlp.experts.2.up_proj.weight",
+        "model.layers.3.mlp.experts.3.gate_proj.weight",
+        "model.layers.3.mlp.experts.3.up_proj.weight",
+    ]
+    assert model.to_hf_key_list("mtp_block.layers.0.decoder_layer.experts.fused_w2.weight") == [
+        "model.layers.3.mlp.experts.0.down_proj.weight",
+        "model.layers.3.mlp.experts.1.down_proj.weight",
+        "model.layers.3.mlp.experts.2.down_proj.weight",
+        "model.layers.3.mlp.experts.3.down_proj.weight",
+    ]
+
+
+def test_glm52_hf_checkpoint_loads_mtp_final_layer_keys(tmp_path):
+    config = _tiny_glm52_config()
+    config.mtp_config = MTPConfig(num_layers=1)
+    model = config.build()
+
+    state_dict = model.state_dict()
+    mtp_model_keys = {
+        "mtp_block.layers.0.enorm.weight": 1.0,
+        "mtp_block.layers.0.hnorm.weight": 2.0,
+        "mtp_block.layers.0.eh_proj.weight": 3.0,
+        "mtp_block.layers.0.decoder_layer.self_attn.q_a_proj.weight": 4.0,
+        "mtp_block.layers.0.decoder_layer.gate.router.e_score_correction_bias": 5.0,
+        "mtp_block.layers.0.final_layernorm.weight": 6.0,
+    }
+    tensors = {}
+    expected_tensors = {}
+    for model_key, value in mtp_model_keys.items():
+        hf_keys = model.to_hf_key_list(model_key)
+        assert len(hf_keys) == 1
+        expected = torch.full_like(state_dict[model_key], value)
+        expected_tensors[model_key] = expected
+        tensors[hf_keys[0]] = expected
+
+    checkpoint_dir = tmp_path / "fake-glm52-mtp"
+    _write_single_shard_hf_checkpoint(checkpoint_dir, tensors)
+
+    loaded_keys, unloaded_keys, missing_keys = model.from_hf(checkpoint_dir, strict=False)
+
+    assert set(mtp_model_keys).issubset(loaded_keys)
+    assert set(mtp_model_keys).isdisjoint(unloaded_keys)
+    for model_key, expected in expected_tensors.items():
+        assert missing_keys.isdisjoint(model.to_hf_key_list(model_key))
+        torch.testing.assert_close(model.state_dict()[model_key], expected)
 
 
 def test_tiny_glm52_hf_checkpoint_load_reports_loaded_missing_and_ignored_keys():
