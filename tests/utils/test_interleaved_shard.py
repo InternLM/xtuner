@@ -41,6 +41,7 @@ assert _spec is not None and _spec.loader is not None
 _mod = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 InterleavedShard = _mod.InterleavedShard
+compute_runs = _mod.compute_runs
 has_interleaved_placement = _mod.has_interleaved_placement
 reconstruct_full_tensor = _mod.reconstruct_full_tensor
 
@@ -153,6 +154,20 @@ def test_post_fully_shard_reconstruct():
     full = reconstruct_full_tensor(model.weight)
     assert torch.allclose(full, g), (
         f"reconstruct mismatch on post-FSDP layout: max_diff={(full - g).abs().max().item()}"
+    )
+
+    # HF load uses compute_runs to copy from the concatenated global tensor into the post-FSDP
+    # local tensor. This must describe FSDP's prepended shard as a contiguous cut; otherwise a
+    # valid HF checkpoint is loaded into the wrong local rows before training starts.
+    local = model.weight._local_tensor
+    loaded_local = torch.empty_like(local, dtype=g.dtype)
+    for run in compute_runs(model.weight):
+        loaded_slice = g.narrow(0, run.global_offset[0], run.local_size)
+        loaded_local.narrow(0, run.local_start, run.local_size).copy_(loaded_slice)
+    expected_local = local.to(g.dtype)
+    assert torch.allclose(loaded_local, expected_local), (
+        f"compute_runs load mismatch on post-FSDP layout: "
+        f"max_diff={(loaded_local - expected_local).abs().max().item()}"
     )
 
 

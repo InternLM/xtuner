@@ -28,13 +28,13 @@ The reconstruction algorithm and its rationale are documented inline on
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import torch
 import torch.distributed._functional_collectives as funcol
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 
-
-from typing import NamedTuple
 
 __all__ = [
     "InterleavedShard",
@@ -46,7 +46,8 @@ __all__ = [
 
 
 class Run(NamedTuple):
-    """One contiguous run of global indices that the current rank owns on the sharded dim.
+    """One contiguous run of global indices that the current rank owns on the
+    sharded dim.
 
     Used by both the HF save path (build per-run WriteItems / per-run slices) and the HF load
     path (per-run narrow + copy from the loaded global tensor).
@@ -105,8 +106,9 @@ class InterleavedShard(_StridedShard):
 
 
 def has_interleaved_placement(dt: torch.Tensor) -> bool:
-    """True if ``dt`` is a DTensor whose placements include a strided shard that cannot be
-    reduced to a valid ShardOrder — i.e. our per-expert column parallel layout.
+    """True if ``dt`` is a DTensor whose placements include a strided shard
+    that cannot be reduced to a valid ShardOrder — i.e. our per-expert column
+    parallel layout.
 
     Detection strategy:
 
@@ -133,8 +135,11 @@ _SENTINEL = object()
 
 def _placement_chain_unsupported(placements, mesh) -> bool:
     """Right-to-left insertion check, identical to torch 2.10's
-    ``_maybe_convert_StridedShard_to_shard_order``. Returns ``True`` iff any
-    ``_StridedShard`` cannot be slotted into a consistent carving order."""
+    ``_maybe_convert_StridedShard_to_shard_order``.
+
+    Returns ``True`` iff any
+    ``_StridedShard`` cannot be slotted into a consistent carving order.
+    """
     tensor_dim_to_order: dict[int, list[int]] = {}
     for mesh_dim in reversed(range(len(placements))):
         p = placements[mesh_dim]
@@ -157,7 +162,8 @@ def _placement_chain_unsupported(placements, mesh) -> bool:
 
 
 def _strided_indices(placement, curr_size: int, num_chunks: int, rank: int) -> list[int]:
-    """Return the list of indices the given rank owns under a ``_StridedShard`` placement.
+    """Return the list of indices the given rank owns under a ``_StridedShard``
+    placement.
 
     Compatible with both torch 2.9 (no ``return_first_offset`` kwarg, only contiguous offset
     returned) and torch 2.10+ (full index list available). For 2.9 we replicate the formula
@@ -191,16 +197,15 @@ def _is_fsdp_prepended_strided(placement, mesh_dim: int) -> bool:
     This heuristic breaks if a user places an InterleavedShard at mesh dim 0 directly without
     FSDP wrapping. xtuner does not do that — InterleavedShard is always at the TP position.
     """
-    return (
-        mesh_dim == 0
-        and isinstance(placement, _StridedShard)
-        and placement.split_factor > 1
-    )
+    return mesh_dim == 0 and isinstance(placement, _StridedShard) and placement.split_factor > 1
 
 
 def _is_real_strided(placement, mesh_dim: int) -> bool:
-    """True iff ``placement`` is a real strided shard whose data layout actually requires the
-    interleaved gather+scatter algorithm. Excludes FSDP-prepended labels."""
+    """True iff ``placement`` is a real strided shard whose data layout
+    actually requires the interleaved gather+scatter algorithm.
+
+    Excludes FSDP-prepended labels.
+    """
     return (
         isinstance(placement, _StridedShard)
         and placement.split_factor > 1
@@ -209,8 +214,9 @@ def _is_real_strided(placement, mesh_dim: int) -> bool:
 
 
 def reconstruct_full_tensor(dt: DTensor) -> torch.Tensor:
-    """Reconstruct the global tensor from a DTensor's local data, even when the spec contains
-    placements that PyTorch's ``redistribute`` cannot handle (``shard_order=None``).
+    """Reconstruct the global tensor from a DTensor's local data, even when the
+    spec contains placements that PyTorch's ``redistribute`` cannot handle
+    (``shard_order=None``).
 
     Why a custom routine: ``DTensor.full_tensor()`` goes through ``redistribute`` which asserts
     ``shard_order is not None`` in torch 2.10. For our ``(Shard, InterleavedShard)`` placement
@@ -274,7 +280,8 @@ def reconstruct_full_tensor(dt: DTensor) -> torch.Tensor:
 
 
 def _all_gather_plain(local: torch.Tensor, tensor_dim: int, group) -> torch.Tensor:
-    """``all_gather_tensor`` along ``tensor_dim`` then materialize the async wrapper."""
+    """``all_gather_tensor`` along ``tensor_dim`` then materialize the async
+    wrapper."""
     gathered = funcol.all_gather_tensor(local, gather_dim=tensor_dim, group=group)
     if isinstance(gathered, funcol.AsyncCollectiveTensor):
         gathered = gathered.wait()
@@ -282,11 +289,16 @@ def _all_gather_plain(local: torch.Tensor, tensor_dim: int, group) -> torch.Tens
 
 
 def compute_runs(dt: DTensor) -> list[Run]:
-    """Compute the contiguous-run decomposition of this rank's share of the global tensor.
+    """Compute the contiguous-run decomposition of this rank's share of the
+    global tensor.
 
-    Walks the placement chain in mesh-dim order and accumulates the global indices the current
-    rank owns on the sharded dim. Adjacent indices are grouped into ``Run`` records so the
-    caller can do per-run narrow + copy without ever materializing the full index tensor.
+    Accumulates the global indices the current rank owns on the sharded dim. Adjacent indices
+    are grouped into ``Run`` records so the caller can do per-run narrow + copy without ever
+    materializing the full index tensor.
+
+    FSDP prepends its placement at mesh dim 0, but semantically it shards the already EP/TP-local
+    parameter. So for index computation we apply non-FSDP placements first and the FSDP-prepended
+    shard last, mirroring ``reconstruct_full_tensor`` which undoes FSDP first.
 
     Restricted to single-dim sharding (the only layout xtuner currently uses for fused MoE
     weights). For multi-dim sharding a Cartesian-product extension is straightforward.
@@ -298,28 +310,33 @@ def compute_runs(dt: DTensor) -> list[Run]:
     global_shape = tuple(dt.shape)
     ndim = len(global_shape)
 
-    dim_indices: dict[int, list[int]] = {}
+    fsdp_prepended = []
+    placement_order = []
     for mesh_dim, p in enumerate(dt.placements):
+        item = (mesh_dim, p)
+        if _is_fsdp_prepended_strided(p, mesh_dim):
+            fsdp_prepended.append(item)
+        else:
+            placement_order.append(item)
+
+    dim_indices: dict[int, list[int]] = {}
+    for mesh_dim, p in placement_order + fsdp_prepended:
         if not isinstance(p, (Shard, _StridedShard)):
             continue
         d = p.dim
         prev = dim_indices.get(d)
         prev_size = len(prev) if prev is not None else global_shape[d]
-        if isinstance(p, _StridedShard):
-            new_idx = _strided_indices(
-                p, prev_size, mesh.size(mesh_dim), mesh.get_local_rank(mesh_dim)
-            )
+        if _is_real_strided(p, mesh_dim):
+            new_idx = _strided_indices(p, prev_size, mesh.size(mesh_dim), mesh.get_local_rank(mesh_dim))
         else:
-            size, offset = p._local_shard_size_and_offset(  # type: ignore[attr-defined]
+            size, offset = Shard(d)._local_shard_size_and_offset(  # type: ignore[attr-defined]
                 prev_size, mesh.size(mesh_dim), mesh.get_local_rank(mesh_dim)
             )
             new_idx = list(range(offset, offset + size))
         dim_indices[d] = new_idx if prev is None else [prev[i] for i in new_idx]
 
     sharded_dims = sorted(dim_indices.keys())
-    assert sharded_dims == [0], (
-        f"compute_runs currently handles dim-0 sharding only, got {sharded_dims}"
-    )
+    assert sharded_dims == [0], f"compute_runs currently handles dim-0 sharding only, got {sharded_dims}"
 
     indices = dim_indices[0]
     if not indices:
