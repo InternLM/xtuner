@@ -107,7 +107,7 @@ def _validate_tilelang_sparse_mla_inputs(
 class _TileLangSparseMLAFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q: torch.Tensor, kv: torch.Tensor, indices: torch.Tensor, scaling: float | None):
-        from .ops.tilelang_sparse_mla_fwd import sparse_mla_fwd_interface
+        from xtuner.v1.ops.sparse_mla import sparse_mla_fwd_interface
 
         q = q.contiguous()
         kv = kv.contiguous()
@@ -121,7 +121,7 @@ class _TileLangSparseMLAFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor, grad_lse: torch.Tensor):
-        from .ops.tilelang_sparse_mla_bwd import sparse_mla_bwd
+        from xtuner.v1.ops.sparse_mla import sparse_mla_bwd
 
         q, kv, indices, out, lse = ctx.saved_tensors
         dq, dkv = sparse_mla_bwd(q, kv, out, grad_output.contiguous(), indices, lse, sm_scale=ctx.scaling)
@@ -278,7 +278,7 @@ class DSAIndexer(nn.Module):
         weights: torch.Tensor,
         seq_ctx: SequenceContext,
     ) -> torch.Tensor:
-        from .ops.tilelang_indexer_fwd import indexer_fwd_interface
+        from xtuner.v1.ops.sparse_mla import indexer_fwd_interface
 
         if q.dtype != torch.bfloat16 or k.dtype != torch.bfloat16:
             raise RuntimeError("TileLang DSA indexer requires bfloat16 q and k tensors.")
