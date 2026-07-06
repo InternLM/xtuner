@@ -1,7 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import functools
-import subprocess
-import sys
 from typing import Literal
 
 import torch
@@ -12,140 +9,17 @@ from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module.rope import RopeScalingConfig
+from xtuner.v1.ops.sparse_mla import (
+    DSATopKIndicesProtocol,
+    SparseMLAProtocol,
+    ensure_tilelang_runtime_available,
+    get_dsa_topk_indices,
+    get_sparse_mla,
+)
 
 from ..linear import build_linear
 from .attn_outputs import AttnOutputs
 from .mla import MLAConfig, MultiLatentAttention, mla_apply_rotary_pos_emb
-
-
-def torch_sparse_mla(
-    q: torch.Tensor,
-    kv: torch.Tensor,
-    indices: torch.Tensor,
-    scaling: float | None,
-    value_dim: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Correctness-first PyTorch SparseMLA backend.
-
-    The GLM-5.2 sparse kernel uses ``-1`` to pad invalid top-k slots. Short smoke
-    tests can have many invalid slots, so trim columns that are invalid for the
-    whole microbatch before the gather to keep the fallback cheap.
-    """
-
-    _, heads, dim_plus_tail_dim = q.shape
-    _, kv_group, _ = kv.shape
-    head_kv = heads // kv_group
-    value_dim = value_dim if value_dim is not None else dim_plus_tail_dim
-    scale = float(scaling) if scaling is not None else dim_plus_tail_dim**-0.5
-
-    outputs = []
-    lses = []
-    for group_idx in range(kv_group):
-        group_indices = indices[:, group_idx, :]
-        valid = group_indices != -1
-
-        valid_cols = valid.any(dim=0)
-        if valid_cols.any().item():
-            last_col = int(valid_cols.nonzero()[-1].item()) + 1
-            group_indices = group_indices[:, :last_col]
-            valid = valid[:, :last_col]
-
-        safe_indices = group_indices.clamp(min=0).to(torch.long)
-        gathered_kv = kv[:, group_idx, :][safe_indices]
-        q_group = q[:, group_idx * head_kv : (group_idx + 1) * head_kv, :]
-
-        scores = torch.einsum("shd,skd->shk", q_group.float(), gathered_kv.float())
-        scores = scores.mul(scale).masked_fill(~valid[:, None, :], float("-inf"))
-        probs = torch.softmax(scores, dim=-1)
-        out = torch.einsum("shk,skd->shd", probs, gathered_kv[..., :value_dim].float())
-
-        outputs.append(out.to(q.dtype))
-        lses.append(torch.logsumexp(scores, dim=-1))
-
-    return torch.cat(outputs, dim=1), torch.cat(lses, dim=1)
-
-
-def sparse_mla(
-    q: torch.Tensor,
-    kv: torch.Tensor,
-    indices: torch.Tensor,
-    scaling: float | None,
-    value_dim: int | None = None,
-    backend: Literal["torch", "tilelang"] = "torch",
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if backend == "torch":
-        return torch_sparse_mla(q, kv, indices, scaling=scaling, value_dim=value_dim)
-    if backend != "tilelang":
-        raise ValueError(f"Unsupported SparseMLA backend: {backend}")
-
-    _validate_tilelang_sparse_mla_inputs(q, kv, indices, value_dim)
-    return _TileLangSparseMLAFunction.apply(q, kv, indices, scaling)
-
-
-def _validate_tilelang_sparse_mla_inputs(
-    q: torch.Tensor,
-    kv: torch.Tensor,
-    indices: torch.Tensor,
-    value_dim: int | None,
-) -> None:
-    if not q.is_cuda or not kv.is_cuda or not indices.is_cuda:
-        raise RuntimeError("TileLang SparseMLA requires q, kv, and indices to be CUDA tensors.")
-    if q.dtype != torch.bfloat16 or kv.dtype != torch.bfloat16:
-        raise RuntimeError("TileLang SparseMLA requires bfloat16 q and kv tensors.")
-    if q.ndim != 3 or kv.ndim != 3 or indices.ndim != 3:
-        raise RuntimeError("TileLang SparseMLA expects q=(S,H,D), kv=(S,K,D), indices=(S,K,topk).")
-    if q.shape[-1] != 576 or kv.shape[-1] != 576:
-        raise RuntimeError("TileLang SparseMLA supports GLM-5.2 DSA dim_plus_tail_dim=576 only.")
-    if value_dim not in (None, 512):
-        raise RuntimeError("TileLang SparseMLA supports value_dim=512 only.")
-    if indices.shape[-1] % 64 != 0:
-        raise RuntimeError("TileLang SparseMLA requires topk to be divisible by 64.")
-    if not q.is_contiguous() or not kv.is_contiguous() or not indices.is_contiguous():
-        raise RuntimeError("TileLang SparseMLA requires contiguous q, kv, and indices tensors.")
-
-
-class _TileLangSparseMLAFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, q: torch.Tensor, kv: torch.Tensor, indices: torch.Tensor, scaling: float | None):
-        from xtuner.v1.ops.sparse_mla import sparse_mla_fwd_interface
-
-        q = q.contiguous()
-        kv = kv.contiguous()
-        indices = indices.to(torch.int32).contiguous()
-        out, lse = sparse_mla_fwd_interface(q, kv, indices, sm_scale=scaling)
-        ctx.scaling = scaling
-        ctx.save_for_backward(q, kv, indices, out, lse)
-        # TileLang stores LSE in log2 space for its exp2-based backward. The public
-        # sparse_mla contract follows PyTorch's natural-log logsumexp.
-        return out, lse * 0.6931471805599453
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor, grad_lse: torch.Tensor):
-        from xtuner.v1.ops.sparse_mla import sparse_mla_bwd
-
-        q, kv, indices, out, lse = ctx.saved_tensors
-        dq, dkv = sparse_mla_bwd(q, kv, out, grad_output.contiguous(), indices, lse, sm_scale=ctx.scaling)
-        return dq, dkv, None, None
-
-
-@functools.cache
-def _tilelang_runtime_import_error() -> str | None:
-    result = subprocess.run(
-        [sys.executable, "-c", "import tilelang"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    if result.returncode == 0:
-        return None
-    return result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "unknown import failure"
-
-
-def _ensure_tilelang_runtime_available() -> None:
-    detail = _tilelang_runtime_import_error()
-    if detail is not None:
-        raise RuntimeError(f"TileLang SparseMLA runtime is unavailable: {detail}")
 
 
 def is_dsa_skip_topk_layer(layer_idx: int, skip_topk_offset: int, topk_freq: int) -> bool:
@@ -214,6 +88,7 @@ class DSAIndexer(nn.Module):
         self.index_n_heads = index_n_heads
         self.index_topk = index_topk
         self.indexer_backend = indexer_backend
+        self.dsa_topk_indices_func: DSATopKIndicesProtocol = get_dsa_topk_indices(indexer_backend)
         self.wq_b = build_linear(q_lora_rank, index_n_heads * index_head_dim, bias=False)
         self.wk = build_linear(hidden_size, index_head_dim, bias=False)
         self.k_norm = LayerNorm(index_head_dim, eps=1e-6)
@@ -247,77 +122,14 @@ class DSAIndexer(nn.Module):
         weights = self.weights_proj(hidden_states).float() * (self.index_n_heads**-0.5)
 
         with torch.no_grad():
-            if self.indexer_backend == "tilelang":
-                return self._tilelang_topk_indices(q, k, weights, seq_ctx)
-            return self._torch_topk_indices(q, k, weights, seq_ctx)
-
-    def _torch_topk_indices(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        weights: torch.Tensor,
-        seq_ctx: SequenceContext,
-    ) -> torch.Tensor:
-        _, seq_len, _, _ = q.shape
-        scores = torch.einsum("bshd,btd->bsht", q.float(), k.float()) * (self.index_head_dim**-0.5)
-        scores = torch.relu(scores)
-        index_scores = torch.einsum("bsht,bsh->bst", scores, weights)
-
-        packed_mask = _packed_causal_mask(seq_ctx, seq_len, q.device)
-        index_scores = index_scores.masked_fill(~packed_mask.unsqueeze(0), float("-inf"))
-
-        topk = min(self.index_topk, seq_len)
-        topk_scores, topk_indices = index_scores.topk(topk, dim=-1)
-        topk_indices = topk_indices.masked_fill(topk_scores == -torch.inf, -1)
-        return topk_indices.squeeze(0).unsqueeze(1)
-
-    def _tilelang_topk_indices(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        weights: torch.Tensor,
-        seq_ctx: SequenceContext,
-    ) -> torch.Tensor:
-        from xtuner.v1.ops.sparse_mla import indexer_fwd_interface
-
-        if q.dtype != torch.bfloat16 or k.dtype != torch.bfloat16:
-            raise RuntimeError("TileLang DSA indexer requires bfloat16 q and k tensors.")
-        if not q.is_cuda or not k.is_cuda or not weights.is_cuda:
-            raise RuntimeError("TileLang DSA indexer requires CUDA tensors.")
-
-        q = q.squeeze(0).contiguous()
-        k = k.squeeze(0).contiguous()
-        weights = (weights.squeeze(0) * (self.index_head_dim**-0.5)).contiguous()
-        starts, ends = _packed_causal_start_end(seq_ctx, q.shape[0], q.device)
-        logits = indexer_fwd_interface(q, k, weights, starts, ends, clean_logits=True)
-
-        topk = min(self.index_topk, q.shape[0])
-        topk_scores, topk_indices = logits.topk(topk, dim=-1)
-        topk_indices = topk_indices.masked_fill(topk_scores == -torch.inf, -1)
-        return topk_indices.to(torch.int64).unsqueeze(1)
-
-
-def _packed_causal_mask(seq_ctx: SequenceContext, seq_len: int, device: torch.device) -> torch.Tensor:
-    mask = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=device)
-    cu_seq_lens = seq_ctx.cu_seq_lens_q.to(device)
-    for seq_idx in range(cu_seq_lens.numel() - 1):
-        start = int(cu_seq_lens[seq_idx].item())
-        end = int(cu_seq_lens[seq_idx + 1].item())
-        rows = torch.arange(start, end, device=device)
-        cols = torch.arange(start, end, device=device)
-        mask[start:end, start:end] = cols.unsqueeze(0) <= rows.unsqueeze(1)
-    return mask
-
-
-def _packed_causal_start_end(
-    seq_ctx: SequenceContext, seq_len: int, device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor]:
-    cu_seq_lens = seq_ctx.cu_seq_lens_q.to(device)
-    token_indices = torch.arange(seq_len, device=device)
-    seq_indices = torch.searchsorted(cu_seq_lens, token_indices, right=True) - 1
-    starts = cu_seq_lens[seq_indices]
-    ends = token_indices + 1
-    return starts.to(torch.int32), ends.to(torch.int32)
+            return self.dsa_topk_indices_func(
+                q,
+                k,
+                weights,
+                seq_ctx,
+                index_head_dim=self.index_head_dim,
+                index_topk=self.index_topk,
+            )
 
 
 class DSAMLAConfig(MLAConfig):
@@ -340,7 +152,7 @@ class DSAMLAConfig(MLAConfig):
         float8_cfg: Float8Config | None = None,
     ) -> "DSAMultiLatentAttention":
         if self.sparse_mla_backend == "tilelang":
-            _ensure_tilelang_runtime_available()
+            ensure_tilelang_runtime_available()
 
         return DSAMultiLatentAttention(
             **self.model_dump(),
@@ -377,6 +189,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         self.indexer_rope_interleave = indexer_rope_interleave
         self.indexer_types = indexer_types
         self.sparse_mla_backend = sparse_mla_backend
+        self.sparse_mla_func: SparseMLAProtocol = get_sparse_mla(sparse_mla_backend)
 
         if self.q_lora_rank is None:
             raise ValueError("DSA MLA requires q_lora_rank because the indexer consumes q_a_layernorm output.")
@@ -481,15 +294,15 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         key_states = key_states.squeeze(0).unsqueeze(1).contiguous()
 
         topk_indices = self._get_topk_indices(hidden_states, q_resid, position_embeddings, seq_ctx)
-        # TODO: refactor below as MHA's `self.attn_impl_func: Callable[..., AttnOpOutputs] = get_attn_impl_fn(attn_impl)`
-        raw_output, softmax_lse = sparse_mla(
+        sparse_mla_outputs = self.sparse_mla_func(
             query_states,
             key_states,
             topk_indices,
             self.softmax_scale,
             value_dim=self.kv_lora_rank,
-            backend=self.sparse_mla_backend,
         )
+        raw_output = sparse_mla_outputs.raw_output
+        softmax_lse = sparse_mla_outputs.softmax_lse
         raw_output = torch.einsum("shm,hdm->shd", raw_output, w_vc)
         raw_output = raw_output.reshape(bsz, q_len, self.num_attention_heads * self.v_head_dim).contiguous()
         projected_output = self.o_proj(raw_output)

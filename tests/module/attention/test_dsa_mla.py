@@ -7,7 +7,7 @@ import torch
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module.attention import DSAMLAConfig, dsa_mla
-from xtuner.v1.module.attention.dsa_mla import sparse_mla, torch_sparse_mla
+from xtuner.v1.ops.sparse_mla import sparse_mla, torch_sparse_mla
 
 
 BF16_ATOL = 1e-2
@@ -104,7 +104,9 @@ def test_sparse_mla_selects_torch_backend_explicitly():
         dtype=torch.int64,
     )
 
-    out, lse = sparse_mla(q, kv, indices, scaling=0.5, value_dim=4, backend="torch")
+    outputs = sparse_mla(q, kv, indices, scaling=0.5, value_dim=4, backend="torch")
+    out = outputs.raw_output
+    lse = outputs.softmax_lse
     loss = out.square().mean() + lse.mean()
     loss.backward()
 
@@ -226,7 +228,7 @@ def test_dsa_attention_tilelang_runtime_checked_once_at_build(monkeypatch):
         nonlocal calls
         calls += 1
 
-    monkeypatch.setattr(dsa_mla, "_ensure_tilelang_runtime_available", fake_ensure_tilelang_runtime_available)
+    monkeypatch.setattr(dsa_mla, "ensure_tilelang_runtime_available", fake_ensure_tilelang_runtime_available)
     _tiny_dsa_attention(indexer_types=["full"], layer_idx=0, sparse_mla_backend="tilelang")
 
     q = torch.randn(4, 2, 6)
