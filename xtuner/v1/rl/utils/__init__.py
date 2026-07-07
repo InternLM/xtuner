@@ -47,7 +47,9 @@ from .ray_utils import (
     free_object_refs,
     get_accelerator_ids,
     get_ray_accelerator,
+    merge_trace_runtime_env,
     register_cleanup,
+    with_trace_runtime_env,
 )
 
 
@@ -83,6 +85,8 @@ __all__ = [
     "get_accelerator_ids",
     "free_object_refs",
     "bind_train_rollout",
+    "merge_trace_runtime_env",
+    "with_trace_runtime_env",
     "handle_task_exception",
     "create_task",
     "cancel_and_drain",

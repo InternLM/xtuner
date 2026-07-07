@@ -19,6 +19,8 @@ from typing_extensions import Annotated
 
 from xtuner.v1.utils.logger import get_logger
 
+from .ray_utils import with_trace_runtime_env
+
 
 PG_READY_TIMEOUT = os.getenv("XTUNER_PG_READY_TIMEOUT", 30)  # default 30 seconds
 PlacementGroups: TypeAlias = PlacementGroup | list[PlacementGroup] | tuple[PlacementGroup, ...] | None
@@ -187,7 +189,7 @@ class CPUActorLauncher:
             actor_options["memory"] = resolved_memory
 
         if pg is None:
-            return actor_cls.options(**actor_options).remote(*init_args, **init_kwargs)
+            return actor_cls.options(**with_trace_runtime_env(actor_options)).remote(*init_args, **init_kwargs)
 
         resolved_num_cpus, resolved_memory = cls._resolve_actor_resources(
             pg=pg,
@@ -203,7 +205,7 @@ class CPUActorLauncher:
             placement_group_bundle_index=bundle_idx,
             placement_group_capture_child_tasks=capture_child_tasks,
         )
-        return actor_cls.options(**actor_options).remote(*init_args, **init_kwargs)
+        return actor_cls.options(**with_trace_runtime_env(actor_options)).remote(*init_args, **init_kwargs)
 
     @classmethod
     def build_actors(

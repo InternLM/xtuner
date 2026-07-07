@@ -15,7 +15,7 @@ from ray.util.placement_group import (
 )
 from typing_extensions import Annotated
 
-from .ray_utils import find_master_addr_and_port, get_accelerator_ids
+from .ray_utils import find_master_addr_and_port, get_accelerator_ids, with_trace_runtime_env
 
 
 PG_READY_TIMEOUT = os.getenv("XTUNER_PG_READY_TIMEOUT", 30)  # default 30 seconds
@@ -443,7 +443,12 @@ class AutoAcceleratorWorkers:
 
     @classmethod
     def from_placement_group(
-        cls, worker_cls: ActorClass[T], worker_config, pg: PlacementGroup
+        cls,
+        worker_cls: ActorClass[T],
+        worker_config,
+        pg: PlacementGroup,
+        *,
+        runtime_env: dict[str, Any] | None = None,
     ) -> tuple[list[ActorProxy[T]], list[tuple[int, int]]]:
         """Create workers from an existing placement group.
 
@@ -464,11 +469,22 @@ class AutoAcceleratorWorkers:
         workers_list: list[ActorProxy[T]] = []
         rank_bundle_idx_list: list[tuple[int, int]] = []
         for rank, bundle_idx in enumerate(sorted_bundle_idxs):
-            worker = worker_cls.options(
-                placement_group=pg,
-                placement_group_bundle_index=bundle_idx,
-                **pg_options,
-            ).remote(worker_config, rank, master_addr, master_port, world_size, device_type)
+            ray_options = with_trace_runtime_env(
+                {
+                    "placement_group": pg,
+                    "placement_group_bundle_index": bundle_idx,
+                    "runtime_env": runtime_env,
+                    **pg_options,
+                }
+            )
+            worker = worker_cls.options(**ray_options).remote(
+                worker_config,
+                rank,
+                master_addr,
+                master_port,
+                world_size,
+                device_type,
+            )
             workers_list.append(worker)
             rank_bundle_idx_list.append((rank, bundle_idx))
 

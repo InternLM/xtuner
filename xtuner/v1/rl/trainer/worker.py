@@ -166,16 +166,20 @@ class WorkerConfig(BaseModel):
         from xtuner.v1.rl.trainer.controller import TrainingController
         from xtuner.v1.rl.utils import AutoAcceleratorWorkers
 
-        TrainingWorkerCls = ray.remote(
-            runtime_env={
-                "env_vars": {
-                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                    "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                    "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
-                }
+        training_runtime_env = {
+            "env_vars": {
+                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
             }
-        )(TrainingWorker)
-        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorkerCls, self, placement_group)
+        }
+        TrainingWorkerCls = ray.remote(TrainingWorker)
+        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(
+            TrainingWorkerCls,
+            self,
+            placement_group,
+            runtime_env=training_runtime_env,
+        )
         ray.wait([w.ready.remote() for w in train_workers])
         return TrainingController(workers=train_workers)
 

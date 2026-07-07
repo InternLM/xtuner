@@ -1,8 +1,8 @@
 import atexit
 import signal
 import subprocess
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional, cast
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import ray
 from ray import ObjectRef
@@ -17,6 +17,51 @@ if TYPE_CHECKING:
 
 
 logger = get_logger()
+
+_PROTECTED_TRACE_ENV_KEYS = frozenset(
+    {
+        "XTUNER_OTEL_ENABLED",
+        "XTUNER_OTEL_OUTPUT_DIR",
+        "XTUNER_OTEL_RUN_ID",
+        "XTUNER_OTEL_RUN_DIR",
+        "XTUNER_OTEL_JSONL_PATH",
+        "OTEL_TRACES_EXPORTER",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_PROTOCOL",
+    }
+)
+
+
+def merge_trace_runtime_env(runtime_env: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Merge active trace runtime env into a Ray runtime_env dict."""
+
+    merged_runtime_env = dict(runtime_env or {})
+
+    from xtuner.v1.rl.telemetry.runtime import get_trace_env_vars
+
+    trace_env = get_trace_env_vars()
+    if not trace_env:
+        return merged_runtime_env
+
+    env_vars = dict(merged_runtime_env.get("env_vars") or {})
+    for key, value in trace_env.items():
+        if key in _PROTECTED_TRACE_ENV_KEYS or key not in env_vars:
+            env_vars[key] = value
+    merged_runtime_env["env_vars"] = env_vars
+    return merged_runtime_env
+
+
+def with_trace_runtime_env(ray_options: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Return Ray options with active trace runtime env merged in."""
+
+    options = dict(ray_options or {})
+    runtime_env = merge_trace_runtime_env(options.get("runtime_env"))
+    if runtime_env:
+        options["runtime_env"] = runtime_env
+    else:
+        options.pop("runtime_env", None)
+    return options
 
 
 @ray.remote
