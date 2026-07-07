@@ -469,6 +469,8 @@ class MoE(BaseModel):
         loss_ctx: list[MoELossContextDict] | MoELossContextDict | None,
         return_router_logits: bool = False,
     ):
+        self._prepare_gated_deltanet_metadata(seq_ctx)
+
         # TODO: caoweihan: Recover this assertion after the refactor of LossContext
         if isinstance(seq_ctx, SequenceContext):
             # assert isinstance(loss_ctx, (CELossContext, LossContext)) or loss_ctx is None, (

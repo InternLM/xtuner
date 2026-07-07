@@ -14,9 +14,9 @@ from xtuner.v1.model import MoE
 from xtuner.v1.model.base import BaseModel as XTunerBaseModel
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.module import LMHead, MHAConfig, MLAConfig, MultiHeadAttention, MultiLatentAttention
-from xtuner.v1.module.attention.gated_deltanet import FusedRMSNormGated, has_fused_rms_norm_gated
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayer
+from xtuner.v1.ops.gated_deltanet import is_rms_norm_gated_module
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.utils.dtensor import cal_total_norm, group_tensors_by_device_mesh_and_placements
 
@@ -227,11 +227,7 @@ class InternalMetricsRecorder:
             if self.internal_metrics_cfg.monitor_weights_rms_norm and isinstance(module, RMS_NORM_MONITOR_MODULES):
                 self.calculate_module_weight_rms(module, self._clean_module_name(name), dtype=torch.float32)
 
-            if (
-                self.internal_metrics_cfg.monitor_gdn_stats
-                and has_fused_rms_norm_gated
-                and isinstance(module, FusedRMSNormGated)
-            ):
+            if self.internal_metrics_cfg.monitor_gdn_stats and is_rms_norm_gated_module(module):
                 self.calculate_module_weight_min_max(module, self._clean_module_name(name))
 
             if self.internal_metrics_cfg.monitor_gdn_stats and hasattr(module, "A_log"):

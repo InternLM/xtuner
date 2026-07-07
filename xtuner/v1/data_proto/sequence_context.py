@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from dataclasses import dataclass
 from typing import cast
 
 import torch
@@ -6,6 +7,17 @@ from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
 from .utils import gather_for_sequence_parallel, pad_to_multiple_of, split_for_sequence_parallel
+
+
+@dataclass(slots=True)
+class GatedDeltaNetMetadata:
+    """Metadata cached in SequenceContext and unpacked before operator
+    calls."""
+
+    seq_idx: torch.Tensor | None = None
+    cu_seqlens_int64: torch.Tensor | None = None
+    chunk_indices: dict[str, torch.Tensor] | None = None
+    chunk_indices_list: dict[str, list[int]] | None = None
 
 
 class DSATopKCacheState:
@@ -83,7 +95,7 @@ class SequenceContext:
     block_table: torch.Tensor | None
     device: str | torch.device  # TODO: 这个地方有点乱，到处是 device
     position_ids: torch.LongTensor | None
-    seq_idx: torch.IntTensor | None
+    gdn_metadata: "GatedDeltaNetMetadata | None"
 
     # Qwen3VL
     image_grid_thw: torch.Tensor | None
@@ -135,6 +147,7 @@ class SequenceContext:
         shard_size: int = 0,
         cu_seq_lens_q_list: list[int] | None = None,
         cu_seq_lens_k_list: list[int] | None = None,
+        gdn_metadata: "GatedDeltaNetMetadata | None" = None,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
         # the argument can be an int, but as an attribute it can only be a tensor
@@ -173,7 +186,7 @@ class SequenceContext:
         self._raw_inputs_embeds = raw_inputs_embeds
         self._shard_start = shard_start
         self._shard_size = shard_size
-        self.seq_idx = None
+        self.gdn_metadata = gdn_metadata
 
         # `DeviceMesh.get_local_rank` is not compatible with `torch.compile`, we calculate `_sp_rank` in
         # `SequenceContext`
@@ -247,6 +260,7 @@ class SequenceContext:
     def split(self, sequence_parallel_mesh: DeviceMesh | None = None) -> Self:
         if sequence_parallel_mesh is None:
             sequence_parallel_mesh = self.sequence_parallel_mesh
+        self.gdn_metadata = None
         self.sequence_parallel_mesh = sequence_parallel_mesh
 
         if sequence_parallel_mesh is None:
@@ -585,6 +599,7 @@ class SequenceContext:
 
     def set_sp_mesh(self, sp_mesh: DeviceMesh) -> Self:
         """Set the sequence parallel mesh."""
+        self.gdn_metadata = None
         self.sequence_parallel_mesh = sp_mesh
         self._sp_rank = sp_mesh.get_local_rank()
         return self
@@ -599,6 +614,19 @@ class SequenceContext:
         Returns:
             Self: A new SequenceContext instance with copied attributes.
         """
+        metadata_dependencies = {
+            "cu_seq_lens_q",
+            "cu_seq_lens_q_list",
+            "device",
+            "sequence_parallel_mesh",
+        }
+        if "gdn_metadata" in overrides:
+            gdn_metadata = overrides["gdn_metadata"]
+        elif metadata_dependencies.intersection(overrides):
+            gdn_metadata = None
+        else:
+            gdn_metadata = self.gdn_metadata
+
         return self.__class__(
             input_ids=overrides.get("input_ids", self.input_ids),
             cu_seq_lens_q=overrides.get("cu_seq_lens_q", self.cu_seq_lens_q),
@@ -633,6 +661,7 @@ class SequenceContext:
                 "cu_seq_lens_k_list",
                 None if "cu_seq_lens_k" in overrides else self.cu_seq_lens_k_list,
             ),
+            gdn_metadata=gdn_metadata,
         )
 
     def to(self, device: torch.device | str):
@@ -644,6 +673,9 @@ class SequenceContext:
         Returns:
             Self: The context with tensors moved to the target device.
         """
+        # GatedDeltaNet metadata contains device tensors. It is prepared again at
+        # model-forward entry after SequenceContext reaches its final device.
+        self.gdn_metadata = None
         self.input_ids = self.input_ids.to(device)  # type: ignore
         self.cu_seq_lens_q = self.cu_seq_lens_q.to(device)  # type: ignore
         self.cu_seq_lens_k = self.cu_seq_lens_k.to(device)  # type: ignore

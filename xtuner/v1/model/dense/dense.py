@@ -79,6 +79,7 @@ class Dense(BaseModel):
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
         loss_ctx: dict[str, BaseLossContext | list[BaseLossContext]] | None = None,
     ) -> ModelOutputs:
+        self._prepare_gated_deltanet_metadata(seq_ctx)
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
 
