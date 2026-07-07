@@ -300,8 +300,10 @@ def replay_interval_peaks(profile_dir: str | Path, ranks: Iterable[int] | None =
             {
                 "rank": rank,
                 "step": record["step"],
+                "micro_batch": record["micro_batch"],
                 "stage": record["stage"],
                 "start_step": previous_record["step"],
+                "start_micro_batch": previous_record["micro_batch"],
                 "start_stage": previous_record["stage"],
                 "peak_allocated_gib": peak_gib,
                 **peak_event,
@@ -313,6 +315,7 @@ def replay_interval_peaks(profile_dir: str | Path, ranks: Iterable[int] | None =
             row: dict[str, Any] = {
                 "rank": rank,
                 "step": record["step"],
+                "micro_batch": record["micro_batch"],
                 "stage": record["stage"],
                 "source": "peak_active",
                 "category": category,
@@ -335,9 +338,16 @@ def category_summary(rows: pd.DataFrame, *, min_gib: float = MIN_GIB) -> pd.Data
     if rows.empty:
         return rows
     grouped = (
-        rows.groupby(["rank", "step", "stage", "source", "category", "subcategory"], as_index=False)
+        rows.groupby(
+            ["rank", "step", "micro_batch", "stage", "source", "category", "subcategory"],
+            as_index=False,
+            dropna=False,
+        )
         .agg(gib=("gib", "sum"), count=("count", "sum"))
-        .sort_values(["step", "stage", "source", "gib"], ascending=[True, True, True, False])
+        .sort_values(
+            ["step", "micro_batch", "stage", "source", "gib"],
+            ascending=[True, True, True, True, False],
+        )
     )
     return grouped[grouped["gib"] >= min_gib]
 
@@ -347,7 +357,11 @@ def hierarchy_summary(rows: pd.DataFrame, *, min_gib: float = MIN_GIB, max_depth
         return rows
     levels = [f"level_{idx}" for idx in range(max_depth)]
     grouped = (
-        rows.groupby(["rank", "step", "stage", "source", "category", "subcategory", *levels], as_index=False)
+        rows.groupby(
+            ["rank", "step", "micro_batch", "stage", "source", "category", "subcategory", *levels],
+            as_index=False,
+            dropna=False,
+        )
         .agg(gib=("gib", "sum"), count=("count", "sum"))
         .sort_values("gib", ascending=False)
     )
@@ -358,6 +372,7 @@ def filter_rows(
     rows: pd.DataFrame,
     *,
     step: int | None = None,
+    micro_batch: int | None = None,
     stage: str | None = None,
     source: str | None = None,
     category: str | None = None,
@@ -366,6 +381,8 @@ def filter_rows(
     result = rows
     if step is not None:
         result = result[result["step"] == step]
+    if micro_batch is not None and "micro_batch" in result.columns:
+        result = result[result["micro_batch"] == micro_batch]
     if stage is not None:
         result = result[result["stage"] == stage]
     if source is not None:
@@ -433,6 +450,7 @@ def hierarchy_label_table(
     rows: pd.DataFrame,
     *,
     step: int,
+    micro_batch: int | None = None,
     stage: str,
     source: str = "active",
     category: str | None = "activations",
@@ -446,7 +464,15 @@ def hierarchy_label_table(
     subcategory and call path mapping for interpretation.
     """
 
-    data = filter_rows(rows, step=step, stage=stage, source=source, category=category, min_gib=min_gib).head(top_n)
+    data = filter_rows(
+        rows,
+        step=step,
+        micro_batch=micro_batch,
+        stage=stage,
+        source=source,
+        category=category,
+        min_gib=min_gib,
+    ).head(top_n)
     if data.empty:
         return data
     result = data.reset_index(drop=True).copy()
@@ -511,6 +537,7 @@ def plot_hierarchy_bar(
     rows: pd.DataFrame,
     *,
     step: int,
+    micro_batch: int | None = None,
     stage: str,
     source: str = "active",
     category: str | None = "activations",
@@ -522,6 +549,7 @@ def plot_hierarchy_bar(
     labels = hierarchy_label_table(
         rows,
         step=step,
+        micro_batch=micro_batch,
         stage=stage,
         source=source,
         category=category,
@@ -535,7 +563,11 @@ def plot_hierarchy_bar(
     ax.set_yticks(range(len(plot_data)))
     ax.set_yticklabels(plot_data["plot_label"])
     ax.set_xlabel("GiB")
-    ax.set_title(f"{source} hierarchy: step={step}, stage={stage}, category={category}")
+    if micro_batch is None:
+        point = f"step={step}, stage={stage}"
+    else:
+        point = f"step={step}, micro_batch={micro_batch}, stage={stage}"
+    ax.set_title(f"{source} hierarchy: {point}, category={category}")
     ax.xtuner_label_map = labels
     plt.tight_layout()
     return ax
