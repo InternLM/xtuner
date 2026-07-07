@@ -28,12 +28,19 @@ from xtuner.v1.data_proto.rl_data import (
     reset_rollout_response,
     update_status_from_finish_reason,
 )
+from xtuner.v1.rl.trace import inject_trace_context, trace_span, traced_rollout_endpoint
 from xtuner.v1.rl.utils import (
     AutoAcceleratorWorkers,
     CPUResourcesConfig,
     SingleAcceleratorWorker,
     get_eos_token,
     register_cpu_resources,
+    with_trace_runtime_env,
+)
+from xtuner.v1.rl.utils.trace_utils import (
+    TRACE_ATTR_ROLLOUT_BACKEND,
+    TRACE_SPAN_ROLLOUT_WORKER_GENERATE,
+    rollout_state_trace_attributes,
 )
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
@@ -531,13 +538,14 @@ class RolloutConfig(BaseModel):
             name="rollout_controller",
             cpu_resources=CPUResourcesConfig(num_workers=num_workers),
         )
+        ray_kwargs = {
+            "concurrency_groups": {
+                ROLLOUT_CONCURRENCY_GROUP_GENERATE: ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY,
+            },
+        }
         return (
-            ray.remote(
-                concurrency_groups={
-                    ROLLOUT_CONCURRENCY_GROUP_GENERATE: ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY,
-                },
-            )(RolloutController)
-            .options(num_cpus=num_workers)
+            ray.remote(**ray_kwargs)(RolloutController)
+            .options(**with_trace_runtime_env({"num_cpus": num_workers}))
             .remote(self, placement_group)
         )
 
@@ -882,8 +890,12 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.session_server_actor = (
             ray.remote(SessionServerActor)
             .options(
-                scheduling_strategy=scheduling_strategy,
-                num_cpus=0,
+                **with_trace_runtime_env(
+                    {
+                        "scheduling_strategy": scheduling_strategy,
+                        "num_cpus": 0,
+                    }
+                )
             )
             .remote(
                 worker_base_url=self.server_url,
@@ -968,6 +980,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         return routed_experts
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
+    @traced_rollout_endpoint(TRACE_SPAN_ROLLOUT_WORKER_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         request_max_tokens = rollout_state.sample_params.max_tokens
         try:
@@ -1021,7 +1034,12 @@ class RolloutWorker(SingleAcceleratorWorker):
 
             for attempt in range(max_retries + 1):
                 is_last_attempt = attempt == max_retries
-                http_result = await self._safe_post_request(endpoint_url, headers=headers, payload=payload)
+                http_result = await self._safe_post_request(
+                    endpoint_url,
+                    headers=headers,
+                    payload=payload,
+                    rollout_state=rollout_state,
+                )
 
                 # Case 1: HTTP Request is Successful
                 if http_result.response:
@@ -1225,15 +1243,18 @@ class RolloutWorker(SingleAcceleratorWorker):
                 placement_group_bundle_index=self.engine_bundle_idxs[0],
             )
             assert ray.is_initialized()
-            ray_kwargs = (
-                {"runtime_env": server_configs.ray_runtime_env} if hasattr(server_configs, "ray_runtime_env") else {}
+            runtime_env = copy.deepcopy(getattr(server_configs, "ray_runtime_env", None)) or {}
+            ray_options = with_trace_runtime_env(
+                {
+                    "scheduling_strategy": scheduling_strategy,
+                    **AutoAcceleratorWorkers.get_pg_options(current_pg),
+                    "runtime_env": runtime_env,
+                }
             )
             self.server_task = (
                 ray.remote(self.server_func)
                 .options(
-                    scheduling_strategy=scheduling_strategy,
-                    **AutoAcceleratorWorkers.get_pg_options(current_pg),
-                    **ray_kwargs,
+                    **ray_options,
                 )
                 .remote(server_configs)
             )
@@ -1267,18 +1288,34 @@ class RolloutWorker(SingleAcceleratorWorker):
             ray.cancel(self.server_task)
             raise TimeoutError("Server failed to start within the timeout period.")
 
-    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
+    async def _safe_post_request(
+        self,
+        url,
+        headers,
+        payload,
+        *,
+        rollout_state: RolloutState,
+    ) -> HttpRequestResult:
         try:
             if self.receive_abort_request.is_set():
                 return HttpRequestResult(error_type=HttpRequestErrorType.REQUEST_ABORTED, url=url, payload=payload)
-            req = self.client.build_request(
-                "POST",
-                url,
-                headers=headers,
-                json=payload,
-            )
-            r = await self.client.send(req)
-            r.raise_for_status()
+            trace_attributes = {
+                TRACE_ATTR_ROLLOUT_BACKEND: self.config.rollout_backend,
+                "http.method": "POST",
+                "http.url": url,
+            }
+            trace_attributes.update(rollout_state_trace_attributes(rollout_state))
+            request_headers = dict(headers)
+            with trace_span("infer_engine.generate", attributes=trace_attributes):
+                inject_trace_context(request_headers)
+                req = self.client.build_request(
+                    "POST",
+                    url,
+                    headers=request_headers,
+                    json=payload,
+                )
+                r = await self.client.send(req)
+                r.raise_for_status()
             return HttpRequestResult(response=r)
         except Exception as e:
             error_type = HttpRequestErrorType.from_exception(e)

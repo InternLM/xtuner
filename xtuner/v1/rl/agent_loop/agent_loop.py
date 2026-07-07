@@ -13,6 +13,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.constants import AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
+from xtuner.v1.rl.trace import traced_judger_endpoint
 from xtuner.v1.rl.utils import (
     JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S,
     CPUActorLauncher,
@@ -183,7 +184,11 @@ class AgentLoop(ABC):
         self._judger_pause_event = asyncio.Event()
 
     @abstractmethod
-    async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
+    async def generate_sample(
+        self,
+        rollout_state: RolloutState,
+        **kwargs,
+    ) -> RolloutState: ...
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         pending_tasks = []
@@ -204,6 +209,7 @@ class AgentLoop(ABC):
     @overload
     async def run_judger(self, rollout_state: list[RolloutState]) -> list[RolloutState]: ...
 
+    @traced_judger_endpoint()
     async def run_judger(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:
         assert self.judger is not None
         if isinstance(rollout_state, list):
@@ -211,31 +217,35 @@ class AgentLoop(ABC):
         else:
             judge_task = create_task(self.judger.judge(rollout_state))
         pause_task = create_task(self._judger_pause_event.wait())
+        result: RolloutState | list[RolloutState] = rollout_state
         try:
             done, _ = await asyncio.wait({judge_task, pause_task}, return_when=asyncio.FIRST_COMPLETED)
             if judge_task in done:
-                return await judge_task
-            try:
-                return await asyncio.wait_for(
-                    asyncio.shield(judge_task),
-                    timeout=JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S,
-                )
-            except asyncio.TimeoutError:
-                await cancel_and_drain([judge_task])
-                for sample in rollout_state if isinstance(rollout_state, list) else [rollout_state]:
-                    sample.status = Status.ABORTED
-                    sample.finish_reason = "abort"
-                    sample.reward = None
-                return rollout_state
+                result = await judge_task
+            else:
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.shield(judge_task),
+                        timeout=JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    await cancel_and_drain([judge_task])
+                    for sample in rollout_state if isinstance(rollout_state, list) else [rollout_state]:
+                        sample.status = Status.ABORTED
+                        sample.finish_reason = "abort"
+                        sample.reward = None
+                    result = rollout_state
         except asyncio.CancelledError:
             await cancel_and_drain([judge_task])
             for sample in rollout_state if isinstance(rollout_state, list) else [rollout_state]:
                 sample.status = Status.ABORTED
                 sample.finish_reason = "abort"
                 sample.reward = None
-            return rollout_state
+            result = rollout_state
         finally:
             await cancel_and_drain([pause_task])
+
+        return result
 
     async def pause(self) -> None:
         self._judger_pause_event.set()

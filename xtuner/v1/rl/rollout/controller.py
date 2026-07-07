@@ -7,7 +7,10 @@ from ray.actor import ActorProxy
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.rl.trace import traced_rollout_endpoint
+from xtuner.v1.rl.trace_transport import trace_remote
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
+from xtuner.v1.rl.utils.trace_utils import TRACE_SPAN_ROLLOUT_CONTROLLER_GENERATE
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
 from .constants import ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
@@ -89,6 +92,7 @@ class RolloutController:
         self.proxy_manager.validate_registered_session_urls()
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
+    @traced_rollout_endpoint(TRACE_SPAN_ROLLOUT_CONTROLLER_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         if XTUNER_DETERMINISTIC:
             sample_params = rollout_state.sample_params.model_copy(deep=True)
@@ -104,7 +108,10 @@ class RolloutController:
             rollout_state.error_msg = "No active rollout worker available."
             return rollout_state
 
-        response_ref = worker.generate.remote(rollout_state=rollout_state)  # type: ignore[attr-defined]
+        response_ref = trace_remote(
+            worker.generate,  # type: ignore[attr-defined]
+            rollout_state=rollout_state,
+        )
         try:
             response_rollout_state = await asyncio.wait_for(
                 response_ref,
@@ -197,11 +204,12 @@ class RolloutController:
         assert self.config.rollout_max_batch_size_per_instance is not None, (
             "rollout_max_batch_size_per_instance must be set before building RolloutWorker."
         )
-        return ray.remote(
-            concurrency_groups={
+        ray_kwargs = {
+            "concurrency_groups": {
                 ROLLOUT_CONCURRENCY_GROUP_GENERATE: ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY,
-            },
-        )(worker_base_cls)
+            }
+        }
+        return ray.remote(**ray_kwargs)(worker_base_cls)
 
     def _init_workers(self, placement_group: PlacementGroup) -> RolloutWorkerRegistry:
         """Initializes and configures the pool of RolloutWorker actors.

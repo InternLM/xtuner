@@ -9,6 +9,9 @@ from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 from xtuner.v1.rl.agent_loop import AgentLoop, AgentLoopConfig
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.trace import traced_rollout_endpoint
+from xtuner.v1.rl.utils.trace_utils import TRACE_SPAN_AGENT_LOOP_RUN
+from xtuner.v1.rl.trace_transport import trace_remote
 from xtuner.v1.utils import get_logger
 
 
@@ -53,6 +56,7 @@ class GSM8KToolAgentLoop(AgentLoop):
             judger=judger,
             enable_batch_judge=enable_batch_judge,
         )
+        self.rollout_ctl: RolloutController = rollout_ctl
         self.max_turns = max_turns
         self.tool_call_pattern = re.compile(r"\n*<tool_call>(.*?)</tool_call>", re.DOTALL)
         self.tool_call_start_token: str = "<tool_call>"
@@ -86,7 +90,12 @@ class GSM8KToolAgentLoop(AgentLoop):
         content = self.tool_call_pattern.sub("", text)
         return content, function_calls
 
-    async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
+    @traced_rollout_endpoint(TRACE_SPAN_AGENT_LOOP_RUN)
+    async def generate_sample(
+        self,
+        rollout_state: RolloutState,
+        **kwargs,
+    ) -> RolloutState:
         # Respect state passed from preprocess for partial rollout continuation.
         base_sample_params = copy.deepcopy(rollout_state.sample_params or self.sample_params)
         final_response_mask: list[int] = []
@@ -105,8 +114,10 @@ class GSM8KToolAgentLoop(AgentLoop):
             rollout_state.sample_params = copy.deepcopy(base_sample_params)
             rollout_state.sample_params.max_tokens = remaining_max_tokens
 
-            assert self.rollout_ctl is not None
-            rollout_state = await self.rollout_ctl.generate.remote(rollout_state)  # type: ignore[attr-defined]
+            rollout_state = await trace_remote(
+                self.rollout_ctl.generate,  # type: ignore[attr-defined]
+                rollout_state=rollout_state,
+            )
             cur_turn += 1
             response_ids = cast(list[int], rollout_state.response_ids)
             cur_turn_tokens.extend(response_ids)

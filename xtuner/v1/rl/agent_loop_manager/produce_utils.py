@@ -135,7 +135,14 @@ class BaseProduceContext:
 
     async def sample_group(self, *, from_expired_pool: bool) -> list[RolloutState]:
         group_status = [Status.EXPIRED, Status.ABORTED] if from_expired_pool else [Status.ABORTED]
-        return await self.sampler.sample(task_name=self.task_name, group_status=group_status)
+        group = await self.sampler.sample(task_name=self.task_name, group_status=group_status)
+        for item in group:
+            extra_fields = getattr(item, "extra_fields", None)
+            if extra_fields is None:
+                extra_fields = {}
+                setattr(item, "extra_fields", extra_fields)
+            extra_fields["producer_future_step"] = self.train_step
+        return group
 
     async def generate_group(
         self,

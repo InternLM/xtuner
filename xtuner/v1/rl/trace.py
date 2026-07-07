@@ -9,6 +9,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.rl.telemetry import otel_utils
 from xtuner.v1.rl.telemetry.runtime import (
     TraceRuntime,
@@ -164,6 +165,90 @@ def inject_trace_context(carrier: dict[str, str] | None = None) -> dict[str, str
     return target
 
 
+def traced_rollout_endpoint(
+    span_name: str,
+    *,
+    target_arg: str = "rollout_state",
+    initial_attributes: Callable[[Any, RolloutState], Mapping[str, Any]] | None = None,
+) -> Callable[[F], F]:
+    """Decorate a framework-owned rollout endpoint with trace lifecycle logic."""
+
+    def decorator(func: F) -> F:
+        if not inspect.iscoroutinefunction(func):
+            raise TypeError("traced_rollout_endpoint() only supports async functions")
+
+        signature = inspect.signature(func)
+
+        @wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            if target_arg not in bound.arguments:
+                raise TypeError(f"traced rollout endpoint target argument {target_arg!r} was not bound")
+            rollout_state = bound.arguments[target_arg]
+            if not isinstance(rollout_state, RolloutState):
+                raise TypeError("traced_rollout_endpoint target must be a RolloutState")
+            owner = bound.arguments.get("self", args[0] if args else None)
+            if initial_attributes is not None:
+                attributes = dict(initial_attributes(owner, rollout_state))
+            else:
+                from xtuner.v1.rl.utils.trace_utils import rollout_state_initial_attributes
+
+                attributes = rollout_state_initial_attributes(rollout_state)
+
+            from xtuner.v1.rl.trace_transport import extract_rollout_trace_parent_carrier
+
+            parent_carrier = extract_rollout_trace_parent_carrier(rollout_state)
+            with trace_span(span_name, attributes=attributes, parent_carrier=parent_carrier):
+                result = await func(*args, **kwargs)
+
+                from xtuner.v1.rl.utils.trace_utils import record_rollout_state_result
+
+                record_rollout_state_result(result if isinstance(result, RolloutState) else rollout_state)
+                return result
+
+        return wrapper  # type: ignore[return-value]
+
+    return decorator
+
+
+def traced_judger_endpoint(
+    span_name: str = "judger.run",
+    *,
+    target_arg: str = "rollout_state",
+) -> Callable[[F], F]:
+    """Decorate an agent-loop judger endpoint with trace lifecycle logic."""
+
+    def decorator(func: F) -> F:
+        if not inspect.iscoroutinefunction(func):
+            raise TypeError("traced_judger_endpoint() only supports async functions")
+
+        signature = inspect.signature(func)
+
+        @wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            if target_arg not in bound.arguments:
+                raise TypeError(f"traced judger endpoint target argument {target_arg!r} was not bound")
+            owner = bound.arguments.get("self", args[0] if args else None)
+            judger = getattr(owner, "judger", None)
+            if judger is None:
+                raise RuntimeError("traced_judger_endpoint() requires owner.judger")
+            target_obj = bound.arguments[target_arg]
+
+            from xtuner.v1.rl.utils.trace_utils import judger_trace_attributes
+
+            with trace_span(span_name, attributes=judger_trace_attributes(judger, target_obj)):
+                result = await func(*args, **kwargs)
+                set_trace_attributes(judger_trace_attributes(judger, result))
+                return result
+
+        return wrapper  # type: ignore[return-value]
+
+    return decorator
+
+
 @contextmanager
 def _attach_parent_carrier(parent_carrier: Mapping[str, str] | None):
     if parent_carrier is None:
@@ -249,4 +334,6 @@ __all__ = [
     "trace_event",
     "trace_function",
     "trace_span",
+    "traced_judger_endpoint",
+    "traced_rollout_endpoint",
 ]
