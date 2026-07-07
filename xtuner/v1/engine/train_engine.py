@@ -48,6 +48,7 @@ from xtuner.v1.utils import (
     profile_time_and_memory,
 )
 from xtuner.v1.utils.grad_norm import cal_grad_norm
+from xtuner.v1.utils.memory_stage_profile import get_memory_stage_profiler
 
 
 class TrainStepInfo(DataBatchInfo, BatchForwardInfo):
@@ -155,6 +156,7 @@ class TrainEngine:
         self.optimizer = self.build_optimizer(optim_cfg)
         self.intra_layer_micro_batch = intra_layer_micro_batch
         self._count = 0
+        self._train_step_idx = 0
         self.has_freeze_params = self.__has_freeze_params()
         self._async_checkpoint_pg: dist.ProcessGroup | None = None
         self._async_state_dict_cache: dict[str, Any] | None = None
@@ -214,17 +216,21 @@ class TrainEngine:
 
         micro_batch_iter = 0
         micro_batch_results = []
+        memory_stage_profiler = get_memory_stage_profiler()
+        train_step_idx = self._train_step_idx + 1
 
         data_batch_info = self.model.pre_micro_batch_forward(data_batches)
         total_loss = torch.tensor(0.0, device=DEVICE)
 
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             ProberList.set_micro_batch_iter(micro_batch_iter)
+            current_micro_batch = micro_batch_iter
             micro_batch_iter += 1
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = [i["seq_ctx"] for i in data_batch]
             loss_ctx_list = [i["loss_ctx"] for i in data_batch]
 
+            memory_stage_profiler.capture("forward_start", step=train_step_idx, micro_batch=current_micro_batch)
             if self.intra_layer_micro_batch == 1:
                 output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
             else:
@@ -235,16 +241,19 @@ class TrainEngine:
                     loss_ctx=loss_ctx_list,  # type: ignore[arg-type]
                 )
             output.free_nongrad_feature()
+            memory_stage_profiler.capture("forward_end", step=train_step_idx, micro_batch=current_micro_batch)
 
             micro_batch_results.append(output)
 
             loss = self._get_total_loss(output)
             loss.backward()
+            memory_stage_profiler.capture("backward_end", step=train_step_idx, micro_batch=current_micro_batch)
             total_loss += loss.detach()
             # call dump_forward_records after backward to record the recomputed activations
             ProberList.after_micro_iter_forward()
 
         batch_forward_info = self.model.post_micro_batch_forward(micro_batch_results)
+        self._train_step_idx += 1
         return TrainStepInfo(total_loss=total_loss.item(), **data_batch_info, **batch_forward_info)
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):
@@ -276,6 +285,8 @@ class TrainEngine:
 
     def step_optimizer(self, grad_norm):
         """Step the optimizer to update the model parameters."""
+        memory_stage_profiler = get_memory_stage_profiler()
+        memory_stage_profiler.capture("optimizer_step_start", step=self._train_step_idx)
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
             log_rank0.warning(f"Gradient norm {grad_norm} is invalid, skipping optimizer step.")
             self.optimizer.zero_grad()
@@ -289,6 +300,7 @@ class TrainEngine:
         else:
             self.optimizer.step()
             self.optimizer.zero_grad()
+        memory_stage_profiler.capture("optimizer_step_end", step=self._train_step_idx)
         return grad_norm
 
     # TODO: Should be removed
