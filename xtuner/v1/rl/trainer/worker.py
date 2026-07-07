@@ -950,10 +950,22 @@ class TrainingWorker(SingleAcceleratorWorker):
         model_cfg = self._engine.model_cfg
         return model_cfg
 
+    def _clear_cublas_workspaces(self) -> None:
+        clear_fn = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
+        if clear_fn is None:
+            self.logger.warning("torch._C._cuda_clearCublasWorkspaces is unavailable")
+            return
+        try:
+            clear_fn()
+            DEVICE_MODULE.empty_cache()
+        except Exception as e:
+            self.logger.warning(f"Failed to clear cuBLAS workspaces: {e}")
+
     @ray_method
     def offload_model(self):
         self._engine.put_model_to_device("cpu")
         DEVICE_MODULE.empty_cache()
+        self._clear_cublas_workspaces()
         self.logger.info(
             f"Offloaded model to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
         )
