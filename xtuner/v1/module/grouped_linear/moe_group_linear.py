@@ -77,9 +77,7 @@ class GroupedLinear(nn.Module):
             use_dtensor = ep_tp_mesh is not None and self.tp_size > 1
             if use_dtensor:
                 assert ep_tp_mesh is not None  # for type narrowing
-                assert ep_tp_mesh.ndim == 2, (
-                    f"ep_tp_mesh must be a 2D (ep, tp) sub-mesh, got ndim={ep_tp_mesh.ndim}"
-                )
+                assert ep_tp_mesh.ndim == 2, f"ep_tp_mesh must be a 2D (ep, tp) sub-mesh, got ndim={ep_tp_mesh.ndim}"
                 local = torch.empty(
                     self.local_num_routed_experts * self.local_out_features,
                     self.local_in_features,
@@ -100,9 +98,7 @@ class GroupedLinear(nn.Module):
                     )
                 else:  # row
                     placements = (Shard(0), Shard(1))
-                self.weight = nn.Parameter(
-                    DTensor.from_local(local, ep_tp_mesh, placements, run_check=False)
-                )
+                self.weight = nn.Parameter(DTensor.from_local(local, ep_tp_mesh, placements, run_check=False))
             else:
                 weight = torch.empty(
                     self.local_num_routed_experts * self.local_out_features,
@@ -167,10 +163,18 @@ def build_grouped_linear(
             num_fused_projections=num_fused_projections,
         )
     elif float8_cfg.scaling_granularity_grouped_gemm == ScalingGranularity.TILEWISE:
-        if expert_tp_mesh is not None and expert_tp_mesh.size() > 1:
-            raise NotImplementedError("Tile-wise float8 grouped linear does not support expert TP sharding yet.")
         return TileWiseFloat8GroupedLinear(
-            in_features, out_features, num_routed_experts, moe_bias=moe_bias, ep_mesh=ep_mesh
+            in_features,
+            out_features,
+            num_routed_experts,
+            moe_bias=moe_bias,
+            ep_mesh=ep_mesh,
+            expert_tp_mesh=expert_tp_mesh,
+            parallel_style=parallel_style,
+            ep_tp_mesh=ep_tp_mesh,
+            num_fused_projections=num_fused_projections,
         )
     else:
-        raise NotImplementedError(f"Unsupported float8 scaling granularity: {float8_cfg.scaling_granularity_gemm}")
+        raise NotImplementedError(
+            f"Unsupported float8 grouped GEMM scaling granularity: {float8_cfg.scaling_granularity_grouped_gemm}"
+        )

@@ -105,7 +105,7 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
         try:
             dist.destroy_process_group(pg)
-        except:
+        except Exception:
             pass
 
     @parametrize.parametrize(
@@ -185,7 +185,99 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
         try:
             dist.destroy_process_group(pg)
-        except:
+        except Exception:
+            pass
+
+    @parametrize.parametrize(
+        "device,ep_size,expert_tp_size",
+        [
+            ("cuda", 2, 2),
+        ],
+    )
+    def test_fp8_ep2_etp2_fsdp2_train(self, device, ep_size, expert_tp_size):
+        pg = self.create_pg(device)
+        assert dist.get_world_size() == 8
+
+        moe_cfg = Qwen3MoE30BA3Config(
+            ep_size=ep_size,
+            expert_tp_size=expert_tp_size,
+            dispatcher="all2all",
+            balancing_loss_cfg=BalancingLossConfig(),
+            float8_cfg=Float8Config(
+                scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+                scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+            ),
+        )
+        optim_cfg: AdamWConfig = AdamWConfig()
+        lr_cfg: LRConfig = LRConfig()
+        fsdp_cfg: FSDPConfig = FSDPConfig(
+            cpu_offload=False,
+            ep_size=ep_size,
+        )
+        engine = TrainEngine(
+            model_cfg=moe_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+        )
+        assert engine.model.fsdp_mesh is not None
+        assert engine.model.fsdp_mesh.size() == 2
+        assert engine.model.ep_mesh is not None
+        assert engine.model.ep_mesh.size() == ep_size
+        assert engine.model.expert_tp_mesh is not None
+        assert engine.model.expert_tp_mesh.size() == expert_tp_size
+
+        engine.from_hf(hf_path=QWEN3_MOE_PATH)
+
+        loss_cfg = CELossConfig()
+        total_steps = 1000
+        warmup_steps = total_steps * lr_cfg.warmup_ratio
+
+        def warmup_fn(x):
+            return x / warmup_steps if x < warmup_steps else 1
+
+        lr_scheduler = LambdaLR(engine.optimizer, warmup_fn)
+
+        tok = AutoTokenizer.from_pretrained(QWEN3_MOE_PATH)
+        txt = "根据国际地球自转和参考系服务机构的数据，今年夏天是自2020年以来第六次地球自转加速。7月9日将成为有史以来最短的一天，比平时短1.3到1.6毫秒。 "
+        input_ids = tok.encode(txt, return_tensors="pt").view(1, -1)
+        labels = input_ids.clone()
+        input_ids = input_ids[:, :-1]
+        labels = labels[:, 1:]
+        pack_len = 8192 - input_ids.shape[1]
+        input_ids = pad_to_max_length(input_ids, 0, max_length=8192)
+        labels = pad_to_max_length(labels, -100, max_length=8192).to(DEVICE)
+
+        losses = []
+        for _ in range(10):
+            seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
+            seq_ctx.num_padding = pack_len
+            LossContext = loss_cfg.loss_ctx_cls
+            loss_ctx = loss_cfg.build(data={"shifted_labels": labels}, sp_mesh=None)
+            loss_ctx = LossContext.build_batches([loss_ctx])[0]
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
+
+            loss_log = engine.train_step(engine_input)["logs_info"]
+            grad_norm = engine.clip_grad_norm()
+            engine.step_optimizer(grad_norm)
+            lr_scheduler.step()
+            assert torch.isfinite(grad_norm)
+            assert grad_norm.item() > 0
+            losses.append(loss_log["reduced_llm_loss"])
+
+        losses = torch.tensor(losses)
+        if dist.get_rank() == 0:
+            print(f"fp8_ep2_etp2_fsdp2 losses: {losses.tolist()}", flush=True)
+        losses_ref = torch.tensor([2.41, 2.41, 1.79, 1.39, 1.02, 0.68, 0.52, 0.31, 0.18, 0.12])
+        # 2026-07-08 实测 EP2/ETP2/FSDP2 full tilewise FP8 loss:
+        # [2.4088690281, 2.4088690281, 1.7859514952, 1.3338183165, 0.9629249573,
+        #  0.6677960753, 0.4466774166, 0.2764163315, 0.1643507332, 0.1138044521]
+        # 相对原 tilewise ref: cosine similarity = 0.999698, avg relative diff = 0.05054.
+        self._check_loss_curve(losses, losses_ref, sim_tol=0.02, rtol=0.2)
+
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except Exception:
             pass
 
     @parametrize.parametrize(
@@ -285,7 +377,7 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
         try:
             dist.destroy_process_group(pg)
-        except:
+        except Exception:
             pass
 
     @property

@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
 import math
-from typing import Optional, Tuple, cast
+from typing import Literal, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -18,6 +18,7 @@ from xtuner.v1.float8.triton_kernels import (
     trans_per_block_quant_expand_128x,
     trans_per_tile_quant_expand_128x,
 )
+from xtuner.v1.utils.interleaved_shard import InterleavedShard
 
 
 # from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
@@ -208,6 +209,10 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
         num_routed_experts: int,
         moe_bias: bool = False,
         ep_mesh: DeviceMesh | None = None,
+        expert_tp_mesh: DeviceMesh | None = None,
+        parallel_style: Literal["column", "row"] | None = None,
+        ep_tp_mesh: DeviceMesh | None = None,
+        num_fused_projections: int = 1,
     ) -> None:
         super().__init__()
 
@@ -222,38 +227,104 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.num_routed_experts = num_routed_experts
+        self.ep_mesh = ep_mesh
+        self.expert_tp_mesh = expert_tp_mesh
+        self.parallel_style = parallel_style
+        self.ep_size = ep_mesh.size() if ep_mesh is not None else 1
+        self.tp_size = expert_tp_mesh.size() if expert_tp_mesh is not None else 1
+        self.tp_enabled = self.expert_tp_mesh is not None and self.tp_size > 1 and self.parallel_style is not None
+        self.num_fused_projections = num_fused_projections
+        if self.expert_tp_mesh is not None and self.expert_tp_mesh.size() > 1 and self.parallel_style is None:
+            raise ValueError("parallel_style must be set when expert_tp_mesh size is greater than 1.")
+        if self.num_routed_experts % self.ep_size != 0:
+            raise ValueError(
+                f"num_routed_experts ({self.num_routed_experts}) must be divisible by ep_size ({self.ep_size})."
+            )
+
+        self.local_num_routed_experts = self.num_routed_experts // self.ep_size
+        self.local_in_features = in_features
+        self.local_out_features = out_features
+        if self.tp_enabled:
+            if self.parallel_style == "column":
+                if out_features % self.tp_size != 0:
+                    raise ValueError(f"out_features ({out_features}) must be divisible by tp_size ({self.tp_size}).")
+                self.local_out_features = out_features // self.tp_size
+            elif self.parallel_style == "row":
+                if in_features % self.tp_size != 0:
+                    raise ValueError(f"in_features ({in_features}) must be divisible by tp_size ({self.tp_size}).")
+                self.local_in_features = in_features // self.tp_size
+            else:
+                raise ValueError(f"Unsupported parallel_style: {self.parallel_style}.")
+
         self.ori_shape = (num_routed_experts, out_features, in_features)
         self.ori_local_shape = (
-            (num_routed_experts // ep_mesh.size(), out_features, in_features)
-            if ep_mesh is not None
-            else self.ori_shape
+            self.local_num_routed_experts,
+            self.local_out_features,
+            self.local_in_features,
         )
 
         # We have padded the dim0 of GroupedLinear's weight to make fsdp compatible with block-wise fp8.
-        weight = WeightWithDynamicTilewiseFloat8CastTensor(
-            torch.empty(num_routed_experts * out_features, in_features),
-            torch.float8_e4m3fn,
-            (num_routed_experts * out_features, in_features),
-        )
-        self.ep_mesh = ep_mesh
-        if ep_mesh is not None and ep_mesh.size() > 1:
+        local_shape = (self.local_num_routed_experts * self.local_out_features, self.local_in_features)
+        if ep_tp_mesh is not None and self.tp_enabled:
+            weight = WeightWithDynamicTilewiseFloat8CastTensor(
+                torch.empty(local_shape),
+                torch.float8_e4m3fn,
+                (num_routed_experts * out_features, in_features),
+            )
+            self.weight = nn.Parameter(
+                DTensor.from_local(weight, ep_tp_mesh, self._weight_placements(), run_check=False)
+            )
+        elif ep_mesh is not None and ep_mesh.size() > 1:
+            weight = WeightWithDynamicTilewiseFloat8CastTensor(
+                torch.empty(num_routed_experts * out_features, in_features),
+                torch.float8_e4m3fn,
+                (num_routed_experts * out_features, in_features),
+            )
             self.weight = nn.Parameter(distribute_tensor(weight, ep_mesh, [Shard(0)]))
         else:
+            weight = WeightWithDynamicTilewiseFloat8CastTensor(
+                torch.empty(local_shape),
+                torch.float8_e4m3fn,
+                (num_routed_experts * out_features, in_features),
+            )
             self.weight = nn.Parameter(weight)
 
         self.pad_shape: Optional[Tuple[int, int]] = None
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
+        init.kaiming_uniform_(weight, a=math.sqrt(5))
+
+    def _weight_placements(self):
+        if self.tp_enabled:
+            if self.parallel_style == "column":
+                # fused_w1w3 has one stripe per (expert, fused projection); TP cuts inside every stripe.
+                num_local_stripes = self.local_num_routed_experts * self.num_fused_projections
+                return (
+                    Shard(0),
+                    InterleavedShard(0, num_local_stripes=num_local_stripes),
+                )
+            return (Shard(0), Shard(1))
+        return (Shard(0),)
+
+    def _dim_shard_size(self, dim: int) -> int:
+        if dim == 0:
+            return self.ep_size * (self.tp_size if self.tp_enabled and self.parallel_style == "column" else 1)
+        if dim == 1:
+            return self.tp_size if self.tp_enabled and self.parallel_style == "row" else 1
+        return 1
 
     def _check_shape(self, weight):
-        ep_size = self.ep_mesh.size() if self.ep_mesh is not None else 1
         if self.is_padded:
             assert weight.shape == (
-                self.pad_shape[0] // ep_size,
-                self.pad_shape[1],
-            ), f"Expected weight shape {(self.pad_shape[0] // ep_size, self.pad_shape[1])}, but got {weight.shape}."
+                self.pad_shape[0] // self._dim_shard_size(0),
+                self.pad_shape[1] // self._dim_shard_size(1),
+            ), (
+                f"Expected weight shape "
+                f"{(self.pad_shape[0] // self._dim_shard_size(0), self.pad_shape[1] // self._dim_shard_size(1))}, "
+                f"but got {weight.shape}."
+            )
         else:
             assert weight.shape == (
                 self.ori_local_shape[0] * self.ori_local_shape[1],
@@ -270,7 +341,8 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
 
         if tensor_already_casted_to_fp8(weight):
             # If we use fsdp, the weight is already casted to fp8.
-            # If self.is_padded is True, ep size should be 1
+            # FSDP padding only extends flattened dim0; trim it before restoring
+            # the local (expert, out, in) grouped-GEMM layout.
             weight_fp8 = slice_weight.apply(weight, self.ori_local_shape) if self.is_padded else weight
             weight_fp8 = view_weight.apply(weight_fp8, self.ori_local_shape)
         else:
@@ -301,8 +373,13 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
         if padded_out_features == self.weight.shape[0]:
             return
 
+        ori_local_weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
+        local_shape = (
+            padded_out_features // self._dim_shard_size(0),
+            self.in_features // self._dim_shard_size(1),
+        )
         weight = torch.empty(
-            (padded_out_features, self.in_features),
+            local_shape if isinstance(self.weight, DTensor) else (padded_out_features, self.in_features),
             dtype=self.weight.dtype,
             layout=self.weight.layout,
             device=self.weight.device,
@@ -312,9 +389,8 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
             torch.float8_e4m3fn,
             (self.num_routed_experts * self.out_features, self.in_features),
         )
-        if self.ep_mesh is not None and self.ep_mesh.size() > 1:
-            weight = distribute_tensor(weight, self.ep_mesh, [Shard(0)])
-            ori_local_weight = cast(DTensor, self.weight)._local_tensor
+        if isinstance(self.weight, DTensor):
+            weight = DTensor.from_local(weight, self.weight.device_mesh, self._weight_placements(), run_check=False)
             local_weight = weight._local_tensor
             local_weight[: ori_local_weight.shape[0]].data.copy_(ori_local_weight.data)  # copy the original weight
             local_weight[ori_local_weight.shape[0] :].data.copy_(0.0)  # type: ignore  # zero pad the weight
