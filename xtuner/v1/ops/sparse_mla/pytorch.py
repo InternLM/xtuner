@@ -78,12 +78,13 @@ def torch_dsa_topk_indices(
 
 
 def _packed_causal_mask(seq_ctx: SequenceContext, seq_len: int, device: torch.device) -> torch.Tensor:
-    mask = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=device)
     cu_seq_lens = seq_ctx.cu_seq_lens_q.to(device)
-    for seq_idx in range(cu_seq_lens.numel() - 1):
-        start = int(cu_seq_lens[seq_idx].item())
-        end = int(cu_seq_lens[seq_idx + 1].item())
-        rows = torch.arange(start, end, device=device)
-        cols = torch.arange(start, end, device=device)
-        mask[start:end, start:end] = cols.unsqueeze(0) <= rows.unsqueeze(1)
-    return mask
+    token_indices = torch.arange(seq_len, device=device)
+    seq_indices = torch.searchsorted(cu_seq_lens, token_indices, right=True) - 1
+    row_starts = cu_seq_lens[seq_indices]
+
+    # Keep this vectorized: GLM DSA compiles the indexer inside fullgraph
+    # decoder-layer compile, so Python scalar reads from cu_seq_lens would break.
+    rows = token_indices[:, None]
+    cols = token_indices[None, :]
+    return (cols >= row_starts[:, None]) & (cols <= rows)
