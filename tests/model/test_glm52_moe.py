@@ -410,7 +410,84 @@ def test_tiny_glm52_native_forward_matches_hf_numeric_oracle():
         torch.cuda.empty_cache()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="tiny GLM-5.2 compile oracle requires CUDA")
+def test_tiny_glm52_native_compile_forward_matches_hf_numeric_oracle():
+    tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
+    input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
+
+    hf_model = load_glm52_hf_oracle_model(GLM5_2_TINY_MOE_PATH)
+    try:
+        with torch.no_grad():
+            expected_loss = hf_model(input_ids=input_ids, labels=input_ids.clone(), use_cache=False).loss
+    finally:
+        del hf_model
+        torch.cuda.empty_cache()
+
+    with torch.device("meta"):
+        config = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
+        config.dispatcher = None
+        config.ep_size = 1
+        model = config.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
+
+    assert model.compile_cfg["xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward"] == {
+        "fullgraph": True
+    }
+
+    try:
+        model.from_hf(GLM5_2_TINY_MOE_PATH)
+        model.eval()
+
+        seq_ctx, loss_ctx = _build_lm_loss_ctx(input_ids)
+        with torch.no_grad():
+            output = model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
+
+        # This is the user-facing GLM compile contract: the default ep=1 path
+        # keeps fullgraph decoder-layer compile and preserves tiny-checkpoint
+        # numerics within the same absorbed-MLA bf16 tolerance as eager.
+        torch.testing.assert_close(output["loss"], expected_loss.to(output["loss"].dtype), rtol=5e-2, atol=5e-2)
+    finally:
+        del model
+        torch.cuda.empty_cache()
+
+
 class TestGlm52MoE(DeterministicDDPTestCase):
+    @parametrize.parametrize(
+        "device,dispatcher,ep_size,expect_full_layer_compile",
+        [
+            ("cuda", None, 1, True),
+            ("cuda", "all2all", 8, False),
+        ],
+    )
+    def test_glm52_default_compile_cfg_respects_ep_granularity(
+        self, device, dispatcher, ep_size, expect_full_layer_compile
+    ):
+        self.create_pg(device)
+
+        with torch.device("meta"):
+            cfg = _tiny_glm52_config()
+            cfg.compile_cfg = None
+            cfg.dispatcher = dispatcher
+            cfg.ep_size = ep_size
+            if dispatcher is not None:
+                cfg.n_routed_experts = ep_size
+            model = cfg.build()
+
+        full_layer_target = "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward"
+        sub_layer_targets = [
+            "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._pre_moe_forward",
+            "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward",
+            "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._shared_experts_forward",
+            "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._post_moe_forward",
+        ]
+
+        if expect_full_layer_compile:
+            self.assertEqual(model.compile_cfg[full_layer_target], {"fullgraph": True})
+        else:
+            self.assertNotIn(full_layer_target, model.compile_cfg)
+
+        for target in sub_layer_targets:
+            self.assertEqual(model.compile_cfg[target], {"fullgraph": True})
+
     @parametrize.parametrize(
         "device,dispatcher,ep_size,compile,tol,loss_mode",
         [
