@@ -1775,9 +1775,8 @@ class RLColocateTrainer(BaseRLTrainer):
                 self.logger.info("Rollout workers update weights successfully in colocate mode")
                 self.train_controller.offload(target="model")
                 destroy_train_nccl = os.getenv("XTUNER_DESTROY_TRAIN_NCCL_AFTER_SYNC", "0") == "1"
-                destroy_train_nccl_step = int(os.getenv("XTUNER_DESTROY_TRAIN_NCCL_AFTER_SYNC_STEP", "1") or "1")
                 already_destroyed = getattr(self, "_train_nccl_destroyed", False)
-                if destroy_train_nccl and not already_destroyed and train_step >= destroy_train_nccl_step:
+                if destroy_train_nccl and not already_destroyed:
                     # This runs only after rollout weights have been updated
                     # and the train model has been offloaded. Only replayable
                     # non-default NCCL groups are destroyed.
