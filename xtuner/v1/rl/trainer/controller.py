@@ -1,6 +1,6 @@
 import math
 import os
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 import ray
 import torch
@@ -22,6 +22,32 @@ class ColateItem(TypedDict):
     shifted_labels: torch.Tensor
     advantage: float
     rollout_logprobs: torch.Tensor | None
+
+
+def _summarize_process_group_results(results: list[dict[str, Any]]) -> str:
+    if not results:
+        return "ranks=0"
+
+    count_key = "destroyed" if "destroyed" in results[0] else "reloaded"
+    counts = [result.get(count_key, 0) for result in results]
+    count_summary = f"{counts[0]} on all ranks" if len(set(counts)) == 1 else f"by_rank={counts}"
+    errors = sum(len(result.get("errors", [])) for result in results)
+    unwrapped = sum(len(result.get("unwrapped_nccl_groups", [])) for result in results)
+    status = results[0].get("reloadable_status", {})
+    after_used = [
+        result["after"]["used_gb"]
+        for result in results
+        if isinstance(result.get("after"), dict) and "used_gb" in result["after"]
+    ]
+    mem_range = ""
+    if after_used:
+        mem_range = f", after_used_gb={min(after_used):.3f}-{max(after_used):.3f}"
+    return (
+        f"ranks={len(results)}, {count_key}={count_summary}, "
+        f"reloadable={status.get('alive', '?')}/{status.get('total', '?')} alive, "
+        f"destroyed={status.get('destroyed', '?')}, specs={status.get('specs', '?')}"
+        f"{mem_range}, errors={errors}, unwrapped_nccl_groups={unwrapped}"
+    )
 
 
 class TrainingController:
@@ -246,8 +272,6 @@ class TrainingController:
             pad_data_samples = [pad_data for _ in range(pad_num)]
             packed_data_batches = packed_data_batches + pad_data_samples
 
-        print(f"len(packed_data_batches): {len(packed_data_batches)}")
-
         handles = []
         for worker_idx, worker in enumerate(self.workers):
             handles.append(
@@ -308,6 +332,26 @@ class TrainingController:
         handles = [worker.update_weights.remote() for worker in self.workers]
         ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
+
+    def destroy_train_nccl_process_groups(self):
+        """Destroy train-side NCCL process groups after weight sync."""
+        handles = [
+            worker.destroy_train_nccl_process_groups.remote()  # type: ignore[attr-defined]
+            for worker in self.workers
+        ]
+        results = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        self.logger.info(f"Destroyed train NCCL process groups: {_summarize_process_group_results(results)}")
+        return results
+
+    def reload_train_nccl_process_groups(self):
+        """Reload train-side reloadable NCCL process groups before training."""
+        handles = [
+            worker.reload_train_nccl_process_groups.remote()  # type: ignore[attr-defined]
+            for worker in self.workers
+        ]
+        results = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        self.logger.info(f"Reloaded train NCCL process groups: {_summarize_process_group_results(results)}")
+        return results
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         handles = [worker.save_hf.remote(hf_dir, save_dtype) for worker in self.workers]  # type: ignore

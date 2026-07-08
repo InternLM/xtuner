@@ -60,6 +60,13 @@ from xtuner.v1.utils import (
     set_deterministic,
 )
 from xtuner.v1.utils.activation_offload import OffloadManager
+from xtuner.v1.utils.reloadable_process_group import (
+    destroy_reloadable_process_groups,
+    monkey_patch_reloadable_process_groups,
+    process_group_name,
+    reload_process_groups,
+    reloadable_process_group_status,
+)
 
 from ..rollout_is import merge_rollout_is_metrics
 
@@ -221,6 +228,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.config = cast(WorkerConfig, self.config)
         torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
         self.rank = rank
+        monkey_patch_reloadable_process_groups()
 
         # TODO: add lr scheduler
         log_dir = worker_cfg.log_dir
@@ -277,6 +285,101 @@ class TrainingWorker(SingleAcceleratorWorker):
             config=self.config,
             engine=self._engine,
         )
+
+    def _memory_snapshot(self, tag: str) -> dict[str, float | str]:
+        DEVICE_MODULE.synchronize()
+        free, total = DEVICE_MODULE.mem_get_info()
+        allocated = DEVICE_MODULE.memory_allocated()
+        reserved = DEVICE_MODULE.memory_reserved()
+        gb = 1024**3
+        return {
+            "tag": tag,
+            "free_gb": round(free / gb, 3),
+            "used_gb": round((total - free) / gb, 3),
+            "allocated_gb": round(allocated / gb, 3),
+            "reserved_gb": round(reserved / gb, 3),
+        }
+
+    @ray_method
+    def destroy_train_nccl_process_groups(self) -> dict[str, object]:
+        """Destroy reloadable train-side NCCL PG inners after weight sync and train offload."""
+
+        before = self._memory_snapshot("before_destroy_train_nccl")
+        details = destroy_reloadable_process_groups()
+        errors: list[str] = []
+        unwrapped_nccl_groups: list[dict[str, object]] = []
+
+        try:
+            import torch.distributed.distributed_c10d as c10d
+        except Exception as exc:
+            errors.append(f"import distributed_c10d {type(exc).__name__}: {exc}")
+            c10d = None
+
+        groups: list[tuple[dist.ProcessGroup, list[int], str]] = []
+        default_group = dist.group.WORLD if dist.is_initialized() else None
+        if c10d is not None:
+            for group, rank_map in list(c10d._world.pg_group_ranks.items()):
+                if group is default_group:
+                    continue
+                try:
+                    backend = str(dist.get_backend(group)).lower()
+                except ValueError:
+                    # The c10d registry may still contain entries for groups
+                    # just destroyed by the reloadable wrapper. They are not
+                    # actionable unwrapped NCCL groups.
+                    continue
+                except Exception as exc:
+                    errors.append(f"get_backend {type(exc).__name__}: {exc}")
+                    continue
+                if "nccl" not in backend:
+                    continue
+                ranks = [global_rank for global_rank, _ in sorted(rank_map.items(), key=lambda item: item[1])]
+                groups.append((group, ranks, backend))
+
+        for group, ranks, backend in groups:
+            if group.__class__.__name__ == "ReloadableProcessGroup":
+                continue
+            unwrapped_nccl_groups.append(
+                {"ranks": ranks, "backend": backend, "group_name": process_group_name(group)}
+            )
+
+        DEVICE_MODULE.empty_cache()
+        after = self._memory_snapshot("after_destroy_train_nccl")
+        result = {
+            "rank": self.rank,
+            "destroyed": len(details),
+            "details": details,
+            "unwrapped_nccl_groups": unwrapped_nccl_groups,
+            "reloadable_status": reloadable_process_group_status(),
+            "errors": errors,
+            "before": before,
+            "after": after,
+        }
+        return result
+
+    @ray_method
+    def reload_train_nccl_process_groups(self) -> dict[str, object]:
+        """Reload train-side NCCL PG inners before FSDP2 runs again."""
+
+        before = self._memory_snapshot("before_reload_train_nccl")
+        errors: list[str] = []
+        try:
+            details = reload_process_groups()
+        except Exception as exc:
+            details = []
+            errors.append(f"reload {type(exc).__name__}: {exc}")
+        DEVICE_MODULE.empty_cache()
+        after = self._memory_snapshot("after_reload_train_nccl")
+        result = {
+            "rank": self.rank,
+            "reloaded": len(details),
+            "details": details,
+            "reloadable_status": reloadable_process_group_status(),
+            "errors": errors,
+            "before": before,
+            "after": after,
+        }
+        return result
 
     @ray_method
     def update_rollout_info(self, *args, **kwargs):
