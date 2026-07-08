@@ -235,11 +235,20 @@ class WeightIterator:
 
         for name_list, fused_param_list in fused_gen:
             state_dict = {name: param.detach() for name, param in zip(name_list, fused_param_list)}
+            # 过滤掉 LoRA 参数：当前推理引擎只接收全量参数（base + merged LoRA），
+            # 不需要单独的 lora_A/lora_B 参数。LoRA 参数在训练侧保留，通过 merge/unmerge
+            # 在推理时临时合并进 base weight。
+            for key in list(state_dict.keys()):
+                if "lora_" in key:
+                    del state_dict[key]
             yield WeightUpdateBatch(state_dict, train_enable_ep=train_enable_ep, finished=False)
             del state_dict, name_list, fused_param_list
 
         for name_list, param_list in chain(same_gen, shard_gen):
             state_dict = {name: param.detach() for name, param in zip(name_list, param_list)}
+            for key in list(state_dict.keys()):
+                if "lora_" in key:
+                    del state_dict[key]
             yield WeightUpdateBatch(state_dict, train_enable_ep=train_enable_ep, finished=False)
             del state_dict, name_list, param_list
 

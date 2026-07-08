@@ -45,6 +45,7 @@ from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, Da
 from xtuner.v1.engine import TrainEngine
 from xtuner.v1.engine.train_engine import TrainStepInfo
 from xtuner.v1.loss import CELossConfig
+from xtuner.v1.model.adapter.lora import LoraConfig
 from xtuner.v1.model.base import ModelItem, XTunerBaseModelConfig
 from xtuner.v1.model.moe.moe import MoEConfig
 from xtuner.v1.patch import (
@@ -405,6 +406,7 @@ class TrainerConfig(BaseModel):
     lr_cfg: LRConfig
     loss_cfg: CELossConfig = CELossConfig()
     fsdp_cfg: FSDPConfig | None = None
+    adapter_cfg: LoraConfig | None = None
     global_batch_size: int | None
     work_dir: Path | str | None = None
     log_dir: Path | str | None = None
@@ -525,6 +527,7 @@ class Trainer:
         model_cfg: XTunerBaseModelConfig,
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig | None = FSDPConfig(),
+        adapter_cfg: LoraConfig | None = None,
         dataset_cfg: DatasetConfigList | None = None,  # TODO: Removed in version 1.1.0
         dataloader_cfg: DataloaderConfig,
         loss_cfg: CELossConfig | None = CELossConfig(),
@@ -720,6 +723,7 @@ class Trainer:
             model_config=model_cfg,
             optim_config=optim_cfg,
             fsdp_config=fsdp_cfg,
+            adapter_config=adapter_cfg,
             load_checkpoint_path=self._load_checkpoint_cfg.checkpoint_path,
             strict=strict_load,
             intra_layer_micro_batch=intra_layer_micro_batch,
@@ -774,6 +778,7 @@ class Trainer:
             model_cfg=config.model_cfg,
             optim_cfg=config.optim_cfg,
             fsdp_cfg=config.fsdp_cfg,
+            adapter_cfg=config.adapter_cfg,
             dataset_cfg=config.dataset_cfg,
             dataloader_cfg=config.dataloader_cfg,
             loss_cfg=config.loss_cfg,
@@ -1115,6 +1120,7 @@ class Trainer:
         model_config: XTunerBaseModelConfig,
         optim_config: OptimConfig,
         fsdp_config: FSDPConfig,
+        adapter_config: LoraConfig,
         load_checkpoint_path: str | Path | None,
         intra_layer_micro_batch: int = 1,
         strict: bool = True,
@@ -1126,6 +1132,7 @@ class Trainer:
             model_config (TransformerConfig | BaseComposeConfig): Model configuration.
             optim_config (OptimConfig): Optimizer configuration.
             fsdp_config (FSDPConfig): FSDP configuration for distributed training.
+            adapter_config (LoraConfig): LoRA adapter configuration.
             resume_cfg (ResumeConfig | None): Resume configuration for continuing training.
             intra_layer_micro_batch (int): Intra-layer micro batch size for gradient accumulation.
             strict (bool): Whether to strictly load model weights.
@@ -1137,6 +1144,7 @@ class Trainer:
             optim_cfg=optim_config,
             fsdp_cfg=fsdp_config,
             model_cfg=model_config,
+            adapter_config=adapter_config,
             intra_layer_micro_batch=intra_layer_micro_batch,
         )
         if model_path is not None and (model_config.dcp_ignore_frozen_params or load_checkpoint_path is None):
