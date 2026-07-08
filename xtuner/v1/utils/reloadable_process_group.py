@@ -1,16 +1,16 @@
 """Reload selected train-side NCCL process groups without rebuilding FSDP2.
 
-FSDP2 and DeviceMesh keep Python references to process groups. Destroying those
-groups directly leaves stale objects in FSDP hooks and functional collective
-registries, so this module gives PyTorch a stable wrapper object and swaps only
+FSDP2 and DeviceMesh keep Python references to process groups. Destroying those groups directly leaves stale objects in
+FSDP hooks and functional collective registries, so this module gives PyTorch a stable wrapper object and swaps only
 the wrapped NCCL process group when train memory is released/reloaded.
 
-The default/world process group is intentionally not managed here. It is used by
-Ray/torch distributed control paths and is not replayed safely from this layer.
+The default/world process group is intentionally not managed here. It is used by Ray/torch distributed control paths
+and is not replayed safely from this layer.
 """
 
 import os
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -23,7 +23,7 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
     _GROUPS_BY_NAME: dict[int, dict[str, "ReloadableProcessGroup"]] = {}
 
     def __init__(self, group: dist.ProcessGroup, ranks: list[int], backend: str | None = None):
-        super().__init__(rank=group.rank(), size=group.size())
+        super().__init__(rank=group.rank(), size=group.size())  # type: ignore[call-arg]
         self.group: dist.ProcessGroup | None = group
         self._stable_group_name = group.group_name
         self._stable_group_desc = getattr(group, "group_desc", "")
@@ -101,11 +101,11 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
 
     def shutdown(self) -> None:
         if self.group is not None:
-            self.group.shutdown()
+            getattr(self.group, "shutdown")()
 
     def abort(self) -> None:
         if self.group is not None:
-            self.group.abort()
+            getattr(self.group, "abort")()
 
     def split_group(self, *args, **kwargs):
         return self._inner().split_group(*args, **kwargs)
@@ -176,14 +176,15 @@ _SPECS_BY_PID: dict[int, list[dict[str, Any]]] = {}
 
 
 def monkey_patch_reloadable_process_groups() -> None:
-    """Install per-process patches before DeviceMesh/FSDP2 creates subgroups."""
+    """Install per-process patches before DeviceMesh/FSDP2 creates
+    subgroups."""
 
     pid = os.getpid()
     if pid in _ORIGINALS_BY_PID:
         return
 
-    import torch.distributed.distributed_c10d as c10d
     import torch.distributed.device_mesh as device_mesh
+    import torch.distributed.distributed_c10d as c10d
 
     originals = {
         "c10d_new_group": c10d.new_group,
@@ -229,7 +230,8 @@ def monkey_patch_reloadable_process_groups() -> None:
         wrapper = ReloadableProcessGroup._GROUPS_BY_NAME.get(os.getpid(), {}).get(group_name)
         if wrapper is not None:
             return wrapper
-        return originals["c10d_resolve_process_group"](group_name)
+        resolve_process_group_fn = cast(Callable[[str], Any], originals["c10d_resolve_process_group"])
+        return resolve_process_group_fn(group_name)
 
     dist.new_group = new_group
     c10d.new_group = new_group
@@ -237,7 +239,7 @@ def monkey_patch_reloadable_process_groups() -> None:
     c10d.split_group = split_group
     device_mesh.split_group = split_group
     c10d._resolve_process_group = resolve_process_group
-    device_mesh._resolve_process_group = resolve_process_group
+    device_mesh._resolve_process_group = resolve_process_group  # type: ignore[attr-defined]
     if "dist_split_group" in originals:
         dist.split_group = split_group  # type: ignore[attr-defined]
 
@@ -258,12 +260,15 @@ def destroy_reloadable_process_groups() -> list[dict[str, object]]:
             details.append({"ranks": ranks, "backend": backend, "group_name": wrapper.group_name})
         except ValueError:
             wrapper.group = None
-            details.append({"ranks": ranks, "backend": backend, "group_name": wrapper.group_name, "already_gone": True})
+            details.append(
+                {"ranks": ranks, "backend": backend, "group_name": wrapper.group_name, "already_gone": True}
+            )
     return details
 
 
 def reload_process_groups() -> list[dict[str, object]]:
-    """Replay recorded subgroup creation and attach fresh inners to wrappers."""
+    """Replay recorded subgroup creation and attach fresh inners to
+    wrappers."""
 
     pid = os.getpid()
     originals = _ORIGINALS_BY_PID.get(pid)
