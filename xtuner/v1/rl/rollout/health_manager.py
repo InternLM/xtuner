@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 ROLLOUT_RAY_GET_TIMEOUT = int(os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", str(5 * 3600)))  # default 5 hours
 ROLLOUT_RECOVERY_MAX_PARALLEL_GROUPS = 4
 HEALTH_MANAGER_STOP_JOIN_TIMEOUT = 30.0
+SHUTDOWN_SERVER_DOWN_MAX_ATTEMPTS = 60
 logger = get_logger()
 
 __all__ = [
@@ -179,6 +180,10 @@ class RolloutHealthManager:
     # ------------------------------------------------------------------
 
     def run_once(self) -> None:
+        if not self._periodic_health_checks_enabled:
+            logger.debug("Skipping rollout worker periodic health check because it is disabled.")
+            return
+
         if not self._lifecycle_operation_lock.acquire(blocking=False):
             logger.debug("Skipping rollout worker health check because another lifecycle operation is running.")
             return
@@ -392,7 +397,7 @@ class RolloutHealthManager:
             recovered_groups: list[WorkerGroup] = []
             for group in groups:
                 recovered = group_recovery_results.get(group.ranks, False)
-                recorded_group = self._registry.set_group_recovery_result(group, recovered=recovered) or group
+                recorded_group = self._registry.set_group_recovery_result(group, recovered=recovered)
                 if recovered:
                     self._worker_health_failure_tracker.clear(group.ranks)
                     groups_needing_cleanup.pop(group.ranks, None)
@@ -414,7 +419,7 @@ class RolloutHealthManager:
     def _cleanup_unfinalized_recovery_groups(self, groups: tuple[WorkerGroup, ...]) -> None:
         for group in groups:
             try:
-                self._shutdown_worker_group(group, wait_server_down_attempts=0)
+                self._shutdown_worker_group(group, wait_server_down=False)
             except BaseException:
                 logger.exception(f"Failed to clean up claimed rollout worker group ranks={group.ranks}.")
             try:
@@ -497,7 +502,7 @@ class RolloutHealthManager:
                     logger.error(
                         f"Restarted rollout worker group ranks={group.ranks} has unhealthy ranks={unhealthy_ranks}."
                     )
-                    self._shutdown_worker_group(group, wait_server_down_attempts=0)
+                    self._shutdown_worker_group(group, wait_server_down=False)
                     return False
 
                 self._checkpoint_not_stopping()
@@ -513,24 +518,24 @@ class RolloutHealthManager:
             return True
         except _HealthManagerStopping:
             if restart_cleanup_needed:
-                self._shutdown_worker_group(group, wait_server_down_attempts=0)
+                self._shutdown_worker_group(group, wait_server_down=False)
             return False
         except Exception as e:
             logger.error(f"Failed to restart rollout worker group ranks={group.ranks}: {e}")
             if restart_cleanup_needed:
-                self._shutdown_worker_group(group, wait_server_down_attempts=0)
+                self._shutdown_worker_group(group, wait_server_down=False)
             return False
 
     @contextmanager
     def _skip_load_weights_during_restart(self, group: WorkerGroup):
-        ray.get(
-            [
-                worker.actor.set_skip_load_weights.remote(True)  # type: ignore[attr-defined]
-                for worker in group.workers
-            ],
-            timeout=ROLLOUT_RAY_GET_TIMEOUT,
-        )
         try:
+            ray.get(
+                [
+                    worker.actor.set_skip_load_weights.remote(True)  # type: ignore[attr-defined]
+                    for worker in group.workers
+                ],
+                timeout=ROLLOUT_RAY_GET_TIMEOUT,
+            )
             yield
         finally:
             try:
@@ -550,28 +555,22 @@ class RolloutHealthManager:
         self,
         group: WorkerGroup,
         *,
-        wait_server_down_attempts: int = 60,
+        wait_server_down: bool = True,
     ) -> bool:
         """Shutdown every worker in one group and aggregate per-worker shutdown
         results."""
-        wait_server_down_attempts = max(0, wait_server_down_attempts)
         shutdown_succeeded = True
         for worker in group.workers:
             try:
                 ray.get(worker.actor.shutdown.remote(), timeout=60)  # type: ignore[attr-defined]
             except Exception as e:
-                if wait_server_down_attempts == 0:
-                    logger.warning(
-                        f"Best-effort shutdown failed for rollout worker rank={worker.rank}, url={worker.url}: {e}"
-                    )
-                else:
-                    logger.error(f"Shutdown failed for rollout worker rank={worker.rank}, url={worker.url}: {e}")
+                logger.warning(f"Shutdown failed for rollout worker rank={worker.rank}, url={worker.url}: {e}")
                 shutdown_succeeded = False
                 continue
 
-            if wait_server_down_attempts == 0:
+            if not wait_server_down:
                 continue
-            if not self._wait_worker_server_down(worker, max_wait_attempts=wait_server_down_attempts):
+            if not self._wait_worker_server_down(worker, max_wait_attempts=SHUTDOWN_SERVER_DOWN_MAX_ATTEMPTS):
                 logger.error(
                     f"Shutdown failed for rollout worker rank={worker.rank} because server did not stop: "
                     f"url={worker.url}"

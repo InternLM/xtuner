@@ -1185,6 +1185,11 @@ class TestRolloutHealthManager(unittest.TestCase):
         self.assertTrue(self._worker_by_rank(registry, 0).is_active())
         self.assertEqual(actor.check_health.calls, [])
 
+        manager.run_once()
+
+        self.assertTrue(self._worker_by_rank(registry, 0).is_active())
+        self.assertEqual(actor.check_health.calls, [])
+
     def test_run_once_does_not_log_error_when_no_active_workers(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
         workers_info = {
@@ -1356,10 +1361,10 @@ class TestRolloutHealthManager(unittest.TestCase):
 
         shutdown_group.assert_called_once()
         self.assertEqual(shutdown_group.call_args.args[0].ranks, (0,))
-        self.assertEqual(shutdown_group.call_args.kwargs, {"wait_server_down_attempts": 0})
+        self.assertEqual(shutdown_group.call_args.kwargs, {"wait_server_down": False})
         self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.INACTIVE)
 
-    def test_best_effort_shutdown_does_not_wait_worker_server_down(self):
+    def test_shutdown_without_waiting_server_down_does_not_probe_worker_server(self):
         actor = SimpleNamespace(
             shutdown=_FakeAsyncRemoteMethod(None),
             check_health=_FakeAsyncRemoteMethod(True),
@@ -1378,7 +1383,7 @@ class TestRolloutHealthManager(unittest.TestCase):
             return asyncio.run(ref)
 
         with patch("xtuner.v1.rl.rollout.health_manager.ray.get", side_effect=fake_ray_get):
-            self.assertTrue(manager._shutdown_worker_group(group, wait_server_down_attempts=0))
+            self.assertTrue(manager._shutdown_worker_group(group, wait_server_down=False))
 
         self.assertEqual(actor.shutdown.calls, [()])
         self.assertEqual(actor.check_health.calls, [])

@@ -218,7 +218,7 @@ class RolloutWorkerRegistry:
         group: WorkerGroup,
         *,
         recovered: bool,
-    ) -> WorkerGroup | None:
+    ) -> WorkerGroup:
         """Apply the final lifecycle state for a completed group recovery
         attempt and return the updated group snapshot."""
         with self._lock:
@@ -228,7 +228,13 @@ class RolloutWorkerRegistry:
                 if worker is not None:
                     self._workers[rank] = replace(worker, lifecycle_state=lifecycle_state)
             worker_groups = self._build_worker_groups()
-            return worker_groups.get(group.ranks)
+            recorded_group = worker_groups.get(group.ranks)
+            if recorded_group is None:
+                raise RuntimeError(
+                    f"Failed to finalize rollout worker group recovery because group_ranks={group.ranks} "
+                    "is not registered."
+                )
+            return recorded_group
 
     def weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
         """Return weight-update targets resolved with current runtime state."""
