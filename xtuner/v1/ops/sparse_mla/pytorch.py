@@ -16,9 +16,8 @@ def torch_sparse_mla(
 ) -> SparseMLAOutputs:
     """Correctness-first PyTorch SparseMLA backend.
 
-    The GLM-5.2 sparse kernel uses ``-1`` to pad invalid top-k slots. Short smoke
-    tests can have many invalid slots, so trim columns that are invalid for the
-    whole microbatch before the gather to keep the fallback cheap.
+    The GLM-5.2 sparse kernel uses ``-1`` to pad invalid top-k slots. Keep the
+    fallback fully tensorized so it can run inside GLM fullgraph compile.
     """
 
     _, heads, dim_plus_tail_dim = q.shape
@@ -32,12 +31,6 @@ def torch_sparse_mla(
     for group_idx in range(kv_group):
         group_indices = indices[:, group_idx, :]
         valid = group_indices != -1
-
-        valid_cols = valid.any(dim=0)
-        if valid_cols.any().item():
-            last_col = int(valid_cols.nonzero()[-1].item()) + 1
-            group_indices = group_indices[:, :last_col]
-            valid = valid[:, :last_col]
 
         safe_indices = group_indices.clamp(min=0).to(torch.long)
         gathered_kv = kv[:, group_idx, :][safe_indices]
