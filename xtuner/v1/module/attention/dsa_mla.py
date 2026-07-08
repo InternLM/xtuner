@@ -181,6 +181,20 @@ class DSAMultiLatentAttention(MultiLatentAttention):
     ):
         super().__init__(**kwargs)
 
+        # DSA absorbed MLA reads kv_b_proj.weight directly and reshapes it to
+        # (num_heads, qk_nope + v_dim, kv_lora_rank) before two einsums. The
+        # current FP8 tensor wrapper only supports views whose last two
+        # dimensions are 128-aligned, while GLM-5.2 has qk_nope + v_dim = 448.
+        # Keep this projection in bf16 until there is a fused FP8 absorbed MLA
+        # path for the direct-weight computation below.
+        if self.float8_cfg is not None:
+            self.kv_b_proj = build_linear(
+                self.kv_lora_rank,
+                self.num_attention_heads * (self.q_head_dim - self.qk_rope_head_dim + self.v_head_dim),
+                bias=False,
+                float8_cfg=None,
+            )
+
         self.index_topk = index_topk
         self.index_head_dim = index_head_dim
         self.index_n_heads = index_n_heads

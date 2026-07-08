@@ -4,6 +4,7 @@ from pathlib import Path
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.datasets import OpenaiTokenizeFunctionConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
+from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.train import TrainerConfig
@@ -19,6 +20,15 @@ def _get_dispatcher():
     if dispatcher in ("", "none", "null"):
         return None
     return dispatcher
+
+
+def _get_float8_config() -> Float8Config | None:
+    if not _get_bool_env("FP8", False):
+        return None
+    return Float8Config(
+        scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+        scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+    )
 
 
 def _dataset_entry(name: str, anno_path: str | Path, sample_ratio: float, cache_dir: str, cache_tag: str):
@@ -59,6 +69,7 @@ model_cfg = get_model_config_from_hf(GLM5_2_MODEL_PATH)
 model_cfg.dispatcher = _get_dispatcher()
 model_cfg.ep_size = ep_size
 model_cfg.compile_cfg = _get_bool_env("MODEL_COMPILE", False)
+model_cfg.float8_cfg = _get_float8_config()
 model_cfg.lm_loss_cfg = loss_cfg
 if hasattr(model_cfg.attention, "sparse_mla_backend"):
     model_cfg.attention.sparse_mla_backend = os.environ.get("SPARSE_MLA_BACKEND", "tilelang")

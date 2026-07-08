@@ -16,6 +16,7 @@ from transformers import AutoTokenizer
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.engine.train_engine import TrainEngine
+from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.model.base import ModelItem
@@ -95,8 +96,21 @@ def _tiny_glm52_checkpoint_config(dispatcher: str | None, ep_size: int) -> Glm52
     )
 
 
-def _build_engine(dispatcher: str | None, ep_size: int, hsdp_sharding_size: int | None = None) -> TrainEngine:
+def _tilewise_float8_config() -> Float8Config:
+    return Float8Config(
+        scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+        scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+    )
+
+
+def _build_engine(
+    dispatcher: str | None,
+    ep_size: int,
+    hsdp_sharding_size: int | None = None,
+    float8_cfg: Float8Config | None = None,
+) -> TrainEngine:
     cfg = _glm52_engine_config(dispatcher=dispatcher, ep_size=ep_size)
+    cfg.float8_cfg = float8_cfg
     optim_cfg = AdamWConfig()
     fsdp_cfg = FSDPConfig(cpu_offload=False, ep_size=ep_size, hsdp_sharding_size=hsdp_sharding_size)
     return TrainEngine(model_cfg=cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg)
@@ -142,6 +156,37 @@ def _build_train_engine_input(tokenizer: AutoTokenizer, loss_cfg: CELossConfig) 
     assert loss_ctx is not None
     loss_ctx = loss_cfg.loss_ctx_cls.build_batches([loss_ctx])[0]
     return [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
+
+
+def _run_tiny_engine_loss_curve(
+    tokenizer: AutoTokenizer,
+    dispatcher: str | None,
+    ep_size: int,
+    float8_cfg: Float8Config | None = None,
+    num_steps: int = 3,
+) -> torch.Tensor:
+    engine = _build_engine(dispatcher=dispatcher, ep_size=ep_size, float8_cfg=float8_cfg)
+    engine.from_hf(GLM5_2_TINY_MOE_PATH)
+    loss_cfg = CELossConfig()
+    lr_cfg = LRConfig()
+    warmup_steps = 1000 * lr_cfg.warmup_ratio
+
+    def warmup_fn(step):
+        return step / warmup_steps if step < warmup_steps else 1
+
+    lr_scheduler = LambdaLR(engine.optimizer, warmup_fn)
+    losses = []
+    try:
+        for _ in range(num_steps):
+            loss_log = engine.train_step(_build_train_engine_input(tokenizer, loss_cfg))["logs_info"]
+            grad_norm = engine.clip_grad_norm()
+            engine.step_optimizer(grad_norm)
+            lr_scheduler.step()
+            losses.append(loss_log["reduced_llm_loss"])
+        return torch.tensor(losses)
+    finally:
+        del engine
+        torch.cuda.empty_cache()
 
 
 def _build_30b_long_train_engine_input(engine: TrainEngine, seq_len: int = 32768) -> list[ModelItem]:
@@ -220,6 +265,55 @@ class TestGlm52MoEEngine(DeterministicDDPTestCase):
             self._check_loss_curve(torch.tensor(losses), losses_ref)
         finally:
             torch.cuda.empty_cache()
+
+    @parametrize.parametrize(
+        "device,dispatcher,ep_size",
+        [
+            ("cuda", None, 1),
+        ],
+    )
+    def test_tile_wise_fp8_train_matches_bf16_loss_curve(self, device, dispatcher, ep_size):
+        self.create_pg(device)
+
+        tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
+        bf16_losses = _run_tiny_engine_loss_curve(
+            tokenizer=tokenizer,
+            dispatcher=dispatcher,
+            ep_size=ep_size,
+            float8_cfg=None,
+        )
+        fp8_losses = _run_tiny_engine_loss_curve(
+            tokenizer=tokenizer,
+            dispatcher=dispatcher,
+            ep_size=ep_size,
+            float8_cfg=_tilewise_float8_config(),
+        )
+
+        # FP8 tilewise training quantizes GEMM and grouped-GEMM weights/activations.
+        # Compare against the same bf16 training path to catch GLM-specific
+        # precision regressions while allowing expected quantization drift.
+        self._check_loss_curve(losses=fp8_losses, losses_ref=bf16_losses, sim_tol=2e-2, rtol=5e-2)
+
+    @parametrize.parametrize(
+        "device,dispatcher,ep_size",
+        [
+            ("cuda", "all2all", 2),
+            ("cuda", "all2all", 4),
+            ("cuda", "all2all", 8),
+        ],
+    )
+    def test_tile_wise_fp8_train_with_ep(self, device, dispatcher, ep_size):
+        self.create_pg(device)
+
+        tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
+        losses = _run_tiny_engine_loss_curve(
+            tokenizer=tokenizer,
+            dispatcher=dispatcher,
+            ep_size=ep_size,
+            float8_cfg=_tilewise_float8_config(),
+            num_steps=1,
+        )
+        self.assertTrue(torch.isfinite(losses).all(), f"FP8 EP training produced non-finite losses: {losses}")
 
     @parametrize.parametrize(
         "device,ep_size,hsdp_sharding_size",
