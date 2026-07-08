@@ -32,15 +32,22 @@ DEVICE = get_device()
 class TestMoEEngineFloat8(DeterministicDDPTestCase):
 
     @parametrize.parametrize(
-        "device,ep_size,hsdp_sharding_size",
+        "device,ep_size,hsdp_sharding_size,sim_tol,rtol",
         [
-            ("cuda", 1, int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8"))),  # todo: test ep8 and hsdp, OOM in 8 gpus
+            ("cuda", 1, int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8")), 0.01, 0.01),
+            # ep8 is a smoke/trend coverage for the FSDP shard-mesh-size-1 FP8 path.
+            # It shares the ep1 reference below, but is not expected to align step-by-step
+            # because EP changes routing/collective order and accumulates FP8 numeric drift.
+            # Observed 10-step loss:
+            # [2.4714, 2.4714, 1.8044, 1.5210, 0.9570, 0.6952, 0.4370, 0.3123, 0.1714, 0.1100]
+            ("cuda", 8, int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8")), 0.01, 0.15),
         ],
     )
-    def test_tile_wise_fp8(self, device, ep_size, hsdp_sharding_size):
+    def test_tile_wise_fp8(self, device, ep_size, hsdp_sharding_size, sim_tol, rtol):
         pg = self.create_pg(device)
 
         moe_cfg = Qwen3MoE30BA3Config(
+            ep_size=ep_size,
             balancing_loss_cfg=BalancingLossConfig(),
             float8_cfg=Float8Config(
                 scaling_granularity_gemm=ScalingGranularity.TILEWISE,
@@ -102,7 +109,7 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         losses = torch.tensor(losses)
         losses_ref = torch.tensor([2.4234, 2.4234, 1.5270, 1.1483, 0.8904, 0.6388, 0.3963, 0.2589, 0.1519, 0.1101])
 
-        self._check_loss_curve(losses, losses_ref, sim_tol=0.01, rtol=0.01)
+        self._check_loss_curve(losses, losses_ref, sim_tol=sim_tol, rtol=rtol)
         torch.cuda.empty_cache()
         try:
             dist.destroy_process_group(pg)
