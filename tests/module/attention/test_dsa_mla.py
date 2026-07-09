@@ -319,6 +319,30 @@ def test_dsa_attention_shares_topk_within_microbatch_only():
     assert set(other_seq_ctx.dsa_topk_indices) == {0}
 
 
+def test_sequence_context_splits_cat_dsa_topk_cache_to_microbatches():
+    seq_ctx_list = [
+        SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu"),
+        SequenceContext.from_input_ids((torch.tensor([[3, 4, 5]]),), device="cpu"),
+    ]
+    assert seq_ctx_list[0].dsa_topk_indices == {}
+    assert seq_ctx_list[0].dsa_topk_indices is not seq_ctx_list[1].dsa_topk_indices
+
+    cat_seq_ctx = SequenceContext.cat(seq_ctx_list)
+    layer0_topk = torch.arange(5 * 1 * 4, dtype=torch.int64).view(5, 1, 4)
+    layer2_topk = layer0_topk + 100
+    cat_seq_ctx.dsa_topk_indices[0] = layer0_topk
+    cat_seq_ctx.dsa_topk_indices[2] = layer2_topk
+
+    cat_seq_ctx.split_dsa_topk_indices_to(seq_ctx_list)
+
+    assert set(seq_ctx_list[0].dsa_topk_indices) == {0, 2}
+    assert set(seq_ctx_list[1].dsa_topk_indices) == {0, 2}
+    torch.testing.assert_close(seq_ctx_list[0].dsa_topk_indices[0], layer0_topk[:2])
+    torch.testing.assert_close(seq_ctx_list[1].dsa_topk_indices[0], layer0_topk[2:])
+    torch.testing.assert_close(seq_ctx_list[0].dsa_topk_indices[2], layer2_topk[:2])
+    torch.testing.assert_close(seq_ctx_list[1].dsa_topk_indices[2], layer2_topk[2:])
+
+
 def test_dsa_attention_mtp_layer_reuses_last_main_full_indexer():
     torch.manual_seed(0)
     mtp_attn = _tiny_dsa_attention(indexer_types=["full", "full", "full", "shared", "shared"], layer_idx=5)

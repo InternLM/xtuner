@@ -511,6 +511,8 @@ class MoE(BaseModel):
                 )
             else:
                 if not moe_forward:
+                    if cat_seq_ctx is not None:
+                        cat_seq_ctx.split_dsa_topk_indices_to(seq_ctx_list)
                     # TODO: `i.clone()` here is weird. However, the current Implementation of
                     # `async_save_on_cpu` is not friendly with `chunk` op (maybe caused by shared storage? not sure),
                     # resulting in nan grad norm. So we have to clone the chunked tensors here to make sure each

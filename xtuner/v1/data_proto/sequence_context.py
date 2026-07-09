@@ -52,7 +52,7 @@ class SequenceContext:
     # DSA cross-layer top-k sharing cache, scoped to one microbatch.
     # Format: {source_layer_idx: topk_indices}, where topk_indices is
     # [seq_len, kv_group, topk] and invalid/padded sparse slots are -1.
-    dsa_topk_indices: dict[int, torch.Tensor] | None
+    dsa_topk_indices: dict[int, torch.Tensor]
 
     # Private backing attributes for SP shard reconstruction
     _raw_input_ids: torch.LongTensor | None
@@ -115,7 +115,7 @@ class SequenceContext:
         self.inputs_embeds = inputs_embeds
         self.num_img_tokens = num_img_tokens
         self.rollout_routed_experts = rollout_routed_experts
-        self.dsa_topk_indices = dsa_topk_indices
+        self.dsa_topk_indices = {} if dsa_topk_indices is None else dsa_topk_indices
         self._raw_input_ids = raw_input_ids
         self._raw_inputs_embeds = raw_inputs_embeds
         self._shard_start = shard_start
@@ -317,6 +317,28 @@ class SequenceContext:
             position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
             rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None,  # type: ignore
         )
+
+    def split_dsa_topk_indices_to(self, sequence_context_list: list["SequenceContext"]) -> None:
+        if not self.dsa_topk_indices:
+            return
+
+        lengths = []
+        for seq_ctx in sequence_context_list:
+            if seq_ctx.input_ids is not None:
+                lengths.append(seq_ctx.input_ids.shape[1])
+            elif seq_ctx.inputs_embeds is not None:
+                lengths.append(seq_ctx.inputs_embeds.shape[1])
+            else:
+                assert seq_ctx.position_ids is not None
+                lengths.append(seq_ctx.position_ids.shape[-1])
+
+        # Dense prefix layers run on a concatenated SequenceContext. When later
+        # sparse layers switch back to per-microbatch contexts, shared-indexer
+        # DSA layers need the full-indexer cache split back by microbatch.
+        for layer_idx, topk_indices in self.dsa_topk_indices.items():
+            assert sum(lengths) == topk_indices.shape[0]
+            for seq_ctx, single_topk_indices in zip(sequence_context_list, topk_indices.split(lengths, dim=0)):
+                seq_ctx.dsa_topk_indices[layer_idx] = single_topk_indices
 
     @property
     def mask(self) -> torch.BoolTensor:

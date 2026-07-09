@@ -4,9 +4,10 @@ from typing import Literal
 
 import torch
 from pydantic import Field, computed_field
-from typing_extensions import Self
+from typing_extensions import Self, override
 
 from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as HFGlmMoeDsaConfig
+from xtuner.v1.model.base import DEFAULT_FLOAT8_CFG, TorchCompileOption
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import DSAMLAConfig, MLAConfig
 from xtuner.v1.module.mtp import MTPConfig
@@ -16,7 +17,41 @@ from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 from .moe import MoE
 
 
+# GLM DSA attention records cross-layer top-k indices in SequenceContext.
+# That Python-side cache mutation is intentionally kept out of strict fullgraph
+# regions, so decoder/pre-attn/DSA/dense boundaries allow graph breaks while
+# pure tensor MoE expert sub-stages stay fullgraph.
+MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward": TorchCompileOption(fullgraph=False),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._pre_moe_forward": TorchCompileOption(
+        fullgraph=False
+    ),
+    "xtuner.v1.module.attention.dsa_mla.DSAMultiLatentAttention.forward": TorchCompileOption(fullgraph=False),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._shared_experts_forward": TorchCompileOption(
+        fullgraph=True
+    ),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._post_moe_forward": TorchCompileOption(
+        fullgraph=True
+    ),
+    "xtuner.v1.module.decoder_layer.dense_decoder_layer.DenseDecoderLayer.forward": TorchCompileOption(
+        fullgraph=False
+    ),
+    **DEFAULT_FLOAT8_CFG,
+}
+
+MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
+MOE_EP_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward")
+
+
 class Glm52MoE(MoE):
+    @property
+    @override
+    def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
+        if self.config.ep_size > 1:
+            return MOE_EP_COMPILE_CFG
+        return MOE_NON_EP_COMPILE_CFG
+
     def to_hf_key_list(self, key: str) -> list[str]:
         if self.config.tie_word_embeddings and "lm_head" in key:
             key = key.replace("lm_head", "embed_tokens")

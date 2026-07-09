@@ -251,9 +251,6 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
     ) -> torch.Tensor:
-        if seq_ctx.dsa_topk_indices is None:
-            seq_ctx.dsa_topk_indices = {}
-
         if self._is_skip_topk_layer():
             if self.source_layer_idx not in seq_ctx.dsa_topk_indices:
                 raise AssertionError(

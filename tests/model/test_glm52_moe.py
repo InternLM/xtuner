@@ -20,6 +20,7 @@ from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.module.attention import DSAMLAConfig, MLAConfig
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
+from xtuner.v1.utils.compile import is_compiled_function
 from xtuner.v1.utils.loader import HFCheckpointLoader
 
 
@@ -94,7 +95,7 @@ def _write_single_shard_hf_checkpoint(path: Path, tensors: dict[str, torch.Tenso
     save_file(tensors, path / shard)
     index = {
         "metadata": {"total_size": sum(t.numel() * t.element_size() for t in tensors.values())},
-        "weight_map": {key: shard for key in tensors},
+        "weight_map": dict.fromkeys(tensors, shard),
     }
     (path / "model.safetensors.index.json").write_text(json.dumps(index))
 
@@ -430,7 +431,7 @@ def test_tiny_glm52_native_compile_forward_matches_hf_numeric_oracle():
         model = config.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
     assert model.compile_cfg["xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward"] == {
-        "fullgraph": True
+        "fullgraph": False
     }
 
     try:
@@ -441,25 +442,109 @@ def test_tiny_glm52_native_compile_forward_matches_hf_numeric_oracle():
         with torch.no_grad():
             output = model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
 
-        # This is the user-facing GLM compile contract: the default ep=1 path
-        # keeps fullgraph decoder-layer compile and preserves tiny-checkpoint
-        # numerics within the same absorbed-MLA bf16 tolerance as eager.
+        # GLM keeps decoder-layer interfaces unchanged and lets seq_ctx cache writes
+        # graph-break, while the heavy pure sub-functions remain compiled.
         torch.testing.assert_close(output["loss"], expected_loss.to(output["loss"].dtype), rtol=5e-2, atol=5e-2)
     finally:
         del model
         torch.cuda.empty_cache()
 
 
+def test_glm52_micro_batch_forward_splits_dense_prefix_dsa_topk_cache_before_sparse_layers():
+    class FakeEmbedding(torch.nn.Module):
+        def __init__(self, hidden_size: int):
+            super().__init__()
+            self.hidden_size = hidden_size
+
+        def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+            return input_ids.float().unsqueeze(-1).expand(*input_ids.shape, self.hidden_size)
+
+    class FakeRotaryEmbedding(torch.nn.Module):
+        def forward(self, hidden_states: torch.Tensor, position_ids: torch.Tensor):
+            cos = torch.ones(hidden_states.shape[0], hidden_states.shape[1], 1, device=hidden_states.device)
+            sin = torch.zeros_like(cos)
+            return cos, sin
+
+    class FakeDensePrefixLayer(torch.nn.Module):
+        def forward(self, hidden_states: torch.Tensor, *, position_embeddings, seq_ctx: SequenceContext):
+            seq_len = hidden_states.shape[1]
+            seq_ctx.dsa_topk_indices[0] = torch.arange(seq_len, device=hidden_states.device).view(seq_len, 1, 1)
+            return hidden_states
+
+    class FakeSparseSharedLayer(torch.nn.Module):
+        def forward(self, *hidden_states_list: torch.Tensor, position_embeddings, seq_ctx: list[SequenceContext]):
+            assert len(hidden_states_list) == len(seq_ctx)
+            for micro_batch_idx, micro_batch_seq_ctx in enumerate(seq_ctx):
+                assert set(micro_batch_seq_ctx.dsa_topk_indices) == {0}
+                topk_indices = micro_batch_seq_ctx.dsa_topk_indices[0]
+                assert topk_indices.shape[0] == micro_batch_seq_ctx.input_ids.shape[1]
+                if micro_batch_idx == 0:
+                    torch.testing.assert_close(topk_indices.flatten(), torch.tensor([0, 1]))
+                else:
+                    torch.testing.assert_close(topk_indices.flatten(), torch.tensor([2, 3, 4]))
+
+            router_logits = tuple(
+                torch.zeros(hidden_states.shape[1], 1, device=hidden_states.device)
+                for hidden_states in hidden_states_list
+            )
+            router_weights = tuple(
+                torch.ones(hidden_states.shape[1], 1, device=hidden_states.device)
+                for hidden_states in hidden_states_list
+            )
+            return (*hidden_states_list, *router_logits, *router_weights)
+
+    class FakeAuxLoss(torch.nn.Module):
+        def accumulate(self, *, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
+            return hidden_states
+
+        def finalize(self, **kwargs):
+            return None, None, torch.zeros(1, 1)
+
+    class FakeLossCtx:
+        @classmethod
+        def cat(cls, chunks):
+            return cls()
+
+    class FakeLMHead(torch.nn.Module):
+        def forward(self, hidden_states: torch.Tensor, loss_ctx):
+            return hidden_states.sum() * 0, (hidden_states, None)
+
+    cfg = _tiny_glm52_config()
+    model = cfg.build()
+    model.embed_tokens = FakeEmbedding(cfg.hidden_size)
+    model.rotary_emb = FakeRotaryEmbedding()
+    model.layers = torch.nn.ModuleDict(
+        {
+            "0": FakeDensePrefixLayer(),
+            "1": FakeSparseSharedLayer(),
+        }
+    )
+    model.norm = torch.nn.Identity()
+    model.lm_head = FakeLMHead()
+    model.aux_loss = FakeAuxLoss()
+    model.mtp_block = None
+
+    seq_ctx_list = [
+        SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu"),
+        SequenceContext.from_input_ids((torch.tensor([[3, 4, 5]]),), device="cpu"),
+    ]
+    loss_ctx_list = [{"lm": FakeLossCtx()}, {"lm": FakeLossCtx()}]
+
+    output = model(seq_ctx=seq_ctx_list, loss_ctx=loss_ctx_list)
+
+    assert torch.isfinite(output["loss"])
+
+
 class TestGlm52MoE(DeterministicDDPTestCase):
     @parametrize.parametrize(
-        "device,dispatcher,ep_size,expect_full_layer_compile",
+        "device,dispatcher,ep_size,expected_full_layer_option",
         [
-            ("cuda", None, 1, True),
-            ("cuda", "all2all", 8, False),
+            ("cuda", None, 1, {"fullgraph": False}),
+            ("cuda", "all2all", 8, None),
         ],
     )
     def test_glm52_default_compile_cfg_respects_ep_granularity(
-        self, device, dispatcher, ep_size, expect_full_layer_compile
+        self, device, dispatcher, ep_size, expected_full_layer_option
     ):
         self.create_pg(device)
 
@@ -473,20 +558,24 @@ class TestGlm52MoE(DeterministicDDPTestCase):
             model = cfg.build()
 
         full_layer_target = "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward"
-        sub_layer_targets = [
-            "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._pre_moe_forward",
-            "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward",
-            "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._shared_experts_forward",
-            "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._post_moe_forward",
-        ]
+        expected_targets = {
+            "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._pre_moe_forward": {"fullgraph": False},
+            "xtuner.v1.module.attention.dsa_mla.DSAMultiLatentAttention.forward": {"fullgraph": False},
+            "xtuner.v1.module.decoder_layer.dense_decoder_layer.DenseDecoderLayer.forward": {"fullgraph": False},
+            "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward": {"fullgraph": True},
+            "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._shared_experts_forward": {
+                "fullgraph": True
+            },
+            "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._post_moe_forward": {"fullgraph": True},
+        }
 
-        if expect_full_layer_compile:
-            self.assertEqual(model.compile_cfg[full_layer_target], {"fullgraph": True})
+        if expected_full_layer_option is not None:
+            self.assertEqual(model.compile_cfg[full_layer_target], expected_full_layer_option)
         else:
             self.assertNotIn(full_layer_target, model.compile_cfg)
 
-        for target in sub_layer_targets:
-            self.assertEqual(model.compile_cfg[target], {"fullgraph": True})
+        for target, expected_option in expected_targets.items():
+            self.assertEqual(model.compile_cfg[target], expected_option)
 
     @parametrize.parametrize(
         "device,dispatcher,ep_size,compile,tol,loss_mode",
@@ -533,14 +622,15 @@ class TestGlm52MoE(DeterministicDDPTestCase):
             torch.cuda.empty_cache()
 
     @parametrize.parametrize(
-        "device,dispatcher,ep_size",
+        "device,dispatcher,ep_size,compile",
         [
-            ("cuda", "all2all", 4),
-            ("cuda", "all2all", 8),
-            ("cuda", None, 1),
+            ("cuda", "all2all", 4, False),
+            ("cuda", "all2all", 8, False),
+            ("cuda", None, 1, False),
+            ("cuda", None, 1, True),
         ],
     )
-    def test_fsdp_accuracy(self, device, dispatcher, ep_size):
+    def test_fsdp_accuracy(self, device, dispatcher, ep_size, compile):
         self.create_pg(device)
 
         tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
@@ -555,13 +645,34 @@ class TestGlm52MoE(DeterministicDDPTestCase):
 
         with torch.device("meta"):
             cfg = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
-            cfg.compile_cfg = False
+            if not compile:
+                cfg.compile_cfg = False
             cfg.dispatcher = dispatcher
             cfg.ep_size = ep_size
             model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(ep_size=ep_size, cpu_offload=False)
         model.fully_shard(fsdp_config=fsdp_config)
+        if compile:
+            self.assertFalse(is_compiled_function(model.layers["0"].forward))
+            self.assertTrue(is_compiled_function(model.layers["0"]._checkpoint_wrapped_module.forward))
+            sparse_checkpoint_layer = next(
+                (
+                    layer
+                    for layer in model.layers.values()
+                    if hasattr(layer, "_checkpoint_wrapped_module")
+                    and hasattr(layer._checkpoint_wrapped_module, "_pre_moe_forward")
+                ),
+                None,
+            )
+            # Keep checkpoint wrappers eager so activation checkpoint remains a
+            # PyTorch higher-order op outside AOTAutograd; the wrapped decoder
+            # layer still uses the class-level compile config.
+            if sparse_checkpoint_layer is not None:
+                sparse_wrapped_layer = sparse_checkpoint_layer._checkpoint_wrapped_module
+                self.assertFalse(is_compiled_function(sparse_checkpoint_layer.forward))
+                self.assertTrue(is_compiled_function(sparse_wrapped_layer.forward))
+                self.assertTrue(is_compiled_function(sparse_wrapped_layer._pre_moe_forward))
 
         try:
             model.from_hf(GLM5_2_TINY_MOE_PATH)
