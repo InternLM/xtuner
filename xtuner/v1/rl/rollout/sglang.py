@@ -14,6 +14,9 @@ from xtuner.v1.utils import XTUNER_DETERMINISTIC
 from .rollout_topology import RolloutEngine, RolloutServerProcess, RolloutTopology
 from .worker import RolloutConfig, RolloutWorker
 
+SHARED_STORE = "shared_store"
+SHARED_STORE_NAMESPACE = "sglang"
+
 
 class SGLangWorker(RolloutWorker):
     def __init__(
@@ -42,6 +45,7 @@ class SGLangWorker(RolloutWorker):
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
+        self.sglang_actor = None
 
     @classmethod
     def build_rollout_topology(
@@ -338,6 +342,15 @@ class SGLangWorker(RolloutWorker):
 
     async def _decode_routed_experts(self, routed_experts: Any):
         if isinstance(routed_experts, str):
+            try:
+                if self.sglang_actor is None:
+                    self.sglang_actor = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
+                routed_experts_data = await self.sglang_actor.get.remote(routed_experts)
+                if hasattr(routed_experts_data, "detach"):
+                    routed_experts_data = routed_experts_data.detach().cpu().numpy()
+                return ray.put(np.asarray(routed_experts_data))
+            except Exception:
+                self.logger.debug("Failed to resolve SGLang routed_experts from Ray shared store; trying base64.")
             routed_experts_flat = np.frombuffer(base64.b64decode(routed_experts), dtype=np.int32)
             routed_experts_array = routed_experts_flat.reshape(
                 -1,
