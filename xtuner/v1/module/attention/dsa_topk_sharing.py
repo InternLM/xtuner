@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
+from dataclasses import dataclass
 from typing import Callable, Protocol
 
 import torch
@@ -12,10 +13,77 @@ class DSATopKSharingLayerProtocol(Protocol):
     layer_idx: int
     source_layer_idx: int
     training: bool
+    indexer_types: list[str] | None
+    index_skip_topk_offset: int
+    index_topk_freq: int
     dsa_topk_last_use: dict[int, int]
     dsa_topk_recompute_release: dict[int, int]
 
     def _is_skip_topk_layer(self) -> bool: ...
+
+
+@dataclass(frozen=True)
+class DSATopKReleasePlan:
+    forward_last_use: dict[int, int]
+    recompute_release: dict[int, int]
+
+
+def build_dsa_topk_release_plan(
+    *,
+    num_main_layers: int,
+    num_mtp_layers: int,
+    indexer_types: list[str] | None,
+    index_skip_topk_offset: int,
+    index_topk_freq: int,
+) -> DSATopKReleasePlan:
+    consumers: dict[int, list[int]] = {}
+    for layer_idx in range(num_main_layers + num_mtp_layers):
+        source_layer_idx = _source_layer_for_plan(
+            layer_idx=layer_idx,
+            indexer_types=indexer_types,
+            index_skip_topk_offset=index_skip_topk_offset,
+            index_topk_freq=index_topk_freq,
+        )
+        consumers.setdefault(source_layer_idx, []).append(layer_idx)
+
+    return DSATopKReleasePlan(
+        forward_last_use={
+            source_layer_idx: max(consumer_layers) for source_layer_idx, consumer_layers in consumers.items()
+        },
+        recompute_release={
+            source_layer_idx: min(consumer_layers) for source_layer_idx, consumer_layers in consumers.items()
+        },
+    )
+
+
+def _source_layer_for_plan(
+    *,
+    layer_idx: int,
+    indexer_types: list[str] | None,
+    index_skip_topk_offset: int,
+    index_topk_freq: int,
+) -> int:
+    if indexer_types is not None:
+        if layer_idx < len(indexer_types) and indexer_types[layer_idx] == "full":
+            return layer_idx
+        start_idx = min(layer_idx, len(indexer_types) - 1)
+        for source_layer_idx in range(start_idx, -1, -1):
+            if indexer_types[source_layer_idx] == "full":
+                return source_layer_idx
+        raise ValueError(f"DSA layer {layer_idx} has no preceding full indexer layer.")
+
+    if index_topk_freq <= 1:
+        return layer_idx
+
+    source_layer_idx = layer_idx
+    while _is_skip_topk_layer_for_plan(source_layer_idx, index_skip_topk_offset, index_topk_freq):
+        source_layer_idx -= 1
+    return source_layer_idx
+
+
+def _is_skip_topk_layer_for_plan(layer_idx: int, skip_topk_offset: int, topk_freq: int) -> bool:
+    layer_number = layer_idx + 1
+    return (max(layer_number - skip_topk_offset, 0) % topk_freq) != 0
 
 
 class TopKResidencyBase:

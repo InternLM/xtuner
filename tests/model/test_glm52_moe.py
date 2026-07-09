@@ -337,6 +337,20 @@ def test_glm52_update_bias_covers_main_and_mtp_moe_gates():
         torch.testing.assert_close(bias, expected)
 
 
+def test_glm52_mtp_layer_extends_dsa_topk_release_plan():
+    config = _tiny_glm52_config()
+    config.mtp_config = MTPConfig(num_layers=1)
+
+    model = config.build()
+
+    main_attn = model.layers["2"].self_attn
+    mtp_attn = model.mtp_block.layers[0].decoder_layer.self_attn  # type: ignore[union-attr]
+    assert main_attn.dsa_topk_last_use[0] == 3
+    assert mtp_attn.dsa_topk_last_use[0] == 3
+    assert main_attn.dsa_topk_recompute_release[0] == 0
+    assert mtp_attn.dsa_topk_recompute_release[0] == 0
+
+
 def test_tiny_glm52_hf_checkpoint_load_reports_loaded_missing_and_ignored_keys():
     config = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
     config.compile_cfg = False
