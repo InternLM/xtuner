@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import parametrize
 import torch
@@ -263,6 +264,33 @@ class TestGlm52MoEEngine(DeterministicDDPTestCase):
                 [12.5259, 12.5333, 12.5516, 12.5002, 12.4089, 12.3696, 11.9864, 11.8645, 10.7606, 10.3792]
             )
             self._check_loss_curve(torch.tensor(losses), losses_ref)
+        finally:
+            torch.cuda.empty_cache()
+
+    @parametrize.parametrize(
+        "device,dispatcher,ep_size",
+        [
+            ("cuda", "all2all", 8),
+        ],
+    )
+    def test_activation_offload_train_step(self, device, dispatcher, ep_size):
+        self.create_pg(device)
+
+        engine = _build_engine(dispatcher=dispatcher, ep_size=ep_size)
+        engine.from_hf(GLM5_2_TINY_MOE_PATH)
+        tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
+        loss_cfg = CELossConfig()
+
+        try:
+            # Exercise GLM's sparse-layer activation-offload branch through the
+            # public TrainEngine path, including backward and optimizer update.
+            with mock.patch.dict(os.environ, {"XTUNER_ACTIVATION_OFFLOAD": "1"}):
+                loss_log = engine.train_step(_build_train_engine_input(tokenizer, loss_cfg))["logs_info"]
+                grad_norm = engine.clip_grad_norm()
+                engine.step_optimizer(grad_norm)
+
+            assert math.isfinite(loss_log["reduced_llm_loss"])
+            assert math.isfinite(float(grad_norm))
         finally:
             torch.cuda.empty_cache()
 
