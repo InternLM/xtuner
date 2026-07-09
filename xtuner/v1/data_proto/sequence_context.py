@@ -53,6 +53,8 @@ class SequenceContext:
     # Format: {source_layer_idx: topk_indices}, where topk_indices is
     # [seq_len, kv_group, topk] and invalid/padded sparse slots are -1.
     dsa_topk_indices: dict[int, torch.Tensor]
+    dsa_topk_released_sources: set[int]
+    dsa_topk_checkpoint_active: bool
 
     # Private backing attributes for SP shard reconstruction
     _raw_input_ids: torch.LongTensor | None
@@ -82,6 +84,8 @@ class SequenceContext:
         num_img_tokens: list[list[int]] | None = None,
         rollout_routed_experts: torch.Tensor | None = None,
         dsa_topk_indices: dict[int, torch.Tensor] | None = None,
+        dsa_topk_released_sources: set[int] | None = None,
+        dsa_topk_checkpoint_active: bool = False,
         # SP shard metadata: private, accessed via properties below
         raw_input_ids: torch.LongTensor | None = None,
         raw_inputs_embeds: torch.FloatTensor | None = None,
@@ -116,6 +120,8 @@ class SequenceContext:
         self.num_img_tokens = num_img_tokens
         self.rollout_routed_experts = rollout_routed_experts
         self.dsa_topk_indices = {} if dsa_topk_indices is None else dsa_topk_indices
+        self.dsa_topk_released_sources = set() if dsa_topk_released_sources is None else dsa_topk_released_sources
+        self.dsa_topk_checkpoint_active = dsa_topk_checkpoint_active
         self._raw_input_ids = raw_input_ids
         self._raw_inputs_embeds = raw_inputs_embeds
         self._shard_start = shard_start
@@ -503,6 +509,8 @@ class SequenceContext:
             num_img_tokens=overrides.get("num_img_tokens", self.num_img_tokens),
             rollout_routed_experts=overrides.get("rollout_routed_experts", self.rollout_routed_experts),
             dsa_topk_indices=overrides.get("dsa_topk_indices", self.dsa_topk_indices),
+            dsa_topk_released_sources=overrides.get("dsa_topk_released_sources", self.dsa_topk_released_sources),
+            dsa_topk_checkpoint_active=overrides.get("dsa_topk_checkpoint_active", self.dsa_topk_checkpoint_active),
             raw_input_ids=overrides.get("raw_input_ids", self._raw_input_ids),
             raw_inputs_embeds=overrides.get("raw_inputs_embeds", self._raw_inputs_embeds),
             shard_start=overrides.get("shard_start", self._shard_start),
@@ -590,4 +598,6 @@ class SequenceContext:
             "num_img_tokens": self.num_img_tokens,
             "rollout_routed_experts": self.rollout_routed_experts,
             "dsa_topk_indices": self.dsa_topk_indices,
+            "dsa_topk_released_sources": self.dsa_topk_released_sources,
+            "dsa_topk_checkpoint_active": self.dsa_topk_checkpoint_active,
         }

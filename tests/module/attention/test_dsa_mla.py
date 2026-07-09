@@ -361,6 +361,31 @@ def test_dsa_attention_mtp_layer_reuses_last_main_full_indexer():
     assert seq_ctx.dsa_topk_indices[2] is source_topk
 
 
+def test_dsa_attention_checkpoint_recompute_reuses_and_releases_source_topk():
+    torch.manual_seed(0)
+    source_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0)
+    shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1)
+    hidden_states = torch.randn(1, 4, 4)
+    position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
+    seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
+
+    with torch.no_grad():
+        source_attn(hidden_states, position_embeddings, seq_ctx)
+        shared_attn(hidden_states, position_embeddings, seq_ctx)
+
+    source_topk = seq_ctx.dsa_topk_indices[0]
+    assert seq_ctx.dsa_topk_checkpoint_active
+
+    recompute_hidden_states = hidden_states.detach().clone().requires_grad_()
+    shared_attn(recompute_hidden_states, position_embeddings, seq_ctx)
+    assert seq_ctx.dsa_topk_indices[0] is source_topk
+
+    source_attn(recompute_hidden_states, position_embeddings, seq_ctx)
+
+    assert seq_ctx.dsa_topk_indices == {}
+    assert seq_ctx.dsa_topk_released_sources == {0}
+
+
 def test_dsa_attention_shared_layer_fails_when_source_topk_is_missing():
     shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1)
     seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
