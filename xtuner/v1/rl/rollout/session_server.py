@@ -33,13 +33,19 @@ def _is_error_payload(payload: dict) -> bool:
     return payload.get("error") is not None or payload.get("type") == "error" or payload.get("object") == "error"
 
 
-def _lmdeploy_error_payload(message: str, status: int = 500, error_type: str = "internal_server_error") -> dict:
-    return {
-        "message": message,
-        "type": error_type,
-        "code": status,
-        "object": "error",
-    }
+def _error_payload(fmt: str, message: str, status: int = 500, error_type: str = "internal_server_error") -> dict:
+    """Error body in the caller's native shape.
+
+    The downstream SessionClient recorder drops a turn only when it recognizes the
+    error shape: Anthropic keys on top-level ``type == "error"``, OpenAI/lmdeploy on
+    ``object == "error"``. Emitting the matching shape keeps a turn the SessionServer
+    dropped (e.g. an ``on_response`` that raised on missing routed experts) out of the
+    client's records, so the trace store stays a superset of them and export never
+    sees a trajectory whose nodes were never written.
+    """
+    if fmt == FMT_ANTHROPIC:
+        return {"type": "error", "error": {"type": error_type, "message": message}}
+    return {"message": message, "type": error_type, "code": status, "object": "error"}
 
 
 def _bool_request_value(value: Any, default: bool = False) -> bool:
@@ -527,19 +533,19 @@ class SessionServer:
         """Proxy handler: detect format, run hooks, forward, stream back."""
 
         req_path = request.match_info["path"]
+        fmt = _detect_format(req_path)
 
         # Reject /v1/responses outright — upstream worker doesn't implement it.
         if req_path.endswith("/responses") or "/v1/responses" in req_path:
             return web.json_response(
-                _lmdeploy_error_payload(
+                _error_payload(
+                    fmt,
                     "/v1/responses is not supported by SessionServer (upstream worker has no responses endpoint).",
                     status=HTTPStatus.NOT_IMPLEMENTED,
                     error_type="not_implemented",
                 ),
                 status=HTTPStatus.NOT_IMPLEMENTED,
             )
-
-        fmt = _detect_format(req_path)
 
         # Read the request body
         request_body = await request.read()
@@ -580,7 +586,7 @@ class SessionServer:
             except Exception as exc:
                 message = f"SessionServer request hook failed: {type(exc).__name__}: {exc}"
                 get_logger().error(message)
-                return web.json_response(_lmdeploy_error_payload(message), status=500)
+                return web.json_response(_error_payload(fmt, message), status=500)
 
         # Build forwarding headers, dropping original Host / Content-Length.
         forward_headers = dict(request.headers)
@@ -712,10 +718,13 @@ class SessionServer:
         if is_stream:
             try:
                 if session_error_msg:
-                    error_payload = _lmdeploy_error_payload(session_error_msg)
-                    await response.write(
-                        ("data: " + json.dumps(error_payload, ensure_ascii=False) + "\n\n").encode("utf-8")
-                    )
+                    error_payload = _error_payload(fmt, session_error_msg)
+                    error_line = "data: " + json.dumps(error_payload, ensure_ascii=False) + "\n\n"
+                    # Anthropic SSE carries a named ``event: error`` line; the recorder keys on the ``data:`` JSON
+                    # either way, but a real Anthropic SDK consumer needs the event name.
+                    if fmt == FMT_ANTHROPIC:
+                        error_line = "event: error\n" + error_line
+                    await response.write(error_line.encode("utf-8"))
                     skip_done = True
                 if not skip_done:
                     await response.write(b"data: [DONE]\n\n")
@@ -723,7 +732,7 @@ class SessionServer:
             except (ConnectionError, ClientConnectionResetError):
                 pass
         elif session_error_msg:
-            return web.json_response(_lmdeploy_error_payload(session_error_msg), status=500)
+            return web.json_response(_error_payload(fmt, session_error_msg), status=500)
 
         return response
 
