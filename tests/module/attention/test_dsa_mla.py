@@ -386,6 +386,42 @@ def test_dsa_attention_checkpoint_recompute_reuses_and_releases_source_topk():
     assert seq_ctx.dsa_topk_released_sources == {0}
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA activation offload")
+def test_dsa_attention_activation_offload_checkpoint_recompute_onloads_and_clears_topk(monkeypatch):
+    monkeypatch.setenv("XTUNER_ACTIVATION_OFFLOAD", "1")
+    torch.manual_seed(0)
+    source_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0).cuda()
+    shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1).cuda()
+    hidden_states = torch.randn(1, 4, 4, device="cuda")
+    position_embeddings = (
+        torch.ones(1, 4, 2, device="cuda"),
+        torch.zeros(1, 4, 2, device="cuda"),
+    )
+    seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cuda")
+
+    with torch.no_grad():
+        source_attn(hidden_states, position_embeddings, seq_ctx)
+        source_topk = seq_ctx.dsa_topk_indices[0].detach().cpu().clone()
+        shared_attn(hidden_states, position_embeddings, seq_ctx)
+    torch.cuda.synchronize()
+
+    assert seq_ctx.dsa_topk_indices == {}
+    assert set(seq_ctx.dsa_topk_offloaded) == {0}
+    assert seq_ctx.dsa_topk_offloaded[0] == f"dsa_topk_{seq_ctx.dsa_topk_context_id}_0"
+
+    recompute_hidden_states = hidden_states.detach().clone().requires_grad_()
+    shared_attn(recompute_hidden_states, position_embeddings, seq_ctx)
+    assert set(seq_ctx.dsa_topk_indices) == {0}
+    torch.testing.assert_close(seq_ctx.dsa_topk_indices[0].cpu(), source_topk)
+
+    source_attn(recompute_hidden_states, position_embeddings, seq_ctx)
+    torch.cuda.synchronize()
+
+    assert seq_ctx.dsa_topk_indices == {}
+    assert seq_ctx.dsa_topk_offloaded == {}
+    assert seq_ctx.dsa_topk_released_sources == {0}
+
+
 def test_dsa_attention_shared_layer_fails_when_source_topk_is_missing():
     shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1)
     seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")

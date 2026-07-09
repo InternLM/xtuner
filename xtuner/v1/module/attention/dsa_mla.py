@@ -19,6 +19,7 @@ from xtuner.v1.ops.sparse_mla import (
 
 from ..linear import build_linear
 from .attn_outputs import AttnOutputs
+from .dsa_topk_sharing import get_dsa_topk_sharing_runtime
 from .mla import MLAConfig, MultiLatentAttention, mla_apply_rotary_pos_emb
 
 
@@ -267,65 +268,6 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             {source_layer_idx: min(consumer_layers) for source_layer_idx, consumer_layers in consumers.items()},
         )
 
-    def _is_checkpoint_original_forward(self) -> bool:
-        return self.training and not torch.is_grad_enabled()
-
-    def _is_checkpoint_recompute(self, seq_ctx: SequenceContext) -> bool:
-        return seq_ctx.dsa_topk_checkpoint_active and torch.is_grad_enabled()
-
-    def _get_topk_indices(
-        self,
-        hidden_states: torch.Tensor,
-        q_resid: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        seq_ctx: SequenceContext,
-    ) -> torch.Tensor:
-        if self._is_skip_topk_layer():
-            if self.source_layer_idx not in seq_ctx.dsa_topk_indices:
-                raise AssertionError(
-                    "DSA index-share: skip layer "
-                    f"{self.layer_idx} needs source layer {self.source_layer_idx} top-k, "
-                    "but it is not present in this microbatch SequenceContext. "
-                    "Cross-pipeline top-k sharing is not supported."
-                )
-            return seq_ctx.dsa_topk_indices[self.source_layer_idx]
-
-        if (
-            self._is_checkpoint_recompute(seq_ctx)
-            and self.layer_idx not in seq_ctx.dsa_topk_released_sources
-            and self.source_layer_idx in seq_ctx.dsa_topk_indices
-        ):
-            return seq_ctx.dsa_topk_indices[self.source_layer_idx]
-
-        topk_indices = self.indexer(
-            hidden_states.detach(),
-            q_resid.detach(),
-            position_embeddings,
-            seq_ctx,
-        )
-        seq_ctx.dsa_topk_indices[self.layer_idx] = topk_indices
-        return topk_indices
-
-    def _after_sparse_mla_use(self, seq_ctx: SequenceContext) -> None:
-        source_layer_idx = self.source_layer_idx
-        if self._is_checkpoint_original_forward():
-            if self.dsa_topk_last_use.get(source_layer_idx) == self.layer_idx:
-                # Reentrant checkpoint original forward runs under no_grad, so
-                # SparseMLA has no autograd ctx. Keep source top-k for backward
-                # recompute, then switch grad-enabled replay to recompute release
-                # semantics.
-                seq_ctx.dsa_topk_checkpoint_active = True
-            return
-
-        if not self._is_checkpoint_recompute(seq_ctx):
-            return
-
-        if self.dsa_topk_recompute_release.get(source_layer_idx) != self.layer_idx:
-            return
-
-        seq_ctx.dsa_topk_indices.pop(source_layer_idx, None)
-        seq_ctx.dsa_topk_released_sources.add(source_layer_idx)
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -360,7 +302,16 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         key_states = torch.cat([kv_compressed, k_pe.transpose(1, 2).squeeze(2)], dim=-1)
         key_states = key_states.squeeze(0).unsqueeze(1).contiguous()
 
-        topk_indices = self._get_topk_indices(hidden_states, q_resid, position_embeddings, seq_ctx)
+        topk_indices = get_dsa_topk_sharing_runtime().get_or_compute(
+            layer=self,
+            seq_ctx=seq_ctx,
+            compute_source_topk=lambda: self.indexer(
+                hidden_states.detach(),
+                q_resid.detach(),
+                position_embeddings,
+                seq_ctx,
+            ),
+        )
         sparse_mla_outputs = self.sparse_mla_func(
             query_states,
             key_states,
@@ -368,7 +319,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             self.softmax_scale,
             value_dim=self.kv_lora_rank,
         )
-        self._after_sparse_mla_use(seq_ctx)
+        get_dsa_topk_sharing_runtime().after_sparse_mla_use(layer=self, seq_ctx=seq_ctx)
         raw_output = sparse_mla_outputs.raw_output
         softmax_lse = sparse_mla_outputs.softmax_lse
         raw_output = torch.einsum("shm,hdm->shd", raw_output, w_vc)
