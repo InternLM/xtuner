@@ -66,6 +66,34 @@ def _mismatch_window(left: str, right: str, *, radius: int = 160) -> dict[str, A
     }
 
 
+def _resolve_routed_experts(expert_keys: List[Any], session_id: str) -> List[Any] | None:
+    """Collapse per-node ``expert_key`` values into the exported
+    ``routed_experts``.
+
+    The SessionServer's single-phase write guarantees that, within one session,
+    either every trace node carries routed experts (MoE) or none of them do
+    (dense). This helper enforces that invariant at export time.
+
+    Args:
+        expert_keys (List[Any]): One ``expert_key`` per trace node, in path order.
+        session_id (str): The session identifier, used only for error messages.
+
+    Returns:
+        List[Any] | None: The per-node expert refs for a MoE trace, or ``None``
+        when the trace carries no routed experts at all (dense model), so the
+        trainer skips routed-expert consumption entirely.
+    """
+    present = [expert_key is not None for expert_key in expert_keys]
+    if not any(present):
+        return None
+    if all(present):
+        return expert_keys
+    raise ValueError(
+        f"Inconsistent routed_experts in session {session_id!r}: {sum(present)}/{len(present)} trace nodes carry "
+        "routed experts; the trace mixes MoE turns with missing-expert turns and cannot be exported."
+    )
+
+
 class TokenizedSegment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -324,7 +352,9 @@ class RolloutTraceStore:
 
         Returns:
             dict: The trace dictionary containing `input_ids`, `labels`, `logprobs`,
-                and `routed_experts`.
+                and `routed_experts`. `routed_experts` is a per-node list of expert-id
+                refs for a MoE trace, or `None` when the trace carries no routed
+                experts at all (dense model).
 
         Raises:
             ValueError: If the prompt_text does not completely match the trace keys in the session.
@@ -354,7 +384,8 @@ class RolloutTraceStore:
                 f"prompt_len={len(prompt_text)} matched_len={len(key)} key_count={len(session_keys)}. "
                 "See the logged '[TraceStore] prompt mismatch' report for the full diff."
             )
-        trace: dict[str, list[Any]] = {"input_ids": [], "labels": [], "logprobs": [], "routed_experts": []}
+        trace: dict[str, Any] = {"input_ids": [], "labels": [], "logprobs": []}
+        expert_keys: list[Any] = []
         for node in nodes:
             node_val = node.value
             if not isinstance(node_val, TokenizedSegment):
@@ -364,7 +395,8 @@ class RolloutTraceStore:
             trace["input_ids"].extend(node_val.token_ids)
             trace["labels"].extend(node_val.labels)
             trace["logprobs"].extend(node_val.logprobs)
-            trace["routed_experts"].append(node_val.expert_key)
+            expert_keys.append(node_val.expert_key)
+        trace["routed_experts"] = _resolve_routed_experts(expert_keys, session_id)
         return trace
 
     def get_objects(self, keys: list[str]) -> list[ray.ObjectRef]:

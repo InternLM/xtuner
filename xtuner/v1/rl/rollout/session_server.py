@@ -332,14 +332,17 @@ class SessionServer:
             tokenize=False,
         )
 
-        # 2. Prefix-cache lookup; insert the delta tail back into the store.
+        # 2. Prefix-cache lookup. The delta tail is NOT persisted here: writing a
+        #    node before generation would leave it with ``expert_key=None`` (routed
+        #    experts don't exist yet), which is exactly the orphan the trace store
+        #    must never keep. ``delta_ids`` is only needed locally to build
+        #    ``input_ids``; ``on_response`` re-derives and persists the delta node
+        #    once its routed experts are known (single-phase write).
         prefix, nodes = await self.store.search.remote(session_id, prompt_text, filter_none=True)
         if prefix:
             get_logger().debug(f"Hit prefix cache for session {session_id}")
-        delta, delta_ids = prompt_text[len(prefix) :], []
-        if delta:
-            delta_ids = self.tokenizer.encode(delta, add_special_tokens=False)
-            await self.store.insert.remote(session_id, prompt_text, TokenizedSegment(text=delta, token_ids=delta_ids))
+        delta = prompt_text[len(prefix) :]
+        delta_ids = self.tokenizer.encode(delta, add_special_tokens=False) if delta else []
         input_ids = reduce(add, [node.value.token_ids for node in nodes] + [delta_ids])
 
         # 3. Inject extension fields on the forwarded request. The body still
@@ -418,77 +421,77 @@ class SessionServer:
         old_prompt = self.tokenizer.apply_chat_template(
             canonicalize_messages_for_chat_template(messages), tools=tools, add_generation_prompt=True, tokenize=False
         )
-        try:
-            if output_token_ids is None:
-                raise RuntimeError(
-                    "SessionServer response has no output_ids; cannot export a training trace for this assistant turn."
-                )
-            output_logprobs = _extract_output_logprobs(output_token_logprobs, output_token_ids)
+        if output_token_ids is None:
+            raise RuntimeError(
+                "SessionServer response has no output_ids; cannot export a training trace for this assistant turn."
+            )
+        output_logprobs = _extract_output_logprobs(output_token_logprobs, output_token_ids)
 
-            full_messages = [*messages, assistant_msg]
-            new_prompt = (
-                self.tokenizer.apply_chat_template(
-                    canonicalize_messages_for_chat_template(full_messages),
-                    tools=tools,
-                    add_generation_prompt=False,
-                    tokenize=False,
-                )
-            ).rstrip()
-            assert new_prompt.startswith(old_prompt) and new_prompt.endswith(self.stop_word)
+        full_messages = [*messages, assistant_msg]
+        new_prompt = (
+            self.tokenizer.apply_chat_template(
+                canonicalize_messages_for_chat_template(full_messages),
+                tools=tools,
+                add_generation_prompt=False,
+                tokenize=False,
+            )
+        ).rstrip()
+        assert new_prompt.startswith(old_prompt) and new_prompt.endswith(self.stop_word)
 
-            if raw_routed_expert is not None:
-                raw_routed_expert = await self._decode_routed_experts(raw_routed_expert)
-                if len(raw_routed_expert) > 0:
-                    num_layers = raw_routed_expert.shape[1]
-                    topk_experts = raw_routed_expert.shape[2]
-                    dummy_expert = np.full((1, num_layers, topk_experts), 0, dtype=raw_routed_expert.dtype)
-                    raw_routed_expert = np.concatenate([dummy_expert, raw_routed_expert], axis=0)
+        # Re-derive the input delta the worker processed. on_request no longer
+        # persists it (that would leave a None-expert placeholder in the store),
+        # so recompute it from the current prefix and split the routed experts
+        # across (prefix, delta, response) using the same boundaries on_request
+        # used to build ``input_ids``.
+        matched_prefix, prefix_nodes = await self.store.search.remote(session_id, old_prompt, filter_none=True)
+        delta_text = old_prompt[len(matched_prefix) :]
+        delta_ids = self.tokenizer.encode(delta_text, add_special_tokens=False) if delta_text else []
+        prefix_len = sum(len(n.value.token_ids) for n in prefix_nodes)
+        delta_len = len(delta_ids)
 
-                _, nodes = await self.store.search.remote(session_id, old_prompt, filter_none=True)
+        delta_expert: Any = None
+        response_expert: Any = None
+        if raw_routed_expert is not None:
+            raw_routed_expert = await self._decode_routed_experts(raw_routed_expert)
+            if len(raw_routed_expert) > 0:
+                num_layers = raw_routed_expert.shape[1]
+                topk_experts = raw_routed_expert.shape[2]
+                dummy_expert = np.full((1, num_layers, topk_experts), 0, dtype=raw_routed_expert.dtype)
+                raw_routed_expert = np.concatenate([dummy_expert, raw_routed_expert], axis=0)
+            assert prefix_len + delta_len + len(output_token_ids) == len(raw_routed_expert)
+            if delta_len > 0:
+                delta_expert = ray.put(raw_routed_expert[prefix_len : prefix_len + delta_len])
+            response_expert = ray.put(raw_routed_expert[prefix_len + delta_len :])
+        elif self.enable_return_routed_experts and _bool_request_value(
+            orig_req_body.get("return_routed_experts"), True
+        ):
+            raise RuntimeError(
+                "SessionServer response is missing routed_experts, but enable_return_routed_experts is True."
+                " The upstream worker may encounter an LLM call error."
+            )
 
-                # last node in nodes corresponds to the delta inserted in on_request (if any)
-                if nodes:
-                    delta_node_val: TokenizedSegment = nodes[-1].value
-                    delta_len = len(delta_node_val.token_ids)
-                    prefix_len = sum(len(n.value.token_ids) for n in nodes[:-1])
-                    assert prefix_len + delta_len + len(output_token_ids) == len(raw_routed_expert)
-
-                    delta_expert = raw_routed_expert[prefix_len : prefix_len + delta_len]
-                    response_expert = raw_routed_expert[prefix_len + delta_len :]
-
-                    if delta_len > 0:
-                        delta_node_val.expert_key = ray.put(delta_expert)
-                        await self.store.insert.remote(session_id, old_prompt, delta_node_val)
-
-                    raw_routed_expert = ray.put(response_expert)
-                else:
-                    raw_routed_expert = ray.put(raw_routed_expert)
-            elif self.enable_return_routed_experts and _bool_request_value(
-                orig_req_body.get("return_routed_experts"), True
-            ):
-                raise RuntimeError(
-                    "SessionServer response is missing routed_experts, but enable_return_routed_experts is True."
-                    " The upstream worker may encounter an LLM call error."
-                )
-
+        # Single-phase write: nodes are persisted only now, already carrying their
+        # final ``expert_key`` (a valid ref for MoE, None for dense). Every assert /
+        # raise above runs before any write, so a dropped turn leaves nothing
+        # half-written in the store (and no orphan placeholder to clean up).
+        if delta_ids:
             await self.store.insert.remote(
                 session_id,
-                key=new_prompt,
-                value=TokenizedSegment(
-                    text=new_prompt[len(old_prompt) :],
-                    token_ids=output_token_ids,
-                    logprobs=output_logprobs,
-                    labels=output_token_ids,
-                    expert_key=raw_routed_expert,
-                    length=len(output_token_ids),
-                ),
+                key=old_prompt,
+                value=TokenizedSegment(text=delta_text, token_ids=delta_ids, expert_key=delta_expert),
             )
-        except Exception:
-            if self.enable_return_routed_experts:
-                matched_key, nodes = await self.store.search.remote(session_id, old_prompt, filter_none=True)
-                if matched_key == old_prompt and nodes and getattr(nodes[-1].value, "expert_key", None) is None:
-                    await self.store.release.remote(session_id, old_prompt)
-            raise
+        await self.store.insert.remote(
+            session_id,
+            key=new_prompt,
+            value=TokenizedSegment(
+                text=new_prompt[len(old_prompt) :],
+                token_ids=output_token_ids,
+                logprobs=output_logprobs,
+                labels=output_token_ids,
+                expert_key=response_expert,
+                length=len(output_token_ids),
+            ),
+        )
 
         return worker_resp
 
