@@ -119,6 +119,8 @@ class ActivationOffloadedTopKResidency(TopKResidencyBase):
     def has_cache(self, seq_ctx: SequenceContext, source_layer_idx: int) -> bool:
         return source_layer_idx in seq_ctx.dsa_topk_indices or source_layer_idx in seq_ctx.dsa_topk_offloaded
 
+    # Pinned CPU buffers and stream-side effects must stay outside Inductor graphs.
+    @torch.compiler.disable
     def read(self, seq_ctx: SequenceContext, source_layer_idx: int) -> torch.Tensor:
         if source_layer_idx in seq_ctx.dsa_topk_indices:
             return seq_ctx.dsa_topk_indices[source_layer_idx]
@@ -138,6 +140,8 @@ class ActivationOffloadedTopKResidency(TopKResidencyBase):
         seq_ctx.dsa_topk_indices[source_layer_idx] = swap_tensor.tensor
         return swap_tensor.tensor
 
+    # Pinned CPU buffers and stream-side effects must stay outside Inductor graphs.
+    @torch.compiler.disable
     def after_original_forward_last_use(self, seq_ctx: SequenceContext, source_layer_idx: int) -> None:
         topk_indices = seq_ctx.dsa_topk_indices.pop(source_layer_idx)
         if not topk_indices.is_cuda:
@@ -154,6 +158,8 @@ class ActivationOffloadedTopKResidency(TopKResidencyBase):
         OffloadManager().put(key, swap_tensor)
         seq_ctx.dsa_topk_offloaded[source_layer_idx] = key
 
+    # Pinned CPU buffers and stream-side effects must stay outside Inductor graphs.
+    @torch.compiler.disable
     def after_recompute_release(self, seq_ctx: SequenceContext, source_layer_idx: int) -> None:
         super().after_recompute_release(seq_ctx, source_layer_idx)
         key = seq_ctx.dsa_topk_offloaded.pop(source_layer_idx, None)
