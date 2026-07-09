@@ -249,10 +249,14 @@ class TrainingController:
         print(f"len(packed_data_batches): {len(packed_data_batches)}")
 
         handles = []
+        data_batch_refs = {}
         for worker_idx, worker in enumerate(self.workers):
+            dp_idx = worker_idx // data_replicate_size
+            if dp_idx not in data_batch_refs:
+                data_batch_refs[dp_idx] = ray.put(packed_data_batches[dp_idx::dp_size])
             handles.append(
                 worker.fit.remote(  # type: ignore[attr-defined]
-                    data_batches=packed_data_batches[(worker_idx // data_replicate_size) :: dp_size],
+                    data_batches=data_batch_refs[dp_idx],
                     rollout_idx=rollout_idx,
                 )
             )
@@ -266,6 +270,7 @@ class TrainingController:
                     free_pixel_value_refs.extend(data["seq_ctx"].pixel_values)
             if len(free_pixel_value_refs) > 0:
                 free_object_refs(free_pixel_value_refs)
+            del data_batch_refs
             del packed_data_batches
         return log_infos
 
