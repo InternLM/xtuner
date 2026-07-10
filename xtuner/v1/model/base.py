@@ -26,6 +26,7 @@ from pydantic import ConfigDict, Field, computed_field, model_validator
 from pydantic.fields import FieldInfo
 from safetensors.torch import save_file
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.distributed_c10d import ProcessGroup
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     FSDPModule,
@@ -536,6 +537,11 @@ class BaseModel(nn.Module):
     hsdp_mesh: DeviceMesh | None = None
     fsdp_config: FSDPConfig | None = None
     config: XTunerBaseModelConfig
+    # Data-parallel process group used to reduce/calibrate the loss and MoE aux losses. ``None`` means
+    # the default WORLD group (non-pipeline behavior). Pipeline parallel sets this to the group of
+    # ranks sharing this rank's pipeline stage, so the loss collectives (which run only on the last
+    # stage) do not deadlock against stages that never enter them.
+    dp_group: "ProcessGroup | None" = None
 
     FSDP_SHARD_DIM = 0
 
@@ -1219,8 +1225,11 @@ class BaseModel(nn.Module):
 
         if lm_loss_ctx_list is not None:
             loss_ctx_cls = lm_loss_ctx_list[0].__class__
+            # ``self.dp_group`` is None for the non-pipeline path (build_batches reduces over WORLD as
+            # before); pipeline parallel sets it to the data-parallel group so the loss denominator
+            # and final loss reduce only span the ranks that compute the loss (the last stage).
             lm_loss_ctx_list = loss_ctx_cls.build_batches(
-                lm_loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=sp_mesh
+                lm_loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=sp_mesh, reduce_group=self.dp_group
             )
 
             if lm_loss_ctx_list is not None:

@@ -149,6 +149,12 @@ class BaseLossContext(nn.Module, ABC):
         self.loss_cfg = loss_cfg
         self.loss_kwargs = loss_kwargs
         self._batch_size = 1
+        # Process group over which the loss is reduced/calibrated (denominator + final loss sum).
+        # ``None`` means the default (WORLD) group, preserving non-pipeline behavior. Under pipeline
+        # parallel the loss is only computed on the last stage, so this is set to the data-parallel
+        # group (the ranks sharing this rank's pipeline stage) to avoid a WORLD collective that the
+        # other stages never enter.
+        self.reduce_group: Any = None
 
     @staticmethod
     def build_batches(loss_ctx_list: list[_BaseLossContextT], *args, **kwargs) -> list[_BaseLossContextT]:

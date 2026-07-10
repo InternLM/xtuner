@@ -1,4 +1,4 @@
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import torch
 import torch.nn as nn
@@ -126,6 +126,7 @@ class BalancingLossContext(nn.Module):
         n_routed_experts: int,
         num_experts_per_tok: int,
         non_pad_token: int,
+        reduce_group: Any = None,
     ) -> torch.Tensor:
         """Finalize balancing loss from accumulators.
 
@@ -149,7 +150,8 @@ class BalancingLossContext(nn.Module):
         local_gating_sum = torch.stack(routing_weights_sum_list, dim=0)
 
         if self.loss_cfg.balancing_loss_global_average and dist.is_initialized():
-            group = dist.group.WORLD
+            # ``reduce_group`` is the data-parallel group; None defaults to WORLD (non-pipeline path).
+            group = reduce_group if reduce_group is not None else dist.group.WORLD
             assert group is not None
             tokens_global = tokens_per_expert_global.sum(-1)
             seqlen_global = tokens_global // num_experts_per_tok

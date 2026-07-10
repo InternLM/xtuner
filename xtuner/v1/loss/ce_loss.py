@@ -126,6 +126,7 @@ class LMHeadLossContext(BaseLossContext):
         loss_ctx_list: list["CELossContext"],
         cu_seq_lens_list: Sequence[torch.IntTensor] | None = None,
         sp_mesh: DeviceMesh | None = None,
+        reduce_group: Any = None,
     ) -> list["CELossContext"]:
         assert len(loss_ctx_list) > 0, "loss_ctx_list can not be empty"
         loss_cfg = loss_ctx_list[0].loss_cfg
@@ -176,10 +177,15 @@ class LMHeadLossContext(BaseLossContext):
         rank_denominator = cast(torch.Tensor, rank_denominator)
         global_denominator = rank_denominator
         if dist.is_initialized():
-            dist.all_reduce(global_denominator, op=dist.ReduceOp.SUM)
+            # ``reduce_group`` is the data-parallel group; None defaults to WORLD (non-pipeline path).
+            # Skip a size-1 group (e.g. pipeline parallel with ep=1): no reduction is needed.
+            _group = reduce_group if reduce_group is not None else dist.group.WORLD
+            if dist.get_world_size(_group) > 1:
+                dist.all_reduce(global_denominator, op=dist.ReduceOp.SUM, group=reduce_group)
 
         for loss_ctx in loss_ctx_list:
             loss_ctx._batch_size = len(loss_ctx_list)
+            loss_ctx.reduce_group = reduce_group
             assert loss_ctx.loss_kwargs.loss_weight is not None
             loss_ctx.loss_kwargs.loss_weight /= global_denominator + 1e-12
         return loss_ctx_list
@@ -282,9 +288,13 @@ class LMHeadLossContext(BaseLossContext):
 
         extra_info["local_base_loss"] = loss.detach().clone()
 
-        # Step 2.c in the loss calculation: reduce the loss over all ranks using all_reduce with autograd support
+        # Step 2.c in the loss calculation: reduce the loss over all ranks using all_reduce with autograd support.
+        # ``self.reduce_group`` is the data-parallel group; None defaults to WORLD (non-pipeline path).
+        # Skip a size-1 group (e.g. pipeline parallel with ep=1): no reduction is needed.
         if dist.is_initialized():
-            loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
+            _group = self.reduce_group if self.reduce_group is not None else dist.group.WORLD
+            if dist.get_world_size(_group) > 1:
+                loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=self.reduce_group)
 
         return loss, (logits, extra_info)
 

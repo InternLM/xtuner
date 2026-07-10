@@ -3,6 +3,7 @@ from typing import Literal, TypeAlias, cast
 import torch
 import torch.distributed as dist
 from torch.autograd.function import Function
+from torch.distributed._functional_collectives import AsyncCollectiveTensor
 from typing_extensions import override
 
 from xtuner.v1.ops import permute, unpermute
@@ -432,9 +433,17 @@ class TorchAll2AllDispatcher(
             self._expert_ids_per_ep_rank, token_counts, output_size=sum(dispatched["output_splits"])
         )
 
+        # The all2all output is an AsyncCollectiveTensor; materialize it before it is saved for
+        # backward by ``permute``. Under pipeline parallel the schedule reconstructs saved tensor
+        # subclasses across the stage backward boundary, which yields an AsyncCollectiveTensor whose
+        # ``completed`` state is lost and trips the functional-collective wait in the permute backward.
+        dispatch_hidden_states = dispatched["hidden_states"]
+        if isinstance(dispatch_hidden_states, AsyncCollectiveTensor):
+            dispatch_hidden_states = dispatch_hidden_states.wait()
+
         # The dispatch result is already permuted, so we can return it directly.
         global_input_tokens, row_ids_map = permute(
-            dispatched["hidden_states"],
+            dispatch_hidden_states,
             global_input_tokens_local_experts_indices.to(torch.int32),
         )
         tokens_per_expert = tokens_per_expert_group.sum(dim=0)
@@ -563,8 +572,14 @@ class TorchAll2AllDispatcher(
         async_op: bool = False,
     ) -> PostCombineResult:
         if not async_op:
+            # Materialize the combine all2all output before ``unpermute`` saves it for backward; see
+            # the note in ``dispatch_postprocess`` for why the AsyncCollectiveTensor breaks under
+            # pipeline parallel.
+            combine_hidden_states = combined["hidden_states"]
+            if isinstance(combine_hidden_states, AsyncCollectiveTensor):
+                combine_hidden_states = combine_hidden_states.wait()
             hidden_states = unpermute(
-                combined["hidden_states"],
+                combine_hidden_states,
                 pre_dispatched["row_id_map"],
                 probs=dispatched["topk_weights"],
             )

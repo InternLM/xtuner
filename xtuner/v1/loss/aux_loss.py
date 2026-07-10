@@ -1,3 +1,5 @@
+from typing import Any
+
 import torch
 import torch.nn as nn
 from pydantic import BaseModel, ConfigDict
@@ -151,10 +153,17 @@ class AuxLossContext(nn.Module):
         balancing_ctx: list[BalancingLossContext] | BalancingLossContext | None,
         z_ctx: list[ZLossContext] | ZLossContext | None,
         non_pad_token: int,
+        reduce_group: Any = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor]:
         """Finalize split auxiliary losses and expert counts from runtime
-        state."""
-        tokens_per_expert_local, tokens_per_expert_global = self._cal_tokens_per_expert()
+        state.
+
+        Args:
+            reduce_group: Data-parallel process group to reduce expert/token statistics over. ``None``
+                defaults to WORLD (non-pipeline behavior). Under pipeline parallel this is the group of
+                ranks sharing the last stage, since aux finalize only runs on the last stage.
+        """
+        tokens_per_expert_local, tokens_per_expert_global = self._cal_tokens_per_expert(reduce_group)
 
         balancing_loss: torch.Tensor | None = None
         balancing_list = _as_list(balancing_ctx)
@@ -166,6 +175,7 @@ class AuxLossContext(nn.Module):
                     n_routed_experts=self.n_routed_experts,
                     num_experts_per_tok=self.num_experts_per_tok,
                     non_pad_token=non_pad_token,
+                    reduce_group=reduce_group,
                 )
                 for ctx in balancing_list
             ]
@@ -179,13 +189,7 @@ class AuxLossContext(nn.Module):
 
         return balancing_loss, z_loss, tokens_per_expert_global
 
-    def _cal_tokens_per_expert(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Stack per-layer expert counts and produce both local and globally
-        reduced views.
-
-        The local view is needed by BalancingLossContext's non-global-average branch (per-rank scaling); the global
-        view is what the consumer (logging / bias update) wants.
-        """
+    def _cal_tokens_per_expert(self, reduce_group: Any = None) -> tuple[torch.Tensor, torch.Tensor]:
         local_load_logits = self._local_load_logits_list
         self._local_load_logits_list = []
 
@@ -196,9 +200,15 @@ class AuxLossContext(nn.Module):
                 "without a preceding accumulate()."
             )
         tokens_per_expert_local = torch.stack(local_load_logits, dim=0)
+        # ``reduce_group`` is the data-parallel group; None defaults to WORLD (non-pipeline path). A
+        # size-1 group (e.g. pipeline parallel with ep=1) needs no reduction — skip it both as an
+        # optimization and to avoid launching a collective on a trivial group under the pipeline schedule.
         if dist.is_initialized():
-            group = dist.group.WORLD
+            group = reduce_group if reduce_group is not None else dist.group.WORLD
             assert group is not None
+        else:
+            group = None
+        if group is not None and dist.get_world_size(group) > 1:
             tokens_per_expert_global = all_reduce(tokens_per_expert_local, "sum", group)
         else:
             tokens_per_expert_global = tokens_per_expert_local

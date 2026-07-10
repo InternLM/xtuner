@@ -264,10 +264,12 @@ class MoE(BaseModel):
         if not first.loss_cfg.z_loss_global_average or not dist.is_initialized():
             return None, 1
         n = torch.tensor(num_tokens_local, device=device, dtype=torch.int64)
-        group = dist.group.WORLD
+        # ``dp_group`` is None for the non-pipeline path (reduce over WORLD); pipeline parallel sets it
+        # to the data-parallel group so the z-loss token count spans only the loss-computing ranks.
+        group = self.dp_group if self.dp_group is not None else dist.group.WORLD
         assert group is not None
         n_global = all_reduce(n, "sum", group)
-        return n_global, dist.get_world_size()
+        return n_global, dist.get_world_size(group)
 
     def _extract_aux_loss_ctx(
         self,
@@ -754,6 +756,7 @@ class MoE(BaseModel):
             balancing_ctx=balancing_ctx,
             z_ctx=z_ctx,
             non_pad_token=non_pad_token,
+            reduce_group=self.dp_group,
         )
         balancing_loss, z_loss, tokens_per_expert_global = split_aux_output
         if balancing_loss is not None:
@@ -999,6 +1002,7 @@ class MoE(BaseModel):
             balancing_ctx=balancing_ctx,
             z_ctx=z_ctx,
             non_pad_token=state.non_pad_token,
+            reduce_group=self.dp_group,
         )
         balancing_loss, z_loss, tokens_per_expert_global = split_aux_output
         if balancing_loss is not None:
