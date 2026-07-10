@@ -2,6 +2,9 @@ import math
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor
+
+from xtuner.v1.utils import init_params
 
 from ..linear.linear import build_linear
 
@@ -24,6 +27,7 @@ class LoraLinear(nn.Module):
         self.alpha = alpha
         self.scale = alpha / rank
         self.merged = False
+        self.init_lora_weights = init_lora_weights
 
         weight = base_layer.weight
         dtype = weight.dtype
@@ -39,12 +43,17 @@ class LoraLinear(nn.Module):
         for p in self.base_layer.parameters():
             p.requires_grad = False
 
-        if init_lora_weights:
-            self.reset_parameters()
+        self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
-        nn.init.zeros_(self.lora_B.weight)
+        if self.lora_A.weight.is_meta:
+            return
+
+        init_params(self.lora_A.weight, lambda weight: nn.init.kaiming_uniform_(weight, a=math.sqrt(5)))
+        if self.init_lora_weights:
+            init_params(self.lora_B.weight, nn.init.zeros_)
+        else:
+            init_params(self.lora_B.weight, lambda weight: nn.init.kaiming_uniform_(weight, a=math.sqrt(5)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.merged:
@@ -60,16 +69,23 @@ class LoraLinear(nn.Module):
         if self.merged:
             return
 
-        # delta_W = B @ A   shape: [out, in]
-        delta_w = torch.matmul(self.lora_B.weight, self.lora_A.weight)
-        self.base_layer.weight += delta_w * self.scale
+        base_weight = self.base_layer.weight
+        lora_a_weight = self.lora_A.weight
+        lora_b_weight = self.lora_B.weight
+
+        base_local = base_weight.to_local() if isinstance(base_weight, DTensor) else base_weight
+        a_local = lora_a_weight.to_local() if isinstance(lora_a_weight, DTensor) else lora_a_weight
+        b_local = lora_b_weight.to_local() if isinstance(lora_b_weight, DTensor) else lora_b_weight
+
+        if a_local.shape != (self.rank, self.in_features) or b_local.shape != (self.out_features, self.rank):
+            raise RuntimeError("LoRA weights must be unsharded before merge_lora() is called")
+        if base_local.ndim != 2 or base_local.shape[0] < self.out_features or base_local.shape[1] != self.in_features:
+            raise RuntimeError("Base weight has an incompatible shape for merge_lora()")
+
+        delta_w = torch.matmul(b_local, a_local)
+        base_local[: self.out_features].add_(delta_w, alpha=self.scale)
 
         self.merged = True
-        # 合并后 GoRA 参数可以不再训练
-        for p in self.lora_A.parameters():
-            p.requires_grad = False
-        for p in self.lora_B.parameters():
-            p.requires_grad = False
 
     @torch.no_grad()
     def unmerge_lora(self):
@@ -77,14 +93,23 @@ class LoraLinear(nn.Module):
         if not self.merged:
             return
 
-        delta_w = torch.matmul(self.lora_B.weight, self.lora_A.weight)
-        self.base_layer.weight -= delta_w * self.scale
+        base_weight = self.base_layer.weight
+        lora_a_weight = self.lora_A.weight
+        lora_b_weight = self.lora_B.weight
+
+        base_local = base_weight.to_local() if isinstance(base_weight, DTensor) else base_weight
+        a_local = lora_a_weight.to_local() if isinstance(lora_a_weight, DTensor) else lora_a_weight
+        b_local = lora_b_weight.to_local() if isinstance(lora_b_weight, DTensor) else lora_b_weight
+
+        if a_local.shape != (self.rank, self.in_features) or b_local.shape != (self.out_features, self.rank):
+            raise RuntimeError("LoRA weights must be unsharded before unmerge_lora() is called")
+        if base_local.ndim != 2 or base_local.shape[0] < self.out_features or base_local.shape[1] != self.in_features:
+            raise RuntimeError("Base weight has an incompatible shape for unmerge_lora()")
+
+        delta_w = torch.matmul(b_local, a_local)
+        base_local[: self.out_features].sub_(delta_w, alpha=self.scale)
 
         self.merged = False
-        for p in self.lora_A.parameters():
-            p.requires_grad = True
-        for p in self.lora_B.parameters():
-            p.requires_grad = True
 
     def extra_repr(self) -> str:
         return (

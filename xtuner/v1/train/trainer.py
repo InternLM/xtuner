@@ -1120,7 +1120,7 @@ class Trainer:
         model_config: XTunerBaseModelConfig,
         optim_config: OptimConfig,
         fsdp_config: FSDPConfig,
-        adapter_config: LoraConfig,
+        adapter_config: LoraConfig | None,
         load_checkpoint_path: str | Path | None,
         intra_layer_micro_batch: int = 1,
         strict: bool = True,
@@ -1144,7 +1144,7 @@ class Trainer:
             optim_cfg=optim_config,
             fsdp_cfg=fsdp_config,
             model_cfg=model_config,
-            adapter_config=adapter_config,
+            adapter_cfg=adapter_config,
             intra_layer_micro_batch=intra_layer_micro_batch,
         )
         if model_path is not None and (model_config.dcp_ignore_frozen_params or load_checkpoint_path is None):

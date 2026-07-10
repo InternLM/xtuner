@@ -89,11 +89,12 @@ class UpdateWeighter:
             #       直接加载 LoRA 参数，避免 merge/unmerge 的开销和精度损失。
             lora_model.merge_lora()
 
-        self._transport.update(self.weight_iterator)
-
-        if lora_model is not None:
-            # 恢复 LoRA 状态，保持训练侧模型可继续训练
-            lora_model.unmerge_lora()
+        try:
+            self._transport.update(self.weight_iterator)
+        finally:
+            if lora_model is not None:
+                # 恢复 LoRA 状态，保持训练侧模型可继续训练
+                lora_model.unmerge_lora()
 
     def _set_transport(self) -> None:
         rollout_info = self.rollout_info

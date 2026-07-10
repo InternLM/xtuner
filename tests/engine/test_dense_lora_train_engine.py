@@ -1,24 +1,25 @@
 import os
-import tempfile
 import shutil
+import tempfile
 import time
+
 import parametrize
 import torch
 import torch.distributed as dist
-from xtuner._testing import DeterministicDDPTestCase
-from transformers import AutoTokenizer
-
-from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
-from xtuner.v1.model.base import ModelItem
-from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
-from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig
-from xtuner.v1.engine.train_engine import TrainEngine
 from torch.optim.lr_scheduler import LambdaLR
+
+from transformers import AutoTokenizer
+from xtuner._testing import DeterministicDDPTestCase
+from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
+from xtuner.v1.engine.train_engine import TrainEngine
+from xtuner.v1.loss.ce_loss import CELossConfig
+from xtuner.v1.model.adapter.lora import LoraConfig
+from xtuner.v1.model.base import ModelItem
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
+from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.utils import pad_to_max_length
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.utils.test_utils import init_data_mesh
-from xtuner.v1.model.adapter.lora import LoraConfig
 
 
 # Qwen3 8B
@@ -92,28 +93,21 @@ class TestDenseEngine(DeterministicDDPTestCase):
         labels = pad_to_max_length(labels, -100, max_length=8192)
         losses = []
 
-        data_mesh = None
+        sp_mesh = None
         if sp_size > 1:
             data_mesh = init_data_mesh(str(DEVICE), sp_size)
+            sp_mesh = data_mesh["sp"]
 
         for _ in range(10):
             seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pack_len
-            seq_ctx_list = [seq_ctx]
-            loss_ctx_input_list: list[CELossContextInputItem] = [
-                CELossContextInputItem(shifted_labels=labels)
-            ]
-            LossContext = loss_cfg.loss_ctx_cls
-            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-                loss_ctx_input_list,
-                loss_cfg,
-            )
-            loss_kwargs = batches_loss_kwargs[0]
-            loss_ctx = LossContext(loss_cfg, loss_kwargs)
-            seq_ctx = seq_ctx_list[0]
-            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
-            loss_log, _ = engine.train_step(engine_input)
+            if sp_mesh is not None:
+                seq_ctx = seq_ctx.split(sequence_parallel_mesh=sp_mesh)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": labels}, sp_mesh=sp_mesh)
+            loss_ctx = loss_cfg.loss_ctx_cls.build_batches([loss_ctx])[0]
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
+            loss_log = engine.train_step(engine_input)["logs_info"]
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
@@ -128,7 +122,7 @@ class TestDenseEngine(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
         try:
             dist.destroy_process_group(pg)
-        except:
+        except Exception:
             pass
 
     @parametrize.parametrize(
@@ -179,21 +173,23 @@ class TestDenseEngine(DeterministicDDPTestCase):
         dist.barrier()
         time.sleep(1)
 
-        # engine2 = TrainEngine(
-        #     model_cfg=moe_cfg,
-        #     optim_cfg=optim_cfg,
-        #     fsdp_cfg=fsdp_cfg,
-        # )
-        # engine2.from_hf(hf_path=temp_dir)
+        engine2 = TrainEngine(
+            model_cfg=moe_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+            adapter_cfg=adapter_cfg,
+        )
+        engine2.from_hf(hf_path=temp_dir, strict=True)
 
-        # state_dict = engine.model.state_dict()
-        # state_dict2 = engine2.model.state_dict()
-        # for key, val in state_dict.items():
-        #     val2 = state_dict2[key]
-        #     val = val.full_tensor().bfloat16()
-        #     val2 = val2.full_tensor().bfloat16()
-        #     self.assertTrue(torch.equal(val, val2[:val.shape[0]]),
-        #                     f"Mismatch in {key} between bf16 and fp8, {val} and {val2[:val.shape[0]]}")
+        state_dict = engine.model.state_dict()
+        state_dict2 = engine2.model.state_dict()
+        for key, val in state_dict.items():
+            if "lora_A." not in key and "lora_B." not in key and "lm_head" not in key:
+                continue
+            val2 = state_dict2[key]
+            val = val.full_tensor().bfloat16()
+            val2 = val2.full_tensor().bfloat16()
+            self.assertTrue(torch.equal(val, val2), f"Mismatch in {key} after adapter round trip")
 
         if dist.get_rank() == 0:
             shutil.rmtree(temp_dir)
@@ -201,7 +197,7 @@ class TestDenseEngine(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
         try:
             dist.destroy_process_group(pg)
-        except:
+        except Exception:
             pass
 
     @property
