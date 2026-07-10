@@ -38,10 +38,10 @@ from typing_extensions import NotRequired, Self, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
-from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
+from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig, PipelineParallelConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
-from xtuner.v1.engine import TrainEngine
+from xtuner.v1.engine import PPEngine, TrainEngine
 from xtuner.v1.engine.train_engine import TrainStepInfo
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model.base import AsyncHFSaveHandle, ModelItem, XTunerBaseModelConfig
@@ -398,6 +398,7 @@ class TrainerConfig(BaseModel):
     lr_cfg: LRConfig
     loss_cfg: CELossConfig = CELossConfig()
     fsdp_cfg: FSDPConfig | None = None
+    pp_cfg: PipelineParallelConfig | None = None
     global_batch_size: int | None
     work_dir: Path | str | None = None
     log_dir: Path | str | None = None
@@ -518,6 +519,7 @@ class Trainer:
         model_cfg: XTunerBaseModelConfig,
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig | None = FSDPConfig(),
+        pp_cfg: PipelineParallelConfig | None = None,
         dataset_cfg: DatasetConfigList | None = None,  # TODO: Removed in version 1.1.0
         dataloader_cfg: DataloaderConfig,
         loss_cfg: CELossConfig | None = CELossConfig(),
@@ -605,6 +607,8 @@ class Trainer:
         if fsdp_cfg is None:
             fsdp_cfg = FSDPConfig()
         self._fsdp_config = fsdp_cfg
+        self._pp_config = pp_cfg
+        self._pp_size = pp_cfg.pp_size if pp_cfg is not None else 1
         self._optim_config = optim_cfg
         self._sp_size = sp_size
         self._debug = debug
@@ -755,6 +759,7 @@ class Trainer:
             model_cfg=config.model_cfg,
             optim_cfg=config.optim_cfg,
             fsdp_cfg=config.fsdp_cfg,
+            pp_cfg=config.pp_cfg,
             dataset_cfg=config.dataset_cfg,
             dataloader_cfg=config.dataloader_cfg,
             loss_cfg=config.loss_cfg,
@@ -1051,6 +1056,31 @@ class Trainer:
         tp_size: int,
         sp_size: int,
     ):
+        # Pipeline parallel owns the pp dimension and combines with expert parallel only (no tp/sp).
+        # Data is replicated along the pp dimension (a microbatch flows through every stage of one lane)
+        # and parallelized along the ep dimension, so the dataloader's dp group is the ep group. The
+        # (pp, dp) ordering keeps ep the fast dimension (ep_idx == rank % ep_size), matching PPEngine's
+        # own (pp, ep) mesh so the data sharding and the engine's expert parallel agree rank-for-rank.
+        if self._pp_size > 1:
+            if tp_size != 1 or sp_size != 1:
+                raise ParallelConfigException(
+                    f"Pipeline parallel (pp_size={self._pp_size}) does not support tensor/sequence "
+                    f"parallel yet, got tp_size={tp_size}, sp_size={sp_size}."
+                )
+            if self.world_size % self._pp_size != 0:
+                raise ParallelConfigException(
+                    f"Found pp_size {self._pp_size}, world_size {self.world_size}. "
+                    "pipeline parallel size must be a divisor of world size."
+                )
+            dp_size = self.world_size // self._pp_size
+            device = str(DEVICE) if self._fsdp_config.cpu_offload else "cpu"
+            data_mesh = init_device_mesh(
+                device,
+                (self._pp_size, dp_size, sp_size, tp_size),
+                mesh_dim_names=("pp", "dp", "sp", "tp"),
+            )
+            return data_mesh
+
         if self.world_size % tp_size != 0:
             raise ParallelConfigException(
                 f"Found tp_size {tp_size}, world_size {self.world_size}."
@@ -1105,13 +1135,25 @@ class Trainer:
         Returns:
             TrainEngine: Initialized training engine.
         """
-        engine = TrainEngine(  # type: ignore
-            optim_cfg=optim_config,
-            fsdp_cfg=fsdp_config,
-            model_cfg=model_config,
-            intra_layer_micro_batch=intra_layer_micro_batch,
-            async_hf_export=self._async_hf_export,
-        )
+        if self._pp_size > 1:
+            assert self._pp_config is not None
+            # Pipeline parallel runs without FSDP parameter sharding; it reuses ep_size from the FSDP
+            # config (ep is independent of FSDP) and self-builds its own (pp, ep) mesh.
+            engine: TrainEngine | PPEngine = PPEngine(
+                model_cfg=model_config,
+                optim_cfg=optim_config,
+                pp_cfg=self._pp_config,
+                ep_size=fsdp_config.ep_size,
+                param_dtype=fsdp_config.param_dtype,
+            )
+        else:
+            engine = TrainEngine(  # type: ignore
+                optim_cfg=optim_config,
+                fsdp_cfg=fsdp_config,
+                model_cfg=model_config,
+                intra_layer_micro_batch=intra_layer_micro_batch,
+                async_hf_export=self._async_hf_export,
+            )
         if model_path is not None and (model_config.dcp_ignore_frozen_params or load_checkpoint_path is None):
             engine.from_hf(hf_path=model_path, strict=strict)
         elif load_checkpoint_path is None:
@@ -1531,6 +1573,13 @@ class Trainer:
     def _maybe_profiling(self):
         """Check if profiling is enabled and perform profiling if necessary."""
         if self._profile_step is not None and self._cur_step in self._profile_step:
+            # Align the profiling window across ranks before starting the profiler. Without this, ranks
+            # that reach this step at different wall-clock times (notably pipeline-parallel stages, which
+            # finish a step staggered by the pipeline bubble and have no collective after the local
+            # optimizer step) would start their profiler at different moments, leaving the per-rank
+            # traces unaligned. Only runs on profiled steps, so it adds no steady-state overhead.
+            if dist.is_initialized():
+                dist.barrier()
             with contextlib.ExitStack() as stack:
                 if self._profile_time:
                     time_dir = self.exp_dir / self._PROFILE_TIME_PATH / f"step-{self._cur_step}"
@@ -1561,14 +1610,26 @@ class Trainer:
         """
         e2e_train_time = self._train_time + self._train_time_offset
 
-        tgs = local_step_consumed_tokens / step_time
+        # Throughput accounting must count each distinct-data replica once. Ranks that differ only in
+        # the pipeline / sequence / tensor dimension process the *same* tokens (data is replicated along
+        # those dimensions), so the global token count scales by the data-parallel size, not world_size,
+        # and per-GPU throughput divides the global by world_size. For plain FSDP data parallel
+        # (dp_size == world_size) this is unchanged; under pipeline parallel it removes the pp_size
+        # over-count (and likewise sp_size under sequence parallel).
+        dp_size = self.data_mesh["dp"].size()
+
+        tgs = local_step_consumed_tokens * dp_size / self.world_size / step_time
         approximate_total_consumed_tokens = (
-            self._init_total_tokens + self._local_total_consumed_tokens * self.world_size
+            self._init_total_tokens + self._local_total_consumed_tokens * dp_size
         )
         # TODO: approximate_total_consumed_tokens_per_rank could be incorrect if world_size changed.
         #       So calculate `eta_seconds = step_time * remaining_steps` instead?
         approximate_total_consumed_tokens_per_rank = approximate_total_consumed_tokens / self.world_size
-        exp_tgs = self._local_total_consumed_tokens / self._train_time if self._train_time > 0 else 0.0
+        exp_tgs = (
+            self._local_total_consumed_tokens * dp_size / self.world_size / self._train_time
+            if self._train_time > 0
+            else 0.0
+        )
 
         remaining_steps = self.total_step - self.cur_step
         avg_tokens_per_step = approximate_total_consumed_tokens_per_rank / self.cur_step

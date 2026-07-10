@@ -26,7 +26,9 @@ from torch.nn.utils.clip_grad import _no_grad
 from torch.utils._foreach_utils import _device_has_foreach_support
 
 from xtuner.v1.config import OptimConfig, PipelineParallelConfig
-from xtuner.v1.model.base import BaseModel, ModelItem, ModelOutputs, XTunerBaseModelConfig
+from xtuner.v1.engine.train_engine import TrainStepInfo
+from xtuner.v1.model.base import BaseModel, BatchForwardInfo, ModelItem, ModelOutputs, XTunerBaseModelConfig
+from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.utils import get_device, log_rank0
 
 
@@ -161,7 +163,7 @@ class PPEngine:
         """
         self.model.save_hf(hf_dir, save_dtype=save_dtype)
 
-    def train_step(self, data_batches: list[ModelItem]) -> dict:
+    def train_step(self, data_batches: list[ModelItem]) -> "TrainStepInfo":
         """Run one optimizer-step worth of microbatches through the pipeline schedule.
 
         Args:
@@ -169,7 +171,10 @@ class PPEngine:
                 of pipeline microbatches and must be >= num_stages.
 
         Returns:
-            dict: ``{"total_loss": float}`` with the loss reduced across the pipeline (for logging).
+            TrainStepInfo: The data-batch statistics plus ``total_loss`` reduced across the pipeline.
+                ``logs_info`` / ``extra_info`` are left empty because the per-microbatch outputs only
+                exist on the last stage and their reduction collectives run over WORLD, which would
+                deadlock the stages that never produce outputs.
         """
         n_microbatches = len(data_batches)
         if n_microbatches < self.num_stages:
@@ -206,7 +211,16 @@ class PPEngine:
             schedule._step_microbatches(arg_mbs=arg_mbs, kwarg_mbs=kwarg_mbs)
 
         total_loss = self._reduce_step_loss(losses)
-        return {"total_loss": total_loss}
+        # ``pre_micro_batch_forward`` derives its stats purely from seq_ctx (no collectives), so it is
+        # safe on every stage; the output-derived ``batch_forward_info`` is intentionally left empty.
+        data_batch_info = self.model.pre_micro_batch_forward(data_batches)
+        batch_forward_info = BatchForwardInfo(logs_info={}, extra_info=ModelForwardExtraLogInfo())
+        return TrainStepInfo(total_loss=total_loss, **data_batch_info, **batch_forward_info)
+
+    def destroy_async_checkpoint_pg(self) -> None:
+        # Pipeline parallel has no async-checkpoint process group; provided so the trainer can call it
+        # uniformly across engines.
+        return None
 
     @_no_grad
     def clip_grad_norm(self, do_clip: bool = True, dtype=torch.float32) -> torch.Tensor:
