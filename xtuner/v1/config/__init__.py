@@ -1,6 +1,7 @@
 from .fsdp import FSDPConfig
 from .generate import GenerateConfig
 from .optim import AdamWConfig, LRConfig, MuonConfig, OptimConfig
+from .parallel import PipelineParallelConfig
 
 
 __all__ = [
@@ -10,4 +11,5 @@ __all__ = [
     "LRConfig",
     "GenerateConfig",
     "MuonConfig",
+    "PipelineParallelConfig",
 ]

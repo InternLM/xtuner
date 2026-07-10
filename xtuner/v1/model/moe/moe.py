@@ -419,6 +419,116 @@ class MoE(BaseModel):
                 return_router_logits=return_router_logits,
             )
 
+    def split_for_pipeline(self, pp_rank: int, num_stages: int, layer_split: list[int] | None = None) -> None:
+        """Trim this model in place to the pipeline stage owned by ``pp_rank``.
+
+        Keeps only this stage's contiguous range of decoder layers (layer indices are preserved so
+        checkpoint keys stay stable), drops ``embed_tokens`` on non-first stages and
+        ``norm`` / ``lm_head`` / ``mtp_block`` on non-last stages. ``rotary_emb`` and the aux-loss
+        context are kept on every stage (position embeddings are recomputed locally and each stage
+        accumulates aux loss for its own layers). After this call, ``parameters()`` and the optimizer
+        see only the owned stage's parameters.
+
+        Args:
+            pp_rank (int): This rank's pipeline stage index, in ``[0, num_stages)``.
+            num_stages (int): Total number of pipeline stages.
+            layer_split (list[int] | None): Per-stage decoder layer counts; ``None`` splits evenly.
+        """
+        num_layers = self.config.num_hidden_layers
+        if num_stages < 1:
+            raise ValueError(f"num_stages must be >= 1, got {num_stages}")
+        if not 0 <= pp_rank < num_stages:
+            raise ValueError(f"pp_rank {pp_rank} out of range for num_stages {num_stages}")
+        if self.config.tie_word_embeddings and num_stages > 1:
+            # embed_tokens (first stage) and lm_head (last stage) would live on different stages, so
+            # the shared weight cannot be tied in place. Supporting this needs cross-stage weight
+            # sharing / gradient sync; remove this guard once that lands.
+            raise NotImplementedError("Pipeline parallel (num_stages > 1) with tie_word_embeddings is not supported")
+
+        ranges = self._compute_layer_ranges(num_layers, num_stages, layer_split)
+        start, end = ranges[pp_rank]
+        owned = {str(idx) for idx in range(start, end)}
+        for key in list(self.layers.keys()):
+            if key not in owned:
+                del self.layers[key]
+
+        if pp_rank != 0:
+            del self.embed_tokens
+        if pp_rank != num_stages - 1:
+            del self.norm
+            del self.lm_head
+            self.mtp_block = None
+
+    def pipeline_forward(
+        self,
+        stage_input: torch.Tensor | None,
+        seq_ctx: SequenceContext,
+        loss_ctx: MoELossContextDict | None,
+        *,
+        is_first: bool,
+        is_last: bool,
+        return_router_logits: bool = False,
+    ) -> torch.Tensor | MoEModelOutputs:
+        """Run this pipeline stage's forward over its owned decoder layers.
+
+        Composes the staged forward helpers: the first stage embeds ``seq_ctx`` while later stages
+        consume the previous stage's ``hidden_states`` (``stage_input``); the last stage runs the head
+        and returns :class:`MoEModelOutputs`, while non-last stages return the ``hidden_states`` tensor
+        to hand to the next stage. ``seq_ctx`` is available on every stage (data is replicated along
+        the pipeline dimension), so position embeddings are recomputed locally.
+
+        Auxiliary loss is *accumulated* for this stage's layers but only *finalized* by the last
+        stage's head here; per-stage aux finalize and cross-stage gradient injection are handled by the
+        pipeline engine (a non-last stage's accumulated aux loss is left for the engine to finalize).
+
+        Args:
+            stage_input (torch.Tensor | None): Incoming ``hidden_states`` from the previous stage;
+                ignored (and may be ``None``) on the first stage.
+            seq_ctx (SequenceContext): Sequence context, replicated across pipeline stages.
+            loss_ctx (MoELossContextDict | None): Loss contexts (lm + aux); required on the last stage.
+            is_first (bool): Whether this is the first pipeline stage.
+            is_last (bool): Whether this is the last pipeline stage.
+            return_router_logits (bool): Whether to retain router logits/weights. Defaults to ``False``.
+
+        Returns:
+            torch.Tensor | MoEModelOutputs: ``hidden_states`` for non-last stages, otherwise the head
+            outputs.
+        """
+        state = self._prepare_forward(seq_ctx, loss_ctx, return_router_logits)
+        if is_first:
+            hidden_states = self._embed_step(seq_ctx)
+        else:
+            assert stage_input is not None, "non-first pipeline stage requires stage_input hidden_states"
+            hidden_states = stage_input
+        hidden_states, position_embeddings = self._layers_step(hidden_states, seq_ctx, state)
+        if is_last:
+            return self._head_step(hidden_states, position_embeddings, seq_ctx, loss_ctx, state)
+        return hidden_states
+
+    @staticmethod
+    def _compute_layer_ranges(
+        num_layers: int, num_stages: int, layer_split: list[int] | None
+    ) -> list[tuple[int, int]]:
+        if layer_split is not None:
+            if len(layer_split) != num_stages:
+                raise ValueError(f"layer_split must have {num_stages} entries, got {len(layer_split)}")
+            if sum(layer_split) != num_layers:
+                raise ValueError(f"layer_split {layer_split} must sum to num_hidden_layers {num_layers}")
+            counts = layer_split
+        else:
+            if num_layers < num_stages:
+                raise ValueError(f"num_hidden_layers {num_layers} must be >= num_stages {num_stages} for even split")
+            # Even split: the first ``num_layers % num_stages`` stages get one extra layer.
+            base, rem = divmod(num_layers, num_stages)
+            counts = [base + 1 if i < rem else base for i in range(num_stages)]
+
+        ranges: list[tuple[int, int]] = []
+        cursor = 0
+        for count in counts:
+            ranges.append((cursor, cursor + count))
+            cursor += count
+        return ranges
+
     def post_micro_batch_forward(self, batch_outputs: Sequence[MoEModelOutputs]) -> MoEBatchForwardInfo:
         base_info = super().post_micro_batch_forward(batch_outputs)
         logs_info = base_info["logs_info"]
