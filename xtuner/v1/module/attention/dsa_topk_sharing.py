@@ -313,6 +313,19 @@ def get_dsa_topk_sharing_runtime() -> CrossLayerTopKSharingRuntime:
     return _DSA_TOPK_SHARING_RUNTIME
 
 
+def configure_dsa_topk_decoder_lifecycle(
+    *,
+    decoder_layer: torch.nn.Module,
+    attention: DSATopKSharingLayerProtocol,
+    release_plan: DSATopKReleasePlan,
+) -> None:
+    # The release maps and decoder hooks are one lifecycle contract: source
+    # caches are kept/offloaded until the planned consumer layer runs.
+    attention.dsa_topk_last_use = release_plan.forward_last_use
+    attention.dsa_topk_recompute_release = release_plan.recompute_release
+    register_dsa_topk_decoder_lifecycle_hooks(decoder_layer)
+
+
 @torch.compiler.disable
 def before_dsa_topk_decoder_forward(attention: object, seq_ctx: SequenceContext | list[SequenceContext]) -> None:
     if not hasattr(attention, "dsa_topk_last_use"):
