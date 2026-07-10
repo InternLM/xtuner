@@ -90,22 +90,22 @@ class TopKResidencyBase:
     reuse_source_topk_in_recompute = True
 
     def has_cache(self, seq_ctx: SequenceContext, source_layer_idx: int) -> bool:
-        return source_layer_idx in seq_ctx.dsa_topk_indices
+        return source_layer_idx in seq_ctx.dsa_topk_cache.indices
 
     def store_gpu(self, seq_ctx: SequenceContext, source_layer_idx: int, topk_indices: torch.Tensor) -> None:
-        seq_ctx.dsa_topk_indices[source_layer_idx] = topk_indices
+        seq_ctx.dsa_topk_cache.indices[source_layer_idx] = topk_indices
 
     def read(self, seq_ctx: SequenceContext, source_layer_idx: int) -> torch.Tensor:
-        return seq_ctx.dsa_topk_indices[source_layer_idx]
+        return seq_ctx.dsa_topk_cache.indices[source_layer_idx]
 
     def after_original_forward_last_use(self, seq_ctx: SequenceContext, source_layer_idx: int) -> None:
         return
 
     def after_recompute_release(self, seq_ctx: SequenceContext, source_layer_idx: int) -> None:
-        seq_ctx.dsa_topk_indices.pop(source_layer_idx, None)
+        seq_ctx.dsa_topk_cache.indices.pop(source_layer_idx, None)
 
     def _offload_key(self, seq_ctx: SequenceContext, source_layer_idx: int) -> str:
-        return f"dsa_topk_{seq_ctx.dsa_topk_context_id}_{source_layer_idx}"
+        return f"dsa_topk_{seq_ctx.dsa_topk_cache.context_id}_{source_layer_idx}"
 
 
 class GpuTopKResidency(TopKResidencyBase):
@@ -117,17 +117,20 @@ class ActivationOffloadedTopKResidency(TopKResidencyBase):
         self._streams: dict[int, torch.cuda.Stream] = {}
 
     def has_cache(self, seq_ctx: SequenceContext, source_layer_idx: int) -> bool:
-        return source_layer_idx in seq_ctx.dsa_topk_indices or source_layer_idx in seq_ctx.dsa_topk_offloaded
+        cache = seq_ctx.dsa_topk_cache
+        return source_layer_idx in cache.indices or source_layer_idx in cache.offloaded
 
     def read(self, seq_ctx: SequenceContext, source_layer_idx: int) -> torch.Tensor:
-        if source_layer_idx in seq_ctx.dsa_topk_indices:
-            return seq_ctx.dsa_topk_indices[source_layer_idx]
+        cache = seq_ctx.dsa_topk_cache
+        if source_layer_idx in cache.indices:
+            return cache.indices[source_layer_idx]
         return self._read_offloaded(seq_ctx, source_layer_idx)
 
     # Pinned CPU buffers and stream-side effects must stay outside Inductor graphs.
     @torch.compiler.disable
     def _read_offloaded(self, seq_ctx: SequenceContext, source_layer_idx: int) -> torch.Tensor:
-        key = seq_ctx.dsa_topk_offloaded[source_layer_idx]
+        cache = seq_ctx.dsa_topk_cache
+        key = cache.offloaded[source_layer_idx]
         swap_tensor = OffloadManager().get(key)
         stream = self._stream_for_device(swap_tensor.tensor.device)
         working_stream = torch.cuda.current_stream(swap_tensor.tensor.device)
@@ -139,15 +142,16 @@ class ActivationOffloadedTopKResidency(TopKResidencyBase):
             swap_tensor.launch_h2d(stream, True, stream)
         working_stream.wait_stream(stream)
 
-        seq_ctx.dsa_topk_indices[source_layer_idx] = swap_tensor.tensor
+        cache.indices[source_layer_idx] = swap_tensor.tensor
         return swap_tensor.tensor
 
     # Pinned CPU buffers and stream-side effects must stay outside Inductor graphs.
     @torch.compiler.disable
     def after_original_forward_last_use(self, seq_ctx: SequenceContext, source_layer_idx: int) -> None:
-        topk_indices = seq_ctx.dsa_topk_indices.pop(source_layer_idx)
+        cache = seq_ctx.dsa_topk_cache
+        topk_indices = cache.indices.pop(source_layer_idx)
         if not topk_indices.is_cuda:
-            seq_ctx.dsa_topk_indices[source_layer_idx] = topk_indices
+            cache.indices[source_layer_idx] = topk_indices
             return
 
         key = self._offload_key(seq_ctx, source_layer_idx)
@@ -158,13 +162,14 @@ class ActivationOffloadedTopKResidency(TopKResidencyBase):
         swap_tensor.launch_d2h(stream)
         swap_tensor.wait_d2h_finished(stream, True)
         OffloadManager().put(key, swap_tensor)
-        seq_ctx.dsa_topk_offloaded[source_layer_idx] = key
+        cache.offloaded[source_layer_idx] = key
 
     # Pinned CPU buffers and stream-side effects must stay outside Inductor graphs.
     @torch.compiler.disable
     def after_recompute_release(self, seq_ctx: SequenceContext, source_layer_idx: int) -> None:
+        cache = seq_ctx.dsa_topk_cache
         super().after_recompute_release(seq_ctx, source_layer_idx)
-        key = seq_ctx.dsa_topk_offloaded.pop(source_layer_idx, None)
+        key = cache.offloaded.pop(source_layer_idx, None)
         if key is None:
             return
 
@@ -196,39 +201,41 @@ class CrossLayerTopKSharingRuntime:
         compute_source_topk: Callable[[], torch.Tensor],
     ) -> torch.Tensor:
         residency = self._residency()
+        cache = seq_ctx.dsa_topk_cache
         source_layer_idx = layer.source_layer_idx
 
         if layer._is_skip_topk_layer():
             self._assert_source_present(layer, seq_ctx, residency)
-            if source_layer_idx in seq_ctx.dsa_topk_indices:
-                return seq_ctx.dsa_topk_indices[source_layer_idx]
+            if source_layer_idx in cache.indices:
+                return cache.indices[source_layer_idx]
             return residency.read(seq_ctx, source_layer_idx)
 
         if (
             self._is_checkpoint_recompute(seq_ctx)
-            and layer.layer_idx not in seq_ctx.dsa_topk_released_sources
+            and layer.layer_idx not in cache.released_sources
             and residency.has_cache(seq_ctx, source_layer_idx)
         ):
-            if source_layer_idx in seq_ctx.dsa_topk_indices:
-                return seq_ctx.dsa_topk_indices[source_layer_idx]
+            if source_layer_idx in cache.indices:
+                return cache.indices[source_layer_idx]
             return residency.read(seq_ctx, source_layer_idx)
 
         topk_indices = compute_source_topk()
-        if layer.layer_idx not in seq_ctx.dsa_topk_released_sources:
+        if layer.layer_idx not in cache.released_sources:
             residency.store_gpu(seq_ctx, layer.layer_idx, topk_indices)
         return topk_indices
 
     def after_sparse_mla_use(self, *, layer: DSATopKSharingLayerProtocol, seq_ctx: SequenceContext) -> None:
         residency = self._residency()
+        cache = seq_ctx.dsa_topk_cache
         source_layer_idx = layer.source_layer_idx
         if self._is_checkpoint_original_forward(layer):
             if layer.dsa_topk_last_use.get(source_layer_idx) == layer.layer_idx:
                 # Reentrant checkpoint original forward runs under no_grad, so
                 # SparseMLA has no autograd ctx. Keep/offload source top-k for
                 # backward recompute, then release after source replay consumes it.
-                seq_ctx.dsa_topk_checkpoint_active = True
+                cache.checkpoint_active = True
                 if self._should_defer_transfer():
-                    seq_ctx.dsa_topk_pending_offloads.add(source_layer_idx)
+                    cache.pending_offloads.add(source_layer_idx)
                 else:
                     residency.after_original_forward_last_use(seq_ctx, source_layer_idx)
             return
@@ -240,33 +247,34 @@ class CrossLayerTopKSharingRuntime:
             return
 
         if self._should_defer_transfer():
-            seq_ctx.dsa_topk_pending_releases.add(source_layer_idx)
+            cache.pending_releases.add(source_layer_idx)
         else:
             residency.after_recompute_release(seq_ctx, source_layer_idx)
-            seq_ctx.dsa_topk_released_sources.add(source_layer_idx)
+            cache.released_sources.add(source_layer_idx)
 
     def before_layer_forward(self, *, layer: DSATopKSharingLayerProtocol, seq_ctx: SequenceContext) -> None:
         if not isinstance(self._residency(), ActivationOffloadedTopKResidency):
             return
         source_layer_idx = layer.source_layer_idx
-        if source_layer_idx not in seq_ctx.dsa_topk_offloaded:
+        if source_layer_idx not in seq_ctx.dsa_topk_cache.offloaded:
             return
         self._offloaded_residency.read(seq_ctx, source_layer_idx)
 
     def flush_pending(self, seq_ctx: SequenceContext) -> None:
+        cache = seq_ctx.dsa_topk_cache
         if not isinstance(self._residency(), ActivationOffloadedTopKResidency):
-            seq_ctx.dsa_topk_pending_offloads.clear()
-            seq_ctx.dsa_topk_pending_releases.clear()
+            cache.pending_offloads.clear()
+            cache.pending_releases.clear()
             return
 
-        for source_layer_idx in tuple(seq_ctx.dsa_topk_pending_offloads):
+        for source_layer_idx in tuple(cache.pending_offloads):
             self._offloaded_residency.after_original_forward_last_use(seq_ctx, source_layer_idx)
-            seq_ctx.dsa_topk_pending_offloads.remove(source_layer_idx)
+            cache.pending_offloads.remove(source_layer_idx)
 
-        for source_layer_idx in tuple(seq_ctx.dsa_topk_pending_releases):
+        for source_layer_idx in tuple(cache.pending_releases):
             self._offloaded_residency.after_recompute_release(seq_ctx, source_layer_idx)
-            seq_ctx.dsa_topk_released_sources.add(source_layer_idx)
-            seq_ctx.dsa_topk_pending_releases.remove(source_layer_idx)
+            cache.released_sources.add(source_layer_idx)
+            cache.pending_releases.remove(source_layer_idx)
 
     def _residency(self) -> TopKResidencyBase:
         if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1 and torch.cuda.is_available():
@@ -280,7 +288,7 @@ class CrossLayerTopKSharingRuntime:
         return layer.training and not torch.is_grad_enabled()
 
     def _is_checkpoint_recompute(self, seq_ctx: SequenceContext) -> bool:
-        return seq_ctx.dsa_topk_checkpoint_active and torch.is_grad_enabled()
+        return seq_ctx.dsa_topk_cache.checkpoint_active and torch.is_grad_enabled()
 
     def _assert_source_present(
         self,

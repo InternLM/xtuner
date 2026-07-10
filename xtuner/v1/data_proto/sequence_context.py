@@ -12,6 +12,39 @@ from .utils import gather_for_sequence_parallel, pad_to_multiple_of, split_for_s
 _DSA_TOPK_CONTEXT_IDS = itertools.count()
 
 
+class DSATopKCacheState:
+    """Mutable DSA cross-layer top-k cache, scoped to one microbatch."""
+
+    indices: dict[int, torch.Tensor]
+    offloaded: dict[int, str]
+    released_sources: set[int]
+    pending_offloads: set[int]
+    pending_releases: set[int]
+    checkpoint_active: bool
+    context_id: int
+
+    def __init__(
+        self,
+        *,
+        indices: dict[int, torch.Tensor] | None = None,
+        offloaded: dict[int, str] | None = None,
+        released_sources: set[int] | None = None,
+        pending_offloads: set[int] | None = None,
+        pending_releases: set[int] | None = None,
+        checkpoint_active: bool = False,
+        context_id: int | None = None,
+    ) -> None:
+        # topk_indices format: {source_layer_idx: [seq_len, kv_group, topk]}.
+        # Invalid/padded sparse slots are represented by -1.
+        self.indices = {} if indices is None else indices
+        self.offloaded = {} if offloaded is None else offloaded
+        self.released_sources = set() if released_sources is None else released_sources
+        self.pending_offloads = set() if pending_offloads is None else pending_offloads
+        self.pending_releases = set() if pending_releases is None else pending_releases
+        self.checkpoint_active = checkpoint_active
+        self.context_id = next(_DSA_TOPK_CONTEXT_IDS) if context_id is None else context_id
+
+
 # Avoid using dataclass decorator here to get rid of extra ops called in pytorch 2.8 and above
 # The extra ops is introduced by function _apply_to_tensors in
 # https://github.com/pytorch/pytorch/blob/v2.8.0/torch/distributed/fsdp/_fully_shard/_fsdp_state.py
@@ -53,16 +86,7 @@ class SequenceContext:
 
     # moe routed_experts
     rollout_routed_experts: torch.Tensor | None
-    # DSA cross-layer top-k sharing cache, scoped to one microbatch.
-    # Format: {source_layer_idx: topk_indices}, where topk_indices is
-    # [seq_len, kv_group, topk] and invalid/padded sparse slots are -1.
-    dsa_topk_indices: dict[int, torch.Tensor]
-    dsa_topk_offloaded: dict[int, str]
-    dsa_topk_released_sources: set[int]
-    dsa_topk_pending_offloads: set[int]
-    dsa_topk_pending_releases: set[int]
-    dsa_topk_checkpoint_active: bool
-    dsa_topk_context_id: int
+    dsa_topk_cache: DSATopKCacheState
 
     # Private backing attributes for SP shard reconstruction
     _raw_input_ids: torch.LongTensor | None
@@ -91,12 +115,13 @@ class SequenceContext:
         inputs_embeds: torch.FloatTensor | None = None,
         num_img_tokens: list[list[int]] | None = None,
         rollout_routed_experts: torch.Tensor | None = None,
+        dsa_topk_cache: DSATopKCacheState | None = None,
         dsa_topk_indices: dict[int, torch.Tensor] | None = None,
         dsa_topk_offloaded: dict[int, str] | None = None,
         dsa_topk_released_sources: set[int] | None = None,
         dsa_topk_pending_offloads: set[int] | None = None,
         dsa_topk_pending_releases: set[int] | None = None,
-        dsa_topk_checkpoint_active: bool = False,
+        dsa_topk_checkpoint_active: bool | None = None,
         dsa_topk_context_id: int | None = None,
         # SP shard metadata: private, accessed via properties below
         raw_input_ids: torch.LongTensor | None = None,
@@ -131,13 +156,32 @@ class SequenceContext:
         self.inputs_embeds = inputs_embeds
         self.num_img_tokens = num_img_tokens
         self.rollout_routed_experts = rollout_routed_experts
-        self.dsa_topk_indices = {} if dsa_topk_indices is None else dsa_topk_indices
-        self.dsa_topk_offloaded = {} if dsa_topk_offloaded is None else dsa_topk_offloaded
-        self.dsa_topk_released_sources = set() if dsa_topk_released_sources is None else dsa_topk_released_sources
-        self.dsa_topk_pending_offloads = set() if dsa_topk_pending_offloads is None else dsa_topk_pending_offloads
-        self.dsa_topk_pending_releases = set() if dsa_topk_pending_releases is None else dsa_topk_pending_releases
-        self.dsa_topk_checkpoint_active = dsa_topk_checkpoint_active
-        self.dsa_topk_context_id = next(_DSA_TOPK_CONTEXT_IDS) if dsa_topk_context_id is None else dsa_topk_context_id
+        if dsa_topk_cache is None:
+            self.dsa_topk_cache = DSATopKCacheState(
+                indices=dsa_topk_indices,
+                offloaded=dsa_topk_offloaded,
+                released_sources=dsa_topk_released_sources,
+                pending_offloads=dsa_topk_pending_offloads,
+                pending_releases=dsa_topk_pending_releases,
+                checkpoint_active=False if dsa_topk_checkpoint_active is None else dsa_topk_checkpoint_active,
+                context_id=dsa_topk_context_id,
+            )
+        else:
+            self.dsa_topk_cache = dsa_topk_cache
+            if dsa_topk_indices is not None:
+                self.dsa_topk_cache.indices = dsa_topk_indices
+            if dsa_topk_offloaded is not None:
+                self.dsa_topk_cache.offloaded = dsa_topk_offloaded
+            if dsa_topk_released_sources is not None:
+                self.dsa_topk_cache.released_sources = dsa_topk_released_sources
+            if dsa_topk_pending_offloads is not None:
+                self.dsa_topk_cache.pending_offloads = dsa_topk_pending_offloads
+            if dsa_topk_pending_releases is not None:
+                self.dsa_topk_cache.pending_releases = dsa_topk_pending_releases
+            if dsa_topk_checkpoint_active is not None:
+                self.dsa_topk_cache.checkpoint_active = dsa_topk_checkpoint_active
+            if dsa_topk_context_id is not None:
+                self.dsa_topk_cache.context_id = dsa_topk_context_id
         self._raw_input_ids = raw_input_ids
         self._raw_inputs_embeds = raw_inputs_embeds
         self._shard_start = shard_start
@@ -166,6 +210,62 @@ class SequenceContext:
     @property
     def sp_rank(self):
         return self._sp_rank
+
+    @property
+    def dsa_topk_indices(self) -> dict[int, torch.Tensor]:
+        return self.dsa_topk_cache.indices
+
+    @dsa_topk_indices.setter
+    def dsa_topk_indices(self, value: dict[int, torch.Tensor]) -> None:
+        self.dsa_topk_cache.indices = value
+
+    @property
+    def dsa_topk_offloaded(self) -> dict[int, str]:
+        return self.dsa_topk_cache.offloaded
+
+    @dsa_topk_offloaded.setter
+    def dsa_topk_offloaded(self, value: dict[int, str]) -> None:
+        self.dsa_topk_cache.offloaded = value
+
+    @property
+    def dsa_topk_released_sources(self) -> set[int]:
+        return self.dsa_topk_cache.released_sources
+
+    @dsa_topk_released_sources.setter
+    def dsa_topk_released_sources(self, value: set[int]) -> None:
+        self.dsa_topk_cache.released_sources = value
+
+    @property
+    def dsa_topk_pending_offloads(self) -> set[int]:
+        return self.dsa_topk_cache.pending_offloads
+
+    @dsa_topk_pending_offloads.setter
+    def dsa_topk_pending_offloads(self, value: set[int]) -> None:
+        self.dsa_topk_cache.pending_offloads = value
+
+    @property
+    def dsa_topk_pending_releases(self) -> set[int]:
+        return self.dsa_topk_cache.pending_releases
+
+    @dsa_topk_pending_releases.setter
+    def dsa_topk_pending_releases(self, value: set[int]) -> None:
+        self.dsa_topk_cache.pending_releases = value
+
+    @property
+    def dsa_topk_checkpoint_active(self) -> bool:
+        return self.dsa_topk_cache.checkpoint_active
+
+    @dsa_topk_checkpoint_active.setter
+    def dsa_topk_checkpoint_active(self, value: bool) -> None:
+        self.dsa_topk_cache.checkpoint_active = value
+
+    @property
+    def dsa_topk_context_id(self) -> int:
+        return self.dsa_topk_cache.context_id
+
+    @dsa_topk_context_id.setter
+    def dsa_topk_context_id(self, value: int) -> None:
+        self.dsa_topk_cache.context_id = value
 
     @classmethod
     def from_input_ids(
@@ -341,7 +441,7 @@ class SequenceContext:
         )
 
     def split_dsa_topk_indices_to(self, sequence_context_list: list["SequenceContext"]) -> None:
-        if not self.dsa_topk_indices:
+        if not self.dsa_topk_cache.indices:
             return
 
         lengths = []
@@ -357,10 +457,10 @@ class SequenceContext:
         # Dense prefix layers run on a concatenated SequenceContext. When later
         # sparse layers switch back to per-microbatch contexts, shared-indexer
         # DSA layers need the full-indexer cache split back by microbatch.
-        for layer_idx, topk_indices in self.dsa_topk_indices.items():
+        for layer_idx, topk_indices in self.dsa_topk_cache.indices.items():
             assert sum(lengths) == topk_indices.shape[0]
             for seq_ctx, single_topk_indices in zip(sequence_context_list, topk_indices.split(lengths, dim=0)):
-                seq_ctx.dsa_topk_indices[layer_idx] = single_topk_indices
+                seq_ctx.dsa_topk_cache.indices[layer_idx] = single_topk_indices
 
     @property
     def mask(self) -> torch.BoolTensor:
@@ -506,6 +606,27 @@ class SequenceContext:
         Returns:
             Self: A new SequenceContext instance with copied attributes.
         """
+        dsa_topk_cache = overrides.get("dsa_topk_cache", self.dsa_topk_cache)
+        dsa_topk_override_keys = {
+            "dsa_topk_indices",
+            "dsa_topk_offloaded",
+            "dsa_topk_released_sources",
+            "dsa_topk_pending_offloads",
+            "dsa_topk_pending_releases",
+            "dsa_topk_checkpoint_active",
+            "dsa_topk_context_id",
+        }
+        if "dsa_topk_cache" not in overrides and dsa_topk_override_keys.intersection(overrides):
+            dsa_topk_cache = DSATopKCacheState(
+                indices=overrides.get("dsa_topk_indices", self.dsa_topk_indices),
+                offloaded=overrides.get("dsa_topk_offloaded", self.dsa_topk_offloaded),
+                released_sources=overrides.get("dsa_topk_released_sources", self.dsa_topk_released_sources),
+                pending_offloads=overrides.get("dsa_topk_pending_offloads", self.dsa_topk_pending_offloads),
+                pending_releases=overrides.get("dsa_topk_pending_releases", self.dsa_topk_pending_releases),
+                checkpoint_active=overrides.get("dsa_topk_checkpoint_active", self.dsa_topk_checkpoint_active),
+                context_id=overrides.get("dsa_topk_context_id", self.dsa_topk_context_id),
+            )
+
         return self.__class__(
             input_ids=overrides.get("input_ids", self.input_ids),
             cu_seq_lens_q=overrides.get("cu_seq_lens_q", self.cu_seq_lens_q),
@@ -524,13 +645,7 @@ class SequenceContext:
             inputs_embeds=overrides.get("inputs_embeds", self.inputs_embeds),
             num_img_tokens=overrides.get("num_img_tokens", self.num_img_tokens),
             rollout_routed_experts=overrides.get("rollout_routed_experts", self.rollout_routed_experts),
-            dsa_topk_indices=overrides.get("dsa_topk_indices", self.dsa_topk_indices),
-            dsa_topk_offloaded=overrides.get("dsa_topk_offloaded", self.dsa_topk_offloaded),
-            dsa_topk_released_sources=overrides.get("dsa_topk_released_sources", self.dsa_topk_released_sources),
-            dsa_topk_pending_offloads=overrides.get("dsa_topk_pending_offloads", self.dsa_topk_pending_offloads),
-            dsa_topk_pending_releases=overrides.get("dsa_topk_pending_releases", self.dsa_topk_pending_releases),
-            dsa_topk_checkpoint_active=overrides.get("dsa_topk_checkpoint_active", self.dsa_topk_checkpoint_active),
-            dsa_topk_context_id=overrides.get("dsa_topk_context_id", self.dsa_topk_context_id),
+            dsa_topk_cache=dsa_topk_cache,
             raw_input_ids=overrides.get("raw_input_ids", self._raw_input_ids),
             raw_inputs_embeds=overrides.get("raw_inputs_embeds", self._raw_inputs_embeds),
             shard_start=overrides.get("shard_start", self._shard_start),
@@ -617,6 +732,7 @@ class SequenceContext:
             "inputs_embeds": self.inputs_embeds,
             "num_img_tokens": self.num_img_tokens,
             "rollout_routed_experts": self.rollout_routed_experts,
+            "dsa_topk_cache": self.dsa_topk_cache,
             "dsa_topk_indices": self.dsa_topk_indices,
             "dsa_topk_offloaded": self.dsa_topk_offloaded,
             "dsa_topk_released_sources": self.dsa_topk_released_sources,

@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.data_proto import DSATopKCacheState, SequenceContext
 from xtuner.v1.module.attention import DSAMLAConfig, dsa_mla
 from xtuner.v1.module.attention.dsa_topk_sharing import register_dsa_topk_decoder_lifecycle_hooks
 from xtuner.v1.ops.sparse_mla import sparse_mla, torch_sparse_mla
@@ -363,6 +363,37 @@ def test_sequence_context_splits_cat_dsa_topk_cache_to_microbatches():
     torch.testing.assert_close(seq_ctx_list[1].dsa_topk_indices[0], layer0_topk[2:])
     torch.testing.assert_close(seq_ctx_list[0].dsa_topk_indices[2], layer2_topk[:2])
     torch.testing.assert_close(seq_ctx_list[1].dsa_topk_indices[2], layer2_topk[2:])
+
+
+def test_sequence_context_dsa_topk_cache_state_keeps_legacy_fields_in_sync():
+    seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3]]),), device="cpu").copy(
+        dsa_topk_cache=DSATopKCacheState(context_id=123, checkpoint_active=True)
+    )
+    topk = torch.arange(3, dtype=torch.int64).view(3, 1, 1)
+
+    seq_ctx.dsa_topk_indices[0] = topk
+    seq_ctx.dsa_topk_offloaded[0] = "cache-key"
+    seq_ctx.dsa_topk_released_sources.add(0)
+    seq_ctx.dsa_topk_pending_offloads.add(0)
+    seq_ctx.dsa_topk_pending_releases.add(0)
+
+    assert seq_ctx.dsa_topk_cache.indices[0] is topk
+    assert seq_ctx.dsa_topk_cache.offloaded == {0: "cache-key"}
+    assert seq_ctx.dsa_topk_cache.released_sources == {0}
+    assert seq_ctx.dsa_topk_cache.pending_offloads == {0}
+    assert seq_ctx.dsa_topk_cache.pending_releases == {0}
+    assert seq_ctx.dsa_topk_cache.checkpoint_active
+    assert seq_ctx.dsa_topk_context_id == 123
+
+    copied_seq_ctx = seq_ctx.copy()
+    copied_seq_ctx.dsa_topk_indices = {1: topk}
+    assert seq_ctx.dsa_topk_indices == {1: topk}
+    assert copied_seq_ctx.dsa_topk_cache is seq_ctx.dsa_topk_cache
+
+    overridden_seq_ctx = seq_ctx.copy(dsa_topk_indices={2: topk})
+    assert overridden_seq_ctx.dsa_topk_indices == {2: topk}
+    assert seq_ctx.dsa_topk_indices == {1: topk}
+    assert overridden_seq_ctx.dsa_topk_cache is not seq_ctx.dsa_topk_cache
 
 
 def test_dsa_attention_mtp_layer_reuses_last_main_full_indexer():
