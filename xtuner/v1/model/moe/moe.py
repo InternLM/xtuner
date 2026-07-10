@@ -59,7 +59,7 @@ from xtuner.v1.module import (
 from xtuner.v1.module.attention.dsa_topk_sharing import (
     DSATopKSharingLayerProtocol,
     build_dsa_topk_release_plan,
-    register_dsa_topk_lifecycle_hooks,
+    register_dsa_topk_decoder_lifecycle_hooks,
 )
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
@@ -261,7 +261,7 @@ class MoE(BaseModel):
             # global topology, so MoE injects the model-level lifecycle plan.
             self_attn.dsa_topk_last_use = release_plan.forward_last_use
             self_attn.dsa_topk_recompute_release = release_plan.recompute_release
-            register_dsa_topk_lifecycle_hooks(decoder_layer)
+            register_dsa_topk_decoder_lifecycle_hooks(decoder_layer)
 
     def _z_loss_dist_token_count(
         self,

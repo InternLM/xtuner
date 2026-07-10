@@ -306,7 +306,7 @@ def get_dsa_topk_sharing_runtime() -> CrossLayerTopKSharingRuntime:
 
 
 @torch.compiler.disable
-def before_dsa_topk_attention_forward(attention: object, seq_ctx: SequenceContext | list[SequenceContext]) -> None:
+def before_dsa_topk_decoder_forward(attention: object, seq_ctx: SequenceContext | list[SequenceContext]) -> None:
     if not hasattr(attention, "dsa_topk_last_use"):
         return
 
@@ -316,7 +316,7 @@ def before_dsa_topk_attention_forward(attention: object, seq_ctx: SequenceContex
 
 
 @torch.compiler.disable
-def flush_dsa_topk_pending(seq_ctx: SequenceContext | list[SequenceContext]) -> None:
+def flush_dsa_topk_decoder_pending(seq_ctx: SequenceContext | list[SequenceContext]) -> None:
     runtime = get_dsa_topk_sharing_runtime()
     for ctx in seq_ctx if isinstance(seq_ctx, list) else [seq_ctx]:
         runtime.flush_pending(ctx)
@@ -333,7 +333,7 @@ def _get_seq_ctx_from_forward(
     return None
 
 
-def _dsa_topk_lifecycle_pre_hook(
+def _dsa_topk_decoder_lifecycle_pre_hook(
     module: torch.nn.Module,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
@@ -341,10 +341,10 @@ def _dsa_topk_lifecycle_pre_hook(
     seq_ctx = _get_seq_ctx_from_forward(args, kwargs)
     if seq_ctx is None:
         return
-    before_dsa_topk_attention_forward(getattr(module, "self_attn", None), seq_ctx)
+    before_dsa_topk_decoder_forward(getattr(module, "self_attn", None), seq_ctx)
 
 
-def _dsa_topk_lifecycle_post_hook(
+def _dsa_topk_decoder_lifecycle_post_hook(
     module: torch.nn.Module,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
@@ -353,11 +353,11 @@ def _dsa_topk_lifecycle_post_hook(
     seq_ctx = _get_seq_ctx_from_forward(args, kwargs)
     if seq_ctx is None:
         return
-    flush_dsa_topk_pending(seq_ctx)
+    flush_dsa_topk_decoder_pending(seq_ctx)
 
 
-def register_dsa_topk_lifecycle_hooks(decoder_layer: torch.nn.Module) -> None:
-    if getattr(decoder_layer, "_dsa_topk_lifecycle_hooks_registered", False):
+def register_dsa_topk_decoder_lifecycle_hooks(decoder_layer: torch.nn.Module) -> None:
+    if getattr(decoder_layer, "_dsa_topk_decoder_lifecycle_hooks_registered", False):
         return
     self_attn = getattr(decoder_layer, "self_attn", None)
     if not hasattr(self_attn, "dsa_topk_last_use"):
@@ -366,6 +366,6 @@ def register_dsa_topk_lifecycle_hooks(decoder_layer: torch.nn.Module) -> None:
     # Hooks run around the decoder module call, so reentrant checkpoint replay
     # triggers them again while the compiled decoder/attention forward stays
     # free of offload stream and pinned-memory side effects.
-    decoder_layer.register_forward_pre_hook(_dsa_topk_lifecycle_pre_hook, with_kwargs=True)
-    decoder_layer.register_forward_hook(_dsa_topk_lifecycle_post_hook, with_kwargs=True)
-    object.__setattr__(decoder_layer, "_dsa_topk_lifecycle_hooks_registered", True)
+    decoder_layer.register_forward_pre_hook(_dsa_topk_decoder_lifecycle_pre_hook, with_kwargs=True)
+    decoder_layer.register_forward_hook(_dsa_topk_decoder_lifecycle_post_hook, with_kwargs=True)
+    object.__setattr__(decoder_layer, "_dsa_topk_decoder_lifecycle_hooks_registered", True)

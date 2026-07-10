@@ -8,7 +8,7 @@ import torch.nn as nn
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module.attention import DSAMLAConfig, dsa_mla
-from xtuner.v1.module.attention.dsa_topk_sharing import register_dsa_topk_lifecycle_hooks
+from xtuner.v1.module.attention.dsa_topk_sharing import register_dsa_topk_decoder_lifecycle_hooks
 from xtuner.v1.ops.sparse_mla import sparse_mla, torch_sparse_mla
 
 
@@ -68,7 +68,7 @@ class _TinyDsaDecoderBlock(nn.Module):
     def __init__(self, attention: nn.Module) -> None:
         super().__init__()
         self.self_attn = attention
-        register_dsa_topk_lifecycle_hooks(self)
+        register_dsa_topk_decoder_lifecycle_hooks(self)
 
     def forward(
         self,
