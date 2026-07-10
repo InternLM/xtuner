@@ -4,9 +4,11 @@ import sys
 
 import pytest
 import torch
+import torch.nn as nn
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module.attention import DSAMLAConfig, dsa_mla
+from xtuner.v1.module.attention.dsa_topk_sharing import register_dsa_topk_lifecycle_hooks
 from xtuner.v1.ops.sparse_mla import sparse_mla, torch_sparse_mla
 
 
@@ -60,6 +62,26 @@ def _tiny_dsa_attention(
         indexer_types=indexer_types,
         sparse_mla_backend=sparse_mla_backend,
     ).build(hidden_size=4, layer_idx=layer_idx)
+
+
+class _TinyDsaDecoderBlock(nn.Module):
+    def __init__(self, attention: nn.Module) -> None:
+        super().__init__()
+        self.self_attn = attention
+        register_dsa_topk_lifecycle_hooks(self)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        seq_ctx: SequenceContext,
+    ) -> torch.Tensor:
+        outputs = self.self_attn(
+            hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
+            seq_ctx=seq_ctx,
+        )
+        return outputs["projected_output"]
 
 
 def test_torch_sparse_mla_handles_invalid_indices_and_backward():
@@ -426,14 +448,12 @@ def test_dsa_attention_activation_offload_checkpoint_recompute_onloads_and_clear
 def test_dsa_attention_activation_offload_compile_keeps_pin_memory_out_of_graph(monkeypatch):
     monkeypatch.setenv("XTUNER_ACTIVATION_OFFLOAD", "1")
     torch.manual_seed(0)
-    source_attn = torch.compile(
-        _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0).cuda(),
-        fullgraph=False,
-    )
-    shared_attn = torch.compile(
-        _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1).cuda(),
-        fullgraph=False,
-    )
+    source_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0).cuda()
+    shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1).cuda()
+    compiled_source_block = _TinyDsaDecoderBlock(source_attn).cuda()
+    compiled_shared_block = _TinyDsaDecoderBlock(shared_attn).cuda()
+    compiled_source_block.forward = torch.compile(compiled_source_block.forward, fullgraph=False)
+    compiled_shared_block.forward = torch.compile(compiled_shared_block.forward, fullgraph=False)
     hidden_states = torch.randn(1, 4, 4, device="cuda")
     position_embeddings = (
         torch.ones(1, 4, 2, device="cuda"),
@@ -442,17 +462,25 @@ def test_dsa_attention_activation_offload_compile_keeps_pin_memory_out_of_graph(
     seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cuda")
 
     with torch.no_grad():
-        source_attn(hidden_states, position_embeddings, seq_ctx)
-        shared_attn(hidden_states, position_embeddings, seq_ctx)
+        compiled_source_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
+        compiled_shared_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
     torch.cuda.synchronize()
 
+    assert seq_ctx.dsa_topk_indices == {}
+    assert seq_ctx.dsa_topk_pending_offloads == set()
+    assert set(seq_ctx.dsa_topk_offloaded) == {0}
+
     recompute_hidden_states = hidden_states.detach().clone().requires_grad_()
-    shared_attn(recompute_hidden_states, position_embeddings, seq_ctx)
-    source_attn(recompute_hidden_states, position_embeddings, seq_ctx)
+    compiled_shared_block(recompute_hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
+    assert set(seq_ctx.dsa_topk_indices) == {0}
+    assert set(seq_ctx.dsa_topk_offloaded) == {0}
+
+    compiled_source_block(recompute_hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
     torch.cuda.synchronize()
 
     assert seq_ctx.dsa_topk_indices == {}
     assert seq_ctx.dsa_topk_offloaded == {}
+    assert seq_ctx.dsa_topk_pending_releases == set()
     assert seq_ctx.dsa_topk_released_sources == {0}
 
 

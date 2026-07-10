@@ -56,7 +56,11 @@ from xtuner.v1.module import (
     NoAuxRouterConfig,
     RMSNorm,
 )
-from xtuner.v1.module.attention.dsa_topk_sharing import DSATopKSharingLayerProtocol, build_dsa_topk_release_plan
+from xtuner.v1.module.attention.dsa_topk_sharing import (
+    DSATopKSharingLayerProtocol,
+    build_dsa_topk_release_plan,
+    register_dsa_topk_lifecycle_hooks,
+)
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
 from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
@@ -225,25 +229,25 @@ class MoE(BaseModel):
         return tensor
 
     def _configure_dsa_topk_release_layers(self) -> None:
-        dsa_attns: list[DSATopKSharingLayerProtocol] = []
+        dsa_layers: list[tuple[nn.Module, DSATopKSharingLayerProtocol]] = []
         for decoder_layer in self.layers.values():
             self_attn = getattr(decoder_layer, "self_attn", None)
             if hasattr(self_attn, "dsa_topk_last_use"):
-                dsa_attns.append(cast(DSATopKSharingLayerProtocol, self_attn))
+                dsa_layers.append((decoder_layer, cast(DSATopKSharingLayerProtocol, self_attn)))
 
         num_mtp_layers = 0
         if self.mtp_block is not None and self.config.mtp_config is not None:
             num_mtp_layers = 1 if self.config.mtp_config.share_weights else self.config.mtp_config.num_layers
             for mtp_idx in range(num_mtp_layers):
-                decoder_layer = self.mtp_block.layers[mtp_idx].decoder_layer
+                decoder_layer = cast(nn.Module, self.mtp_block.layers[mtp_idx].decoder_layer)
                 self_attn = getattr(decoder_layer, "self_attn", None)
                 if hasattr(self_attn, "dsa_topk_last_use"):
-                    dsa_attns.append(cast(DSATopKSharingLayerProtocol, self_attn))
+                    dsa_layers.append((decoder_layer, cast(DSATopKSharingLayerProtocol, self_attn)))
 
-        if not dsa_attns:
+        if not dsa_layers:
             return
 
-        sample_attn = dsa_attns[0]
+        sample_attn = dsa_layers[0][1]
         release_plan = build_dsa_topk_release_plan(
             num_main_layers=self.config.num_hidden_layers,
             num_mtp_layers=num_mtp_layers,
@@ -251,12 +255,13 @@ class MoE(BaseModel):
             index_skip_topk_offset=sample_attn.index_skip_topk_offset,
             index_topk_freq=sample_attn.index_topk_freq,
         )
-        for self_attn in dsa_attns:
+        for decoder_layer, self_attn in dsa_layers:
             # DSA top-k sharing spans dense prefix, sparse MoE layers, and the
             # optional MTP layer. A single attention module cannot know that
             # global topology, so MoE injects the model-level lifecycle plan.
             self_attn.dsa_topk_last_use = release_plan.forward_last_use
             self_attn.dsa_topk_recompute_release = release_plan.recompute_release
+            register_dsa_topk_lifecycle_hooks(decoder_layer)
 
     def _z_loss_dist_token_count(
         self,

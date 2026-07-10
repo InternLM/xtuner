@@ -59,6 +59,8 @@ class SequenceContext:
     dsa_topk_indices: dict[int, torch.Tensor]
     dsa_topk_offloaded: dict[int, str]
     dsa_topk_released_sources: set[int]
+    dsa_topk_pending_offloads: set[int]
+    dsa_topk_pending_releases: set[int]
     dsa_topk_checkpoint_active: bool
     dsa_topk_context_id: int
 
@@ -92,6 +94,8 @@ class SequenceContext:
         dsa_topk_indices: dict[int, torch.Tensor] | None = None,
         dsa_topk_offloaded: dict[int, str] | None = None,
         dsa_topk_released_sources: set[int] | None = None,
+        dsa_topk_pending_offloads: set[int] | None = None,
+        dsa_topk_pending_releases: set[int] | None = None,
         dsa_topk_checkpoint_active: bool = False,
         dsa_topk_context_id: int | None = None,
         # SP shard metadata: private, accessed via properties below
@@ -130,6 +134,8 @@ class SequenceContext:
         self.dsa_topk_indices = {} if dsa_topk_indices is None else dsa_topk_indices
         self.dsa_topk_offloaded = {} if dsa_topk_offloaded is None else dsa_topk_offloaded
         self.dsa_topk_released_sources = set() if dsa_topk_released_sources is None else dsa_topk_released_sources
+        self.dsa_topk_pending_offloads = set() if dsa_topk_pending_offloads is None else dsa_topk_pending_offloads
+        self.dsa_topk_pending_releases = set() if dsa_topk_pending_releases is None else dsa_topk_pending_releases
         self.dsa_topk_checkpoint_active = dsa_topk_checkpoint_active
         self.dsa_topk_context_id = next(_DSA_TOPK_CONTEXT_IDS) if dsa_topk_context_id is None else dsa_topk_context_id
         self._raw_input_ids = raw_input_ids
@@ -521,6 +527,8 @@ class SequenceContext:
             dsa_topk_indices=overrides.get("dsa_topk_indices", self.dsa_topk_indices),
             dsa_topk_offloaded=overrides.get("dsa_topk_offloaded", self.dsa_topk_offloaded),
             dsa_topk_released_sources=overrides.get("dsa_topk_released_sources", self.dsa_topk_released_sources),
+            dsa_topk_pending_offloads=overrides.get("dsa_topk_pending_offloads", self.dsa_topk_pending_offloads),
+            dsa_topk_pending_releases=overrides.get("dsa_topk_pending_releases", self.dsa_topk_pending_releases),
             dsa_topk_checkpoint_active=overrides.get("dsa_topk_checkpoint_active", self.dsa_topk_checkpoint_active),
             dsa_topk_context_id=overrides.get("dsa_topk_context_id", self.dsa_topk_context_id),
             raw_input_ids=overrides.get("raw_input_ids", self._raw_input_ids),
@@ -612,6 +620,8 @@ class SequenceContext:
             "dsa_topk_indices": self.dsa_topk_indices,
             "dsa_topk_offloaded": self.dsa_topk_offloaded,
             "dsa_topk_released_sources": self.dsa_topk_released_sources,
+            "dsa_topk_pending_offloads": self.dsa_topk_pending_offloads,
+            "dsa_topk_pending_releases": self.dsa_topk_pending_releases,
             "dsa_topk_checkpoint_active": self.dsa_topk_checkpoint_active,
             "dsa_topk_context_id": self.dsa_topk_context_id,
         }
