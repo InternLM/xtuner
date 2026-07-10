@@ -421,49 +421,75 @@ class MoE(BaseModel):
                 return_router_logits=return_router_logits,
             )
 
-    def split_for_pipeline(self, pp_rank: int, num_stages: int, layer_split: list[int] | None = None) -> None:
-        """Trim this model in place to the pipeline stage owned by ``pp_rank``.
+    def split_for_pipeline(
+        self,
+        pp_rank: int,
+        num_stages: int,
+        layer_split: list[int] | None = None,
+        num_virtual_stages: int = 1,
+    ) -> list[tuple[int, list[str]]]:
+        """Trim this model in place to the pipeline stage(s) owned by ``pp_rank``.
 
-        Keeps only this stage's contiguous range of decoder layers (layer indices are preserved so
-        checkpoint keys stay stable), drops ``embed_tokens`` on non-first stages and
-        ``norm`` / ``lm_head`` / ``mtp_block`` on non-last stages. ``rotary_emb`` and the aux-loss
-        context are kept on every stage (position embeddings are recomputed locally and each stage
-        accumulates aux loss for its own layers). After this call, ``parameters()`` and the optimizer
-        see only the owned stage's parameters.
+        The model's decoder layers are cut into ``num_stages * num_virtual_stages`` contiguous chunks
+        (one per virtual stage). Virtual stages are assigned round-robin, so rank ``pp_rank`` owns the
+        global virtual stages ``pp_rank, pp_rank + num_stages, ...``. With ``num_virtual_stages == 1``
+        this is the ordinary one-stage-per-rank split. Layer indices are preserved (checkpoint keys stay
+        stable); ``embed_tokens`` is dropped unless this rank owns global virtual stage 0, and
+        ``norm`` / ``lm_head`` / ``mtp_block`` unless it owns the last global virtual stage. After this
+        call ``parameters()`` and the optimizer see only the owned layers.
 
         Args:
-            pp_rank (int): This rank's pipeline stage index, in ``[0, num_stages)``.
-            num_stages (int): Total number of pipeline stages.
-            layer_split (list[int] | None): Per-stage decoder layer counts; ``None`` splits evenly.
+            pp_rank (int): This rank's pipeline-parallel index, in ``[0, num_stages)``.
+            num_stages (int): Number of pipeline-parallel ranks (physical stages).
+            layer_split (list[int] | None): Per-virtual-stage decoder layer counts in global stage
+                order, length ``num_stages * num_virtual_stages``; ``None`` splits evenly.
+            num_virtual_stages (int): Virtual stages (model chunks) per rank for interleaved schedules.
+
+        Returns:
+            list[tuple[int, list[str]]]: For each owned virtual stage, in ascending global-index order,
+            its ``(global_stage_index, layer_index_keys)`` where ``layer_index_keys`` are the decoder
+            layer dict keys of that chunk.
         """
         num_layers = self.config.num_hidden_layers
         if num_stages < 1:
             raise ValueError(f"num_stages must be >= 1, got {num_stages}")
+        if num_virtual_stages < 1:
+            raise ValueError(f"num_virtual_stages must be >= 1, got {num_virtual_stages}")
         if not 0 <= pp_rank < num_stages:
             raise ValueError(f"pp_rank {pp_rank} out of range for num_stages {num_stages}")
-        if self.config.tie_word_embeddings and num_stages > 1:
+
+        total_stages = num_stages * num_virtual_stages
+        if self.config.tie_word_embeddings and total_stages > 1:
             # embed_tokens (first stage) and lm_head (last stage) would live on different stages, so
             # the shared weight cannot be tied in place. Supporting this needs cross-stage weight
             # sharing / gradient sync; remove this guard once that lands.
-            raise NotImplementedError("Pipeline parallel (num_stages > 1) with tie_word_embeddings is not supported")
+            raise NotImplementedError("Pipeline parallel (>1 stage) with tie_word_embeddings is not supported")
 
-        ranges = self._compute_layer_ranges(num_layers, num_stages, layer_split)
-        start, end = ranges[pp_rank]
-        owned = {str(idx) for idx in range(start, end)}
+        ranges = self._compute_layer_ranges(num_layers, total_stages, layer_split)
+        # Round-robin ("loop") assignment of virtual stages to ranks.
+        owned: list[tuple[int, list[str]]] = []
+        for global_idx in range(pp_rank, total_stages, num_stages):
+            start, end = ranges[global_idx]
+            owned.append((global_idx, [str(idx) for idx in range(start, end)]))
+
+        owned_layers = {key for _, keys in owned for key in keys}
         for key in list(self.layers.keys()):
-            if key not in owned:
+            if key not in owned_layers:
                 del self.layers[key]
 
-        if pp_rank != 0:
+        owns_first = any(global_idx == 0 for global_idx, _ in owned)
+        owns_last = any(global_idx == total_stages - 1 for global_idx, _ in owned)
+        if not owns_first:
             del self.embed_tokens
-        if pp_rank != num_stages - 1:
+        if not owns_last:
             del self.norm
             del self.lm_head
             self.mtp_block = None
 
         # Mark the model as a pipeline-stage subset so checkpoint save/load handles the partial key set.
-        if num_stages > 1:
+        if total_stages > 1:
             self._pipeline_split = True
+        return owned
 
     def pipeline_forward(
         self,
@@ -473,6 +499,7 @@ class MoE(BaseModel):
         *,
         is_first: bool,
         is_last: bool,
+        layer_indices: list[str] | None = None,
         return_router_logits: bool = False,
     ) -> torch.Tensor | MoEModelOutputs:
         """Run this pipeline stage's forward over its owned decoder layers.
@@ -492,8 +519,11 @@ class MoE(BaseModel):
                 ignored (and may be ``None``) on the first stage.
             seq_ctx (SequenceContext): Sequence context, replicated across pipeline stages.
             loss_ctx (MoELossContextDict | None): Loss contexts (lm + aux); required on the last stage.
-            is_first (bool): Whether this is the first pipeline stage.
-            is_last (bool): Whether this is the last pipeline stage.
+            is_first (bool): Whether this is the first (global) pipeline stage.
+            is_last (bool): Whether this is the last (global) pipeline stage.
+            layer_indices (list[str] | None): Decoder layer keys this (virtual) stage runs. ``None``
+                runs all of the model's currently-held layers (one-stage-per-rank). For interleaved
+                schedules each virtual stage passes its own chunk's keys.
             return_router_logits (bool): Whether to retain router logits/weights. Defaults to ``False``.
 
         Returns:
@@ -506,7 +536,9 @@ class MoE(BaseModel):
         else:
             assert stage_input is not None, "non-first pipeline stage requires stage_input hidden_states"
             hidden_states = stage_input
-        hidden_states, position_embeddings = self._layers_step(hidden_states, seq_ctx, state)
+        hidden_states, position_embeddings = self._layers_step(
+            hidden_states, seq_ctx, state, layer_indices=layer_indices
+        )
         if is_last:
             return self._head_step(hidden_states, position_embeddings, seq_ctx, loss_ctx, state)
         return hidden_states

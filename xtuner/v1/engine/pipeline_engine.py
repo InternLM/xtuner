@@ -20,7 +20,11 @@ import torch.distributed as dist
 from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.pipelining import PipelineStage
-from torch.distributed.pipelining.schedules import Schedule1F1B
+from torch.distributed.pipelining.schedules import (
+    Schedule1F1B,
+    ScheduleInterleaved1F1B,
+    _PipelineSchedule,
+)
 from torch.distributed.tensor import DTensor
 from torch.nn.utils.clip_grad import _no_grad
 from torch.utils._foreach_utils import _device_has_foreach_support
@@ -36,23 +40,28 @@ DEVICE = get_device()
 
 
 class _PipelineStageModule(nn.Module):
-    """Adapt a pipeline-split model to the tensor-in/tensor-out contract of ``PipelineStage``.
+    """Adapt one (virtual) pipeline stage to the tensor-in/tensor-out contract of ``PipelineStage``.
 
-    The first stage ignores its positional input and embeds ``seq_ctx``; later stages consume the
-    previous stage's ``hidden_states``. The last stage returns the total loss (sum of all loss terms,
-    mirroring the FSDP engine's loss aggregation) so the schedule can drive backward from it; non-last
-    stages return the ``hidden_states`` tensor to send downstream.
+    A stage runs only its chunk of decoder layers (``layer_keys``). The first (global) stage ignores its
+    positional input and embeds ``seq_ctx``; later stages consume the previous stage's ``hidden_states``.
+    The last (global) stage returns the total loss (sum of all loss terms, mirroring the FSDP engine's
+    aggregation) so the schedule can drive backward from it; other stages return the ``hidden_states``
+    tensor to send downstream. With one virtual stage per rank ``layer_keys`` covers all owned layers;
+    under interleaving each virtual stage gets its own chunk's keys.
     """
 
-    def __init__(self, model: BaseModel, is_first: bool, is_last: bool):
+    def __init__(self, model: BaseModel, layer_keys: list[str], is_first: bool, is_last: bool):
         super().__init__()
         self.model = model
+        self.layer_keys = layer_keys
         self.is_first = is_first
         self.is_last = is_last
 
     def forward(self, stage_input, seq_ctx=None, loss_ctx=None):
         x = None if self.is_first else stage_input
-        out = self.model.pipeline_forward(x, seq_ctx, loss_ctx, is_first=self.is_first, is_last=self.is_last)
+        out = self.model.pipeline_forward(
+            x, seq_ctx, loss_ctx, is_first=self.is_first, is_last=self.is_last, layer_indices=self.layer_keys
+        )
         if not self.is_last:
             return out
         return _total_loss(out)
@@ -109,19 +118,52 @@ class PPEngine:
         self.ep_mesh = self.mesh[f"{prefix}.ep"]
         self.pp_rank = self.pp_mesh.get_local_rank()
         self.num_stages = pp_cfg.pp_size
+        self.num_virtual_stages = pp_cfg.num_virtual_stages
+        # Total virtual stages across the whole pipeline. Global stage 0 lives on rank 0 and the last
+        # global stage on rank num_stages-1 regardless of interleaving, so first/last-rank tests are
+        # unchanged. ``self._owned_stages`` (set in build_model) lists this rank's (global_idx, keys).
+        self.total_stages = self.num_stages * self.num_virtual_stages
         self.is_first = self.pp_rank == 0
         self.is_last = self.pp_rank == self.num_stages - 1
+
+        if self.num_virtual_stages > 1 and (
+            getattr(model_cfg, "balancing_loss_cfg", None) is not None
+            or getattr(model_cfg, "z_loss_cfg", None) is not None
+        ):
+            # The MoE aux (balancing / z) loss accumulates per-layer stats in model-global state that is
+            # drained once per forward at finalize. Interleaving runs several forwards per finalize
+            # (across microbatches and virtual stages), so that accumulation mixes microbatches and the
+            # finalize shapes stop matching. Block it clearly until aux accumulation is made
+            # per-microbatch (and finalized per stage) for interleaved schedules.
+            raise NotImplementedError(
+                "Interleaved pipeline parallel (num_virtual_stages > 1) does not support the MoE "
+                "balancing / z auxiliary loss yet. Set balancing_loss_cfg=None and z_loss_cfg=None, or "
+                "use num_virtual_stages=1."
+            )
 
         self.model = self.build_model()
         self.optimizer = self.build_optimizer(optim_cfg)
 
-        self._stage: PipelineStage | None = None
-        self._schedule: Schedule1F1B | None = None
-        self._stage_module = _PipelineStageModule(self.model, self.is_first, self.is_last)
+        self._stages: list[PipelineStage] | None = None
+        self._schedule: _PipelineSchedule | None = None
+        self._stage_modules = [
+            _PipelineStageModule(
+                self.model,
+                layer_keys=keys,
+                is_first=(global_idx == 0),
+                is_last=(global_idx == self.total_stages - 1),
+            )
+            for global_idx, keys in self._owned_stages
+        ]
 
     def build_model(self) -> BaseModel:
         model = self.model_cfg.build()
-        model.split_for_pipeline(self.pp_rank, self.num_stages, layer_split=self.pp_cfg.layer_split)
+        self._owned_stages = model.split_for_pipeline(
+            self.pp_rank,
+            self.num_stages,
+            layer_split=self.pp_cfg.layer_split,
+            num_virtual_stages=self.num_virtual_stages,
+        )
         # Activation checkpointing is orthogonal to FSDP; apply the same per-layer recompute policy the
         # FSDP path uses (only this stage's owned layers are wrapped, by global layer index).
         if self.recompute_ratio > 0:
@@ -204,9 +246,11 @@ class PPEngine:
         kwarg_mbs = [{"seq_ctx": seq_ctx_list[i], "loss_ctx": loss_ctx_list[i]} for i in range(n_microbatches)]
 
         # Replicate what Schedule.step() does before driving microbatches (we bypass step() to keep
-        # seq_ctx un-chunked).
-        self._stage.has_backward = schedule._has_backward  # type: ignore[union-attr]
-        self._stage.clear_runtime_states()  # type: ignore[union-attr]
+        # seq_ctx un-chunked): set has_backward and clear runtime state on every owned (virtual) stage.
+        assert self._stages is not None
+        for stage in self._stages:
+            stage.has_backward = schedule._has_backward  # type: ignore[attr-defined]
+            stage.clear_runtime_states()
 
         losses: list[torch.Tensor] = []
         if self.is_last:
@@ -288,27 +332,33 @@ class PPEngine:
             self.optimizer.zero_grad()
         return grad_norm
 
-    def _get_schedule(self, n_microbatches: int, seq_ctx) -> Schedule1F1B:
+    def _get_schedule(self, n_microbatches: int, seq_ctx) -> _PipelineSchedule:
         if self._schedule is not None:
             return self._schedule
         example = self._example_hidden(seq_ctx)
-        # Provide output_args so PipelineStage skips its forward-based shape inference, which would call
-        # the stage without our seq_ctx kwarg. Non-last stages output hidden_states; the last outputs
-        # the (float32) scalar loss.
-        if self.is_last:
-            output_args: tuple = (torch.zeros((), dtype=torch.float32, device=DEVICE),)
+        loss_example = torch.zeros((), dtype=torch.float32, device=DEVICE)
+        stages: list[PipelineStage] = []
+        for (global_idx, _keys), module in zip(self._owned_stages, self._stage_modules):
+            # Provide output_args so PipelineStage skips its forward-based shape inference, which would
+            # call the stage without our seq_ctx kwarg. The last global stage outputs the (float32)
+            # scalar loss; every other stage outputs hidden_states.
+            output_args: tuple = (loss_example,) if global_idx == self.total_stages - 1 else (example,)
+            stages.append(
+                PipelineStage(
+                    module,
+                    global_idx,
+                    self.total_stages,
+                    torch.device(DEVICE),
+                    input_args=(example,),
+                    output_args=output_args,
+                    group=self.pp_mesh.get_group(),
+                )
+            )
+        self._stages = stages
+        if self.num_virtual_stages == 1:
+            self._schedule = Schedule1F1B(stages[0], n_microbatches=n_microbatches, loss_fn=_passthrough_loss)
         else:
-            output_args = (example,)
-        self._stage = PipelineStage(
-            self._stage_module,
-            self.pp_rank,
-            self.num_stages,
-            torch.device(DEVICE),
-            input_args=(example,),
-            output_args=output_args,
-            group=self.pp_mesh.get_group(),
-        )
-        self._schedule = Schedule1F1B(self._stage, n_microbatches=n_microbatches, loss_fn=_passthrough_loss)
+            self._schedule = ScheduleInterleaved1F1B(stages, n_microbatches=n_microbatches, loss_fn=_passthrough_loss)
         return self._schedule
 
     def _example_hidden(self, seq_ctx) -> torch.Tensor:
