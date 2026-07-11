@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import parametrize
 import pytest
@@ -698,6 +699,38 @@ class TestGlm52MoE(DeterministicDDPTestCase):
             self.assertTrue(
                 torch.allclose(output["loss"], expected_loss.to(output["loss"].dtype), rtol=5e-2, atol=5e-2)
             )
+        finally:
+            del model
+            torch.cuda.empty_cache()
+
+    def test_activation_offload_compile_checkpoint_forward_backward_cleans_topk_cache(self):
+        self.create_pg("cuda")
+
+        tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
+        input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
+
+        with torch.device("meta"):
+            cfg = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
+            cfg.dispatcher = None
+            cfg.ep_size = 1
+            model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
+
+        fsdp_config = FSDPConfig(ep_size=1, cpu_offload=False, recompute_ratio=1.0)
+        model.fully_shard(fsdp_config=fsdp_config)
+
+        try:
+            model.from_hf(GLM5_2_TINY_MOE_PATH)
+            model.train()
+
+            seq_ctx, loss_ctx = _build_lm_loss_ctx(input_ids)
+            with mock.patch.dict(os.environ, {"XTUNER_ACTIVATION_OFFLOAD": "1"}):
+                output = model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
+                self.assertTrue(torch.isfinite(output["loss"]).all())
+                output["loss"].backward()
+            torch.cuda.synchronize()
+
+            self.assertEqual(seq_ctx.dsa_topk_cache.indices, {})
+            self.assertEqual(seq_ctx.dsa_topk_cache.offloaded, {})
         finally:
             del model
             torch.cuda.empty_cache()

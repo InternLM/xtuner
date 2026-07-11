@@ -653,7 +653,6 @@ def client_usage_current_interface(input_ids: torch.Tensor) -> None:
 
 def remaining_design_work() -> list[str]:
     return [
-        "Move model-level tests to public decoder/model paths; keep pending_* assertions in runtime tests only.",
         "Evaluate int32 top-k only after PyTorch SparseMLA, TileLang SparseMLA, and indexer agree on dtype.",
         "Optionally wrap dense-prefix split through CrossLayerTopKSharingRuntime if more callers appear.",
     ]
