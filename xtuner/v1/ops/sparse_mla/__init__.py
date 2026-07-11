@@ -14,6 +14,10 @@ def get_sparse_mla(backend: SparseMLABackend) -> SparseMLAProtocol:
         from .tilelang import tilelang_sparse_mla
 
         return tilelang_sparse_mla
+    if backend == "cudnn_dsa":
+        from .cudnn_dsa import cudnn_dsa_sparse_mla
+
+        return cudnn_dsa_sparse_mla
     raise ValueError(f"Unsupported SparseMLA backend: {backend}")
 
 
@@ -31,7 +35,7 @@ def sparse_mla(
 def get_dsa_topk_indices(backend: SparseMLABackend) -> DSATopKIndicesProtocol:
     if backend == "torch":
         return torch_dsa_topk_indices
-    if backend == "tilelang":
+    if backend in ("tilelang", "cudnn_dsa"):
         from .tilelang import tilelang_dsa_topk_indices
 
         return tilelang_dsa_topk_indices
@@ -64,6 +68,12 @@ def ensure_tilelang_runtime_available() -> None:
     return _impl()
 
 
+def ensure_cudnn_dsa_runtime_available() -> None:
+    from .cudnn_dsa import ensure_cudnn_dsa_runtime_available as _impl
+
+    return _impl()
+
+
 def sparse_mla_fwd_interface(*args, **kwargs):
     from .tilelang_sparse_mla_fwd import sparse_mla_fwd_interface as _impl
 
@@ -88,6 +98,7 @@ __all__ = [
     "SparseMLAOutputs",
     "SparseMLAProtocol",
     "dsa_topk_indices",
+    "ensure_cudnn_dsa_runtime_available",
     "ensure_tilelang_runtime_available",
     "get_dsa_topk_indices",
     "get_sparse_mla",

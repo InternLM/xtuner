@@ -20,6 +20,8 @@ BF16_ATOL = 1e-2
 BF16_RTOL = 1.6e-2
 DKV_ATOL = 1e-1
 DKV_RTOL = 1e-1
+CUDNN_DQ_ATOL = 5e-2
+CUDNN_DQ_RTOL = 5e-2
 
 
 def _tilelang_sparse_mla_available() -> bool:
@@ -35,11 +37,42 @@ def _tilelang_sparse_mla_available() -> bool:
     return result.returncode == 0
 
 
+def _cudnn_dsa_sparse_mla_available() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    if torch.cuda.get_device_capability()[0] < 9:
+        return False
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from cudnn.deepseek_sparse_attention.sparse_attention_backward import sparse_attention_backward_wrapper",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 def _tilelang_sparse_mla_inputs():
     torch.manual_seed(0)
     seq_len = 64
     topk = 64
     q = torch.randn(seq_len, 16, 576, device="cuda", dtype=torch.bfloat16)
+    kv = torch.randn(seq_len, 1, 576, device="cuda", dtype=torch.bfloat16)
+    indices = torch.full((seq_len, 1, topk), -1, device="cuda", dtype=torch.int64)
+    for token_idx in range(seq_len):
+        indices[token_idx, 0, : token_idx + 1] = torch.arange(token_idx + 1, device="cuda")
+    return q, kv, indices
+
+
+def _cudnn_dsa_sparse_mla_inputs():
+    torch.manual_seed(0)
+    seq_len = 64
+    topk = 64
+    q = torch.randn(seq_len, 64, 576, device="cuda", dtype=torch.bfloat16)
     kv = torch.randn(seq_len, 1, 576, device="cuda", dtype=torch.bfloat16)
     indices = torch.full((seq_len, 1, topk), -1, device="cuda", dtype=torch.int64)
     for token_idx in range(seq_len):
@@ -223,6 +256,30 @@ def test_sparse_mla_tilelang_backward_matches_torch_sparse_mla():
     torch.testing.assert_close(kv_tilelang.grad, kv_ref.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
 
 
+@pytest.mark.skipif(
+    not (_tilelang_sparse_mla_available() and _cudnn_dsa_sparse_mla_available()),
+    reason="requires CUDA, TileLang, and cuDNN DSA sparse attention backward",
+)
+def test_sparse_mla_cudnn_dsa_backward_matches_tilelang_sparse_mla():
+    q, kv, indices = _cudnn_dsa_sparse_mla_inputs()
+    scaling = 1 / math.sqrt(q.shape[-1])
+    q_tilelang = q.detach().clone().requires_grad_()
+    kv_tilelang = kv.detach().clone().requires_grad_()
+    q_cudnn = q.detach().clone().requires_grad_()
+    kv_cudnn = kv.detach().clone().requires_grad_()
+
+    tilelang_out, _ = sparse_mla(q_tilelang, kv_tilelang, indices, scaling=scaling, value_dim=512, backend="tilelang")
+    cudnn_out, _ = sparse_mla(q_cudnn, kv_cudnn, indices, scaling=scaling, value_dim=512, backend="cudnn_dsa")
+    grad_output = torch.randn_like(tilelang_out)
+
+    tilelang_out.backward(grad_output)
+    cudnn_out.backward(grad_output)
+
+    torch.testing.assert_close(cudnn_out, tilelang_out, atol=BF16_ATOL, rtol=BF16_RTOL)
+    torch.testing.assert_close(q_cudnn.grad, q_tilelang.grad, atol=CUDNN_DQ_ATOL, rtol=CUDNN_DQ_RTOL)
+    torch.testing.assert_close(kv_cudnn.grad, kv_tilelang.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
+
+
 def test_dsa_attention_topk_respects_packed_causal_boundaries():
     torch.manual_seed(0)
     attn = _tiny_dsa_attention(indexer_types=["full"], layer_idx=0)
@@ -293,6 +350,26 @@ def test_dsa_attention_tilelang_runtime_checked_once_at_build(monkeypatch):
         sparse_mla(q, kv, indices, scaling=0.5, value_dim=4, backend="tilelang")
 
     assert calls == 1
+
+
+def test_dsa_attention_cudnn_dsa_runtime_checked_once_at_build(monkeypatch):
+    tilelang_calls = 0
+    cudnn_calls = 0
+
+    def fake_ensure_tilelang_runtime_available():
+        nonlocal tilelang_calls
+        tilelang_calls += 1
+
+    def fake_ensure_cudnn_dsa_runtime_available():
+        nonlocal cudnn_calls
+        cudnn_calls += 1
+
+    monkeypatch.setattr(dsa_mla, "ensure_tilelang_runtime_available", fake_ensure_tilelang_runtime_available)
+    monkeypatch.setattr(dsa_mla, "ensure_cudnn_dsa_runtime_available", fake_ensure_cudnn_dsa_runtime_available)
+    _tiny_dsa_attention(indexer_types=["full"], layer_idx=0, sparse_mla_backend="cudnn_dsa")
+
+    assert tilelang_calls == 1
+    assert cudnn_calls == 1
 
 
 @pytest.mark.skipif(not _tilelang_sparse_mla_available(), reason="requires CUDA and importable TileLang runtime")

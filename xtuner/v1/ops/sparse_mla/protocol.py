@@ -6,7 +6,7 @@ import torch
 from xtuner.v1.data_proto import SequenceContext
 
 
-SparseMLABackend = Literal["torch", "tilelang"]
+SparseMLABackend = Literal["torch", "tilelang", "cudnn_dsa"]
 
 
 class SparseMLAOutputs(NamedTuple):
