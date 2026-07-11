@@ -250,6 +250,9 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         if self.indexer_types is None:
             return {}, {}
 
+        # This is an attention-local fallback built from the main-stack
+        # indexer_types only. Model-level owners such as GLM-5.2 MoE may
+        # override it with a release plan that also includes MTP logical layers.
         consumers: dict[int, list[int]] = {}
         for layer_idx, indexer_type in enumerate(self.indexer_types):
             if indexer_type == "full":

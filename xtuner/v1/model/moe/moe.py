@@ -257,8 +257,9 @@ class MoE(BaseModel):
         )
         for decoder_layer, self_attn in dsa_layers:
             # DSA top-k sharing spans dense prefix, sparse MoE layers, and the
-            # optional MTP layer. A single attention module cannot know that
-            # global topology, so MoE injects the model-level lifecycle plan.
+            # optional MTP layer. The attention-local default release maps only
+            # see the main-stack indexer_types, so this model-level plan
+            # intentionally overrides them with the full logical layer topology.
             configure_dsa_topk_decoder_lifecycle(
                 decoder_layer=decoder_layer,
                 attention=self_attn,
