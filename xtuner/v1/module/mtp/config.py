@@ -1,9 +1,13 @@
 """Configuration for Multi-Token Prediction (MTP)."""
 
-from typing import Annotated
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Annotated
 
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
+
+from xtuner.v1.loss.mtp_loss import MTPLossConfig
 
 
 class MTPConfig(BaseModel):
@@ -18,6 +22,7 @@ class MTPConfig(BaseModel):
     decoder layers.
 
     Args:
+        name (str): Name of mtp module.
         num_layers (int): Number of MTP layers (prediction depths). Each layer
             predicts tokens at increasing future positions (i+1, i+2, ..., i+D).
         share_weights (bool): Whether to share the weights of the MTP layers.
@@ -30,6 +35,8 @@ class MTPConfig(BaseModel):
         loss_scaling_factor (float): Scaling factor for MTP loss. The total MTP loss
             is computed as the average of losses across all depths, multiplied by
             this factor. Default: 0.1.
+        loss_cfg (MTPLossConfig | None): Loss configuration for MTP.
+            If None, loss config will be constructed from MTPLossConfig(). Default: None.
 
     Example:
         >>> # In model config
@@ -39,14 +46,17 @@ class MTPConfig(BaseModel):
         ...         num_layers=2,
         ...         share_weights=True,
         ...         loss_scaling_factor=0.1,
+        ...         loss_cfg=MTPLossConfig()
         ...     ),
         ... )
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    name: Annotated[str, Parameter(group="model")]
     num_layers: Annotated[int, Parameter(group="model")]
     share_weights: Annotated[bool, Parameter(group="model")] = False
     detach_mtp_lm_head_weight: Annotated[bool, Parameter(group="model")] = False
     detach_mtp_inputs: Annotated[bool, Parameter(group="model")] = False
     loss_scaling_factor: Annotated[float, Parameter(group="model")] = 0.1
+    loss_cfg: MTPLossConfig | None = None

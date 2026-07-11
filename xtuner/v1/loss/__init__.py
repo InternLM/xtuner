@@ -10,7 +10,7 @@ from .moe_loss import (
     ZLossContext,
     ZLossKwargs,
 )
-from .mtp_loss import MTPLossContext
+from .mtp_loss import MTPLossContext, SciMTPLossContext, MTPLossConfig, SciMTPLossConfig
 from .rl_loss import LogProbConfig, LogProbContext
 
 
@@ -31,6 +31,9 @@ __all__ = [
     "BaseLossKwargs",
     "LMHeadLossContext",
     "MTPLossContext",
+    "MTPLossConfig",
+    "SciMTPLossContext",
+    "SciMTPLossConfig",
     "LogProbConfig",
     "LogProbContext",
 ]
