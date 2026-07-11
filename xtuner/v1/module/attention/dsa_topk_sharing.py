@@ -115,6 +115,7 @@ class GpuTopKResidency(TopKResidencyBase):
 class ActivationOffloadedTopKResidency(TopKResidencyBase):
     def __init__(self) -> None:
         self._streams: dict[int, torch.cuda.Stream] = {}
+        self._prefetched: dict[tuple[int, int], SwapTensor] = {}
 
     def has_cache(self, seq_ctx: SequenceContext, source_layer_idx: int) -> bool:
         cache = seq_ctx.dsa_topk_cache
@@ -123,8 +124,25 @@ class ActivationOffloadedTopKResidency(TopKResidencyBase):
     def read(self, seq_ctx: SequenceContext, source_layer_idx: int) -> torch.Tensor:
         cache = seq_ctx.dsa_topk_cache
         if source_layer_idx in cache.indices:
+            self._wait_prefetched(seq_ctx, source_layer_idx)
             return cache.indices[source_layer_idx]
         return self._read_offloaded(seq_ctx, source_layer_idx)
+
+    # Pinned CPU buffers and stream-side effects must stay outside Inductor graphs.
+    @torch.compiler.disable
+    def prefetch(self, seq_ctx: SequenceContext, source_layer_idx: int) -> None:
+        cache = seq_ctx.dsa_topk_cache
+        if source_layer_idx in cache.indices or source_layer_idx not in cache.offloaded:
+            return
+
+        key = cache.offloaded[source_layer_idx]
+        swap_tensor = OffloadManager().get(key)
+        stream = self._stream_for_device(swap_tensor.tensor.device)
+        # Decoder pre-hook runs before the compiled layer body. Launch H2D here
+        # and wait only when SparseMLA actually consumes top-k in read().
+        swap_tensor.prefetch_launch_h2d(stream, True)
+        cache.indices[source_layer_idx] = swap_tensor.tensor
+        self._prefetched[self._prefetch_key(seq_ctx, source_layer_idx)] = swap_tensor
 
     # Pinned CPU buffers and stream-side effects must stay outside Inductor graphs.
     @torch.compiler.disable
@@ -144,6 +162,14 @@ class ActivationOffloadedTopKResidency(TopKResidencyBase):
 
         cache.indices[source_layer_idx] = swap_tensor.tensor
         return swap_tensor.tensor
+
+    # Pinned CPU buffers and stream-side effects must stay outside Inductor graphs.
+    @torch.compiler.disable
+    def _wait_prefetched(self, seq_ctx: SequenceContext, source_layer_idx: int) -> None:
+        swap_tensor = self._prefetched.pop(self._prefetch_key(seq_ctx, source_layer_idx), None)
+        if swap_tensor is None:
+            return
+        swap_tensor.wait_h2d_finished()
 
     # Pinned CPU buffers and stream-side effects must stay outside Inductor graphs.
     @torch.compiler.disable
@@ -168,6 +194,7 @@ class ActivationOffloadedTopKResidency(TopKResidencyBase):
     @torch.compiler.disable
     def after_recompute_release(self, seq_ctx: SequenceContext, source_layer_idx: int) -> None:
         cache = seq_ctx.dsa_topk_cache
+        self._wait_prefetched(seq_ctx, source_layer_idx)
         super().after_recompute_release(seq_ctx, source_layer_idx)
         key = cache.offloaded.pop(source_layer_idx, None)
         if key is None:
@@ -186,6 +213,9 @@ class ActivationOffloadedTopKResidency(TopKResidencyBase):
         if device_idx not in self._streams:
             self._streams[device_idx] = torch.cuda.Stream(device=device_idx)
         return self._streams[device_idx]
+
+    def _prefetch_key(self, seq_ctx: SequenceContext, source_layer_idx: int) -> tuple[int, int]:
+        return id(seq_ctx.dsa_topk_cache), source_layer_idx
 
 
 class CrossLayerTopKSharingRuntime:
@@ -258,7 +288,7 @@ class CrossLayerTopKSharingRuntime:
         source_layer_idx = layer.source_layer_idx
         if source_layer_idx not in seq_ctx.dsa_topk_cache.offloaded:
             return
-        self._offloaded_residency.read(seq_ctx, source_layer_idx)
+        self._offloaded_residency.prefetch(seq_ctx, source_layer_idx)
 
     def flush_pending(self, seq_ctx: SequenceContext) -> None:
         cache = seq_ctx.dsa_topk_cache

@@ -250,6 +250,9 @@ class GpuTopKResidency(TopKResidencyBase):
 class ActivationOffloadedTopKResidency(TopKResidencyBase):
     """Pseudo OffloadManager/SwapTensor-backed residency."""
 
+    def __init__(self) -> None:
+        self._prefetched: dict[tuple[int, int], object] = {}
+
     def has_cache(self, seq_ctx: SequenceContextPseudo, source_layer_idx: int) -> bool:
         cache = seq_ctx.dsa_topk_cache
         return source_layer_idx in cache.indices or source_layer_idx in cache.offloaded
@@ -257,6 +260,7 @@ class ActivationOffloadedTopKResidency(TopKResidencyBase):
     def read(self, seq_ctx: SequenceContextPseudo, source_layer_idx: int) -> torch.Tensor:
         cache = seq_ctx.dsa_topk_cache
         if source_layer_idx in cache.indices:
+            self._wait_prefetched(seq_ctx, source_layer_idx)
             return cache.indices[source_layer_idx]
 
         key = cache.offloaded[source_layer_idx]
@@ -268,6 +272,30 @@ class ActivationOffloadedTopKResidency(TopKResidencyBase):
         cache.indices[source_layer_idx] = topk
         _ = key
         return topk
+
+    def prefetch(self, seq_ctx: SequenceContextPseudo, source_layer_idx: int) -> None:
+        cache = seq_ctx.dsa_topk_cache
+        if source_layer_idx in cache.indices or source_layer_idx not in cache.offloaded:
+            return
+
+        key = cache.offloaded[source_layer_idx]
+        # Production code:
+        #   swap_tensor = OffloadManager().get(key)
+        #   swap_tensor.prefetch_launch_h2d(side_stream, True)
+        #   cache.indices[source_layer_idx] = swap_tensor.tensor
+        #   self._prefetched[(id(cache), source_layer_idx)] = swap_tensor
+        topk = torch.empty(0, dtype=torch.int64, device="cuda")
+        cache.indices[source_layer_idx] = topk
+        self._prefetched[(id(cache), source_layer_idx)] = object()
+        _ = key
+
+    def _wait_prefetched(self, seq_ctx: SequenceContextPseudo, source_layer_idx: int) -> None:
+        token = self._prefetched.pop((id(seq_ctx.dsa_topk_cache), source_layer_idx), None)
+        if token is None:
+            return
+        # Production code:
+        #   swap_tensor.wait_h2d_finished()
+        _ = token
 
     def after_original_forward_last_use(self, seq_ctx: SequenceContextPseudo, source_layer_idx: int) -> None:
         cache = seq_ctx.dsa_topk_cache
@@ -286,6 +314,7 @@ class ActivationOffloadedTopKResidency(TopKResidencyBase):
 
     def after_recompute_release(self, seq_ctx: SequenceContextPseudo, source_layer_idx: int) -> None:
         cache = seq_ctx.dsa_topk_cache
+        self._wait_prefetched(seq_ctx, source_layer_idx)
         super().after_recompute_release(seq_ctx, source_layer_idx)
         key = cache.offloaded.pop(source_layer_idx, None)
         if key is not None:
@@ -366,7 +395,7 @@ class CrossLayerTopKSharingRuntime:
         source = layer.source_layer_idx
         if source not in seq_ctx.dsa_topk_cache.offloaded:
             return
-        self._offloaded_residency.read(seq_ctx, source)
+        self._offloaded_residency.prefetch(seq_ctx, source)
 
     def flush_pending(self, seq_ctx: SequenceContextPseudo) -> None:
         cache = seq_ctx.dsa_topk_cache
@@ -624,8 +653,6 @@ def client_usage_current_interface(input_ids: torch.Tensor) -> None:
 
 def remaining_design_work() -> list[str]:
     return [
-        "Use seq_ctx.dsa_topk_cache in all new code; keep legacy dsa_topk_* properties as compatibility only.",
-        "Add stream/event H2D prefetch before ActivationOffloadedTopKResidency.read blocks the current stream.",
         "Move model-level tests to public decoder/model paths; keep pending_* assertions in runtime tests only.",
         "Evaluate int32 top-k only after PyTorch SparseMLA, TileLang SparseMLA, and indexer agree on dtype.",
         "Optionally wrap dense-prefix split through CrossLayerTopKSharingRuntime if more callers appear.",

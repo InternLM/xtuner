@@ -8,7 +8,11 @@ import torch.nn as nn
 
 from xtuner.v1.data_proto import DSATopKCacheState, SequenceContext
 from xtuner.v1.module.attention import DSAMLAConfig, dsa_mla
-from xtuner.v1.module.attention.dsa_topk_sharing import register_dsa_topk_decoder_lifecycle_hooks
+from xtuner.v1.module.attention.dsa_topk_sharing import (
+    before_dsa_topk_decoder_forward,
+    get_dsa_topk_sharing_runtime,
+    register_dsa_topk_decoder_lifecycle_hooks,
+)
 from xtuner.v1.ops.sparse_mla import sparse_mla, torch_sparse_mla
 
 
@@ -436,6 +440,42 @@ def test_dsa_attention_checkpoint_recompute_reuses_and_releases_source_topk():
 
     assert seq_ctx.dsa_topk_cache.indices == {}
     assert seq_ctx.dsa_topk_cache.released_sources == {0}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA activation offload")
+def test_dsa_attention_activation_offload_decoder_pre_hook_prefetches_without_sync_read(monkeypatch):
+    monkeypatch.setenv("XTUNER_ACTIVATION_OFFLOAD", "1")
+    torch.manual_seed(0)
+    source_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0).cuda()
+    shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1).cuda()
+    source_block = _TinyDsaDecoderBlock(source_attn).cuda()
+    shared_block = _TinyDsaDecoderBlock(shared_attn).cuda()
+    hidden_states = torch.randn(1, 4, 4, device="cuda")
+    position_embeddings = (
+        torch.ones(1, 4, 2, device="cuda"),
+        torch.zeros(1, 4, 2, device="cuda"),
+    )
+    seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cuda")
+
+    with torch.no_grad():
+        source_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
+        shared_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
+    torch.cuda.synchronize()
+
+    assert seq_ctx.dsa_topk_cache.indices == {}
+    assert set(seq_ctx.dsa_topk_cache.offloaded) == {0}
+
+    runtime = get_dsa_topk_sharing_runtime()
+
+    def fail_sync_read(*args, **kwargs):
+        raise AssertionError("decoder pre-hook should prefetch top-k instead of synchronously reading it")
+
+    monkeypatch.setattr(runtime._offloaded_residency, "_read_offloaded", fail_sync_read)
+
+    before_dsa_topk_decoder_forward(shared_attn, seq_ctx)
+    assert set(seq_ctx.dsa_topk_cache.indices) == {0}
+    runtime._offloaded_residency.after_recompute_release(seq_ctx, 0)
+    torch.cuda.synchronize()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA activation offload")
