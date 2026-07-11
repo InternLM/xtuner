@@ -116,6 +116,27 @@ def test_torch_sparse_mla_handles_invalid_indices_and_backward():
     assert torch.isfinite(kv.grad).all()
 
 
+def test_torch_sparse_mla_accepts_int32_indices_like_int64():
+    torch.manual_seed(0)
+    q = torch.randn(4, 2, 6)
+    kv = torch.randn(5, 1, 6)
+    indices = torch.tensor(
+        [
+            [[0, -1, -1]],
+            [[1, 0, -1]],
+            [[2, 1, -1]],
+            [[4, 3, 1]],
+        ],
+        dtype=torch.int64,
+    )
+
+    int64_outputs = torch_sparse_mla(q, kv, indices, scaling=0.5, value_dim=4)
+    int32_outputs = torch_sparse_mla(q, kv, indices.to(torch.int32), scaling=0.5, value_dim=4)
+
+    torch.testing.assert_close(int32_outputs.raw_output, int64_outputs.raw_output)
+    torch.testing.assert_close(int32_outputs.softmax_lse, int64_outputs.softmax_lse)
+
+
 def test_sparse_mla_selects_torch_backend_explicitly():
     torch.manual_seed(0)
     q = torch.randn(4, 2, 6, requires_grad=True)
@@ -167,7 +188,14 @@ def test_sparse_mla_tilelang_forward_matches_torch_sparse_mla():
     scaling = 1 / math.sqrt(q.shape[-1])
 
     ref_out, ref_lse = sparse_mla(q, kv, indices, scaling=scaling, value_dim=512, backend="torch")
-    tilelang_out, tilelang_lse = sparse_mla(q, kv, indices, scaling=scaling, value_dim=512, backend="tilelang")
+    tilelang_out, tilelang_lse = sparse_mla(
+        q,
+        kv,
+        indices.to(torch.int32),
+        scaling=scaling,
+        value_dim=512,
+        backend="tilelang",
+    )
 
     torch.testing.assert_close(tilelang_out, ref_out, atol=BF16_ATOL, rtol=BF16_RTOL)
     torch.testing.assert_close(tilelang_lse, ref_lse, atol=BF16_ATOL, rtol=BF16_RTOL)
@@ -208,6 +236,7 @@ def test_dsa_attention_topk_respects_packed_causal_boundaries():
     attn(hidden_states, position_embeddings, seq_ctx)
 
     topk = seq_ctx.dsa_topk_cache.indices[0]
+    assert topk.dtype == torch.int64
     for token_idx, seq_start in [(0, 0), (1, 0), (2, 2), (3, 2), (4, 2)]:
         valid_indices = topk[token_idx, 0][topk[token_idx, 0] != -1]
         assert valid_indices.numel() == token_idx - seq_start + 1
@@ -313,6 +342,7 @@ def test_dsa_attention_tilelang_long_packed_sequence_respects_boundaries_and_bac
     assert torch.isfinite(hidden_states.grad).all()
 
     topk = seq_ctx.dsa_topk_cache.indices[0]
+    assert topk.dtype == torch.int64
     for seq_start, seq_end in zip(seq_ctx.cu_seq_lens_q[:-1].tolist(), seq_ctx.cu_seq_lens_q[1:].tolist()):
         for token_idx in range(seq_start, seq_end):
             valid_indices = topk[token_idx, 0][topk[token_idx, 0] != -1]
