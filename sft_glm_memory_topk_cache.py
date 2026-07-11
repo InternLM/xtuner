@@ -652,6 +652,4 @@ def client_usage_current_interface(input_ids: torch.Tensor) -> None:
 
 
 def remaining_design_work() -> list[str]:
-    return [
-        "Optionally wrap dense-prefix split through CrossLayerTopKSharingRuntime if more callers appear.",
-    ]
+    return []
