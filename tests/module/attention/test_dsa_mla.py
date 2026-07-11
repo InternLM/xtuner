@@ -203,7 +203,7 @@ def test_dsa_attention_topk_respects_packed_causal_boundaries():
 
     attn(hidden_states, position_embeddings, seq_ctx)
 
-    topk = seq_ctx.dsa_topk_indices[0]
+    topk = seq_ctx.dsa_topk_cache.indices[0]
     for token_idx, seq_start in [(0, 0), (1, 0), (2, 2), (3, 2), (4, 2)]:
         valid_indices = topk[token_idx, 0][topk[token_idx, 0] != -1]
         assert valid_indices.numel() == token_idx - seq_start + 1
@@ -308,8 +308,7 @@ def test_dsa_attention_tilelang_long_packed_sequence_respects_boundaries_and_bac
     assert hidden_states.grad is not None
     assert torch.isfinite(hidden_states.grad).all()
 
-    assert seq_ctx.dsa_topk_indices is not None
-    topk = seq_ctx.dsa_topk_indices[0]
+    topk = seq_ctx.dsa_topk_cache.indices[0]
     for seq_start, seq_end in zip(seq_ctx.cu_seq_lens_q[:-1].tolist(), seq_ctx.cu_seq_lens_q[1:].tolist()):
         for token_idx in range(seq_start, seq_end):
             valid_indices = topk[token_idx, 0][topk[token_idx, 0] != -1]
@@ -327,18 +326,18 @@ def test_dsa_attention_shares_topk_within_microbatch_only():
     seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
     hidden_states = torch.randn(1, 4, 4)
     full_attn(hidden_states, position_embeddings, seq_ctx)
-    source_topk = seq_ctx.dsa_topk_indices[0]
+    source_topk = seq_ctx.dsa_topk_cache.indices[0]
 
     shared_attn(hidden_states, position_embeddings, seq_ctx)
 
-    assert set(seq_ctx.dsa_topk_indices) == {0}
-    assert seq_ctx.dsa_topk_indices[0] is source_topk
+    assert set(seq_ctx.dsa_topk_cache.indices) == {0}
+    assert seq_ctx.dsa_topk_cache.indices[0] is source_topk
 
     other_seq_ctx = SequenceContext.from_input_ids((torch.tensor([[5, 6, 7, 8]]),), device="cpu")
     full_attn(torch.randn(1, 4, 4), position_embeddings, other_seq_ctx)
 
-    assert other_seq_ctx.dsa_topk_indices is not seq_ctx.dsa_topk_indices
-    assert set(other_seq_ctx.dsa_topk_indices) == {0}
+    assert other_seq_ctx.dsa_topk_cache.indices is not seq_ctx.dsa_topk_cache.indices
+    assert set(other_seq_ctx.dsa_topk_cache.indices) == {0}
 
 
 def test_sequence_context_splits_cat_dsa_topk_cache_to_microbatches():
@@ -346,23 +345,23 @@ def test_sequence_context_splits_cat_dsa_topk_cache_to_microbatches():
         SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu"),
         SequenceContext.from_input_ids((torch.tensor([[3, 4, 5]]),), device="cpu"),
     ]
-    assert seq_ctx_list[0].dsa_topk_indices == {}
-    assert seq_ctx_list[0].dsa_topk_indices is not seq_ctx_list[1].dsa_topk_indices
+    assert seq_ctx_list[0].dsa_topk_cache.indices == {}
+    assert seq_ctx_list[0].dsa_topk_cache.indices is not seq_ctx_list[1].dsa_topk_cache.indices
 
     cat_seq_ctx = SequenceContext.cat(seq_ctx_list)
     layer0_topk = torch.arange(5 * 1 * 4, dtype=torch.int64).view(5, 1, 4)
     layer2_topk = layer0_topk + 100
-    cat_seq_ctx.dsa_topk_indices[0] = layer0_topk
-    cat_seq_ctx.dsa_topk_indices[2] = layer2_topk
+    cat_seq_ctx.dsa_topk_cache.indices[0] = layer0_topk
+    cat_seq_ctx.dsa_topk_cache.indices[2] = layer2_topk
 
     cat_seq_ctx.split_dsa_topk_indices_to(seq_ctx_list)
 
-    assert set(seq_ctx_list[0].dsa_topk_indices) == {0, 2}
-    assert set(seq_ctx_list[1].dsa_topk_indices) == {0, 2}
-    torch.testing.assert_close(seq_ctx_list[0].dsa_topk_indices[0], layer0_topk[:2])
-    torch.testing.assert_close(seq_ctx_list[1].dsa_topk_indices[0], layer0_topk[2:])
-    torch.testing.assert_close(seq_ctx_list[0].dsa_topk_indices[2], layer2_topk[:2])
-    torch.testing.assert_close(seq_ctx_list[1].dsa_topk_indices[2], layer2_topk[2:])
+    assert set(seq_ctx_list[0].dsa_topk_cache.indices) == {0, 2}
+    assert set(seq_ctx_list[1].dsa_topk_cache.indices) == {0, 2}
+    torch.testing.assert_close(seq_ctx_list[0].dsa_topk_cache.indices[0], layer0_topk[:2])
+    torch.testing.assert_close(seq_ctx_list[1].dsa_topk_cache.indices[0], layer0_topk[2:])
+    torch.testing.assert_close(seq_ctx_list[0].dsa_topk_cache.indices[2], layer2_topk[:2])
+    torch.testing.assert_close(seq_ctx_list[1].dsa_topk_cache.indices[2], layer2_topk[2:])
 
 
 def test_sequence_context_dsa_topk_cache_state_keeps_legacy_fields_in_sync():
@@ -405,13 +404,13 @@ def test_dsa_attention_mtp_layer_reuses_last_main_full_indexer():
     for token_idx in range(5):
         valid = torch.arange(token_idx + 1)[:4]
         source_topk[token_idx, 0, : valid.numel()] = valid
-    seq_ctx.dsa_topk_indices = {2: source_topk}
+    seq_ctx.dsa_topk_cache.indices = {2: source_topk}
 
     attn_outputs = mtp_attn(torch.randn(1, 5, 4), position_embeddings, seq_ctx)
 
     assert torch.isfinite(attn_outputs["projected_output"]).all()
-    assert set(seq_ctx.dsa_topk_indices) == {2}
-    assert seq_ctx.dsa_topk_indices[2] is source_topk
+    assert set(seq_ctx.dsa_topk_cache.indices) == {2}
+    assert seq_ctx.dsa_topk_cache.indices[2] is source_topk
 
 
 def test_dsa_attention_checkpoint_recompute_reuses_and_releases_source_topk():
@@ -426,17 +425,17 @@ def test_dsa_attention_checkpoint_recompute_reuses_and_releases_source_topk():
         source_attn(hidden_states, position_embeddings, seq_ctx)
         shared_attn(hidden_states, position_embeddings, seq_ctx)
 
-    source_topk = seq_ctx.dsa_topk_indices[0]
-    assert seq_ctx.dsa_topk_checkpoint_active
+    source_topk = seq_ctx.dsa_topk_cache.indices[0]
+    assert seq_ctx.dsa_topk_cache.checkpoint_active
 
     recompute_hidden_states = hidden_states.detach().clone().requires_grad_()
     shared_attn(recompute_hidden_states, position_embeddings, seq_ctx)
-    assert seq_ctx.dsa_topk_indices[0] is source_topk
+    assert seq_ctx.dsa_topk_cache.indices[0] is source_topk
 
     source_attn(recompute_hidden_states, position_embeddings, seq_ctx)
 
-    assert seq_ctx.dsa_topk_indices == {}
-    assert seq_ctx.dsa_topk_released_sources == {0}
+    assert seq_ctx.dsa_topk_cache.indices == {}
+    assert seq_ctx.dsa_topk_cache.released_sources == {0}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA activation offload")
@@ -456,25 +455,25 @@ def test_dsa_attention_activation_offload_decoder_hooks_onload_and_clear_topk(mo
 
     with torch.no_grad():
         source_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
-        source_topk = seq_ctx.dsa_topk_indices[0].detach().cpu().clone()
+        source_topk = seq_ctx.dsa_topk_cache.indices[0].detach().cpu().clone()
         shared_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
     torch.cuda.synchronize()
 
-    assert seq_ctx.dsa_topk_indices == {}
-    assert set(seq_ctx.dsa_topk_offloaded) == {0}
-    assert seq_ctx.dsa_topk_offloaded[0] == f"dsa_topk_{seq_ctx.dsa_topk_context_id}_0"
+    assert seq_ctx.dsa_topk_cache.indices == {}
+    assert set(seq_ctx.dsa_topk_cache.offloaded) == {0}
+    assert seq_ctx.dsa_topk_cache.offloaded[0] == f"dsa_topk_{seq_ctx.dsa_topk_cache.context_id}_0"
 
     recompute_hidden_states = hidden_states.detach().clone().requires_grad_()
     shared_block(recompute_hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
-    assert set(seq_ctx.dsa_topk_indices) == {0}
-    torch.testing.assert_close(seq_ctx.dsa_topk_indices[0].cpu(), source_topk)
+    assert set(seq_ctx.dsa_topk_cache.indices) == {0}
+    torch.testing.assert_close(seq_ctx.dsa_topk_cache.indices[0].cpu(), source_topk)
 
     source_block(recompute_hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
     torch.cuda.synchronize()
 
-    assert seq_ctx.dsa_topk_indices == {}
-    assert seq_ctx.dsa_topk_offloaded == {}
-    assert seq_ctx.dsa_topk_released_sources == {0}
+    assert seq_ctx.dsa_topk_cache.indices == {}
+    assert seq_ctx.dsa_topk_cache.offloaded == {}
+    assert seq_ctx.dsa_topk_cache.released_sources == {0}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA activation offload")
@@ -499,22 +498,22 @@ def test_dsa_attention_activation_offload_compile_keeps_pin_memory_out_of_graph(
         compiled_shared_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
     torch.cuda.synchronize()
 
-    assert seq_ctx.dsa_topk_indices == {}
-    assert seq_ctx.dsa_topk_pending_offloads == set()
-    assert set(seq_ctx.dsa_topk_offloaded) == {0}
+    assert seq_ctx.dsa_topk_cache.indices == {}
+    assert seq_ctx.dsa_topk_cache.pending_offloads == set()
+    assert set(seq_ctx.dsa_topk_cache.offloaded) == {0}
 
     recompute_hidden_states = hidden_states.detach().clone().requires_grad_()
     compiled_shared_block(recompute_hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
-    assert set(seq_ctx.dsa_topk_indices) == {0}
-    assert set(seq_ctx.dsa_topk_offloaded) == {0}
+    assert set(seq_ctx.dsa_topk_cache.indices) == {0}
+    assert set(seq_ctx.dsa_topk_cache.offloaded) == {0}
 
     compiled_source_block(recompute_hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
     torch.cuda.synchronize()
 
-    assert seq_ctx.dsa_topk_indices == {}
-    assert seq_ctx.dsa_topk_offloaded == {}
-    assert seq_ctx.dsa_topk_pending_releases == set()
-    assert seq_ctx.dsa_topk_released_sources == {0}
+    assert seq_ctx.dsa_topk_cache.indices == {}
+    assert seq_ctx.dsa_topk_cache.offloaded == {}
+    assert seq_ctx.dsa_topk_cache.pending_releases == set()
+    assert seq_ctx.dsa_topk_cache.released_sources == {0}
 
 
 def test_dsa_attention_shared_layer_fails_when_source_topk_is_missing():

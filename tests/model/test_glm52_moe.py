@@ -411,11 +411,10 @@ def test_tiny_glm52_native_forward_matches_hf_numeric_oracle():
         # matmul orders, so keep torch.testing's bf16 rtol and allow the observed
         # logit-scale absolute drift from that accumulation difference.
         torch.testing.assert_close(native_logits, hf_logits, rtol=1.6e-2, atol=1e-1)
-        assert seq_ctx.dsa_topk_indices is not None
-        assert sorted(seq_ctx.dsa_topk_indices) == [0, 1, 2]
+        assert sorted(seq_ctx.dsa_topk_cache.indices) == [0, 1, 2]
 
         seq_len = input_ids.numel()
-        for topk_indices in seq_ctx.dsa_topk_indices.values():
+        for topk_indices in seq_ctx.dsa_topk_cache.indices.values():
             assert topk_indices.shape == (seq_len, 1, seq_len)
             assert topk_indices.dtype == torch.int64
             assert topk_indices.device.type == "cuda"
@@ -482,15 +481,15 @@ def test_glm52_micro_batch_forward_splits_dense_prefix_dsa_topk_cache_before_spa
     class FakeDensePrefixLayer(torch.nn.Module):
         def forward(self, hidden_states: torch.Tensor, *, position_embeddings, seq_ctx: SequenceContext):
             seq_len = hidden_states.shape[1]
-            seq_ctx.dsa_topk_indices[0] = torch.arange(seq_len, device=hidden_states.device).view(seq_len, 1, 1)
+            seq_ctx.dsa_topk_cache.indices[0] = torch.arange(seq_len, device=hidden_states.device).view(seq_len, 1, 1)
             return hidden_states
 
     class FakeSparseSharedLayer(torch.nn.Module):
         def forward(self, *hidden_states_list: torch.Tensor, position_embeddings, seq_ctx: list[SequenceContext]):
             assert len(hidden_states_list) == len(seq_ctx)
             for micro_batch_idx, micro_batch_seq_ctx in enumerate(seq_ctx):
-                assert set(micro_batch_seq_ctx.dsa_topk_indices) == {0}
-                topk_indices = micro_batch_seq_ctx.dsa_topk_indices[0]
+                assert set(micro_batch_seq_ctx.dsa_topk_cache.indices) == {0}
+                topk_indices = micro_batch_seq_ctx.dsa_topk_cache.indices[0]
                 assert topk_indices.shape[0] == micro_batch_seq_ctx.input_ids.shape[1]
                 if micro_batch_idx == 0:
                     torch.testing.assert_close(topk_indices.flatten(), torch.tensor([0, 1]))
