@@ -280,6 +280,36 @@ def test_sparse_mla_cudnn_dsa_backward_matches_tilelang_sparse_mla():
     torch.testing.assert_close(kv_cudnn.grad, kv_tilelang.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
 
 
+@pytest.mark.skipif(
+    not (_tilelang_sparse_mla_available() and _cudnn_dsa_sparse_mla_available()),
+    reason="requires CUDA, TileLang, and cuDNN DSA sparse attention backward",
+)
+def test_sparse_mla_cudnn_dsa_compile_keeps_eager_backward_accuracy():
+    q, kv, indices = _cudnn_dsa_sparse_mla_inputs()
+    scaling = 1 / math.sqrt(q.shape[-1])
+
+    def compiled_sparse_mla(q: torch.Tensor, kv: torch.Tensor, backend: str) -> torch.Tensor:
+        out, _ = sparse_mla(q, kv, indices, scaling=scaling, value_dim=512, backend=backend)
+        return out
+
+    compiled_sparse_mla = torch.compile(compiled_sparse_mla, fullgraph=False)
+    q_tilelang = q.detach().clone().requires_grad_()
+    kv_tilelang = kv.detach().clone().requires_grad_()
+    q_cudnn = q.detach().clone().requires_grad_()
+    kv_cudnn = kv.detach().clone().requires_grad_()
+
+    tilelang_out = compiled_sparse_mla(q_tilelang, kv_tilelang, "tilelang")
+    cudnn_out = compiled_sparse_mla(q_cudnn, kv_cudnn, "cudnn_dsa")
+    grad_output = torch.randn_like(tilelang_out)
+
+    tilelang_out.backward(grad_output)
+    cudnn_out.backward(grad_output)
+
+    torch.testing.assert_close(cudnn_out, tilelang_out, atol=BF16_ATOL, rtol=BF16_RTOL)
+    torch.testing.assert_close(q_cudnn.grad, q_tilelang.grad, atol=CUDNN_DQ_ATOL, rtol=CUDNN_DQ_RTOL)
+    torch.testing.assert_close(kv_cudnn.grad, kv_tilelang.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
+
+
 def test_dsa_attention_topk_respects_packed_causal_boundaries():
     torch.manual_seed(0)
     attn = _tiny_dsa_attention(indexer_types=["full"], layer_idx=0)

@@ -7,6 +7,7 @@ from .protocol import SparseMLAOutputs
 from .tilelang import _validate_tilelang_sparse_mla_inputs
 
 
+@torch.compiler.disable
 def cudnn_dsa_sparse_mla(
     q: torch.Tensor,
     kv: torch.Tensor,
