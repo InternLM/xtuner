@@ -549,6 +549,98 @@ def test_glm52_micro_batch_forward_splits_dense_prefix_dsa_topk_cache_before_spa
     assert torch.isfinite(output["loss"])
 
 
+def test_glm52_micro_batch_forward_accumulates_mtp_aux_stats_once_per_depth():
+    class FakeEmbedding(torch.nn.Module):
+        def __init__(self, hidden_size: int):
+            super().__init__()
+            self.hidden_size = hidden_size
+
+        def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+            return input_ids.float().unsqueeze(-1).expand(*input_ids.shape, self.hidden_size)
+
+    class FakeRotaryEmbedding(torch.nn.Module):
+        def forward(self, hidden_states: torch.Tensor, position_ids: torch.Tensor):
+            cos = torch.ones(hidden_states.shape[0], hidden_states.shape[1], 1, device=hidden_states.device)
+            sin = torch.zeros_like(cos)
+            return cos, sin
+
+    class FakeDensePrefixLayer(torch.nn.Module):
+        def forward(self, hidden_states: torch.Tensor, *, position_embeddings, seq_ctx: SequenceContext):
+            return hidden_states
+
+    class FakeSparseSharedLayer(torch.nn.Module):
+        def forward(self, *hidden_states_list: torch.Tensor, position_embeddings, seq_ctx: list[SequenceContext]):
+            router_logits = tuple(
+                torch.zeros(hidden_states.shape[1], 1, device=hidden_states.device)
+                for hidden_states in hidden_states_list
+            )
+            router_weights = tuple(
+                torch.ones(hidden_states.shape[1], 1, device=hidden_states.device)
+                for hidden_states in hidden_states_list
+            )
+            return (*hidden_states_list, *router_logits, *router_weights)
+
+    class FakeMTPBlock(torch.nn.Module):
+        def forward(self, *hidden_states_list: torch.Tensor, embed_tokens_fn, position_embeddings, seq_ctx):
+            outputs = []
+            for hidden_states in hidden_states_list:
+                router_logits = torch.zeros(hidden_states.shape[1], 1, device=hidden_states.device)
+                router_weights = torch.ones(hidden_states.shape[1], 1, device=hidden_states.device)
+                outputs.append([(hidden_states, router_logits, router_weights)])
+            return outputs
+
+    class FakeAuxLoss(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.accumulate_calls = 0
+
+        def accumulate(self, *, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
+            self.accumulate_calls += 1
+            return hidden_states
+
+        def finalize(self, **kwargs):
+            return None, None, torch.zeros(self.accumulate_calls, 1)
+
+    class FakeLossCtx:
+        @classmethod
+        def cat(cls, chunks):
+            return cls()
+
+    class FakeLMHead(torch.nn.Module):
+        def forward(self, hidden_states: torch.Tensor, loss_ctx):
+            return hidden_states.sum() * 0, (hidden_states, None)
+
+    cfg = _tiny_glm52_config()
+    cfg.mtp_config = MTPConfig(num_layers=1)
+    model = cfg.build()
+    model.embed_tokens = FakeEmbedding(cfg.hidden_size)
+    model.rotary_emb = FakeRotaryEmbedding()
+    model.layers = torch.nn.ModuleDict(
+        {
+            "0": FakeDensePrefixLayer(),
+            "1": FakeSparseSharedLayer(),
+        }
+    )
+    model.norm = torch.nn.Identity()
+    model.lm_head = FakeLMHead()
+    model.aux_loss = FakeAuxLoss()
+    model.mtp_block = FakeMTPBlock()
+
+    seq_ctx_list = [
+        SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu"),
+        SequenceContext.from_input_ids((torch.tensor([[3, 4, 5]]),), device="cpu"),
+    ]
+    loss_ctx_list = [
+        {"lm": FakeLossCtx(), "mtp": [FakeLossCtx()]},
+        {"lm": FakeLossCtx(), "mtp": [FakeLossCtx()]},
+    ]
+
+    output = model(seq_ctx=seq_ctx_list, loss_ctx=loss_ctx_list)
+
+    assert model.aux_loss.accumulate_calls == 2
+    assert output["tokens_per_expert_global"].shape[0] == 2
+
+
 class TestGlm52MoE(DeterministicDDPTestCase):
     @parametrize.parametrize(
         "device,dispatcher,ep_size,expected_full_layer_option",
