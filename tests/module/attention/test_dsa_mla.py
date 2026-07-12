@@ -80,6 +80,15 @@ def _cudnn_dsa_sparse_mla_inputs():
     return q, kv, indices
 
 
+def _cat_microbatch_topk_indices(seq_len: int, topk: int, device: str):
+    local_rows = torch.arange(seq_len, device=device, dtype=torch.int64).view(seq_len, 1)
+    topk_offsets = torch.arange(topk, device=device, dtype=torch.int64).view(1, topk)
+    local_topk = local_rows - topk_offsets
+    first = local_topk.clamp_min(-1)
+    second = torch.where(local_topk >= 0, local_topk + seq_len, torch.full_like(local_topk, -1))
+    return torch.cat([first, second], dim=0).unsqueeze(1).contiguous()
+
+
 def _tiny_dsa_attention(
     indexer_types: list[str] | None = None,
     layer_idx: int = 0,
@@ -310,6 +319,54 @@ def test_sparse_mla_cudnn_dsa_compile_backward_matches_tilelang_sparse_mla():
     torch.testing.assert_close(kv_cudnn.grad, kv_tilelang.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
 
 
+@pytest.mark.skipif(
+    not (_tilelang_sparse_mla_available() and _cudnn_dsa_sparse_mla_available()),
+    reason="requires CUDA, TileLang, and cuDNN DSA sparse attention backward",
+)
+def test_sparse_mla_cudnn_dsa_compile_backward_matches_after_microbatch_topk_split():
+    seq_len = 64
+    topk = 64
+    seq_ctx_list = [
+        SequenceContext.from_input_ids((torch.arange(seq_len, device="cuda").view(1, -1),), device="cuda"),
+        SequenceContext.from_input_ids(
+            (torch.arange(seq_len, 2 * seq_len, device="cuda").view(1, -1),),
+            device="cuda",
+        ),
+    ]
+    cat_seq_ctx = SequenceContext.cat(seq_ctx_list)
+    cat_seq_ctx.dsa_topk_cache.indices[0] = _cat_microbatch_topk_indices(seq_len, topk, "cuda")
+    cat_seq_ctx.split_dsa_topk_indices_to(seq_ctx_list)
+    indices = seq_ctx_list[1].dsa_topk_cache.indices[0]
+    valid_indices = indices[indices != -1]
+    assert valid_indices.max().item() < seq_len
+
+    q, kv, _ = _cudnn_dsa_sparse_mla_inputs()
+    scaling = 0.0625
+
+    def compiled_sparse_mla(q: torch.Tensor, kv: torch.Tensor, backend: str) -> torch.Tensor:
+        out, _ = sparse_mla(q, kv, indices, scaling=scaling, value_dim=512, backend=backend)
+        return out
+
+    compiled_sparse_mla = torch.compile(compiled_sparse_mla, fullgraph=False)
+    q_tilelang = q.detach().clone().requires_grad_()
+    kv_tilelang = kv.detach().clone().requires_grad_()
+    q_cudnn = q.detach().clone().requires_grad_()
+    kv_cudnn = kv.detach().clone().requires_grad_()
+
+    tilelang_out = compiled_sparse_mla(q_tilelang, kv_tilelang, "tilelang")
+    cudnn_out = compiled_sparse_mla(q_cudnn, kv_cudnn, "cudnn_dsa")
+    grad_output = torch.randn_like(tilelang_out)
+
+    tilelang_out.backward(grad_output)
+    cudnn_out.backward(grad_output)
+
+    assert torch.isfinite(q_cudnn.grad).all()
+    assert torch.isfinite(kv_cudnn.grad).all()
+    torch.testing.assert_close(cudnn_out, tilelang_out, atol=BF16_ATOL, rtol=BF16_RTOL)
+    torch.testing.assert_close(q_cudnn.grad, q_tilelang.grad, atol=CUDNN_DQ_ATOL, rtol=CUDNN_DQ_RTOL)
+    torch.testing.assert_close(kv_cudnn.grad, kv_tilelang.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
+
+
 def test_dsa_attention_topk_respects_packed_causal_boundaries():
     torch.manual_seed(0)
     attn = _tiny_dsa_attention(indexer_types=["full"], layer_idx=0)
@@ -482,16 +539,27 @@ def test_dsa_attention_shares_topk_within_microbatch_only():
 
 
 def test_sequence_context_splits_cat_dsa_topk_cache_to_microbatches():
+    seq_len0 = 2
+    seq_len1 = 3
     seq_ctx_list = [
-        SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu"),
-        SequenceContext.from_input_ids((torch.tensor([[3, 4, 5]]),), device="cpu"),
+        SequenceContext.from_input_ids((torch.arange(seq_len0).view(1, -1),), device="cpu"),
+        SequenceContext.from_input_ids((torch.arange(seq_len0, seq_len0 + seq_len1).view(1, -1),), device="cpu"),
     ]
     assert seq_ctx_list[0].dsa_topk_cache.indices == {}
     assert seq_ctx_list[0].dsa_topk_cache.indices is not seq_ctx_list[1].dsa_topk_cache.indices
 
     cat_seq_ctx = SequenceContext.cat(seq_ctx_list)
-    layer0_topk = torch.arange(5 * 1 * 4, dtype=torch.int64).view(5, 1, 4)
-    layer2_topk = layer0_topk + 100
+    layer0_topk = torch.tensor(
+        [
+            [[0, -1, -1, -1]],
+            [[1, 0, -1, -1]],
+            [[2, -1, -1, -1]],
+            [[3, 2, -1, -1]],
+            [[4, 3, 2, -1]],
+        ],
+        dtype=torch.int64,
+    )
+    layer2_topk = layer0_topk.clone()
     cat_seq_ctx.dsa_topk_cache.indices[0] = layer0_topk
     cat_seq_ctx.dsa_topk_cache.indices[2] = layer2_topk
 
@@ -500,9 +568,65 @@ def test_sequence_context_splits_cat_dsa_topk_cache_to_microbatches():
     assert set(seq_ctx_list[0].dsa_topk_cache.indices) == {0, 2}
     assert set(seq_ctx_list[1].dsa_topk_cache.indices) == {0, 2}
     torch.testing.assert_close(seq_ctx_list[0].dsa_topk_cache.indices[0], layer0_topk[:2])
-    torch.testing.assert_close(seq_ctx_list[1].dsa_topk_cache.indices[0], layer0_topk[2:])
+    torch.testing.assert_close(
+        seq_ctx_list[1].dsa_topk_cache.indices[0],
+        torch.tensor(
+            [
+                [[0, -1, -1, -1]],
+                [[1, 0, -1, -1]],
+                [[2, 1, 0, -1]],
+            ],
+            dtype=torch.int64,
+        ),
+    )
     torch.testing.assert_close(seq_ctx_list[0].dsa_topk_cache.indices[2], layer2_topk[:2])
-    torch.testing.assert_close(seq_ctx_list[1].dsa_topk_cache.indices[2], layer2_topk[2:])
+    torch.testing.assert_close(
+        seq_ctx_list[1].dsa_topk_cache.indices[2],
+        torch.tensor(
+            [
+                [[0, -1, -1, -1]],
+                [[1, 0, -1, -1]],
+                [[2, 1, 0, -1]],
+            ],
+            dtype=torch.int64,
+        ),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA DSA top-k offload")
+def test_dsa_topk_offload_keeps_cat_cache_after_microbatch_split():
+    seq_len0 = 2
+    seq_len1 = 3
+    seq_ctx_list = [
+        SequenceContext.from_input_ids((torch.arange(seq_len0, device="cuda").view(1, -1),), device="cuda"),
+        SequenceContext.from_input_ids(
+            (torch.arange(seq_len0, seq_len0 + seq_len1, device="cuda").view(1, -1),),
+            device="cuda",
+        ),
+    ]
+    cat_seq_ctx = SequenceContext.cat(seq_ctx_list)
+    topk = torch.tensor(
+        [
+            [[0, -1, -1, -1]],
+            [[1, 0, -1, -1]],
+            [[2, -1, -1, -1]],
+            [[3, 2, -1, -1]],
+            [[4, 3, 2, -1]],
+        ],
+        dtype=torch.int64,
+        device="cuda",
+    )
+    expected_topk = topk.clone()
+    cat_seq_ctx.dsa_topk_cache.indices[0] = topk
+    cat_seq_ctx.split_dsa_topk_indices_to(seq_ctx_list)
+
+    runtime = get_dsa_topk_sharing_runtime()
+    runtime._offloaded_residency.after_original_forward_last_use(seq_ctx_list[0], 0)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(cat_seq_ctx.dsa_topk_cache.indices[0], expected_topk)
+    runtime._offloaded_residency.after_recompute_release(seq_ctx_list[0], 0)
+    torch.cuda.synchronize()
 
 
 def test_sequence_context_dsa_topk_cache_state_keeps_legacy_fields_in_sync():
@@ -579,9 +703,40 @@ def test_dsa_attention_checkpoint_recompute_reuses_and_releases_source_topk():
     assert seq_ctx.dsa_topk_cache.released_sources == {0}
 
 
+def test_dsa_topk_stats_counts_source_compute_and_checkpoint_reuse(monkeypatch):
+    monkeypatch.setenv("XTUNER_DSA_TOPK_STATS", "1")
+    runtime = get_dsa_topk_sharing_runtime()
+    runtime.reset_stats()
+
+    torch.manual_seed(0)
+    source_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0)
+    shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1)
+    hidden_states = torch.randn(1, 4, 4)
+    position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
+    seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
+
+    with torch.no_grad():
+        source_attn(hidden_states, position_embeddings, seq_ctx)
+        shared_attn(hidden_states, position_embeddings, seq_ctx)
+
+    recompute_hidden_states = hidden_states.detach().clone().requires_grad_()
+    shared_attn(recompute_hidden_states, position_embeddings, seq_ctx)
+    source_attn(recompute_hidden_states, position_embeddings, seq_ctx)
+
+    stats = runtime.stats_snapshot()["total"]
+    assert stats["source_compute"] == 1
+    assert stats["checkpoint_source_reuse_gpu"] == 1
+    assert stats["skip_layer_reuse_gpu"] == 2
+    assert stats["release"] == 1
+    assert stats["source_compute_wall_ms"] == 0
+    assert runtime.stats_snapshot()["by_source_layer"]["0:source_compute"] == 1
+    runtime.reset_stats()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA activation offload")
 def test_dsa_attention_activation_offload_decoder_pre_hook_prefetches_without_sync_read(monkeypatch):
     monkeypatch.setenv("XTUNER_ACTIVATION_OFFLOAD", "1")
+    monkeypatch.setenv("XTUNER_DSA_TOPK_OFFLOAD", "1")
     torch.manual_seed(0)
     source_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0).cuda()
     shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1).cuda()
@@ -616,8 +771,110 @@ def test_dsa_attention_activation_offload_decoder_pre_hook_prefetches_without_sy
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA activation offload")
+def test_dsa_attention_topk_offload_waits_after_decoder_pre_hook_prefetch(monkeypatch):
+    monkeypatch.setenv("XTUNER_ACTIVATION_OFFLOAD", "1")
+    monkeypatch.setenv("XTUNER_DSA_TOPK_OFFLOAD", "1")
+    torch.manual_seed(0)
+    source_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0).cuda()
+    shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1).cuda()
+    source_block = _TinyDsaDecoderBlock(source_attn).cuda()
+    shared_block = _TinyDsaDecoderBlock(shared_attn).cuda()
+    hidden_states = torch.randn(1, 4, 4, device="cuda")
+    position_embeddings = (
+        torch.ones(1, 4, 2, device="cuda"),
+        torch.zeros(1, 4, 2, device="cuda"),
+    )
+    seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cuda")
+
+    with torch.no_grad():
+        source_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
+        shared_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
+    torch.cuda.synchronize()
+
+    runtime = get_dsa_topk_sharing_runtime()
+    before_dsa_topk_decoder_forward(shared_attn, seq_ctx)
+    assert set(seq_ctx.dsa_topk_cache.indices) == {0}
+
+    wait_calls = 0
+    original_wait_prefetched = runtime._offloaded_residency._wait_prefetched
+
+    def count_wait_prefetched(*args, **kwargs):
+        nonlocal wait_calls
+        wait_calls += 1
+        return original_wait_prefetched(*args, **kwargs)
+
+    monkeypatch.setattr(runtime._offloaded_residency, "_wait_prefetched", count_wait_prefetched)
+    recompute_hidden_states = hidden_states.detach().clone().requires_grad_()
+    shared_block(recompute_hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
+
+    assert wait_calls == 1
+    runtime._offloaded_residency.after_recompute_release(seq_ctx, 0)
+    torch.cuda.synchronize()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA DSA top-k offload")
+def test_dsa_attention_topk_offload_without_activation_offload(monkeypatch):
+    monkeypatch.delenv("XTUNER_ACTIVATION_OFFLOAD", raising=False)
+    monkeypatch.setenv("XTUNER_DSA_TOPK_OFFLOAD", "1")
+    torch.manual_seed(0)
+    source_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0).cuda()
+    shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1).cuda()
+    source_block = _TinyDsaDecoderBlock(source_attn).cuda()
+    shared_block = _TinyDsaDecoderBlock(shared_attn).cuda()
+    hidden_states = torch.randn(1, 4, 4, device="cuda")
+    position_embeddings = (
+        torch.ones(1, 4, 2, device="cuda"),
+        torch.zeros(1, 4, 2, device="cuda"),
+    )
+    seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cuda")
+
+    with torch.no_grad():
+        source_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
+        shared_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
+    torch.cuda.synchronize()
+
+    assert seq_ctx.dsa_topk_cache.indices == {}
+    assert set(seq_ctx.dsa_topk_cache.offloaded) == {0}
+
+    recompute_hidden_states = hidden_states.detach().clone().requires_grad_()
+    shared_block(recompute_hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
+    source_block(recompute_hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
+    torch.cuda.synchronize()
+
+    assert seq_ctx.dsa_topk_cache.indices == {}
+    assert seq_ctx.dsa_topk_cache.offloaded == {}
+    assert seq_ctx.dsa_topk_cache.released_sources == {0}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA activation offload")
+def test_dsa_attention_activation_offload_keeps_topk_on_gpu_by_default(monkeypatch):
+    monkeypatch.setenv("XTUNER_ACTIVATION_OFFLOAD", "1")
+    monkeypatch.delenv("XTUNER_DSA_TOPK_OFFLOAD", raising=False)
+    torch.manual_seed(0)
+    source_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0).cuda()
+    shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1).cuda()
+    source_block = _TinyDsaDecoderBlock(source_attn).cuda()
+    shared_block = _TinyDsaDecoderBlock(shared_attn).cuda()
+    hidden_states = torch.randn(1, 4, 4, device="cuda")
+    position_embeddings = (
+        torch.ones(1, 4, 2, device="cuda"),
+        torch.zeros(1, 4, 2, device="cuda"),
+    )
+    seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cuda")
+
+    with torch.no_grad():
+        source_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
+        shared_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
+    torch.cuda.synchronize()
+
+    assert set(seq_ctx.dsa_topk_cache.indices) == {0}
+    assert seq_ctx.dsa_topk_cache.offloaded == {}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA activation offload")
 def test_dsa_attention_activation_offload_decoder_hooks_onload_and_clear_topk(monkeypatch):
     monkeypatch.setenv("XTUNER_ACTIVATION_OFFLOAD", "1")
+    monkeypatch.setenv("XTUNER_DSA_TOPK_OFFLOAD", "1")
     torch.manual_seed(0)
     source_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0).cuda()
     shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1).cuda()
@@ -656,6 +913,7 @@ def test_dsa_attention_activation_offload_decoder_hooks_onload_and_clear_topk(mo
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA activation offload")
 def test_dsa_attention_activation_offload_compile_keeps_pin_memory_out_of_graph(monkeypatch):
     monkeypatch.setenv("XTUNER_ACTIVATION_OFFLOAD", "1")
+    monkeypatch.setenv("XTUNER_DSA_TOPK_OFFLOAD", "1")
     torch.manual_seed(0)
     source_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0).cuda()
     shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1).cuda()

@@ -459,8 +459,22 @@ class SequenceContext:
         # DSA layers need the full-indexer cache split back by microbatch.
         for layer_idx, topk_indices in self.dsa_topk_cache.indices.items():
             assert sum(lengths) == topk_indices.shape[0]
-            for seq_ctx, single_topk_indices in zip(sequence_context_list, topk_indices.split(lengths, dim=0)):
+            start = 0
+            for seq_ctx, length, single_topk_indices in zip(
+                sequence_context_list, lengths, topk_indices.split(lengths, dim=0)
+            ):
+                # Top-k values were computed in the concatenated dense-prefix
+                # token coordinate system. Sparse micro-batches build local KV
+                # tensors, so shared indices must be rebased to local offsets.
+                if start:
+                    offset = single_topk_indices.new_tensor(start)
+                    single_topk_indices = torch.where(
+                        single_topk_indices == -1,
+                        single_topk_indices,
+                        single_topk_indices - offset,
+                    )
                 seq_ctx.dsa_topk_cache.indices[layer_idx] = single_topk_indices
+                start += length
 
     @property
     def mask(self) -> torch.BoolTensor:

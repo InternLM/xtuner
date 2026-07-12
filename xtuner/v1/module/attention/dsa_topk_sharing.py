@@ -1,9 +1,14 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import atexit
+import json
 import os
+import time
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol, cast
 
 import torch
+import torch.distributed as dist
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.utils.activation_offload import OffloadManager, SwapTensor
@@ -26,6 +31,65 @@ class DSATopKSharingLayerProtocol(Protocol):
 class DSATopKReleasePlan:
     forward_last_use: dict[int, int]
     recompute_release: dict[int, int]
+
+
+@dataclass
+class DSATopKSharingStats:
+    source_compute: int = 0
+    source_compute_wall_ms: float = 0.0
+    source_compute_cuda_ms: float = 0.0
+    checkpoint_source_reuse_gpu: int = 0
+    checkpoint_source_reuse_offloaded: int = 0
+    skip_layer_reuse_gpu: int = 0
+    skip_layer_reuse_offloaded: int = 0
+    store_gpu: int = 0
+    offload_d2h: int = 0
+    prefetch_h2d: int = 0
+    sync_read_h2d: int = 0
+    release: int = 0
+
+
+class DSATopKSharingStatsTracker:
+    def __init__(self) -> None:
+        self.total = DSATopKSharingStats()
+        self.by_source_layer: defaultdict[str, float] = defaultdict(float)
+
+    def reset(self) -> None:
+        self.total = DSATopKSharingStats()
+        self.by_source_layer.clear()
+
+    def add(self, name: str, source_layer_idx: int, value: int = 1) -> None:
+        setattr(self.total, name, getattr(self.total, name) + value)
+        self.by_source_layer[f"{source_layer_idx}:{name}"] += value
+
+    def add_time(self, source_layer_idx: int, *, wall_ms: float, cuda_ms: float = 0.0) -> None:
+        self.total.source_compute_wall_ms += wall_ms
+        self.total.source_compute_cuda_ms += cuda_ms
+        self.by_source_layer[f"{source_layer_idx}:source_compute_wall_ms"] += wall_ms
+        if cuda_ms:
+            self.by_source_layer[f"{source_layer_idx}:source_compute_cuda_ms"] += cuda_ms
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "total": self.total.__dict__.copy(),
+            "by_source_layer": dict(sorted(self.by_source_layer.items())),
+        }
+
+    def has_data(self) -> bool:
+        return any(value for value in self.total.__dict__.values() if isinstance(value, int | float))
+
+
+def _env_flag(name: str) -> bool:
+    return int(os.getenv(name, "0")) == 1
+
+
+def _dsa_topk_offload_enabled() -> bool:
+    override = os.getenv("XTUNER_DSA_TOPK_OFFLOAD")
+    if override is not None:
+        return int(override) == 1
+    # DSA top-k cache is consumed by SparseMLA backward. Keep this offload path
+    # opt-in instead of coupling it to hidden-state activation offload.
+    return False
 
 
 def build_dsa_topk_release_plan(
@@ -180,6 +244,14 @@ class ActivationOffloadedTopKResidency(TopKResidencyBase):
             cache.indices[source_layer_idx] = topk_indices
             return
 
+        # Micro-batch top-k entries can be split views of the concatenated
+        # dense-prefix cache. SwapTensor releases its input storage after D2H,
+        # so offload must own the storage it is going to resize.
+        storage_nbytes = topk_indices.untyped_storage().nbytes()
+        expected_nbytes = topk_indices.numel() * topk_indices.element_size()
+        if storage_nbytes != expected_nbytes or topk_indices.storage_offset() != 0:
+            topk_indices = topk_indices.clone()
+
         key = self._offload_key(seq_ctx, source_layer_idx)
         cpu_buffer = OffloadManager().get_or_create_pin_memory(key, topk_indices.shape, topk_indices.dtype)
         swap_tensor = SwapTensor(topk_indices, key, tensor_cpu=cpu_buffer)
@@ -222,6 +294,8 @@ class CrossLayerTopKSharingRuntime:
     def __init__(self) -> None:
         self._gpu_residency = GpuTopKResidency()
         self._offloaded_residency = ActivationOffloadedTopKResidency()
+        self._stats = DSATopKSharingStatsTracker()
+        atexit.register(self.print_stats_if_enabled)
 
     def get_or_compute(
         self,
@@ -237,7 +311,10 @@ class CrossLayerTopKSharingRuntime:
         if layer._is_skip_topk_layer():
             self._assert_source_present(layer, seq_ctx, residency)
             if source_layer_idx in cache.indices:
-                return cache.indices[source_layer_idx]
+                self._record("skip_layer_reuse_gpu", source_layer_idx)
+                return residency.read(seq_ctx, source_layer_idx)
+            self._record("skip_layer_reuse_offloaded", source_layer_idx)
+            self._record("sync_read_h2d", source_layer_idx)
             return residency.read(seq_ctx, source_layer_idx)
 
         if (
@@ -246,12 +323,19 @@ class CrossLayerTopKSharingRuntime:
             and residency.has_cache(seq_ctx, source_layer_idx)
         ):
             if source_layer_idx in cache.indices:
-                return cache.indices[source_layer_idx]
+                self._record("checkpoint_source_reuse_gpu", source_layer_idx)
+                return residency.read(seq_ctx, source_layer_idx)
+            self._record("checkpoint_source_reuse_offloaded", source_layer_idx)
+            self._record("sync_read_h2d", source_layer_idx)
             return residency.read(seq_ctx, source_layer_idx)
 
-        topk_indices = compute_source_topk()
+        topk_indices = self._compute_source_topk(
+            compute_source_topk=compute_source_topk,
+            source_layer_idx=source_layer_idx,
+        )
         if layer.layer_idx not in cache.released_sources:
             residency.store_gpu(seq_ctx, layer.layer_idx, topk_indices)
+            self._record("store_gpu", layer.layer_idx)
         return topk_indices
 
     def after_sparse_mla_use(self, *, layer: DSATopKSharingLayerProtocol, seq_ctx: SequenceContext) -> None:
@@ -268,6 +352,8 @@ class CrossLayerTopKSharingRuntime:
                     cache.pending_offloads.add(source_layer_idx)
                 else:
                     residency.after_original_forward_last_use(seq_ctx, source_layer_idx)
+                    if isinstance(residency, ActivationOffloadedTopKResidency):
+                        self._record("offload_d2h", source_layer_idx)
             return
 
         if not self._is_checkpoint_recompute(seq_ctx):
@@ -281,6 +367,7 @@ class CrossLayerTopKSharingRuntime:
         else:
             residency.after_recompute_release(seq_ctx, source_layer_idx)
             cache.released_sources.add(source_layer_idx)
+            self._record("release", source_layer_idx)
 
     def before_layer_forward(self, *, layer: DSATopKSharingLayerProtocol, seq_ctx: SequenceContext) -> None:
         if not isinstance(self._residency(), ActivationOffloadedTopKResidency):
@@ -288,6 +375,7 @@ class CrossLayerTopKSharingRuntime:
         source_layer_idx = layer.source_layer_idx
         if source_layer_idx not in seq_ctx.dsa_topk_cache.offloaded:
             return
+        self._record("prefetch_h2d", source_layer_idx)
         self._offloaded_residency.prefetch(seq_ctx, source_layer_idx)
 
     def flush_pending(self, seq_ctx: SequenceContext) -> None:
@@ -299,15 +387,17 @@ class CrossLayerTopKSharingRuntime:
 
         for source_layer_idx in tuple(cache.pending_offloads):
             self._offloaded_residency.after_original_forward_last_use(seq_ctx, source_layer_idx)
+            self._record("offload_d2h", source_layer_idx)
             cache.pending_offloads.remove(source_layer_idx)
 
         for source_layer_idx in tuple(cache.pending_releases):
             self._offloaded_residency.after_recompute_release(seq_ctx, source_layer_idx)
             cache.released_sources.add(source_layer_idx)
+            self._record("release", source_layer_idx)
             cache.pending_releases.remove(source_layer_idx)
 
     def _residency(self) -> TopKResidencyBase:
-        if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1 and torch.cuda.is_available():
+        if _dsa_topk_offload_enabled() and torch.cuda.is_available():
             return self._offloaded_residency
         return self._gpu_residency
 
@@ -333,6 +423,58 @@ class CrossLayerTopKSharingRuntime:
             f"{layer.layer_idx} needs source layer {layer.source_layer_idx} top-k, "
             "but it is not present in this microbatch SequenceContext. "
             "Cross-pipeline top-k sharing is not supported."
+        )
+
+    def _compute_source_topk(
+        self,
+        *,
+        compute_source_topk: Callable[[], torch.Tensor],
+        source_layer_idx: int,
+    ) -> torch.Tensor:
+        if not self._stats_enabled():
+            return compute_source_topk()
+
+        self._record("source_compute", source_layer_idx)
+        if _env_flag("XTUNER_DSA_TOPK_STATS_SYNC") and torch.cuda.is_available():
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_wall = time.perf_counter()
+            start_event.record()
+            topk_indices = compute_source_topk()
+            end_event.record()
+            end_event.synchronize()
+            wall_ms = (time.perf_counter() - start_wall) * 1000
+            self._stats.add_time(source_layer_idx, wall_ms=wall_ms, cuda_ms=start_event.elapsed_time(end_event))
+            return topk_indices
+
+        if not _env_flag("XTUNER_DSA_TOPK_STATS_TIME"):
+            return compute_source_topk()
+
+        start_wall = time.perf_counter()
+        topk_indices = compute_source_topk()
+        self._stats.add_time(source_layer_idx, wall_ms=(time.perf_counter() - start_wall) * 1000)
+        return topk_indices
+
+    def _record(self, name: str, source_layer_idx: int) -> None:
+        if self._stats_enabled():
+            self._stats.add(name, source_layer_idx)
+
+    def _stats_enabled(self) -> bool:
+        return _env_flag("XTUNER_DSA_TOPK_STATS")
+
+    def reset_stats(self) -> None:
+        self._stats.reset()
+
+    def stats_snapshot(self) -> dict[str, Any]:
+        return self._stats.snapshot()
+
+    def print_stats_if_enabled(self) -> None:
+        if not self._stats_enabled() or not self._stats.has_data():
+            return
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        print(
+            f"[xtuner-dsa-topk-stats][rank={rank}] {json.dumps(self.stats_snapshot(), sort_keys=True)}",
+            flush=True,
         )
 
 
