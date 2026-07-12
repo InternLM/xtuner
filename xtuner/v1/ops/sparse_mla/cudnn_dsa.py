@@ -7,7 +7,6 @@ from .protocol import SparseMLAOutputs
 from .tilelang import _validate_tilelang_sparse_mla_inputs
 
 
-@torch.compiler.disable
 def cudnn_dsa_sparse_mla(
     q: torch.Tensor,
     kv: torch.Tensor,
@@ -56,26 +55,27 @@ def _(
     scaling: float | None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     out = q.new_empty((*q.shape[:-1], 512))
-    lse = q.new_empty(q.shape[:-1], dtype=torch.float32)
-    return out, lse, lse
+    softmax_lse = q.new_empty(q.shape[:-1], dtype=torch.float32)
+    lse_log2 = q.new_empty(q.shape[:-1], dtype=torch.float32)
+    return out, softmax_lse, lse_log2
 
 
 def _setup_cudnn_dsa_sparse_mla_context(ctx, inputs, output) -> None:
     q, kv, indices, scaling = inputs
-    raw_output, softmax_lse, _ = output
+    raw_output, _, lse_log2 = output
     ctx.scaling = scaling
-    ctx.save_for_backward(q, kv, indices, raw_output, softmax_lse)
+    ctx.save_for_backward(q, kv, indices, raw_output, lse_log2)
 
 
 def _cudnn_dsa_sparse_mla_backward(ctx, grad_output: Tensor, grad_lse: Tensor, grad_lse_log2: Tensor):
-    q, kv, indices, raw_output, softmax_lse = ctx.saved_tensors
+    q, kv, indices, raw_output, lse_log2 = ctx.saved_tensors
     dq, dkv = _cudnn_dsa_sparse_mla_backward_op(
         q,
         kv,
         raw_output,
         grad_output.contiguous(),
         indices,
-        softmax_lse,
+        lse_log2,
         ctx.scaling,
     )
     return dq, dkv, None, None
@@ -93,7 +93,7 @@ def _cudnn_dsa_sparse_mla_backward_op(
     raw_output: Tensor,
     grad_output: Tensor,
     indices: Tensor,
-    softmax_lse: Tensor,
+    lse_log2: Tensor,
     scaling: float | None,
 ) -> tuple[Tensor, Tensor]:
     from cudnn.deepseek_sparse_attention.sparse_attention_backward import sparse_attention_backward_wrapper
@@ -101,6 +101,10 @@ def _cudnn_dsa_sparse_mla_backward_op(
     if kv.shape[1] != 1 or indices.shape[1] != 1:
         raise RuntimeError("cuDNN DSA SparseMLA backward currently supports kv_group=1 only.")
 
+    # The TileLang forward stores raw LSE in log2 space. Keep this conversion
+    # inside the opaque custom op so torch.compile/AOTAutograd cannot bypass it
+    # when tracing the Python autograd formula.
+    softmax_lse = lse_log2 * 0.6931471805599453
     indices_2d = indices[:, 0, :]
     # cuDNN uses a per-query valid length and expects the physical index tensor
     # to be non-negative. GLM pads invalid tail slots with -1 after top-k.
@@ -129,7 +133,7 @@ def _(
     raw_output: Tensor,
     grad_output: Tensor,
     indices: Tensor,
-    softmax_lse: Tensor,
+    lse_log2: Tensor,
     scaling: float | None,
 ) -> tuple[Tensor, Tensor]:
     return torch.empty_like(q), torch.empty_like(kv)

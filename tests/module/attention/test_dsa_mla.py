@@ -284,7 +284,7 @@ def test_sparse_mla_cudnn_dsa_backward_matches_tilelang_sparse_mla():
     not (_tilelang_sparse_mla_available() and _cudnn_dsa_sparse_mla_available()),
     reason="requires CUDA, TileLang, and cuDNN DSA sparse attention backward",
 )
-def test_sparse_mla_cudnn_dsa_compile_keeps_eager_backward_accuracy():
+def test_sparse_mla_cudnn_dsa_compile_backward_matches_tilelang_sparse_mla():
     q, kv, indices = _cudnn_dsa_sparse_mla_inputs()
     scaling = 1 / math.sqrt(q.shape[-1])
 

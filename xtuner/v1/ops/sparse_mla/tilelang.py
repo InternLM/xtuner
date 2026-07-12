@@ -74,8 +74,9 @@ def _(
     scaling: float | None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     out = q.new_empty((*q.shape[:-1], 512))
-    lse = q.new_empty(q.shape[:-1], dtype=torch.float32)
-    return out, lse, lse
+    softmax_lse = q.new_empty(q.shape[:-1], dtype=torch.float32)
+    lse_log2 = q.new_empty(q.shape[:-1], dtype=torch.float32)
+    return out, softmax_lse, lse_log2
 
 
 def _setup_tilelang_sparse_mla_context(ctx, inputs, output) -> None:
