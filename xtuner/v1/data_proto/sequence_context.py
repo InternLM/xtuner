@@ -29,6 +29,19 @@ class SequenceContext:
     input_ids: torch.LongTensor | None  # shape (1, seq_len)
     cu_seq_lens_q: torch.IntTensor
     cu_seq_lens_k: torch.IntTensor
+    # CPU mirrors of the cumulative lengths. Kept alongside the GPU versions so that downstream
+    # code (e.g. KVCompressor's chunk-buffer sizing) can compute shape-defining quantities
+    # without forcing a host-blocking D2H during forward. ``None`` when not pre-populated;
+    # consumers must tolerate fallback to a GPU ``.item()`` path in that case.
+    cu_seq_lens_q_cpu: torch.Tensor | None
+    cu_seq_lens_k_cpu: torch.Tensor | None
+    # Optional per-``compress_ratio`` cache of compressed-chunk cumulative boundaries
+    # (``{ratio: cu_seq_lens_out}``), populated by chunk-compression models (DeepSeek-V4)
+    # at the start of forward via ``KVCompressor.build_cu_seq_lens_out`` so every decoder
+    # layer of a given ratio reuses one cumsum + H2D instead of recomputing it. ``None`` for
+    # models that don't compress; not a constructor argument (set post-construction, like
+    # ``seq_idx``) so it stays out of the generic SequenceContext contract.
+    compressed_cu_seq_lens: dict[int, torch.Tensor] | None
     max_length_q: torch.Tensor
     max_length_k: torch.Tensor
     num_padding: int
@@ -63,6 +76,8 @@ class SequenceContext:
         cu_seq_lens_k: torch.IntTensor,
         max_length_q: torch.Tensor | int,
         max_length_k: torch.Tensor | int,
+        cu_seq_lens_q_cpu: torch.Tensor | None = None,
+        cu_seq_lens_k_cpu: torch.Tensor | None = None,
         num_padding: int = 0,
         sequence_parallel_mesh: DeviceMesh | None = None,
         block_table: torch.Tensor | None = None,
@@ -88,6 +103,13 @@ class SequenceContext:
         self.input_ids = input_ids
         self.cu_seq_lens_q = cu_seq_lens_q
         self.cu_seq_lens_k = cu_seq_lens_k
+        # Default-derive the CPU mirrors from the GPU copies when the caller did not pass them.
+        # The derivation is a one-shot D2H at construction time, so callers that build the
+        # SequenceContext before forward (dataloader, SP split) pay it when the offload queue is
+        # empty. Callers on the forward-time hot path (``cat``) populate the CPU mirrors directly
+        # without going through this default — they never trigger the D2H below.
+        self.cu_seq_lens_q_cpu = cu_seq_lens_q_cpu if cu_seq_lens_q_cpu is not None else cu_seq_lens_q.cpu()
+        self.cu_seq_lens_k_cpu = cu_seq_lens_k_cpu if cu_seq_lens_k_cpu is not None else cu_seq_lens_k.cpu()
         # force max_length_q and max_length_k be cpu tensors to avoid cuda synchronization
         # max_length_q and max_length_k should be unpacked to int in attention implementation
         if isinstance(max_length_q, int):
@@ -115,6 +137,9 @@ class SequenceContext:
         self._shard_start = shard_start
         self._shard_size = shard_size
         self.seq_idx = None
+        # Populated lazily by the model forward (chunk-compression models only); see the
+        # field declaration above.
+        self.compressed_cu_seq_lens = None
 
         # `DeviceMesh.get_local_rank` is not compatible with `torch.compile`, we calculate `_sp_rank` in
         # `SequenceContext`
@@ -152,13 +177,21 @@ class SequenceContext:
             assert ids.shape[0] == 1, "input_ids must have batch size of 1"
         num_tokens = [x.numel() for x in input_ids]
 
-        cu_seq_lens = cast(torch.IntTensor, torch.cumsum(torch.LongTensor([0] + num_tokens), dim=0).to(device).int())
+        # Build the cumulative-lengths tensor on CPU first, then move to device. Keeping the CPU
+        # copy lets downstream code (KVCompressor, etc.) compute shape-defining quantities
+        # without forcing a host-blocking D2H mid-forward; the CPU value is also reused below
+        # for ``max_length_*`` so the two ``.max().item()`` calls no longer go through GPU.
+        cu_seq_lens_cpu = torch.cumsum(torch.LongTensor([0] + num_tokens), dim=0).int()
+        cu_seq_lens = cast(torch.IntTensor, cu_seq_lens_cpu.to(device))
+        max_length = int((cu_seq_lens_cpu[1:] - cu_seq_lens_cpu[:-1]).max())
         return cls(
             input_ids=cast(torch.LongTensor, torch.cat(input_ids, dim=1).to(device)),
             cu_seq_lens_k=cu_seq_lens,
             cu_seq_lens_q=cu_seq_lens,
-            max_length_q=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
-            max_length_k=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
+            cu_seq_lens_q_cpu=cu_seq_lens_cpu,
+            cu_seq_lens_k_cpu=cu_seq_lens_cpu,
+            max_length_q=max_length,
+            max_length_k=max_length,
             block_table=block_table,
             sequence_parallel_mesh=sp_mesh,
             device=device,
@@ -245,6 +278,10 @@ class SequenceContext:
         packed_input_ids: list[torch.Tensor] = []
         cu_seq_lens_q: list[torch.IntTensor] = []
         cu_seq_lens_k: list[torch.IntTensor] = []
+        # CPU mirrors — accumulated only if every input carries them. As soon as one is missing,
+        # the result drops to ``None`` and downstream falls back to the GPU ``.item()`` path.
+        cu_seq_lens_q_cpu_parts: list[torch.Tensor] | None = []
+        cu_seq_lens_k_cpu_parts: list[torch.Tensor] | None = []
         max_length_q = 0
         max_length_k = 0
         num_padding = 0
@@ -273,6 +310,25 @@ class SequenceContext:
                 if len(cu_seq_lens_k) == 0
                 else (seq_ctx.cu_seq_lens_k + cu_seq_lens_k[-1][-1])[1:]
             )
+            # Mirror the offset-and-trim on the CPU copies. Drop to ``None`` if any input lacks them.
+            if cu_seq_lens_q_cpu_parts is not None:
+                if seq_ctx.cu_seq_lens_q_cpu is None:
+                    cu_seq_lens_q_cpu_parts = None
+                else:
+                    cu_seq_lens_q_cpu_parts.append(
+                        seq_ctx.cu_seq_lens_q_cpu
+                        if len(cu_seq_lens_q_cpu_parts) == 0
+                        else (seq_ctx.cu_seq_lens_q_cpu + cu_seq_lens_q_cpu_parts[-1][-1])[1:]
+                    )
+            if cu_seq_lens_k_cpu_parts is not None:
+                if seq_ctx.cu_seq_lens_k_cpu is None:
+                    cu_seq_lens_k_cpu_parts = None
+                else:
+                    cu_seq_lens_k_cpu_parts.append(
+                        seq_ctx.cu_seq_lens_k_cpu
+                        if len(cu_seq_lens_k_cpu_parts) == 0
+                        else (seq_ctx.cu_seq_lens_k_cpu + cu_seq_lens_k_cpu_parts[-1][-1])[1:]
+                    )
             max_length_q = max(max_length_q, seq_ctx.max_length_q)  # type: ignore[call-overload]
             max_length_k = max(max_length_k, seq_ctx.max_length_k)  # type: ignore[call-overload]
             num_padding += seq_ctx.num_padding
@@ -300,6 +356,8 @@ class SequenceContext:
             input_ids=torch.cat(packed_input_ids, dim=1) if len(packed_input_ids) > 0 else None,  # type: ignore
             cu_seq_lens_q=torch.cat(cu_seq_lens_q, dim=0),  # type: ignore
             cu_seq_lens_k=torch.cat(cu_seq_lens_k, dim=0),  # type: ignore
+            cu_seq_lens_q_cpu=torch.cat(cu_seq_lens_q_cpu_parts, dim=0) if cu_seq_lens_q_cpu_parts else None,
+            cu_seq_lens_k_cpu=torch.cat(cu_seq_lens_k_cpu_parts, dim=0) if cu_seq_lens_k_cpu_parts else None,
             max_length_q=max_length_q,
             max_length_k=max_length_k,
             num_padding=num_padding,
