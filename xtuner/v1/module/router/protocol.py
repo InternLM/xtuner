@@ -13,6 +13,20 @@ class RouterResults(TypedDict):
 
 
 class RouterProtocol(Protocol):
-    def forward(self, logits: torch.Tensor) -> RouterResults: ...
+    # `input_ids` is keyword-only so existing positional calls (logits, rollout_routed_experts)
+    # remain backward-compatible. Only HashRouter consumes it; other routers ignore it.
+    def forward(
+        self,
+        logits: torch.Tensor,
+        rollout_routed_experts: torch.Tensor | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> RouterResults: ...
 
-    def __call__(self, logits: torch.Tensor) -> RouterResults: ...
+    def __call__(
+        self,
+        logits: torch.Tensor,
+        rollout_routed_experts: torch.Tensor | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> RouterResults: ...

@@ -17,7 +17,15 @@ from .rope import (
     RotaryEmbeddingProtocol,
     get_rope_embedding,
 )
-from .router import GreedyRouter, GreedyRouterConfig, NoAuxRouter, NoAuxRouterConfig, RouterResults
+from .router import (
+    GreedyRouter,
+    GreedyRouterConfig,
+    HashRouter,
+    HashRouterConfig,
+    NoAuxRouter,
+    NoAuxRouterConfig,
+    RouterResults,
+)
 
 
 # WARN: Optional dependency related module should never be imported here, such as `GroupedLinear`
@@ -40,6 +48,8 @@ __all__ = [
     "NoAuxRouterConfig",
     "GreedyRouter",
     "GreedyRouterConfig",
+    "HashRouter",
+    "HashRouterConfig",
     "RouterResults",
     "LMHead",
     "Qwen3VLTextRotaryEmbedding",

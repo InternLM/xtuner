@@ -59,7 +59,7 @@ def get_zero_centered_rms_norm_fn() -> RMSNormProtocol:
     if device in ["cpu", "cuda"]:
         # TODO: control triton rmsnorm by model config rather than env var
         if os.getenv("XTUNER_USE_NATIVE_RMSNORM", "1") == "0" and device == "cuda":
-            raise NotImplementedError("Zero-centered RMSNorm is not implemented in triton")
+            return native_zero_centered_rms_norm
         else:
             return native_zero_centered_rms_norm
     elif device == "npu":
