@@ -739,14 +739,6 @@ class MoE(BaseModel):
                 output["hidden_states"].append(hidden_states)
 
         layer_hidden_states = hidden_states
-        hidden_states = self.norm(hidden_states)
-
-        # Get LM loss context from dict
-        lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
-        loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
-        output["loss"] = loss
-        output["logits"] = logits
-        output["extra_info"] = extra_info
 
         # MTP forward pass and loss computation
         if (
@@ -805,6 +797,17 @@ class MoE(BaseModel):
 
             # Add to total loss
             output["mtp_loss"] = scaled_mtp_loss
+
+        # Keep the main LM branch after MTP so the final normalized states, logits,
+        # and unsharded LM-head parameters are not resident across the whole MTP forward.
+        hidden_states = self.norm(layer_hidden_states)
+
+        # Get LM loss context from dict
+        lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
+        loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
+        output["loss"] = loss
+        output["logits"] = logits
+        output["extra_info"] = extra_info
 
         split_aux_output = self.aux_loss.finalize(
             balancing_ctx=balancing_ctx,
@@ -1082,7 +1085,6 @@ class MoE(BaseModel):
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.lm_head,
         )
-        layer_next.set_modules_to_forward_prefetch([self.lm_head])
         # Shard MTP block if it exists
         if self.mtp_block is not None:
             for mtp_idx, mtp_layer in enumerate(self.mtp_block.layers):
@@ -1100,15 +1102,31 @@ class MoE(BaseModel):
                     offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
                     module=mtp_layer,
                 )
-                if mtp_idx == 0:
-                    self.lm_head.set_modules_to_forward_prefetch([mtp_layer])  # type: ignore
-
             if self.config.mtp_config is not None and self.config.mtp_config.num_layers > 0:
                 for prev_mtp_layer, next_mtp_layer in zip(
                     list(self.mtp_block.layers)[:-1],
                     list(self.mtp_block.layers)[1:],
                 ):
                     prev_mtp_layer.set_modules_to_forward_prefetch([next_mtp_layer])  # type: ignore
+
+            first_mtp_layer = self.mtp_block.layers[0]
+            last_decoder_layer = list(self.layers.values())[-1]
+            last_decoder_layer.set_modules_to_forward_prefetch([first_mtp_layer])  # type: ignore
+
+            assert self.config.mtp_config is not None
+            # Shared-weight MTP reuses one physical FSDP layer at every logical depth. A static
+            # forward-prefetch hook on that layer would therefore materialize the LM head after
+            # the first depth and keep it resident for all remaining depths. We intentionally
+            # leave the first post-MTP LM-head call to unshard on demand for now. A future
+            # optimization can explicitly prefetch the LM head in MTPBlock only after its final
+            # logical depth finishes.
+            if not self.config.mtp_config.share_weights:
+                # MTP outputs are projected by the shared LM head before the main LM branch,
+                # so non-shared MTP can safely prefetch it from the last physical MTP layer.
+                self.mtp_block.layers[-1].set_modules_to_forward_prefetch([self.lm_head])  # type: ignore
+        else:
+            last_decoder_layer = list(self.layers.values())[-1]
+            last_decoder_layer.set_modules_to_forward_prefetch([self.lm_head])  # type: ignore
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
