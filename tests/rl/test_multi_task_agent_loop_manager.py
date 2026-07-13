@@ -167,7 +167,7 @@ def _fake_agent_loop():
     rollout_ctl = MagicMock()
     rollout_ctl.continue_generation.remote = AsyncMock()
     rollout_ctl.pause_generation.remote = AsyncMock()
-    rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+    rollout_ctl.get_weight_update_targets.remote = AsyncMock(return_value=())
     agent_loop = MagicMock()
     agent_loop.rollout_ctl = rollout_ctl
     return agent_loop
@@ -177,7 +177,7 @@ def _fake_rollout_controller():
     rollout_controller = MagicMock()
     rollout_controller.continue_generation.remote = AsyncMock()
     rollout_controller.pause_generation.remote = AsyncMock()
-    rollout_controller.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+    rollout_controller.get_weight_update_targets.remote = AsyncMock(return_value=())
     return rollout_controller
 
 
@@ -252,8 +252,8 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.leftover_completed, 1)
         self.assertEqual(result.leftover_aborted, 2)
         self.assertEqual(result.leftover_expired, 0)
-        self.assertEqual(result.leftover_failed, 0)
-        self.assertEqual(result.leftover_filtered, 0)
+        self.assertEqual(result.failed_samples, 0)
+        self.assertEqual(result.filtered_samples, 0)
         self.assertIn("task_a", result.task_results)
         self.assertIn("task_b", result.task_results)
         self.assertIn("task_c", result.task_results)

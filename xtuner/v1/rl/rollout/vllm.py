@@ -2,7 +2,7 @@ import asyncio
 import os
 import traceback
 from argparse import Namespace
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Mapping, Union
 
 import numpy as np
 import ray
@@ -16,6 +16,7 @@ from vllm.utils import FlexibleArgumentParser
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_status_from_finish_reason
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
+from .rollout_topology import RolloutTopology
 from .worker import RolloutConfig, RolloutWorker
 
 
@@ -131,6 +132,15 @@ def run_lmdeploy_server_wrapper(server_namespace: Namespace):
 
 
 class vLLMWorker(RolloutWorker):
+    @classmethod
+    def build_rollout_topology(
+        cls,
+        config: RolloutConfig,
+        rank_bundle_idx_list: list[tuple[int, int]],
+        rank_to_dist_init_addr: Mapping[int, str],
+    ) -> RolloutTopology:
+        raise NotImplementedError("vLLM rollout topology has not been verified after topology refactor.")
+
     def __init__(
         self,
         config: RolloutConfig,
@@ -323,13 +333,14 @@ class vLLMWorker(RolloutWorker):
         args["limit_mm_per_prompt"] = {"image": 10, "video": 0}
         args["enable_log_requests"] = False
         args["uvicorn_log_level"] = "error"
+        assert self.server_launch_spec is not None
         env = {
             "VLLM_VERSION": "0.11.0",
             "TASK_QUEUE_ENABLE": "0",
             "CPU_AFFINITY_CONF": "2",
             "VLLM_USE_V1": "1",
             "VLLM_RAY_PER_WORKER_GPUS": "0.1",
-            "VLLM_RAY_BUNDLE_INDICES": ",".join(map(str, self.engine_bundle_idxs)),
+            "VLLM_RAY_BUNDLE_INDICES": ",".join(map(str, self.server_launch_spec.placement_group_bundle_idxs)),
             "VLLM_MONITOR": "1",
             "VLLM_ACCU_MONITOR": "0",
             "CUSTOM_SCHEDULE_KV_LIMIT": "0.9",

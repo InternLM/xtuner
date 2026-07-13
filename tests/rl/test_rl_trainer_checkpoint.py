@@ -73,6 +73,16 @@ class _RemoteMethod:
         return _run()
 
 
+class _AwaitableValue:
+    def __init__(self, value=None):
+        self.value = value
+
+    def __await__(self):
+        if False:
+            yield None
+        return self.value
+
+
 class _FakeCPUResourceManager:
     def __init__(self, accelerator_placement_groups=None):
         self.accelerator_placement_groups = accelerator_placement_groups
@@ -90,12 +100,13 @@ class _FakeRolloutController:
         self.pause_generation = _RemoteMethod(async_result=True)
         self.continue_generation = _RemoteMethod(async_result=True)
         self.offload = _RemoteMethod(return_value="rollout_offloaded")
-        self.ensure_workers_healthy_before_training = _RemoteMethod(return_value="rollout_ready_for_training")
-        self.recover_failed_workers = _RemoteMethod(return_value="rollout_recovered")
+        self.check_and_shutdown_inactive_workers = _RemoteMethod(return_value="rollout_inactive_workers_shutdown")
+        self.restart_inactive_workers = _RemoteMethod(return_value="rollout_restarted")
         self.onload_weights = _RemoteMethod(return_value="weights_loaded")
         self.onload_kvcache = _RemoteMethod(return_value="kvcache_loaded")
-        self.get_rollout_metadata = _RemoteMethod(return_value={"server_url_dict": {}})
+        self.get_weight_update_targets = _RemoteMethod(return_value=())
         self.set_enable_partial_rollout = _RemoteMethod(return_value=None)
+        self.validate_registered_workers_to_proxy = _RemoteMethod(return_value=_AwaitableValue(None))
 
     def _generate(self, rollout_state):
         # 生成侧只补齐训练真正需要的可观察 rollout 结果，不加载真实推理服务。
@@ -112,15 +123,26 @@ class _FakeTrainController:
         self.fit_steps: list[int] = []
         self.saved_checkpoints: list[Path] = []
         self.resume_checkpoint_paths: list[Path] = []
-        self.train_rollout_mode = None
+        self.weight_transport_type = None
         self.update_weights_count = 0
         self.rollout_info = None
 
-    def set_train_rollout_mode(self, mode: str):
-        self.train_rollout_mode = mode
-
-    def update_rollout_info(self, info):
-        self.rollout_info = info
+    def bind_rollout_weight_update(
+        self,
+        *,
+        targets,
+        rollout_config,
+        weight_transport_type,
+        weight_update_host=None,
+        weight_update_port=None,
+    ):
+        self.rollout_info = {
+            "targets": targets,
+            "rollout_config": rollout_config,
+        }
+        self.weight_transport_type = weight_transport_type
+        self.weight_update_host = weight_update_host
+        self.weight_update_port = weight_update_port
 
     def onload(self, target="all"):
         return f"onload:{target}"
@@ -204,6 +226,7 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             return controller
 
         with (
+            patch("ray.get", side_effect=lambda obj, timeout=None: obj),
             patch("xtuner.v1.rl.utils.ray_accelerator_worker.ray.is_initialized", return_value=True),
             patch(
                 "xtuner.v1.rl.utils.ray_accelerator_worker.ray.available_resources",
@@ -321,6 +344,7 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             auto_resume=auto_resume,
             checkpoint_interval=1,
             checkpoint_maxkeep=None,
+            checkpoint_no_save_replay_buffer=True,
             hf_interval=-1,
             seed=42,
             exp_tracker="jsonl",
@@ -361,6 +385,7 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             auto_resume=auto_resume,
             checkpoint_interval=1,
             checkpoint_maxkeep=None,
+            checkpoint_no_save_replay_buffer=True,
             hf_interval=-1,
             seed=42,
             exp_tracker="jsonl",

@@ -31,11 +31,6 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.trace import span
 from xtuner.v1.utils import get_logger
 
 
-# ─────────────────────────────────────────────────────────────────
-# Runner
-# ─────────────────────────────────────────────────────────────────
-
-
 class Runner:
     """Pairs one infer stage with one validation judger."""
 
@@ -155,15 +150,32 @@ class Runner:
         t_infer: float | None,
         t_validate: float | None,
     ) -> None:
+        def format_seconds(label: str, val: Any) -> str | None:
+            if isinstance(val, (int, float)):
+                return f"{label}={val:.1f}s"
+            return None
+
         parts: list[str] = [f"status={item.status.value}"]
         if item.reward is not None:
             parts.append(f"reward={item.reward:.4f}")
-        if t_acquire is not None:
-            parts.append(f"t_acquire={t_acquire:.1f}s")
-        if t_infer is not None:
-            parts.append(f"t_infer={t_infer:.1f}s")
-        if t_validate is not None:
-            parts.append(f"t_validate={t_validate:.1f}s")
+        if item.infer.agent is not None:
+            parts.append(f"agent={item.infer.agent.name}")
+        timing_parts = [
+            format_seconds("t_acquire", t_acquire),
+            format_seconds("t_acquire_rate_limit", item.infer.metadata.get("sandbox_acquire_rate_limit_wait_s")),
+            format_seconds("t_sandbox_ready", item.infer.metadata.get("sandbox_create_to_ready_time_s")),
+            format_seconds("t_install_agent", item.infer.metadata.get("install_agent_time_s")),
+            format_seconds("t_infer", t_infer),
+            format_seconds("t_validate", t_validate),
+        ]
+        parts.extend(part for part in timing_parts if part is not None)
+        attempts = item.infer.metadata.get("sandbox_create_attempts")
+        if isinstance(attempts, int):
+            parts.append(f"sandbox_create_attempts={attempts}")
+        if item.infer.sandbox_image:
+            parts.append(f"sandbox_image={item.infer.sandbox_image}")
+        if item.infer.sandbox_url:
+            parts.append(f"sandbox_url={item.infer.sandbox_url}")
         if item.status == RolloutStatus.FAILED and item.error is not None:
             parts.append(f"error={item.error.stage or '?'}/{item.error.category}")
         get_logger().info(f"[{tid}] done {' '.join(parts)}")

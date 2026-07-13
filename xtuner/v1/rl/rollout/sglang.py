@@ -1,6 +1,6 @@
 import base64
 import os
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Mapping, Union
 
 import numpy as np
 import ray
@@ -11,6 +11,7 @@ from transformers import AutoConfig, AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.utils import XTUNER_DETERMINISTIC
 
+from .rollout_topology import RolloutEngine, RolloutServerProcess, RolloutTopology
 from .worker import RolloutConfig, RolloutWorker
 
 
@@ -28,7 +29,8 @@ class SGLangWorker(RolloutWorker):
         from sglang.srt.entrypoints.http_server import launch_server
 
         self.server_func = launch_server
-        self.endpoints["health_generate"] = "health"
+        self.endpoints["health"] = "health"
+        self.endpoints["health_generate"] = "health_generate"
         self.endpoints["generate"] = "generate"
         self.endpoints["v1/chat/completions"] = "v1/chat/completions"
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_path, trust_remote_code=True)
@@ -40,6 +42,131 @@ class SGLangWorker(RolloutWorker):
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
+
+    @classmethod
+    def build_rollout_topology(
+        cls,
+        config: RolloutConfig,
+        rank_bundle_idx_list: list[tuple[int, int]],
+        rank_to_dist_init_addr: Mapping[int, str],
+    ) -> RolloutTopology:
+        """Build SGLang rollout topology with bound engine dist-init addresses.
+
+        The normal SGLang topology starts one server process for each logical
+        engine. Cross-node engines are the special case: SGLang starts one
+        server process per node, but only node 0 accepts rollout requests and
+        owns the weight-update endpoint.
+
+        Example with ``expert_parallel_size=2`` on one node:
+            RolloutTopology(
+                engines=(
+                    RolloutEngine(
+                        engine_ranks=(0, 1),
+                        dist_init_addr="addr0",
+                        server_processes=(
+                            RolloutServerProcess(
+                                worker_rank=0,
+                                placement_group_bundle_idxs=(0, 1),
+                                accepts_rollout_requests=True,
+                                weight_update_ranks=(0, 1),
+                                node_rank=0,
+                                nnodes=1,
+                            ),
+                        ),
+                    ),
+                    RolloutEngine(
+                        engine_ranks=(2, 3),
+                        dist_init_addr="addr2",
+                        server_processes=(
+                            RolloutServerProcess(
+                                worker_rank=2,
+                                placement_group_bundle_idxs=(2, 3),
+                                accepts_rollout_requests=True,
+                                weight_update_ranks=(2, 3),
+                                node_rank=0,
+                                nnodes=1,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+
+        Example with ``expert_parallel_size=16`` across two 8-GPU nodes:
+            RolloutTopology(
+                engines=(
+                    RolloutEngine(
+                        engine_ranks=(0, 1, 2, 3, 4, 5, 6, 7,
+                                      8, 9, 10, 11, 12, 13, 14, 15),
+                        dist_init_addr="addr0",
+                        server_processes=(
+                            RolloutServerProcess(
+                                worker_rank=0,
+                                placement_group_bundle_idxs=(0, 1, 2, 3, 4, 5, 6, 7),
+                                accepts_rollout_requests=True,
+                                weight_update_ranks=(0, 1, 2, 3, 4, 5, 6, 7,
+                                                     8, 9, 10, 11, 12, 13, 14, 15),
+                                node_rank=0,
+                                nnodes=2,
+                            ),
+                            RolloutServerProcess(
+                                worker_rank=8,
+                                placement_group_bundle_idxs=(8, 9, 10, 11, 12, 13, 14, 15),
+                                accepts_rollout_requests=False,
+                                weight_update_ranks=(),
+                                node_rank=1,
+                                nnodes=2,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        """
+        num_workers = len(rank_bundle_idx_list)
+        num_gpus_per_engine = config.num_gpus_per_engine
+        if num_workers % num_gpus_per_engine != 0:
+            raise ValueError(
+                f"num_rollout_workers={num_workers} must be divisible by num_gpus_per_engine={num_gpus_per_engine}."
+            )
+        if num_gpus_per_engine > config.gpus_per_node and num_gpus_per_engine % config.gpus_per_node != 0:
+            raise ValueError(
+                "SGLang cross-node rollout requires num_gpus_per_engine to be divisible by gpus_per_node."
+            )
+
+        nnodes = max(1, num_gpus_per_engine // config.gpus_per_node)
+        engines = []
+        for engine_start in range(0, num_workers, num_gpus_per_engine):
+            engine_meta = rank_bundle_idx_list[engine_start : engine_start + num_gpus_per_engine]
+            engine_ranks = tuple(rank for rank, _ in engine_meta)
+            engine_bundle_idxs = tuple(bundle_idx for _, bundle_idx in engine_meta)
+            # SGLang cross-node launch starts one server process per node. The
+            # first rank of each node owns that node's bundles, while only node
+            # 0 is exposed as the rollout request entrypoint.
+            server_ranks = engine_ranks[:: config.gpus_per_node]
+            dist_init_addr_owner_rank = server_ranks[0]
+            server_processes = []
+            for node_rank, server_rank in enumerate(server_ranks):
+                node_bundle_start = node_rank * config.gpus_per_node
+                node_bundle_end = node_bundle_start + config.gpus_per_node
+                server_processes.append(
+                    RolloutServerProcess(
+                        worker_rank=server_rank,
+                        placement_group_bundle_idxs=engine_bundle_idxs[node_bundle_start:node_bundle_end],
+                        accepts_rollout_requests=node_rank == 0,
+                        weight_update_ranks=engine_ranks if node_rank == 0 else (),
+                        node_rank=node_rank,
+                        nnodes=nnodes,
+                    )
+                )
+            engines.append(
+                RolloutEngine(
+                    engine_ranks=engine_ranks,
+                    dist_init_addr=rank_to_dist_init_addr[dist_init_addr_owner_rank],
+                    server_processes=tuple(server_processes),
+                )
+            )
+        return RolloutTopology(
+            engines=tuple(engines),
+        )
 
     def _get_request_payload(self, rollout_state: RolloutState) -> dict:
         sample_params = rollout_state.sample_params
@@ -144,6 +271,17 @@ class SGLangWorker(RolloutWorker):
         response.raise_for_status()
         return response.json()
 
+    def check_health(self) -> bool:
+        try:
+            response = requests.get(
+                f"{self.server_url}/{self.endpoints['health']}",
+                timeout=self.config.health_check_timeout_seconds,
+            )
+            return response.status_code == 200
+        except requests.RequestException as e:
+            self.logger.error(f"Health check failed for server {self.server_url}: {e}")
+            return False
+
     def flush_cache(self):
         """Flush the cache of the server."""
         # TODO: 支持 tp
@@ -214,7 +352,7 @@ class SGLangWorker(RolloutWorker):
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         from sglang.srt.server_args import ServerArgs
 
-        extra_config = self.config.extra_rollout_config or dict()
+        extra_config = self.config.extra_rollout_config
         sglang_config_kwargs = {
             k.replace("sglang_", ""): v for k, v in extra_config.items() if k.startswith("sglang_")
         }
@@ -227,8 +365,7 @@ class SGLangWorker(RolloutWorker):
         )
         tp_size = num_gpus_per_engine if self.config.expert_parallel_size > 1 else self.config.tensor_parallel_size
         ep_size = num_gpus_per_engine if self.config.expert_parallel_size > 1 else self.config.expert_parallel_size
-        nnodes = max(1, num_gpus_per_engine // self.config.gpus_per_node)
-        node_rank = self.rank // self.config.gpus_per_node if nnodes > 1 else 0
+        assert self.server_launch_spec is not None
         assigned_gpu_id = int(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
 
         # SGLang 0.5.10 默认启用的 Piecewise CUDA Graph 在启动 warmup compile 阶段会报错。sglang的文档提到这个功能还是实验功能，可能还不太稳定(https://sgl-project-sglang-93.mintlify.app/optimization/cuda-graph#bug-report)。暂时先通过disable_piecewise_cuda_graph=True关掉改功能
@@ -238,11 +375,11 @@ class SGLangWorker(RolloutWorker):
             host=self.host,
             port=self.server_port,
             nccl_port=self.nccl_port,
-            dist_init_addr=self.dist_init_addr,
+            dist_init_addr=self.server_launch_spec.dist_init_addr,
             base_gpu_id=assigned_gpu_id,
             gpu_id_step=1,
-            nnodes=nnodes,
-            node_rank=node_rank,
+            nnodes=self.server_launch_spec.nnodes,
+            node_rank=self.server_launch_spec.node_rank,
             skip_server_warmup=True,
             mem_fraction_static=self.config.gpu_memory_utilization,
             enable_memory_saver=True,

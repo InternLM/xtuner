@@ -143,6 +143,54 @@ class RolloutState(BaseModel):
             self.uid = self.rollout_id
 
 
+def free_rollout_state_refs(rollout_state: RolloutState) -> None:
+    from ray import ObjectRef
+
+    from xtuner.v1.rl.utils.ray_utils import free_object_refs
+
+    refs: list[ObjectRef] = []
+
+    def clear_object_refs(value: Any) -> Any:
+        if isinstance(value, ObjectRef):
+            refs.append(value)
+            return None
+        if isinstance(value, BaseModel):
+            for field_name in type(value).model_fields:
+                field_value = getattr(value, field_name)
+                cleared_value = clear_object_refs(field_value)
+                if cleared_value is not field_value:
+                    setattr(value, field_name, cleared_value)
+            return value
+        if isinstance(value, dict):
+            for key, item in value.items():
+                value[key] = clear_object_refs(item)
+            return value
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                value[index] = clear_object_refs(item)
+            return value
+        if isinstance(value, tuple):
+            return tuple(clear_object_refs(item) for item in value)
+        if isinstance(value, set):
+            return {clear_object_refs(item) for item in value}
+        return value
+
+    clear_object_refs(rollout_state)
+    free_object_refs(refs)
+
+
+def discard_rollout_state(rollout_state: RolloutState) -> RolloutState:
+    """Release heavy references and clear fields before dropping a rollout."""
+
+    free_rollout_state_refs(rollout_state)
+
+    for field_name, field in type(rollout_state).model_fields.items():
+        if field.is_required():
+            continue
+        setattr(rollout_state, field_name, field.get_default(call_default_factory=True))
+    return rollout_state
+
+
 def update_status_from_finish_reason(finish_reason: str | None) -> Status:
     """Updates the internal status based on the inference engine's finish
     reason.
@@ -184,11 +232,12 @@ def update_status_from_finish_reason(finish_reason: str | None) -> Status:
 def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
     routed_experts = getattr(rollout_state, "routed_experts", None)
     if routed_experts is not None:
-        import ray
-        from ray import ObjectRef as RayObjectRef
+        from ray import ObjectRef
 
-        if isinstance(routed_experts, RayObjectRef):
-            ray.internal.free([routed_experts], local_only=False)
+        from xtuner.v1.rl.utils.ray_utils import free_object_refs
+
+        if isinstance(routed_experts, (ObjectRef, list)):
+            free_object_refs(routed_experts)
         rollout_state.routed_experts = None
     prompt_ids = getattr(rollout_state, "prompt_ids", None)
     rollout_state.tokens = list(prompt_ids) if prompt_ids is not None else None

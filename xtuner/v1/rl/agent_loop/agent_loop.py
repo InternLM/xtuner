@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import math
 from abc import ABC, abstractmethod
 from typing import Any, TypeAlias, cast, overload
 
@@ -13,6 +12,7 @@ from ray.util.placement_group import PlacementGroup
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.rollout.constants import AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
 from xtuner.v1.rl.utils import (
     JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S,
     CPUActorLauncher,
@@ -34,6 +34,7 @@ class AgentLoopConfig(ABC, BaseModel):
     sample_params: SampleParams | None = None
     cpu_resources: CPUResourcesConfig | None = None
     enable_batch_judge: bool = False
+    requires_rollout_proxy: bool = False
 
     def build(self, rollout_controller, judger: Judger | None = None, logger=None) -> AgentLoopSpec:
         if self.cpu_resources is None:
@@ -43,12 +44,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 logger=logger,
             )
 
-        get_generate_concurrency = rollout_controller.get_generate_concurrency
-        if hasattr(get_generate_concurrency, "remote"):
-            total_generate_concurrency = ray.get(get_generate_concurrency.remote())
-        else:
-            total_generate_concurrency = get_generate_concurrency()
-        concurrency = max(1, math.ceil(total_generate_concurrency / self.cpu_resources.num_workers))
+        concurrency = AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
 
         register_cpu_resources(
             name=f"agent_loop:{self.__class__.__name__}",

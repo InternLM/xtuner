@@ -7,11 +7,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
-    Dict,
     Iterable,
     List,
     Sequence,
-    TypeAlias,
     TypedDict,
     cast,
 )
@@ -48,6 +46,7 @@ from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, finalize_train_policy_metrics, kl_penalty
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
+from xtuner.v1.rl.weight_update import UpdateWeighter
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
@@ -60,11 +59,8 @@ from xtuner.v1.utils import (
 )
 
 from ..rollout_is import merge_rollout_is_metrics
-from .update_weighter import UpdateWeighter
 
 
-DeviceMeshRaw: TypeAlias = List[List[int]]  # A list of lists representing device mesh indices
-ServiceUrlMap: TypeAlias = Dict[int, str]  # A dictionary mapping service names to their URLs
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
@@ -151,6 +147,7 @@ class WorkerConfig(BaseModel):
     profile_step: list[int] | int | None = None  # 1-based global RL train_step ids to profile.
     profile_time: bool = True
     profile_memory: bool = False
+    free_rollout_routed_experts_in_worker: bool = True  # 默认不需要用户配置
 
     # sft config
     sft_dataloader_cfg: DataloaderConfig | None = None
@@ -201,7 +198,7 @@ class WorkerLogItem(TypedDict):
     sft_train_metrics: NotRequired[dict[str, float]]
 
 
-class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
+class TrainingWorker(SingleAcceleratorWorker):
     _SAVE_WEIGHTS_DIR = "weights"
     _SAVE_SFT_DATALOADER_DIR = "sft_dataloader"
     _SAVE_SFT_TRAIN_STATE_PATH = "sft_train_state.json"
@@ -269,7 +266,20 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
             if hasattr(worker_cfg.model_cfg.text_config, "mtp_config"):
                 self.mtp_config = worker_cfg.model_cfg.text_config.mtp_config
 
-        self._init_update_weighter()
+        self.update_weighter = UpdateWeighter(
+            rank=self.rank,
+            logger=self.logger,
+            config=self.config,
+            engine=self._engine,
+        )
+
+    @ray_method
+    def bind_rollout_weight_update(self, *args, **kwargs):
+        return self.update_weighter.bind_rollout_weight_update(*args, **kwargs)
+
+    @ray_method
+    def update_weights(self):
+        return self.update_weighter.update_weights()
 
     def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
@@ -454,13 +464,17 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
                         raise ValueError(
                             f"Invalid rollout_routed_expert_refs type: {type(rollout_routed_expert_refs)}"
                         )
-                    # free obj store explicitly
-                    if self.sp_mesh is None or self.sp_mesh.size() == 1:
-                        ray.internal.free(rollout_routed_expert_refs, local_only=False)
-                    else:
-                        if self.sp_mesh.get_local_rank() == 0:
-                            # only free once of sp mesh
-                            to_free_routed_expert_refs.append(rollout_routed_expert_refs)
+                    # Some agent loops export routed-expert refs from the rollout trace store.
+                    # Those refs may be shared by multiple trainable segments and replicated
+                    # train workers, so they must be released by the trainer after all workers
+                    # finish consuming the batch.
+                    if self.config.free_rollout_routed_experts_in_worker:
+                        if self.sp_mesh is None or self.sp_mesh.size() == 1:
+                            ray.internal.free(rollout_routed_expert_refs, local_only=False)
+                        else:
+                            if self.sp_mesh.get_local_rank() == 0:
+                                # only free once of sp mesh
+                                to_free_routed_expert_refs.append(rollout_routed_expert_refs)
                     rollout_routed_expert = torch.as_tensor(rollout_routed_expert, dtype=torch.long)
                     rollout_routed_expert = rollout_routed_expert.reshape(
                         -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
@@ -488,7 +502,7 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
             f"rollout_routed_experts.size(0) {seq_ctx.rollout_routed_experts.size(0)} != input_ids.size(1) {seq_ctx.input_ids.size(1)}"
         )
 
-        if self.sp_mesh is not None and self.sp_mesh.size() > 1:
+        if self.config.free_rollout_routed_experts_in_worker and self.sp_mesh is not None and self.sp_mesh.size() > 1:
             dist.barrier()
             for free_routed_expert_refs in to_free_routed_expert_refs:
                 ray.internal.free(free_routed_expert_refs, local_only=False)

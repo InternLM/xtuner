@@ -1,7 +1,6 @@
 import os
 from argparse import Namespace
-from itertools import chain
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
 
 import numpy as np
 import ray
@@ -11,6 +10,7 @@ from ray.util.placement_group import placement_group_table
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 
+from .rollout_topology import RolloutEngine, RolloutServerProcess, RolloutTopology
 from .worker import RolloutConfig, RolloutWorker
 
 
@@ -79,6 +79,135 @@ class LMDeployWorker(RolloutWorker):
         self.model_name = self.config.model_name
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
         self.lmdeploy_actor = None
+
+    @classmethod
+    def build_rollout_topology(
+        cls,
+        config: RolloutConfig,
+        rank_bundle_idx_list: list[tuple[int, int]],
+        rank_to_dist_init_addr: Mapping[int, str],
+    ) -> RolloutTopology:
+        """Build LMDeploy rollout topology with bound engine dist-init
+        addresses.
+
+        ``rank_bundle_idx_list`` stores ``(worker_rank, bundle_idx)`` pairs.
+
+        Example with ranks [(0, 0), (1, 1), (2, 2), (3, 3)] and addrs
+        {0: "addr0", 1: "addr1", 2: "addr2", 3: "addr3"}:
+
+        +------+------------------------------------------------------------------+
+        | Mode | RolloutEngine topology                                           |
+        +------+------------------------------------------------------------------+
+        | TP   | RolloutEngine(                                                   |
+        |      |     engine_ranks=(0, 1),                                         |
+        |      |     dist_init_addr="addr0",                                      |
+        |      |     server_processes=(                                           |
+        |      |         RolloutServerProcess(                                    |
+        |      |             worker_rank=0,                                       |
+        |      |             placement_group_bundle_idxs=(0, 1),                  |
+        |      |             weight_update_ranks=(0, 1),                          |
+        |      |         ),                                                       |
+        |      |     ),                                                           |
+        |      | )                                                                |
+        |      | RolloutEngine(                                                   |
+        |      |     engine_ranks=(2, 3),                                         |
+        |      |     dist_init_addr="addr2",                                      |
+        |      |     server_processes=(                                           |
+        |      |         RolloutServerProcess(                                    |
+        |      |             worker_rank=2,                                       |
+        |      |             placement_group_bundle_idxs=(2, 3),                  |
+        |      |             weight_update_ranks=(2, 3),                          |
+        |      |         ),                                                       |
+        |      |     ),                                                           |
+        |      | )                                                                |
+        +------+------------------------------------------------------------------+
+        | EP   | RolloutEngine(                                                   |
+        |      |     engine_ranks=(0, 1),                                         |
+        |      |     dist_init_addr="addr0",                                      |
+        |      |     server_processes=(                                           |
+        |      |         RolloutServerProcess(                                    |
+        |      |             worker_rank=0,                                       |
+        |      |             placement_group_bundle_idxs=(0,),                    |
+        |      |             weight_update_ranks=(0,),                            |
+        |      |         ),                                                       |
+        |      |         RolloutServerProcess(                                    |
+        |      |             worker_rank=1,                                       |
+        |      |             placement_group_bundle_idxs=(1,),                    |
+        |      |             weight_update_ranks=(1,),                            |
+        |      |         ),                                                       |
+        |      |     ),                                                           |
+        |      | )                                                                |
+        |      | RolloutEngine(                                                   |
+        |      |     engine_ranks=(2, 3),                                         |
+        |      |     dist_init_addr="addr2",                                      |
+        |      |     server_processes=(                                           |
+        |      |         RolloutServerProcess(                                    |
+        |      |             worker_rank=2,                                       |
+        |      |             placement_group_bundle_idxs=(2,),                    |
+        |      |             weight_update_ranks=(2,),                            |
+        |      |         ),                                                       |
+        |      |         RolloutServerProcess(                                    |
+        |      |             worker_rank=3,                                       |
+        |      |             placement_group_bundle_idxs=(3,),                    |
+        |      |             weight_update_ranks=(3,),                            |
+        |      |         ),                                                       |
+        |      |     ),                                                           |
+        |      | )                                                                |
+        +------+------------------------------------------------------------------+
+        """
+        engines: list[RolloutEngine] = []
+        num_workers = len(rank_bundle_idx_list)
+        if config.expert_parallel_size <= 1:
+            num_gpus_per_engine = config.num_gpus_per_engine
+            if num_workers % num_gpus_per_engine != 0:
+                raise ValueError(
+                    f"num_rollout_workers={num_workers} must be divisible by "
+                    f"num_gpus_per_engine={num_gpus_per_engine}."
+                )
+            for engine_start in range(0, num_workers, num_gpus_per_engine):
+                engine_meta = rank_bundle_idx_list[engine_start : engine_start + num_gpus_per_engine]
+                engine_ranks = tuple(rank for rank, _ in engine_meta)
+                engine_bundle_idxs = tuple(bundle_idx for _, bundle_idx in engine_meta)
+                dist_init_addr_owner_rank = engine_ranks[0]
+                engines.append(
+                    RolloutEngine(
+                        engine_ranks=engine_ranks,
+                        dist_init_addr=rank_to_dist_init_addr[dist_init_addr_owner_rank],
+                        server_processes=(
+                            RolloutServerProcess(
+                                worker_rank=engine_ranks[0],
+                                placement_group_bundle_idxs=engine_bundle_idxs,
+                                weight_update_ranks=engine_ranks,
+                            ),
+                        ),
+                    )
+                )
+        else:
+            ep_size = config.expert_parallel_size
+            if num_workers % ep_size != 0:
+                raise ValueError(
+                    f"num_rollout_workers={num_workers} must be divisible by expert_parallel_size={ep_size}."
+                )
+            for engine_start in range(0, num_workers, ep_size):
+                engine_meta = rank_bundle_idx_list[engine_start : engine_start + ep_size]
+                engine_ranks = tuple(rank for rank, _ in engine_meta)
+                dist_init_addr_owner_rank = engine_ranks[0]
+                engines.append(
+                    RolloutEngine(
+                        engine_ranks=engine_ranks,
+                        dist_init_addr=rank_to_dist_init_addr[dist_init_addr_owner_rank],
+                        server_processes=tuple(
+                            RolloutServerProcess(
+                                worker_rank=server_rank,
+                                placement_group_bundle_idxs=(bundle_idx,),
+                                weight_update_ranks=(server_rank,),
+                            )
+                            for server_rank, bundle_idx in engine_meta
+                        ),
+                    )
+                )
+
+        return RolloutTopology(engines=tuple(engines))
 
     def offload(self):
         """Offloads the model weights and KV cache."""
@@ -163,7 +292,7 @@ class LMDeployWorker(RolloutWorker):
         url = f"{self.server_url}/{self.endpoints['sleep']}"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_keys}"}
         data = {"level": level}
-        response = requests.post(url, headers=headers, params=data, timeout=180)
+        response = requests.post(url, headers=headers, params=data, timeout=600)
         assert response.status_code == 200, response.status_code
         return response.text
 
@@ -180,7 +309,7 @@ class LMDeployWorker(RolloutWorker):
         url = f"{self.server_url}/{self.endpoints['wake_up']}"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_keys}"}
         data = {"tags": tags}
-        response = requests.post(url, headers=headers, params=data, timeout=180)
+        response = requests.post(url, headers=headers, params=data, timeout=600)
         assert response.status_code == 200, response.status_code
         return response.text
 
@@ -229,7 +358,7 @@ class LMDeployWorker(RolloutWorker):
             "NPU": "ascend",
         }
 
-        extra_config = self.config.extra_rollout_config or dict()
+        extra_config = self.config.extra_rollout_config
         lmdeploy_config_kwargs = {
             k.replace("lmdeploy_", ""): v for k, v in extra_config.items() if k.startswith("lmdeploy_")
         }
@@ -270,35 +399,13 @@ class LMDeployWorker(RolloutWorker):
         if backend == "pytorch" and self.config.max_prefill_token_num:
             extra_engine_config["max_prefill_token_num"] = self.config.max_prefill_token_num
 
+        assert self.server_launch_spec is not None
         dp_rank = 0
         if backend == "pytorch":
             # currently only support ep > 1 and tp == 1 / ep == 1 and tp > 1
             assert ep_size == 1 or tp_size == 1
             if ep_size > 1:
-                dp_rank_found = False
-                # In the case of pure expert parallelism, each worker from all ranks serve url.
-                # `engine_rank_mesh_array` would miss the ep_size information in inner list,
-                # Therefore, we need to regroup them into `engine_rank_mesh_array_for_ep`.
-                # For example, ep_size = 2, work_size = 8:
-                # engine_rank_mesh_array = [[0],[1],[2],[3],[4],[5],[6],[7]] ->
-                # engine_rank_mesh_array_for_ep = [[0,1],[2,3],[4,5],[6,7]]
-                engine_rank_mesh_array_for_ep = [
-                    list(chain.from_iterable(self.engine_rank_mesh_array[i : i + ep_size]))
-                    for i in range(0, len(self.engine_rank_mesh_array), ep_size)
-                ]
-                # dp_rank is the index of self.rank in the inner list of rank mesh array.
-                # For example, ep_size = 2, work_size = 8:
-                # engine_rank_mesh_array_for_ep = [[0,1],[2,3],[4,5],[6,7]]
-                # rank 3 is in [2, 3], dp_rank = [2, 3].index(3) = 1
-                for engine_rank_mesh in engine_rank_mesh_array_for_ep:
-                    if self.rank in engine_rank_mesh:
-                        dp_rank = engine_rank_mesh.index(self.rank)
-                        dp_rank_found = True
-                        break
-                assert dp_rank_found, (
-                    f"self.rank: {self.rank} should be found in "
-                    f"engine_rank_mesh_array_for_ep: {engine_rank_mesh_array_for_ep}"
-                )
+                dp_rank = self.server_launch_spec.engine_rank
 
         backend_config = (
             PytorchEngineConfig(
@@ -321,7 +428,10 @@ class LMDeployWorker(RolloutWorker):
             else TurbomindEngineConfig(
                 tp=tp_size,
                 max_batch_size=self.config.rollout_max_batch_size_per_instance,
-                devices=[bundle_idxs % self.config.gpus_per_node for bundle_idxs in self.engine_bundle_idxs],
+                devices=[
+                    bundle_idx % self.config.gpus_per_node
+                    for bundle_idx in self.server_launch_spec.placement_group_bundle_idxs
+                ],
                 empty_init=self.config.skip_load_weights,
                 session_len=self.config.context_length,
                 model_format="fp8" if self.config.enable_float8 else None,
@@ -339,7 +449,9 @@ class LMDeployWorker(RolloutWorker):
             env = {
                 "LMDEPLOY_RAY_EXTERNAL_NS": ray_runtime_ctx.namespace,
                 "LMDEPLOY_RAY_EXTERNAL_PG_NAME": current_pg_name,
-                "LMDEPLOY_RAY_EXTERNAL_PG_BUNDLES": ",".join(map(str, self.engine_bundle_idxs)),
+                "LMDEPLOY_RAY_EXTERNAL_PG_BUNDLES": ",".join(
+                    map(str, self.server_launch_spec.placement_group_bundle_idxs)
+                ),
             }
 
             if self.accelerator == "NPU":
@@ -352,7 +464,7 @@ class LMDeployWorker(RolloutWorker):
                 )
 
             if tp_size > 1:
-                dist_addr, dist_port = self.dist_init_addr.split(":")[:2]
+                dist_addr, dist_port = self.server_launch_spec.dist_init_addr.split(":")[:2]
                 env.update(
                     {
                         "LMDEPLOY_DIST_MASTER_ADDR": dist_addr,
@@ -360,7 +472,7 @@ class LMDeployWorker(RolloutWorker):
                     }
                 )
             elif ep_size > 1:
-                dist_addr, dist_port = self.dist_init_addr.split(":")[:2]
+                dist_addr, dist_port = self.server_launch_spec.dist_init_addr.split(":")[:2]
                 if speculative_num_draft_tokens is not None:
                     deepep_max_tokens_per_rank = max_batch_size * (1 + speculative_num_draft_tokens)
                 else:

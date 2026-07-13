@@ -85,6 +85,8 @@ def _bool_request_value(value: Any, default: bool = False) -> bool:
 
 
 def _request_uses_trace_store(req_body: dict) -> bool:
+    if req_body.get("session_id") is None or "messages" not in req_body:
+        return False
     return _bool_request_value(req_body.get("return_token_ids"), True)
 
 

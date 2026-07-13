@@ -5,7 +5,7 @@ import torch.distributed as dist
 from torch.distributed._tensor import Replicate, Shard
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.placement_types import Placement
+from torch.distributed.tensor.placement_types import Placement, _StridedShard
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
     _has_foreach_support,
@@ -79,7 +79,7 @@ def cal_total_norm(
     if norm_type == 2:
         local_norm_squared = local_norm**2
         for i, placement in enumerate(placements):
-            if isinstance(placement, Shard):
+            if isinstance(placement, (Shard, _StridedShard)):
                 # When using ep + fsdp, the placement corresponding to fsdp mesh is _StridedShard
                 # isinstance(_StridedShard, Shard) is True
                 dist.all_reduce(local_norm_squared, group=device_mesh.get_group(i))

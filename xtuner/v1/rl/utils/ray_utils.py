@@ -1,6 +1,7 @@
 import atexit
 import signal
 import subprocess
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional, cast
 
 import ray
@@ -90,8 +91,20 @@ def get_ray_accelerator() -> "AcceleratorType":
     return cast("AcceleratorType", accelerator)
 
 
-def free_object_refs(refs: list[ObjectRef]) -> None:
-    valid_refs = [ref for ref in refs if isinstance(ref, ObjectRef)]
+def free_object_refs(refs: ObjectRef | Iterable[ObjectRef]) -> None:
+    if isinstance(refs, ObjectRef):
+        refs = [refs]
+
+    seen: set[str] = set()
+    valid_refs = []
+    for ref in refs:
+        if not isinstance(ref, ObjectRef):
+            continue
+        ref_key = ref.hex()
+        if ref_key in seen:
+            continue
+        seen.add(ref_key)
+        valid_refs.append(ref)
     if not valid_refs:
         return
 
@@ -146,6 +159,10 @@ def register_cleanup():
 def bind_train_rollout(
     train_workers,
     rollout_controller,
+    rollout_config,
+    weight_transport_type,
+    weight_update_host=None,
+    weight_update_port=None,
 ) -> None:
     """Bind the training and rollout workers for updating weights.
 
@@ -157,6 +174,17 @@ def bind_train_rollout(
         train_workers: A list of training worker actors.
         rollout_controller: The rollout controller actor.
     """
-    info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())  # type: ignore[attr-defined]
-    ray.get([worker.update_rollout_info.remote(**info_dict) for worker in train_workers])  # type: ignore[attr-defined]
+    targets = ray.get(rollout_controller.get_weight_update_targets.remote())  # type: ignore[attr-defined]
+    ray.get(
+        [
+            worker.bind_rollout_weight_update.remote(
+                targets=targets,
+                rollout_config=rollout_config,
+                weight_transport_type=weight_transport_type,
+                weight_update_host=weight_update_host,
+                weight_update_port=weight_update_port,
+            )
+            for worker in train_workers
+        ]
+    )  # type: ignore[attr-defined]
     return

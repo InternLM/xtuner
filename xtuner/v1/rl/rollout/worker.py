@@ -1,22 +1,22 @@
 import asyncio
 import copy
 import json
-import math
 import multiprocessing
 import os
 import threading
 import time
 import traceback
 from abc import abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, List, Literal, Mapping, Optional, Union, cast
 
 import httpx
 import ray
 import requests  # type: ignore[import-untyped]
 from cyclopts import Group, Parameter
 from packaging.version import Version
-from pydantic import BaseModel, ConfigDict, PrivateAttr
+from pydantic import BaseModel, ConfigDict
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from typing_extensions import Annotated
 
@@ -38,8 +38,11 @@ from xtuner.v1.rl.utils import (
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
+from .constants import ROLLOUT_HTTP_MAX_CONNECTIONS, ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
+from .health_manager import ROLLOUT_RAY_GET_TIMEOUT
+from .rollout_topology import RolloutTopology, ServerLaunchSpec
 from .session_server import SessionServerActor
-from .utils import ROLLOUT_RAY_GET_TIMEOUT, PartialRolloutHandler
+from .utils import PartialRolloutHandler
 
 
 if TYPE_CHECKING:
@@ -48,6 +51,35 @@ if TYPE_CHECKING:
 
 infer_group = Group("inference", help="Inference worker configuration.")
 ROLLOUT_CONCURRENCY_GROUP_GENERATE = "generate"
+
+
+@dataclass(frozen=True)
+class RolloutWorkerInitResult:
+    """Result returned by RolloutWorker.init() after its server starts."""
+
+    rank: int
+    server_url: str
+    session_url: str | None
+
+
+def get_rollout_worker_base_cls(config: "RolloutConfig") -> type["RolloutWorker"]:
+    if config.rollout_backend == "lmdeploy":
+        from .lmdeploy import LMDeployWorker
+
+        return LMDeployWorker
+    elif config.rollout_backend == "vllm":
+        from .vllm import vLLMWorker
+
+        return vLLMWorker
+    elif config.rollout_backend == "sglang":
+        from .sglang import SGLangWorker
+
+        return SGLangWorker
+    else:
+        raise NotImplementedError(
+            f"Rollout backend is not supported: {config.rollout_backend}. "
+            "Please set XTUNER_USE_LMDEPLOY or XTUNER_USE_VLLM or XTUNER_USE_SGLANG environment variable."
+        )
 
 
 class RolloutConfig(BaseModel):
@@ -69,10 +101,14 @@ class RolloutConfig(BaseModel):
         gpu_memory_utilization (float): GPU memory utilization ratio. Defaults to 0.85.
         random_seed (int): Random seed for reproducible generation. Defaults to 1024.
         rollout_cross_node_comm (bool): Enable cross-node communication. Defaults to False.
+        weight_update_host (Optional[str]): Host used by train rank 0 to initialize the external NCCL weight update
+            group. Defaults to None.
+        weight_update_port (Optional[int]): Port used by train rank 0 to initialize the external NCCL weight update
+            group. Defaults to 30000.
         rollout_max_batch_size_per_instance (int): Maximum batch size for the rollout worker. If not set, it
             will be determined automatically based on `context_length`. Defaults to 512.
-        allow_over_concurrency_ratio (float): Factor to allow over-concurrency in HTTP requests for the
-            rollout worker to improve GPU utilization. Defaults to 1.2.
+        allow_over_concurrency_ratio (float): Deprecated compatibility option. Rollout runtime concurrency is
+            controlled by fixed caps in xtuner.v1.rl.rollout.constants. Defaults to 1.2.
         tensor_parallel_size (int): GPUs per inference engine (tensor parallelism). Defaults to 1.
         expert_parallel_size (int): Experts per inference engine (expert parallelism). Defaults to 1.
         enable_chunked_prefill (bool): Enable chunked prefill for memory efficiency. Defaults to False.
@@ -148,6 +184,26 @@ class RolloutConfig(BaseModel):
             help="Base port number for distributed communication among rollout workers.",
         ),
     ] = 25000
+    weight_update_host: Annotated[
+        Optional[str],
+        Parameter(
+            group=infer_group,
+            help=(
+                "Host used by train rank 0 to initialize the external NCCL weight update group. "
+                "Only used for NCCL weight update."
+            ),
+        ),
+    ] = None
+    weight_update_port: Annotated[
+        Optional[int],
+        Parameter(
+            group=infer_group,
+            help=(
+                "Port used by train rank 0 to initialize the external NCCL weight update group. "
+                "Only used for NCCL weight update."
+            ),
+        ),
+    ] = 30000
     rollout_max_batch_size_per_instance: Annotated[
         Optional[int],
         Parameter(
@@ -159,7 +215,10 @@ class RolloutConfig(BaseModel):
         float,
         Parameter(
             group=infer_group,
-            help="Factor to allow over concurrency in the http request for rollout worker to improve GPU utilization.",
+            help=(
+                "Deprecated compatibility option. Rollout runtime concurrency is controlled by fixed caps in "
+                "xtuner.v1.rl.rollout.constants."
+            ),
         ),
     ] = 1.2
     tensor_parallel_size: Annotated[
@@ -240,20 +299,6 @@ class RolloutConfig(BaseModel):
             help="Context length for the rollout worker.",
         ),
     ] = None
-    tool_call_parser: Annotated[
-        Literal["none", "qwen3", "qwen3p5"],
-        Parameter(
-            group=infer_group,
-            help='Structured tool-call parser to apply to rollout output. Use "none" to disable parsing, "qwen3" to enable Qwen3 tool-call parsing, or "qwen3p5" to enable Qwen3.5 coder-style tool-call parsing.',
-        ),
-    ] = "none"
-    reasoning_parser: Annotated[
-        Literal["none", "qwen3"],
-        Parameter(
-            group=infer_group,
-            help='Reasoning parser to apply to rollout output. Use "none" to disable parsing or "qwen3" to enable Qwen3 <think> parsing.',
-        ),
-    ] = "none"
     enable_float8: Annotated[
         bool,
         Parameter(
@@ -311,6 +356,21 @@ class RolloutConfig(BaseModel):
             help="Interval in seconds between rollout worker health checks.",
         ),
     ] = 30.0
+    # LMDeploy /health returns an EngineHealthMonitor snapshot. The monitor's
+    # backend probe timeout defaults to 10s and its poll interval defaults to
+    # 12s, so XTuner's HTTP read timeout needs to be longer than 10s to avoid
+    # turning a slow but informative /health response into a client-side
+    # timeout.
+    health_check_timeout_seconds: Annotated[
+        float,
+        Parameter(
+            group=infer_group,
+            help=(
+                "HTTP timeout in seconds for rollout worker health check requests. "
+                "The default is longer than LMDeploy's 10s backend health probe timeout."
+            ),
+        ),
+    ] = 15.0
     health_check_failure_threshold: Annotated[
         int,
         Parameter(
@@ -318,7 +378,27 @@ class RolloutConfig(BaseModel):
             help="Number of consecutive health check failures required before marking a worker inactive.",
         ),
     ] = 3
-    _logged_server_urls_per_engine: bool = PrivateAttr(default=False)
+    enable_proxy: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Register rollout session servers to routed API proxy and keep registrations in sync with health.",
+        ),
+    ] = False
+    routed_proxy_url: Annotated[
+        str,
+        Parameter(
+            group=infer_group,
+            help="Routed API proxy base URL used to validate proxy chat completions after registration.",
+        ),
+    ] = "http://s-20260104203038-22bhb.ailab-evalservice.pjh-service.org.cn"
+    routed_proxy_admin_url: Annotated[
+        str,
+        Parameter(
+            group=infer_group,
+            help="Routed API proxy admin base URL used for model registration and deletion.",
+        ),
+    ] = "http://s-20260104203038-22bhb-decode.ailab-evalservice.svc:4000"
 
     @property
     def rollout_backend(self) -> str:
@@ -336,53 +416,19 @@ class RolloutConfig(BaseModel):
         return backend
 
     @property
-    def server_urls_per_engine(self) -> int:
-        # server_urls_per_engine is introduced for lmdeploy ep settings
-        # for now only lmdeploy pytorch backend with ep > 1 requires multiple server urls per engine
-        if self.rollout_backend == "lmdeploy" and self.expert_parallel_size > 1:
-            # when expert parallelism is used, lmdeploy requires `expert_parallel_size` server instances per engine
-            if not self._logged_server_urls_per_engine:
-                self._logged_server_urls_per_engine = True
-                get_logger().info(
-                    f"Setting server_urls_per_engine={self.expert_parallel_size} due to expert parallelism in LMDeploy."
-                )
-            return self.expert_parallel_size
-        else:
-            return 1
-
-    @property
     def num_gpus_per_engine(self) -> int:
         return self.expert_parallel_size if self.expert_parallel_size > 1 else self.tensor_parallel_size
 
-    def get_active_servers_count(self, num_rollout_workers: int) -> tuple[int, int]:
-        """Calculate the number of active servers and nodes per engine."""
-        # NOTE: Since different inference engines have different launch methods,
-        # the number of nodes contained in each engine is not consistent.
-        # For example, sglang requires starting an inference engine for each node,
-        # while lmdeploy and vllm do not. Therefore, calculate active servers from the rollout config.
-        nodes_per_engine = (
-            1
-            if self.rollout_cross_node_comm or self.num_gpus_per_engine < self.gpus_per_node
-            else self.num_gpus_per_engine // self.gpus_per_node
-        )
-        active_servers_count = max(
-            1,
-            int((num_rollout_workers // self.num_gpus_per_engine) * nodes_per_engine * self.server_urls_per_engine),
-        )
-        return active_servers_count, nodes_per_engine
-
-    def get_controller_generate_concurrency(self, placement_group: "PlacementGroup") -> int:
-        active_worker_count, _ = self.get_active_servers_count(len(placement_group.bundle_specs))
-        assert self.rollout_max_batch_size_per_instance is not None, (
-            "rollout_max_batch_size_per_instance must be set before building RolloutController."
-        )
-        concurrency_per_worker = math.ceil(
-            self.rollout_max_batch_size_per_instance * self.allow_over_concurrency_ratio
-        )
-        generate_max_concurrency = active_worker_count * concurrency_per_worker
-        return generate_max_concurrency
-
     def model_post_init(self, __context: Any) -> None:
+        default_allow_over_concurrency_ratio = type(self).model_fields["allow_over_concurrency_ratio"].default
+        if self.allow_over_concurrency_ratio != default_allow_over_concurrency_ratio:
+            get_logger().warning(
+                "rollout_config.allow_over_concurrency_ratio is deprecated and no longer controls runtime "
+                "rollout concurrency. The configured value "
+                f"{self.allow_over_concurrency_ratio} will be ignored; fixed rollout concurrency caps from "
+                "xtuner.v1.rl.rollout.constants are used instead."
+            )
+
         if self.model_name is None:
             model_name_from_config = None
             config_json_path = Path(self.model_path) / "config.json"
@@ -442,12 +488,10 @@ class RolloutConfig(BaseModel):
             name="rollout_controller",
             cpu_resources=CPUResourcesConfig(num_workers=num_workers),
         )
-        generate_max_concurrency = self.get_controller_generate_concurrency(placement_group)
-        get_logger().info(f"Calculated RolloutController generate concurrency: {generate_max_concurrency}")
         return (
             ray.remote(
                 concurrency_groups={
-                    ROLLOUT_CONCURRENCY_GROUP_GENERATE: generate_max_concurrency,
+                    ROLLOUT_CONCURRENCY_GROUP_GENERATE: ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY,
                 },
             )(RolloutController)
             .options(num_cpus=num_workers)
@@ -484,6 +528,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 Defaults to "GPU".
         """
         self.config = config
+        self._default_skip_load_weights = config.skip_load_weights
         self.rank = rank
         self.master_addr = master_addr  # ray master
         self.master_port = master_port
@@ -491,16 +536,14 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.accelerator = accelerator
         self.server_func: Callable
         self.endpoints: dict[str, str] = dict()
-        self.engine_rank_mesh_array: list[list[int]]
-        # http_concurrency is calculated based on the max batch size per engine and the total number of engines
-        assert config.rollout_max_batch_size_per_instance, (
-            "rollout_max_batch_size_per_instance must be set in RolloutConfig"
-        )
-        http_concurrency = math.ceil(config.rollout_max_batch_size_per_instance * config.allow_over_concurrency_ratio)
+        self.server_launch_spec: ServerLaunchSpec | None = None
+        # Keep this deliberately large so requests do not queue in the
+        # RolloutWorker/httpx client; the inference engine owns rollout request
+        # scheduling and queueing.
+        http_concurrency = ROLLOUT_HTTP_MAX_CONNECTIONS
         limits = httpx.Limits(max_connections=http_concurrency, max_keepalive_connections=100)
         self.client = httpx.AsyncClient(limits=limits, timeout=self.config.rollout_timeout)
         self.server_task = None
-        self.engine_bundle_idxs: list[int] = []
         self.server_process: Optional[multiprocessing.Process] = None
         self.session_server_actor: Any | None = None
         self.session_server_url: str | None = None
@@ -514,33 +557,64 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.logger.info(f"Using eos_token: {eos_token} for model at {self.config.model_path}")
         self.eos_token: List[int] = [eos_token] if isinstance(eos_token, int) else eos_token
         self.receive_abort_request = threading.Event()
-        self.dist_init_addr: str = ""
         self.serverl_url: str = ""
         self.partial_rollout_handler = PartialRolloutHandler()
         self.enable_partial_rollout: bool = False
 
+    @classmethod
+    @abstractmethod
+    def build_rollout_topology(
+        cls,
+        config: RolloutConfig,
+        rank_bundle_idx_list: list[tuple[int, int]],
+        rank_to_dist_init_addr: Mapping[int, str],
+    ) -> RolloutTopology:
+        raise NotImplementedError("Concrete rollout worker classes must implement build_rollout_topology().")
+
     def set_enable_partial_rollout(self, enable: bool) -> None:
         self.enable_partial_rollout = enable
 
-    def init(self, dist_init_addr: str | None = None) -> tuple[int, str]:
+    def _bind_server_launch_spec(self, server_launch_spec: ServerLaunchSpec) -> None:
+        if server_launch_spec.worker_rank != self.rank:
+            raise ValueError(
+                f"Server launch spec rank={server_launch_spec.worker_rank} does not match worker rank={self.rank}."
+            )
+        self.server_launch_spec = server_launch_spec
+
+    def init(self, server_launch_spec: ServerLaunchSpec) -> RolloutWorkerInitResult:
+        """Bind the worker launch spec and initialize the rollout server."""
+        self._bind_server_launch_spec(server_launch_spec)
+        return self._init_server()
+
+    def reinit(self) -> RolloutWorkerInitResult:
+        """Reinitialize the rollout server using the previously bound launch
+        spec."""
+        return self._init_server()
+
+    def _init_server(self) -> RolloutWorkerInitResult:
         """Initialize the worker and launch the server.
 
-        Args:
-            dist_init_addr (str): The distributed initialization address.
-                If not provided, the one generated by `init_dist_port` is used.
-
         Returns:
-            Tuple[int, str]: A tuple containing the worker's rank and its
-                server URL.
+            Startup result containing rank, server URL, and session URL.
         """
-        if dist_init_addr is not None:
-            self.dist_init_addr = dist_init_addr
+        if self.server_launch_spec is None:
+            raise RuntimeError("Rollout worker must bind a server launch spec before starting server.")
         self.receive_abort_request.clear()
         self._launch_server()
         self._start_session_server()
-        return (self.rank, self.server_url)
+        return RolloutWorkerInitResult(
+            rank=self.rank,
+            server_url=self.server_url,
+            session_url=self.session_server_url,
+        )
 
-    def init_dist_port(self) -> str:
+    def set_skip_load_weights(self, skip_load_weights: bool) -> None:
+        self.config = self.config.model_copy(update={"skip_load_weights": skip_load_weights})
+
+    def restore_skip_load_weights(self) -> None:
+        self.config = self.config.model_copy(update={"skip_load_weights": self._default_skip_load_weights})
+
+    def init_dist_port(self) -> tuple[int, str]:
         """Initialize distributed communication ports.
 
         This method initializes four fixed ports for the distributed setup:
@@ -548,7 +622,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         for NCCL, and one for the session server.
 
         Returns:
-            str: The distributed initialization address (host:port).
+            Worker rank and distributed initialization address (host:port).
         """
         local_rank = int(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
         base_port = self.config.dist_port_base + local_rank * 4
@@ -557,9 +631,9 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.server_port = base_port + 1
         self.nccl_port = base_port + 2
         self.session_server_port = base_port + 3
-        self.dist_init_addr = f"{self.host}:{self.dist_port}"
+        dist_init_addr = f"{self.host}:{self.dist_port}"
         self.server_url = f"http://{self.host}:{self.server_port}"
-        return self.dist_init_addr
+        return self.rank, dist_init_addr
 
     def shutdown(self, *, stop_session_server: bool = False):
         """Shut down the worker, its server task, and any child processes."""
@@ -570,6 +644,13 @@ class RolloutWorker(SingleAcceleratorWorker):
             server_task = self.server_task
             self._request_server_terminate()
             ray.cancel(server_task, force=True, recursive=True)
+            try:
+                ray.get(server_task, timeout=60)
+            except ray.exceptions.GetTimeoutError:
+                self.logger.warning(f"Worker {self.rank} server task did not stop within shutdown timeout.")
+                raise
+            except Exception as e:
+                self.logger.debug(f"Worker {self.rank} server task stopped after shutdown: {e}")
             self.server_task = None
             return
 
@@ -595,14 +676,15 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     def _start_session_server(self) -> None:
         """Start the per-worker SessionServer proxy."""
-        if self.session_server_actor is not None:
+        assert self.server_launch_spec is not None
+        if not self.server_launch_spec.accepts_rollout_requests or self.session_server_actor is not None:
             return
 
         current_pg = ray.util.get_current_placement_group()
         scheduling_strategy = PlacementGroupSchedulingStrategy(
             placement_group=current_pg,
             placement_group_capture_child_tasks=False,
-            placement_group_bundle_index=self.engine_bundle_idxs[0],
+            placement_group_bundle_index=self.server_launch_spec.placement_group_bundle_idxs[0],
         )
         self.session_server_actor = (
             ray.remote(SessionServerActor)
@@ -622,6 +704,10 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.session_server_actor.start.remote(),
             timeout=ROLLOUT_RAY_GET_TIMEOUT,
         )
+        if self.session_server_url is None:
+            raise RuntimeError(
+                f"Request-entrypoint rollout worker rank={self.rank} did not start session server during init."
+            )
 
     def _stop_session_server(self) -> None:
         if self.session_server_actor is not None:
@@ -631,9 +717,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                 ray.kill(self.session_server_actor)
                 self.session_server_actor = None
             self.session_server_url = None
-
-    def get_session_server_info(self) -> tuple[int, str | None]:
-        return self.rank, self.session_server_url
 
     async def pause_generation(self):
         """Pause the worker's generation process."""
@@ -665,10 +748,26 @@ class RolloutWorker(SingleAcceleratorWorker):
                 "Content-Type": "application/json; charset=utf-8",
                 "Authorization": f"Bearer {self.config.api_key}",
             }
+            health_url = f"{self.server_url}/{self.endpoints['health_generate']}"
             response = requests.get(
-                f"{self.server_url}/{self.endpoints['health_generate']}", headers=headers, timeout=5.0
+                health_url,
+                headers=headers,
+                timeout=self.config.health_check_timeout_seconds,
             )
-            return response.status_code == 200
+            if response.status_code == 200:
+                return True
+            health_message = ""
+            try:
+                payload = response.json()
+                if isinstance(payload, dict) and payload.get("message"):
+                    health_message = f", message={payload['message']!r}"
+            except ValueError:
+                pass
+            self.logger.warning(
+                f"Health check returned non-200 for server {health_url}: "
+                f"status_code={response.status_code}{health_message}"
+            )
+            return False
         except requests.RequestException as e:
             self.logger.error(f"Health check failed for server {self.server_url}: {e}")
             return False
@@ -927,11 +1026,12 @@ class RolloutWorker(SingleAcceleratorWorker):
         else:
             # launch the server as ray task
             # so that the lmdeploy backend could get externl pg
+            assert self.server_launch_spec is not None
             current_pg = ray.util.get_current_placement_group()
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=current_pg,
                 placement_group_capture_child_tasks=True,
-                placement_group_bundle_index=self.engine_bundle_idxs[0],
+                placement_group_bundle_index=self.server_launch_spec.placement_group_bundle_idxs[0],
             )
             assert ray.is_initialized()
             ray_kwargs = (
@@ -1223,20 +1323,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                         f"You should use lmdeploy >= v0.10.2 to support return_token_ids, but current version is {lmdeploy_version}"
                     )
             self.check_flag = False
-
-    def _set_engine_rank_mesh_array(self, engine_rank_mesh_array: list[list[int]]):
-        self.engine_rank_mesh_array = engine_rank_mesh_array
-
-    def _set_engine_bundle_idxs(self, engine_bundle_idxs: list[int]):
-        """Set the bundle indices for the inference engine.
-
-        This is used by some backends (like LMDeploy with Ray executor) to
-        know which bundles in the placement group belong to this engine.
-
-        Args:
-            engine_bundle_idxs (list[int]): A list of bundle indices.
-        """
-        self.engine_bundle_idxs = engine_bundle_idxs
 
     @abstractmethod
     def _get_request_payload(self, rollout_state: RolloutState) -> dict:
