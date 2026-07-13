@@ -61,7 +61,16 @@ class GreedyRouter(nn.Module, RouterProtocol):
         self.scoring_func = scoring_func
         self.router_scaling_factor = router_scaling_factor
 
-    def forward(self, logits: torch.Tensor, rollout_routed_experts: torch.Tensor | None = None) -> RouterResults:
+    def forward(
+        self,
+        logits: torch.Tensor,
+        rollout_routed_experts: torch.Tensor | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> RouterResults:
+        # `input_ids` is accepted for protocol compatibility with HashRouter but is
+        # not consumed by score-based routing.
+        del input_ids
         if os.getenv("XTUNER_ROUTER_DEBUG") == "true":
             noise = torch.randn_like(logits) * 50
             logits = logits + noise
@@ -118,7 +127,16 @@ class GreedyGroupedRouter(GreedyRouter):
         )
         self.router_n_groups = router_n_groups
 
-    def forward(self, logits: torch.Tensor, rollout_routed_experts: torch.Tensor | None = None) -> RouterResults:
+    def forward(
+        self,
+        logits: torch.Tensor,
+        rollout_routed_experts: torch.Tensor | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> RouterResults:
+        # `input_ids` is accepted for protocol compatibility with HashRouter but is
+        # not consumed by score-based routing.
+        del input_ids
         if os.getenv("XTUNER_ROUTER_DEBUG") == "true":
             noise = torch.randn_like(logits) * 50
             logits = logits + noise
