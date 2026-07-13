@@ -113,9 +113,10 @@ class Qwen3VLTextMoE(Qwen3MoE):
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
         loss_ctx: MoELossContextDict | None,
         return_router_logits: bool = False,
+        skip_all_reduce: bool = False,
     ) -> MoEModelOutputs:
         if seq_ctx.deepstack_visual_embeds is None:
-            return super()._forward(seq_ctx, loss_ctx, return_router_logits)
+            return super()._forward(seq_ctx, loss_ctx, return_router_logits, skip_all_reduce)
 
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -210,7 +211,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
 
         # Get LM loss context from dict
         lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
-        loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
+        loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx, skip_all_reduce=skip_all_reduce)  # type: ignore
         output["loss"] = loss
         output["logits"] = logits
         output["extra_info"] = extra_info

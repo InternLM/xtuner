@@ -162,12 +162,12 @@ class MTPLossContext(LMHeadLossContext):
         hidden_states: torch.Tensor,
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None = None,
+        skip_all_reduce: bool = False,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         if self.loss_cfg.detach_mtp_lm_head_weight:
             head_weight = head_weight.detach()
             head_bias = head_bias.detach() if head_bias is not None else None
-        # Dispatch to eager_mode/chunk_mode via base class, which calls loss_fn per chunk
-        return super().forward(hidden_states, head_weight, head_bias)
+        return super().forward(hidden_states, head_weight, head_bias, skip_all_reduce=skip_all_reduce)
 
     def loss_fn(
         self,

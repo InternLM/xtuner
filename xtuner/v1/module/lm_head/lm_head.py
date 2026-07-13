@@ -20,16 +20,16 @@ Labels: TypeAlias = torch.Tensor
 class LMHead(nn.Linear):
     @overload  # type: ignore[override]
     def forward(
-        self, hidden_states: HiddenStates, loss_ctx: None = None
+        self, hidden_states: HiddenStates, loss_ctx: None = None, *, skip_all_reduce: bool = False
     ) -> tuple[None, tuple[Logits | None, dict[str, Any]]]: ...
 
     @overload  # type: ignore[override]
     def forward(
-        self, hidden_states: HiddenStates, loss_ctx: LMHeadLossContext
+        self, hidden_states: HiddenStates, loss_ctx: LMHeadLossContext, *, skip_all_reduce: bool = False
     ) -> tuple[Loss, tuple[Logits | None, dict[str, Any]]]: ...
 
     def forward(  # type: ignore[override]
-        self, hidden_states: torch.Tensor, loss_ctx: LMHeadLossContext | None = None
+        self, hidden_states: torch.Tensor, loss_ctx: LMHeadLossContext | None = None, *, skip_all_reduce: bool = False
     ) -> tuple[Loss | None, tuple[Logits | None, dict[str, Any]]]:
         """Forward pass of the language model head."""
         if isinstance(self.weight, DTensor):
@@ -46,16 +46,16 @@ class LMHead(nn.Linear):
             logits = F.linear(hidden_states, w, b)
             return None, (logits.float(), {})
         else:
-            return loss_ctx.forward(hidden_states, w, b)
+            return loss_ctx.forward(hidden_states, w, b, skip_all_reduce=skip_all_reduce)
 
     @overload  # type: ignore
     def __call__(
-        self, hidden_states: HiddenStates, loss_ctx: None = None
+        self, hidden_states: HiddenStates, loss_ctx: None = None, *, skip_all_reduce: bool = False
     ) -> tuple[None, tuple[Logits | None, dict[str, Any]]]: ...
 
     @overload  # type: ignore
     def __call__(
-        self, hidden_states: HiddenStates, loss_ctx: LMHeadLossContext
+        self, hidden_states: HiddenStates, loss_ctx: LMHeadLossContext, *, skip_all_reduce: bool = False
     ) -> tuple[Loss, tuple[Logits | None, dict[str, Any]]]: ...
 
     __call__ = nn.Module.__call__

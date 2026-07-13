@@ -264,6 +264,7 @@ class LMHeadLossContext(BaseLossContext):
         hidden_states: torch.Tensor,
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None = None,
+        skip_all_reduce: bool = False,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 
@@ -282,9 +283,9 @@ class LMHeadLossContext(BaseLossContext):
 
         extra_info["local_base_loss"] = loss.detach().clone()
 
-        # Step 2.c in the loss calculation: reduce the loss over all ranks using all_reduce with autograd support
-        if dist.is_initialized():
-            loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
+        if not skip_all_reduce:
+            if dist.is_initialized():
+                loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
 
         return loss, (logits, extra_info)
 
