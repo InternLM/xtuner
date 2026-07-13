@@ -2024,7 +2024,11 @@ class Trainer:
 
     def _load_checkpoint(self):
         load_checkpoint_cfg: LoadCheckpointConfig = self._load_checkpoint_cfg
+        # 从 xtuner.v1.utils 获取 npu_cpu_binder 模块
+        from xtuner.v1.utils import npu_cpu_binder
 
+        # 执行npu_cpu_binder 细粒度绑核操作
+        npu_cpu_binder.run(self.rank)
         if (resume_from := load_checkpoint_cfg.checkpoint_path) is None:
             log_rank0.info("No checkpoint to resume from.")
             return
