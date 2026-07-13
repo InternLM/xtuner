@@ -1,3 +1,10 @@
+"""Build the XTuner trace-viewer payload from Jaeger-shaped traces.
+
+This module owns XTuner semantics: rollout grouping, stage names, train-step
+filtering, duration summaries, error summaries, and display paths. It does not
+serve HTTP or render HTML.
+"""
+
 from __future__ import annotations
 
 import json
@@ -31,23 +38,44 @@ def build_rollout_view_payload_from_jaeger_traces(
     *,
     jaeger_query_url: str | None = None,
     jaeger_link_url: str | None = None,
-    live_records: Iterable[dict[str, Any]] | None = None,
     service_name: str | None = None,
     run_id: str | None = None,
     train_step: Any = "latest",
 ) -> dict[str, Any]:
     samples_by_key: dict[tuple[str, Any], dict[str, Any]] = {}
-    jaeger_trace_link_base_url = _jaeger_trace_link_base_url(jaeger_query_url, jaeger_link_url)
+    jaeger_trace_link_base_url = _normalize_jaeger_query_url(jaeger_link_url) or _normalize_jaeger_query_url(
+        jaeger_query_url
+    )
 
     for trace_data in traces:
+        if not isinstance(trace_data, dict):
+            raise ValueError(f"Jaeger trace must be an object, got {type(trace_data).__name__}")
         trace_id = str(trace_data.get("traceID") or trace_data.get("trace_id") or "")
         if not trace_id:
-            continue
+            raise ValueError("Jaeger trace is missing traceID")
         process_metadata = _process_metadata(trace_data)
         span_entries = []
         entries_by_span_id: dict[str, dict[str, Any]] = {}
-        for span in trace_data.get("spans") or []:
-            process = process_metadata.get(str(span.get("processID") or ""), {})
+        spans = trace_data.get("spans") or []
+        if not isinstance(spans, list):
+            raise ValueError(f"Jaeger trace {trace_id} has non-list spans")
+        if spans and not process_metadata:
+            raise ValueError(f"Jaeger trace {trace_id} has spans but no processes")
+        for span in spans:
+            if not isinstance(span, dict):
+                raise ValueError(f"Jaeger trace {trace_id} span must be an object")
+            span_id = str(span.get("spanID") or span.get("span_id") or "")
+            if not span_id:
+                raise ValueError(f"Jaeger trace {trace_id} span is missing spanID")
+            process_id = str(span.get("processID") or "")
+            if process_metadata:
+                if not process_id:
+                    raise ValueError(f"Jaeger trace {trace_id} span {span_id} is missing processID")
+                process = process_metadata.get(process_id)
+                if process is None:
+                    raise ValueError(f"Jaeger trace {trace_id} span {span_id} references unknown processID {process_id}")
+            else:
+                process = {}
             span_service_name = process.get("service_name")
             if service_name is not None and span_service_name != service_name:
                 continue
@@ -60,7 +88,7 @@ def build_rollout_view_payload_from_jaeger_traces(
                 "tags": tags,
                 "service_name": span_service_name,
                 "run_id": span_run_id,
-                "span_id": _span_id(span),
+                "span_id": span_id,
                 "trace_id": trace_id,
             }
             span_entries.append(entry)
@@ -84,27 +112,46 @@ def build_rollout_view_payload_from_jaeger_traces(
                     "group_id": sample_tags.get("xtuner.group_id"),
                     "producer_future_step": _producer_future_step(sample_tags),
                     "task_name": sample_tags.get("xtuner.task_name"),
-                    "status": sample_tags.get("xtuner.status"),
+                    "status": _sample_status_from_span(span, tags),
                     "service_name": span_service_name,
                     "run_id": span_run_id,
-                    "jaeger_url": _jaeger_trace_url(jaeger_trace_link_base_url, trace_id),
+                    "jaeger_url": f"{jaeger_trace_link_base_url}/trace/{trace_id}"
+                    if jaeger_trace_link_base_url is not None
+                    else None,
                     "spans": [],
                 },
             )
-            _merge_sample_fields(sample, sample_tags)
+            for sample_key, tag_key in (
+                ("rollout_id", "xtuner.rollout_id"),
+                ("group_id", "xtuner.group_id"),
+                ("task_name", "xtuner.task_name"),
+            ):
+                if sample_tags.get(tag_key) is not None:
+                    sample[sample_key] = sample_tags[tag_key]
+            status = _sample_status_from_span(span, tags)
+            if status is not None:
+                current_status = sample.get("status")
+                if current_status is None or _sample_status_priority(status) >= _sample_status_priority(current_status):
+                    sample["status"] = status
+            producer_future_step = _producer_future_step(sample_tags)
+            if producer_future_step is not None:
+                sample["producer_future_step"] = producer_future_step
             if span_run_id is not None:
                 sample["run_id"] = span_run_id
             sample["spans"].append(_span_payload(span, tags, service_name=span_service_name, run_id=span_run_id))
-
-    _merge_live_records(samples_by_key, live_records or (), jaeger_trace_link_base_url)
 
     generated_at_s = time.time()
     samples = []
     for sample in samples_by_key.values():
         sample["spans"].sort(key=lambda item: (item["start_time_us"], item["span_id"]))
         sample["span_count"] = len(sample["spans"])
-        _apply_live_state(sample, generated_at_s)
-        _apply_sample_display_status(sample)
+        if sample.get("status") is None:
+            if _has_finished_sample_root_span(sample["spans"]):
+                sample["status"] = "completed"
+            elif sample.get("spans"):
+                sample["status"] = "running"
+        sample["display_path"] = _build_display_path(sample)
+        sample["chain"] = " -> ".join(node["name"] for node in sample["display_path"])
         _apply_sample_reward_filter(sample)
         sample["stage"] = _sample_stage(sample)
         samples.append(sample)
@@ -129,28 +176,29 @@ def load_jaeger_traces_from_otel_jsonl(trace_jsonl_path: Path | str) -> list[dic
     process_ids: dict[tuple[str, str, tuple[tuple[str, str], ...]], str] = {}
     path = Path(trace_jsonl_path).expanduser()
     if not path.is_file():
-        return []
+        raise FileNotFoundError(f"trace_jsonl path does not exist: {path}")
 
-    for record in _iter_jsonl_records(path):
-        if not isinstance(record, dict):
-            continue
-        jaeger_traces = _jaeger_traces_from_json_record(record)
+    for line_no, record in _iter_jsonl_records(path):
+        context = f"{path}:{line_no}"
+        jaeger_traces = _jaeger_traces_from_json_record(record, context=context)
         if jaeger_traces is not None:
             for trace_data in jaeger_traces:
-                _merge_jaeger_trace(traces_by_id, trace_data)
+                _merge_jaeger_trace(traces_by_id, trace_data, context=context)
             continue
-        for resource_span in record.get("resourceSpans") or []:
-            if not isinstance(resource_span, dict):
-                continue
-            resource_attrs = _otel_attributes_to_dict(
-                (resource_span.get("resource") or {}).get("attributes") or []
-            )
+        if "resourceSpans" not in record:
+            raise ValueError(f"{context}: trace record must contain Jaeger data or OTLP resourceSpans")
+        resource_spans = record.get("resourceSpans")
+        if not isinstance(resource_spans, list):
+            raise ValueError(f"{context}: OTLP resourceSpans must be a list")
+        for resource_index, resource_span in enumerate(resource_spans):
+            resource_attrs = _otel_attributes_to_dict((resource_span.get("resource") or {}).get("attributes") or [])
             service_name = str(resource_attrs.get("service.name") or "unknown")
             process_tags = _dict_to_jaeger_tags(resource_attrs)
-            for scope_span in _otel_scope_spans(resource_span):
-                for otel_span in scope_span.get("spans") or []:
-                    if not isinstance(otel_span, dict):
-                        continue
+            scope_spans = resource_span.get("scopeSpans")
+            if scope_spans is None:
+                scope_spans = resource_span.get("instrumentationLibrarySpans") or []
+            for scope_index, scope_span in enumerate(scope_spans):
+                for span_index, otel_span in enumerate(scope_span.get("spans") or []):
                     trace_id = str(
                         otel_span.get("traceId")
                         or otel_span.get("traceID")
@@ -164,7 +212,10 @@ def load_jaeger_traces_from_otel_jsonl(trace_jsonl_path: Path | str) -> list[dic
                         or ""
                     )
                     if not trace_id or not span_id:
-                        continue
+                        raise ValueError(
+                            f"{context}: resourceSpans[{resource_index}].scopeSpans[{scope_index}].spans[{span_index}] "
+                            "is missing traceId or spanId"
+                        )
                     trace_data = traces_by_id.setdefault(
                         trace_id,
                         {
@@ -192,56 +243,47 @@ def load_jaeger_traces_from_otel_jsonl(trace_jsonl_path: Path | str) -> list[dic
     return list(traces_by_id.values())
 
 
-def load_live_trace_records(live_jsonl_path: Path | str | None) -> list[dict[str, Any]]:
-    if live_jsonl_path is None:
-        return []
-    path = Path(live_jsonl_path).expanduser()
-    if not path.is_file():
-        return []
-    return list(_iter_jsonl_records(path))
-
-
-def _iter_jsonl_records(path: Path) -> Iterable[dict[str, Any]]:
+def _iter_jsonl_records(path: Path) -> Iterable[tuple[int, dict[str, Any]]]:
     with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
+        for line_no, line in enumerate(handle, start=1):
             stripped = line.strip()
             if not stripped:
                 continue
             try:
                 payload = json.loads(stripped)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                yield payload
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON in {path}:{line_no}: {exc.msg}") from exc
+            if not isinstance(payload, dict):
+                raise ValueError(f"{path}:{line_no}: trace JSONL record must be an object")
+            yield line_no, payload
 
 
-def _jaeger_traces_from_json_record(record: dict[str, Any]) -> list[dict[str, Any]] | None:
+def _jaeger_traces_from_json_record(record: dict[str, Any], *, context: str) -> list[dict[str, Any]] | None:
     data = record.get("data")
-    if isinstance(data, list):
-        return [trace_data for trace_data in data if isinstance(trace_data, dict)]
+    if data is not None:
+        if not isinstance(data, list):
+            raise ValueError(f"{context}: Jaeger data must be a list")
+        return data
     if record.get("traceID") is not None and isinstance(record.get("spans"), list):
         return [record]
+    if record.get("traceID") is not None:
+        raise ValueError(f"{context}: Jaeger trace spans must be a list")
     return None
 
 
-def _merge_jaeger_trace(traces_by_id: dict[str, dict[str, Any]], trace_data: dict[str, Any]) -> None:
+def _merge_jaeger_trace(traces_by_id: dict[str, dict[str, Any]], trace_data: dict[str, Any], *, context: str) -> None:
     trace_id = str(trace_data.get("traceID") or trace_data.get("trace_id") or "")
     if not trace_id:
-        return
+        raise ValueError(f"{context}: Jaeger trace is missing traceID")
     target = traces_by_id.setdefault(trace_id, {"traceID": trace_id, "processes": {}, "spans": []})
-    if isinstance(trace_data.get("processes"), dict):
-        target["processes"].update(trace_data["processes"])
-    target["spans"].extend([span for span in trace_data.get("spans") or [] if isinstance(span, dict)])
-
-
-def _otel_scope_spans(resource_span: dict[str, Any]) -> list[dict[str, Any]]:
-    scope_spans = resource_span.get("scopeSpans")
-    if isinstance(scope_spans, list):
-        return [scope_span for scope_span in scope_spans if isinstance(scope_span, dict)]
-    legacy_scope_spans = resource_span.get("instrumentationLibrarySpans")
-    if isinstance(legacy_scope_spans, list):
-        return [scope_span for scope_span in legacy_scope_spans if isinstance(scope_span, dict)]
-    return []
+    processes = trace_data.get("processes") or {}
+    if not isinstance(processes, dict):
+        raise ValueError(f"{context}: Jaeger trace {trace_id} processes must be an object")
+    target["processes"].update(processes)
+    spans = trace_data.get("spans") or []
+    if not isinstance(spans, list):
+        raise ValueError(f"{context}: Jaeger trace {trace_id} spans must be a list")
+    target["spans"].extend(spans)
 
 
 def _otel_span_to_jaeger_span(
@@ -253,18 +295,20 @@ def _otel_span_to_jaeger_span(
     attributes = _otel_attributes_to_dict(otel_span.get("attributes") or [])
     tags = _dict_to_jaeger_tags(attributes)
     tags.extend(_otel_status_tags(otel_span.get("status") or {}))
-    start_ns = _int_from_otel_time(
+    start_time = (
         otel_span.get("startTimeUnixNano")
         or otel_span.get("start_time_unix_nano")
         or otel_span.get("startTime")
         or 0
     )
-    end_ns = _int_from_otel_time(
+    start_ns = int(str(start_time))
+    end_time = (
         otel_span.get("endTimeUnixNano")
         or otel_span.get("end_time_unix_nano")
         or otel_span.get("endTime")
         or start_ns
     )
+    end_ns = int(str(end_time))
     parent_span_id = otel_span.get("parentSpanId") or otel_span.get("parent_span_id")
     references = []
     if parent_span_id is not None and str(parent_span_id):
@@ -281,7 +325,7 @@ def _otel_span_to_jaeger_span(
     }
 
 
-def _otel_status_tags(status: dict[str, Any]) -> list[dict[str, Any]]:
+def _otel_status_tags(status: Any) -> list[dict[str, Any]]:
     code = str(status.get("code") or status.get("statusCode") or "STATUS_CODE_UNSET")
     if code in {"STATUS_CODE_ERROR", "ERROR", "2"}:
         normalized = "ERROR"
@@ -303,16 +347,15 @@ def _otel_attributes_to_dict(attributes: Any) -> dict[str, Any]:
         return dict(attributes)
     result: dict[str, Any] = {}
     for attribute in attributes or []:
-        if not isinstance(attribute, dict):
-            continue
         key = attribute.get("key")
-        if key is None:
-            continue
-        result[str(key)] = _otel_any_value_to_python(attribute.get("value"))
+        if key is not None:
+            result[str(key)] = _otel_any_value_to_python(attribute.get("value"))
     return result
 
 
 def _otel_any_value_to_python(value: Any) -> Any:
+    if value is None:
+        return None
     if not isinstance(value, dict):
         return value
     if "stringValue" in value:
@@ -320,7 +363,7 @@ def _otel_any_value_to_python(value: Any) -> Any:
     if "boolValue" in value:
         return bool(value["boolValue"])
     if "intValue" in value:
-        return _int_or_original(value["intValue"])
+        return int(str(value["intValue"]))
     if "doubleValue" in value:
         return float(value["doubleValue"])
     if "bytesValue" in value:
@@ -337,74 +380,20 @@ def _otel_any_value_to_python(value: Any) -> Any:
 
 
 def _dict_to_jaeger_tags(attributes: dict[str, Any]) -> list[dict[str, Any]]:
-    return [
-        {"key": str(key), "type": _jaeger_tag_type(value), "value": value}
-        for key, value in attributes.items()
-        if value is not None
-    ]
-
-
-def _jaeger_tag_type(value: Any) -> str:
-    if isinstance(value, bool):
-        return "bool"
-    if isinstance(value, int):
-        return "int64"
-    if isinstance(value, float):
-        return "float64"
-    return "string"
-
-
-def _int_from_otel_time(value: Any) -> int:
-    parsed = _int_or_original(value)
-    return parsed if isinstance(parsed, int) and not isinstance(parsed, bool) else 0
-
-
-def _int_or_original(value: Any) -> int | Any:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        return value
-    try:
-        return int(str(value))
-    except (TypeError, ValueError):
-        return value
-
-
-def _merge_sample_fields(sample: dict[str, Any], tags: dict[str, Any]) -> None:
-    for sample_key, tag_key in (
-        ("rollout_id", "xtuner.rollout_id"),
-        ("group_id", "xtuner.group_id"),
-        ("task_name", "xtuner.task_name"),
-    ):
-        if tags.get(tag_key) is not None:
-            sample[sample_key] = tags[tag_key]
-    _merge_sample_status(sample, tags.get("xtuner.status"))
-    producer_future_step = _producer_future_step(tags)
-    if producer_future_step is not None:
-        sample["producer_future_step"] = producer_future_step
-
-
-def _merge_sample_status(sample: dict[str, Any], status: Any) -> None:
-    if status is None:
-        return
-    current_status = sample.get("status")
-    if current_status is None or _sample_status_priority(status) >= _sample_status_priority(current_status):
-        sample["status"] = status
-
-
-def _apply_sample_display_status(sample: dict[str, Any]) -> None:
-    status = str(sample.get("status") or "").strip().lower()
-    if status not in _INITIAL_SAMPLE_STATUSES:
-        return
-    if _sample_has_observed_stage(sample):
-        sample["status"] = "running"
-
-
-def _sample_has_observed_stage(sample: dict[str, Any]) -> bool:
-    current_stage = sample.get("current_stage")
-    if isinstance(current_stage, dict) and current_stage.get("name"):
-        return True
-    return bool(sample.get("spans"))
+    tags = []
+    for key, value in attributes.items():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            tag_type = "bool"
+        elif isinstance(value, int):
+            tag_type = "int64"
+        elif isinstance(value, float):
+            tag_type = "float64"
+        else:
+            tag_type = "string"
+        tags.append({"key": str(key), "type": tag_type, "value": value})
+    return tags
 
 
 def _sample_status_priority(status: Any) -> int:
@@ -418,125 +407,39 @@ def _sample_status_priority(status: Any) -> int:
     return 1
 
 
-def _merge_live_records(
-    samples_by_key: dict[tuple[str, Any], dict[str, Any]],
-    live_records: Iterable[dict[str, Any]],
-    jaeger_trace_link_base_url: str | None,
-) -> None:
-    for record in live_records:
-        if not isinstance(record, dict):
-            continue
-        trace_id = str(record.get("trace_id") or "")
-        attributes = record.get("attributes")
-        if not trace_id or not isinstance(attributes, dict):
-            continue
-        rollout_id = attributes.get("xtuner.rollout_id")
-        if rollout_id is None:
-            continue
-        sample_key = (trace_id, rollout_id)
-        sample = samples_by_key.setdefault(
-            sample_key,
-            {
-                "trace_id": trace_id,
-                "rollout_id": rollout_id,
-                "group_id": attributes.get("xtuner.group_id"),
-                "producer_future_step": _producer_future_step(attributes),
-                "task_name": attributes.get("xtuner.task_name"),
-                "status": attributes.get("xtuner.status"),
-                "service_name": None,
-                "run_id": None,
-                "jaeger_url": _jaeger_trace_url(jaeger_trace_link_base_url, trace_id),
-                "spans": [],
-            },
-        )
-        _merge_sample_fields(sample, attributes)
-        sample.setdefault("_live_records", []).append(record)
+def _sample_status_from_span(span: dict[str, Any], tags: dict[str, Any]) -> Any:
+    status = tags.get("xtuner.status")
+    if status is None:
+        return None
+    normalized = str(status).strip().lower()
+    if normalized in _ERROR_SAMPLE_STATUSES:
+        return status
+    return None
 
 
-def _apply_live_state(sample: dict[str, Any], generated_at_s: float) -> None:
-    live_states = _live_span_states(sample.pop("_live_records", []))
-    active_states = [state for state in live_states if state.get("status") == "running"]
-    active_states.sort(key=lambda state: (len(state.get("span_name_path") or []), float(state.get("started_at_s") or 0.0)))
-    current_state = active_states[-1] if active_states else None
-    if current_state is not None:
-        started_at_s = float(current_state.get("started_at_s") or generated_at_s)
-        span_name = str(current_state.get("span_name") or "")
-        sample["current_stage"] = {
-            "name": span_name,
-            "stage": str(current_state.get("stage") or span_name or "unknown"),
-            "status": "running",
-            "elapsed_ms": round(max(0.0, generated_at_s - started_at_s) * 1000.0, 3),
-            "started_at_s": started_at_s,
-        }
-    else:
-        sample["current_stage"] = None
-    sample["live_spans"] = live_states
-    sample["display_path"] = _build_display_path(sample, live_states, current_state, generated_at_s)
-    sample["chain"] = " -> ".join(node["name"] for node in sample["display_path"])
+def _has_finished_sample_root_span(spans: list[dict[str, Any]]) -> bool:
+    return any(_is_sample_root_span(span) for span in spans)
 
 
-def _live_span_states(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    states: dict[str, dict[str, Any]] = {}
-    for index, record in enumerate(records):
-        span_name = str(record.get("span_name") or "")
-        attributes = record.get("attributes") if isinstance(record.get("attributes"), dict) else {}
-        span_id = str(record.get("span_id") or "")
-        if not span_id:
-            span_id = f"live:{span_name}:{index}"
-        state = states.setdefault(
-            span_id,
-            {
-                "span_id": span_id,
-                "span_name": span_name,
-                "stage": _stage_from_span_name_and_attributes(span_name, attributes),
-                "span_name_path": _span_name_path_from_value(
-                    record.get("span_name_path") or record.get("logical_path")
-                ),
-                "attributes": attributes,
-                "status": "running",
-            },
-        )
-        event = str(record.get("event") or "")
-        if event == "start":
-            state["started_at_s"] = _float_or_none(record.get("time_s"))
-            state["status"] = "running"
-        elif event == "end":
-            state["ended_at_s"] = _float_or_none(record.get("time_s"))
-            state["duration_ms"] = _float_or_none(record.get("duration_ms"))
-            state["status"] = str(record.get("status") or "completed")
-            if record.get("error_message"):
-                state["error_message"] = record["error_message"]
-        if record.get("trace_id") is not None:
-            state["trace_id"] = record["trace_id"]
-    return sorted(states.values(), key=lambda state: (float(state.get("started_at_s") or 0.0), str(state.get("span_id"))))
+def _is_sample_root_span(span: dict[str, Any]) -> bool:
+    attributes = span.get("attributes") or {}
+    span_path = _span_name_path(attributes)
+    if span_path:
+        return len(span_path) == 1
+    return span.get("parent_span_id") is None
 
 
-def _build_display_path(
-    sample: dict[str, Any],
-    live_states: list[dict[str, Any]],
-    current_state: dict[str, Any] | None,
-    generated_at_s: float,
-) -> list[dict[str, Any]]:
+def _build_display_path(sample: dict[str, Any]) -> list[dict[str, Any]]:
     spans = sample.get("spans") or []
     spans_by_name = {str(span.get("name") or ""): span for span in spans}
-    live_by_name = {str(state.get("span_name") or ""): state for state in live_states}
-    path = _display_path_names(spans, live_states, current_state)
+    if str(sample.get("status") or "").strip().lower() == "running" and not _has_finished_sample_root_span(spans):
+        path = _running_display_path_names(spans)
+    else:
+        path = _display_path_names(spans)
     nodes = []
     for name in path:
         span = spans_by_name.get(name)
-        live_state = live_by_name.get(name)
-        if current_state is not None and name == current_state.get("span_name"):
-            started_at_s = float(current_state.get("started_at_s") or generated_at_s)
-            nodes.append(
-                {
-                    "name": name,
-                    "stage": current_state.get("stage") or name,
-                    "source": "live",
-                    "status": "running",
-                    "elapsed_ms": round(max(0.0, generated_at_s - started_at_s) * 1000.0, 3),
-                }
-            )
-        elif span is not None:
+        if span is not None:
             nodes.append(
                 {
                     "name": name,
@@ -546,119 +449,68 @@ def _build_display_path(
                     "duration_ms": span.get("duration_ms"),
                 }
             )
-        elif live_state is not None and live_state.get("status") == "running":
-            nodes.append({"name": name, "stage": live_state.get("stage") or name, "source": "live", "status": "active"})
         else:
             nodes.append({"name": name, "source": "logical", "status": "inferred"})
     return nodes
 
 
-def _display_path_names(
-    spans: list[dict[str, Any]],
-    live_states: list[dict[str, Any]],
-    current_state: dict[str, Any] | None,
-) -> list[str]:
-    path = _span_name_path_from_value(current_state.get("span_name_path")) if current_state is not None else []
+def _running_display_path_names(spans: list[dict[str, Any]]) -> list[str]:
+    roots = []
+    for span in spans:
+        attributes = span.get("attributes") or {}
+        span_path = _span_name_path(attributes)
+        if span_path:
+            roots.append(span_path[0])
+        elif span.get("parent_span_id") is None and span.get("name"):
+            roots.append(str(span["name"]))
+    unique_roots = []
+    for name in roots:
+        if name not in unique_roots:
+            unique_roots.append(name)
+    return unique_roots
+
+
+def _display_path_names(spans: list[dict[str, Any]]) -> list[str]:
+    span_paths = []
+    for span in spans:
+        attributes = span.get("attributes") or {}
+        span_paths.append(_span_name_path(attributes))
+    path = []
+    for span_path in span_paths:
+        if not span_path:
+            continue
+        common_prefix_len = 0
+        while (
+            common_prefix_len < len(path)
+            and common_prefix_len < len(span_path)
+            and path[common_prefix_len] == span_path[common_prefix_len]
+        ):
+            common_prefix_len += 1
+        path.extend(span_path[common_prefix_len:])
     if not path:
         path = [str(span.get("name") or "") for span in spans if span.get("name")]
-    if not path:
-        path = [str(state.get("span_name") or "") for state in live_states if state.get("span_name")]
-    if not path:
-        span_paths = [
-            _span_name_path_from_span_attributes(span.get("attributes") or {})
-            for span in spans
-        ]
-        path = max(span_paths, key=len, default=[])
-    if not path:
-        live_paths = [_span_name_path_from_value(state.get("span_name_path")) for state in live_states]
-        path = max(live_paths, key=len, default=[])
-    return _unique_path(path)
+    unique_path = []
+    for name in path:
+        if not unique_path or unique_path[-1] != name:
+            unique_path.append(name)
+    return unique_path
 
 
-def _span_name_path_from_span_attributes(attributes: dict[str, Any]) -> list[str]:
-    return _span_name_path_from_value(
-        attributes.get(_SPAN_NAME_PATH_ATTRIBUTE) or attributes.get(_LEGACY_LOGICAL_PATH_ATTRIBUTE)
-    )
-
-
-def _span_name_path_from_value(value: Any) -> list[str]:
+def _span_name_path(attributes: dict[str, Any]) -> list[str]:
+    value = attributes.get(_SPAN_NAME_PATH_ATTRIBUTE) or attributes.get(_LEGACY_LOGICAL_PATH_ATTRIBUTE)
     if isinstance(value, str):
         try:
-            decoded = json.loads(value)
+            value = json.loads(value)
         except json.JSONDecodeError:
-            decoded = [part.strip() for part in value.split("->")]
-        value = decoded
+            value = [part.strip() for part in value.split("->")]
     if isinstance(value, (list, tuple)):
         return [str(item).strip() for item in value if isinstance(item, str) and item.strip()]
     return []
 
 
-def _unique_path(path: list[str]) -> list[str]:
-    result = []
-    for name in path:
-        if not result or result[-1] != name:
-            result.append(name)
-    return result
-
-
 def _producer_future_step(tags: dict[str, Any]) -> Any:
     value = tags.get("xtuner.producer_future_step")
     return value if value is not None else tags.get("xtuner.train_step")
-
-
-def _build_step_group_summaries(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    steps: dict[str, dict[str, Any]] = {}
-    for sample in samples:
-        producer_future_step = sample.get("producer_future_step")
-        group_id = sample.get("group_id")
-        step_key = _summary_key(producer_future_step)
-        group_key = _summary_key(group_id)
-
-        step_summary = steps.setdefault(
-            step_key,
-            {
-                "producer_future_step": producer_future_step,
-                "sample_count": 0,
-                "groups": {},
-            },
-        )
-        step_summary["sample_count"] += 1
-        groups = step_summary["groups"]
-        group_summary = groups.setdefault(
-            group_key,
-            {
-                "group_id": group_id,
-                "sample_count": 0,
-                "statuses": Counter(),
-                "stages": Counter(),
-                "rollout_ids": [],
-            },
-        )
-        group_summary["sample_count"] += 1
-        group_summary["statuses"][str(sample.get("status") or "unknown")] += 1
-        if _should_show_group_stage(sample):
-            group_summary["stages"][str(sample.get("stage") or "unknown")] += 1
-        group_summary["rollout_ids"].append(sample.get("rollout_id"))
-
-    summaries = []
-    for step_summary in steps.values():
-        groups = []
-        for group_summary in step_summary["groups"].values():
-            group_summary["statuses"] = dict(sorted(group_summary["statuses"].items()))
-            group_summary["stages"] = dict(sorted(group_summary["stages"].items()))
-            group_summary["rollout_ids"].sort(key=lambda value: str(value))
-            groups.append(group_summary)
-        groups.sort(key=lambda item: _sortable_summary_value(item["group_id"]))
-        summaries.append(
-            {
-                "producer_future_step": step_summary["producer_future_step"],
-                "group_count": sum(1 for group in groups if group["group_id"] is not None),
-                "sample_count": step_summary["sample_count"],
-                "groups": groups,
-            }
-        )
-    summaries.sort(key=lambda item: _sortable_summary_value(item["producer_future_step"]))
-    return summaries
 
 
 def _available_train_steps(samples: list[dict[str, Any]]) -> list[Any]:
@@ -682,49 +534,54 @@ def _select_train_step(requested: Any, available_steps: list[Any]) -> Any:
     return max(available_steps, key=_sortable_summary_value)
 
 
-def _filter_samples_by_train_step(samples: list[dict[str, Any]], selected_train_step: Any) -> list[dict[str, Any]]:
-    if selected_train_step == "all":
-        return samples
-    return [sample for sample in samples if str(sample.get("producer_future_step")) == str(selected_train_step)]
-
-
 def filter_rollout_view_payload_by_train_step(payload: dict[str, Any], train_step: Any = "latest") -> dict[str, Any]:
     samples = list(payload.get("samples") or [])
     generated_at_s = float(payload.get("generated_at_s") or time.time())
     available_train_steps = list(payload.get("available_train_steps") or _available_train_steps(samples))
+    requested_train_step = _requested_train_step(train_step)
     selected_train_step = _select_train_step(train_step, available_train_steps)
-    visible_samples = _filter_samples_by_train_step(samples, selected_train_step)
+    if selected_train_step == "all":
+        visible_samples = samples
+    else:
+        visible_samples = [
+            sample for sample in samples if str(sample.get("producer_future_step")) == str(selected_train_step)
+        ]
 
     status_counts: Counter[str] = Counter()
-    stage_counts: Counter[str] = Counter()
     group_ids: set[Any] = set()
+    visible_steps: set[Any] = set()
     for sample in visible_samples:
         status = str(sample.get("status") or "unknown")
         status_counts[status] += 1
-        stage_counts[str(sample["stage"])] += 1
         if sample.get("group_id") is not None:
             group_ids.add(sample["group_id"])
+        if sample.get("producer_future_step") is not None:
+            visible_steps.add(sample["producer_future_step"])
 
-    step_group_summaries = _build_step_group_summaries(visible_samples)
     filtered_payload = dict(payload)
     filtered_payload.update(
         {
             "generated_at_s": generated_at_s,
+            "requested_train_step": requested_train_step,
             "selected_train_step": selected_train_step,
             "available_train_steps": available_train_steps,
-            "total_sample_count": len(samples),
             "sample_count": len(visible_samples),
             "group_count": len(group_ids),
-            "step_count": len(step_group_summaries),
-            "step_group_summaries": step_group_summaries,
-            "stage_occupancy": _build_stage_occupancy(visible_samples, generated_at_s),
+            "step_count": len(visible_steps),
             "stage_duration_summaries": _build_stage_duration_summaries(visible_samples),
             "status_counts": dict(sorted(status_counts.items())),
-            "stage_counts": dict(sorted(stage_counts.items())),
             "samples": visible_samples,
         }
     )
     return filtered_payload
+
+
+def _requested_train_step(train_step: Any) -> Any:
+    if train_step is None:
+        return "latest"
+    if isinstance(train_step, str) and not train_step.strip():
+        return "latest"
+    return train_step
 
 
 def _build_stage_duration_summaries(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -843,96 +700,6 @@ def _summarize_stage_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]
     return result
 
 
-def _build_stage_occupancy(samples: list[dict[str, Any]], generated_at_s: float) -> list[dict[str, Any]]:
-    buckets: dict[str, dict[str, Any]] = {}
-    for sample in samples:
-        stage, raw_span_name = _stage_bucket_for_sample(sample)
-        latest_start_s = _latest_span_start_s(sample)
-        age_s = 0.0 if stage in _TERMINAL_STAGE_STATUSES else max(0.0, generated_at_s - latest_start_s)
-        bucket = buckets.setdefault(
-            stage,
-            {
-                "stage": stage,
-                "sample_count": 0,
-                "_group_ids": set(),
-                "_raw_spans": {},
-                "oldest_age_s": 0.0,
-                "oldest_rollout_id": None,
-                "oldest_group_id": None,
-                "oldest_producer_future_step": None,
-            },
-        )
-        bucket["sample_count"] += 1
-        if sample.get("group_id") is not None:
-            bucket["_group_ids"].add(sample["group_id"])
-        if raw_span_name:
-            raw_spans = bucket["_raw_spans"]
-            raw_bucket = raw_spans.setdefault(raw_span_name, {"span": raw_span_name, "sample_count": 0, "_group_ids": set()})
-            raw_bucket["sample_count"] += 1
-            if sample.get("group_id") is not None:
-                raw_bucket["_group_ids"].add(sample["group_id"])
-        if age_s >= bucket["oldest_age_s"]:
-            bucket["oldest_age_s"] = _round_duration(age_s)
-            bucket["oldest_rollout_id"] = sample.get("rollout_id")
-            bucket["oldest_group_id"] = sample.get("group_id")
-            bucket["oldest_producer_future_step"] = sample.get("producer_future_step")
-    rows = list(buckets.values())
-    for row in rows:
-        row["group_count"] = len(row.pop("_group_ids"))
-        row["raw_spans"] = _summarize_raw_span_occupancy(row.pop("_raw_spans"))
-    return rows
-
-
-def _summarize_raw_span_occupancy(raw_spans: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    rows = []
-    for raw_bucket in raw_spans.values():
-        rows.append(
-            {
-                "span": raw_bucket["span"],
-                "sample_count": raw_bucket["sample_count"],
-                "group_count": len(raw_bucket["_group_ids"]),
-            }
-        )
-    rows.sort(key=lambda item: (-item["sample_count"], str(item["span"])))
-    return rows
-
-
-def _stage_bucket_for_sample(sample: dict[str, Any]) -> tuple[str, str | None]:
-    status = str(sample.get("status") or "").strip().lower()
-    if status in _TERMINAL_STAGE_STATUSES:
-        return status, None
-    current_stage = sample.get("current_stage")
-    if isinstance(current_stage, dict):
-        raw_stage_name = str(current_stage.get("name") or "").strip()
-        semantic_stage = str(current_stage.get("stage") or "").strip()
-        if semantic_stage:
-            return semantic_stage, raw_stage_name or None
-        if raw_stage_name:
-            return raw_stage_name, raw_stage_name
-    spans = sample.get("spans") or []
-    if not spans:
-        return status or "unknown", None
-    latest_span = spans[-1]
-    if latest_span.get("rollout_backend"):
-        return str(latest_span.get("stage") or "llm_generate"), _span_raw_name(latest_span)
-    if status in {"pending", "queued", "scheduled"}:
-        return "scheduled", None
-    return _span_semantic_stage(latest_span), _span_raw_name(latest_span)
-
-
-def _latest_span_start_s(sample: dict[str, Any]) -> float:
-    current_stage = sample.get("current_stage")
-    if isinstance(current_stage, dict) and current_stage.get("started_at_s") is not None:
-        try:
-            return float(current_stage["started_at_s"])
-        except (TypeError, ValueError):
-            pass
-    spans = sample.get("spans") or []
-    if not spans:
-        return time.time()
-    return max(float(span.get("start_time_us") or 0) / 1_000_000.0 for span in spans)
-
-
 def _apply_sample_reward_filter(sample: dict[str, Any]) -> None:
     values: dict[str, Any] = {}
     for span in sample.get("spans") or []:
@@ -950,7 +717,10 @@ def _apply_sample_reward_filter(sample: dict[str, Any]) -> None:
                 if key in attrs:
                     values[target] = attrs[key]
     if "reward_score" in values:
-        values["reward_score"] = _to_float(values["reward_score"])
+        try:
+            values["reward_score"] = float(values["reward_score"])
+        except (TypeError, ValueError):
+            pass
     if "reward_pass" in values:
         values["reward_pass"] = _to_bool(values["reward_pass"])
     if "train_included" in values:
@@ -1034,15 +804,8 @@ def _stage_from_span_name_and_attributes(span_name: str, attributes: dict[str, A
 
 def _sample_stage(sample: dict[str, Any]) -> str:
     status = str(sample.get("status") or "").strip().lower()
-    if status and status not in _NON_TERMINAL_SAMPLE_STATUSES:
+    if status in _ERROR_SAMPLE_STATUSES:
         return status
-    current_stage = sample.get("current_stage")
-    if isinstance(current_stage, dict):
-        semantic_stage = str(current_stage.get("stage") or "").strip()
-        if semantic_stage:
-            return semantic_stage
-        if current_stage.get("name"):
-            return str(current_stage["name"])
 
     spans = sample.get("spans") or []
     for span in spans:
@@ -1053,16 +816,6 @@ def _sample_stage(sample: dict[str, Any]) -> str:
     if spans:
         return _span_semantic_stage(spans[-1])
     return status or "unknown"
-
-
-def _should_show_group_stage(sample: dict[str, Any]) -> bool:
-    status = str(sample.get("status") or "unknown").strip().lower()
-    stage = str(sample.get("stage") or "unknown").strip().lower()
-    return stage != status
-
-
-def _summary_key(value: Any) -> str:
-    return "<unknown>" if value is None else str(value)
 
 
 def _sortable_summary_value(value: Any) -> tuple[int, float | str]:
@@ -1086,7 +839,15 @@ def _span_payload(
     service_name: str | None,
     run_id: str | None,
 ) -> dict[str, Any]:
-    name = str(span.get("operationName") or span.get("name") or "unknown")
+    span_id = str(span.get("spanID") or span.get("span_id") or "")
+    name_value = span.get("operationName") or span.get("name")
+    if not name_value:
+        raise ValueError(f"Jaeger span {span_id} is missing operationName")
+    if span.get("startTime") is None:
+        raise ValueError(f"Jaeger span {span_id} is missing startTime")
+    if span.get("duration") is None:
+        raise ValueError(f"Jaeger span {span_id} is missing duration")
+    name = str(name_value)
     attributes = {
         key: value
         for key, value in tags.items()
@@ -1108,20 +869,16 @@ def _span_payload(
     return {
         "name": name,
         "stage": _stage_from_span_name_and_attributes(name, attributes),
-        "span_id": str(span.get("spanID") or span.get("span_id") or ""),
+        "span_id": span_id,
         "parent_span_id": _parent_span_id(span),
-        "start_time_us": int(span.get("startTime") or 0),
-        "duration_ms": float(span.get("duration") or 0) / 1000.0,
+        "start_time_us": int(span["startTime"]),
+        "duration_ms": float(span["duration"]) / 1000.0,
         "status": tags.get("otel.status_code") or tags.get("status.code") or "UNSET",
         "service_name": service_name,
         "run_id": run_id,
         "rollout_backend": tags.get("rollout.backend"),
         "attributes": attributes,
     }
-
-
-def _span_id(span: dict[str, Any]) -> str:
-    return str(span.get("spanID") or span.get("span_id") or "")
 
 
 def _resolve_rollout_sample(
@@ -1155,29 +912,44 @@ def _resolve_rollout_sample(
 
 def _process_metadata(trace_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
     metadata: dict[str, dict[str, Any]] = {}
-    for process_id, process in (trace_data.get("processes") or {}).items():
+    processes = trace_data.get("processes") or {}
+    if not isinstance(processes, dict):
+        trace_id = str(trace_data.get("traceID") or trace_data.get("trace_id") or "")
+        raise ValueError(f"Jaeger trace {trace_id} processes must be an object")
+    for process_id, process in processes.items():
         if not isinstance(process, dict):
-            continue
+            raise ValueError(f"Jaeger process {process_id} must be an object")
         tags = _tags_to_dict(process.get("tags") or [])
+        if process.get("serviceName") is None:
+            raise ValueError(f"Jaeger process {process_id} is missing serviceName")
         metadata[str(process_id)] = {
-            "service_name": str(process["serviceName"]) if process.get("serviceName") is not None else None,
+            "service_name": str(process["serviceName"]),
             "run_id": tags.get("run.id"),
         }
     return metadata
 
 
-def _tags_to_dict(tags: list[dict[str, Any]]) -> dict[str, Any]:
+def _tags_to_dict(tags: Any) -> dict[str, Any]:
+    if not isinstance(tags, list):
+        raise ValueError(f"Jaeger tags must be a list, got {type(tags).__name__}")
     result: dict[str, Any] = {}
-    for tag in tags:
+    for index, tag in enumerate(tags):
+        if not isinstance(tag, dict):
+            raise ValueError(f"Jaeger tags[{index}] must be an object")
         key = tag.get("key")
         if key is None:
-            continue
+            raise ValueError(f"Jaeger tags[{index}] is missing key")
         result[str(key)] = tag.get("value")
     return result
 
 
 def _parent_span_id(span: dict[str, Any]) -> str | None:
-    for reference in span.get("references") or []:
+    references = span.get("references") or []
+    if not isinstance(references, list):
+        raise ValueError("Jaeger span references must be a list")
+    for index, reference in enumerate(references):
+        if not isinstance(reference, dict):
+            raise ValueError(f"Jaeger span references[{index}] must be an object")
         if reference.get("refType") == "CHILD_OF" and reference.get("spanID") is not None:
             return str(reference["spanID"])
     return None
@@ -1190,34 +962,9 @@ def _normalize_jaeger_query_url(jaeger_query_url: str | None) -> str | None:
     return stripped.rstrip("/") if stripped else None
 
 
-def _jaeger_trace_url(jaeger_query_url: str | None, trace_id: str) -> str | None:
-    base = _normalize_jaeger_query_url(jaeger_query_url)
-    if base is None:
-        return None
-    return f"{base}/trace/{trace_id}"
-
-
-def _jaeger_trace_link_base_url(jaeger_query_url: str | None, jaeger_link_url: str | None) -> str | None:
-    return _normalize_jaeger_query_url(jaeger_link_url) or _normalize_jaeger_query_url(jaeger_query_url)
-
-
 def _append_unique(values: list[Any], value: Any) -> None:
     if value is not None and value not in values:
         values.append(value)
-
-
-def _to_float(value: Any) -> float | Any:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return value
-
-
-def _float_or_none(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _to_bool(value: Any) -> bool | None:
@@ -1233,26 +980,8 @@ def _to_bool(value: Any) -> bool | None:
     return None
 
 
-def _int_value(value: Any) -> int | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        parsed = float(text)
-    except ValueError:
-        return None
-    if parsed.is_integer():
-        return int(parsed)
-    return None
-
-
 __all__ = [
     "build_rollout_view_payload_from_jaeger_traces",
     "filter_rollout_view_payload_by_train_step",
     "load_jaeger_traces_from_otel_jsonl",
-    "load_live_trace_records",
 ]

@@ -44,10 +44,12 @@ Open the rollout viewer:
 
 ```bash
 python -m xtuner.tools.trace_viewer.server \
+  --trace-jsonl <trace_run_dir>/traces/traces.jsonl \
   --jaeger-query-url http://127.0.0.1:16686 \
   --service xtuner-rollout
 ```
 
-The viewer is a thin Jaeger Query API adapter. Jaeger remains the trace backend;
-XTuner only groups spans by rollout metadata such as `xtuner.rollout_id`,
-`xtuner.group_id`, `xtuner.task_name`, and `xtuner.status`.
+The viewer reads `traces.jsonl` directly and uses Jaeger only for trace links
+and the optional same-origin proxy. XTuner groups spans by rollout metadata such
+as `xtuner.rollout_id`, `xtuner.group_id`, `xtuner.task_name`, and
+`xtuner.status`.

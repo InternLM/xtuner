@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import contextlib
 import contextvars
 import inspect
 import json
-import os
-import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from functools import wraps
-from pathlib import Path
 from typing import Any, TypeVar
 
 from . import otel_utils
@@ -24,7 +20,6 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 _SPAN_NAME_PATH_BAGGAGE_KEY = "xtuner.span_name_path"
 _SPAN_NAME_PATH_ATTRIBUTE = "xtuner.span_name_path"
-_LIVE_TRACE_PATH_ENV = "XTUNER_OTEL_LIVE_JSONL_PATH"
 # OTel context propagation carries trace/span IDs, not the current span names.
 # XTuner keeps this local path so child spans and remote carriers can expose a
 # readable execution chain for the viewer.
@@ -44,8 +39,8 @@ def trace_span(
     """Create a current trace span.
 
     XTuner wraps OTel spans with runtime auto-initialization, trace-enabled
-    gating, attribute normalization, failure recording, live JSONL progress,
-    and a ``xtuner.span_name_path`` attribute for viewer-friendly call chains.
+    gating, attribute normalization, failure recording, and a
+    ``xtuner.span_name_path`` attribute for viewer-friendly call chains.
     ``parent_carrier`` accepts the W3C carrier produced by
     ``inject_trace_context`` across a process or request boundary.
     """
@@ -65,39 +60,13 @@ def trace_span(
         normalized_attributes = dict(normalized_attributes)
         normalized_attributes.setdefault(_SPAN_NAME_PATH_ATTRIBUTE, span_name_path)
         path_token = _CURRENT_SPAN_NAME_PATH.set(span_name_path)
-        started_at_s = time.time()
-        status = "completed"
-        error_message: str | None = None
         try:
             with otel_utils.start_span(span_name, attributes=normalized_attributes):
-                span_ids = otel_utils.current_span_ids()
-                _record_live_span(
-                    "start",
-                    span_name=span_name,
-                    span_name_path=span_name_path,
-                    attributes=normalized_attributes,
-                    span_ids=span_ids,
-                    started_at_s=started_at_s,
-                )
                 try:
                     yield
                 except Exception as exc:
-                    status = "error"
-                    error_message = str(exc)
                     otel_utils.record_failure(exc)
                     raise
-                finally:
-                    _record_live_span(
-                        "end",
-                        span_name=span_name,
-                        span_name_path=span_name_path,
-                        attributes=normalized_attributes,
-                        span_ids=span_ids,
-                        started_at_s=started_at_s,
-                        ended_at_s=time.time(),
-                        status=status,
-                        error_message=error_message,
-                    )
         finally:
             _CURRENT_SPAN_NAME_PATH.reset(path_token)
 
@@ -277,52 +246,6 @@ def _normalize_trace_attribute_value(value: Any) -> Any:
             return items
         return tuple(str(item) for item in items)
     return f"<{type(value).__name__}>"
-
-
-def _record_live_span(
-    event: str,
-    *,
-    span_name: str,
-    span_name_path: tuple[str, ...],
-    attributes: Mapping[str, Any],
-    span_ids: Mapping[str, str] | None,
-    started_at_s: float,
-    ended_at_s: float | None = None,
-    status: str | None = None,
-    error_message: str | None = None,
-) -> None:
-    live_path = os.environ.get(_LIVE_TRACE_PATH_ENV)
-    if not live_path:
-        return
-    record: dict[str, Any] = {
-        "event": event,
-        "time_s": ended_at_s if ended_at_s is not None else started_at_s,
-        "span_name": span_name,
-        "span_name_path": list(span_name_path),
-        "attributes": {key: _json_safe_trace_value(value) for key, value in attributes.items()},
-    }
-    if span_ids is not None:
-        record.update(span_ids)
-    if status is not None:
-        record["status"] = status
-    if ended_at_s is not None:
-        record["duration_ms"] = round(max(0.0, ended_at_s - started_at_s) * 1000.0, 3)
-    if error_message:
-        record["error_message"] = error_message
-
-    with contextlib.suppress(Exception):
-        path = Path(live_path).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-
-
-def _json_safe_trace_value(value: Any) -> Any:
-    if isinstance(value, (str, bool, int, float)) or value is None:
-        return value
-    if isinstance(value, (list, tuple)):
-        return [_json_safe_trace_value(item) for item in value]
-    return str(value)
 
 
 __all__ = [

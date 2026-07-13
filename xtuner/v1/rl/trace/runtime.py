@@ -32,7 +32,6 @@ TRACE_ENV_KEYS = (
     "XTUNER_OTEL_RUN_ID",
     "XTUNER_OTEL_RUN_DIR",
     "XTUNER_OTEL_JSONL_PATH",
-    "XTUNER_OTEL_LIVE_JSONL_PATH",
     "XTUNER_TRACE_ENABLE_ROLLOUT",
     "OTEL_TRACES_EXPORTER",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -140,7 +139,6 @@ class TraceRuntime:
     run_id: str
     run_dir: Path
     trace_jsonl_path: Path
-    live_jsonl_path: Path
     service_name: str
     trace_viewer_url: str | None = None
     trace_viewer_port: int | None = None
@@ -277,7 +275,6 @@ class _TraceViewerProcess:
         cls,
         *,
         trace_jsonl_path: Path,
-        live_jsonl_path: Path,
         jaeger_query_url: str | None,
         jaeger_link_url: str | None,
         service_name: str,
@@ -290,7 +287,6 @@ class _TraceViewerProcess:
         _ensure_trace_viewer_port_available(host=host, port=port, run_id=run_id)
         command = _build_trace_viewer_command(
             trace_jsonl_path=trace_jsonl_path,
-            live_jsonl_path=live_jsonl_path,
             jaeger_query_url=jaeger_query_url,
             jaeger_link_url=jaeger_link_url,
             service_name=service_name,
@@ -459,7 +455,6 @@ def _process_has_socket_inode(proc_dir: Path, socket_inodes: set[str]) -> bool:
 def _build_trace_viewer_command(
     *,
     trace_jsonl_path: Path,
-    live_jsonl_path: Path,
     jaeger_query_url: str | None,
     jaeger_link_url: str | None,
     service_name: str,
@@ -473,8 +468,6 @@ def _build_trace_viewer_command(
         "xtuner.tools.trace_viewer.server",
         "--trace-jsonl",
         os.fspath(trace_jsonl_path),
-        "--live-jsonl",
-        os.fspath(live_jsonl_path),
         "--service",
         service_name,
         "--run-id",
@@ -527,7 +520,6 @@ class _TraceRuntimeHandle:
             if self.runtime.mode == "driver" and self.viewer_host is not None:
                 self.viewer = _TraceViewerProcess.start(
                     trace_jsonl_path=self.runtime.trace_jsonl_path,
-                    live_jsonl_path=self.runtime.live_jsonl_path,
                     jaeger_query_url=self.viewer_jaeger_query_url,
                     jaeger_link_url=self.viewer_jaeger_link_url,
                     service_name=self.runtime.service_name,
@@ -606,7 +598,6 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
                 run_id="",
                 run_dir=Path(),
                 trace_jsonl_path=Path(),
-                live_jsonl_path=Path(),
                 service_name=config.service_name,
                 trace_viewer_url=None,
                 trace_viewer_port=None,
@@ -622,7 +613,7 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
     traces_dir = run_dir / "traces"
     traces_dir.mkdir(parents=True, exist_ok=True)
     trace_jsonl_path = traces_dir / "traces.jsonl"
-    live_jsonl_path = traces_dir / "live.jsonl"
+    trace_jsonl_path.touch(exist_ok=True)
 
     try:
         port = find_free_ports(nums=1, host="127.0.0.1", start_port=4317, end_port=4318)[0]
@@ -637,7 +628,6 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
         "XTUNER_OTEL_RUN_ID": run_id,
         "XTUNER_OTEL_RUN_DIR": os.fspath(run_dir),
         "XTUNER_OTEL_JSONL_PATH": os.fspath(trace_jsonl_path),
-        "XTUNER_OTEL_LIVE_JSONL_PATH": os.fspath(live_jsonl_path),
         "XTUNER_TRACE_ENABLE_ROLLOUT": "1" if config.enable_rollout_trace else "0",
         "OTEL_TRACES_EXPORTER": "otlp",
         "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
@@ -652,7 +642,6 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
             run_id=run_id,
             run_dir=run_dir,
             trace_jsonl_path=trace_jsonl_path,
-            live_jsonl_path=live_jsonl_path,
             service_name=config.service_name,
             trace_viewer_url=None,
             trace_viewer_port=None,
@@ -712,9 +701,6 @@ def ensure_trace_runtime_from_env() -> bool:
 
     run_dir = Path(env_vars.get("XTUNER_OTEL_RUN_DIR") or Path.cwd()).expanduser()
     trace_jsonl_path = Path(env_vars.get("XTUNER_OTEL_JSONL_PATH") or run_dir / "traces" / "traces.jsonl").expanduser()
-    live_jsonl_path = Path(
-        env_vars.get("XTUNER_OTEL_LIVE_JSONL_PATH") or run_dir / "traces" / "live.jsonl"
-    ).expanduser()
     runtime_handle = _TraceRuntimeHandle(
         runtime=TraceRuntime(
             enabled=True,
@@ -722,7 +708,6 @@ def ensure_trace_runtime_from_env() -> bool:
             run_id=env_vars.get("XTUNER_OTEL_RUN_ID", ""),
             run_dir=run_dir,
             trace_jsonl_path=trace_jsonl_path,
-            live_jsonl_path=live_jsonl_path,
             service_name=env_vars.get("OTEL_SERVICE_NAME", "xtuner-rollout"),
             trace_viewer_url=None,
             trace_viewer_port=None,

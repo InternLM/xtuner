@@ -11,6 +11,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.utils import get_logger
 
 from . import api as trace_api
+from . import otel_utils
 from .runtime import is_trace_enabled
 
 
@@ -18,7 +19,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 TRACE_ROLLOUT_ENABLED_ENV = "XTUNER_TRACE_ENABLE_ROLLOUT"
 TRACE_CARRIER_EXTRA_FIELD = "_xtuner_trace_carrier"
-TRACE_METADATA_EXTRA_FIELD = "_xtuner_trace_metadata"
+TRACE_CALL_CHAIN_EXTRA_FIELD = "_xtuner_trace_call_chain"
 
 
 class _RayRemoteMethod(Protocol):
@@ -66,13 +67,20 @@ def trace_rollout_endpoint(
                 else rollout_state_initial_attributes(rollout_state)
             )
             attributes.setdefault("xtuner.stage", span_name)
-
             parent_carrier = extract_rollout_trace_parent_carrier(rollout_state)
-            with trace_api.trace_span(span_name, attributes=attributes, parent_carrier=parent_carrier):
-                result = await func(*args, **kwargs)
-                result_rollout_state = result if isinstance(result, RolloutState) else rollout_state
-                trace_api.set_trace_attributes(rollout_state_final_attributes(result_rollout_state))
-                return result
+
+            with _attach_rollout_call_chain(rollout_state, span_name, parent_carrier) as (
+                call_chain,
+                cleanup_call_chain_on_exit,
+            ):
+                attributes["xtuner.span_name_path"] = call_chain
+                with trace_api.trace_span(span_name, attributes=attributes, parent_carrier=parent_carrier):
+                    result = await func(*args, **kwargs)
+                    result_rollout_state = result if isinstance(result, RolloutState) else rollout_state
+                    trace_api.set_trace_attributes(rollout_state_final_attributes(result_rollout_state))
+                    if cleanup_call_chain_on_exit and isinstance(result, RolloutState):
+                        result.extra_fields.pop(TRACE_CALL_CHAIN_EXTRA_FIELD, None)
+                    return result
 
         return wrapper  # type: ignore[return-value]
 
@@ -122,15 +130,14 @@ def extract_rollout_trace_parent_carrier(rollout_state: RolloutState) -> dict[st
 
 
 def rollout_state_initial_attributes(rollout_state: RolloutState) -> dict[str, Any]:
-    metadata = _trace_metadata(rollout_state)
+    extra_fields = rollout_state.extra_fields
     attributes: dict[str, Any] = {
         "xtuner.status": rollout_state.status.value,
         "xtuner.rollout_id": rollout_state.rollout_id,
         "xtuner.group_id": rollout_state.group_id,
         "xtuner.session_id": rollout_state.session_id,
-        "xtuner.task_name": rollout_state.task_name or metadata.get("task_name"),
-        "xtuner.producer_future_step": metadata.get("producer_future_step"),
-        "xtuner.model_step": metadata.get("model_step"),
+        "xtuner.task_name": rollout_state.task_name or extra_fields.get("task_name"),
+        "xtuner.producer_future_step": extra_fields.get("producer_future_step"),
     }
     if rollout_state.prompt_ids is not None:
         attributes["prompt.tokens"] = len(rollout_state.prompt_ids)
@@ -158,11 +165,36 @@ def rollout_state_final_attributes(rollout_state: RolloutState) -> dict[str, Any
     return {key: value for key, value in attributes.items() if value is not None}
 
 
-def _trace_metadata(rollout_state: RolloutState) -> dict[str, Any]:
-    metadata = rollout_state.extra_fields.get(TRACE_METADATA_EXTRA_FIELD)
-    if not isinstance(metadata, Mapping):
-        metadata = rollout_state.extra_fields
-    return {str(key): value for key, value in metadata.items()}
+@contextmanager
+def _attach_rollout_call_chain(
+    rollout_state: RolloutState,
+    span_name: str,
+    parent_carrier: Mapping[str, str] | None,
+):
+    extra_fields = rollout_state.extra_fields
+    cleanup_call_chain_on_exit = TRACE_CALL_CHAIN_EXTRA_FIELD not in extra_fields
+    call_chain = (*_rollout_call_chain(rollout_state, parent_carrier), span_name)
+    extra_fields[TRACE_CALL_CHAIN_EXTRA_FIELD] = list(call_chain)
+    try:
+        yield call_chain, cleanup_call_chain_on_exit
+    finally:
+        if cleanup_call_chain_on_exit:
+            rollout_state.extra_fields.pop(TRACE_CALL_CHAIN_EXTRA_FIELD, None)
+
+
+def _rollout_call_chain(
+    rollout_state: RolloutState,
+    parent_carrier: Mapping[str, str] | None,
+) -> tuple[str, ...]:
+    value = rollout_state.extra_fields.get(TRACE_CALL_CHAIN_EXTRA_FIELD)
+    if value is None and parent_carrier:
+        parent_context = otel_utils.extract_otel_context(parent_carrier)
+        value = trace_api._extract_span_name_path(parent_context, otel_utils=otel_utils)
+    if isinstance(value, str):
+        return tuple(part.strip() for part in value.split("->") if part.strip())
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    return ()
 
 
 def _resolve_rollout_state_target(
@@ -193,7 +225,6 @@ def _resolve_rollout_state_target(
 
 __all__ = [
     "TRACE_CARRIER_EXTRA_FIELD",
-    "TRACE_METADATA_EXTRA_FIELD",
     "TRACE_ROLLOUT_ENABLED_ENV",
     "extract_rollout_trace_parent_carrier",
     "is_rollout_trace_enabled",

@@ -1,3 +1,10 @@
+"""CLI and HTTP server for the XTuner trace viewer.
+
+The server reads ``traces.jsonl``, asks ``payload.py`` to build the XTuner view
+model, and asks ``render.py`` to render HTML. It is the only module that owns
+HTTP refresh, static HTML output, and the optional same-origin Jaeger proxy.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -16,21 +23,13 @@ from urllib.request import Request, urlopen
 from xtuner.tools.trace_viewer.payload import (
     build_rollout_view_payload_from_jaeger_traces,
     filter_rollout_view_payload_by_train_step,
-    load_live_trace_records,
+    load_jaeger_traces_from_otel_jsonl,
 )
 from xtuner.tools.trace_viewer.render import render_rollout_trace_html, write_rollout_trace_html
-from xtuner.tools.trace_viewer.source import (
-    JAEGER_DEFAULT_LIMIT,
-    JAEGER_DEFAULT_LOOKBACK_S,
-    JAEGER_DEFAULT_QUERY_URL,
-    JaegerQuerySource,
-    JsonlTraceSource,
-    normalize_jaeger_query_url,
-    require_jaeger_query_url,
-)
 
 
 _JAEGER_PROXY_PREFIX = "/jaeger"
+JAEGER_DEFAULT_QUERY_URL = "http://127.0.0.1:16686"
 _PROXY_TIMEOUT_S = 10.0
 _HOP_BY_HOP_HEADERS = {
     "connection",
@@ -43,6 +42,20 @@ _HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+
+
+def normalize_jaeger_query_url(jaeger_query_url: str | None) -> str | None:
+    if jaeger_query_url is None:
+        return None
+    stripped = jaeger_query_url.strip()
+    return stripped.rstrip("/") if stripped else None
+
+
+def require_jaeger_query_url(jaeger_query_url: str | None) -> str:
+    normalized = normalize_jaeger_query_url(jaeger_query_url)
+    if normalized is None:
+        raise ValueError("jaeger_query_url is required")
+    return normalized
 
 
 class TraceViewerHandle:
@@ -109,72 +122,20 @@ def _train_step_cache_key(train_step: str | int | None) -> str:
     return text or "latest"
 
 
-def fetch_jaeger_traces(
-    jaeger_query_url: str,
-    *,
-    service_name: str,
-    lookback_s: int = JAEGER_DEFAULT_LOOKBACK_S,
-    limit: int = JAEGER_DEFAULT_LIMIT,
-    timeout_s: float = 5.0,
-) -> list[dict[str, Any]]:
-    return JaegerQuerySource(
-        query_url=jaeger_query_url,
-        service_name=service_name,
-        lookback_s=lookback_s,
-        limit=limit,
-        timeout_s=timeout_s,
-    ).load()
-
-
-def fetch_rollout_view_payload(
-    jaeger_query_url: str,
-    *,
-    jaeger_link_url: str | None = None,
-    live_jsonl_path: Path | str | None = None,
-    service_name: str,
-    run_id: str | None = None,
-    lookback_s: int = JAEGER_DEFAULT_LOOKBACK_S,
-    limit: int = JAEGER_DEFAULT_LIMIT,
-    train_step: str | int | None = "latest",
-) -> dict[str, Any]:
-    traces = JaegerQuerySource(
-        query_url=jaeger_query_url,
-        service_name=service_name,
-        lookback_s=lookback_s,
-        limit=limit,
-    ).load()
-    payload = build_rollout_view_payload_from_jaeger_traces(
-        traces,
-        jaeger_query_url=jaeger_query_url,
-        jaeger_link_url=jaeger_link_url,
-        live_records=load_live_trace_records(live_jsonl_path),
-        service_name=service_name,
-        run_id=run_id,
-        train_step=train_step,
-    )
-    payload["service_name"] = service_name
-    payload["run_id"] = run_id
-    payload["lookback_s"] = lookback_s
-    payload["limit"] = limit
-    return payload
-
-
 def fetch_rollout_view_payload_from_trace_jsonl(
     trace_jsonl_path: Path | str,
     *,
     jaeger_query_url: str | None = None,
     jaeger_link_url: str | None = None,
-    live_jsonl_path: Path | str | None = None,
     service_name: str | None = None,
     run_id: str | None = None,
     train_step: str | int | None = "latest",
 ) -> dict[str, Any]:
-    traces = JsonlTraceSource(trace_jsonl_path).load()
+    traces = load_jaeger_traces_from_otel_jsonl(trace_jsonl_path)
     payload = build_rollout_view_payload_from_jaeger_traces(
         traces,
         jaeger_query_url=jaeger_query_url,
         jaeger_link_url=jaeger_link_url,
-        live_records=load_live_trace_records(live_jsonl_path),
         service_name=service_name,
         run_id=run_id,
         train_step=train_step,
@@ -192,56 +153,35 @@ def start_rollout_trace_viewer(
     jaeger_link_url: str | None = None,
     service_name: str,
     run_id: str | None = None,
-    trace_jsonl_path: Path | str | None = None,
-    live_jsonl_path: Path | str | None = None,
-    payload_output_path: Path | str | None = None,
+    trace_jsonl_path: Path | str,
     host: str = "127.0.0.1",
     port: int = 0,
     refresh_interval_s: float = 2.0,
-    lookback_s: int = JAEGER_DEFAULT_LOOKBACK_S,
-    limit: int = JAEGER_DEFAULT_LIMIT,
     train_step: str | int | None = "latest",
 ) -> TraceViewerHandle:
     jaeger_query_url = normalize_jaeger_query_url(jaeger_query_url)
     jaeger_link_url = normalize_jaeger_query_url(jaeger_link_url)
     viewer_jaeger_link_url = jaeger_link_url or (_JAEGER_PROXY_PREFIX if jaeger_query_url is not None else None)
-    if trace_jsonl_path is None:
-        jaeger_query_url = require_jaeger_query_url(jaeger_query_url)
 
     def load_base_payload() -> dict[str, Any]:
-        if trace_jsonl_path is not None:
-            payload = fetch_rollout_view_payload_from_trace_jsonl(
-                trace_jsonl_path,
-                jaeger_query_url=jaeger_query_url,
-                jaeger_link_url=viewer_jaeger_link_url,
-                live_jsonl_path=live_jsonl_path,
-                service_name=service_name,
-                run_id=run_id,
-                train_step="all",
-            )
-        else:
-            payload = fetch_rollout_view_payload(
-                jaeger_query_url,
-                jaeger_link_url=viewer_jaeger_link_url,
-                live_jsonl_path=live_jsonl_path,
-                service_name=service_name,
-                run_id=run_id,
-                lookback_s=lookback_s,
-                limit=limit,
-                train_step="all",
-            )
+        payload = fetch_rollout_view_payload_from_trace_jsonl(
+            trace_jsonl_path,
+            jaeger_query_url=jaeger_query_url,
+            jaeger_link_url=viewer_jaeger_link_url,
+            service_name=service_name,
+            run_id=run_id,
+            train_step="all",
+        )
         return payload
 
     def current_source_signature() -> Any:
-        if trace_jsonl_path is None:
-            return ("jaeger", _source_signature(live_jsonl_path))
-        return _source_signature(trace_jsonl_path, live_jsonl_path)
+        return _source_signature(trace_jsonl_path)
 
     payload_cache = _TraceViewerPayloadCache(
         load_base_payload,
         source_signature=current_source_signature,
-        max_age_s=max(refresh_interval_s, 5.0) if trace_jsonl_path is None else None,
     )
+    payload_cache.get(train_step)
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -253,7 +193,7 @@ def start_rollout_trace_viewer(
             if path in {"/", "/index.html"}:
                 html_body = render_rollout_trace_html(
                     self._payload(self._query_train_step(parsed.query)),
-                    live=True,
+                    auto_refresh=True,
                     api_url="/api/trace",
                     refresh_interval_s=refresh_interval_s,
                 )
@@ -271,10 +211,7 @@ def start_rollout_trace_viewer(
             return values[-1]
 
         def _payload(self, selected_train_step: str | int | None) -> dict[str, Any]:
-            payload = payload_cache.get(selected_train_step)
-            if payload_output_path is not None:
-                _write_payload_json(payload, payload_output_path)
-            return payload
+            return payload_cache.get(selected_train_step)
 
         def _send_json(self, payload: dict[str, Any]) -> None:
             self._send_bytes(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json")
@@ -334,25 +271,10 @@ def start_rollout_trace_viewer(
     )
 
 
-def _write_payload_json(payload: dict[str, Any], output_path: Path | str) -> None:
-    path = Path(output_path).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def _source_signature(*paths: Path | str | None) -> tuple[tuple[str, int | None, int | None], ...]:
-    signatures = []
-    for value in paths:
-        if value is None:
-            continue
-        path = Path(value).expanduser()
-        try:
-            stat = path.stat()
-        except OSError:
-            signatures.append((os.fspath(path), None, None))
-            continue
-        signatures.append((os.fspath(path), stat.st_mtime_ns, stat.st_size))
-    return tuple(signatures)
+def _source_signature(path_value: Path | str) -> tuple[str, int, int]:
+    path = Path(path_value).expanduser()
+    stat = path.stat()
+    return (os.fspath(path), stat.st_mtime_ns, stat.st_size)
 
 
 def _jaeger_proxy_target_url(jaeger_query_url: str, request_path: str) -> str:
@@ -368,57 +290,36 @@ def _jaeger_proxy_target_url(jaeger_query_url: str, request_path: str) -> str:
     return target
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Serve or render an XTuner rollout trace viewer backed by Jaeger or JSONL."
+        description="Serve or render an XTuner rollout trace viewer backed by traces.jsonl."
     )
     parser.add_argument("--jaeger-query-url", default=JAEGER_DEFAULT_QUERY_URL)
     parser.add_argument("--jaeger-link-url", default=None)
-    parser.add_argument("--trace-jsonl", type=Path, default=None)
-    parser.add_argument("--live-jsonl", type=Path, default=None)
+    parser.add_argument("--trace-jsonl", type=Path, required=True)
     parser.add_argument("--service", "--service-name", dest="service", default="xtuner-rollout")
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0)
-    parser.add_argument("--lookback", type=int, default=JAEGER_DEFAULT_LOOKBACK_S)
-    parser.add_argument("--limit", type=int, default=JAEGER_DEFAULT_LIMIT)
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--payload-output", type=Path, default=None)
     parser.add_argument("--train-step", default="latest", help="Initial train step to render: latest, all, or a step value.")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> None:
     args = _parse_args()
 
     if args.output is not None:
-        if args.trace_jsonl is not None:
-            payload = fetch_rollout_view_payload_from_trace_jsonl(
-                args.trace_jsonl,
-                jaeger_query_url=args.jaeger_query_url,
-                jaeger_link_url=args.jaeger_link_url,
-                live_jsonl_path=args.live_jsonl,
-                service_name=args.service,
-                run_id=args.run_id,
-                train_step=args.train_step,
-            )
-        else:
-            payload = fetch_rollout_view_payload(
-                args.jaeger_query_url,
-                jaeger_link_url=args.jaeger_link_url,
-                live_jsonl_path=args.live_jsonl,
-                service_name=args.service,
-                run_id=args.run_id,
-                lookback_s=args.lookback,
-                limit=args.limit,
-                train_step=args.train_step,
-            )
-        if args.payload_output is not None:
-            _write_payload_json(payload, args.payload_output)
+        payload = fetch_rollout_view_payload_from_trace_jsonl(
+            args.trace_jsonl,
+            jaeger_query_url=args.jaeger_query_url,
+            jaeger_link_url=args.jaeger_link_url,
+            service_name=args.service,
+            run_id=args.run_id,
+            train_step=args.train_step,
+        )
         write_rollout_trace_html(payload, args.output)
         print(args.output)
-        if args.payload_output is not None:
-            print(args.payload_output)
         return
 
     handle = start_rollout_trace_viewer(
@@ -427,19 +328,12 @@ def main() -> None:
         service_name=args.service,
         run_id=args.run_id,
         trace_jsonl_path=args.trace_jsonl,
-        live_jsonl_path=args.live_jsonl,
-        payload_output_path=args.payload_output,
         host=args.host,
         port=args.port,
-        lookback_s=args.lookback,
-        limit=args.limit,
         train_step=args.train_step,
     )
     print(f"XTuner Rollout Trace Viewer: {handle.url}", flush=True)
-    if args.trace_jsonl is not None:
-        print(f"Trace JSONL: {args.trace_jsonl}", flush=True)
-    if args.live_jsonl is not None:
-        print(f"Live JSONL: {args.live_jsonl}", flush=True)
+    print(f"Trace JSONL: {args.trace_jsonl}", flush=True)
     jaeger_query_url = normalize_jaeger_query_url(args.jaeger_query_url)
     if jaeger_query_url is not None:
         print(f"Jaeger Trace Viewer: {jaeger_query_url}", flush=True)
@@ -447,8 +341,6 @@ def main() -> None:
     jaeger_link_url = normalize_jaeger_query_url(args.jaeger_link_url)
     if jaeger_link_url is not None:
         print(f"Jaeger Open Links: {jaeger_link_url}", flush=True)
-    if args.payload_output is not None:
-        print(f"Viewer Payload JSON: {args.payload_output}", flush=True)
     try:
         handle.thread.join()
     except KeyboardInterrupt:
@@ -465,8 +357,6 @@ __all__ = [
     "TraceViewerHandle",
     "_TraceViewerPayloadCache",
     "build_rollout_view_payload_from_jaeger_traces",
-    "fetch_jaeger_traces",
-    "fetch_rollout_view_payload",
     "fetch_rollout_view_payload_from_trace_jsonl",
     "render_rollout_trace_html",
     "start_rollout_trace_viewer",

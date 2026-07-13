@@ -52,6 +52,18 @@ trace. Its helpers live in `xtuner/v1/rl/trace/rollout_api.py`:
 Keep this layer narrow: it may depend on `RolloutState` and Ray call boundaries,
 but it must not leak those dependencies into the basic API.
 
+Rollout endpoint `xtuner.span_name_path` is a sample call chain, not just the
+current process context stack. `trace_rollout_endpoint(...)` should append the
+endpoint span name to an internal trace-only chain carried in
+`RolloutState.extra_fields`, pass that state through remote rollout boundaries,
+and clean the internal field at the outermost endpoint. For example, after a
+sample generates and then judges, `judger.run` should record a path like
+`single_turn_agent_loop.run -> rollout.controller.generate -> rollout.worker.generate -> judger.run`
+even though the local active context at judge time may only be
+`single_turn_agent_loop.run -> judger.run`. Keep this behavior in
+`rollout_api.py` and viewer tests; do not add rollout call-chain semantics to
+the basic trace API.
+
 ## Add Trace Workflow
 
 When adding trace instrumentation to an XTuner run:
@@ -79,10 +91,6 @@ When adding trace instrumentation to an XTuner run:
 
 ## Guardrails
 
-- Do not reintroduce the old generic `trace_remote`, `traced_rollout_endpoint`,
-  `traced_agent_item_endpoint`, or `traced_judger_endpoint` surfaces. The
-  supported rollout starter helpers are `trace_rollout_endpoint` and
-  `trace_rollout_remote` in `rollout_api.py`.
 - Do not recreate `trace_utils.py`, `context_propagation.py`, span-name registries, or business attribute builders under `xtuner/v1/rl/trace`.
 - Do not import `RolloutState`, agent item classes, judgers, rollout workers, Ray actors, aiohttp clients, or trainer configs from the basic trace package.
 - Do not call OpenTelemetry SDK directly from business code; use the basic API only when trace instrumentation is explicitly requested.

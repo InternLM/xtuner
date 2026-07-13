@@ -144,6 +144,9 @@ class BaseProduceContext:
         enable_partial_rollout: bool = False,
     ) -> list[RolloutState]:
         # strategy 不关心 agent_loop 是 ray actor 还是本地对象。
+        for item in rollout_state:
+            item.extra_fields["producer_future_step"] = self.train_step
+
         start = time.perf_counter()
         if isinstance(self.agent_loop, ray.actor.ActorHandle):
             result = await self.agent_loop.generate_group.remote(

@@ -1,3 +1,5 @@
+"""Render the XTuner trace viewer HTML from an already-built payload."""
+
 from __future__ import annotations
 
 import json
@@ -8,14 +10,14 @@ from typing import Any
 def render_rollout_trace_html(
     payload: dict[str, Any],
     *,
-    live: bool = False,
+    auto_refresh: bool = False,
     api_url: str = "/api/trace",
     refresh_interval_s: float = 2.0,
 ) -> str:
     data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return (
         _HTML_TEMPLATE.replace("__TRACE_DATA__", data)
-        .replace("__LIVE_MODE__", json.dumps(live))
+        .replace("__AUTO_REFRESH__", json.dumps(auto_refresh))
         .replace("__TRACE_API_URL__", json.dumps(api_url))
         .replace("__REFRESH_INTERVAL_MS__", str(int(refresh_interval_s * 1000)))
     )
@@ -111,7 +113,6 @@ _HTML_TEMPLATE = r"""<!doctype html>
 		    .raw-span-item { overflow-wrap: anywhere; }
 		    .raw-span-details { margin-top: 3px; }
 		    .path-summary { display: grid; gap: 6px; min-width: 360px; }
-	    .path-current { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 	    .path-chain { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; line-height: 1.8; }
 	    .path-node {
 	      display: inline-flex;
@@ -160,16 +161,6 @@ _HTML_TEMPLATE = r"""<!doctype html>
 
     <section class="metric-grid" id="metrics"></section>
 
-    <section class="panel" id="stageOccupancy">
-      <h2>Stage Occupancy</h2>
-      <div class="scroll">
-        <table>
-          <thead><tr><th>Stage</th><th>Samples</th><th>Groups</th></tr></thead>
-          <tbody id="stageOccupancyRows"></tbody>
-        </table>
-      </div>
-    </section>
-
     <section class="panel" id="stageDurations">
       <h2>Stage Durations</h2>
       <div class="scroll">
@@ -195,7 +186,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
 	              <th>Group</th>
 	              <th>Step</th>
 	              <th>Reward</th>
-	              <th>Path / Current</th>
+	              <th>Path</th>
               <th>Jaeger</th>
             </tr>
           </thead>
@@ -207,20 +198,19 @@ _HTML_TEMPLATE = r"""<!doctype html>
   </main>
   <script>
     const initialData = __TRACE_DATA__;
-    const liveMode = __LIVE_MODE__;
+    const autoRefresh = __AUTO_REFRESH__;
     const traceApiUrl = __TRACE_API_URL__;
     const refreshIntervalMs = __REFRESH_INTERVAL_MS__;
     let data = initialData;
     let stepRequestId = 0;
     let pendingStepRequest = null;
     const stepPayloadCache = new Map();
-    const filters = {search: "", step: String(initialData.selected_train_step ?? "all"), status: "all"};
+    const filters = {search: "", step: String(initialData.requested_train_step ?? initialData.selected_train_step ?? "all"), status: "all"};
     const els = {
       title: document.getElementById("title"),
       source: document.getElementById("source"),
       mode: document.getElementById("mode"),
       metrics: document.getElementById("metrics"),
-      stageOccupancyRows: document.getElementById("stageOccupancyRows"),
       stageDurationRows: document.getElementById("stageDurationRows"),
       sampleRows: document.getElementById("sampleRows"),
       search: document.getElementById("search"),
@@ -247,6 +237,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
     }
     function cacheStepPayload(payload) {
       if (!payload) return;
+      if (payload.requested_train_step !== undefined && payload.requested_train_step !== null && payload.requested_train_step !== "latest") {
+        stepPayloadCache.set(String(payload.requested_train_step), payload);
+      }
       if (payload.selected_train_step !== undefined && payload.selected_train_step !== null) {
         stepPayloadCache.set(String(payload.selected_train_step), payload);
       }
@@ -268,6 +261,20 @@ _HTML_TEMPLATE = r"""<!doctype html>
       if (select.value !== nextValue) select.value = nextValue;
       return nextValue;
     }
+    function setStepOptions(select, values, currentValue) {
+      const optionValues = ["latest", "all", ...values.map((value) => String(value))];
+      const signature = selectOptionsSignature(optionValues);
+      const nextValue = optionValues.includes(String(currentValue)) ? String(currentValue) : "latest";
+      if (select.dataset.optionsSignature !== signature) {
+        select.innerHTML = optionValues.map((value) => {
+          const label = value === "latest" ? "Latest step" : (value === "all" ? "All steps" : `step ${value}`);
+          return `<option value="${esc(value)}">${esc(label)}</option>`;
+        }).join("");
+        select.dataset.optionsSignature = signature;
+      }
+      if (select.value !== nextValue) select.value = nextValue;
+      return nextValue;
+    }
     function parseSearchTerms(query) {
       return query.trim().toLowerCase().split(/\s+/).filter(Boolean).map((term) => {
         const separator = term.indexOf(":");
@@ -278,7 +285,6 @@ _HTML_TEMPLATE = r"""<!doctype html>
 		    function sampleSearchFields(sample) {
 		      const spans = sample.spans || [];
 		      const displayPathText = (sample.display_path || []).map((node) => `${node.name ?? ""} ${node.stage ?? ""} ${node.status ?? ""} ${node.source ?? ""}`).join(" ");
-		      const currentStageText = sample.current_stage ? `${sample.current_stage.name ?? ""} ${sample.current_stage.stage ?? ""} ${sample.current_stage.status ?? ""}` : "";
 		      const spanText = spans.map((span) => `${span.name ?? ""} ${span.stage ?? ""} ${span.parent_span_id ?? ""} ${JSON.stringify(span.attributes || {})}`).join(" ");
       const errorText = spans.map((span) => {
         const attrs = span.attributes || {};
@@ -297,11 +303,10 @@ _HTML_TEMPLATE = r"""<!doctype html>
         task: sample.task_name,
         trace: sample.trace_id,
         trace_id: sample.trace_id,
-        status: sample.status,
-        stage: sample.stage,
+	        status: sample.status,
+	        stage: sample.stage,
 	        span: `${sample.chain ?? ""} ${displayPathText} ${spanText}`,
-	        stack: `${sample.chain ?? ""} ${displayPathText} ${currentStageText} ${spanText}`,
-	        current: currentStageText,
+	        stack: `${sample.chain ?? ""} ${displayPathText} ${spanText}`,
         error: errorText,
         reward: `${sample.reward_score ?? ""} ${sample.reward_pass ?? ""}`,
         filter: `${sample.filter_decision ?? ""} ${sample.filter_reason ?? ""} ${sample.train_included ?? ""}`,
@@ -323,7 +328,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
     function filteredSamples() {
 	      const searchTerms = parseSearchTerms(filters.search);
 	      return (data.samples || []).filter((sample) => {
-	        if (filters.step !== "all" && String(sample.producer_future_step) !== filters.step) return false;
+	        if (filters.step !== "all" && filters.step !== "latest" && String(sample.producer_future_step) !== filters.step) return false;
 	        if (filters.status !== "all" && String(sample.status) !== filters.status) return false;
 	        return !searchTerms.length || matchesSearch(sample, searchTerms);
 	      });
@@ -342,24 +347,11 @@ _HTML_TEMPLATE = r"""<!doctype html>
     function formatCounts(counts) {
       return Object.entries(counts || {}).sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => `${key}: ${value}`).join(" | ") || "-";
     }
-    function countBy(samples, field) {
-      return samples.reduce((counts, sample) => {
-        const key = String(sample[field] ?? "unknown");
-        counts[key] = (counts[key] || 0) + 1;
-        return counts;
-      }, {});
-    }
     function renderOptions() {
       const statuses = Object.keys(data.status_counts || {}).sort();
       const steps = sortValues(data.available_train_steps || (data.samples || []).map((sample) => sample.producer_future_step));
-      filters.step = setSelectOptions(
-        els.step,
-        steps,
-        "All steps",
-        (value) => `step ${value}`,
-        data.selected_train_step ?? filters.step,
-      );
-      els.step.disabled = !liveMode;
+      filters.step = setStepOptions(els.step, steps, data.requested_train_step ?? data.selected_train_step ?? filters.step);
+      els.step.disabled = !autoRefresh;
       filters.status = setSelectOptions(els.status, statuses, "All status", (value) => value, filters.status);
     }
     function renderMetrics() {
@@ -370,17 +362,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
 	        ["Steps", data.step_count || 0],
 	        ["Statuses", formatCounts(data.status_counts || {})],
 	        ["Visible", visibleSamples.length],
-	      ];
+      ];
       els.metrics.innerHTML = metrics.map(([label, value]) => `<div class="metric"><div class="muted">${esc(label)}</div><strong>${esc(value)}</strong></div>`).join("");
     }
-	    function renderStageOccupancy() {
-	      const rows = data.stage_occupancy || [];
-	      els.stageOccupancyRows.innerHTML = rows.length ? rows.map((row) => `<tr>
-	        <td>${stageCellHtml(row, "sample_count", "samples")}</td>
-	        <td>${esc(row.sample_count)}</td>
-	        <td>${esc(row.group_count ?? 0)}</td>
-	      </tr>`).join("") : `<tr><td colspan="3" class="muted">No stage occupancy data</td></tr>`;
-	    }
 	    function rawSpanBreakdownHtml(rawSpans, countKey, countLabel) {
 	      const rows = rawSpans || [];
 	      if (!rows.length) return "";
@@ -444,15 +428,13 @@ _HTML_TEMPLATE = r"""<!doctype html>
 	    }
 	    function displayPathHtml(sample) {
 	      const nodes = (sample.display_path && sample.display_path.length) ? sample.display_path : fallbackDisplayPath(sample);
-	      const current = sample.current_stage;
-	      const currentHtml = current ? `<div class="path-current"><span class="${tagClass(current.status || "running")}">${esc(current.status || "running")}</span><strong>${esc(current.name || "-")}</strong><span class="muted">${esc(formatDurationMs(current.elapsed_ms))}</span></div>` : "";
 	      const chainHtml = nodes.length ? nodes.map((node, index) => {
 	        const status = node.status || "inferred";
 	        const meta = pathNodeMeta(node);
 	        const arrow = index ? `<span class="path-arrow">-&gt;</span>` : "";
 	        return `${arrow}<span class="path-node ${esc(status)} ${esc(node.source || "")}" title="${esc(node.source || "")}"><span class="path-node-name">${esc(node.name || "-")}</span>${meta ? `<span class="path-meta">${esc(meta)}</span>` : ""}</span>`;
 	      }).join("") : `<span class="muted">-</span>`;
-	      return `<div class="path-summary">${currentHtml}<div class="path-chain">${chainHtml}</div></div>`;
+	      return `<div class="path-summary"><div class="path-chain">${chainHtml}</div></div>`;
 	    }
 	    function renderSamples() {
 	      const rows = filteredSamples();
@@ -484,21 +466,20 @@ _HTML_TEMPLATE = r"""<!doctype html>
       if (data.run_id) sourceParts.push(`run ${data.run_id}`);
       if (data.generated_at_s) sourceParts.push(`generated ${new Date(data.generated_at_s * 1000).toLocaleString()}`);
       els.source.textContent = sourceParts.join(" | ");
-      els.mode.textContent = liveMode ? "Live viewer" : "Static viewer";
+      els.mode.textContent = autoRefresh ? "Auto refresh" : "Static HTML";
       renderOptions();
       renderMetrics();
-      renderStageOccupancy();
       renderStageDurations();
       renderSamples();
     }
     function applyPayload(payload, fallbackStep) {
       data = payload;
       cacheStepPayload(data);
-      filters.step = String(data.selected_train_step ?? fallbackStep ?? filters.step);
+      filters.step = String(data.requested_train_step ?? fallbackStep ?? data.selected_train_step ?? filters.step);
       render();
     }
     async function fetchStep(step) {
-      if (!liveMode) return;
+      if (!autoRefresh) return;
       const requestId = ++stepRequestId;
       const selectedStep = String(step || filters.step || "latest");
       filters.step = selectedStep;
@@ -521,10 +502,10 @@ _HTML_TEMPLATE = r"""<!doctype html>
       }
     }
     async function loadStep(step) {
-      if (!liveMode) return;
+      if (!autoRefresh) return;
       const selectedStep = String(step || filters.step || "latest");
       filters.step = selectedStep;
-      const cachedPayload = stepPayloadCache.get(selectedStep);
+      const cachedPayload = selectedStep === "latest" ? null : stepPayloadCache.get(selectedStep);
       if (cachedPayload) {
         stepRequestId += 1;
         applyPayload(cachedPayload, selectedStep);
@@ -533,15 +514,15 @@ _HTML_TEMPLATE = r"""<!doctype html>
       await fetchStep(selectedStep);
     }
     async function refresh() {
-      if (!liveMode || pendingStepRequest) return;
-      await fetchStep(filters.step || data.selected_train_step || "latest");
+      if (!autoRefresh || pendingStepRequest) return;
+      await fetchStep(filters.step || data.requested_train_step || data.selected_train_step || "latest");
     }
     els.search.addEventListener("input", (event) => { filters.search = event.target.value; renderFilteredViews(); });
     els.step.addEventListener("change", (event) => { filters.step = event.target.value; loadStep(filters.step); });
     els.status.addEventListener("change", (event) => { filters.status = event.target.value; renderFilteredViews(); });
     cacheStepPayload(data);
     render();
-    if (liveMode) window.setInterval(refresh, refreshIntervalMs);
+    if (autoRefresh) window.setInterval(refresh, refreshIntervalMs);
   </script>
 </body>
 </html>
