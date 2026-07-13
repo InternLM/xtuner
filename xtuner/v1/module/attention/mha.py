@@ -405,8 +405,12 @@ class MultiHeadAttention(nn.Module):
             query_states,
             key_states,
             value_states,
-            cu_seqlens_q=seq_ctx.cu_seq_lens_q,
-            cu_seqlens_k=seq_ctx.cu_seq_lens_k,
+            cu_seqlens_q=seq_ctx.cu_seq_lens_q_list
+            if hasattr(seq_ctx, "cu_seq_lens_q_list")
+            else seq_ctx.cu_seq_lens_q,
+            cu_seqlens_k=seq_ctx.cu_seq_lens_k_list
+            if hasattr(seq_ctx, "cu_seq_lens_k_list")
+            else seq_ctx.cu_seq_lens_k,
             max_seqlen_q=seq_ctx.max_length_q,
             max_seqlen_k=seq_ctx.max_length_k,
             window_size=self.window_size,

@@ -87,7 +87,9 @@ class SequenceContext:
         # the argument can be an int, but as an attribute it can only be a tensor
         self.input_ids = input_ids
         self.cu_seq_lens_q = cu_seq_lens_q
+        self.cu_seq_lens_q_list = cu_seq_lens_q.tolist() if isinstance(cu_seq_lens_q, torch.Tensor) else cu_seq_lens_q
         self.cu_seq_lens_k = cu_seq_lens_k
+        self.cu_seq_lens_k_list = cu_seq_lens_k.tolist() if isinstance(cu_seq_lens_k, torch.Tensor) else cu_seq_lens_k
         # force max_length_q and max_length_k be cpu tensors to avoid cuda synchronization
         # max_length_q and max_length_k should be unpacked to int in attention implementation
         if isinstance(max_length_q, int):

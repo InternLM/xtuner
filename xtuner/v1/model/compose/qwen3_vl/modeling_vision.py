@@ -503,6 +503,7 @@ class Qwen3VLVisionModel(BaseModel):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        cu_seqlens_list: List[int] = cu_seqlens.tolist() if isinstance(cu_seqlens, torch.Tensor) else cu_seqlens
 
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
             div_num = sequence_parallel_mesh.size() * 4
@@ -532,7 +533,7 @@ class Qwen3VLVisionModel(BaseModel):
                 ):
                     hidden_states = blk(
                         hidden_states,
-                        cu_seqlens,
+                        cu_seqlens_list,
                         max_seqlen,
                         position_embeddings,
                         sequence_parallel_mesh,
@@ -540,7 +541,7 @@ class Qwen3VLVisionModel(BaseModel):
             else:
                 hidden_states = blk(
                     hidden_states,
-                    cu_seqlens,
+                    cu_seqlens_list,
                     max_seqlen,
                     position_embeddings,
                     sequence_parallel_mesh,
