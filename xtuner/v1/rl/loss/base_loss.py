@@ -214,6 +214,7 @@ class BaseRLLossContext(CELossContext):
         rollout_logprobs = self.loss_kwargs.rollout_logprobs
         mask = shifted_labels != self.loss_cfg.ignore_idx
         old_logprobs = self.loss_kwargs.old_logprobs
+        advantages = self.loss_kwargs.advantages
 
         assert rollout_logprobs is not None
         assert old_logprobs is not None
@@ -225,6 +226,8 @@ class BaseRLLossContext(CELossContext):
             old_logprobs = old_logprobs[:, : rollout_logprobs.size(1)]  # type: ignore
             mask = sp_gather(mask, sp_mesh, dim=1)
             mask = mask[:, : rollout_logprobs.size(1)]  # type: ignore
+            advantages = sp_gather(advantages, sp_mesh, dim=1)
+            advantages = advantages[:, : rollout_logprobs.size(1)]  # type: ignore
 
         rollout_is_weights, rollout_is_mask, mismatch_metrics, rollout_is_metrics = (
             self.loss_cfg.rollout_is.compute_rollout_importance_weights_and_metrics(
@@ -232,6 +235,7 @@ class BaseRLLossContext(CELossContext):
                 rollout_log_prob=rollout_logprobs,
                 num_tokens=num_tokens,
                 response_mask=mask,
+                advantages=advantages,
             )
         )
         if sp_mesh and sp_mesh.size() > 1:

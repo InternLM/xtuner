@@ -57,12 +57,22 @@ class RolloutImportanceSampling(BaseModel):
             Common values are "token" and "sequence". Defaults to "token".
         rollout_is_mode (str): Handling mode for samples outside configured
             thresholds. Defaults to "truncate".
-        rollout_is_threshold (tuple[float, float] | None): Lower and upper
+        rollout_is_threshold (tuple[float, float] | None): Upper and lower
             clipping thresholds for importance weights. Defaults to None.
-        rollout_is_mask_threshold (tuple[float, float] | None): Lower and upper
+        rollout_is_mask_threshold (tuple[float, float] | None): Upper and lower
             thresholds for masking tokens. Defaults to None.
-        rollout_is_veto_threshold (tuple[float, float] | None): Lower and upper
-            thresholds for rejecting a rollout group. Defaults to None.
+        rollout_is_veto_level (str): Granularity used to apply veto rejection.
+            "max" rejects a sequence if any token is outside thresholds, while
+            "geometric" rejects by the sequence geometric-mean ratio, and
+            "kl3" rejects by the mean token k3 divergence estimator.
+            Defaults to "max".
+        rollout_is_veto_threshold (tuple[float, float] | None): Upper and lower
+            thresholds for rejecting a rollout group. For "kl3", the first
+            value is used as the k3 upper threshold and the second value is
+            ignored. Defaults to None.
+        rollout_is_veto_negative_adv_only (bool): When True, apply sequence
+            veto only to sequences whose mean valid-token advantage is negative.
+            Defaults to False.
 
     **Examples:**
 
@@ -71,7 +81,7 @@ class RolloutImportanceSampling(BaseModel):
         config = RolloutImportanceSampling(
             rollout_is_level="token",
             rollout_is_mode="truncate",
-            rollout_is_threshold=(0.8, 1.2),
+            rollout_is_threshold=(1.2, 0.8),
         )
     """
 
@@ -80,7 +90,9 @@ class RolloutImportanceSampling(BaseModel):
     rollout_is_mode: str = "truncate"
     rollout_is_threshold: Optional[Tuple[float, float]] = None
     rollout_is_mask_threshold: Optional[Tuple[float, float]] = None
+    rollout_is_veto_level: str = "max"
     rollout_is_veto_threshold: Optional[Tuple[float, float]] = None
+    rollout_is_veto_negative_adv_only: bool = False
 
     def compute_rollout_importance_weights_and_metrics(
         self,
@@ -88,6 +100,7 @@ class RolloutImportanceSampling(BaseModel):
         rollout_log_prob: torch.Tensor,
         num_tokens: torch.Tensor,
         response_mask: torch.Tensor,
+        advantages: Optional[torch.Tensor] = None,
     ) -> tuple[Optional[torch.Tensor], torch.Tensor, dict[str, Any], dict[str, Any]]:
         mismatch_metrics = compute_mismatch_metrics(
             old_log_prob=old_log_prob, rollout_log_prob=rollout_log_prob, response_mask=response_mask
@@ -108,7 +121,10 @@ class RolloutImportanceSampling(BaseModel):
             rollout_is_mode=self.rollout_is_mode,
             rollout_is_threshold=self.rollout_is_threshold,
             rollout_is_mask_threshold=self.rollout_is_mask_threshold,
+            rollout_is_veto_level=self.rollout_is_veto_level,
             rollout_is_veto_threshold=self.rollout_is_veto_threshold,
+            rollout_is_veto_negative_adv_only=self.rollout_is_veto_negative_adv_only,
+            advantages=advantages,
         )
         return rollout_is_weights, modified_response_mask, mismatch_metrics_scalar, metrics_scalar
 
@@ -123,6 +139,9 @@ def compute_rollout_importance_weights(
     rollout_is_threshold: Optional[Tuple[float, float]] = None,
     rollout_is_mask_threshold: Optional[Tuple[float, float]] = None,
     rollout_is_veto_threshold: Optional[Tuple[float, float]] = None,
+    rollout_is_veto_level: str = "max",
+    rollout_is_veto_negative_adv_only: bool = False,
+    advantages: Optional[torch.Tensor] = None,
 ) -> tuple[Optional[torch.Tensor], torch.Tensor, dict[str, Any]]:
     """Compute importance sampling weights and rejection mask for rollout-
     training mismatch.
@@ -165,8 +184,18 @@ def compute_rollout_importance_weights(
             - "mask": Reject tokens/sequences outside [lower, upper] via response_mask (MIS/rejection sampling)
         rollout_is_threshold: Tuple of (upper threshold, lower threshold) for IS weights (e.g., (2.0, 0.5))
         rollout_is_mask_threshold: Tuple of (upper threshold, lower threshold) for mask mode (e.g., (2.0, 0.5))
+        rollout_is_veto_level: Veto aggregation level:
+            - "max": reject a sequence if any token ratio is outside thresholds
+            - "geometric": reject a sequence if geometric-mean ratio is outside thresholds
+            - "kl3": reject a sequence if mean(exp(log_ratio) - 1 - log_ratio) exceeds threshold
         rollout_is_veto_threshold: Tuple of (upper threshold, lower threshold), if any token has ratio < lower threshold or > upper threshold,
-            reject entire sequence. Applied independently of rollout_is_mode. If None, veto disabled.
+            reject entire sequence. For "kl3", the first value is the k3 upper
+            threshold and the second value is ignored. Applied independently of
+            rollout_is_mode. If None, veto disabled.
+        rollout_is_veto_negative_adv_only: If True, only apply sequence veto to
+            sequences whose mean valid-token advantage is negative.
+        advantages: Token-level advantages, packed like ``old_log_prob``. Required
+            when ``rollout_is_veto_negative_adv_only`` is True.
 
     Returns:
         Tuple of (is_weights, modified_response_mask, metrics):
@@ -187,7 +216,11 @@ def compute_rollout_importance_weights(
     assert rollout_is_level in ["token", "sequence", "geometric"], (
         f"Invalid rollout_is_level: {rollout_is_level}. Must be 'token', 'sequence', or 'geometric'."
     )
-    # Parse thresholds: if lower not specified, use 1/upper (reciprocal)
+    assert rollout_is_veto_level in ["max", "geometric", "kl3"], (
+        f"Invalid rollout_is_veto_level: {rollout_is_veto_level}. "
+        "Must be 'max', 'geometric', or 'kl3'."
+    )
+    # Parse thresholds: tuple order is (upper, lower).
     upper_threshold, lower_threshold = rollout_is_threshold
     assert upper_threshold > lower_threshold, (
         f"upper_threshold must be greater than lower_threshold, but got {upper_threshold} and {lower_threshold}"
@@ -203,6 +236,9 @@ def compute_rollout_importance_weights(
     old_log_prob = convert_packed_to_padded(old_log_prob, num_tokens, padding_value=0, padding_side="right")
     rollout_log_prob = convert_packed_to_padded(rollout_log_prob, num_tokens, padding_value=0, padding_side="right")
     response_mask = convert_packed_to_padded(response_mask, num_tokens, padding_value=0, padding_side="right")
+    if rollout_is_veto_negative_adv_only:
+        assert advantages is not None, "advantages must be provided when rollout_is_veto_negative_adv_only=True"
+        advantages = convert_packed_to_padded(advantages, num_tokens, padding_value=0, padding_side="right")
 
     # Step 1: Compute raw importance weights based on the specified level
     log_ratio = old_log_prob - rollout_log_prob
@@ -248,20 +284,72 @@ def compute_rollout_importance_weights(
         raise ValueError(f"Invalid rollout_is_level: {rollout_is_level}. Must be 'token', 'sequence', or 'geometric'.")
 
     # Step 1.5: Apply per-token veto check in log space (memory efficient)
+    veto_extra_metrics: dict[str, Any] = {}
     if rollout_is_veto_threshold is not None:
         upper_veto_threshold, lower_veto_threshold = rollout_is_veto_threshold
-        log_veto_threshold_lower = torch.log(torch.tensor(lower_veto_threshold, device=device))
-        log_veto_threshold_upper = torch.log(torch.tensor(upper_veto_threshold, device=device))
+        seq_valid = response_mask.sum(dim=-1, keepdim=True) > 0
 
-        # Check if any token ratio is below veto threshold (in log space)
-        # log(π_train/π_rollout) < log(veto_threshold) ⟺ π_train/π_rollout < veto_threshold
-        catastrophic_tokens = (
-            (log_ratio < log_veto_threshold_lower) | (log_ratio > log_veto_threshold_upper)
-        ) & response_mask.bool()
+        if rollout_is_veto_level == "max":
+            log_veto_threshold_lower = torch.log(torch.tensor(lower_veto_threshold, device=device))
+            log_veto_threshold_upper = torch.log(torch.tensor(upper_veto_threshold, device=device))
 
-        # For each sequence, check if it has any catastrophic token
-        # Use broadcasting instead of expand_as to save memory
-        has_catastrophic = catastrophic_tokens.any(dim=-1, keepdim=True)
+            # Check if any token ratio is below veto threshold (in log space)
+            # log(π_train/π_rollout) < log(veto_threshold) ⟺ π_train/π_rollout < veto_threshold
+            catastrophic_tokens = (
+                (log_ratio < log_veto_threshold_lower) | (log_ratio > log_veto_threshold_upper)
+            ) & response_mask.bool()
+
+            # For each sequence, check if it has any catastrophic token
+            # Use broadcasting instead of expand_as to save memory
+            has_catastrophic = catastrophic_tokens.any(dim=-1, keepdim=True)
+        elif rollout_is_veto_level == "geometric":
+            log_veto_threshold_lower = torch.log(torch.tensor(lower_veto_threshold, device=device))
+            log_veto_threshold_upper = torch.log(torch.tensor(upper_veto_threshold, device=device))
+
+            # Geometric mean veto: reject if geometric mean ratio < lower threshold or > upper threshold
+            log_ratio_mean = masked_mean(log_ratio, response_mask, axis=-1).unsqueeze(-1)
+            has_catastrophic = (
+                (log_ratio_mean < log_veto_threshold_lower) | (log_ratio_mean > log_veto_threshold_upper)
+            ) & seq_valid
+            catastrophic_tokens = has_catastrophic & response_mask.bool()
+        elif rollout_is_veto_level == "kl3":
+            # K3 divergence veto, matching verl's sequence-mean K3 statistic:
+            # kl3_i = mean_t(exp(log_ratio_t) - 1 - log_ratio_t).
+            # Threshold is an upper bound in divergence space; lower threshold is unused.
+            log_ratio_safe_for_k3 = torch.clamp(log_ratio, min=-SAFETY_BOUND, max=SAFETY_BOUND)
+            token_k3 = torch.exp(log_ratio_safe_for_k3) - 1.0 - log_ratio_safe_for_k3
+            kl3 = masked_mean(token_k3, response_mask, axis=-1).unsqueeze(-1)
+
+            has_catastrophic = (kl3 > upper_veto_threshold) & seq_valid
+            catastrophic_tokens = has_catastrophic & response_mask.bool()
+            kl3_valid = kl3[seq_valid]
+            if kl3_valid.numel() > 0:
+                veto_extra_metrics["rollout_is_veto_kl3_mean"] = kl3_valid.mean()
+                veto_extra_metrics["rollout_is_veto_kl3_max"] = kl3_valid.max()
+                veto_extra_metrics["rollout_is_veto_kl3_min"] = kl3_valid.min()
+                veto_extra_metrics["rollout_is_veto_kl3_fraction_high"] = (
+                    kl3_valid > upper_veto_threshold
+                ).float().mean()
+            else:
+                zero = torch.tensor(0.0, device=device)
+                veto_extra_metrics["rollout_is_veto_kl3_mean"] = zero
+                veto_extra_metrics["rollout_is_veto_kl3_max"] = zero
+                veto_extra_metrics["rollout_is_veto_kl3_min"] = zero
+                veto_extra_metrics["rollout_is_veto_kl3_fraction_high"] = zero
+            veto_extra_metrics["rollout_is_veto_kl3_threshold"] = upper_veto_threshold
+
+        if rollout_is_veto_negative_adv_only:
+            veto_candidate = has_catastrophic
+            seq_advantage = masked_mean(advantages, response_mask, axis=-1).unsqueeze(-1)
+            negative_adv = (seq_advantage < 0) & seq_valid
+            has_catastrophic = veto_candidate & negative_adv
+            catastrophic_tokens = has_catastrophic & response_mask.bool()
+            veto_extra_metrics["rollout_is_veto_pre_adv_fraction"] = masked_mean(
+                veto_candidate.float(), seq_valid
+            )
+            veto_extra_metrics["rollout_is_veto_negative_adv_fraction"] = masked_mean(
+                negative_adv.float(), seq_valid
+            )
 
         # Create veto mask: 0 if sequence has catastrophic token, 1 otherwise
         veto_mask = (~has_catastrophic).float()
@@ -285,6 +373,7 @@ def compute_rollout_importance_weights(
         catastrophic_tokens=catastrophic_tokens,
         SAFETY_BOUND=SAFETY_BOUND,
     )
+    metrics.update(veto_extra_metrics)
 
     # Step 3: Apply outlier handling and rejection sampling
     # Key design principle: IS weights and rejection are separate mechanisms
