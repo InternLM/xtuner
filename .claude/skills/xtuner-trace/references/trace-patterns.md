@@ -74,19 +74,18 @@ Add `TraceConfig` to the training config and pass it to the trainer config:
 
 ```python
 import os
-from pathlib import Path
 
 from xtuner.v1.rl.trace import TraceConfig
 
 
 trace_config = TraceConfig(
     enabled=os.environ.get("XTUNER_TRACE_ENABLED") == "1",
-    output_dir=Path(work_dir) / "otel",
     service_name="xtuner-agent-rollout",
     viewer_enabled=True,
     viewer_host="0.0.0.0",
     viewer_port=18080,
     viewer_jaeger_query_url="http://127.0.0.1:16686",
+    enable_rollout_trace=True,
 )
 
 trainer = RLColocateTrainerConfig(
@@ -94,6 +93,10 @@ trainer = RLColocateTrainerConfig(
     trace_config=trace_config,
 )
 ```
+
+When `output_dir` is omitted in an RL trainer config, the trainer places trace
+artifacts under the current experiment directory, for example
+`work_dirs/name/20260713071356/otel/<trace_run_id>`.
 
 ### Stage Spans
 
@@ -400,7 +403,27 @@ Avoid recording prompts, responses, full configs, secrets, raw headers, or large
 
 `examples/v1/scripts/setup_trace.sh` and `recipe/otle/` are local helper tooling for installing OTel collector binaries and starting local Jaeger/viewer dependencies. Keep these as setup assets; do not use them to add automatic trace behavior to training configs or launch scripts unless that integration is explicitly requested.
 
-## Removed Semantics
+## Rollout Starter Preset
+
+The built-in rollout starter trace is opt-in:
+
+```python
+trace_config = TraceConfig(
+    enabled=True,
+    viewer_enabled=True,
+    enable_rollout_trace=True,
+)
+```
+
+Its rollout-specific helpers live in `xtuner/v1/rl/trace/rollout_api.py`:
+
+- `trace_rollout_endpoint(...)`
+- `trace_rollout_remote(...)`
+
+Use this only for the starter rollout chain. For custom instrumentation, ask
+which stages and metrics the user wants before adding spans.
+
+## Removed Legacy Semantics
 
 Do not use or recreate these removed surfaces in this branch:
 

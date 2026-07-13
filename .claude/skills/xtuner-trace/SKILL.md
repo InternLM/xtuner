@@ -15,10 +15,11 @@ Keep this package infrastructure-only:
 - OTel SDK adapter: `xtuner/v1/rl/trace/otel_utils.py`
 - Public facade: `xtuner/v1/rl/trace/__init__.py`
 - Basic API: `xtuner/v1/rl/trace/api.py`
+- Rollout starter preset: `xtuner/v1/rl/trace/rollout_api.py`
 - Viewer: `xtuner/tools/trace_viewer/`
 - Local tooling: `recipe/otle/` and `examples/v1/scripts/setup_trace.sh`
 
-Do not add rollout, agent, judger, Ray remote, HTTP proxy, reward, status, or session-server business semantics to the basic trace package.
+Do not add rollout, agent, judger, Ray remote, HTTP proxy, reward, status, or session-server business semantics to `api.py`, `runtime.py`, or `otel_utils.py`. Keep rollout-specific starter behavior inside `rollout_api.py` and gated by `TraceConfig.enable_rollout_trace`.
 
 ## Basic API
 
@@ -40,6 +41,17 @@ runtime setup:
 - `configure_trace(...)`
 - `close_trace()`
 
+## Rollout Starter Preset
+
+`TraceConfig(enable_rollout_trace=True)` enables the built-in rollout starter
+trace. Its helpers live in `xtuner/v1/rl/trace/rollout_api.py`:
+
+- `trace_rollout_endpoint(...)`
+- `trace_rollout_remote(...)`
+
+Keep this layer narrow: it may depend on `RolloutState` and Ray call boundaries,
+but it must not leak those dependencies into the basic API.
+
 ## Add Trace Workflow
 
 When adding trace instrumentation to an XTuner run:
@@ -48,7 +60,9 @@ When adding trace instrumentation to an XTuner run:
 2. In the launch script, source `examples/v1/scripts/setup_trace.sh` when
    `XTUNER_TRACE_ENABLED=1`.
 3. In the training config, add `TraceConfig` and set `enabled=True`; set
-   `viewer_enabled=True` when the user needs interactive inspection.
+   `viewer_enabled=True` when the user needs interactive inspection. Set
+   `enable_rollout_trace=True` only when the user wants the built-in rollout
+   starter trace.
 4. Before adding any `trace_span(...)` instrumentation, you mask ask the user which
    stages they want to observe and which metrics each stage should expose.
    Do not infer default stages unless the user explicitly asks you to choose.
@@ -65,7 +79,10 @@ When adding trace instrumentation to an XTuner run:
 
 ## Guardrails
 
-- Do not reintroduce `trace_remote`, `traced_rollout_endpoint`, `traced_agent_item_endpoint`, or `traced_judger_endpoint`.
+- Do not reintroduce the old generic `trace_remote`, `traced_rollout_endpoint`,
+  `traced_agent_item_endpoint`, or `traced_judger_endpoint` surfaces. The
+  supported rollout starter helpers are `trace_rollout_endpoint` and
+  `trace_rollout_remote` in `rollout_api.py`.
 - Do not recreate `trace_utils.py`, `context_propagation.py`, span-name registries, or business attribute builders under `xtuner/v1/rl/trace`.
 - Do not import `RolloutState`, agent item classes, judgers, rollout workers, Ray actors, aiohttp clients, or trainer configs from the basic trace package.
 - Do not call OpenTelemetry SDK directly from business code; use the basic API only when trace instrumentation is explicitly requested.

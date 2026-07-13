@@ -22,6 +22,7 @@ from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import AgentLoopManagerConfig, SamplerConfig, SyncProduceStrategyConfig, TaskSpecConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
+from xtuner.v1.rl.trace import TraceConfig
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
 
 # env
@@ -30,6 +31,7 @@ model_path = os.environ["MODEL_PATH"]
 data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
 enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0")
+enable_trace = True
 NNODE = int(os.environ.get("WORLD_SIZE", "1"))
 
 # basic settings
@@ -183,6 +185,16 @@ eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
 # 7. evaluator
 evaluator_config = EvaluatorConfig(compute_metric_func=None)
 
+trace_config = TraceConfig(
+    enabled=enable_trace,
+    service_name="xtuner-agent-rollout",
+    viewer_enabled=True,
+    viewer_host="0.0.0.0",
+    viewer_port=18080,
+    viewer_jaeger_query_url="http://127.0.0.1:16686",
+    enable_rollout_trace=True,
+)
+
 # 8. RL Colocate Trainer Config（CLI 通过 config["trainer"].build() 得到 Trainer）
 trainer = RLColocateTrainerConfig(
     resources=resources,
@@ -203,4 +215,5 @@ trainer = RLColocateTrainerConfig(
     work_dir=work_dir,
     seed=123,
     debug_rollout=False,
+    trace_config=trace_config,
 )

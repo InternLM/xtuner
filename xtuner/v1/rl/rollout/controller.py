@@ -7,6 +7,7 @@ from ray.actor import ActorProxy
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.rl.trace.rollout_api import trace_rollout_endpoint, trace_rollout_remote
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
@@ -89,6 +90,7 @@ class RolloutController:
         self.proxy_manager.validate_registered_session_urls()
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
+    @trace_rollout_endpoint("rollout.controller.generate")
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         if XTUNER_DETERMINISTIC:
             sample_params = rollout_state.sample_params.model_copy(deep=True)
@@ -104,7 +106,10 @@ class RolloutController:
             rollout_state.error_msg = "No active rollout worker available."
             return rollout_state
 
-        response_ref = worker.generate.remote(rollout_state=rollout_state)  # type: ignore[attr-defined]
+        response_ref = trace_rollout_remote(
+            worker.generate,  # type: ignore[attr-defined]
+            rollout_state=rollout_state,
+        )
         try:
             response_rollout_state = await asyncio.wait_for(
                 response_ref,
@@ -197,10 +202,17 @@ class RolloutController:
         assert self.config.rollout_max_batch_size_per_instance is not None, (
             "rollout_max_batch_size_per_instance must be set before building RolloutWorker."
         )
+        from xtuner.v1.rl.trace import get_trace_env_vars
+
+        trace_env_vars = get_trace_env_vars()
+        ray_kwargs = {}
+        if trace_env_vars:
+            ray_kwargs["runtime_env"] = {"env_vars": trace_env_vars}
         return ray.remote(
             concurrency_groups={
                 ROLLOUT_CONCURRENCY_GROUP_GENERATE: ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY,
             },
+            **ray_kwargs,
         )(worker_base_cls)
 
     def _init_workers(self, placement_group: PlacementGroup) -> RolloutWorkerRegistry:

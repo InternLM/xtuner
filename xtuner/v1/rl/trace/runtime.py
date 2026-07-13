@@ -33,6 +33,7 @@ TRACE_ENV_KEYS = (
     "XTUNER_OTEL_RUN_DIR",
     "XTUNER_OTEL_JSONL_PATH",
     "XTUNER_OTEL_LIVE_JSONL_PATH",
+    "XTUNER_TRACE_ENABLE_ROLLOUT",
     "OTEL_TRACES_EXPORTER",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
@@ -122,6 +123,7 @@ class TraceConfig(BaseModel):
     viewer_port: int = Field(default=0, ge=0, le=65535)
     viewer_jaeger_query_url: str | None = None
     viewer_jaeger_link_url: str | None = None
+    enable_rollout_trace: bool = False
 
     @field_validator("output_dir")
     @classmethod
@@ -636,6 +638,7 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
         "XTUNER_OTEL_RUN_DIR": os.fspath(run_dir),
         "XTUNER_OTEL_JSONL_PATH": os.fspath(trace_jsonl_path),
         "XTUNER_OTEL_LIVE_JSONL_PATH": os.fspath(live_jsonl_path),
+        "XTUNER_TRACE_ENABLE_ROLLOUT": "1" if config.enable_rollout_trace else "0",
         "OTEL_TRACES_EXPORTER": "otlp",
         "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": endpoint,
@@ -736,6 +739,8 @@ def ensure_trace_runtime_from_env() -> bool:
 def is_trace_enabled() -> bool:
     """Return whether XTuner trace runtime is enabled in this process."""
 
+    if _RUNTIME is None:
+        ensure_trace_runtime_from_env()
     return _RUNTIME is not None and _RUNTIME.runtime.enabled
 
 

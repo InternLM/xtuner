@@ -1,6 +1,7 @@
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.trace.rollout_api import trace_rollout_endpoint, trace_rollout_remote
 
 from .agent_loop import AgentLoop, AgentLoopConfig
 
@@ -64,6 +65,7 @@ class SingleTurnAgentLoop(AgentLoop):
             enable_batch_judge=enable_batch_judge,
         )
 
+    @trace_rollout_endpoint("single_turn_agent_loop.run")
     async def generate_sample(
         self,
         rollout_state: RolloutState,
@@ -74,7 +76,10 @@ class SingleTurnAgentLoop(AgentLoop):
 
         # 推理引擎generate, 生成的结果会覆盖到 rollout_state.response_ids 上
         assert self.rollout_ctl is not None
-        rollout_state = await self.rollout_ctl.generate.remote(rollout_state)  # type: ignore[attr-defined]
+        rollout_state = await trace_rollout_remote(
+            self.rollout_ctl.generate,  # type: ignore[attr-defined]
+            rollout_state,
+        )
         # 非 COMPLETED 状态（如被截断、放弃等）直接早退，不触发打分
         if rollout_state.status != Status.COMPLETED:
             return rollout_state

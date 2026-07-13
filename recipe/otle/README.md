@@ -34,7 +34,6 @@ Run XTuner with trace enabled:
 
 ```bash
 export XTUNER_TRACE_ENABLED=1
-export XTUNER_TRACE_SERVICE_NAME=xtuner-rollout
 ```
 
 By default, XTuner starts a local collector that writes
