@@ -34,6 +34,13 @@ def native_zero_centered_rms_norm(x: torch.Tensor, weight: torch.Tensor, epsilon
     return output.type_as(x)
 
 
+def zero_centered_rms_norm_npu(x: torch.Tensor, weight: torch.Tensor, epsilon: float) -> torch.Tensor:
+    import torch_npu
+
+    output = torch_npu.npu_rms_norm(x, 1.0 + weight.float(), epsilon)[0]
+    return output.type_as(x)
+
+
 def get_rms_norm_fn() -> RMSNormProtocol:
     from xtuner.v1.utils import get_device
 
@@ -63,11 +70,14 @@ def get_zero_centered_rms_norm_fn() -> RMSNormProtocol:
         else:
             return native_zero_centered_rms_norm
     elif device == "npu":
+        if os.getenv("XTUNER_USE_NATIVE_RMSNORM", "1") == "0":
+            raise NotImplementedError("Zero-centered RMSNorm is not implemented in triton")
+        else:
+            return zero_centered_rms_norm_npu
+        # def _not_implemented(*args, **kwargs):
+        #     raise NotImplementedError("Zero-centered RMSNorm is not implemented on NPU")
 
-        def _not_implemented(*args, **kwargs):
-            raise NotImplementedError("Zero-centered RMSNorm is not implemented on NPU")
-
-        return _not_implemented
+        # return _not_implemented
     else:
         raise NotImplementedError(f"RMSNorm is not implemented on {device}")
 

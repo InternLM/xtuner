@@ -1344,7 +1344,18 @@ def adamw_update_foreach_async(
     epsilon: float,
 ) -> Generator[None, None, None]:
     """Async wrapper around foreach AdamW update."""
-    adamw_update_foreach(X, G, M, V, lr, beta1, beta2, weight_decay, step, epsilon)
+    adamw_update_foreach(
+        X,
+        G,
+        M,
+        V,
+        lr.to(X[0].device),
+        beta1.to(X[0].device),
+        beta2.to(X[0].device),
+        weight_decay.to(X[0].device),
+        step,
+        epsilon,
+    )
     yield
 
 
@@ -1449,7 +1460,6 @@ def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7, num_experts: i
     ]
 
     X = G.to(dtype=torch.bfloat16)
-    original_shape = X.shape
 
     # Unified handling: reshape to (num_experts, M, N) for both cases
     # For regular case (num_experts=1), this adds a batch dimension of size 1
@@ -1481,6 +1491,6 @@ def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7, num_experts: i
         X = X.mT
 
     # Reshape back to original shape: (num_experts, M, N) -> (num_experts * M, N)
-    X = X.view(original_shape)
+    X = X.reshape(num_experts * X.size(-2), X.size(-1))
 
     return X
