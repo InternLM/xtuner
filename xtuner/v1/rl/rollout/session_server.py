@@ -51,8 +51,8 @@ def _error_payload(fmt: str, message: str, status: int = 500, error_type: str = 
 def _bool_request_value(value: Any, default: bool = False) -> bool:
     """Coerce an opaque request-body value (bool / int / str / None) to bool.
 
-    Mirrors how lmdeploy validates flag-style fields — accepts ``"true"``,
-    ``"1"`` etc. as truthy and ``"false"``, ``"0"`` as falsy.
+    Mirrors how lmdeploy validates flag-style fields — accepts ``"true"``, ``"1"`` etc. as true,
+    ``"false"``, ``"0"``, ``""`` etc. as false, and falls back to the default value for unrecognized strings.
     """
     if value is None:
         return default
