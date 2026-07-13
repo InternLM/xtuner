@@ -22,6 +22,7 @@ from .dense.dense import Dense
 from .dense.qwen2 import Qwen2Dense7BConfig, Qwen2DenseConfig
 from .dense.qwen3 import Qwen3Dense0P6BConfig, Qwen3Dense4BConfig, Qwen3Dense8BConfig, Qwen3DenseConfig
 from .moe.deepseek_v3 import DeepSeekV3Config
+from .moe.deepseek_v4 import DeepSeekV4Config
 from .moe.gpt_oss import GptOss21BA3P6Config, GptOss117BA5P8Config, GptOssConfig
 from .moe.moe import BalancingLossConfig, MoE, MoEConfig, MoEModelOutputs, ZLossConfig
 from .moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig, Qwen3MoEFoPEConfig
@@ -39,6 +40,7 @@ model_mapping = {
     "internvl-3.5-1b-hf": InternVL3P5Dense1BConfig(),
     "internvl-3.5-30b-a3b-hf": InternVL3P5MoE30BA3Config(),
     "qwen3.5-vl-4b": Qwen3_5_VLDense4BConfig(),
+    "deepseek-v4-flash": DeepSeekV4Config(),
 }
 
 
@@ -49,7 +51,19 @@ def get_model_config(model_alias: str):
 
 def get_model_config_from_hf(model_path: Path):
     """Convert HuggingFace config to XTuner."""
-    cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    # `transformers<5.10` does not ship a `DeepseekV4Config`; AutoConfig raises a
+    # ValueError on `model_type == "deepseek_v4"` unless the release also ships
+    # `*.py` modeling files (BF16 reference dirs do not). Read config.json
+    # directly in that case so DeepSeekV4Config.from_hf can take over.
+    import json
+    from types import SimpleNamespace
+
+    try:
+        cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    except ValueError:
+        config_json_path = Path(model_path) / "config.json"
+        with open(config_json_path, encoding="utf-8") as f:
+            cfg = SimpleNamespace(**json.load(f))
 
     if cfg.model_type == "qwen3_moe":
         return Qwen3MoEConfig.from_hf(model_path)
@@ -63,6 +77,8 @@ def get_model_config_from_hf(model_path: Path):
         return GptOssConfig.from_hf(model_path)
     elif cfg.model_type == "deepseek_v3":
         return DeepSeekV3Config.from_hf(model_path)
+    elif cfg.model_type == "deepseek_v4":
+        return DeepSeekV4Config.from_hf(model_path)
     else:
         raise ValueError(f"Unsupported model type: {cfg.model_type}")
 
@@ -103,4 +119,5 @@ __all__ = [
     "XTunerBaseModelConfig",
     "Qwen3_5_VLMoE35BA3Config",
     "Qwen3_5_VLDense4BConfig",
+    "DeepSeekV4Config",
 ]
