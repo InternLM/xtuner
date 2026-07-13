@@ -4,7 +4,7 @@ from typing import Callable, Literal, Optional, Protocol, cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from typing_extensions import Self, deprecated, overload
 
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
@@ -103,10 +103,71 @@ class RopeParametersConfig(BaseModel):
     fope_sep_head: bool | None = None
     num_inv_freq: int | None = None
 
+    # For DeepSeek-V4 dual rope.
+    # `compress_rope_theta` is a second theta used by compressed-DSA layers.
+    # `compress_ratios` is per-layer (length = num_hidden_layers, optionally + MTP);
+    # 0 marks pure sliding-window layers (use `rope_theta`), other values mark
+    # compressed-DSA layers (use `compress_rope_theta`). The rope module produces
+    # both freq sets; layer-level selection happens in attention modules.
+    compress_rope_theta: float | None = None
+    compress_ratios: list[int] | None = None
+
     @property
     def use_fope(self) -> bool:
         """Check if FoPE is enabled."""
         return self.fope_init_factor is not None or self.fope_sep_head is not None or self.num_inv_freq is not None
+
+    @model_validator(mode="after")
+    def _validate_compress_pair(self) -> "RopeParametersConfig":
+        # `compress_ratios` is meaningless without `compress_rope_theta`; refuse partial
+        # configs so a user cannot silently fall back to single-rope behavior for V4.
+        if self.compress_ratios is not None and self.compress_rope_theta is None:
+            raise ValueError(
+                "compress_rope_theta must be set when compress_ratios is set (dual rope requires both fields)."
+            )
+        return self
+
+    @classmethod
+    def _read_compress_ratios(cls, hf_config) -> list[int] | None:
+        # DeepSeek-V4 ships per-layer compression as a flat `compress_ratios` vector
+        # (0 / 4 / 128 per layer). transformers >= 5.9 pops that key in
+        # `DeepseekV4Config.__post_init__` and re-expresses it as `layer_types` plus a
+        # `compress_rates` lookup, so reading the scalar list alone silently yields
+        # `None` for every released V4 checkpoint and leaves the caller on its default.
+        # Recover the vector from whichever of the two schemas the config carries.
+        hf_compress_ratios = getattr(hf_config, "compress_ratios", None)
+        if hf_compress_ratios is not None:
+            return list(hf_compress_ratios)
+
+        layer_types = getattr(hf_config, "layer_types", None)
+        if not layer_types:
+            return None
+        compress_rates = getattr(hf_config, "compress_rates", None) or {}
+        # `sliding_attention` has no entry in `compress_rates`; it is the ratio-0 mode.
+        return [int(compress_rates.get(layer_type, 0)) for layer_type in layer_types]
+
+    @classmethod
+    def _flatten_dual_rope_parameters(cls, hf_rope_parameters: dict) -> dict:
+        # transformers >= 5.9 rewrites DeepSeek-V4's flat rope config into a rope-type-keyed
+        # nesting: ``{"main": {rope_type: "default", rope_theta: 10000, ...},
+        # "compress": {rope_type: "yarn", rope_theta: 160000, factor, beta_*, ...}}``.
+        # A flat reader sees no `factor` / `beta_fast` / `original_max_position_embeddings`
+        # at the top level and silently keeps its own defaults, which is only invisible
+        # because the released V4-Flash values happen to equal XTuner's V4 defaults.
+        #
+        # Flatten back to the single-rope schema this class models: the scaling
+        # (YaRN) parameters describe the compressed branch — the reference builds the
+        # sliding-window branch with interpolation disabled — while `rope_theta` stays the
+        # uncompressed base. `partial_rotary_factor` is deliberately dropped: it encodes
+        # `qk_rope_head_dim / head_dim`, which XTuner reads from the attention config
+        # instead of folding into the rope dim.
+        main = hf_rope_parameters.get("main")
+        compress = hf_rope_parameters.get("compress")
+        if not isinstance(main, dict) or not isinstance(compress, dict):
+            return hf_rope_parameters
+        flat = {k: v for k, v in compress.items() if k != "partial_rotary_factor"}
+        flat["rope_theta"] = main.get("rope_theta", flat.get("rope_theta"))
+        return flat
 
     @classmethod
     @lru_cache(maxsize=None)
@@ -119,9 +180,14 @@ class RopeParametersConfig(BaseModel):
 
         Result is cached since model_fields is static after class definition.
         """
+        # `compress_rope_theta`/`compress_ratios` were added by PR2 (dual rope) but do not have a
+        # `RopeScalingConfig` counterpart (RopeScalingConfig uses `extra="forbid"`); excluding them
+        # here keeps the backward-compat `rope_scaling_cfg` property valid for V4 configs. Any new
+        # `RopeParametersConfig` field that is V4-specific (no rope_scaling analog) should be added.
+        _no_scaling_analog = {"rope_theta", "compress_rope_theta", "compress_ratios"}
         mapping: dict[str, str] = {}
         for field_name in cls.model_fields.keys():
-            if field_name == "rope_theta":
+            if field_name in _no_scaling_analog:
                 continue
             elif field_name == "rope_type":
                 mapping["type"] = "rope_type"
@@ -197,9 +263,23 @@ class RopeParametersConfig(BaseModel):
         kwargs: dict = default_value_dict or {}
         default_rope_theta = kwargs["rope_theta"] if "rope_theta" in kwargs else 10000.0
 
+        # DeepSeek-V4 carries dual-rope metadata as top-level HF config attributes,
+        # parallel to `rope_theta`. Read them here so both 4.57.0 (rope_scaling) and
+        # 5.2.0 (rope_parameters) code paths inherit the same values.
+        hf_compress_rope_theta = getattr(hf_config, "compress_rope_theta", None)
+        if hf_compress_rope_theta is not None:
+            kwargs["compress_rope_theta"] = hf_compress_rope_theta
+        hf_compress_ratios = cls._read_compress_ratios(hf_config)
+        if hf_compress_ratios is not None:
+            kwargs["compress_ratios"] = hf_compress_ratios
+
         hf_rope_parameters = getattr(hf_config, "rope_parameters", None)
         hf_rope_scaling = getattr(hf_config, "rope_scaling", None)
         hf_rope_theta = getattr(hf_config, "rope_theta", None)
+        if isinstance(hf_rope_parameters, dict):
+            hf_rope_parameters = cls._flatten_dual_rope_parameters(hf_rope_parameters)
+        if isinstance(hf_rope_scaling, dict):
+            hf_rope_scaling = cls._flatten_dual_rope_parameters(hf_rope_scaling)
         if isinstance(hf_rope_parameters, dict):
             # Try rope_parameters dict (transformers 5.2.0)
             # In 5.2.0, all rope params are consolidated into rope_parameters
@@ -378,6 +458,218 @@ class RotaryEmbedding(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
     __call__ = nn.Module.__call__
+
+
+class _RopeHeadDimProxy:
+    """Lightweight ``TransformerConfig`` proxy that overrides ``head_dim``.
+
+    HF's rope_init_fns (default / yarn / llama3 / longrope) read
+    ``getattr(config, "head_dim", ...)`` to size ``inv_freq`` and to compute
+    the yarn extrapolation boundaries. DeepSeek-V3 and V4 want those derived
+    from ``qk_rope_head_dim`` (the rope-carrying suffix), not from the full
+    per-head dim. HF's own ``DeepseekV3Config.__init__`` does
+    ``self.head_dim = qk_rope_head_dim`` for the same reason
+    (transformers/models/deepseek_v3/configuration_deepseek_v3.py:204).
+    XTuner's ``TransformerConfig.head_dim`` is a ``@computed_field`` returning
+    ``attention.head_dim`` (= 512 for V4 MLA), so the same in-place override
+    isn't available; we wrap the cfg at rope-init time instead.
+    """
+
+    __slots__ = ("_wrapped", "head_dim")
+
+    def __init__(self, wrapped, head_dim: int) -> None:
+        object.__setattr__(self, "_wrapped", wrapped)
+        object.__setattr__(self, "head_dim", head_dim)
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+
+class DualRotaryEmbedding(nn.Module):
+    """Rotary embedding with two `inv_freq` sets driven by two distinct bases.
+
+    DeepSeek-V4-Flash interleaves pure sliding-window attention layers and DSA
+    (compressed) layers; each kind uses a different rope base — `rope_theta`
+    and `compress_rope_theta` respectively. Position-interpolation scaling
+    (`rope_parameters_cfg.rope_type`, i.e. yarn) applies to the compressed base
+    only; the dense base is always plain RoPE, and neither base rescales
+    cos/sin by yarn's `mscale`. This module precomputes both `inv_freq` tensors once and lets
+    callers pick which one to use per forward via the keyword-only
+    `use_compressed` flag. It produces `(cos, sin)` with the same shape and
+    dtype contract as :class:`RotaryEmbedding`, so attention modules see a
+    drop-in replacement.
+
+    The module is intentionally model-level (single instance), not
+    layer-aware: the per-layer choice of `compress_ratios[layer_idx] == 0`
+    versus `> 0` is owned by attention modules.
+
+    Args:
+        config (TransformerConfig): Model config; `rope_parameters_cfg` must
+            have both `rope_theta` and `compress_rope_theta` set.
+        device (torch.device | None): Initial device for the `inv_freq`
+            buffers.
+    """
+
+    inv_freq_dense: torch.Tensor
+    inv_freq_compressed: torch.Tensor
+
+    def __init__(self, config, device=None):
+        from xtuner.v1.model.base import TransformerConfig
+
+        config = cast(TransformerConfig, config)
+        super().__init__()
+
+        assert config.rope_parameters_cfg is not None, "DualRotaryEmbedding requires rope_parameters_cfg to be set."
+        assert config.rope_parameters_cfg.compress_rope_theta is not None, (
+            "DualRotaryEmbedding requires compress_rope_theta to be set."
+        )
+
+        self.max_seq_len_cached = config.max_position_embeddings
+        self.original_max_seq_len = config.max_position_embeddings
+        self.rope_type = config.rope_parameters_cfg.rope_type
+        self.config = config
+
+        # ``DualRotaryEmbedding`` is V4-specific (predicated on
+        # ``compress_rope_theta`` above), and V4 attention is always DSA which
+        # exposes ``qk_rope_head_dim`` — the rope-carrying suffix length.
+        # We pass this through to the rope_init_fn as the "head dim" so
+        # ``inv_freq`` is sized to ``qk_rope_head_dim/2``, matching the
+        # ``DualRotaryEmbedding.forward`` shape contract (and HF V3/V4 which
+        # also derive rope from ``qk_rope_head_dim``).
+        assert hasattr(config.attention, "qk_rope_head_dim"), (
+            "DualRotaryEmbedding requires attention config to expose qk_rope_head_dim; "
+            f"got {type(config.attention).__name__}"
+        )
+        self._qk_rope_head_dim: int = config.attention.qk_rope_head_dim
+
+        assert self.rope_type in ["default", "linear", "yarn", "llama3"], (
+            f"Unsupported rope_type: {self.rope_type}. Supported types are: 'default', 'linear', 'yarn', 'llama3'."
+        )
+
+        self.rope_init_fn: Callable = compute_default_rope_parameters
+        if self.rope_type != "default":
+            self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+
+        dense_theta = config.rope_parameters_cfg.rope_theta
+        compressed_theta = config.rope_parameters_cfg.compress_rope_theta
+
+        # Position-interpolation scaling (`rope_type`, i.e. YaRN for V4) belongs to the
+        # *compressed* base only. The V4 reference builds the sliding-window layers'
+        # `freqs_cis` with `original_seq_len=0`, which is exactly its "no interpolation"
+        # switch, and HF's `DeepseekV4Config.__post_init__` mirrors that by emitting
+        # `rope_parameters={"main": {"rope_type": "default", ...}, "compress": {"rope_type":
+        # "yarn", ...}}`. Applying YaRN to the dense base as well shifts every
+        # sliding-window layer's `inv_freq` (up to ~85% relative on the low-frequency dims).
+        inv_freq_dense, _ = self._init_inv_freq(dense_theta, device, rope_init_fn=compute_default_rope_parameters)
+        inv_freq_compressed, _ = self._init_inv_freq(compressed_theta, device)
+
+        # V4 never rescales cos/sin by YaRN's `mscale`: the reference `precompute_freqs_cis`
+        # returns unit-modulus `polar(ones, freqs)`, and HF pins `attention_factor=1.0` on
+        # the compress rope for the same reason. Whatever the upstream YaRN helper derives
+        # (0.1·ln(factor)+1 ≈ 1.277 at factor=16) is therefore discarded here.
+        self.attention_scaling = 1.0
+
+        self.register_buffer("inv_freq_dense", inv_freq_dense.to(DEVICE), persistent=False)
+        self.register_buffer("inv_freq_compressed", inv_freq_compressed.to(DEVICE), persistent=False)
+
+    @torch.no_grad()
+    def forward(
+        self,
+        x: torch.Tensor,
+        position_ids: torch.LongTensor,
+        *,
+        use_compressed: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return `(cos, sin)` using either dense or compressed base.
+
+        Args:
+            x (torch.Tensor): Hidden states; only `dtype` and `device` are read.
+            position_ids (torch.LongTensor): Position ids of shape `[B, S]`.
+            use_compressed (bool): If `True` use `compress_rope_theta` freqs;
+                otherwise use `rope_theta` freqs.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: ``(cos_full, sin_full_signed)``
+            of shape ``[B, S, qk_rope_head_dim]`` — full per-head RoPE dim,
+            laid out so the per-layer rotation in
+            :func:`xtuner.v1.module.attention.dsa._dsa_rope._apply_rope` reduces to one
+            ``x * cos_full + flip_pairs(x) * sin_full_signed``. The pair-
+            broadcast and sign pattern that the interleaved
+            ``[[cos, -sin], [sin, cos]]`` rotation needs are folded into
+            ``cos_full`` and ``sin_full_signed`` here (once per MB) so 43
+            ``_apply_rope`` calls do not each ``repeat_interleave``,
+            ``unbind`` and ``stack`` to recover the same layout — that chain
+            compiles to a stride-2 read / stride-2 write kernel in inductor.
+
+            Specifically::
+
+                cos_full[..., 2i]   = cos_full[..., 2i+1] = cos_half[..., i]
+                sin_full_signed[..., 2i]   = -sin_half[..., i]
+                sin_full_signed[..., 2i+1] = +sin_half[..., i]
+
+            so each output position ``2i`` reads ``x[2i]`` and the flipped
+            pair-neighbour ``x[2i+1]`` against the right ``(cos, -sin)``
+            factors, and position ``2i+1`` reads ``x[2i+1]`` and ``x[2i]``
+            against ``(cos, sin)`` — the standard interleaved RoPE rotation,
+            mathematically identical to HF's ``DeepseekV4RotaryEmbedding`` +
+            ``apply_rotary_pos_emb_interleave`` and the V4-Flash reference
+            (``inference/kernel.py``).
+        """
+        inv_freq = self.inv_freq_compressed if use_compressed else self.inv_freq_dense
+
+        inv_freq_expanded = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        position_ids_expanded = position_ids[:, None, :].float()
+        device_type = x.device.type
+        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            freqs = (inv_freq_expanded.float().to(x.device) @ position_ids_expanded.float()).transpose(1, 2)
+            cos_half = freqs.cos()
+            sin_half = freqs.sin()
+
+        cos_half = cos_half * self.attention_scaling
+        sin_half = sin_half * self.attention_scaling
+
+        # Materialise the D-dim cos / signed-sin layout the per-layer kernel
+        # consumes. ``repeat_interleave(2, -1)`` and ``stack(... , -1).flatten(-2)``
+        # are inductor-unfriendly when they appear inside a compiled training
+        # graph (their backward path mis-lowers to NaN-producing strided
+        # kernels — see the dsa.py ``_apply_rope`` notes), but here they live
+        # inside ``@torch.no_grad()`` and run once per micro-batch in eager
+        # mode, so the cost is one-shot and the autograd-graph hazard never
+        # materialises.
+        cos_full = cos_half.repeat_interleave(2, dim=-1)
+        sin_full_signed = torch.stack([-sin_half, sin_half], dim=-1).flatten(-2)
+
+        return cos_full.to(dtype=x.dtype), sin_full_signed.to(dtype=x.dtype)
+
+    @overload  # type: ignore
+    def __call__(  # type: ignore
+        self,
+        x: torch.Tensor,
+        position_ids: torch.LongTensor,
+        *,
+        use_compressed: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+    __call__ = nn.Module.__call__
+
+    def _init_inv_freq(self, base: float, device, rope_init_fn: Callable | None = None) -> tuple[torch.Tensor, float]:
+        # Reuse the upstream yarn/default rope_init_fn unchanged. We temporarily swap
+        # `rope_parameters_cfg.rope_theta` on a copy of the config so the yarn math sees
+        # the right base; cloning preserves all other yarn parameters bit-for-bit.
+        original_cfg = self.config.rope_parameters_cfg
+        assert original_cfg is not None
+        if base == original_cfg.rope_theta:
+            shim_cfg = self.config
+        else:
+            patched_rope_cfg = original_cfg.model_copy(update={"rope_theta": base})
+            shim_cfg = self.config.model_copy(update={"rope_parameters_cfg": patched_rope_cfg})
+        # Override ``head_dim`` for the rope_init_fn so ``inv_freq`` and yarn's
+        # extrapolation boundaries are sized to ``qk_rope_head_dim`` rather
+        # than the full attention head_dim. See ``_RopeHeadDimProxy``.
+        proxy_cfg = _RopeHeadDimProxy(shim_cfg, self._qk_rope_head_dim)
+        inv_freq, attention_scaling = (rope_init_fn or self.rope_init_fn)(proxy_cfg, device)
+        return inv_freq, attention_scaling
 
 
 def _compute_fope_parameters(
@@ -596,6 +888,11 @@ def get_rope_embedding(config, device=None) -> RotaryEmbeddingProtocol:
     config = cast(TransformerConfig, config)
     rope_parameters_cfg = config.rope_parameters_cfg
 
+    # Dual rope is dispatched purely on the presence of `compress_rope_theta`.
+    # We deliberately avoid model_type-based branching here so any model that
+    # opts into the dual-base convention gets the dispatch for free.
+    if rope_parameters_cfg is not None and rope_parameters_cfg.compress_rope_theta is not None:
+        return DualRotaryEmbedding(config, device=device)  # type: ignore[return-value]
     if rope_parameters_cfg is not None and rope_parameters_cfg.rope_type == "qwen3_vl":
         return Qwen3VLTextRotaryEmbedding(config, device=device)
     elif rope_parameters_cfg is not None and rope_parameters_cfg.use_fope:

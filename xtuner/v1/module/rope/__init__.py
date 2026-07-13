@@ -1,4 +1,5 @@
 from .rope import (
+    DualRotaryEmbedding,
     Qwen3VLTextRotaryEmbedding,
     RopeParametersConfig,
     RopeScalingConfig,
@@ -9,6 +10,7 @@ from .rope import (
 
 
 __all__ = [
+    "DualRotaryEmbedding",
     "RopeParametersConfig",
     "RopeScalingConfig",
     "RotaryEmbedding",
