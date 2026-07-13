@@ -49,6 +49,7 @@ class SequenceContext:
 
     # moe routed_experts
     rollout_routed_experts: torch.Tensor | None
+    offload_rollout_routed_experts: bool
 
     # Private backing attributes for SP shard reconstruction
     _raw_input_ids: torch.LongTensor | None
@@ -77,6 +78,7 @@ class SequenceContext:
         inputs_embeds: torch.FloatTensor | None = None,
         num_img_tokens: list[list[int]] | None = None,
         rollout_routed_experts: torch.Tensor | None = None,
+        offload_rollout_routed_experts: bool = False,
         # SP shard metadata: private, accessed via properties below
         raw_input_ids: torch.LongTensor | None = None,
         raw_inputs_embeds: torch.FloatTensor | None = None,
@@ -110,6 +112,7 @@ class SequenceContext:
         self.inputs_embeds = inputs_embeds
         self.num_img_tokens = num_img_tokens
         self.rollout_routed_experts = rollout_routed_experts
+        self.offload_rollout_routed_experts = offload_rollout_routed_experts
         self._raw_input_ids = raw_input_ids
         self._raw_inputs_embeds = raw_inputs_embeds
         self._shard_start = shard_start
@@ -232,6 +235,7 @@ class SequenceContext:
                 inputs_embeds=self.inputs_embeds,
                 num_img_tokens=self.num_img_tokens,
                 rollout_routed_experts=self.rollout_routed_experts,
+                offload_rollout_routed_experts=self.offload_rollout_routed_experts,
                 raw_input_ids=cast(torch.LongTensor, pad_input_ids),
                 shard_start=start,
                 shard_size=shard_size,
@@ -258,6 +262,7 @@ class SequenceContext:
         num_img_tokens = []
         position_ids = []
         rollout_routed_experts = []
+        offload_rollout_routed_experts = False
 
         for seq_ctx in sequence_context_list:
             assert seq_ctx.sequence_parallel_mesh is None
@@ -287,6 +292,7 @@ class SequenceContext:
                 num_img_tokens.extend(seq_ctx.num_img_tokens)
             if seq_ctx.rollout_routed_experts is not None:
                 rollout_routed_experts.append(seq_ctx.rollout_routed_experts)
+            offload_rollout_routed_experts = offload_rollout_routed_experts or seq_ctx.offload_rollout_routed_experts
             position_ids.append(seq_ctx.position_ids)
         assert len(set(device)) == 1, f"All sequence contexts must be on the same device. Got {set(device)}"
 
@@ -310,6 +316,7 @@ class SequenceContext:
             num_img_tokens=num_img_tokens if num_img_tokens else None,
             position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
             rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None,  # type: ignore
+            offload_rollout_routed_experts=offload_rollout_routed_experts,
         )
 
     @property
@@ -474,6 +481,9 @@ class SequenceContext:
             inputs_embeds=overrides.get("inputs_embeds", self.inputs_embeds),
             num_img_tokens=overrides.get("num_img_tokens", self.num_img_tokens),
             rollout_routed_experts=overrides.get("rollout_routed_experts", self.rollout_routed_experts),
+            offload_rollout_routed_experts=overrides.get(
+                "offload_rollout_routed_experts", self.offload_rollout_routed_experts
+            ),
             raw_input_ids=overrides.get("raw_input_ids", self._raw_input_ids),
             raw_inputs_embeds=overrides.get("raw_inputs_embeds", self._raw_inputs_embeds),
             shard_start=overrides.get("shard_start", self._shard_start),
@@ -528,7 +538,11 @@ class SequenceContext:
         if self.image_grid_thw is not None and hasattr(self.image_grid_thw, "to"):
             self.image_grid_thw = self.image_grid_thw.to(device)  # type: ignore
 
-        if self.rollout_routed_experts is not None and hasattr(self.rollout_routed_experts, "to"):
+        if (
+            self.rollout_routed_experts is not None
+            and not self.offload_rollout_routed_experts
+            and hasattr(self.rollout_routed_experts, "to")
+        ):
             self.rollout_routed_experts = self.rollout_routed_experts.to(device)  # type: ignore
 
         self.device = device
@@ -560,4 +574,5 @@ class SequenceContext:
             "inputs_embeds": self.inputs_embeds,
             "num_img_tokens": self.num_img_tokens,
             "rollout_routed_experts": self.rollout_routed_experts,
+            "offload_rollout_routed_experts": self.offload_rollout_routed_experts,
         }
