@@ -1,4 +1,4 @@
-from .aux_loss import AuxLossConfig, AuxLossContext
+from .aux_loss import AuxLossConfig, AuxLossContext, AuxLossInputs
 from .base_loss_ctx import BaseLossConfig, BaseLossContext, BaseLossKwargs
 from .ce_loss import CELossConfig, CELossContext, LMHeadLossContext
 from .chunk_loss import ChunkLoss
@@ -20,6 +20,7 @@ __all__ = [
     "BalancingLossKwargs",
     "AuxLossConfig",
     "AuxLossContext",
+    "AuxLossInputs",
     "ZLossConfig",
     "ZLossContext",
     "ZLossKwargs",

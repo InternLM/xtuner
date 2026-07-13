@@ -1,12 +1,7 @@
-import os
 import re
 
 import torch
 
-from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.utils.activation_offload import async_save_on_cpu
-
-from .moe import MoELossContextDict, MoEModelOutputs
 from .qwen3 import Qwen3MoE, Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
 
 
@@ -108,130 +103,18 @@ class Qwen3VLTextMoE(Qwen3MoE):
         hidden_states[visual_pos_masks, :] = local_this
         return hidden_states
 
-    def _forward(
-        self,
-        seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        loss_ctx: MoELossContextDict | None,
-        return_router_logits: bool = False,
-    ) -> MoEModelOutputs:
-        if seq_ctx.deepstack_visual_embeds is None:
-            return super()._forward(seq_ctx, loss_ctx, return_router_logits)
-
-        input_ids = seq_ctx.input_ids
-        position_ids = seq_ctx.position_ids
-
-        if input_ids is not None:
-            hidden_states = self.embed_tokens(input_ids)
-        else:
-            hidden_states = seq_ctx.inputs_embeds
-
-        # create position embeddings to be shared across the decoder layers
-        assert position_ids is not None
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-        output: dict = {}  # type: ignore
-        if self.config.return_hidden_states:
-            output["hidden_states"] = []
-
-        # Mirror MoE._forward: only allocate the per-layer router dicts when a
-        # downstream consumer actually asked for them.
-        keep_router = self.config.return_router_results or return_router_logits
-        if keep_router:
-            output["router_logits"] = {}
-            output["router_weights"] = {}
-        else:
-            output["router_logits"] = None
-            output["router_weights"] = None
-
-        self._mark_dynamic(seq_ctx)
-        balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
-        # Hoisted out of the per-layer accumulate path: mask is constant across layers.
-        nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
-        non_pad_token = nonpad_indices.numel()
-        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
-
-        # =====================================================
+    def _post_layer(self, hidden_states, idx, seq_ctx):
+        # Inject the matching deepstack visual embeds after each of the first
+        # ``len(deepstack_visual_embeds)`` layers; text-only batches (no visual
+        # embeds) fall through unchanged. Everything else in the forward — embed,
+        # rope, the offload window, the final norm/aux finalize — uses the MoE base.
         deepstack_visual_embeds = seq_ctx.deepstack_visual_embeds
-        visual_pos_masks = seq_ctx.visual_pos_masks
-        # =====================================================
-
-        for idx, decoder_layer in self.layers.items():
-            if int(idx) < self.config.first_k_dense_replace:
-                hidden_states = decoder_layer(
-                    hidden_states,
-                    position_embeddings=position_embeddings,
-                    seq_ctx=seq_ctx,
-                )
-            else:
-                if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
-                    offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_stream
-                    with async_save_on_cpu(
-                        h2d_stream=offload_stream,
-                        d2h_stream=offload_stream,
-                        block_idx=int(idx),
-                        depth=len(self.layers),
-                        custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
-                    ):
-                        hidden_states, router_results, router_weights = decoder_layer(
-                            hidden_states,
-                            position_embeddings=position_embeddings,
-                            seq_ctx=seq_ctx,
-                        )
-
-                else:
-                    hidden_states, router_results, router_weights = decoder_layer(
-                        hidden_states,
-                        position_embeddings=position_embeddings,
-                        seq_ctx=seq_ctx,
-                    )
-
-                if keep_router:
-                    output["router_logits"][f"layer{idx}"] = router_results
-                    output["router_weights"][f"layer{idx}"] = router_weights
-                hidden_states = self.aux_loss.accumulate(
-                    selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
-                    selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
-                    hidden_states=hidden_states,
-                    balancing_ctx=balancing_ctx,
-                    z_ctx=z_ctx,
-                    num_tokens_local=non_pad_token,
-                    num_tokens_global=num_tokens_global,
-                    world_size=z_world_size,
-                )
-
-            if deepstack_visual_embeds is not None and ((idx := int(idx)) in range(len(deepstack_visual_embeds))):
-                assert visual_pos_masks is not None
-                hidden_states = self._deepstack_process(hidden_states, visual_pos_masks, deepstack_visual_embeds[idx])
-
-            if self.config.return_hidden_states:
-                output["hidden_states"].append(hidden_states)
-
-        hidden_states = self.norm(hidden_states)
-
-        # Get LM loss context from dict
-        lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
-        loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
-        output["loss"] = loss
-        output["logits"] = logits
-        output["extra_info"] = extra_info
-
-        balancing_loss, z_loss, tokens_per_expert_global = self.aux_loss.finalize(
-            balancing_ctx=balancing_ctx,
-            z_ctx=z_ctx,
-            non_pad_token=non_pad_token,
-        )
-        if balancing_loss is not None:
-            output["balancing_loss"] = balancing_loss
-        if z_loss is not None:
-            output["z_loss"] = z_loss
-        output["tokens_per_expert_global"] = tokens_per_expert_global
-
-        if keep_router:
-            # TODO: Moving router logits to CPU is costly.
-            for layer_name, router_logits in output["router_logits"].items():
-                output["router_logits"][layer_name] = router_logits.detach().unsqueeze(0)
-
-        return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
+        if deepstack_visual_embeds is not None and int(idx) in range(len(deepstack_visual_embeds)):
+            assert seq_ctx.visual_pos_masks is not None
+            hidden_states = self._deepstack_process(
+                hidden_states, seq_ctx.visual_pos_masks, deepstack_visual_embeds[int(idx)]
+            )
+        return hidden_states
 
 
 class Qwen3VLTextMoE30BA3Config(Qwen3MoE30BA3Config):

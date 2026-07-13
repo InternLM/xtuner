@@ -1,6 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import contextlib
 import os
 import types
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Self, Sequence, TypedDict, cast
 
@@ -28,6 +30,7 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import (
     AuxLossConfig,
     AuxLossContext,
+    AuxLossInputs,
     BalancingLossConfig,
     BalancingLossContext,
     BaseLossContext,
@@ -101,7 +104,15 @@ class MoEModelOutputs(ModelOutputs):
     router_weights: dict[str, torch.Tensor] | None = None
     balancing_loss: torch.Tensor | None = None
     z_loss: torch.Tensor | None = None
-    tokens_per_expert_global: torch.Tensor
+    # Optional so models with no MoE-routed layer this step (e.g. V4 smoke
+    # configs where `num_hash_layers >= num_hidden_layers` makes every layer
+    # hash-routed) can emit `None` instead of fabricating a tensor.
+    # `internal_metrics.py` already short-circuits on `is None`.
+    tokens_per_expert_global: torch.Tensor | None = None
+    # Per-row routed-layer name aligned with ``tokens_per_expert_global`` rows (``"layer{idx}"``
+    # or ``"mtp_layer{idx}"``), so ``update_bias`` resolves each row back to its router by name
+    # instead of re-deriving the score-routed layer order positionally.
+    aux_loss_layer_names: list[str] | None = None
     mtp_loss: torch.Tensor | None = None
 
     def free_nongrad_feature(self):
@@ -130,6 +141,26 @@ class MoELossContextDict(TypedDict):
     balancing: BalancingLossContext | None
     z_loss: ZLossContext | None
     mtp: list[BaseLossContext] | None
+
+
+class LayerInput(TypedDict):
+    """Everything a decoder layer needs for the single-sequence forward path.
+
+    Produced by :meth:`MoE._prepare_hidden_states`. Subclasses that thread extra per-layer inputs
+    extend this with their own fields (see DeepSeek-V4's ``V4LayerInput``); the base loop only reads
+    the fields it declares, so subclass extras ride along untouched.
+    """
+
+    hidden_states: torch.Tensor
+    position_embeddings: tuple[torch.Tensor, torch.Tensor]
+
+
+class LayerInputMB(TypedDict):
+    """Micro-batch counterpart of :class:`LayerInput`; every field is a per-
+    microbatch list."""
+
+    hidden_states_list: list[torch.Tensor]
+    position_embeddings: list[tuple[torch.Tensor, torch.Tensor]]
 
 
 class MoEConfig(TransformerConfig):
@@ -273,8 +304,77 @@ class MoE(BaseModel):
 
         return loss_ctx.get("balancing"), loss_ctx.get("z_loss")
 
+    def _build_aux_loss_inputs(
+        self,
+        loss_ctx: list[MoELossContextDict] | MoELossContextDict | None,
+        mask: torch.Tensor,
+    ) -> AuxLossInputs:
+        """Build the per-forward aux-loss inputs from a routing mask.
+
+        Both forward paths share this: split the aux-loss sub-contexts, locate non-pad tokens, and
+        bundle the non-pad selection with the balancing / z-loss contexts and token bookkeeping that
+        stay invariant across the decoder layers of one forward.
+
+        Args:
+            loss_ctx (list[MoELossContextDict] | MoELossContextDict | None): Per-microbatch loss
+                context(s); ``None`` when no aux loss is configured.
+            mask (torch.Tensor): Boolean token mask for this forward — a single sequence or the
+                micro-batches concatenated — used to select non-pad tokens.
+
+        Returns:
+            AuxLossInputs: the per-forward aux-loss inputs (non-pad indices, sub-contexts, and token
+            bookkeeping) reused at every ``accumulate`` and at ``finalize``.
+        """
+        balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
+        nonpad_indices = torch.nonzero(mask, as_tuple=True)[1]
+        non_pad_token = nonpad_indices.numel()
+        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, mask.device)
+        return AuxLossInputs(
+            nonpad_indices=nonpad_indices,
+            balancing_ctx=balancing_ctx,
+            z_ctx=z_ctx,
+            num_tokens_local=non_pad_token,
+            num_tokens_global=num_tokens_global,
+            world_size=z_world_size,
+        )
+
+    def _should_compute_aux_loss(self, layer_idx: int) -> bool:
+        # Extension hook for routers whose `router_results` is not shape-compatible with
+        # `aux_loss.accumulate` (e.g. HashRouter emits a `[1]` dummy logits tensor since
+        # it never scores). DeepSeekV4 overrides this for layers wired to HashRouter.
+        # Default keeps the existing score-routed behaviour unchanged.
+        return True
+
+    def get_layer_by_name(self, name: str) -> MoEDecoderLayer:
+        """Resolve a routed-layer name to the decoder layer that owns its
+        router.
+
+        Names follow the router-stats convention shared with ``MoEModelOutputs.router_logits``:
+        ``"layer{idx}"`` for a main decoder layer, ``"mtp_layer{idx}"`` for an MTP depth (whose
+        routed decoder layer is nested under ``MTPLayer.decoder_layer``). Centralizing the mapping
+        keeps the naming a single contract shared by aux-loss accumulation and bias update.
+
+        Args:
+            name (str): Routed-layer name, ``"layer{idx}"`` or ``"mtp_layer{idx}"``.
+
+        Returns:
+            MoEDecoderLayer: The decoder layer whose ``gate.router`` produced that name's count rows.
+        """
+        mtp_prefix = "mtp_layer"
+        if name.startswith(mtp_prefix):
+            assert self.mtp_block is not None, "Got an MTP routed-layer name but this model has no MTP block."
+            return cast(MoEDecoderLayer, self.mtp_block.layers[int(name[len(mtp_prefix) :])].decoder_layer)
+        layer_prefix = "layer"
+        assert name.startswith(layer_prefix), f"Unrecognized routed-layer name: {name!r}"
+        return cast(MoEDecoderLayer, self.layers[name[len(layer_prefix) :]])
+
     @torch.no_grad()
-    def update_bias(self, total_expert_counts_pre_iter, expected_loads):
+    def update_bias(
+        self,
+        total_expert_counts_pre_iter: torch.Tensor,
+        expected_loads: torch.Tensor,
+        layer_names: list[str],
+    ) -> None:
         """Implementation for the following paper:
         Auxiliary-Loss-Free Load Balancing Strategy for Mixture-of-Experts
         https://arxiv.org/abs/2408.15664
@@ -284,22 +384,23 @@ class MoE(BaseModel):
         if self.config.freeze_routers:
             return
 
-        first_k_dense_replace = self.config.first_k_dense_replace
         bias_update_speed = cast(NoAuxRouterConfig, self.config.router).router_bias_update_speed
-        n_layer, _ = total_expert_counts_pre_iter.size()
-
-        for i_layer in range(n_layer):
-            # 前 l 层是 mlp 层，跳过
-            gate = cast(MoEDecoderLayer, self.layers[str(first_k_dense_replace + i_layer)]).gate
-            e_score_correction_bias = cast(NoAuxRouter, gate.router).e_score_correction_bias
-            expected_load = expected_loads[i_layer]
-            current_loads = total_expert_counts_pre_iter[i_layer]
+        # Each count row carries the routed-layer name it was accumulated for (``layer_names``,
+        # aligned with the rows of ``total_expert_counts_pre_iter`` / ``expected_loads``). Resolving
+        # the name back to its layer keeps the row-to-router mapping explicit instead of re-deriving
+        # the score-routed layer order positionally.
+        for layer_name, expected_load, current_loads in zip(layer_names, expected_loads, total_expert_counts_pre_iter):
+            router = self.get_layer_by_name(layer_name).gate.router
+            # Only NoAuxRouter owns a learnable bias; other routers (e.g. HashRouter) never
+            # accumulate a count row, but guard anyway in case a future hybrid router does.
+            if not isinstance(router, NoAuxRouter):
+                continue
 
             load_diff = current_loads - expected_load
             update_mask = load_diff != 0  # 只更新需要调整的专家
             updates = torch.where(load_diff > 0, -bias_update_speed, bias_update_speed) * update_mask.float()
 
-            e_score_correction_bias.add_(updates)
+            router.e_score_correction_bias.add_(updates)
 
     def build_loss_ctx_batch(  # type: ignore[override]
         self,
@@ -400,7 +501,13 @@ class MoE(BaseModel):
         base_info = super().post_micro_batch_forward(batch_outputs)
         logs_info = base_info["logs_info"]
 
+        # No-MoE-layer step (e.g. V4 smoke where every layer is hash-routed):
+        # `tokens_per_expert_global` is None across micro-batches. Nothing to aggregate —
+        # logs simply omit `maxvio` for the step and bias updates have nothing to apply.
         first_tokens_per_expert = batch_outputs[0]["tokens_per_expert_global"]
+        if first_tokens_per_expert is None:
+            return cast(MoEBatchForwardInfo, base_info)
+
         tokens_per_expert_global = torch.zeros_like(first_tokens_per_expert)
         for output in batch_outputs:
             tokens_per_expert_global += output["tokens_per_expert_global"]
@@ -412,10 +519,78 @@ class MoE(BaseModel):
         logs_info["maxvio"] = maxvio.item()
 
         if self.need_update_bias:
-            self.update_bias(tokens_per_expert_global, avg_count_load)  # type: ignore
+            # Row order is identical across micro-batches (same layers accumulate every MB),
+            # so the layer-name mapping from any output describes the summed count rows.
+            aux_loss_layer_names = batch_outputs[0]["aux_loss_layer_names"]
+            self.update_bias(tokens_per_expert_global, avg_count_load, aux_loss_layer_names)  # type: ignore
 
         moe_info = cast(MoEBatchForwardInfo, base_info)
         return moe_info
+
+    def _prepare_hidden_states_mb(self, seq_ctx_list: list[SequenceContext]) -> LayerInputMB:
+        """Embed every micro-batch into a per-MB hidden-state list (mb
+        counterpart of :meth:`_prepare_hidden_states`).
+
+        Embedding and rope run once on the concatenated batch (one kernel for all micro-batches)
+        and are then split per micro-batch, so the decoder stack works in per-MB-list form
+        throughout. Subclasses with a transformed residual stream or extra per-layer inputs
+        override this and return the matching :class:`LayerInputMB` extended with their fields.
+
+        Args:
+            seq_ctx_list (list[SequenceContext]): One packed sequence per micro-batch.
+
+        Returns:
+            LayerInputMB: the per-microbatch ``hidden_states_list`` and per-MB rope list, threaded
+            to :meth:`_call_decoder_layer_mb` for every layer.
+        """
+        n_mb = len(seq_ctx_list)
+        if seq_ctx_list[0].input_ids is None:
+            cat_hidden_states = torch.cat([ctx.inputs_embeds for ctx in seq_ctx_list], dim=1)  # type: ignore
+        else:
+            cat_input_ids = torch.cat([ctx.input_ids for ctx in seq_ctx_list], dim=1)  # type: ignore
+            cat_hidden_states = self.embed_tokens(cat_input_ids)
+        # M-RoPE position_ids are 3D [axes, batch, seq] for VL while text-only ones are 2D
+        # [batch, seq]; -1 selects the seq dim in both cases.
+        cat_position_ids = torch.cat([ctx.position_ids for ctx in seq_ctx_list], dim=-1)  # type: ignore
+        cos, sin = self.rotary_emb(cat_hidden_states, cat_position_ids)  # type: ignore
+        position_embeddings_list = list(zip(cos.chunk(n_mb, dim=1), sin.chunk(n_mb, dim=1)))
+        # Clone the chunks so each micro-batch has its own storage: chunk() returns views into
+        # one tensor, and async_save_on_cpu's in-place offload aliases that shared storage
+        # (it produced nan grad norm). Dense-prefix models re-clone after the dense phase.
+        hidden_states_list = [c.clone() for c in cat_hidden_states.chunk(n_mb, dim=1)]
+        for seq_ctx in seq_ctx_list:
+            self._mark_dynamic(seq_ctx)
+        return {"hidden_states_list": hidden_states_list, "position_embeddings": position_embeddings_list}
+
+    def _call_decoder_layer_mb(
+        self,
+        decoder_layer,
+        idx: str,
+        hidden_states_list: list[torch.Tensor],
+        seq_ctx_list: list[SequenceContext],
+        layer_input: LayerInputMB,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+        """Invoke one MoE layer across all micro-batches (mb counterpart of
+        :meth:`_call_decoder_layer`).
+
+        The layer is called once carrying every micro-batch (it micro-batches internally for
+        Domino EP) and returns a flat ``3 * n_mb`` tuple. Subclasses that thread extra per-layer
+        inputs (from ``layer_input``) override this.
+
+        Returns:
+            tuple[list, list, list]: Per-micro-batch ``(hidden_states, router_logits, router_weights)``.
+        """
+        n_mb = len(hidden_states_list)
+        layer_results = decoder_layer(
+            *hidden_states_list,
+            position_embeddings=layer_input["position_embeddings"],
+            seq_ctx=seq_ctx_list,
+        )
+        return (
+            list(layer_results[:n_mb]),
+            list(layer_results[n_mb : 2 * n_mb]),
+            list(layer_results[2 * n_mb :]),
+        )
 
     def _micro_batch_forward(
         self,
@@ -425,235 +600,227 @@ class MoE(BaseModel):
     ) -> MoEModelOutputs:
         """Micro-batch forward pass for MoE model.
 
-        This method processes multiple micro-batches in parallel, similar to how MoEDecoderLayer handles micro-batching
-        at the layer level.
+        Mirrors :meth:`_forward` but over a list of micro-batches. Dense-prefix layers (if any)
+        run once on the concatenated batch; MoE layers run per micro-batch so Domino EP can
+        overlap dispatch/combine across micro-batches.
         """
         if self.config.return_hidden_states:
             raise NotImplementedError
 
         assert len(seq_ctx_list) == len(loss_ctx_list), "seq_ctx and loss_ctx must have same length"
+        n_mb = len(seq_ctx_list)
 
-        # Prepare input embeddings for all micro-batches
-        if seq_ctx_list[0].input_ids is None:
-            cat_hidden_states = torch.cat([ctx.inputs_embeds for ctx in seq_ctx_list], dim=1)  # type: ignore
-        else:
-            cat_input_ids = torch.cat([ctx.input_ids for ctx in seq_ctx_list], dim=1)  # type: ignore
-            cat_hidden_states = self.embed_tokens(cat_input_ids)
-        # M-RoPE position_ids are 3D [axes, batch, seq] for VL while text-only ones are 2D
-        # [batch, seq]; -1 selects the seq dim in both cases. Hard-coded dim=1 was a text-only
-        # assumption and produced a wrong-length cos/sin for VL under intra_layer_micro_batch.
-        cat_position_ids = torch.cat([ctx.position_ids for ctx in seq_ctx_list], dim=-1)  # type: ignore
-        cat_position_embeddings = self.rotary_emb(cat_hidden_states, cat_position_ids)  # type: ignore
-        position_embeddings_list = list(
-            zip(
-                cat_position_embeddings[0].chunk(len(seq_ctx_list), dim=1),
-                cat_position_embeddings[1].chunk(len(seq_ctx_list), dim=1),
-            )
-        )
+        layer_input = self._prepare_hidden_states_mb(seq_ctx_list)
+        hidden_states_list = layer_input["hidden_states_list"]
+        # Non-pad lookup + aux-loss inputs are invariant across layers; concatenate the per-MB masks
+        # so accumulate sees the same global token set the single-sequence path does.
         cat_mask = torch.cat([ctx.mask for ctx in seq_ctx_list], dim=1)
-        # Hoisted out of the per-layer accumulate path: mask is constant across layers,
-        # so the non-pad index lookup runs once per forward instead of once per (layer, ctx).
-        nonpad_indices = torch.nonzero(cat_mask, as_tuple=True)[1]
-        non_pad_token = nonpad_indices.numel()
+        aux_inputs = self._build_aux_loss_inputs(loss_ctx_list, cat_mask)
 
-        # Initialize output containers
-        output: dict = {}
-
-        # Only the logits side is ever exposed to callers in the micro-batch path; the
-        # weights side is not part of the returned schema, so we never accumulate it.
+        # Only the logits side is exposed per-MB (keep_router); the weights side is consumed by
+        # accumulate only, so it is never stashed per-MB.
         keep_router = self.config.return_router_results or return_router_logits
-        router_logits_list: list[dict[str, torch.Tensor]] = (
-            [{} for _ in range(len(seq_ctx_list))] if keep_router else []
-        )
-        balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx_list)
-        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, cat_mask.device)
+        router_logits_list: list[dict[str, torch.Tensor]] = [{} for _ in range(n_mb)] if keep_router else []
 
-        # Process through layers
-        cat_seq_ctx: SequenceContext | None = None
-
-        hidden_states_list: list[torch.Tensor] = []
-        moe_forward = False
-
-        for seq_ctx in seq_ctx_list:
-            self._mark_dynamic(seq_ctx)
+        # Dense prefix runs on the concatenated batch; no-op when first_k_dense_replace == 0.
+        hidden_states_list = self._run_dense_layers_mb(hidden_states_list, layer_input, seq_ctx_list)
 
         for idx, decoder_layer in self.layers.items():
             layer_idx = int(idx)
-
             if layer_idx < self.config.first_k_dense_replace:
-                if cat_seq_ctx is None:
-                    cat_seq_ctx = SequenceContext.cat(seq_ctx_list)
-                    self._mark_dynamic(cat_seq_ctx)
-                # Dense decoder layer - process concated hidden states
-                cat_hidden_states = decoder_layer(
-                    cat_hidden_states,
-                    position_embeddings=cat_position_embeddings,
-                    seq_ctx=cat_seq_ctx,
-                )
-            else:
-                if not moe_forward:
-                    # TODO: `i.clone()` here is weird. However, the current Implementation of
-                    # `async_save_on_cpu` is not friendly with `chunk` op (maybe caused by shared storage? not sure),
-                    # resulting in nan grad norm. So we have to clone the chunked tensors here to make sure each
-                    # hidden state has its own storage. This workaround may introduce extra memory and time cost, and
-                    # should be optimized in the future.
-                    hidden_states_list = [i.clone() for i in cat_hidden_states.chunk(len(seq_ctx_list), dim=1)]
-                    moe_forward = True
-                assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
-
-                if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
-                    with async_save_on_cpu(
-                        h2d_stream=self.offload_stream,
-                        d2h_stream=self.offload_stream,
-                        block_idx=layer_idx - self.config.first_k_dense_replace,
-                        group="text",
-                        custom_check_fn=lambda x: x.data_ptr()
-                        in [hidden_states.data_ptr() for hidden_states in hidden_states_list],
-                        prefetch=True,
-                        reserve_pin_memory=True,
-                    ):
-                        layer_results = decoder_layer(
-                            *hidden_states_list,
-                            position_embeddings=position_embeddings_list,
-                            seq_ctx=seq_ctx_list,
-                        )
-                else:
-                    layer_results = decoder_layer(
-                        *hidden_states_list,
-                        position_embeddings=position_embeddings_list,
-                        seq_ctx=seq_ctx_list,
-                    )
-                hidden_states = layer_results[: len(hidden_states_list)]
-                router_logits = layer_results[len(hidden_states_list) : len(hidden_states_list) * 2]
-                router_weights = layer_results[len(hidden_states_list) * 2 :]
-
-                # Update hidden states and (optionally) collect router logits.
-                # router_weights are only consumed by aux_loss.accumulate below, so we
-                # never stash them per-MB the way we do for logits.
-                for i, hidden_states in enumerate(hidden_states):
-                    hidden_states_list[i] = hidden_states
-                    if keep_router:
-                        router_logits_list[i][f"layer{idx}"] = self._maybe_offload_router(router_logits[i])
-
-                cat_router_weights = torch.cat(router_weights, dim=0)
-                cat_router_logits = torch.cat(router_logits, dim=0)
-                # Pin the per-layer z-loss to MB0's hidden_states stream. With multiple MBs, only
-                # one carrier may be chosen — all MBs converge into the same total_loss backward,
-                # so MB0's path traverses every aux-loss node exactly once.
-                hidden_states_list[0] = self.aux_loss.accumulate(
-                    selected_router_weights=cat_router_weights.index_select(0, nonpad_indices).contiguous().float(),
-                    selected_router_logits=cat_router_logits.index_select(0, nonpad_indices).contiguous().float(),
-                    hidden_states=hidden_states_list[0],
-                    balancing_ctx=balancing_ctx,
-                    z_ctx=z_ctx,
-                    num_tokens_local=non_pad_token,
-                    num_tokens_global=num_tokens_global,
-                    world_size=z_world_size,
+                continue
+            # One call per layer carrying all MBs. Offload stages the per-MB inputs on CPU; the
+            # block ring is indexed within the MoE sub-stack (dense layers never offload).
+            with self._activation_offload_ctx(
+                layer_idx - self.config.first_k_dense_replace, hidden_states_list, reserve_pin_memory=True
+            ):
+                hidden_states_list, router_logits, router_weights = self._call_decoder_layer_mb(
+                    decoder_layer, idx, hidden_states_list, seq_ctx_list, layer_input
                 )
 
-        assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
+            if keep_router:
+                for mb_idx in range(n_mb):
+                    router_logits_list[mb_idx][f"layer{idx}"] = self._maybe_offload_router(router_logits[mb_idx])
 
-        if self.mtp_block is not None:
-            assert self.config.mtp_config is not None
-
-            # Build a per-microbatch SequenceContext clone for MTP. We always run the MTP
-            # block on every micro-batch so domino EP can overlap dispatch/combine across
-            # micro-batches at each MTP depth; per-microbatch loss aggregation below skips
-            # the ones whose loss context is absent.
-            mtp_seq_ctx_list: list[SequenceContext] = []
-            for seq_ctx in seq_ctx_list:
-                assert seq_ctx.position_ids is not None
-                mtp_seq_ctx_list.append(
-                    seq_ctx.copy(
-                        input_ids=seq_ctx.input_ids.clone() if seq_ctx.input_ids is not None else None,
-                        position_ids=seq_ctx.position_ids.clone(),
-                        inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
-                    )
-                )
-
-            mtp_outputs_per_mb = self.mtp_block(
-                *hidden_states_list,
-                embed_tokens_fn=self.embed_tokens,
-                position_embeddings=position_embeddings_list,
-                seq_ctx=mtp_seq_ctx_list,
+            self._accumulate_layer_router_stats_mb(
+                layer_idx, router_logits, router_weights, hidden_states_list, aux_inputs
             )
 
-            mtp_losses = torch.tensor(0.0, device=DEVICE)
-            has_mtp_loss = False
-            for micro_batch_idx, (loss_ctx_dict, mtp_outputs) in enumerate(zip(loss_ctx_list, mtp_outputs_per_mb)):
-                mtp_loss_ctx_list = loss_ctx_dict.get("mtp")
-                if mtp_loss_ctx_list is None:
-                    continue
+        # Assemble the result from each stage's slice. MTP runs on the per-MB streams before they
+        # are concatenated for the final head.
+        output: dict = {}
+        output |= self._mtp_outputs_mb(
+            hidden_states_list, seq_ctx_list, loss_ctx_list, layer_input, router_logits_list
+        )
 
-                micro_batch_mtp_losses = torch.tensor(0.0, device=DEVICE)
-                for mtp_idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
-                    mtp_hidden_states, mtp_router_results, _ = mtp_hidden
-                    mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
-                    micro_batch_mtp_losses += mtp_loss
-
-                    if keep_router:
-                        router_logits_list[micro_batch_idx][f"mtp_layer{mtp_idx}"] = mtp_router_results
-
-                mtp_losses += micro_batch_mtp_losses / len(mtp_loss_ctx_list)
-                has_mtp_loss = True
-
-            if has_mtp_loss:
-                output["mtp_loss"] = mtp_losses * self.config.mtp_config.loss_scaling_factor
-
-        # Apply final norm to all micro-batches
-        cat_hidden_states = torch.cat(hidden_states_list, dim=1)
-        cat_hidden_states = self.norm(cat_hidden_states)
-
-        # Process final outputs for each micro-batch
-        # Extract LM loss context from dict
+        # Cat once across MBs so the final norm + lm_head run as single kernels. ``_finalize_hidden_states``
+        # is identity for the base; subclasses on an expanded residual stream collapse it here.
+        cat_hidden_states = self.norm(self._finalize_hidden_states(torch.cat(hidden_states_list, dim=1)))
         lm_loss_ctx_list = [loss_ctx_dict["lm"] for loss_ctx_dict in loss_ctx_list]
         cat_loss_ctx = type(lm_loss_ctx_list[0]).cat(lm_loss_ctx_list)
         loss, (logits, extra_info) = self.lm_head(cat_hidden_states, cast(LMHeadLossContext, cat_loss_ctx))
-
-        # Aggregate losses (mean across micro-batches)
         output["loss"] = loss.sum()
         moe_extra_info = ModelForwardExtraLogInfo()
         if extra_info:
             moe_extra_info.append(extra_info)
         output["extra_info"] = moe_extra_info
 
-        split_aux_output = self.aux_loss.finalize(
-            balancing_ctx=balancing_ctx,
-            z_ctx=z_ctx,
-            non_pad_token=non_pad_token,
-        )
-        balancing_loss, z_loss, tokens_per_expert_global = split_aux_output
-        if balancing_loss is not None:
-            output["balancing_loss"] = balancing_loss
-        if z_loss is not None:
-            output["z_loss"] = z_loss
-        output["tokens_per_expert_global"] = tokens_per_expert_global
-
+        output |= self._finalize_aux_loss_outputs(aux_inputs)
         if keep_router:
-            # TODO: Returning router logits is costly.
-            router_logits_dict: dict[str, torch.Tensor] = {}
-            layer_names = list(router_logits_list[0].keys())
-
-            for layer_name in layer_names:
-                layer_router_logits_list: list[torch.Tensor] = []
-                for micro_batch_idx in range(len(seq_ctx_list)):
-                    layer_router_logits_list.append(router_logits_list[micro_batch_idx][layer_name].detach())
-                router_logits = torch.stack(layer_router_logits_list, dim=0).unsqueeze(0)
-                router_logits_dict[layer_name] = router_logits
-
-            output["router_logits"] = router_logits_dict
+            output["router_logits"] = self._stack_router_logits_mb(router_logits_list, n_mb)
 
         return MoEModelOutputs(**output, logits=logits)
 
-    def _forward(
+    def _accumulate_layer_router_stats_mb(
         self,
-        seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        loss_ctx: MoELossContextDict | None,
-        return_router_logits: bool = False,
-    ) -> MoEModelOutputs:
-        input_ids = seq_ctx.input_ids
-        position_ids = seq_ctx.position_ids
+        layer_idx: int,
+        router_logits: list[torch.Tensor],
+        router_weights: list[torch.Tensor],
+        hidden_states_list: list[torch.Tensor],
+        aux_inputs: AuxLossInputs,
+    ) -> None:
+        """Concatenate a layer's per-MB router stats into the global token set
+        and accumulate aux loss.
 
+        No-op for layers that don't contribute (e.g. hash-routed). The z-loss carrier is pinned to MB0's hidden_states:
+        all MBs converge into the same total_loss backward, so MB0's path traverses every aux-loss node exactly once.
+        """
+        if not self._should_compute_aux_loss(layer_idx):
+            return
+        hidden_states_list[0] = self.aux_loss.accumulate(
+            router_weights=torch.cat(router_weights, dim=0),
+            router_logits=torch.cat(router_logits, dim=0),
+            hidden_states=hidden_states_list[0],
+            layer_name=f"layer{layer_idx}",
+            inputs=aux_inputs,
+        )
+
+    def _stack_router_logits_mb(
+        self, router_logits_list: list[dict[str, torch.Tensor]], n_mb: int
+    ) -> dict[str, torch.Tensor]:
+        """Stack the retained per-MB router logits into ``[1, n_mb, ...]``
+        tensors keyed by layer name."""
+        # TODO: Returning router logits is costly.
+        return {
+            layer_name: torch.stack(
+                [router_logits_list[mb_idx][layer_name].detach() for mb_idx in range(n_mb)], dim=0
+            ).unsqueeze(0)
+            for layer_name in router_logits_list[0]
+        }
+
+    def _run_dense_layers_mb(
+        self, hidden_states_list: list[torch.Tensor], layer_input: LayerInputMB, seq_ctx_list: list[SequenceContext]
+    ) -> list[torch.Tensor]:
+        """Run the dense-prefix layers on the concatenated batch, returning a
+        fresh per-MB list.
+
+        Dense layers carry no routing and don't need per-MB separation, so they run once on the
+        concatenated sequence (one call rather than ``n_mb``). No-op when there is no dense prefix,
+        so models like DeepSeek-V4 (``first_k_dense_replace == 0``) never pay the cat/split round
+        trip.
+        """
+        dense_count = self.config.first_k_dense_replace
+        if dense_count <= 0:
+            return hidden_states_list
+        n_mb = len(seq_ctx_list)
+        cat_hidden_states = torch.cat(hidden_states_list, dim=1)
+        pe_list = layer_input["position_embeddings"]
+        cat_position_embeddings = (
+            torch.cat([pe[0] for pe in pe_list], dim=1),
+            torch.cat([pe[1] for pe in pe_list], dim=1),
+        )
+        cat_seq_ctx = SequenceContext.cat(seq_ctx_list)
+        self._mark_dynamic(cat_seq_ctx)
+        for idx, decoder_layer in self.layers.items():
+            if int(idx) >= dense_count:
+                break
+            cat_hidden_states = decoder_layer(
+                cat_hidden_states,
+                position_embeddings=cat_position_embeddings,
+                seq_ctx=cat_seq_ctx,
+            )
+        # Clone the chunks: async_save_on_cpu is not friendly with chunk's shared storage (it
+        # produced nan grad norm), so each micro-batch needs its own storage downstream.
+        return [c.clone() for c in cat_hidden_states.chunk(n_mb, dim=1)]
+
+    def _mtp_outputs_mb(
+        self,
+        hidden_states_list: list[torch.Tensor],
+        seq_ctx_list: list[SequenceContext],
+        loss_ctx_list: list[MoELossContextDict],
+        layer_input: LayerInputMB,
+        router_logits_list: list[dict[str, torch.Tensor]],
+    ) -> dict:
+        """Run the MTP block over every micro-batch and return ``{"mtp_loss":
+        ...}`` (empty when off).
+
+        Per-depth router logits are appended into ``router_logits_list`` (per-MB) when it is retained
+        (non-empty). The block runs on all micro-batches so Domino EP can overlap dispatch/combine
+        across them at each depth; per-MB aggregation skips micro-batches whose loss context is absent.
+        """
+        if self.mtp_block is None:
+            return {}
+        assert self.config.mtp_config is not None
+
+        # Build a per-microbatch SequenceContext clone for MTP.
+        mtp_seq_ctx_list: list[SequenceContext] = []
+        for seq_ctx in seq_ctx_list:
+            assert seq_ctx.position_ids is not None
+            mtp_seq_ctx_list.append(
+                seq_ctx.copy(
+                    input_ids=seq_ctx.input_ids.clone() if seq_ctx.input_ids is not None else None,
+                    position_ids=seq_ctx.position_ids.clone(),
+                    inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
+                )
+            )
+
+        mtp_outputs_per_mb = self.mtp_block(
+            *hidden_states_list,
+            embed_tokens_fn=self.embed_tokens,
+            position_embeddings=layer_input["position_embeddings"],
+            seq_ctx=mtp_seq_ctx_list,
+        )
+
+        mtp_losses = torch.tensor(0.0, device=DEVICE)
+        has_mtp_loss = False
+        for micro_batch_idx, (loss_ctx_dict, mtp_outputs) in enumerate(zip(loss_ctx_list, mtp_outputs_per_mb)):
+            mtp_loss_ctx_list = loss_ctx_dict.get("mtp")
+            if mtp_loss_ctx_list is None:
+                continue
+
+            micro_batch_mtp_losses = torch.tensor(0.0, device=DEVICE)
+            for mtp_idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
+                mtp_hidden_states, mtp_router_results, _ = mtp_hidden
+                mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
+                micro_batch_mtp_losses += mtp_loss
+
+                if router_logits_list:
+                    router_logits_list[micro_batch_idx][f"mtp_layer{mtp_idx}"] = mtp_router_results
+
+            mtp_losses += micro_batch_mtp_losses / len(mtp_loss_ctx_list)
+            has_mtp_loss = True
+
+        if not has_mtp_loss:
+            return {}
+        return {"mtp_loss": mtp_losses * self.config.mtp_config.loss_scaling_factor}
+
+    def _prepare_hidden_states(self, seq_ctx: SequenceContext) -> LayerInput:
+        """Embed inputs, build shared position embeddings, and mark dynamic
+        shapes.
+
+        Template-method seam for the single-sequence :meth:`_forward` path. Subclasses
+        whose decoder layers consume a transformed hidden state (e.g. an extra
+        residual-stream axis) or need extra per-layer inputs (e.g. a second rope)
+        override this and return the matching :class:`LayerInput` extended with their fields.
+
+        Args:
+            seq_ctx (SequenceContext): The packed sequence to embed.
+
+        Returns:
+            LayerInput: the initial ``hidden_states`` and the shared position embeddings, threaded
+            to :meth:`_call_decoder_layer` for every layer.
+        """
+        input_ids = seq_ctx.input_ids
         if input_ids is not None:
             hidden_states = self.embed_tokens(input_ids)
         else:
@@ -667,162 +834,295 @@ class MoE(BaseModel):
             hidden_states = seq_ctx.inputs_embeds.clone()
 
         # create position embeddings to be shared across the decoder layers
-        assert position_ids is not None
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-        output: dict = {}  # type: ignore
-        if self.config.return_hidden_states:
-            output["hidden_states"] = []
-
-        # Router logits / weights are only retained when a downstream consumer
-        # (config flag or per-call kwarg) asked for them; otherwise we skip the
-        # per-layer dict population and the optional D2H offload entirely.
-        keep_router = self.config.return_router_results or return_router_logits
-        if keep_router:
-            output["router_logits"] = {}
-            output["router_weights"] = {}
-        else:
-            output["router_logits"] = None
-            output["router_weights"] = None
+        assert seq_ctx.position_ids is not None
+        position_embeddings = self.rotary_emb(hidden_states, seq_ctx.position_ids)
         self._mark_dynamic(seq_ctx)
-        balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
-        # Hoisted out of the per-layer accumulate path: mask is constant across layers.
-        nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
-        non_pad_token = nonpad_indices.numel()
-        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
+        return {"hidden_states": hidden_states, "position_embeddings": position_embeddings}
+
+    def _activation_offload_ctx(
+        self, block_idx: int, tensors: list[torch.Tensor], *, reserve_pin_memory: bool = False
+    ) -> "contextlib.AbstractContextManager":
+        """Activation-offload context that stages ``tensors`` (a layer's
+        inputs) on CPU.
+
+        Returns a null context when ``XTUNER_ACTIVATION_OFFLOAD`` is off, so callers can ``with``
+        it unconditionally instead of branching on the env flag. Both the single-sequence and
+        micro-batch paths build their offload window through here.
+
+        Args:
+            block_idx (int): Position in the offload buffer ring (the MoE sub-stack index).
+            tensors (list[torch.Tensor]): The layer-input tensors to stage; the offload check
+                matches any of them by storage pointer.
+            reserve_pin_memory (bool): Reuse a pinned CPU buffer per (block, tensor) across steps.
+
+        Returns:
+            contextlib.AbstractContextManager: The offload window, or a null context when off.
+        """
+        if (
+            int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) != 1
+            or block_idx + self.config.first_k_dense_replace == len(self.layers) - 1
+        ):
+            return contextlib.nullcontext()
+        return async_save_on_cpu(
+            h2d_stream=self.offload_stream,
+            d2h_stream=self.offload_stream,
+            block_idx=block_idx,
+            group="text",
+            custom_check_fn=lambda x, _ts=tensors: x.data_ptr() in [t.data_ptr() for t in _ts],
+            prefetch=True,
+            reserve_pin_memory=reserve_pin_memory,
+        )
+
+    def _decoder_layer_offload_ctx(self, decoder_layer, idx: str, layer_input: torch.Tensor):
+        """Activation-offload context wrapping one single-sequence decoder-
+        layer call.
+
+        Dense layers never offload; otherwise delegate to :meth:`_activation_offload_ctx`.
+        Subclasses that use a different offload stream or bucketing override this.
+        """
+        if int(idx) < self.config.first_k_dense_replace:
+            return contextlib.nullcontext()
+        return self._activation_offload_ctx(int(idx), [layer_input])
+
+    def _call_decoder_layer(
+        self,
+        decoder_layer,
+        idx: str,
+        hidden_states: torch.Tensor,
+        seq_ctx: SequenceContext,
+        layer_input: LayerInput,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Invoke one decoder layer and normalise the return to a triple.
+
+        Default: dense layers (``idx < first_k_dense_replace``) return only the hidden
+        state; MoE layers return ``(hidden, router_logits, router_weights)``. Subclasses
+        that thread extra per-layer inputs (from ``layer_input``) or whose layers always
+        return router stats override this. ``hidden_states`` is the live residual stream (the
+        ``layer_input["hidden_states"]`` field only carries the pre-loop seed).
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+            ``(hidden_states, router_logits, router_weights)`` with the router entries
+            ``None`` for layers that do not route.
+        """
+        position_embeddings = layer_input["position_embeddings"]
+        if int(idx) < self.config.first_k_dense_replace:
+            hidden_states = decoder_layer(
+                hidden_states,
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+            )
+            return hidden_states, None, None
+        hidden_states, router_results, router_weights = decoder_layer(
+            hidden_states,
+            position_embeddings=position_embeddings,
+            seq_ctx=seq_ctx,
+        )
+        return hidden_states, router_results, router_weights
+
+    def _post_layer(self, hidden_states: torch.Tensor, idx: str, seq_ctx: SequenceContext) -> torch.Tensor:
+        """Per-layer post-processing hook (default: identity).
+
+        Runs after each decoder layer and its aux-loss accumulation. Subclasses that inject per-layer side inputs (e.g.
+        multi-scale visual embeds) override this.
+        """
+        return hidden_states
+
+    def _finalize_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Transform the stacked hidden state before the final norm (default:
+        identity).
+
+        Subclasses whose decoder stack runs on an expanded residual stream collapse it
+        back to ``[B, S, D]`` here.
+        """
+        return hidden_states
+
+    def _should_finalize_aux_loss(self) -> bool:
+        """Whether to run :meth:`AuxLossContext.finalize` after the stack
+        (default: True).
+
+        Subclasses where no layer accumulates routing stats (e.g. an all-hash-routed sub-stack) override this to skip
+        the finalize, which would otherwise raise.
+        """
+        return True
+
+    def _forward(
+        self,
+        seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
+        loss_ctx: MoELossContextDict | None,
+        return_router_logits: bool = False,
+    ) -> MoEModelOutputs:
+        layer_input = self._prepare_hidden_states(seq_ctx)
+        hidden_states = layer_input["hidden_states"]
+        # Non-pad lookup + aux-loss inputs are invariant across layers, so hoist them out of the
+        # per-layer accumulate path.
+        aux_inputs = self._build_aux_loss_inputs(loss_ctx, seq_ctx.mask)
+
+        # Router stats are retained only when a downstream consumer asked (config flag or kwarg);
+        # otherwise the per-layer collection and its optional D2H offload are skipped entirely.
+        keep_router = self.config.return_router_results or return_router_logits
+        router_logits: dict[str, torch.Tensor] | None = {} if keep_router else None
+        router_weights: dict[str, torch.Tensor] | None = {} if keep_router else None
+        collected_hidden: list[torch.Tensor] | None = [] if self.config.return_hidden_states else None
 
         for idx, decoder_layer in self.layers.items():
-            if int(idx) < self.config.first_k_dense_replace:
-                hidden_states = decoder_layer(
-                    hidden_states,
-                    position_embeddings=position_embeddings,
-                    seq_ctx=seq_ctx,
+            with self._decoder_layer_offload_ctx(decoder_layer, idx, hidden_states):
+                hidden_states, router_logits_l, router_weights_l = self._call_decoder_layer(
+                    decoder_layer, idx, hidden_states, seq_ctx, layer_input
                 )
-            else:
-                if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
-                    with async_save_on_cpu(
-                        h2d_stream=self.offload_stream,
-                        d2h_stream=self.offload_stream,
-                        block_idx=int(idx),
-                        group="text",
-                        custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
-                    ):
-                        layer_results = decoder_layer(
-                            hidden_states,
-                            position_embeddings=position_embeddings,
-                            seq_ctx=seq_ctx,
-                        )
 
-                else:
-                    layer_results = decoder_layer(
-                        hidden_states,
-                        position_embeddings=position_embeddings,
-                        seq_ctx=seq_ctx,
+            # Dense layers report ``None`` router stats — skip the routing bookkeeping.
+            if router_logits_l is not None:
+                # Routed layers return both stats together (dense layers return neither).
+                assert router_weights_l is not None
+                if router_logits is not None:
+                    router_logits[f"layer{idx}"] = self._maybe_offload_router(router_logits_l)
+                    router_weights[f"layer{idx}"] = self._maybe_offload_router(router_weights_l)  # type: ignore[index]
+
+                if self._should_compute_aux_loss(int(idx)):
+                    hidden_states = self.aux_loss.accumulate(
+                        router_weights=router_weights_l,
+                        router_logits=router_logits_l,
+                        hidden_states=hidden_states,
+                        layer_name=f"layer{idx}",
+                        inputs=aux_inputs,
                     )
-                hidden_states, router_results, router_weights = layer_results
-                if keep_router:
-                    output["router_logits"][f"layer{idx}"] = self._maybe_offload_router(router_results)
-                    output["router_weights"][f"layer{idx}"] = self._maybe_offload_router(router_weights)
-                hidden_states = self.aux_loss.accumulate(
-                    selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
-                    selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
-                    hidden_states=hidden_states,
-                    balancing_ctx=balancing_ctx,
-                    z_ctx=z_ctx,
-                    num_tokens_local=non_pad_token,
-                    num_tokens_global=num_tokens_global,
-                    world_size=z_world_size,
-                )
 
-            if self.config.return_hidden_states:
-                output["hidden_states"].append(hidden_states)
+            hidden_states = self._post_layer(hidden_states, idx, seq_ctx)
+            if collected_hidden is not None:
+                collected_hidden.append(hidden_states)
 
         layer_hidden_states = hidden_states
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm(self._finalize_hidden_states(hidden_states))
 
-        # Get LM loss context from dict
-        lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
-        loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
-        output["loss"] = loss
-        output["logits"] = logits
-        output["extra_info"] = extra_info
-
-        # MTP forward pass and loss computation
-        if (
-            self.mtp_block is not None
-            and loss_ctx is not None
-            and (mtp_loss_ctx_list := loss_ctx.get("mtp")) is not None
-        ):
-            mtp_seq_ctx = seq_ctx.copy(
-                input_ids=input_ids.clone() if input_ids is not None else None,
-                position_ids=position_ids.clone(),
-                inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
-            )
-            # MTP uses its own mask; main mask's non-pad indices do not apply.
-            mtp_nonpad_indices = torch.nonzero(mtp_seq_ctx.mask, as_tuple=True)[1]
-            mtp_non_pad_token = mtp_nonpad_indices.numel()
-            mtp_num_tokens_global, mtp_z_world_size = self._z_loss_dist_token_count(
-                z_ctx, mtp_non_pad_token, mtp_seq_ctx.mask.device
-            )
-
-            # Forward through MTP block
-            mtp_outputs = self.mtp_block(
-                layer_hidden_states,
-                embed_tokens_fn=self.embed_tokens,
-                position_embeddings=position_embeddings,
-                seq_ctx=mtp_seq_ctx,
-            )
-
-            # Compute MTP losses for each depth
-            mtp_losses = torch.tensor(0.0, device=DEVICE)
-            for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
-                mtp_hidden_states, mtp_router_results, mtp_router_weights = mtp_hidden
-
-                if keep_router:
-                    output["router_logits"][f"mtp_layer{idx}"] = mtp_router_results
-                    output["router_weights"][f"mtp_layer{idx}"] = mtp_router_weights
-                # Inject this MTP layer's z-loss before lm_head so backward through mtp_loss
-                # traverses the AuxLossScaler node and releases this layer's logsumexp activations.
-                mtp_hidden_states = self.aux_loss.accumulate(
-                    selected_router_weights=mtp_router_weights.index_select(0, mtp_nonpad_indices)
-                    .contiguous()
-                    .float(),
-                    selected_router_logits=mtp_router_results.index_select(0, mtp_nonpad_indices).contiguous().float(),
-                    hidden_states=mtp_hidden_states,
-                    balancing_ctx=balancing_ctx,
-                    z_ctx=z_ctx,
-                    num_tokens_local=mtp_non_pad_token,
-                    num_tokens_global=mtp_num_tokens_global,
-                    world_size=mtp_z_world_size,
-                )
-                mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
-                mtp_losses += mtp_loss
-
-            # Average MTP losses across depths and scale
-            mtp_losses = mtp_losses / len(mtp_loss_ctx_list)
-            scaled_mtp_loss = mtp_losses * self.config.mtp_config.loss_scaling_factor  # type: ignore
-
-            # Add to total loss
-            output["mtp_loss"] = scaled_mtp_loss
-
-        split_aux_output = self.aux_loss.finalize(
-            balancing_ctx=balancing_ctx,
-            z_ctx=z_ctx,
-            non_pad_token=non_pad_token,
+        # Assemble the result from each stage's returned slice. Call order matters for the aux-loss
+        # side effects only: MTP accumulates its depths (inside ``_mtp_outputs``) before finalize.
+        output: dict = {}
+        output |= self._lm_head_outputs(hidden_states, loss_ctx)
+        output |= self._mtp_outputs(
+            layer_hidden_states,
+            seq_ctx,
+            loss_ctx,
+            layer_input["position_embeddings"],
+            aux_inputs,
+            router_logits,
+            router_weights,
         )
-        balancing_loss, z_loss, tokens_per_expert_global = split_aux_output
-        if balancing_loss is not None:
-            output["balancing_loss"] = balancing_loss
-        if z_loss is not None:
-            output["z_loss"] = z_loss
-        output["tokens_per_expert_global"] = tokens_per_expert_global
+        output |= self._finalize_aux_loss_outputs(aux_inputs)
 
-        if keep_router:
-            # TODO: Moving router logits to CPU is costly.
-            for layer_name, router_logits in output["router_logits"].items():
-                output["router_logits"][layer_name] = router_logits.detach().unsqueeze(0)
+        # Detach + add a leading dim only when router logits were retained; MTP depths were appended
+        # into the same dict above, so this covers layer and mtp entries alike.
+        if router_logits is not None:
+            router_logits = {name: rl.detach().unsqueeze(0) for name, rl in router_logits.items()}
+        output["router_logits"] = router_logits
+        output["router_weights"] = router_weights
+        if collected_hidden is not None:
+            output["hidden_states"] = collected_hidden
 
         return MoEModelOutputs(**output)
+
+    def _lm_head_outputs(self, hidden_states: torch.Tensor, loss_ctx: "MoELossContextDict | None") -> dict:
+        """Run the LM head and return its output slice: ``loss``, ``logits``, ``extra_info``."""
+        lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
+        loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
+        return {"loss": loss, "logits": logits, "extra_info": extra_info}
+
+    def _finalize_aux_loss_outputs(self, aux_inputs: AuxLossInputs) -> dict:
+        """Finalize the split aux losses and return their output slice.
+
+        Skips the finalize when no layer accumulated routing stats (e.g. an all-hash-routed step),
+        still reporting ``tokens_per_expert_global`` / ``aux_loss_layer_names`` as ``None`` so
+        downstream logging short-circuits. ``balancing_loss`` / ``z_loss`` are present only when
+        configured.
+        """
+        if not self._should_finalize_aux_loss():
+            return {"tokens_per_expert_global": None, "aux_loss_layer_names": None}
+        balancing_loss, z_loss, tokens_per_expert_global, aux_loss_layer_names = self.aux_loss.finalize(
+            inputs=aux_inputs,
+        )
+        outputs: dict = {
+            "tokens_per_expert_global": tokens_per_expert_global,
+            "aux_loss_layer_names": aux_loss_layer_names,
+        }
+        if balancing_loss is not None:
+            outputs["balancing_loss"] = balancing_loss
+        if z_loss is not None:
+            outputs["z_loss"] = z_loss
+        return outputs
+
+    def _mtp_outputs(
+        self,
+        layer_hidden_states: torch.Tensor,
+        seq_ctx: SequenceContext,
+        loss_ctx: "MoELossContextDict | None",
+        position_embeddings,
+        aux_inputs: AuxLossInputs,
+        router_logits: dict[str, torch.Tensor] | None,
+        router_weights: dict[str, torch.Tensor] | None,
+    ) -> dict:
+        """Run the MTP block and return ``{"mtp_loss": ...}`` (empty dict when
+        MTP is off).
+
+        Per-depth router stats are appended into the caller's retained ``router_logits`` /
+        ``router_weights`` collections when those are not ``None``. MTP uses its own mask, so it
+        recomputes non-pad token counts; each depth's z-loss is injected before its lm_head so
+        backward through ``mtp_loss`` traverses the AuxLossScaler node and releases that depth's
+        logsumexp activations.
+        """
+        if self.mtp_block is None or loss_ctx is None:
+            return {}
+        mtp_loss_ctx_list = loss_ctx.get("mtp")
+        if mtp_loss_ctx_list is None:
+            return {}
+
+        input_ids = seq_ctx.input_ids
+        assert seq_ctx.position_ids is not None
+        mtp_seq_ctx = seq_ctx.copy(
+            input_ids=input_ids.clone() if input_ids is not None else None,
+            position_ids=seq_ctx.position_ids.clone(),
+            inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
+        )
+        mtp_nonpad_indices = torch.nonzero(mtp_seq_ctx.mask, as_tuple=True)[1]
+        mtp_non_pad_token = mtp_nonpad_indices.numel()
+        mtp_num_tokens_global, mtp_z_world_size = self._z_loss_dist_token_count(
+            aux_inputs.z_ctx, mtp_non_pad_token, mtp_seq_ctx.mask.device
+        )
+        # Same balancing / z-loss contexts as the main path, but MTP re-masks its inputs, so it
+        # carries its own non-pad token counts.
+        mtp_inputs = replace(
+            aux_inputs,
+            nonpad_indices=mtp_nonpad_indices,
+            num_tokens_local=mtp_non_pad_token,
+            num_tokens_global=mtp_num_tokens_global,
+            world_size=mtp_z_world_size,
+        )
+
+        mtp_outputs = self.mtp_block(
+            layer_hidden_states,
+            embed_tokens_fn=self.embed_tokens,
+            position_embeddings=position_embeddings,
+            seq_ctx=mtp_seq_ctx,
+        )
+
+        mtp_losses = torch.tensor(0.0, device=DEVICE)
+        for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
+            mtp_hidden_states, mtp_router_results, mtp_router_weights = mtp_hidden
+
+            if router_logits is not None:
+                router_logits[f"mtp_layer{idx}"] = mtp_router_results
+                router_weights[f"mtp_layer{idx}"] = mtp_router_weights  # type: ignore[index]
+            mtp_hidden_states = self.aux_loss.accumulate(
+                router_weights=mtp_router_weights,
+                router_logits=mtp_router_results,
+                hidden_states=mtp_hidden_states,
+                layer_name=f"mtp_layer{idx}",
+                inputs=mtp_inputs,
+            )
+            mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
+            mtp_losses += mtp_loss
+
+        mtp_losses = mtp_losses / len(mtp_loss_ctx_list)
+        return {"mtp_loss": mtp_losses * self.config.mtp_config.loss_scaling_factor}  # type: ignore
 
     def build_embeddings(self, config: MoEConfig):
         return nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
@@ -1117,9 +1417,33 @@ class MoE(BaseModel):
         )
         self.set_modules_to_forward_prefetch([self.embed_tokens, self.layers["0"]])  # type: ignore
 
-        for _, module in self.named_modules():
-            if isinstance(module, nn.Embedding):
+        # Patch nn.Embedding and nn.Linear forwards on the non-MoE backbone so that
+        # weights pre-wrapped as Replicate-on-ep DTensor by `_replicate_other_params`
+        # get .to_local()'d before F.embedding / F.linear. Without this, callers that
+        # pass plain-Tensor activations (V4 HC helpers, attn_block / ffn_block hops
+        # that bypass MoEDecoderLayer.forward's torch.compile coercion) crash with
+        # "got mixed torch.Tensor and DTensor". The walk skips MoEBlock to leave the
+        # expert / gate / shared-expert weights untouched — those are ep-sharded on
+        # purpose by the MoE dispatch path.
+        def _patch_non_moe_block_linears_and_embeds(module: nn.Module) -> None:
+            from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEBlock
+
+            if isinstance(module, MoEBlock):
+                return
+            # Patch only when the module's forward is the stock implementation —
+            # subclasses with a custom forward (e.g. xtuner.v1.module.lm_head.LMHead
+            # inherits nn.Linear with a 2-arg forward(hidden_states, loss_ctx))
+            # must not be replaced. `isinstance` is needed (instead of `type is`)
+            # because FSDP-managed modules can be reachable through synthetic
+            # subclasses without ever overriding `forward`.
+            if isinstance(module, nn.Embedding) and module.__class__.forward is nn.Embedding.forward:
                 module.forward = types.MethodType(self.patched_emb_forward, module)  # type: ignore
+            elif isinstance(module, nn.Linear) and module.__class__.forward is nn.Linear.forward:
+                module.forward = types.MethodType(self.patched_linear_forward, module)  # type: ignore
+            for child in module.children():
+                _patch_non_moe_block_linears_and_embeds(child)
+
+        _patch_non_moe_block_linears_and_embeds(self)
 
         self._to_empty_meta()
         return self
@@ -1293,6 +1617,24 @@ class MoE(BaseModel):
             self.scale_grad_by_freq,
             self.sparse,
         )
+
+    @staticmethod
+    def patched_linear_forward(self, input):
+        # Same shape as `patched_emb_forward`. After FSDP unshards on the fsdp_mesh
+        # dim, an ep-replicated parameter is still a DTensor with Replicate placement
+        # on ep_mesh. F.linear's DTensor dispatch only auto-promotes scalar plain
+        # tensors, so callers with plain-Tensor activations crash. .to_local() is a
+        # no-op for plain Tensors; for Replicate DTensors it costs nothing (every
+        # rank already holds the full copy locally).
+        if isinstance(self.weight, DTensor):
+            w = self.weight.to_local()
+        else:
+            w = self.weight
+        if isinstance(self.bias, DTensor):
+            b = self.bias.to_local()
+        else:
+            b = self.bias
+        return F.linear(input, w, b)
 
     def _should_recompute(
         self,
