@@ -472,6 +472,7 @@ class RLColocateTrainerConfig(BaseRLTrainerConfig):
 
     agent_loop_manager_cfg: AgentLoopManagerConfig
     resources: AcceleratorResourcesConfig
+    weight_transport_type: WeightTransportType = "ipc"
 
     def build(self) -> "RLColocateTrainer":
         return RLColocateTrainer(self)
@@ -1551,6 +1552,7 @@ class BaseRLTrainer:
 
 class RLColocateTrainer(BaseRLTrainer):
     _META_PATH = ".xtuner_rl_colocate_trainer"
+    _DISK_WEIGHT_UPDATE_DIR = "disk_weight_update"
     agent_loop_manager: AgentLoopManager
 
     # 共卡保留资源切换和权重同步流程；通用保存、日志在 BaseRLTrainer。
@@ -1558,6 +1560,12 @@ class RLColocateTrainer(BaseRLTrainer):
         self._init_common(cfg, meta_path=self._META_PATH, logger_tag="RLTrainer")
         self._num_workers = float(cfg.resources.num_workers)
         self._rollout_num_workers = float(cfg.resources.num_workers)
+        self._weight_transport_type = cfg.weight_transport_type
+        if self._weight_transport_type not in ("ipc", "disk"):
+            raise ValueError(
+                f"RLColocateTrainer only supports weight_transport_type 'ipc' or 'disk', "
+                f"got {self._weight_transport_type!r}."
+            )
 
         self._pg = AutoAcceleratorWorkers.build_placement_group(cfg.resources)
         self._cpu_resource_manager = CPUResourceManager(self._pg)
@@ -1600,12 +1608,8 @@ class RLColocateTrainer(BaseRLTrainer):
         self.train_controller.offload(target="all")
 
         self.rollout_controller = self._rollout_config.build(self._pg)
-        bind_train_rollout(
-            train_controller=self.train_controller,
-            rollout_controller=self.rollout_controller,
-            rollout_config=self._rollout_config,
-            weight_transport_type="ipc",
-        )
+        if self._weight_transport_type == "ipc":
+            self._bind_colocate_weight_update()
 
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)
@@ -1617,13 +1621,39 @@ class RLColocateTrainer(BaseRLTrainer):
         if self._rollout_config.skip_load_weights:
             self._sync_weights_from_train_workers()
 
+    def _bind_colocate_weight_update(self, disk_weight_path: Path | str | None = None) -> None:
+        bind_train_rollout(
+            train_controller=self.train_controller,
+            rollout_controller=self.rollout_controller,
+            rollout_config=self._rollout_config,
+            weight_transport_type=self._weight_transport_type,
+            disk_weight_path=str(disk_weight_path) if disk_weight_path is not None else None,
+        )
+
+    def _save_disk_weight_checkpoint(self) -> Path:
+        save_hf_path = self.exp_dir / self._DISK_WEIGHT_UPDATE_DIR
+        if save_hf_path.exists():
+            rmtree(save_hf_path, ignore_errors=True)
+        save_hf_path.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"Saving disk weight checkpoint to {save_hf_path}")
+        self.train_controller.save_hf(str(save_hf_path))
+        if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
+            self.tokenizer.save_pretrained(str(save_hf_path))
+        return save_hf_path
+
     def _sync_weights_from_train_workers(self) -> None:
         self.logger.info("Rollout workers skip load weights, update weights from train workers.")
         ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         self.train_controller.onload(target="model")
+        if self._weight_transport_type == "disk":
+            # disk方式在保存权重到磁盘后可立即offload model，避免模型占用显存。
+            disk_weight_path = self._save_disk_weight_checkpoint()
+            self._bind_colocate_weight_update(disk_weight_path=disk_weight_path)
+            self.train_controller.offload(target="model")
         ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         self.train_controller.update_weights()
-        self.train_controller.offload(target="model")
+        if self._weight_transport_type == "ipc":
+            self.train_controller.offload(target="model")
         ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         self.logger.info("Rollout workers updated weights from train workers.")
 
@@ -1761,19 +1791,18 @@ class RLColocateTrainer(BaseRLTrainer):
                     self.rollout_controller.restart_inactive_workers.remote(),
                     timeout=RL_TRAINER_RAY_GET_TIMEOUT,
                 )
-                bind_train_rollout(
-                    train_controller=self.train_controller,
-                    rollout_controller=self.rollout_controller,
-                    rollout_config=self._rollout_config,
-                    weight_transport_type="ipc",
-                )
+                if self._weight_transport_type == "disk":
+                    disk_weight_path = self._save_disk_weight_checkpoint()
+                    self.train_controller.offload(target="model")
+                self._bind_colocate_weight_update(disk_weight_path=disk_weight_path)
                 ray.get(
                     self.rollout_controller.onload_weights.remote(),
                     timeout=RL_TRAINER_RAY_GET_TIMEOUT,
                 )
                 self.train_controller.update_weights()
                 self.logger.info("Rollout workers update weights successfully in colocate mode")
-                self.train_controller.offload(target="model")
+                if self._weight_transport_type == "ipc":
+                    self.train_controller.offload(target="model")
             else:
                 self.train_controller.offload(target="model")
                 ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
