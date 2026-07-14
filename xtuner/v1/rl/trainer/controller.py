@@ -4,6 +4,7 @@ from typing import Literal, TypedDict
 
 import ray
 import torch
+from typing_extensions import NotRequired
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.compose.base import BaseComposeConfig
@@ -20,8 +21,14 @@ TRAIN_RAY_GET_TIMEOUT = os.getenv("XTUNER_TRAIN_RAY_GET_TIMEOUT", 5 * 3600)  # d
 class ColateItem(TypedDict):
     seq_ctx: SequenceContext
     shifted_labels: torch.Tensor
-    advantage: float
+    advantage: list[float]
     rollout_logprobs: torch.Tensor | None
+    action_mask: NotRequired[torch.BoolTensor]
+    actor_loss_mask: NotRequired[torch.BoolTensor]
+    critic_loss_mask: NotRequired[torch.BoolTensor]
+    token_rewards: NotRequired[torch.Tensor]
+    actor_positive_scale: NotRequired[torch.Tensor]
+    actor_negative_scale: NotRequired[torch.Tensor]
 
 
 class TrainingController:
@@ -93,6 +100,17 @@ class TrainingController:
             seq_ctx_list = [data_batches[i]["seq_ctx"] for i in indices]
             label_list = [data_batches[i]["shifted_labels"] for i in indices]
             advantage_list = [data_batches[i]["advantage"] for i in indices]
+            ppo_tensor_keys = (
+                "action_mask",
+                "actor_loss_mask",
+                "critic_loss_mask",
+                "token_rewards",
+                "actor_positive_scale",
+                "actor_negative_scale",
+            )
+            ppo_tensor_lists = {
+                key: [data_batches[i][key] for i in indices] for key in ppo_tensor_keys if key in data_batches[0]
+            }
 
             rollout_logprobs_list = None
             if "rollout_logprobs" in data_batches[0] and data_batches[0]["rollout_logprobs"] is not None:
@@ -131,6 +149,16 @@ class TrainingController:
                 seq_ctx_list.append(pad_seq_ctx)
                 label_list.append(pad_labels)
                 advantage_list.append(pad_advantages)
+                for key, values in ppo_tensor_lists.items():
+                    fill_value = 1.0 if key in ("actor_positive_scale", "actor_negative_scale") else 0.0
+                    values.append(
+                        torch.full(
+                            (1, pad_len),
+                            fill_value,
+                            dtype=data_batches[0][key].dtype,
+                            device=data_batches[0][key].device,
+                        )
+                    )
                 if rollout_logprobs_list is not None:
                     pad_rollout_logprobs = torch.zeros(
                         1,
@@ -149,14 +177,15 @@ class TrainingController:
             if rollout_logprobs_list is not None:
                 rollout_logprobs = torch.cat(rollout_logprobs_list, dim=1)  # (1, max_len)
 
-            packed_data_batches.append(
-                {
-                    "seq_ctx": seq_ctx,
-                    "shifted_labels": shifted_labels,
-                    "advantages": advantages,
-                    "rollout_logprobs": rollout_logprobs,
-                }
-            )
+            packed_data = {
+                "seq_ctx": seq_ctx,
+                "shifted_labels": shifted_labels,
+                "advantages": advantages,
+                "rollout_logprobs": rollout_logprobs,
+            }
+            for key, values in ppo_tensor_lists.items():
+                packed_data[key] = torch.cat(values, dim=1)
+            packed_data_batches.append(packed_data)
         return packed_data_batches
 
     def _grouped_by_max_length(self, packed_data_batches):
@@ -243,6 +272,23 @@ class TrainingController:
                 "advantages": pad_advantages,
                 "rollout_logprobs": pad_rollout_logprobs,
             }
+            for key in (
+                "action_mask",
+                "actor_loss_mask",
+                "critic_loss_mask",
+                "token_rewards",
+                "actor_positive_scale",
+                "actor_negative_scale",
+            ):
+                if key not in packed_data_batches[0]:
+                    continue
+                fill_value = 1.0 if key in ("actor_positive_scale", "actor_negative_scale") else 0.0
+                pad_data[key] = torch.full(
+                    (1, pack_max_length),
+                    fill_value,
+                    dtype=packed_data_batches[0][key].dtype,
+                    device="cpu",
+                )
             pad_data_samples = [pad_data for _ in range(pad_num)]
             packed_data_batches = packed_data_batches + pad_data_samples
 
@@ -256,16 +302,22 @@ class TrainingController:
                     rollout_idx=rollout_idx,
                 )
             )
+        fit_succeeded = False
         try:
             log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+            fit_succeeded = True
         finally:
-            # free pixel values ref
-            free_pixel_value_refs: list[ray.ObjectRef] = []
-            for data in packed_data_batches:
-                if data["seq_ctx"].pixel_values is not None:
-                    free_pixel_value_refs.extend(data["seq_ctx"].pixel_values)
-            if len(free_pixel_value_refs) > 0:
-                free_object_refs(free_pixel_value_refs)
+            # A failed ray.get may return while sibling worker tasks are still
+            # materializing shared pixels. Manual-free only after every fit
+            # handle has completed successfully; on failure Ray's normal
+            # borrower/reference lifecycle releases them once tasks finish.
+            if fit_succeeded:
+                free_pixel_value_refs: list[ray.ObjectRef] = []
+                for data in packed_data_batches:
+                    if data["seq_ctx"].pixel_values is not None:
+                        free_pixel_value_refs.extend(data["seq_ctx"].pixel_values)
+                if len(free_pixel_value_refs) > 0:
+                    free_object_refs(free_pixel_value_refs)
             del packed_data_batches
         return log_infos
 

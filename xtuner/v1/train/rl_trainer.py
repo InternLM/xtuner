@@ -8,7 +8,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from shutil import rmtree
-from typing import Any, List, cast
+from typing import Any, Callable, List, cast
 
 import numpy as np
 import ray
@@ -34,6 +34,12 @@ from xtuner.v1.rl.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
 from xtuner.v1.rl.evaluator import EvaluatorConfig
+from xtuner.v1.rl.ppo import (
+    align_next_token_data,
+    align_single_turn,
+    build_group_loss_masks,
+    deterministic_truncated_keep_mask,
+)
 from xtuner.v1.rl.replay_buffer import (
     AsyncReplayBufferConfig,
     SyncReplayBufferConfig,
@@ -50,6 +56,7 @@ from xtuner.v1.rl.utils import (
     CPUResourceManager,
     asyncio_run,
     create_task,
+    free_object_refs,
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
@@ -344,6 +351,8 @@ class BaseRLTrainerConfig(BaseModel):
     seed: int = 42
     debug_rollout: bool = False
     debug_rollout_dir: Path | str | None = None
+    rollout_exporter: Callable[[list[list[RolloutState]], int], None] | None = None
+    save_debug_rollout_pt: bool = True
     debug_train: bool = False
     skip_checkpoint_validation: bool = False
     exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard"
@@ -356,6 +365,8 @@ class BaseRLTrainerConfig(BaseModel):
             raise ValueError("debug_rollout_dir must be provided when debug_rollout=True.")
         if self.debug_train and self.debug_rollout_dir is None:
             raise ValueError("debug_rollout_dir must be provided when debug_train=True.")
+        if self.debug_rollout and not self.save_debug_rollout_pt and self.rollout_exporter is None:
+            raise ValueError("debug_rollout needs either save_debug_rollout_pt=True or a rollout_exporter.")
         if not self.debug_train and self.total_train_steps is None and self.total_epochs is None:
             raise ValueError("Either total_train_steps or total_epochs must be provided.")
         if self.total_train_steps is not None and self.total_train_steps <= 0:
@@ -557,6 +568,7 @@ class BaseRLTrainer:
     _CHECKPOINT_DIR = "checkpoints"
     _HF_DIR = "hf"
     _SAVE_TRAIN_STATE_PATH = "train_state.json"
+    _SAVE_RNG_STATE_PATH = "trainer_rng_state.pt"
 
     train_controller: TrainingController
     rollout_controller: RolloutControllerProxy
@@ -709,6 +721,8 @@ class BaseRLTrainer:
         self._evaluate_step = cfg.evaluate_step
         self._debug_rollout = cfg.debug_rollout
         self._debug_rollout_dir = Path(cfg.debug_rollout_dir) if cfg.debug_rollout_dir is not None else None
+        self._rollout_exporter = cfg.rollout_exporter
+        self._save_debug_rollout_pt = cfg.save_debug_rollout_pt
         self._debug_train = cfg.debug_train
         self._debug_train_files: dict[int, Path] = {}
 
@@ -779,6 +793,14 @@ class BaseRLTrainer:
         with train_state_path.open("r") as f:
             train_state = json.load(f)
         self._cur_step = train_state["cur_step"]
+        rng_state_path = checkpoint_path / self._SAVE_RNG_STATE_PATH
+        if rng_state_path.exists():
+            rng_state = torch.load(rng_state_path, map_location="cpu", weights_only=False)
+            random.setstate(rng_state["python"])
+            np.random.set_state(rng_state["numpy"])
+            torch.set_rng_state(rng_state["torch"])
+        elif self._train_worker_cfg.critic_cfg is not None:
+            raise FileNotFoundError(f"PPO strict resume requires trainer RNG state: {rng_state_path}")
         return checkpoint_path
 
     async def _resume_agent_loop_manager(self, checkpoint_path: Path | str) -> int:
@@ -817,6 +839,14 @@ class BaseRLTrainer:
         train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
         with train_state_path.open("w") as f:
             json.dump({"cur_step": cur_step}, f)
+        torch.save(
+            {
+                "python": random.getstate(),
+                "numpy": np.random.get_state(),
+                "torch": torch.get_rng_state(),
+            },
+            checkpoint_path / self._SAVE_RNG_STATE_PATH,
+        )
 
         # 4. Update meta
         current_exp = self._meta.latest_exp
@@ -933,10 +963,12 @@ class BaseRLTrainer:
                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
             )
             ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
-        if onload_train_before_train:
+        if onload_train_before_train and self._train_worker_cfg.critic_cfg is None:
             with timer("onload", step_timer_dict):
                 self.train_controller.onload(target="all")
                 self.logger.info("Training controller loaded")
+        elif onload_train_before_train:
+            self.logger.info("PPO worker controls sequential Critic/Actor onload internally")
 
         with timer("prepare_data", step_timer_dict):
             data_batches, data_info = self._prepare_train_data(
@@ -986,6 +1018,11 @@ class BaseRLTrainer:
     def _save_debug_rollout_batch(self, train_batch: list[list[RolloutState]], train_step: int) -> None:
         assert self._debug_rollout_dir is not None
         self._debug_rollout_dir.mkdir(parents=True, exist_ok=True)
+        if self._rollout_exporter is not None:
+            self._rollout_exporter(train_batch, train_step)
+            self.logger.info(f"Canonical rollout batch for step {train_step} exported")
+        if not self._save_debug_rollout_pt:
+            return
         save_path = self._debug_rollout_dir / f"debug_rollout_{train_step}.pt"
         serializable_batch = [
             [cast(RolloutState, _snapshot_nested_objectrefs(rollout_state)) for rollout_state in group]
@@ -1023,6 +1060,14 @@ class BaseRLTrainer:
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ):
+        if self._train_worker_cfg.critic_cfg is not None:
+            return self._prepare_ppo_train_data(
+                data_groups,
+                pack_max_length,
+                raw_rewards_sum=raw_rewards_sum,
+                raw_rewards_count=raw_rewards_count,
+            )
+
         rewards_list = []
         advantages_list = []
         prompt_len_list = []
@@ -1234,6 +1279,294 @@ class BaseRLTrainer:
             info_dict["tool_turns/max"] = float(tool_turns_t.max().item())
         return data_batches, info_dict
 
+    def _prepare_ppo_train_data(
+        self,
+        data_groups: list[list[RolloutState]],
+        pack_max_length: int,
+        raw_rewards_sum: float = 0.0,
+        raw_rewards_count: int = 0,
+    ):
+        """Build next-token-aligned PPO samples without a group reward baseline."""
+        ppo_cfg = self._train_worker_cfg.ppo_cfg
+        assert ppo_cfg is not None
+
+        data_batches = []
+        rewards_list: list[float] = []
+        generated_rewards_list: list[float] = []
+        prompt_len_list: list[int] = []
+        response_len_list: list[int] = []
+        tool_turns_list: list[int] = []
+        training_tokens = 0
+        uniform_groups = 0
+        nonuniform_groups = 0
+        retained_truncated = 0
+        dropped_truncated = 0
+        actor_valid_tokens = 0
+        critic_valid_tokens = 0
+        uniform_actor_valid_tokens = 0
+        uniform_critic_valid_tokens = 0
+
+        for group_index, group in enumerate(data_groups):
+            if not is_valid_for_training(group, self.logger):
+                self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
+                continue
+
+            rewards: list[float] = []
+            aligned_items: list[dict[str, Any]] = []
+            prompt_ids: list[int] | None = None
+            if any(data.input_ids is None for data in group):
+                if "train_prompt_ids" in group[0].extra_fields:
+                    prompt_ids = cast(list[int], group[0].extra_fields["train_prompt_ids"])
+                else:
+                    prompt_ids = group[0].prompt_ids
+                if not prompt_ids:
+                    raise ValueError(f"Prompt ids cannot be empty in PPO group {group_index}.")
+
+            for data in group:
+                if data.reward is None or "score" not in data.reward:
+                    raise ValueError(f"Reward is missing or has no score: {data}")
+                reward = float(data.reward["score"])
+                if not math.isfinite(reward):
+                    raise ValueError(f"Reward must be finite, got {reward}.")
+                rewards.append(reward)
+                generated_rewards_list.append(reward)
+                turns = data.extra_fields.get("agent_tool_turns")
+                if isinstance(turns, int):
+                    tool_turns_list.append(turns)
+
+                if data.input_ids is not None:
+                    if data.labels is None:
+                        raise ValueError("labels are required when input_ids are present.")
+                    aligned = align_next_token_data(
+                        torch.tensor(data.input_ids, dtype=torch.long),
+                        torch.tensor(data.labels, dtype=torch.long),
+                    )
+                    if data.logprobs is None or len(data.logprobs) != len(data.input_ids):
+                        raise ValueError("Agentic PPO requires one rollout logprob per input token.")
+                    rollout_logprobs = torch.tensor(data.logprobs[1:], dtype=torch.float32).unsqueeze(0)
+                    prompt_len = int((aligned.shifted_labels == -100).sum().item())
+                    response_len = int(aligned.action_mask.sum().item())
+                    len_response_ids = 0
+                else:
+                    assert prompt_ids is not None
+                    if data.response_ids is not None:
+                        response_ids = torch.as_tensor(data.response_ids, dtype=torch.long).flatten()
+                    elif data.response is not None:
+                        response_ids = self.tokenizer(data.response, return_tensors="pt")["input_ids"].flatten()
+                    else:
+                        raise ValueError("Single-turn PPO sample has neither response_ids nor response.")
+                    response_mask = None
+                    if data.response_mask:
+                        response_mask = torch.tensor(data.response_mask, dtype=torch.bool)
+                    aligned = align_single_turn(
+                        torch.tensor(prompt_ids, dtype=torch.long),
+                        response_ids,
+                        response_mask,
+                    )
+                    if data.logprobs is None:
+                        raise ValueError("Online PPO requires rollout logprobs for Actor IS/veto.")
+                    if len(data.logprobs) != response_ids.numel():
+                        raise ValueError("Single-turn rollout logprobs must match response_ids.")
+                    response_logprobs = [0.0] * (len(prompt_ids) - 1) + list(data.logprobs)
+                    rollout_logprobs = torch.tensor(response_logprobs, dtype=torch.float32).unsqueeze(0)
+                    prompt_len = len(prompt_ids)
+                    response_len = int(response_ids.numel())
+                    len_response_ids = response_len - 1
+
+                if aligned.model_input_ids.numel() > pack_max_length:
+                    raise ValueError(
+                        f"PPO trajectory length {aligned.model_input_ids.numel()} exceeds pack_max_length "
+                        f"{pack_max_length}."
+                    )
+                model_input_ids = cast(torch.LongTensor, aligned.model_input_ids.unsqueeze(0))
+                shifted_labels = aligned.shifted_labels.unsqueeze(0)
+                action_mask = aligned.action_mask.unsqueeze(0)
+                if not action_mask.any():
+                    raise ValueError(f"PPO trajectory {data.rollout_id} has no controllable action token.")
+                if not (model_input_ids.shape == shifted_labels.shape == action_mask.shape):
+                    raise AssertionError("PPO next-token fields must have identical shapes.")
+                if rollout_logprobs is not None and rollout_logprobs.shape != shifted_labels.shape:
+                    raise ValueError(
+                        f"rollout_logprobs shape {rollout_logprobs.shape} does not match labels "
+                        f"{shifted_labels.shape}."
+                    )
+
+                seq_ctx = get_train_seq_ctx(
+                    model_input_ids,
+                    data.position_ids,
+                    cast(dict | None, data.mm_info),
+                    len_response_ids,
+                )
+                seq_ctx.rollout_routed_experts = data.routed_experts
+                aligned_items.append(
+                    {
+                        "state": data,
+                        "seq_ctx": seq_ctx,
+                        "shifted_labels": shifted_labels,
+                        "action_mask": action_mask,
+                        "rollout_logprobs": rollout_logprobs,
+                        "prompt_len": prompt_len,
+                        "response_len": response_len,
+                    }
+                )
+
+            rollout_ids = [
+                item["state"].rollout_id if item["state"].rollout_id is not None else index
+                for index, item in enumerate(aligned_items)
+            ]
+            sample_eligible = deterministic_truncated_keep_mask(
+                [item["state"].finish_reason for item in aligned_items],
+                rollout_ids,
+                selection_seed=ppo_cfg.selection_seed,
+                step=self._cur_step + 1,
+                group_id=group[0].group_id if group[0].group_id is not None else group_index,
+            )
+            for item, eligible in zip(aligned_items, sample_eligible):
+                if item["state"].finish_reason == "length":
+                    if eligible:
+                        retained_truncated += 1
+                    else:
+                        dropped_truncated += 1
+
+            group_masks = build_group_loss_masks(
+                [item["action_mask"] for item in aligned_items],
+                rewards,
+                sample_eligible,
+            )
+            uniform_groups += int(group_masks.is_uniform)
+            nonuniform_groups += int(not group_masks.is_uniform)
+            group_actor_valid_tokens = sum(int(mask.sum().item()) for mask in group_masks.actor)
+            group_critic_valid_tokens = sum(int(mask.sum().item()) for mask in group_masks.critic)
+            actor_valid_tokens += group_actor_valid_tokens
+            critic_valid_tokens += group_critic_valid_tokens
+            if group_masks.is_uniform:
+                uniform_actor_valid_tokens += group_actor_valid_tokens
+                uniform_critic_valid_tokens += group_critic_valid_tokens
+
+            positive_scale, negative_scale = self._ppo_surprisal_scales(
+                aligned_items,
+                group_masks.actor,
+            )
+            for item, reward, actor_mask, critic_mask in zip(
+                aligned_items,
+                rewards,
+                group_masks.actor,
+                group_masks.critic,
+            ):
+                if not actor_mask.any() and not critic_mask.any():
+                    # A dropped max-length sample must not consume either
+                    # model's forward compute. Routed-expert refs belong to a
+                    # single trajectory and can be released immediately. In
+                    # contrast, K rollouts from one multimodal prompt share the
+                    # same pixel-values ObjectRef, so freeing the whole state
+                    # here would invalidate a retained sibling before the
+                    # training workers materialize its pixels.
+                    routed_experts = item["state"].routed_experts
+                    if routed_experts is not None:
+                        free_object_refs(routed_experts)
+                    item["state"].routed_experts = None
+                    item["seq_ctx"].rollout_routed_experts = None
+                    continue
+                actor_labels = item["shifted_labels"].masked_fill(~actor_mask, -100)
+                token_rewards = torch.zeros_like(item["action_mask"], dtype=torch.float32)
+                critic_indices = torch.nonzero(critic_mask.reshape(-1), as_tuple=False).flatten()
+                if critic_indices.numel() > 0:
+                    token_rewards.reshape(-1)[critic_indices[-1]] = reward
+                scale_shape = item["action_mask"].shape
+                data_batches.append(
+                    {
+                        "seq_ctx": item["seq_ctx"],
+                        "shifted_labels": actor_labels,
+                        "advantage": [0.0] * actor_labels.numel(),
+                        "rollout_logprobs": item["rollout_logprobs"],
+                        "action_mask": item["action_mask"].bool(),
+                        "actor_loss_mask": actor_mask.bool(),
+                        "critic_loss_mask": critic_mask.bool(),
+                        "token_rewards": token_rewards,
+                        "actor_positive_scale": torch.full(scale_shape, positive_scale, dtype=torch.float32),
+                        "actor_negative_scale": torch.full(scale_shape, negative_scale, dtype=torch.float32),
+                    }
+                )
+                rewards_list.append(reward)
+                prompt_len_list.append(item["prompt_len"])
+                response_len_list.append(item["response_len"])
+                training_tokens += actor_labels.numel()
+
+        if not data_batches:
+            raise RuntimeError("No valid PPO trajectories were prepared.")
+        if not XTUNER_DETERMINISTIC:
+            random.shuffle(data_batches)
+
+        rewards_t = torch.tensor(rewards_list, dtype=torch.float32)
+        generated_rewards_t = torch.tensor(generated_rewards_list, dtype=torch.float32)
+        prompt_len_t = torch.tensor(prompt_len_list, dtype=torch.float32)
+        response_len_t = torch.tensor(response_len_list, dtype=torch.float32)
+        raw_rewards_mean = raw_rewards_sum / raw_rewards_count if raw_rewards_count > 0 else rewards_t.mean().item()
+        info_dict = {
+            "batch_size": len(rewards_list),
+            "training_samples": len(rewards_list),
+            "generated_samples": len(generated_rewards_list),
+            "training_tokens": training_tokens,
+            "rewards/mean": rewards_t.mean().item(),
+            "rewards/min": rewards_t.min().item(),
+            "rewards/max": rewards_t.max().item(),
+            "generated_rewards/mean": generated_rewards_t.mean().item(),
+            "generated_rewards/min": generated_rewards_t.min().item(),
+            "generated_rewards/max": generated_rewards_t.max().item(),
+            "raw_rewards/mean": raw_rewards_mean,
+            "response_len/mean": response_len_t.mean().item(),
+            "response_len/min": response_len_t.min().item(),
+            "response_len/max": response_len_t.max().item(),
+            "prompt_len/mean": prompt_len_t.mean().item(),
+            "prompt_len/min": prompt_len_t.min().item(),
+            "prompt_len/max": prompt_len_t.max().item(),
+            "ppo/uniform_groups": float(uniform_groups),
+            "ppo/nonuniform_groups": float(nonuniform_groups),
+            "ppo/retained_truncated": float(retained_truncated),
+            "ppo/dropped_truncated": float(dropped_truncated),
+            "ppo/actor_valid_tokens": float(actor_valid_tokens),
+            "ppo/critic_valid_tokens": float(critic_valid_tokens),
+            "ppo/uniform_actor_valid_tokens": float(uniform_actor_valid_tokens),
+            "ppo/uniform_critic_valid_tokens": float(uniform_critic_valid_tokens),
+        }
+        if tool_turns_list:
+            tool_turns_t = torch.tensor(tool_turns_list, dtype=torch.float32)
+            info_dict["tool_turns/mean"] = tool_turns_t.mean().item()
+            info_dict["tool_turns/min"] = tool_turns_t.min().item()
+            info_dict["tool_turns/max"] = tool_turns_t.max().item()
+        return data_batches, info_dict
+
+    def _ppo_surprisal_scales(
+        self,
+        aligned_items: list[dict[str, Any]],
+        actor_masks: tuple[torch.Tensor, ...],
+    ) -> tuple[float, float]:
+        ppo_cfg = self._train_worker_cfg.ppo_cfg
+        assert ppo_cfg is not None
+        logprob_sum = 0.0
+        action_count = 0
+        for item, mask in zip(aligned_items, actor_masks):
+            logprobs = item["rollout_logprobs"]
+            if logprobs is None:
+                continue
+            logprob_sum += float(logprobs.masked_select(mask).sum().item())
+            action_count += int(mask.sum().item())
+        if action_count == 0:
+            return 1.0, 1.0
+
+        surprisal = -logprob_sum / action_count
+        positive_scale = 1.0
+        negative_scale = 1.0
+        if surprisal > ppo_cfg.surprisal_upper_bound:
+            delta = (surprisal - ppo_cfg.surprisal_upper_bound) / ppo_cfg.surprisal_upper_bound
+            sigmoid = torch.sigmoid(torch.tensor(-delta / max(ppo_cfg.tau_upper, 1e-8))).item()
+            negative_scale = ppo_cfg.coeff_min_upper + (1 - ppo_cfg.coeff_min_upper) * sigmoid / 0.5
+        elif surprisal < ppo_cfg.surprisal_lower_bound:
+            delta = (ppo_cfg.surprisal_lower_bound - surprisal) / ppo_cfg.surprisal_lower_bound
+            sigmoid = torch.sigmoid(torch.tensor(-delta / max(ppo_cfg.tau_lower, 1e-8))).item()
+            positive_scale = ppo_cfg.coeff_min_lower + (1 - ppo_cfg.coeff_min_lower) * sigmoid / 0.5
+        return positive_scale, negative_scale
+
     def _compute_benchmark_metrics(
         self,
         data_info: dict[str, float],
@@ -1357,11 +1690,18 @@ class BaseRLTrainer:
                     for k, v in mini_batch_log.items():
                         mini_batch_metrics.setdefault(k, []).append(cast(float, v))
 
-                for key, value in mini_batch_metrics.items():
-                    avg_value = sum(value) / len(value)
+                for key, metric_values in mini_batch_metrics.items():
+                    avg_value = sum(metric_values) / len(metric_values)
                     all_scalars.update({f"train_metrics/worker_{worker_idx}/step_avg_{key}": avg_value})
 
-                rank_sft_log = log_item["sft_train_metrics"]
+                critic_metrics: dict[str, List[float]] = {}
+                for critic_log in log_item.get("critic_train_metrics", []):
+                    for key, value in critic_log.items():
+                        critic_metrics.setdefault(key, []).append(cast(float, value))
+                for key, values in critic_metrics.items():
+                    all_scalars[f"critic_metrics/worker_{worker_idx}/step_avg_{key}"] = sum(values) / len(values)
+
+                rank_sft_log = log_item.get("sft_train_metrics", {})
                 for k, v in rank_sft_log.items():
                     all_scalars.update({f"sft_train_metrics/worker_{worker_idx}/{k}": v})
 

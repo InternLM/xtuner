@@ -12,6 +12,7 @@ from .misc import clean_param_name
 DEVICE = get_device()
 
 
+@torch.no_grad()
 def init_params(param: torch.Tensor, init_fn: Callable[[torch.Tensor], torch.Tensor | None]):
     """Initialize a single model parameter tensor, supporting both regular
     tensors and DTensors.

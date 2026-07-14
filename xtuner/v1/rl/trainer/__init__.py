@@ -6,12 +6,15 @@ from ..rollout_is import (
     merge_rollout_is_metrics,
 )
 from .controller import ColateItem, TrainingController
+from .ppo_config import CriticWorkerConfig, PPOConfig
 from .worker import TrainingWorker, WorkerConfig, WorkerInputItem, WorkerLogItem, WorkerTrainLogItem
 
 
 __all__ = [
     "ColateItem",
     "TrainingController",
+    "CriticWorkerConfig",
+    "PPOConfig",
     "RolloutImportanceSampling",
     "compute_rollout_importance_weights",
     "compute_is_metrics",

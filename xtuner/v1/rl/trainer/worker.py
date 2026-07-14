@@ -2,8 +2,10 @@ import contextlib
 import json
 import math
 import os
+import random
 import time
 from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -47,6 +49,7 @@ from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, finalize_train_policy_metrics, kl_penalty
+from xtuner.v1.rl.ppo import action_gae, normalize_advantages
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
@@ -60,6 +63,7 @@ from xtuner.v1.utils import (
 )
 
 from ..rollout_is import merge_rollout_is_metrics
+from .ppo_config import CriticWorkerConfig, PPOConfig
 from .update_weighter import UpdateWeighter
 
 
@@ -141,6 +145,7 @@ class WorkerConfig(BaseModel):
     fsdp_cfg: FSDPConfig
     load_from: str | Path  # TODO: 把 actor 和 ref 配置分离
     optimizer_steps: int = 1
+    scheduler_steps: int = 1_000_000
     sp_size: int = 1
     pack_max_length: int
     ref_load_from: str | Path | None = None
@@ -151,6 +156,11 @@ class WorkerConfig(BaseModel):
     profile_step: list[int] | int | None = None  # 1-based global RL train_step ids to profile.
     profile_time: bool = True
     profile_memory: bool = False
+
+    # Optional PPO/Critic path. Existing RL recipes leave both fields unset and
+    # retain the original Actor-only behavior.
+    critic_cfg: CriticWorkerConfig | None = None
+    ppo_cfg: PPOConfig | None = None
 
     # sft config
     sft_dataloader_cfg: DataloaderConfig | None = None
@@ -184,6 +194,12 @@ class WorkerInputItem(TypedDict):
     shifted_labels: torch.LongTensor
     advantages: torch.Tensor
     rollout_logprobs: torch.Tensor | None
+    action_mask: NotRequired[torch.BoolTensor]
+    actor_loss_mask: NotRequired[torch.BoolTensor]
+    critic_loss_mask: NotRequired[torch.BoolTensor]
+    token_rewards: NotRequired[torch.Tensor]
+    actor_positive_scale: NotRequired[torch.Tensor]
+    actor_negative_scale: NotRequired[torch.Tensor]
 
 
 class WorkerTrainLogItem(TypedDict, total=False):
@@ -199,10 +215,20 @@ class WorkerLogItem(TypedDict):
     rollout_is_metrics: NotRequired[dict[str, float]]
     train_metrics: List[WorkerTrainLogItem]
     sft_train_metrics: NotRequired[dict[str, float]]
+    critic_train_metrics: NotRequired[List[WorkerTrainLogItem]]
+
+
+class PPOPhase(str, Enum):
+    ALL_OFFLOADED = "all_offloaded"
+    CRITIC_TRAIN = "critic_train"
+    ACTOR_TRAIN = "actor_train"
+    ACTOR_READY = "actor_ready"
 
 
 class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
     _SAVE_WEIGHTS_DIR = "weights"
+    _SAVE_CRITIC_WEIGHTS_DIR = "critic_weights"
+    _SAVE_PPO_STATE_DIR = "ppo_worker_state"
     _SAVE_SFT_DATALOADER_DIR = "sft_dataloader"
     _SAVE_SFT_TRAIN_STATE_PATH = "sft_train_state.json"
 
@@ -216,11 +242,10 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
         accelerator: str = "GPU",
     ):
         super().__init__(worker_cfg, rank, master_addr, master_port, world_size, accelerator)
-        self.config = cast(WorkerConfig, self.config)
+        self.config: WorkerConfig = worker_cfg
         torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
         self.rank = rank
 
-        # TODO: add lr scheduler
         log_dir = worker_cfg.log_dir
         self.log_dir = None
         if log_dir is not None:
@@ -237,9 +262,49 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
 
         self._init_sft(worker_cfg)
 
+        if worker_cfg.critic_cfg is not None:
+            worker_cfg.model_cfg.dcp_ignore_frozen_params = False
+            worker_cfg.critic_cfg.model_cfg.dcp_ignore_frozen_params = False
         if not worker_cfg.fsdp_cfg.torch_compile:
             worker_cfg.model_cfg.compile_cfg = False
         self._engine = self._build_engine(worker_cfg)
+
+        self._critic_engine: TrainEngine | None = None
+        self._actor_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
+        self._critic_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
+        self._actor_optimizer_updates = 0
+        self._critic_optimizer_updates = 0
+        self._ppo_phase = PPOPhase.ACTOR_READY
+
+        if worker_cfg.critic_cfg is not None:
+            if worker_cfg.ppo_cfg is None:
+                raise ValueError("ppo_cfg is required when critic_cfg is configured.")
+            if worker_cfg.sp_size != 1:
+                raise ValueError("The first PPO/Critic implementation supports actor sp_size=1 only.")
+            if worker_cfg.loss_cfg.use_kl_loss:
+                raise ValueError("KL loss must be disabled for the first PPO/Critic implementation.")
+            if self._sft_dataloader is not None:
+                raise ValueError("SFT interleaving is not supported by the first PPO/Critic implementation.")
+
+            self._actor_scheduler = self._build_lr_scheduler(
+                self._engine.optimizer,
+                worker_cfg.lr_cfg,
+                worker_cfg.scheduler_steps,
+            )
+            self._engine.put_model_to_device("cpu")
+            self._engine.put_optimizer_to_device("cpu")
+            DEVICE_MODULE.empty_cache()
+
+            self._critic_engine = self._build_critic_engine(worker_cfg, worker_cfg.critic_cfg)
+            self._critic_scheduler = self._build_lr_scheduler(
+                self._critic_engine.optimizer,
+                worker_cfg.critic_cfg.lr_cfg,
+                worker_cfg.critic_cfg.scheduler_steps,
+            )
+            self._critic_engine.put_model_to_device("cpu")
+            self._critic_engine.put_optimizer_to_device("cpu")
+            DEVICE_MODULE.empty_cache()
+            self._ppo_phase = PPOPhase.ALL_OFFLOADED
 
         self._has_ref = False
         if worker_cfg.loss_cfg.use_kl_loss:
@@ -268,8 +333,74 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
         if isinstance(worker_cfg.model_cfg, BaseComposeConfig):
             if hasattr(worker_cfg.model_cfg.text_config, "mtp_config"):
                 self.mtp_config = worker_cfg.model_cfg.text_config.mtp_config
+        if worker_cfg.critic_cfg is not None and self.mtp_config is not None:
+            raise ValueError("Actor MTP must be disabled for the first PPO/Critic implementation.")
 
         self._init_update_weighter()
+
+    def _build_critic_engine(
+        self,
+        worker_cfg: WorkerConfig,
+        critic_cfg: CriticWorkerConfig,
+    ) -> TrainEngine:
+        if not critic_cfg.fsdp_cfg.torch_compile:
+            critic_cfg.model_cfg.compile_cfg = False
+        engine = TrainEngine(  # type: ignore[arg-type]
+            optim_cfg=critic_cfg.optim_cfg,
+            fsdp_cfg=critic_cfg.fsdp_cfg,
+            model_cfg=critic_cfg.model_cfg,
+        )
+
+        if critic_cfg.load_mode == "init_from_actor":
+            source = critic_cfg.load_from or worker_cfg.load_from
+            if source is None:
+                raise ValueError("Actor HF path is required to initialize the Critic backbone.")
+            # The value-model loader consumes the expected Actor LM-head mismatch
+            # and initializes only the scalar head. Keep the compose-level load
+            # strict so a missing backbone/vision/projector tensor fails early.
+            engine.from_hf(source, strict=True)
+        else:
+            assert critic_cfg.load_from is not None
+            weights_path = Path(critic_cfg.load_from)
+            nested_weights_path = weights_path / self._SAVE_CRITIC_WEIGHTS_DIR
+            if nested_weights_path.exists():
+                weights_path = nested_weights_path
+            engine.load_dcp(
+                weights_dir=weights_path,
+                load_states=False,
+                load_args=False,
+                strict=True,
+            )
+        return engine
+
+    @staticmethod
+    def _build_lr_scheduler(
+        optimizer: torch.optim.Optimizer,
+        lr_cfg: LRConfig,
+        total_steps: int,
+    ) -> torch.optim.lr_scheduler.LRScheduler:
+        if lr_cfg.warmup_ratio < 1:
+            warmup_steps = int(lr_cfg.warmup_ratio * total_steps)
+        else:
+            warmup_steps = int(lr_cfg.warmup_ratio)
+        warmup_steps = min(warmup_steps, total_steps)
+        base_lr = float(optimizer.defaults["lr"])
+        min_factor = float(lr_cfg.lr_min) / base_lr if base_lr > 0 else 1.0
+
+        def lr_factor(step: int) -> float:
+            if warmup_steps > 0 and step < warmup_steps:
+                return max(step, 1) / warmup_steps
+            if lr_cfg.lr_type == "constant":
+                return 1.0
+            decay_steps = max(total_steps - warmup_steps, 1)
+            progress = min(max((step - warmup_steps) / decay_steps, 0.0), 1.0)
+            if lr_cfg.lr_type == "linear":
+                return 1.0 - progress * (1.0 - min_factor)
+            if lr_cfg.lr_type == "cosine":
+                return min_factor + 0.5 * (1.0 - min_factor) * (1.0 + math.cos(math.pi * progress))
+            raise ValueError(f"Unsupported lr type: {lr_cfg.lr_type}")
+
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
 
     def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
@@ -516,6 +647,9 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
 
     @ray_method
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:
+        if self._critic_engine is not None:
+            return self._fit_ppo(data_batches, rollout_idx)
+
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
         loss_cfg: BaseRLLossConfig = self.config.loss_cfg
@@ -805,6 +939,444 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
 
         return worker_log_item
 
+    def _fit_ppo(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:
+        """Run one Critic phase followed by one Actor phase on frozen targets."""
+        self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
+        critic_engine = self._critic_engine
+        critic_cfg = self.config.critic_cfg
+        ppo_cfg = self.config.ppo_cfg
+        assert critic_engine is not None and critic_cfg is not None and ppo_cfg is not None
+        if self.sp_mesh.size() != 1:
+            raise RuntimeError("The first PPO/Critic implementation supports TRAIN_SP_SIZE=1 only.")
+
+        # Keep Actor inputs (especially rollout routed-expert tensors) on CPU
+        # until the Critic model and all Critic targets have been offloaded.
+        seq_ctx_list: list[SequenceContext] = []
+        shifted_labels_list: list[torch.Tensor] = []
+        action_mask_list: list[torch.Tensor] = []
+        actor_loss_mask_list: list[torch.Tensor] = []
+        critic_loss_mask_list: list[torch.Tensor] = []
+        token_rewards_list: list[torch.Tensor] = []
+        rollout_logprobs_list: list[torch.Tensor | None] = []
+        positive_scale_list: list[torch.Tensor] = []
+        negative_scale_list: list[torch.Tensor] = []
+
+        for data in data_batches:
+            seq_ctx = data["seq_ctx"]
+            pixel_values = seq_ctx.pixel_values
+            if pixel_values is not None and not isinstance(pixel_values, torch.Tensor):
+                if not isinstance(pixel_values, list):
+                    raise NotImplementedError(f"Unsupported pixel_values type: {type(pixel_values)}")
+                materialized = ray.get(list(pixel_values))
+                seq_ctx.pixel_values = torch.cat([torch.as_tensor(value) for value in materialized], dim=0)
+
+            # Resolve and release rollout ObjectRefs immediately, but keep the
+            # resulting routed-expert tensor on CPU throughout the Critic phase.
+            rollout_routed_experts = seq_ctx.rollout_routed_experts
+            if rollout_routed_experts is not None:
+                self._add_rollout_routed_experts(seq_ctx, rollout_routed_experts)
+
+            required_fields = (
+                "action_mask",
+                "actor_loss_mask",
+                "critic_loss_mask",
+                "token_rewards",
+                "actor_positive_scale",
+                "actor_negative_scale",
+            )
+            missing = [field for field in required_fields if field not in data]
+            if missing:
+                raise ValueError(f"PPO worker input is missing fields: {missing}")
+
+            shifted_labels = data["shifted_labels"].cpu()
+            action_mask = data["action_mask"].cpu().bool()
+            actor_loss_mask = data["actor_loss_mask"].cpu().bool()
+            critic_loss_mask = data["critic_loss_mask"].cpu().bool()
+            token_rewards = data["token_rewards"].cpu().float()
+            positive_scale = data["actor_positive_scale"].cpu().float()
+            negative_scale = data["actor_negative_scale"].cpu().float()
+            rollout_logprobs = data.get("rollout_logprobs")
+            rollout_logprobs = rollout_logprobs.cpu() if rollout_logprobs is not None else None
+
+            expected_shape = shifted_labels.shape
+            fields = {
+                "action_mask": action_mask,
+                "actor_loss_mask": actor_loss_mask,
+                "critic_loss_mask": critic_loss_mask,
+                "token_rewards": token_rewards,
+                "actor_positive_scale": positive_scale,
+                "actor_negative_scale": negative_scale,
+            }
+            for name, tensor in fields.items():
+                if tensor.shape != expected_shape:
+                    raise ValueError(f"{name} shape {tensor.shape} does not match labels {expected_shape}.")
+            if torch.any(actor_loss_mask & ~action_mask) or torch.any(critic_loss_mask & ~action_mask):
+                raise ValueError("Actor/Critic loss masks must be subsets of action_mask.")
+
+            seq_ctx_list.append(seq_ctx)
+            shifted_labels_list.append(shifted_labels)
+            action_mask_list.append(action_mask)
+            actor_loss_mask_list.append(actor_loss_mask)
+            critic_loss_mask_list.append(critic_loss_mask)
+            token_rewards_list.append(token_rewards)
+            rollout_logprobs_list.append(rollout_logprobs)
+            positive_scale_list.append(positive_scale)
+            negative_scale_list.append(negative_scale)
+
+        del data_batches
+        worker_log_item: WorkerLogItem = {
+            "train_entropy": 0.0,
+            "train_metrics": [],
+            "critic_train_metrics": [],
+            "sft_train_metrics": {},
+        }
+
+        # Critic routes independently and owns no rollout routed-expert tensor.
+        self._onload_critic()
+        critic_seq_ctx_list = [seq_ctx.copy(rollout_routed_experts=None).to(DEVICE) for seq_ctx in seq_ctx_list]
+        critic_engine._maybe_precompute_float8_dynamic_scale_for_fsdp()
+        old_values_list: list[torch.Tensor] = []
+        with torch.no_grad():
+            for critic_seq_ctx in critic_seq_ctx_list:
+                output = critic_engine.model(seq_ctx=critic_seq_ctx, loss_ctx=None)  # type: ignore[call-overload]
+                values = output["logits"]
+                if values is None or values.size(-1) != 1:
+                    raise RuntimeError("Critic must return scalar logits with shape [batch, seq, 1].")
+                # GAE is a sequential recurrence. Stage one value tensor to CPU
+                # per pack instead of synchronizing CUDA once per action token.
+                old_values_list.append(values.squeeze(-1).detach().float().to("cpu", copy=True))
+                output.free_nongrad_feature()
+        del critic_seq_ctx, output, values
+
+        actor_advantages_list: list[torch.Tensor] = []
+        critic_returns_list: list[torch.Tensor] = []
+        for seq_ctx, old_values, token_rewards, action_mask, positive_scale, negative_scale in zip(
+            seq_ctx_list,
+            old_values_list,
+            token_rewards_list,
+            action_mask_list,
+            positive_scale_list,
+            negative_scale_list,
+        ):
+            boundaries = seq_ctx.cu_seq_lens_q
+            actor_advantages = action_gae(
+                old_values,
+                token_rewards,
+                action_mask,
+                boundaries,
+                gamma=ppo_cfg.actor_gamma,
+                gae_lambda=ppo_cfg.actor_lambda,
+            )
+            critic_advantages = action_gae(
+                old_values,
+                token_rewards,
+                action_mask,
+                boundaries,
+                gamma=ppo_cfg.critic_gamma,
+                gae_lambda=ppo_cfg.critic_lambda,
+            )
+            actor_advantages = torch.where(
+                actor_advantages > 0,
+                actor_advantages * positive_scale,
+                actor_advantages * negative_scale,
+            )
+            actor_advantages_list.append(actor_advantages.detach())
+            critic_returns_list.append(
+                torch.where(action_mask, critic_advantages + old_values, torch.zeros_like(old_values)).detach()
+            )
+
+        if ppo_cfg.normalize_actor_advantage:
+            sizes = [advantages.numel() for advantages in actor_advantages_list]
+            flat_advantages = torch.cat([advantages.reshape(-1) for advantages in actor_advantages_list]).to(DEVICE)
+            flat_actor_mask = torch.cat([mask.reshape(-1) for mask in actor_loss_mask_list]).to(DEVICE)
+            flat_advantages = normalize_advantages(flat_advantages, flat_actor_mask, distributed=True)
+            actor_advantages_list = [
+                chunk.reshape(reference.shape).cpu()
+                for chunk, reference in zip(flat_advantages.split(sizes), actor_advantages_list)
+            ]
+            del flat_advantages, flat_actor_mask
+        actor_advantages_list = [
+            torch.where(mask, advantages, torch.zeros_like(advantages)).detach().cpu()
+            for advantages, mask in zip(actor_advantages_list, actor_loss_mask_list)
+        ]
+
+        critic_loss_ctx_list: list[BaseLossContext] = []
+        for returns, value_mask, old_values in zip(
+            critic_returns_list,
+            critic_loss_mask_list,
+            old_values_list,
+        ):
+            critic_loss_ctx = critic_cfg.loss_cfg.build(
+                data={
+                    "returns": returns,
+                    "value_mask": value_mask,
+                    "old_values": old_values,
+                },
+                sp_mesh=self.sp_mesh,
+            )
+            if critic_loss_ctx is None:
+                raise RuntimeError("Critic loss config did not build a loss context.")
+            critic_loss_ctx_list.append(critic_loss_ctx)
+        del actor_advantages, critic_advantages, action_mask, negative_scale, old_values, positive_scale, seq_ctx
+        del critic_loss_ctx, token_rewards, returns, value_mask
+
+        worker_log_item["critic_train_metrics"].extend(
+            self._train_ppo_critic(
+                critic_seq_ctx_list,
+                critic_loss_ctx_list,
+                rollout_idx,
+            )
+        )
+
+        # Drop every Critic-only tensor before Actor parameters or routed-expert
+        # tensors are brought to the accelerator.
+        del (
+            critic_loss_ctx_list,
+            critic_returns_list,
+            old_values_list,
+            critic_seq_ctx_list,
+        )
+        DEVICE_MODULE.empty_cache()
+        self._offload_critic()
+        self._onload_actor()
+
+        for seq_ctx in seq_ctx_list:
+            seq_ctx.to(DEVICE)
+        shifted_labels_list = [labels.to(DEVICE) for labels in shifted_labels_list]
+        actor_advantages_list = [advantages.to(DEVICE) for advantages in actor_advantages_list]
+        rollout_logprobs_list = [
+            logprobs.to(DEVICE) if logprobs is not None else None for logprobs in rollout_logprobs_list
+        ]
+
+        loss_cfg: BaseRLLossConfig = self.config.loss_cfg
+        actor_loss_ctx_list: list[BaseRLLossContext] = []
+        for shifted_labels, advantages, rollout_logprobs in zip(
+            shifted_labels_list,
+            actor_advantages_list,
+            rollout_logprobs_list,
+        ):
+            actor_loss_ctx = loss_cfg.build(
+                data={
+                    "shifted_labels": shifted_labels,
+                    "advantages": advantages,
+                    "rollout_logprobs": rollout_logprobs,
+                },
+                sp_mesh=self.sp_mesh,
+            )
+            if actor_loss_ctx is None:
+                raise RuntimeError("Actor loss config did not build a loss context.")
+            actor_loss_ctx_list.append(actor_loss_ctx)
+
+        old_logprobs_list = self.compute_actor_logprobs(seq_ctx_list, shifted_labels_list)
+        all_rollout_is_metrics = []
+        all_mismatch_metrics = []
+        for seq_ctx, old_logprobs, actor_loss_ctx in zip(seq_ctx_list, old_logprobs_list, actor_loss_ctx_list):
+            actor_loss_ctx.loss_kwargs.old_logprobs = old_logprobs.detach()
+            if actor_loss_ctx.loss_kwargs.rollout_logprobs is not None:
+                mismatch_metrics, rollout_is_metrics = actor_loss_ctx.compute_rollout_is(
+                    self.sp_mesh,
+                    seq_ctx.seq_lens_q,
+                )
+                all_mismatch_metrics.append(mismatch_metrics)
+                all_rollout_is_metrics.append(rollout_is_metrics)
+
+        rank_actor_tokens = sum((labels != -100).sum() for labels in shifted_labels_list)
+        global_actor_tokens = cast(torch.Tensor, rank_actor_tokens).clone()
+        dist.all_reduce(global_actor_tokens, op=dist.ReduceOp.SUM)
+        avg_train_entropy = calculate_entropy(shifted_labels_list, old_logprobs_list, global_actor_tokens)
+        avg_rollout_entropy = calculate_entropy(shifted_labels_list, rollout_logprobs_list, global_actor_tokens)
+        if avg_train_entropy is not None:
+            worker_log_item["train_entropy"] = float(avg_train_entropy.item())
+        if avg_rollout_entropy is not None:
+            worker_log_item["rollout_entropy"] = float(avg_rollout_entropy.item())
+        if all_mismatch_metrics:
+            worker_log_item["mismatch_metrics"] = merge_rollout_is_metrics(all_mismatch_metrics, DEVICE)
+        if all_rollout_is_metrics:
+            worker_log_item["rollout_is_metrics"] = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
+
+        self._engine.put_optimizer_to_device(DEVICE)
+        actor_order = list(range(len(seq_ctx_list)))
+        actor_chunks = self._partition_indices(actor_order, self._optimizer_steps)
+        for chunk_index, indices in enumerate(actor_chunks):
+            chunk_contexts = [actor_loss_ctx_list[index] for index in indices]
+            global_chunk_tokens = sum(
+                (context.loss_kwargs.shifted_labels != loss_cfg.ignore_idx).sum() for context in chunk_contexts
+            )
+            global_chunk_tokens = cast(torch.Tensor, global_chunk_tokens).clone()
+            dist.all_reduce(global_chunk_tokens, op=dist.ReduceOp.SUM)
+            if global_chunk_tokens.item() == 0:
+                continue
+            batched_contexts = loss_cfg.loss_ctx_cls.build_batches(chunk_contexts)  # type: ignore[arg-type]
+            engine_input = [
+                ModelItem(seq_ctx=seq_ctx_list[index], loss_ctx={"lm": loss_ctx})
+                for index, loss_ctx in zip(indices, batched_contexts)
+            ]
+            train_step_info = self._engine.train_step(engine_input)
+            grad_norm = self._engine.clip_grad_norm()
+            optimizer_stepped = self._optimizer_step_succeeds(self._engine, grad_norm)
+            self._engine.step_optimizer(grad_norm)
+            if optimizer_stepped:
+                assert self._actor_scheduler is not None
+                self._actor_scheduler.step()
+                self._actor_optimizer_updates += 1
+            log_item = self._build_ppo_train_log(
+                train_step_info,
+                grad_norm,
+                lr=self._engine.optimizer.param_groups[0]["lr"],
+                pass_index=0,
+                chunk_index=chunk_index,
+                policy_metrics=True,
+            )
+            worker_log_item["train_metrics"].append(log_item)
+            self._global_train_step += 1
+
+        self._engine.put_optimizer_to_device("cpu")
+        DEVICE_MODULE.empty_cache()
+        self._set_ppo_phase(PPOPhase.ACTOR_READY)
+        self._rollout_step += 1
+        return worker_log_item
+
+    def _train_ppo_critic(
+        self,
+        critic_seq_ctx_list: list[SequenceContext],
+        critic_loss_ctx_list: list[BaseLossContext],
+        rollout_idx: int,
+    ) -> list[WorkerTrainLogItem]:
+        """Train both Critic passes while keeping their tensor lifetime local."""
+        critic_engine = self._critic_engine
+        critic_cfg = self.config.critic_cfg
+        assert critic_engine is not None and critic_cfg is not None
+
+        train_logs: list[WorkerTrainLogItem] = []
+        critic_engine.put_optimizer_to_device(DEVICE)
+        for pass_index in range(critic_cfg.num_passes):
+            order = self._ppo_pass_order(len(critic_seq_ctx_list), rollout_idx, pass_index)
+            chunks = self._partition_indices(order, critic_cfg.optimizer_steps_per_pass)
+            for chunk_index, indices in enumerate(chunks):
+                chunk_contexts = [critic_loss_ctx_list[index] for index in indices]
+                global_chunk_tokens = sum(context.loss_kwargs.value_mask.sum() for context in chunk_contexts)
+                global_chunk_tokens = cast(torch.Tensor, global_chunk_tokens).clone()
+                dist.all_reduce(global_chunk_tokens, op=dist.ReduceOp.SUM)
+                if global_chunk_tokens.item() == 0:
+                    continue
+                batched_contexts = critic_cfg.loss_cfg.loss_ctx_cls.build_batches(chunk_contexts)  # type: ignore[attr-defined]
+                engine_input = [
+                    ModelItem(seq_ctx=critic_seq_ctx_list[index], loss_ctx={"lm": loss_ctx})
+                    for index, loss_ctx in zip(indices, batched_contexts)
+                ]
+                train_step_info = critic_engine.train_step(engine_input)
+                grad_norm = critic_engine.clip_grad_norm()
+                optimizer_stepped = self._optimizer_step_succeeds(critic_engine, grad_norm)
+                critic_engine.step_optimizer(grad_norm)
+                if optimizer_stepped:
+                    assert self._critic_scheduler is not None
+                    self._critic_scheduler.step()
+                    self._critic_optimizer_updates += 1
+                train_logs.append(
+                    self._build_ppo_train_log(
+                        train_step_info,
+                        grad_norm,
+                        lr=critic_engine.optimizer.param_groups[0]["lr"],
+                        pass_index=pass_index,
+                        chunk_index=chunk_index,
+                    )
+                )
+        return train_logs
+
+    @staticmethod
+    def _partition_indices(indices: list[int], max_updates: int) -> list[list[int]]:
+        if not indices:
+            return []
+        num_updates = min(len(indices), max_updates)
+        quotient, remainder = divmod(len(indices), num_updates)
+        chunks = []
+        offset = 0
+        for chunk_index in range(num_updates):
+            chunk_size = quotient + int(chunk_index < remainder)
+            chunks.append(indices[offset : offset + chunk_size])
+            offset += chunk_size
+        return chunks
+
+    def _ppo_pass_order(self, num_batches: int, rollout_idx: int, pass_index: int) -> list[int]:
+        if pass_index == 0:
+            return list(range(num_batches))
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(self.config.seed or 0) + rollout_idx * 1_000_003 + pass_index)
+        return torch.randperm(num_batches, generator=generator).tolist()
+
+    @staticmethod
+    def _optimizer_step_succeeds(engine: TrainEngine, grad_norm: torch.Tensor) -> bool:
+        if not torch.isfinite(grad_norm):
+            return False
+        threshold = engine.optim_cfg.skip_grad_norm_threshold
+        return threshold is None or bool(grad_norm <= threshold)
+
+    def _build_ppo_train_log(
+        self,
+        train_step_info: TrainStepInfo,
+        grad_norm: torch.Tensor,
+        *,
+        lr: float,
+        pass_index: int,
+        chunk_index: int,
+        policy_metrics: bool = False,
+    ) -> WorkerTrainLogItem:
+        logs_info = cast(dict[str, float], train_step_info["logs_info"])
+        extra_info = train_step_info["extra_info"]
+        if isinstance(extra_info, ModelForwardExtraLogInfo):
+            extra_info_dict = extra_info.get()
+        else:
+            extra_info_dict = cast(dict, extra_info)
+        extra_info_dict = {
+            key: value.item() if isinstance(value, torch.Tensor) else value
+            for key, value in extra_info_dict.items()
+            if isinstance(value, (torch.Tensor, int, float))
+        }
+        if policy_metrics:
+            extra_info_dict = finalize_train_policy_metrics(extra_info_dict, DEVICE)
+        return WorkerTrainLogItem(
+            **logs_info,  # type: ignore[typeddict-item]
+            **extra_info_dict,  # type: ignore[typeddict-item]
+            step_consumed_tokens=train_step_info["step_consumed_tokens"],
+            efficient_attn_ratio=train_step_info["efficient_attn_ratio"],
+            grad_norm=float(grad_norm.item()),
+            lr=float(lr),  # type: ignore[typeddict-unknown-key]
+            pass_index=float(pass_index),  # type: ignore[typeddict-unknown-key]
+            chunk_index=float(chunk_index),  # type: ignore[typeddict-unknown-key]
+        )
+
+    def _set_ppo_phase(self, phase: PPOPhase) -> None:
+        self._ppo_phase = phase
+        self.logger.info(
+            f"PPO phase={phase.value}, allocated={DEVICE_MODULE.memory_allocated() / (1024**3):.2f} GiB, "
+            f"reserved={DEVICE_MODULE.memory_reserved() / (1024**3):.2f} GiB"
+        )
+
+    def _onload_critic(self) -> None:
+        if self._ppo_phase not in (PPOPhase.ALL_OFFLOADED, PPOPhase.ACTOR_READY):
+            raise RuntimeError(f"Cannot onload Critic from phase {self._ppo_phase.value}.")
+        assert self._critic_engine is not None
+        self._engine.put_model_to_device("cpu")
+        self._engine.put_optimizer_to_device("cpu")
+        DEVICE_MODULE.empty_cache()
+        self._critic_engine.put_model_to_device(DEVICE)
+        self._set_ppo_phase(PPOPhase.CRITIC_TRAIN)
+
+    def _offload_critic(self) -> None:
+        if self._ppo_phase != PPOPhase.CRITIC_TRAIN:
+            raise RuntimeError(f"Cannot offload Critic from phase {self._ppo_phase.value}.")
+        assert self._critic_engine is not None
+        self._critic_engine.put_optimizer_to_device("cpu")
+        self._critic_engine.put_model_to_device("cpu")
+        DEVICE_MODULE.empty_cache()
+        self._set_ppo_phase(PPOPhase.ALL_OFFLOADED)
+
+    def _onload_actor(self) -> None:
+        if self._ppo_phase != PPOPhase.ALL_OFFLOADED:
+            raise RuntimeError(f"Cannot onload Actor from phase {self._ppo_phase.value}.")
+        self._engine.put_model_to_device(DEVICE)
+        self._set_ppo_phase(PPOPhase.ACTOR_TRAIN)
+
     def _fit_sft(self):
         self.logger.info(f"Train SFT after {self._rollout_step} RL steps")
         if self._sft_dataloader_iter is None:
@@ -934,6 +1506,10 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
     def offload_model(self):
         self._engine.put_model_to_device("cpu")
         DEVICE_MODULE.empty_cache()
+        if self._critic_engine is not None:
+            if self._ppo_phase == PPOPhase.CRITIC_TRAIN:
+                raise RuntimeError("External Actor offload is not allowed during the Critic phase.")
+            self._set_ppo_phase(PPOPhase.ALL_OFFLOADED)
         self.logger.info(
             f"Offloaded model to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
         )
@@ -950,7 +1526,11 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
 
     @ray_method
     def onload_model(self):
+        if self._critic_engine is not None and self._ppo_phase == PPOPhase.CRITIC_TRAIN:
+            raise RuntimeError("Actor and Critic cannot be onloaded at the same time.")
         self._engine.put_model_to_device(DEVICE)
+        if self._critic_engine is not None:
+            self._set_ppo_phase(PPOPhase.ACTOR_READY)
 
     @ray_method
     def onload_optimizer(self):
@@ -961,6 +1541,8 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
         """Save the DCP checkpoint of the training worker."""
         if not isinstance(checkpoint_path, Path):
             checkpoint_path = Path(checkpoint_path)
+        if self._critic_engine is not None and no_save_optimizer:
+            raise ValueError("PPO strict checkpoints require both Actor and Critic optimizer states.")
         weights_path = checkpoint_path / self._SAVE_WEIGHTS_DIR
 
         # Save model and optimizer
@@ -968,6 +1550,37 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
             weights_dir=weights_path,
             save_optimizer=not no_save_optimizer,
         )
+
+        if self._critic_engine is not None:
+            critic_weights_path = checkpoint_path / self._SAVE_CRITIC_WEIGHTS_DIR
+            self._critic_engine.save_dcp(
+                weights_dir=critic_weights_path,
+                save_optimizer=True,
+            )
+            assert self._actor_scheduler is not None and self._critic_scheduler is not None
+            state_dir = checkpoint_path / self._SAVE_PPO_STATE_DIR
+            if self.rank == 0:
+                state_dir.mkdir(parents=True, exist_ok=True)
+            dist.barrier()
+            worker_state = {
+                "actor_scheduler": self._actor_scheduler.state_dict(),
+                "critic_scheduler": self._critic_scheduler.state_dict(),
+                "actor_optimizer_updates": self._actor_optimizer_updates,
+                "critic_optimizer_updates": self._critic_optimizer_updates,
+                "global_train_step": self._global_train_step,
+                "rollout_step": self._rollout_step,
+                "python_rng_state": random.getstate(),
+                "numpy_rng_state": np.random.get_state(),
+                "torch_rng_state": torch.get_rng_state(),
+                # Ray workers can see every device on the node. Touch only the
+                # rank-local generator instead of initializing CUDA contexts
+                # on all visible GPUs during checkpointing.
+                "cuda_rng_state": (
+                    torch.cuda.get_rng_state(torch.cuda.current_device()) if torch.cuda.is_available() else None
+                ),
+            }
+            torch.save(worker_state, state_dir / f"rank-{self.rank}.pt")
+            dist.barrier()
 
         # Save sft dataloader
         if self._sft_dataloader is not None:
@@ -1013,7 +1626,50 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
             weights_dir=weights_path,
             load_states=load_checkpoint_cfg.load_optimizer_states,
             load_args=load_checkpoint_cfg.load_optimizer_args,
+            strict=self._critic_engine is not None,
         )
+
+        if self._critic_engine is not None:
+            if not (
+                load_checkpoint_cfg.load_optimizer_states
+                and load_checkpoint_cfg.load_optimizer_args
+                and load_checkpoint_cfg.load_scheduler
+            ):
+                raise ValueError("PPO strict resume requires optimizer states, optimizer args, and schedulers.")
+            critic_weights_path = resume_from / self._SAVE_CRITIC_WEIGHTS_DIR
+            if not critic_weights_path.exists():
+                raise FileNotFoundError(f"PPO checkpoint has no {self._SAVE_CRITIC_WEIGHTS_DIR}/ directory.")
+            self._critic_engine.load_dcp(
+                weights_dir=critic_weights_path,
+                load_states=True,
+                load_args=True,
+                strict=True,
+            )
+            worker_state_path = resume_from / self._SAVE_PPO_STATE_DIR / f"rank-{self.rank}.pt"
+            if not worker_state_path.exists():
+                raise FileNotFoundError(f"PPO worker state does not exist: {worker_state_path}")
+            worker_state = torch.load(worker_state_path, map_location="cpu", weights_only=False)
+            assert self._actor_scheduler is not None and self._critic_scheduler is not None
+            self._actor_scheduler.load_state_dict(worker_state["actor_scheduler"])
+            self._critic_scheduler.load_state_dict(worker_state["critic_scheduler"])
+            self._actor_optimizer_updates = int(worker_state["actor_optimizer_updates"])
+            self._critic_optimizer_updates = int(worker_state["critic_optimizer_updates"])
+            self._global_train_step = int(worker_state["global_train_step"])
+            self._rollout_step = int(worker_state["rollout_step"])
+            random.setstate(worker_state["python_rng_state"])
+            np.random.set_state(worker_state["numpy_rng_state"])
+            torch.set_rng_state(worker_state["torch_rng_state"])
+            if torch.cuda.is_available() and worker_state["cuda_rng_state"] is not None:
+                torch.cuda.set_rng_state(
+                    worker_state["cuda_rng_state"],
+                    device=torch.cuda.current_device(),
+                )
+            self._engine.put_model_to_device("cpu")
+            self._engine.put_optimizer_to_device("cpu")
+            self._critic_engine.put_model_to_device("cpu")
+            self._critic_engine.put_optimizer_to_device("cpu")
+            DEVICE_MODULE.empty_cache()
+            self._set_ppo_phase(PPOPhase.ALL_OFFLOADED)
 
         # Resume sft dataloader
         if self._sft_dataloader is not None:

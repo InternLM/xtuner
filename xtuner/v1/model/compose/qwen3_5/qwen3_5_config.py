@@ -5,6 +5,7 @@ from xtuner.v1.model.moe.qwen3_5_text_split import (
     Qwen3_5_VLTextMoE397BA17BSplitConfig,
     Qwen3_5_VLTextMoESplitConfig,
 )
+from xtuner.v1.model.moe.qwen3_5_value import Qwen3_5_VLTextMoE35BA3BValueConfig
 from xtuner.v1.utils import get_logger
 
 from ..qwen3_vl.qwen3_vl_config import Qwen3VLBaseConfig, Qwen3VLProjectorConfig, Qwen3VLVisionConfig
@@ -39,6 +40,12 @@ class Qwen3_5_VLMoE35BA3Config(Qwen3_5_BaseConfig):
     vision_config: Qwen3_5_VisionConfig = Qwen3_5_VisionConfig()
     projector_config: Qwen3_5_ProjectorConfig = Qwen3_5_ProjectorConfig()
     text_config: Qwen3_5_VLTextMoE35BA3BConfig = Qwen3_5_VLTextMoE35BA3BConfig()
+
+
+class Qwen3_5_VLMoE35BA3ValueConfig(Qwen3_5_BaseConfig):
+    vision_config: Qwen3_5_VisionConfig = Qwen3_5_VisionConfig()
+    projector_config: Qwen3_5_ProjectorConfig = Qwen3_5_ProjectorConfig()
+    text_config: Qwen3_5_VLTextMoE35BA3BValueConfig = Qwen3_5_VLTextMoE35BA3BValueConfig()
 
 
 class Qwen3_5_VLDense4BConfig(Qwen3_5_BaseConfig):

@@ -197,7 +197,7 @@ class MoE(BaseModel):
             self.ep_mesh = None
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, type=config.rms_norm_type)
-        self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = self.build_head(config)
 
         self.layers = self.build_layers(config)
         self.rotary_emb = self.build_rotary_embedding(config)
@@ -216,6 +216,17 @@ class MoE(BaseModel):
             n_routed_experts=self.config.n_routed_experts,
             num_experts_per_tok=self.config.num_experts_per_tok,
         )
+
+    def build_head(self, config: MoEConfig) -> LMHead:
+        """Build the output head.
+
+        Args:
+            config (MoEConfig): Model configuration.
+
+        Returns:
+            LMHead: Output head used by the model forward path.
+        """
+        return LMHead(config.hidden_size, config.vocab_size, bias=False)
 
     def _maybe_offload_router(self, tensor: torch.Tensor) -> torch.Tensor:
         if self.config.router_async_offload:
@@ -507,8 +518,9 @@ class MoE(BaseModel):
                         d2h_stream=self.offload_stream,
                         block_idx=layer_idx - self.config.first_k_dense_replace,
                         group="text",
-                        custom_check_fn=lambda x: x.data_ptr()
-                        in [hidden_states.data_ptr() for hidden_states in hidden_states_list],
+                        custom_check_fn=lambda x: (
+                            x.data_ptr() in [hidden_states.data_ptr() for hidden_states in hidden_states_list]
+                        ),
                         prefetch=True,
                         reserve_pin_memory=True,
                     ):
