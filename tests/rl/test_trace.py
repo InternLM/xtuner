@@ -48,53 +48,45 @@ class TestTrace(unittest.TestCase):
         self.assertEqual(output["child_parent_span_id"], output["parent_span_id"])
         self.assertEqual(output["span_name_paths"]["order.parent"], ["order.parent"])
         self.assertEqual(output["span_name_paths"]["order.child"], ["order.parent", "order.child"])
-        self.assertEqual(
-            output["live_sequence"],
-            [
-                {
-                    "event": "start",
-                    "span_name": "order.parent",
-                    "span_name_path": ["order.parent"],
-                },
-                {
-                    "event": "start",
-                    "span_name": "order.child",
-                    "span_name_path": ["order.parent", "order.child"],
-                },
-                {
-                    "event": "end",
-                    "span_name": "order.child",
-                    "span_name_path": ["order.parent", "order.child"],
-                },
-                {
-                    "event": "end",
-                    "span_name": "order.parent",
-                    "span_name_path": ["order.parent"],
-                },
-            ],
-        )
 
-    def test_live_viewer_uses_span_name_path_for_display_chain(self):
+    def test_viewer_uses_span_name_path_for_display_chain(self):
         from xtuner.tools.trace_viewer.payload import build_rollout_view_payload_from_jaeger_traces
 
-        payload = build_rollout_view_payload_from_jaeger_traces(
-            [],
-            live_records=[
-                {
-                    "event": "start",
-                    "time_s": 1.0,
-                    "trace_id": "trace-1",
-                    "span_id": "span-1",
-                    "span_name": "child.phase",
-                    "span_name_path": ["parent.phase", "child.phase"],
-                    "attributes": {
-                        "xtuner.rollout_id": "rollout-1",
-                        "xtuner.status": "running",
+        traces = [
+            {
+                "traceID": "trace-1",
+                "processes": {"p1": {"serviceName": "xtuner-test", "tags": []}},
+                "spans": [
+                    {
+                        "traceID": "trace-1",
+                        "spanID": "span-1",
+                        "operationName": "parent.phase",
+                        "processID": "p1",
+                        "startTime": 1_000,
+                        "duration": 2_000,
+                        "tags": [
+                            {"key": "xtuner.rollout_id", "value": "rollout-1"},
+                            {"key": "xtuner.span_name_path", "value": ["parent.phase"]},
+                        ],
                     },
-                }
-            ],
-            train_step="all",
-        )
+                    {
+                        "traceID": "trace-1",
+                        "spanID": "span-2",
+                        "operationName": "child.phase",
+                        "processID": "p1",
+                        "startTime": 2_000,
+                        "duration": 1_000,
+                        "references": [{"refType": "CHILD_OF", "traceID": "trace-1", "spanID": "span-1"}],
+                        "tags": [
+                            {"key": "xtuner.rollout_id", "value": "rollout-1"},
+                            {"key": "xtuner.span_name_path", "value": ["parent.phase", "child.phase"]},
+                        ],
+                    },
+                ],
+            }
+        ]
+
+        payload = build_rollout_view_payload_from_jaeger_traces(traces, train_step="all")
 
         self.assertEqual(
             [node["name"] for node in payload["samples"][0]["display_path"]],

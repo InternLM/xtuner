@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, MutableMapping
+from typing import TYPE_CHECKING, Any, Mapping, MutableMapping
 
-from opentelemetry import baggage, propagate, trace
-from opentelemetry import context as otel_context
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.trace import Status, StatusCode
+
+if TYPE_CHECKING:
+    from opentelemetry.sdk.trace import TracerProvider
 
 
 def configure_tracer_provider(
@@ -20,7 +17,11 @@ def configure_tracer_provider(
     if protocol != "grpc":
         raise ValueError(f"Unsupported OTel trace export protocol: {protocol!r}")
     try:
+        from opentelemetry import trace
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
     except ImportError as exc:
         raise RuntimeError(
             "XTuner OTel tracing requires the official OpenTelemetry OTLP gRPC trace exporter. "
@@ -39,6 +40,8 @@ def inject_otel_context(
 ) -> MutableMapping[str, str]:
     """Inject the current or provided OTel context into a W3C carrier."""
 
+    from opentelemetry import propagate
+
     carrier = carrier if carrier is not None else {}
     propagate.inject(carrier, context=context)
     return carrier
@@ -50,11 +53,15 @@ def extract_otel_context(
 ) -> Any:
     """Extract W3C TraceContext from a carrier into an OTel context."""
 
+    from opentelemetry import propagate
+
     return propagate.extract(carrier, context=context)
 
 
 def context_with_baggage(name: str, value: object, context: Any | None = None) -> Any:
     """Return a context with one W3C Baggage item attached."""
+
+    from opentelemetry import baggage
 
     return baggage.set_baggage(name, value, context=context)
 
@@ -62,11 +69,15 @@ def context_with_baggage(name: str, value: object, context: Any | None = None) -
 def get_baggage(name: str, context: Any | None = None) -> object | None:
     """Read one W3C Baggage item from a context."""
 
+    from opentelemetry import baggage
+
     return baggage.get_baggage(name, context=context)
 
 
 def attach_otel_context(context: Any) -> object:
     """Attach extracted context to the current execution scope."""
+
+    from opentelemetry import context as otel_context
 
     return otel_context.attach(context)
 
@@ -74,11 +85,15 @@ def attach_otel_context(context: Any) -> object:
 def detach_otel_context(token: object) -> None:
     """Detach a previously attached OTel context token."""
 
+    from opentelemetry import context as otel_context
+
     otel_context.detach(token)
 
 
 def start_span(name: str, *, attributes: Mapping[str, Any] | None = None):
     """Start a current OTel span with XTuner-managed exception handling."""
+
+    from opentelemetry import trace
 
     return trace.get_tracer("xtuner").start_as_current_span(
         name,
@@ -89,6 +104,8 @@ def start_span(name: str, *, attributes: Mapping[str, Any] | None = None):
 
 
 def current_span_ids() -> dict[str, str] | None:
+    from opentelemetry import trace
+
     span = trace.get_current_span()
     span_context = span.get_span_context()
     if not span_context.is_valid:
@@ -100,6 +117,8 @@ def current_span_ids() -> dict[str, str] | None:
 
 
 def add_event(name: str, *, attributes: Mapping[str, Any] | None = None) -> None:
+    from opentelemetry import trace
+
     span = trace.get_current_span()
     if not span.is_recording():
         return
@@ -107,6 +126,8 @@ def add_event(name: str, *, attributes: Mapping[str, Any] | None = None) -> None
 
 
 def set_attributes(attributes: Mapping[str, Any]) -> None:
+    from opentelemetry import trace
+
     span = trace.get_current_span()
     if not span.is_recording():
         return
@@ -115,6 +136,9 @@ def set_attributes(attributes: Mapping[str, Any]) -> None:
 
 
 def set_error_status(message: str | None = None) -> None:
+    from opentelemetry import trace
+    from opentelemetry.trace import Status, StatusCode
+
     span = trace.get_current_span()
     if not span.is_recording():
         return
@@ -125,6 +149,9 @@ def set_error_status(message: str | None = None) -> None:
 
 
 def record_failure(exc: BaseException) -> None:
+    from opentelemetry import trace
+    from opentelemetry.trace import Status, StatusCode
+
     span = trace.get_current_span()
     if not span.is_recording():
         return

@@ -2,7 +2,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -129,18 +128,13 @@ def parent_child() -> None:
 def nested_span_order() -> None:
     exporter = _install_in_memory_exporter()
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        live_path = Path(tmpdir) / "trace-live.jsonl"
-        with mock.patch.dict(os.environ, {"XTUNER_OTEL_LIVE_JSONL_PATH": os.fspath(live_path)}):
-            with (
-                mock.patch.object(trace_api, "_ensure_trace_runtime_from_env"),
-                mock.patch.object(trace_api, "is_trace_enabled", return_value=True),
-            ):
-                with trace_api.trace_span("order.parent"):
-                    with trace_api.trace_span("order.child"):
-                        pass
-
-        live_records = [json.loads(line) for line in live_path.read_text(encoding="utf-8").splitlines()]
+    with (
+        mock.patch.object(trace_api, "_ensure_trace_runtime_from_env"),
+        mock.patch.object(trace_api, "is_trace_enabled", return_value=True),
+    ):
+        with trace_api.trace_span("order.parent"):
+            with trace_api.trace_span("order.child"):
+                pass
 
     spans = {span.name: span for span in exporter.get_finished_spans()}
     parent = spans["order.parent"]
@@ -153,14 +147,6 @@ def nested_span_order() -> None:
                 name: list(span.attributes.get("xtuner.span_name_path") or [])
                 for name, span in spans.items()
             },
-            "live_sequence": [
-                {
-                    "event": record.get("event"),
-                    "span_name": record.get("span_name"),
-                    "span_name_path": record.get("span_name_path"),
-                }
-                for record in live_records
-            ],
         }
     )
 
