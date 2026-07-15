@@ -6,7 +6,8 @@ set -euo pipefail
 
 ROOT="${XTUNER_OTEL_ROOT:-/tmp/xtuner_otel}"
 JAEGER_BIN="${JAEGER_BIN:-${ROOT}/bin/jaeger}"
-CONFIG="${1:-recipe/otle/jaeger/jaeger-memory.yaml}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG="${1:-${SCRIPT_DIR}/../jaeger/jaeger-memory.yaml}"
 PID_FILE="${XTUNER_JAEGER_PID_FILE:-/tmp/xtuner_jaeger_memory.pid}"
 LOG_FILE="${XTUNER_JAEGER_LOG_FILE:-/tmp/xtuner_jaeger_memory.log}"
 QUERY_URL="${XTUNER_JAEGER_QUERY_URL:-http://127.0.0.1:16686}"
@@ -14,7 +15,7 @@ WAIT_TIMEOUT_S="${XTUNER_JAEGER_WAIT_TIMEOUT_S:-30}"
 
 if ! command -v "${JAEGER_BIN}" >/dev/null 2>&1; then
   echo "Jaeger binary not found: ${JAEGER_BIN}" >&2
-  echo "Install it first: bash recipe/otle/install_otel_tools.sh" >&2
+  echo "Install it first: bash recipe/trace/scripts/install_otel_tools.sh" >&2
   exit 1
 fi
 

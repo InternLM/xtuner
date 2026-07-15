@@ -16,8 +16,7 @@ Keep this package infrastructure-only:
 - Public facade: `xtuner/v1/rl/trace/__init__.py`
 - Basic API: `xtuner/v1/rl/trace/api.py`
 - Rollout starter preset: `xtuner/v1/rl/trace/rollout_api.py`
-- Viewer: `recipe/trace_viewer/`
-- Local tooling: `recipe/otle/` and `examples/v1/scripts/setup_trace.sh`
+- Local trace tooling and viewer: `recipe/trace/`
 
 Do not add rollout, agent, judger, Ray remote, HTTP proxy, reward, status, or session-server business semantics to `api.py`, `runtime.py`, or `otel_utils.py`. Keep rollout-specific starter behavior inside `rollout_api.py` and gated by `TraceConfig.enable_rollout_trace`.
 
@@ -25,7 +24,7 @@ Do not add rollout, agent, judger, Ray remote, HTTP proxy, reward, status, or se
 
 Choose the viewer by the observation question:
 
-- Use `recipe/trace_viewer` when the user wants rollout-oriented inspection, such as comparing samples within a training step by stage duration, status, reward/filter metadata, or recorded sample call chain.
+- Use `recipe/trace/viewer` when the user wants rollout-oriented inspection, such as comparing samples within a training step by stage duration, status, reward/filter metadata, or recorded sample call chain.
 - Use Jaeger when the question is not sample/step-centric, such as inspecting raw spans, service boundaries, cross-process causality, backend/client calls, collector/export behavior, or custom instrumentation that does not emit the rollout/sample attributes expected by the recipe viewer.
 
 The recipe viewer reads `traces.jsonl` and adds XTuner rollout/sample aggregation. Jaeger remains the raw trace drill-down surface for the same traced run.
@@ -78,7 +77,7 @@ the basic trace API.
 When adding trace instrumentation to an XTuner run:
 
 1. Ask for or locate the launch script and training config before editing.
-2. In the launch script, source `examples/v1/scripts/setup_trace.sh` when
+2. In the launch script, source `recipe/trace/setup_trace.sh` when
    `XTUNER_TRACE_ENABLED=1`.
 3. In the training config, add `TraceConfig` and set `enabled=True`; set
    `xtuner_viewer_enabled=True` when the user needs interactive sample/step inspection. Set
@@ -112,6 +111,6 @@ For concrete patterns, read [references/trace-patterns.md](references/trace-patt
 
 Use focused checks:
 
-- `PYTHONPATH=. python -m compileall -q xtuner/v1/rl/trace recipe/trace_viewer`
+- `PYTHONPATH=. python -m compileall -q xtuner/v1/rl/trace recipe/trace`
 - `PYTHONPATH=. python -m unittest discover -s tests/rl -p 'test_trace*.py' -v` when the trace tests exist in the worktree.
 - `git diff --check`

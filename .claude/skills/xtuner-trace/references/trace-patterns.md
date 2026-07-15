@@ -53,8 +53,9 @@ Enable trace bootstrap from the launcher, guarded by `XTUNER_TRACE_ENABLED`:
 
 ```bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 if [ "${XTUNER_TRACE_ENABLED:-0}" = "1" ]; then
-  source "${SCRIPT_DIR}/setup_trace.sh"
+  source "${REPO_ROOT}/recipe/trace/setup_trace.sh"
 fi
 ```
 
@@ -354,7 +355,7 @@ report them to the user after the run.
 Useful reference points from the full trace implementation:
 
 - `examples/v1/scripts/run_rl_run.sh`
-- `examples/v1/scripts/setup_trace.sh`
+- `recipe/trace/setup_trace.sh`
 - `examples/v1/config/agentic_rl_qwen3p5vl_mtp_ep_code.py`
 
 ## Runtime
@@ -404,7 +405,7 @@ Avoid recording prompts, responses, full configs, secrets, raw headers, or large
 
 ## Local Setup
 
-`examples/v1/scripts/setup_trace.sh` and `recipe/otle/` are local helper tooling for installing OTel collector binaries, starting the local Jaeger dependency, and clearing stale `recipe.trace_viewer.server` processes on `XTUNER_TRACE_VIEWER_PORT` or the default viewer port `18080`. Keep these as setup assets; do not use them to add automatic trace behavior to training configs or launch scripts unless that integration is explicitly requested.
+`recipe/trace/setup_trace.sh` and the rest of `recipe/trace/` are local helper tooling for installing OTel collector binaries, starting the local Jaeger dependency, and clearing stale `recipe.trace.viewer.server` processes on `XTUNER_TRACE_VIEWER_PORT` or the default viewer port `18080`. Keep these as setup assets; do not use them to add automatic trace behavior to training configs or launch scripts unless that integration is explicitly requested.
 
 ## Rollout Starter Preset
 

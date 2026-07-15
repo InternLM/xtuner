@@ -1,4 +1,4 @@
-# XTuner OTel Trace
+# XTuner Trace Tools
 
 XTuner exports rollout traces through OpenTelemetry. For local inspection, start
 Jaeger with `jaeger/jaeger-memory.yaml`, enable trace in the training config, and
@@ -13,21 +13,21 @@ The reference Jaeger config exposes:
 Install local binaries:
 
 ```bash
-bash recipe/otle/install_otel_tools.sh
+bash recipe/trace/scripts/install_otel_tools.sh
 export PATH=/tmp/xtuner_otel/bin:$PATH
 ```
 
 Start Jaeger:
 
 ```bash
-jaeger --config recipe/otle/jaeger/jaeger-memory.yaml
+jaeger --config recipe/trace/jaeger/jaeger-memory.yaml
 ```
 
 For local smoke tests, restart the in-memory Jaeger before each experiment so
 old services, operations, and trace ids cannot be mixed with the new run:
 
 ```bash
-bash recipe/otle/restart_jaeger_memory.sh
+bash recipe/trace/scripts/restart_jaeger_memory.sh
 ```
 
 Run XTuner with trace enabled:
@@ -43,14 +43,14 @@ OTLP gRPC endpoint `http://127.0.0.1:14317`.
 Set `TraceConfig(xtuner_viewer_enabled=True, ...)` to start the XTuner rollout
 viewer with the trace runtime. The viewer output goes to the same terminal or
 training log as the training process. The default viewer port is `18080`.
-`examples/v1/scripts/setup_trace.sh` clears stale `recipe.trace_viewer.server`
+`recipe/trace/setup_trace.sh` clears stale `recipe.trace.viewer.server`
 processes on `XTUNER_TRACE_VIEWER_PORT` or `18080` before preparing the local
 trace dependencies.
 
 Open the rollout viewer:
 
 ```bash
-python -m recipe.trace_viewer.server \
+python -m recipe.trace.viewer.server \
   --trace-jsonl <trace_run_dir>/traces/traces.jsonl \
   --jaeger-query-url http://127.0.0.1:16686 \
   --service xtuner-rollout
