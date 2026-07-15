@@ -58,12 +58,12 @@ from xtuner.v1.utils import (
     set_deterministic,
 )
 from xtuner.v1.utils.activation_offload import OffloadManager
+from xtuner.v1.utils.fsdp import release_deferred_fsdp_all_gathers
 from xtuner.v1.utils.reloadable_process_group import (
     destroy_reloadable_process_groups,
     monkey_patch_reloadable_process_groups,
     process_group_name,
     reload_process_groups,
-    reloadable_process_group_status,
 )
 
 from ..rollout_is import merge_rollout_is_metrics
@@ -287,26 +287,11 @@ class TrainingWorker(SingleAcceleratorWorker):
             engine=self._engine,
         )
 
-    def _memory_snapshot(self, tag: str) -> dict[str, float | str]:
-        DEVICE_MODULE.synchronize()
-        free, total = DEVICE_MODULE.mem_get_info()
-        allocated = DEVICE_MODULE.memory_allocated()
-        reserved = DEVICE_MODULE.memory_reserved()
-        gb = 1024**3
-        return {
-            "tag": tag,
-            "free_gb": round(free / gb, 3),
-            "used_gb": round((total - free) / gb, 3),
-            "allocated_gb": round(allocated / gb, 3),
-            "reserved_gb": round(reserved / gb, 3),
-        }
-
     @ray_method
     def destroy_train_nccl_process_groups(self) -> dict[str, object]:
         """Destroy reloadable train-side NCCL PG inners after weight sync and
         train offload."""
 
-        before = self._memory_snapshot("before_destroy_train_nccl")
         details = destroy_reloadable_process_groups()
         errors: list[str] = []
         unwrapped_nccl_groups: list[dict[str, object]] = []
@@ -344,16 +329,11 @@ class TrainingWorker(SingleAcceleratorWorker):
             unwrapped_nccl_groups.append({"ranks": ranks, "backend": backend, "group_name": process_group_name(group)})
 
         DEVICE_MODULE.empty_cache()
-        after = self._memory_snapshot("after_destroy_train_nccl")
         result = {
             "rank": self.rank,
             "destroyed": len(details),
-            "details": details,
             "unwrapped_nccl_groups": unwrapped_nccl_groups,
-            "reloadable_status": reloadable_process_group_status(),
             "errors": errors,
-            "before": before,
-            "after": after,
         }
         return result
 
@@ -361,7 +341,6 @@ class TrainingWorker(SingleAcceleratorWorker):
     def reload_train_nccl_process_groups(self) -> dict[str, object]:
         """Reload train-side NCCL PG inners before FSDP2 runs again."""
 
-        before = self._memory_snapshot("before_reload_train_nccl")
         errors: list[str] = []
         try:
             details = reload_process_groups()
@@ -369,15 +348,10 @@ class TrainingWorker(SingleAcceleratorWorker):
             details = []
             errors.append(f"reload {type(exc).__name__}: {exc}")
         DEVICE_MODULE.empty_cache()
-        after = self._memory_snapshot("after_reload_train_nccl")
         result = {
             "rank": self.rank,
             "reloaded": len(details),
-            "details": details,
-            "reloadable_status": reloadable_process_group_status(),
             "errors": errors,
-            "before": before,
-            "after": after,
         }
         return result
 
@@ -782,6 +756,11 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         only_calc_mismatch_ratio = os.environ.get("ONLY_CALC_MISMATCH_RATIO", "0") == "1"
         if only_calc_mismatch_ratio:
+            # This early-return path skips the MTP forward. FSDP may have
+            # prefetched the MTP module already, leaving its all-gather result
+            # cached until we release it explicitly. The normal training branch
+            # can leave the same residue, but it is outside the peak-memory
+            # path and can be ignored.
             self._release_deferred_fsdp_all_gathers(f"rollout_{rollout_idx}/only_calc_mismatch")
             DEVICE_MODULE.empty_cache()
             return worker_log_item
@@ -1072,81 +1051,16 @@ class TrainingWorker(SingleAcceleratorWorker):
             self.logger.warning(f"Failed to clear cuBLAS workspaces: {e}")
 
     def _release_deferred_fsdp_all_gathers(self, log_tag: str) -> None:
-        """Release FSDP2 all-gather buffers that were prefetched but not
-        consumed.
-
-        In forward-only old-logprob calculation, the final decoder layer can prefetch the first MTP layer while the MTP
-        block itself is skipped because only the LM loss context is provided. Without a following MTP forward or
-        backward pass, FSDP2 may keep the prefetched all-gather result alive.
-        """
-        try:
-            from torch.distributed._composable_state import _get_module_state
-        except Exception as e:
-            self.logger.debug(f"[{log_tag}] failed to import FSDP composable state helper: {e}")
-            return
-
-        released_comm_states = 0
-        released_param_groups = 0
-        seen_comm_ctx: set[int] = set()
-        seen_param_groups: set[int] = set()
-
-        def wait_all_gather_result(all_gather_result) -> None:
-            event = getattr(all_gather_result, "all_gather_event", None)
-            if event is not None:
-                try:
-                    torch.accelerator.current_stream().wait_event(event)
-                except Exception:
-                    DEVICE_MODULE.synchronize()
-            work = getattr(all_gather_result, "all_gather_work", None)
-            if work is not None and hasattr(work, "wait"):
-                try:
-                    work.wait()
-                except Exception:
-                    DEVICE_MODULE.synchronize()
-
-        for module in self._engine.model.modules():
-            try:
-                state = _get_module_state(module)
-            except Exception:
-                continue
-            if state is None:
-                continue
-
-            comm_ctx = getattr(state, "_comm_ctx", None)
-            if comm_ctx is not None and id(comm_ctx) not in seen_comm_ctx:
-                seen_comm_ctx.add(id(comm_ctx))
-                all_gather_state = getattr(comm_ctx, "all_gather_state", None)
-                if all_gather_state is not None:
-                    event = getattr(all_gather_state, "event", None)
-                    if event is not None:
-                        try:
-                            event.synchronize()
-                        except Exception:
-                            DEVICE_MODULE.synchronize()
-                    comm_ctx.all_gather_state = None
-                    released_comm_states += 1
-
-            param_group = getattr(state, "_fsdp_param_group", None)
-            if param_group is None or id(param_group) in seen_param_groups:
-                continue
-            seen_param_groups.add(id(param_group))
-            all_gather_result = getattr(param_group, "_all_gather_result", None)
-            if all_gather_result is None:
-                continue
-            wait_all_gather_result(all_gather_result)
-            param_group._all_gather_result = None
-            released_param_groups += 1
-
-        if released_comm_states or released_param_groups:
-            self.logger.info(
+        comm_states, param_groups = release_deferred_fsdp_all_gathers(self._engine.model)
+        if comm_states or param_groups:
+            self.logger.debug(
                 f"[{log_tag}] released deferred FSDP all-gathers: "
-                f"comm_states={released_comm_states}, param_groups={released_param_groups}"
+                f"comm_states={comm_states}, param_groups={param_groups}"
             )
 
     @ray_method
     def offload_model(self):
         self._engine.put_model_to_device("cpu")
-        self._release_deferred_fsdp_all_gathers("offload_model")
         DEVICE_MODULE.empty_cache()
         self._clear_cublas_workspaces()
         self.logger.info(

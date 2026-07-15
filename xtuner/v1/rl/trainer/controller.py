@@ -31,23 +31,14 @@ def _summarize_process_group_results(results: list[dict[str, Any]]) -> str:
     count_key = "destroyed" if "destroyed" in results[0] else "reloaded"
     counts = [result.get(count_key, 0) for result in results]
     count_summary = f"{counts[0]} on all ranks" if len(set(counts)) == 1 else f"by_rank={counts}"
-    errors = sum(len(result.get("errors", [])) for result in results)
+    result_errors = [error for result in results for error in result.get("errors", [])]
     unwrapped = sum(len(result.get("unwrapped_nccl_groups", [])) for result in results)
-    status = results[0].get("reloadable_status", {})
-    after_used = [
-        result["after"]["used_gb"]
-        for result in results
-        if isinstance(result.get("after"), dict) and "used_gb" in result["after"]
-    ]
-    mem_range = ""
-    if after_used:
-        mem_range = f", after_used_gb={min(after_used):.3f}-{max(after_used):.3f}"
-    return (
-        f"ranks={len(results)}, {count_key}={count_summary}, "
-        f"reloadable={status.get('alive', '?')}/{status.get('total', '?')} alive, "
-        f"destroyed={status.get('destroyed', '?')}, specs={status.get('specs', '?')}"
-        f"{mem_range}, errors={errors}, unwrapped_nccl_groups={unwrapped}"
-    )
+    summary = f"ranks={len(results)}, {count_key}={count_summary}"
+    if unwrapped:
+        summary += f", unwrapped_nccl_groups={unwrapped}"
+    if result_errors:
+        summary += f", errors={len(result_errors)}, first_error={result_errors[0]}"
+    return summary
 
 
 class TrainingController:

@@ -62,7 +62,7 @@ hf_interval = 15
 checkpoint_interval = 50
 evaluate_step = 5
 enable_initial_evaluate = os.environ.get("ENABLE_INITIAL_EVALUATE", False)
-train_ep_size=4
+train_ep_size = 4
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
@@ -217,7 +217,6 @@ float8_cfg = Float8Config(
     scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
 )
 model_cfg.float8_cfg = float8_cfg
-# model_cfg.float8_cfg = None
 model_cfg.text_config.ep_size = train_ep_size
 model_cfg.text_config.z_loss_cfg = None
 model_cfg.text_config.balancing_loss_cfg = None
