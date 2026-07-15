@@ -1193,6 +1193,10 @@ class MoE(BaseModel):
                 module.forward = types.MethodType(self.patched_emb_forward, module)  # type: ignore
 
         self._to_empty_meta()
+        # Reduce-scatter gradients with pure SUM (no divide) for every sharded submodule; the
+        # expert / replicated grads not covered by reduce-scatter are handled without division in
+        # scale_and_reduce_grad. See BaseModel.set_gradient_reduce_sum.
+        self.set_gradient_reduce_sum()
         return self
 
     @property
@@ -1222,10 +1226,10 @@ class MoE(BaseModel):
             if param.grad is None:
                 continue
 
-            # Expert parameters live on a unique EP rank, so no cross-rank reduction
-            # is needed — just rescale by `ep_size` to keep the effective average.
+            # Expert parameters live on a unique EP rank; their FSDP sharding is only over the
+            # experts_fsdp sub-dim, already SUM-reduced by reduce-scatter. No cross-rank reduction
+            # and no rescaling: under reduce-sum the local-component gradient is what we keep.
             if ep_enabled and ".experts" in name:
-                param.grad.div_(self.ep_mesh.size())  # type: ignore
                 continue
 
             if not isinstance(param, DTensor):
@@ -1252,8 +1256,8 @@ class MoE(BaseModel):
                 flat_mesh = param.device_mesh[replicate_dim_names[0]]
 
             grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
-            # Pre-scale locally so the SUM all_reduce below yields the mean across replicas.
-            grad.div_(flat_mesh.size())  # type: ignore
+            # Replicated params get no reduce-scatter; SUM their per-rank local-component grads
+            # across the replicate group with NO pre-divide, matching the reduce-sum invariant.
             grads_by_group.setdefault(flat_mesh.get_group(), []).append(grad)  # type: ignore
 
         # One coalesced all_reduce per process group covers all replicated grads.

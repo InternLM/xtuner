@@ -300,6 +300,10 @@ class Dense(BaseModel):
         # Make sure it works properly when using fsdp
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.embed_tokens.weight
+        # Reduce-scatter gradients with pure SUM (no divide) for every sharded submodule; combined
+        # with the loss forwards no longer injecting x world_size, this yields the global loss
+        # gradient. See BaseModel.set_gradient_reduce_sum.
+        self.set_gradient_reduce_sum()
         return self
 
     # TODO: 支持 tp

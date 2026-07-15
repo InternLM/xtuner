@@ -6,7 +6,6 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from cyclopts import Parameter
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.nn.functional import all_reduce
 
 from xtuner.v1.utils.device import get_device
 
@@ -282,10 +281,10 @@ class LMHeadLossContext(BaseLossContext):
 
         extra_info["local_base_loss"] = loss.detach().clone()
 
-        # Step 2.c in the loss calculation: reduce the loss over all ranks using all_reduce with autograd support
-        if dist.is_initialized():
-            loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
-
+        # Under reduce-sum gradients the loss stays as this rank's local component (local token sum
+        # over the global token denominator). Cross-rank aggregation happens on the gradients via the
+        # FSDP SUM reduce-scatter, so no autograd WORLD all_reduce is injected here. The global loss
+        # scalar for logging is restored separately by the detached display pipeline (§5.4).
         return loss, (logits, extra_info)
 
 

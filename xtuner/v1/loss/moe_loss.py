@@ -155,22 +155,18 @@ class BalancingLossContext(nn.Module):
         alpha = self.loss_cfg.balancing_loss_alpha
 
         if self.loss_cfg.balancing_loss_global_average and dist.is_initialized():
-            group = dist.group.WORLD
-            assert group is not None
             tokens_global = tokens_per_expert_global.sum(-1)
             seqlen_global = tokens_global // num_experts_per_tok
             scale_global = n_routed_experts / tokens_global
 
-            routing_weights_sum_global = all_reduce_autograd(local_gating_sum, "sum", group)
-            routing_weights_mean_global = routing_weights_sum_global / seqlen_global.unsqueeze(-1)
-            loss_vec = scale_global * (tokens_per_expert_global * routing_weights_mean_global).sum(-1)
-
-            # Detached local component: same global denominators, but this rank's own gating sum in
-            # place of the cross-rank sum. Because `all_reduce_autograd` is a plain SUM and every
-            # other factor here (scale_global, seqlen_global, tokens_per_expert_global) is detached
-            # and global, summing `local_vec` over ranks reproduces `loss_vec` exactly.
-            routing_weights_mean_local = local_gating_sum.detach() / seqlen_global.unsqueeze(-1)
-            local_vec = scale_global * (tokens_per_expert_global * routing_weights_mean_local).sum(-1)
+            # Under reduce-sum gradients the loss stays as this rank's local component: use this
+            # rank's own gating sum with the global denominators, without any cross-rank all_reduce.
+            # Cross-rank aggregation happens on the gradients (FSDP / scale_and_reduce_grad SUM);
+            # since every other factor here is detached and global, summing the loss over ranks
+            # reproduces the global balancing loss.
+            routing_weights_mean = local_gating_sum / seqlen_global.unsqueeze(-1)
+            loss_vec = scale_global * (tokens_per_expert_global * routing_weights_mean).sum(-1)
+            local_vec = loss_vec.detach()
         else:
             valid_tokens = max(non_pad_token, 1)
             scale_global = n_routed_experts / (valid_tokens * num_experts_per_tok)
@@ -298,20 +294,18 @@ class ZLossContext(nn.Module):
         denom_local = max(num_tokens_local, 1)
         base = torch.logsumexp(router_logits, dim=-1).square().sum() / denom_local
 
-        local_loss = base
         loss = base
         if self.loss_cfg.z_loss_global_average and num_tokens_global is not None:
-            # Local component: this rank's share of the global-average z-loss, without the
-            # `× world_size` factor. The backward path keeps `× world_size` (removed in the
-            # reduce-sum switch); summing `local_loss` over ranks reproduces the global z-loss.
+            # Under reduce-sum gradients the injected z-loss stays as this rank's local component
+            # (its share of the global-average z-loss, WITHOUT any `× world_size`). Cross-rank
+            # aggregation happens on the gradients via the FSDP SUM reduce-scatter; summing this
+            # local component over ranks reproduces the global z-loss.
             denom_global = torch.clamp(num_tokens_global, min=1)
-            local_loss = base * num_tokens_local / denom_global
-            loss = local_loss * world_size
+            loss = base * num_tokens_local / denom_global
 
-        local_loss = local_loss * self.loss_cfg.z_loss_alpha / self._batch_size
         loss = loss * self.loss_cfg.z_loss_alpha / self._batch_size
         self._update_running(loss.detach())
-        self._update_local_running(local_loss.detach())
+        self._update_local_running(loss.detach())
         return loss
 
     def finalize(self) -> tuple[torch.Tensor, torch.Tensor]:

@@ -138,6 +138,12 @@ class BaseComposeModel(BaseModel):
         self.language_model.set_modules_to_forward_prefetch([self.language_model.layers["0"]])  # type: ignore
 
         self._to_empty_meta()
+        # Reduce-scatter gradients with pure SUM for every sharded submodule. The vision tower,
+        # projector, and this compose root are sharded by their own fully_shard overrides / the root
+        # wrap above, none of which set reduce-sum; a single root-level pass over self.modules()
+        # covers them all (and is idempotent for the language model, already set). Without this the
+        # vision/projector grads silently fall back to FSDP AVG and lose a 1/fsdp_size factor.
+        self.set_gradient_reduce_sum()
         return self
 
     def from_hf(self, hf_path: str | Path, strict=True):

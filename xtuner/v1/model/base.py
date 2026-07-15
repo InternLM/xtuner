@@ -676,6 +676,10 @@ class BaseModel(nn.Module):
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
+        # Reduce-scatter gradients with pure SUM (no divide). Combined with the loss forwards no
+        # longer injecting x world_size, each param's gradient is the sum of per-rank local-component
+        # gradients, i.e. the global loss gradient. Covers nested/child FSDP modules via self.modules().
+        self.set_gradient_reduce_sum()
         return self
 
     def _fully_shard(
@@ -1387,6 +1391,21 @@ class BaseModel(nn.Module):
         # CE's local component is keyed `local_base_loss`; expose it under the historical curve name.
         if "reduced_base_loss" in reduced_other_losses:
             reduced_other_losses["reduced_llm_loss"] = reduced_other_losses.pop("reduced_base_loss")
+
+        # Safety net: every `*loss` tensor field an output exposes must have produced a display curve
+        # from a registered local component. Otherwise a newly added loss term would silently vanish
+        # from the logged curves while still driving backward, hiding the regression.
+        for output in batch_outputs:
+            for name in output.model_fields:
+                field_value = getattr(output, name, None)
+                if "loss" in name and isinstance(field_value, torch.Tensor):
+                    expected = "reduced_llm_loss" if name == "loss" else f"reduced_{name}"
+                    if expected not in reduced_other_losses:
+                        raise RuntimeError(
+                            f"Loss field '{name}' has no display curve ('{expected}' missing from reduced "
+                            f"logs): register its detached local component on extra_info (see "
+                            f"`_store_local_display_losses` / CE's `local_base_loss`)."
+                        )
 
         ret = BatchForwardInfo(
             logs_info=reduced_other_losses,
