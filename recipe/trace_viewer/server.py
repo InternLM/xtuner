@@ -20,12 +20,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 
-from xtuner.tools.trace_viewer.payload import (
+from recipe.trace_viewer.payload import (
     build_rollout_view_payload_from_jaeger_traces,
     filter_rollout_view_payload_by_train_step,
     load_jaeger_traces_from_otel_jsonl,
 )
-from xtuner.tools.trace_viewer.render import render_rollout_trace_html, write_rollout_trace_html
+from recipe.trace_viewer.render import render_rollout_trace_html, write_rollout_trace_html
 
 
 _JAEGER_PROXY_PREFIX = "/jaeger"

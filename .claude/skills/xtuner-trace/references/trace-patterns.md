@@ -81,10 +81,10 @@ from xtuner.v1.rl.trace import TraceConfig
 trace_config = TraceConfig(
     enabled=os.environ.get("XTUNER_TRACE_ENABLED") == "1",
     service_name="xtuner-agent-rollout",
-    viewer_enabled=True,
-    viewer_host="0.0.0.0",
-    viewer_port=18080,
-    viewer_jaeger_query_url="http://127.0.0.1:16686",
+    xtuner_viewer_enabled=True,
+    xtuner_viewer_host="0.0.0.0",
+    xtuner_viewer_port=18080,
+    xtuner_viewer_jaeger_query_url="http://127.0.0.1:16686",
     enable_rollout_trace=True,
 )
 
@@ -344,9 +344,12 @@ derived fields such as method, route, status code, stage, IDs, and timing.
 
 ### Viewer Output
 
-When `viewer_enabled=True`, the trace runtime logs the trace JSONL path, viewer
-URL, and restart command. Keep those runtime log lines visible in the main
-training log and report them to the user after the run.
+When `xtuner_viewer_enabled=True`, the trace runtime logs the trace JSONL path,
+the XTuner viewer URL, and the equivalent manual viewer command. The viewer
+defaults to port `18080`; `xtuner_viewer_port=0` is still available when a run
+should pick a free port automatically. The viewer process inherits the training
+stdout/stderr; keep those runtime log lines visible in the main training log and
+report them to the user after the run.
 
 Useful reference points from the full trace implementation:
 
@@ -366,7 +369,7 @@ runtime = configure_trace(
         enabled=True,
         output_dir="work_dirs/example/otel",
         service_name="xtuner",
-        viewer_enabled=True,
+        xtuner_viewer_enabled=True,
     )
 )
 
@@ -376,7 +379,7 @@ finally:
     close_trace()
 ```
 
-The runtime owns OTel collector setup, trace JSONL output, live JSONL output, and optional viewer process startup.
+The runtime owns OTel collector setup, trace JSONL output, and optional lightweight XTuner viewer startup.
 
 ## Viewer
 
@@ -401,7 +404,7 @@ Avoid recording prompts, responses, full configs, secrets, raw headers, or large
 
 ## Local Setup
 
-`examples/v1/scripts/setup_trace.sh` and `recipe/otle/` are local helper tooling for installing OTel collector binaries and starting local Jaeger/viewer dependencies. Keep these as setup assets; do not use them to add automatic trace behavior to training configs or launch scripts unless that integration is explicitly requested.
+`examples/v1/scripts/setup_trace.sh` and `recipe/otle/` are local helper tooling for installing OTel collector binaries, starting the local Jaeger dependency, and clearing stale `recipe.trace_viewer.server` processes on `XTUNER_TRACE_VIEWER_PORT` or the default viewer port `18080`. Keep these as setup assets; do not use them to add automatic trace behavior to training configs or launch scripts unless that integration is explicitly requested.
 
 ## Rollout Starter Preset
 
@@ -410,7 +413,7 @@ The built-in rollout starter trace is opt-in:
 ```python
 trace_config = TraceConfig(
     enabled=True,
-    viewer_enabled=True,
+    xtuner_viewer_enabled=True,
     enable_rollout_trace=True,
 )
 ```

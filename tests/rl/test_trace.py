@@ -50,7 +50,7 @@ class TestTrace(unittest.TestCase):
         self.assertEqual(output["span_name_paths"]["order.child"], ["order.parent", "order.child"])
 
     def test_viewer_uses_span_name_path_for_display_chain(self):
-        from xtuner.tools.trace_viewer.payload import build_rollout_view_payload_from_jaeger_traces
+        from recipe.trace_viewer.payload import build_rollout_view_payload_from_jaeger_traces
 
         traces = [
             {
@@ -95,8 +95,8 @@ class TestTrace(unittest.TestCase):
         self.assertEqual(payload["samples"][0]["chain"], "parent.phase -> child.phase")
 
     def test_viewer_filters_latest_train_step_and_renders_payload(self):
-        from xtuner.tools.trace_viewer.payload import build_rollout_view_payload_from_jaeger_traces
-        from xtuner.tools.trace_viewer.render import render_rollout_trace_html
+        from recipe.trace_viewer.payload import build_rollout_view_payload_from_jaeger_traces
+        from recipe.trace_viewer.render import render_rollout_trace_html
 
         traces = [
             {

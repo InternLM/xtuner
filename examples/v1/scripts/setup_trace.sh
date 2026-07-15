@@ -11,11 +11,11 @@ JAEGER_RESTART_SCRIPT="${XTUNER_JAEGER_RESTART_SCRIPT:-${REPO_ROOT}/recipe/otle/
 JAEGER_CONFIG="${XTUNER_JAEGER_CONFIG:-${REPO_ROOT}/recipe/otle/jaeger/jaeger-memory.yaml}"
 TRACE_VIEWER_PORT="${XTUNER_TRACE_VIEWER_PORT:-18080}"
 
-if pgrep -f "xtuner.tools.trace_viewer.server.*--port ${TRACE_VIEWER_PORT}" >/dev/null 2>&1 ||
-   pgrep -f "xtuner.tools.trace_viewer.server.*--port=${TRACE_VIEWER_PORT}" >/dev/null 2>&1; then
+if pgrep -f "recipe.trace_viewer.server.*--port ${TRACE_VIEWER_PORT}" >/dev/null 2>&1 ||
+   pgrep -f "recipe.trace_viewer.server.*--port=${TRACE_VIEWER_PORT}" >/dev/null 2>&1; then
   echo "Stopping previous XTuner trace viewer on port ${TRACE_VIEWER_PORT}"
-  pkill -f "xtuner.tools.trace_viewer.server.*--port ${TRACE_VIEWER_PORT}" 2>/dev/null || true
-  pkill -f "xtuner.tools.trace_viewer.server.*--port=${TRACE_VIEWER_PORT}" 2>/dev/null || true
+  pkill -f "recipe.trace_viewer.server.*--port ${TRACE_VIEWER_PORT}" 2>/dev/null || true
+  pkill -f "recipe.trace_viewer.server.*--port=${TRACE_VIEWER_PORT}" 2>/dev/null || true
   sleep 1
 fi
 

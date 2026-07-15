@@ -188,10 +188,10 @@ evaluator_config = EvaluatorConfig(compute_metric_func=None)
 trace_config = TraceConfig(
     enabled=enable_trace,
     service_name="xtuner-agent-rollout",
-    viewer_enabled=True,
-    viewer_host="0.0.0.0",
-    viewer_port=18080,
-    viewer_jaeger_query_url="http://127.0.0.1:16686",
+    xtuner_viewer_enabled=True,
+    xtuner_viewer_host="0.0.0.0",
+    xtuner_viewer_port=18080,
+    xtuner_viewer_jaeger_query_url="http://127.0.0.1:16686",
     enable_rollout_trace=True,
 )
 
