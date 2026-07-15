@@ -6,7 +6,7 @@ import torch
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 
-from .moe import MoELossContextDict, MoEModelOutputs
+from .moe import MoELossContextDict, MoEModelOutputs, _store_local_display_losses
 from .qwen3 import Qwen3MoE, Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
 
 
@@ -215,7 +215,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
         output["logits"] = logits
         output["extra_info"] = extra_info
 
-        balancing_loss, z_loss, tokens_per_expert_global = self.aux_loss.finalize(
+        balancing_loss, z_loss, tokens_per_expert_global, local_balancing_loss, local_z_loss = self.aux_loss.finalize(
             balancing_ctx=balancing_ctx,
             z_ctx=z_ctx,
             non_pad_token=non_pad_token,
@@ -225,6 +225,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
         if z_loss is not None:
             output["z_loss"] = z_loss
         output["tokens_per_expert_global"] = tokens_per_expert_global
+        _store_local_display_losses(extra_info, local_balancing_loss, local_z_loss)
 
         if keep_router:
             # TODO: Moving router logits to CPU is costly.

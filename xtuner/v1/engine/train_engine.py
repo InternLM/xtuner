@@ -216,7 +216,10 @@ class TrainEngine:
         micro_batch_results = []
 
         data_batch_info = self.model.pre_micro_batch_forward(data_batches)
-        total_loss = torch.tensor(0.0, device=DEVICE)
+        # Display total loss is accumulated from detached per-rank LOCAL loss components and restored
+        # to the global value by one cross-rank SUM below -- separate from the backward loss so the
+        # logged total stays global once backward carries only per-rank local losses (§5.4).
+        local_display_loss = torch.tensor(0.0, device=DEVICE)
 
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             ProberList.set_micro_batch_iter(micro_batch_iter)
@@ -240,12 +243,14 @@ class TrainEngine:
 
             loss = self._get_total_loss(output)
             loss.backward()
-            total_loss += loss.detach()
+            local_display_loss += self.model.local_display_loss(output)
             # call dump_forward_records after backward to record the recomputed activations
             ProberList.after_micro_iter_forward()
 
+        if dist.is_initialized():
+            dist.all_reduce(local_display_loss, op=dist.ReduceOp.SUM)
         batch_forward_info = self.model.post_micro_batch_forward(micro_batch_results)
-        return TrainStepInfo(total_loss=total_loss.item(), **data_batch_info, **batch_forward_info)
+        return TrainStepInfo(total_loss=local_display_loss.item(), **data_batch_info, **batch_forward_info)
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):
         self.model.from_hf(hf_path=hf_path, strict=strict)

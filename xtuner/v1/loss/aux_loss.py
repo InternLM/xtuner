@@ -151,12 +151,27 @@ class AuxLossContext(nn.Module):
         balancing_ctx: list[BalancingLossContext] | BalancingLossContext | None,
         z_ctx: list[ZLossContext] | ZLossContext | None,
         non_pad_token: int,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
         """Finalize split auxiliary losses and expert counts from runtime
-        state."""
+        state.
+
+        Returns:
+            tuple: ``(balancing_loss, z_loss, tokens_per_expert_global, local_balancing_loss,
+            local_z_loss)``. The ``*_loss`` entries carry the backward graph / global display value;
+            the ``local_*`` entries are detached per-rank components for the logging pipeline (their
+            cross-rank SUM reproduces the corresponding global loss). ``local_*`` is ``None`` exactly
+            when its loss is ``None``.
+        """
         tokens_per_expert_local, tokens_per_expert_global = self._cal_tokens_per_expert()
 
         balancing_loss: torch.Tensor | None = None
+        local_balancing_loss: torch.Tensor | None = None
         balancing_list = _as_list(balancing_ctx)
         if balancing_list:
             partials = [
@@ -169,15 +184,22 @@ class AuxLossContext(nn.Module):
                 )
                 for ctx in balancing_list
             ]
-            balancing_loss = partials[0] if len(partials) == 1 else torch.stack(partials).sum(dim=0)
+            losses = [p[0] for p in partials]
+            locals_ = [p[1] for p in partials]
+            balancing_loss = losses[0] if len(losses) == 1 else torch.stack(losses).sum(dim=0)
+            local_balancing_loss = locals_[0] if len(locals_) == 1 else torch.stack(locals_).sum(dim=0)
 
         z_loss: torch.Tensor | None = None
+        local_z_loss: torch.Tensor | None = None
         z_list = _as_list(z_ctx)
         if z_list:
             partials = [ctx.finalize() for ctx in z_list]
-            z_loss = partials[0] if len(partials) == 1 else torch.stack(partials).sum(dim=0)
+            z_losses = [p[0] for p in partials]
+            z_locals = [p[1] for p in partials]
+            z_loss = z_losses[0] if len(z_losses) == 1 else torch.stack(z_losses).sum(dim=0)
+            local_z_loss = z_locals[0] if len(z_locals) == 1 else torch.stack(z_locals).sum(dim=0)
 
-        return balancing_loss, z_loss, tokens_per_expert_global
+        return balancing_loss, z_loss, tokens_per_expert_global, local_balancing_loss, local_z_loss
 
     def _cal_tokens_per_expert(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Stack per-layer expert counts and produce both local and globally

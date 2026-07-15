@@ -2,7 +2,7 @@
 import os
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, Self, Sequence, TypedDict, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, Sequence, TypedDict, cast
 
 import torch
 import torch.distributed as dist
@@ -94,6 +94,27 @@ MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
 
 MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
 MOE_EP_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward")
+
+
+def _store_local_display_losses(
+    extra_info: dict[str, Any],
+    local_balancing_loss: torch.Tensor | None,
+    local_z_loss: torch.Tensor | None,
+    local_mtp_loss: torch.Tensor | None = None,
+) -> None:
+    """Record detached per-rank local loss components on ``extra_info`` for the
+    display pipeline.
+
+    ``BaseModel.post_micro_batch_forward`` restores each global loss curve by SUM-reducing these
+    ``local_*`` components across ranks. This decouples the logged loss values from the backward
+    loss tensors, which become per-rank local components once gradient reduction switches to SUM.
+    """
+    if local_balancing_loss is not None:
+        extra_info["local_balancing_loss"] = local_balancing_loss
+    if local_z_loss is not None:
+        extra_info["local_z_loss"] = local_z_loss
+    if local_mtp_loss is not None:
+        extra_info["local_mtp_loss"] = local_mtp_loss
 
 
 class MoEModelOutputs(ModelOutputs):
@@ -553,6 +574,7 @@ class MoE(BaseModel):
 
         assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
 
+        local_mtp_loss: torch.Tensor | None = None
         if self.mtp_block is not None:
             assert self.config.mtp_config is not None
 
@@ -579,6 +601,9 @@ class MoE(BaseModel):
             )
 
             mtp_losses = torch.tensor(0.0, device=DEVICE)
+            # Detached local CE component of the MTP loss, mirroring `mtp_losses` term by term, so
+            # the display pipeline can restore the global MTP loss via a cross-rank SUM.
+            mtp_local_losses = torch.tensor(0.0, device=DEVICE)
             has_mtp_loss = False
             for micro_batch_idx, (loss_ctx_dict, mtp_outputs) in enumerate(zip(loss_ctx_list, mtp_outputs_per_mb)):
                 mtp_loss_ctx_list = loss_ctx_dict.get("mtp")
@@ -586,15 +611,18 @@ class MoE(BaseModel):
                     continue
 
                 micro_batch_mtp_losses = torch.tensor(0.0, device=DEVICE)
+                micro_batch_mtp_local = torch.tensor(0.0, device=DEVICE)
                 for mtp_idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
                     mtp_hidden_states, mtp_router_results, _ = mtp_hidden
-                    mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
+                    mtp_loss, (_, mtp_extra) = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
                     micro_batch_mtp_losses += mtp_loss
+                    micro_batch_mtp_local += mtp_extra["local_base_loss"]
 
                     if keep_router:
                         router_logits_list[micro_batch_idx][f"mtp_layer{mtp_idx}"] = mtp_router_results
 
                 mtp_losses += micro_batch_mtp_losses / len(mtp_loss_ctx_list)
+                mtp_local_losses += micro_batch_mtp_local / len(mtp_loss_ctx_list)
                 has_mtp_loss = True
 
             if has_mtp_loss:
@@ -634,6 +662,7 @@ class MoE(BaseModel):
                     )
 
                 output["mtp_loss"] = mtp_losses * self.config.mtp_config.loss_scaling_factor
+                local_mtp_loss = mtp_local_losses * self.config.mtp_config.loss_scaling_factor
 
         # Apply final norm to all micro-batches
         cat_hidden_states = torch.cat(hidden_states_list, dim=1)
@@ -657,12 +686,13 @@ class MoE(BaseModel):
             z_ctx=z_ctx,
             non_pad_token=non_pad_token,
         )
-        balancing_loss, z_loss, tokens_per_expert_global = split_aux_output
+        balancing_loss, z_loss, tokens_per_expert_global, local_balancing_loss, local_z_loss = split_aux_output
         if balancing_loss is not None:
             output["balancing_loss"] = balancing_loss
         if z_loss is not None:
             output["z_loss"] = z_loss
         output["tokens_per_expert_global"] = tokens_per_expert_global
+        _store_local_display_losses(moe_extra_info, local_balancing_loss, local_z_loss, local_mtp_loss)
 
         if keep_router:
             # TODO: Returning router logits is costly.
@@ -783,6 +813,7 @@ class MoE(BaseModel):
         output["extra_info"] = extra_info
 
         # MTP forward pass and loss computation
+        local_mtp_loss: torch.Tensor | None = None
         if (
             self.mtp_block is not None
             and loss_ctx is not None
@@ -810,6 +841,8 @@ class MoE(BaseModel):
 
             # Compute MTP losses for each depth
             mtp_losses = torch.tensor(0.0, device=DEVICE)
+            # Detached local CE component of the MTP loss, mirroring `mtp_losses` term by term.
+            mtp_local_losses = torch.tensor(0.0, device=DEVICE)
             for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
                 mtp_hidden_states, mtp_router_results, mtp_router_weights = mtp_hidden
 
@@ -830,8 +863,9 @@ class MoE(BaseModel):
                     num_tokens_global=mtp_num_tokens_global,
                     world_size=mtp_z_world_size,
                 )
-                mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
+                mtp_loss, (_, mtp_extra) = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
                 mtp_losses += mtp_loss
+                mtp_local_losses += mtp_extra["local_base_loss"]
 
             # Average MTP losses across depths and scale
             mtp_losses = mtp_losses / len(mtp_loss_ctx_list)
@@ -839,18 +873,20 @@ class MoE(BaseModel):
 
             # Add to total loss
             output["mtp_loss"] = scaled_mtp_loss
+            local_mtp_loss = mtp_local_losses / len(mtp_loss_ctx_list) * self.config.mtp_config.loss_scaling_factor  # type: ignore
 
         split_aux_output = self.aux_loss.finalize(
             balancing_ctx=balancing_ctx,
             z_ctx=z_ctx,
             non_pad_token=non_pad_token,
         )
-        balancing_loss, z_loss, tokens_per_expert_global = split_aux_output
+        balancing_loss, z_loss, tokens_per_expert_global, local_balancing_loss, local_z_loss = split_aux_output
         if balancing_loss is not None:
             output["balancing_loss"] = balancing_loss
         if z_loss is not None:
             output["z_loss"] = z_loss
         output["tokens_per_expert_global"] = tokens_per_expert_global
+        _store_local_display_losses(extra_info, local_balancing_loss, local_z_loss, local_mtp_loss)
 
         if keep_router:
             # TODO: Moving router logits to CPU is costly.

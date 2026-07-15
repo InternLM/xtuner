@@ -126,7 +126,7 @@ class BalancingLossContext(nn.Module):
         n_routed_experts: int,
         num_experts_per_tok: int,
         non_pad_token: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Finalize balancing loss from accumulators.
 
         Args:
@@ -139,34 +139,49 @@ class BalancingLossContext(nn.Module):
             non_pad_token (int): Number of non-padding tokens on this rank.
 
         Returns:
-            torch.Tensor: Final balancing loss.
+            tuple[torch.Tensor, torch.Tensor]: ``(balancing_loss, local_balancing_loss)``. The first
+            carries the autograd graph used for backward; in the global-average branch it is reduced
+            across ranks via ``all_reduce_autograd``. The second is a detached, per-rank local
+            component for logging whose cross-rank SUM reproduces the first (used by the display
+            pipeline so that logged curves stay global once backward switches to the local component).
         """
         routing_weights_sum_list = self.routing_weights_sum_list
         self.routing_weights_sum_list = []
         if self.loss_cfg.balancing_loss_alpha == 0 or not routing_weights_sum_list:
-            return torch.tensor(0.0, device=tokens_per_expert_local.device, dtype=torch.float32)
+            zero = torch.tensor(0.0, device=tokens_per_expert_local.device, dtype=torch.float32)
+            return zero, zero
 
         local_gating_sum = torch.stack(routing_weights_sum_list, dim=0)
+        alpha = self.loss_cfg.balancing_loss_alpha
 
         if self.loss_cfg.balancing_loss_global_average and dist.is_initialized():
             group = dist.group.WORLD
             assert group is not None
             tokens_global = tokens_per_expert_global.sum(-1)
             seqlen_global = tokens_global // num_experts_per_tok
+            scale_global = n_routed_experts / tokens_global
 
             routing_weights_sum_global = all_reduce_autograd(local_gating_sum, "sum", group)
             routing_weights_mean_global = routing_weights_sum_global / seqlen_global.unsqueeze(-1)
-            scale_global = n_routed_experts / tokens_global
-            tokens_per_expert_for_loss = tokens_per_expert_global
+            loss_vec = scale_global * (tokens_per_expert_global * routing_weights_mean_global).sum(-1)
+
+            # Detached local component: same global denominators, but this rank's own gating sum in
+            # place of the cross-rank sum. Because `all_reduce_autograd` is a plain SUM and every
+            # other factor here (scale_global, seqlen_global, tokens_per_expert_global) is detached
+            # and global, summing `local_vec` over ranks reproduces `loss_vec` exactly.
+            routing_weights_mean_local = local_gating_sum.detach() / seqlen_global.unsqueeze(-1)
+            local_vec = scale_global * (tokens_per_expert_global * routing_weights_mean_local).sum(-1)
         else:
             valid_tokens = max(non_pad_token, 1)
             scale_global = n_routed_experts / (valid_tokens * num_experts_per_tok)
             routing_weights_mean_global = local_gating_sum / valid_tokens
-            tokens_per_expert_for_loss = tokens_per_expert_local
+            loss_vec = scale_global * (tokens_per_expert_local * routing_weights_mean_global).sum(-1)
+            # No cross-rank term in this branch; the loss is already a per-rank quantity.
+            local_vec = loss_vec.detach()
 
-        loss = scale_global * (tokens_per_expert_for_loss * routing_weights_mean_global).sum(-1)
-        loss = loss.sum() * self.loss_cfg.balancing_loss_alpha
-        return loss / self._batch_size
+        loss = loss_vec.sum() * alpha / self._batch_size
+        local_loss = local_vec.sum() * alpha / self._batch_size
+        return loss, local_loss.detach()
 
     @property
     def batch_size(self) -> int:
@@ -220,6 +235,10 @@ class ZLossContext(nn.Module):
         # accumulate() time, so we never need to keep per-layer logsum tensors around. This is
         # the memory-saving pattern adapted from Megatron's MoEAuxLossAutoScaler.
         self._running_loss_for_log: torch.Tensor | None = None
+        # Detached per-rank local component (the same running scalar but WITHOUT the `× world_size`
+        # global-average factor). The display pipeline restores the global value by SUM-reducing
+        # this across ranks, which keeps logged curves global once backward drops the factor.
+        self._local_running_loss_for_log: torch.Tensor | None = None
 
     @staticmethod
     def build_batches(
@@ -273,39 +292,62 @@ class ZLossContext(nn.Module):
         if self.loss_cfg.z_loss_alpha == 0:
             zero = torch.tensor(0.0, device=router_logits.device, dtype=torch.float32)
             self._update_running(zero)
+            self._update_local_running(zero)
             return zero
 
         denom_local = max(num_tokens_local, 1)
-        loss = torch.logsumexp(router_logits, dim=-1).square().sum() / denom_local
+        base = torch.logsumexp(router_logits, dim=-1).square().sum() / denom_local
 
+        local_loss = base
+        loss = base
         if self.loss_cfg.z_loss_global_average and num_tokens_global is not None:
-            # Equivalent to scaling each layer's local loss by num_tokens_local * world_size /
-            # num_tokens_global, matching the original list-based finalize formula.
+            # Local component: this rank's share of the global-average z-loss, without the
+            # `× world_size` factor. The backward path keeps `× world_size` (removed in the
+            # reduce-sum switch); summing `local_loss` over ranks reproduces the global z-loss.
             denom_global = torch.clamp(num_tokens_global, min=1)
-            loss = loss * num_tokens_local * world_size / denom_global
+            local_loss = base * num_tokens_local / denom_global
+            loss = local_loss * world_size
 
+        local_loss = local_loss * self.loss_cfg.z_loss_alpha / self._batch_size
         loss = loss * self.loss_cfg.z_loss_alpha / self._batch_size
         self._update_running(loss.detach())
+        self._update_local_running(local_loss.detach())
         return loss
 
-    def finalize(self) -> torch.Tensor:
-        """Return the accumulated z-loss as a detached scalar for logging only.
+    def finalize(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the accumulated z-loss as detached scalars for logging only.
 
         The differentiable contribution has already been injected into the main forward graph at
-        each ``accumulate()`` call, so this value carries no autograd graph; it exists purely to
-        populate the logging field on the model output.
+        each ``accumulate()`` call, so these values carry no autograd graph; they exist purely to
+        populate logging.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: ``(z_loss, local_z_loss)``. The first is the current
+            global-average running scalar (kept for the ``z_loss`` output field); the second is the
+            detached per-rank local component (without ``× world_size``) whose cross-rank SUM equals
+            the first, used by the display pipeline.
         """
         value = self._running_loss_for_log
+        local_value = self._local_running_loss_for_log
         self._running_loss_for_log = None
-        if value is None:
-            return torch.tensor(0.0, device=DEVICE, dtype=torch.float32)
-        return value
+        self._local_running_loss_for_log = None
+        zero = torch.tensor(0.0, device=DEVICE, dtype=torch.float32)
+        return (
+            value if value is not None else zero,
+            local_value if local_value is not None else zero,
+        )
 
     def _update_running(self, value: torch.Tensor) -> None:
         if self._running_loss_for_log is None:
             self._running_loss_for_log = value.clone()
         else:
             self._running_loss_for_log = self._running_loss_for_log + value
+
+    def _update_local_running(self, value: torch.Tensor) -> None:
+        if self._local_running_loss_for_log is None:
+            self._local_running_loss_for_log = value.clone()
+        else:
+            self._local_running_loss_for_log = self._local_running_loss_for_log + value
 
     @property
     def batch_size(self) -> int:

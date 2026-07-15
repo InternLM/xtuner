@@ -620,6 +620,26 @@ class BaseModel(nn.Module):
                 module.set_gradient_divide_factor(1.0)  # type: ignore[operator]
                 module.set_force_sum_reduction_for_comms(True)  # type: ignore[operator]
 
+    def local_display_loss(self, output: ModelOutputs) -> torch.Tensor:
+        """Sum this output's detached per-rank local loss components for
+        display.
+
+        The caller restores the global display loss with a cross-rank SUM all_reduce over the
+        returned per-rank value. This is deliberately separate from ``_get_total_loss`` (the backward
+        loss) so the display and backward paths never share a tensor.
+
+        Args:
+            output (ModelOutputs): A single micro-batch model output whose ``extra_info`` carries the
+                per-loss-term ``local_*loss`` components.
+
+        Returns:
+            torch.Tensor: A 0-d tensor: this rank's summed local loss components.
+        """
+        total = torch.tensor(0.0, device=DEVICE)
+        for contribution in self._collect_local_display_losses(output).values():
+            total = total + contribution
+        return total
+
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
@@ -1341,40 +1361,53 @@ class BaseModel(nn.Module):
     def post_micro_batch_forward(self, batch_outputs: Sequence[ModelOutputs]) -> BatchForwardInfo:
         train_engine_extra_info = ModelForwardExtraLogInfo()
 
-        local_total_loss = torch.tensor(0.0, device=DEVICE)
-        reduced_other_losses: dict[str, float] = {}
-
+        # Restore each loss curve's global display value from its detached per-rank LOCAL component
+        # (carried on `output.extra_info` as `local_*loss`), reduced by a cross-rank SUM -- not a
+        # mean. Each term's cross-rank SUM equals the global loss, so this keeps logged curves global
+        # even after backward switches to per-rank local losses, and never reuses the backward loss
+        # tensors for display (§5.4).
+        local_reduced: dict[str, torch.Tensor] = {}
         for output in batch_outputs:
-            output_copy = output.model_copy()
-            for name in output_copy.model_fields:
-                obj = getattr(output_copy, name)
-                if "loss" in name and isinstance(obj, torch.Tensor):
-                    loss_item = obj.item()
-                    local_total_loss += loss_item
-                    reduced_name = f"reduced_{name}"
+            for reduced_name, contribution in self._collect_local_display_losses(output).items():
+                if reduced_name not in local_reduced:
+                    local_reduced[reduced_name] = contribution
+                else:
+                    local_reduced[reduced_name] = local_reduced[reduced_name] + contribution
 
-                    if reduced_name not in reduced_other_losses:
-                        reduced_other_losses[reduced_name] = loss_item
-                    else:
-                        reduced_other_losses[reduced_name] += loss_item
+            if "extra_info" in output:
+                train_engine_extra_info.append(output["extra_info"])
 
-            if "extra_info" in output_copy:
-                extra_info = output["extra_info"]
-                train_engine_extra_info.append(extra_info)
+        reduced_other_losses: dict[str, float] = {}
+        for name, value in local_reduced.items():
+            reduced = value.clone()
+            if dist.is_initialized():
+                dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+            reduced_other_losses[name] = reduced.item()
 
-        for name, loss in reduced_other_losses.items():
-            tensor_loss = torch.tensor(loss, device=DEVICE)
-            dist.all_reduce(tensor_loss.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
-            reduced_other_losses[name] = tensor_loss.item()
-
-        if "reduced_loss" in reduced_other_losses:
-            reduced_other_losses["reduced_llm_loss"] = reduced_other_losses.pop("reduced_loss")
+        # CE's local component is keyed `local_base_loss`; expose it under the historical curve name.
+        if "reduced_base_loss" in reduced_other_losses:
+            reduced_other_losses["reduced_llm_loss"] = reduced_other_losses.pop("reduced_base_loss")
 
         ret = BatchForwardInfo(
             logs_info=reduced_other_losses,
             extra_info=train_engine_extra_info,
         )
         return ret
+
+    def _collect_local_display_losses(self, output: ModelOutputs) -> dict[str, torch.Tensor]:
+        # Map each loss term's reduced-log name to this output's detached per-rank local component
+        # (summed over any intra-layer micro-batches). Loss terms register their local component on
+        # `extra_info` under a `local_*loss` key; see `xtuner.v1.model.moe.moe._store_local_display_losses`
+        # and CE's `local_base_loss`.
+        extra_info = output["extra_info"] if "extra_info" in output else None
+        result: dict[str, torch.Tensor] = {}
+        if extra_info is None:
+            return result
+        for key, value in extra_info.items():
+            if key.startswith("local_") and key.endswith("loss"):
+                reduced_name = "reduced_" + key[len("local_") :]
+                result[reduced_name] = value.detach().float().sum()
+        return result
 
     def _get_save_dtype(self, name: str, dtype: torch.dtype) -> torch.dtype:
         patterns = self.config.hf_save_cfg.fp32_keys_pattern
