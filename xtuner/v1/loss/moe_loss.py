@@ -17,15 +17,12 @@ class BalancingLossConfig(BaseModel):
 
     Args:
         balancing_loss_alpha (float): Weight for the balancing loss. Defaults to 0.001.
-        balancing_loss_global_average (bool): Whether to perform global averaging across all ranks.
-            Defaults to True.
         router_scoring_func (str): Router scoring function type. Options are "sigmoid" and "softmax".
             Defaults to "softmax".
     """
 
     model_config = ConfigDict(extra="forbid")
     balancing_loss_alpha: Annotated[float, Parameter(help="weight for balancing loss")] = 0.001
-    balancing_loss_global_average: Annotated[bool, Parameter(help="global average for balancing loss")] = True
     router_scoring_func: Annotated[Literal["sigmoid", "softmax"], Parameter(help="router scoring function")] = (
         "softmax"
     )
@@ -135,7 +132,7 @@ class BalancingLossContext(nn.Module):
         local_gating_sum = torch.stack(routing_weights_sum_list, dim=0)
         alpha = self.loss_cfg.balancing_loss_alpha
 
-        if self.loss_cfg.balancing_loss_global_average and dist.is_initialized():
+        if dist.is_initialized():
             tokens_global = tokens_per_expert_global.sum(-1)
             seqlen_global = tokens_global // num_experts_per_tok
             scale_global = n_routed_experts / tokens_global
@@ -149,11 +146,14 @@ class BalancingLossContext(nn.Module):
             loss_vec = scale_global * (tokens_per_expert_global * routing_weights_mean).sum(-1)
             local_vec = loss_vec.detach()
         else:
+            # Single-process path (no process group). Numerically identical to the distributed branch
+            # at world size 1: tokens_per_expert_global == tokens_per_expert_local, tokens_global ==
+            # valid_tokens * num_experts_per_tok, and seqlen_global == valid_tokens, so scale / mean /
+            # loss match term for term. Kept so reference / eval (dist uninitialized) still works.
             valid_tokens = max(non_pad_token, 1)
             scale_global = n_routed_experts / (valid_tokens * num_experts_per_tok)
-            routing_weights_mean_global = local_gating_sum / valid_tokens
-            loss_vec = scale_global * (tokens_per_expert_local * routing_weights_mean_global).sum(-1)
-            # No cross-rank term in this branch; the loss is already a per-rank quantity.
+            routing_weights_mean = local_gating_sum / valid_tokens
+            loss_vec = scale_global * (tokens_per_expert_local * routing_weights_mean).sum(-1)
             local_vec = loss_vec.detach()
 
         loss = loss_vec.sum() * alpha / self._batch_size
@@ -170,13 +170,10 @@ class ZLossConfig(BaseModel):
 
     Args:
         z_loss_alpha (float): Weight for the z-loss. Defaults to 0.001.
-        z_loss_global_average (bool): Whether to perform global averaging across all ranks.
-            Defaults to True.
     """
 
     model_config = ConfigDict(extra="forbid")
     z_loss_alpha: Annotated[float, Parameter(help="weight for z-loss")] = 0.001
-    z_loss_global_average: Annotated[bool, Parameter(help="global average for z-loss")] = True
 
     def build(self) -> "ZLossContext":
         """Build ZLossContext.
@@ -256,8 +253,8 @@ class ZLossContext(nn.Module):
             num_tokens_local (int): Number of non-padding tokens on this rank for the current
                 forward (constant across MoE layers in a single forward).
             num_tokens_global (torch.Tensor | None): All-reduced non-padding token count across
-                ranks, as an int64 scalar tensor. ``None`` when ``z_loss_global_average`` is off
-                or the process group is not initialized.
+                ranks, as an int64 scalar tensor. ``None`` when the process group is not initialized
+                (single-process reference / eval).
 
         Returns:
             torch.Tensor: Per-layer z-loss as a 0-d tensor with autograd graph back to
@@ -272,12 +269,14 @@ class ZLossContext(nn.Module):
         denom_local = max(num_tokens_local, 1)
         base = torch.logsumexp(router_logits, dim=-1).square().sum() / denom_local
 
+        # Single-process (dist uninitialized): num_tokens_global is None, so the loss stays `base`,
+        # which equals the distributed branch at world size 1 (denom_global == num_tokens_local).
         loss = base
-        if self.loss_cfg.z_loss_global_average and num_tokens_global is not None:
+        if num_tokens_global is not None:
             # Under reduce-sum gradients the injected z-loss stays as this rank's local component
-            # (its share of the global-average z-loss, WITHOUT any `× world_size`). Cross-rank
-            # aggregation happens on the gradients via the FSDP SUM reduce-scatter; summing this
-            # local component over ranks reproduces the global z-loss.
+            # (its share of the global z-loss, WITHOUT any `× world_size`). Cross-rank aggregation
+            # happens on the gradients via the FSDP SUM reduce-scatter; summing this local component
+            # over ranks reproduces the global z-loss.
             denom_global = torch.clamp(num_tokens_global, min=1)
             loss = base * num_tokens_local / denom_global
 

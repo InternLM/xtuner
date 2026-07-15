@@ -110,8 +110,8 @@ class AuxLossContext(nn.Module):
             num_tokens_local (int): Non-padding token count on this rank for the current forward.
                 Required when any z-loss context is provided.
             num_tokens_global (torch.Tensor | None): All-reduced non-padding token count across
-                ranks (int64 scalar). Pass ``None`` when ``z_loss_global_average`` is off or no
-                process group is initialized.
+                ranks (int64 scalar). Pass ``None`` when no process group is initialized
+                (single-process reference / eval).
 
         Returns:
             torch.Tensor: ``hidden_states`` augmented with the per-layer z-loss autograd hook.
