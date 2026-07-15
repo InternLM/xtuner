@@ -585,6 +585,41 @@ class BaseModel(nn.Module):
         params = [(name, param) for name, param in self.named_parameters() if param.requires_grad]
         return params
 
+    def set_gradient_reduce_sum(self) -> None:
+        """Switch every sharded ``FSDPModule`` under this model to pure SUM
+        gradient reduction.
+
+        FSDP2 reduce-scatters gradients with ``ReduceOp.AVG`` (divide by the sharding group size)
+        by default. This helper sets the gradient divide factor to 1 and forces plain
+        ``ReduceOp.SUM`` communication, so the reduce-scatter accumulates each rank's local-component
+        gradient without any division.
+
+        The two calls must be paired. Setting only the divide factor routes FSDP through
+        ``_make_nccl_premul_sum(1 / factor)``, whose NCCL PreMulSum silently reduces bf16 gradients to
+        all-zeros on torch 2.10; ``set_force_sum_reduction_for_comms(True)`` instead keeps a plain
+        ``ReduceOp.SUM`` that is exact in bf16 without upcasting the reduction dtype.
+
+        ``fully_shard`` wraps modules in place, so nested sharded children remain reachable through
+        ``self.modules()``; one root-level pass therefore covers every layer sharded during
+        ``fully_shard``.
+        """
+        if not (
+            hasattr(FSDPModule, "set_gradient_divide_factor")
+            and hasattr(FSDPModule, "set_force_sum_reduction_for_comms")
+        ):
+            raise RuntimeError(
+                "set_gradient_reduce_sum requires the FSDP2 gradient-reduction APIs "
+                "`FSDPModule.set_gradient_divide_factor` and `FSDPModule.set_force_sum_reduction_for_comms`, "
+                "available since torch 2.10. The installed torch does not expose them, and falling back to "
+                "`set_gradient_divide_factor` alone would silently zero bf16 gradients."
+            )
+        for module in self.modules():
+            if isinstance(module, FSDPModule):
+                # torch < 2.10 type stubs do not declare these FSDP2 setters; guarded by the
+                # hasattr check above, they exist at runtime on torch >= 2.10.
+                module.set_gradient_divide_factor(1.0)  # type: ignore[operator]
+                module.set_force_sum_reduction_for_comms(True)  # type: ignore[operator]
+
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
