@@ -28,6 +28,9 @@ from xtuner.v1.data_proto.rl_data import (
     reset_rollout_response,
     update_status_from_finish_reason,
 )
+from xtuner.v1.rl.trace.rollout_api import (
+    trace_rollout_endpoint,
+)
 from xtuner.v1.rl.utils import (
     AutoAcceleratorWorkers,
     CPUResourcesConfig,
@@ -482,19 +485,24 @@ class RolloutConfig(BaseModel):
         import ray
 
         from xtuner.v1.rl.rollout.controller import RolloutController
+        from xtuner.v1.rl.trace import get_trace_env_vars
 
         num_workers = 1
         register_cpu_resources(
             name="rollout_controller",
             cpu_resources=CPUResourcesConfig(num_workers=num_workers),
         )
+        trace_env_vars = get_trace_env_vars()
+        actor_options: dict[str, Any] = {"num_cpus": num_workers}
+        if trace_env_vars:
+            actor_options["runtime_env"] = {"env_vars": trace_env_vars}
         return (
             ray.remote(
                 concurrency_groups={
                     ROLLOUT_CONCURRENCY_GROUP_GENERATE: ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY,
                 },
             )(RolloutController)
-            .options(num_cpus=num_workers)
+            .options(**actor_options)
             .remote(self, placement_group)
         )
 
@@ -776,6 +784,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         return routed_experts
 
     @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
+    @trace_rollout_endpoint("rollout.worker.generate")
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         request_max_tokens = rollout_state.sample_params.max_tokens
         try:

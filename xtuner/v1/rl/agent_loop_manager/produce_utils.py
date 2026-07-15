@@ -144,6 +144,11 @@ class BaseProduceContext:
         enable_partial_rollout: bool = False,
     ) -> list[RolloutState]:
         # strategy 不关心 agent_loop 是 ray actor 还是本地对象。
+        # Trace viewer uses this producer-side future step to group samples by
+        # the training step they are being generated for.
+        for item in rollout_state:
+            item.extra_fields["producer_future_step"] = self.train_step
+
         start = time.perf_counter()
         if isinstance(self.agent_loop, ray.actor.ActorHandle):
             result = await self.agent_loop.generate_group.remote(
