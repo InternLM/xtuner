@@ -146,9 +146,9 @@ class Qwen3VLTextMoE(Qwen3MoE):
         self._mark_dynamic(seq_ctx)
         balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
         # Hoisted out of the per-layer accumulate path: mask is constant across layers.
-        nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
+        nonpad_indices = seq_ctx.nonpad_indices
         non_pad_token = nonpad_indices.numel()
-        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
+        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, nonpad_indices.device)
 
         # =====================================================
         deepstack_visual_embeds = seq_ctx.deepstack_visual_embeds

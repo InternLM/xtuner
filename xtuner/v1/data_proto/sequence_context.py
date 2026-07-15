@@ -31,7 +31,9 @@ class SequenceContext:
     cu_seq_lens_k: torch.IntTensor
     max_length_q: torch.Tensor
     max_length_k: torch.Tensor
-    num_padding: int
+    _num_padding: int
+    _nonpad_indices: torch.LongTensor | None
+    _pad_indices: torch.LongTensor | None
     sequence_parallel_mesh: DeviceMesh | None
     block_table: torch.Tensor | None
     device: str | torch.device  # TODO: 这个地方有点乱，到处是 device
@@ -98,6 +100,8 @@ class SequenceContext:
             self.max_length_k = torch.tensor(max_length_k, device="cpu")
         else:
             self.max_length_k = max_length_k
+        self._nonpad_indices = None
+        self._pad_indices = None
         self.num_padding = num_padding
         self.sequence_parallel_mesh = sequence_parallel_mesh
         self.block_table = block_table
@@ -334,6 +338,53 @@ class SequenceContext:
             mask[..., -self.num_padding :] = False
         return mask
 
+    def _invalidate_padding_indices(self) -> None:
+        self._nonpad_indices = None
+        self._pad_indices = None
+
+    def _cache_padding_indices(self) -> None:
+        if self.input_ids is not None:
+            seq_len = self.input_ids.shape[1]
+            device = self.input_ids.device
+        else:
+            assert self.inputs_embeds is not None, "input_ids or inputs_embeds must be provided"
+            seq_len = self.inputs_embeds.shape[1]
+            device = self.inputs_embeds.device
+
+        # SequenceContext.mask only represents a contiguous padding suffix, so slicing a
+        # single arange is equivalent to running nonzero on mask and ~mask, without the
+        # mask allocation and two nonzero kernels. If arbitrary-position padding is
+        # supported in the future, derive both index tensors from mask instead.
+        num_non_padding = seq_len if self.num_padding <= 0 else max(seq_len - self.num_padding, 0)
+        token_indices = torch.arange(seq_len, dtype=torch.long, device=device)
+        self._nonpad_indices = cast(torch.LongTensor, token_indices[:num_non_padding])
+        self._pad_indices = cast(torch.LongTensor, token_indices[num_non_padding:])
+
+    @property
+    def num_padding(self) -> int:
+        return self._num_padding
+
+    @num_padding.setter
+    def num_padding(self, value: int) -> None:
+        self._num_padding = value
+        self._invalidate_padding_indices()
+
+    @property
+    def nonpad_indices(self) -> torch.LongTensor:
+        """Indices of non-padding tokens, cached for reuse across decoder
+        layers."""
+        if self._nonpad_indices is None:
+            self._cache_padding_indices()
+        return cast(torch.LongTensor, self._nonpad_indices)
+
+    @property
+    def pad_indices(self) -> torch.LongTensor:
+        """Indices of padding tokens, cached for reuse across decoder
+        layers."""
+        if self._pad_indices is None:
+            self._cache_padding_indices()
+        return cast(torch.LongTensor, self._pad_indices)
+
     @property
     def seq_lens_q(self) -> torch.LongTensor:
         return self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]  # type: ignore
@@ -531,6 +582,7 @@ class SequenceContext:
         if self.rollout_routed_experts is not None and hasattr(self.rollout_routed_experts, "to"):
             self.rollout_routed_experts = self.rollout_routed_experts.to(device)  # type: ignore
 
+        self._invalidate_padding_indices()
         self.device = device
 
         return self

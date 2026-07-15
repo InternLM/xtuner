@@ -155,6 +155,7 @@ class MoEConfig(TransformerConfig):
     freeze_routers: bool = False
     router_async_offload: bool = False
     aux_loss_cfg: AuxLossConfig = AuxLossConfig()
+    skip_dispatch_pad_tokens: Annotated[bool, Parameter(group="moe")] = False
     # TODO: `FSDPConfig` should be model-specific; temporarily keep
     # `embed_reshard_after_forward` here until per-submodule FSDP config is supported.
     # Compose models call `self.embed_tokens` multiple times per step, so default to
@@ -687,9 +688,9 @@ class MoE(BaseModel):
         self._mark_dynamic(seq_ctx)
         balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
         # Hoisted out of the per-layer accumulate path: mask is constant across layers.
-        nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
+        nonpad_indices = seq_ctx.nonpad_indices
         non_pad_token = nonpad_indices.numel()
-        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
+        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, nonpad_indices.device)
 
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
@@ -699,8 +700,9 @@ class MoE(BaseModel):
                     seq_ctx=seq_ctx,
                 )
             else:
-                if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1 and \
-                (self.mtp_block is None or (self.mtp_block is not None and int(idx) > 0)):
+                if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1 and (
+                    self.mtp_block is None or (self.mtp_block is not None and int(idx) > 0)
+                ):
                     with async_save_on_cpu(
                         h2d_stream=self.offload_stream,
                         d2h_stream=self.offload_stream,
@@ -752,10 +754,10 @@ class MoE(BaseModel):
                 inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
             )
             # MTP uses its own mask; main mask's non-pad indices do not apply.
-            mtp_nonpad_indices = torch.nonzero(mtp_seq_ctx.mask, as_tuple=True)[1]
+            mtp_nonpad_indices = mtp_seq_ctx.nonpad_indices
             mtp_non_pad_token = mtp_nonpad_indices.numel()
             mtp_num_tokens_global, mtp_z_world_size = self._z_loss_dist_token_count(
-                z_ctx, mtp_non_pad_token, mtp_seq_ctx.mask.device
+                z_ctx, mtp_non_pad_token, mtp_nonpad_indices.device
             )
 
             # Forward through MTP block
@@ -891,6 +893,7 @@ class MoE(BaseModel):
                     layer_idx=layer_idx,
                     dispatcher=config.dispatcher,
                     ep_mesh=self.ep_mesh,
+                    skip_dispatch_pad_tokens=config.skip_dispatch_pad_tokens,
                 )
                 if self.config.freeze_routers:
                     layers[str(layer_idx)].gate.requires_grad_(False)
@@ -956,6 +959,7 @@ class MoE(BaseModel):
                 layer_idx=config.num_hidden_layers + i,
                 dispatcher=config.dispatcher,
                 ep_mesh=self.ep_mesh,
+                skip_dispatch_pad_tokens=config.skip_dispatch_pad_tokens,
             )
 
             # Wrap decoder layer in MTPLayer
@@ -1088,9 +1092,11 @@ class MoE(BaseModel):
         # Shard MTP block if it exists
         if self.mtp_block is not None:
             for mtp_idx, mtp_layer in enumerate(self.mtp_block.layers):
-                if self._should_recompute(None, mtp_idx=mtp_idx) or (
-                    self.config.mtp_config is not None and self.config.mtp_config.share_weights
-                ) or True:  # share mtp head must recompute
+                if (
+                    self._should_recompute(None, mtp_idx=mtp_idx)
+                    or (self.config.mtp_config is not None and self.config.mtp_config.share_weights)
+                    or True
+                ):  # share mtp head must recompute
                     mtp_layer = checkpoint_wrapper(mtp_layer, checkpoint_impl=CheckpointImpl.REENTRANT)
                 self.mtp_block.layers[mtp_idx] = mtp_layer
 
