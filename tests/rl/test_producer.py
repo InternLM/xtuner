@@ -100,7 +100,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         mock_agent_loop = MagicMock()
         mock_agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
         mock_agent_loop.rollout_ctl.pause_generation.remote = AsyncMock(return_value=None)
-        mock_agent_loop.rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+        mock_agent_loop.rollout_ctl.get_weight_update_targets.remote = AsyncMock(return_value=())
 
         async def mock_pause():
             await mock_agent_loop.rollout_ctl.pause_generation.remote()

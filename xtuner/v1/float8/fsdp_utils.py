@@ -378,6 +378,11 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
 
     def fsdp_pre_all_gather(self, mesh):
         if self._precomputed_w is not None:
+            if mesh.size() == 1:
+                # FSDP2 bypasses the collective when shard mesh size is 1 and only
+                # copies all_gather_inputs[0] into all_gather_outputs. Keep scale in
+                # metadata so post_all_gather can recover the full Float8Tensor.
+                return (self._precomputed_w,), (self._precomputed_scale,)
             return (self._precomputed_w, self._precomputed_scale), None
         assert self._precomputed_scale is not None
         if self._tensor.shape[0] >= 128 and self._tensor.shape[0] % 128 == 64:
@@ -396,6 +401,11 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
                 float8_dtype=self._dtype,
             )
 
+        # FSDP2 bypasses the collective when shard mesh size is 1 and only
+        # copies all_gather_inputs[0] into all_gather_outputs. Keep scale in
+        # metadata so post_all_gather can recover the full Float8Tensor.
+        if mesh.size() == 1:
+            return (w_fp8_data,), (self._precomputed_scale,)
         return (w_fp8_data, self._precomputed_scale), None
 
     def fsdp_post_all_gather(
@@ -406,7 +416,12 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
         *,
         out: Optional[torch.Tensor] = None,
     ):
-        data, scale = all_gather_outputs
+        scale_from_metadata = len(all_gather_outputs) == 1
+        if scale_from_metadata:
+            (data,) = all_gather_outputs
+            (scale,) = metadata
+        else:
+            data, scale = all_gather_outputs
         dim0, dim1 = data.shape
         assert dim1 == self._tensor.shape[1], (
             f"Expected data.shape[1] == self._tensor[1], got data.shape = {data.shape}, self._tensor.shape = {self._tensor.shape}"
@@ -451,13 +466,21 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
             else:
                 raise RuntimeError(f"out must be a Float8Tensor or DTensor(_local_tensor=Float8Tensor), but got {out}")
             return
+        # FSDP frees tensors returned as unsharded inner_tensors after reshard.
+        # If scale came from metadata, it aliases persistent _precomputed_scale
+        # that the next pre_all_gather will reuse. The Python Tensor reference
+        # still exists, but FSDP frees by resizing the backing storage to 0.
+        # Returning (data, scale) here would let FSDP free that persistent
+        # storage after the first reshard, and the next quant cast may read
+        # freed CUDA memory.
+        inner_tensors = (data,) if scale_from_metadata else (data, scale)
         return Float8Tensor(
             data,
             scale,
             param_dtype,
             scaling_granularity=ScalingGranularity.BLOCKWISE,  # tilewise fp8: weight is blockwise quantized
             group_size=128,
-        ), (data, scale)  # afterwards will be freed
+        ), inner_tensors  # afterwards will be freed
 
 
 def tensor_to_per_tensor_fp8_scales(

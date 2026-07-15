@@ -104,7 +104,7 @@ class _FakeRolloutController:
         self.restart_inactive_workers = _RemoteMethod(return_value="rollout_restarted")
         self.onload_weights = _RemoteMethod(return_value="weights_loaded")
         self.onload_kvcache = _RemoteMethod(return_value="kvcache_loaded")
-        self.get_rollout_metadata = _RemoteMethod(return_value={"server_url_dict": {}})
+        self.get_weight_update_targets = _RemoteMethod(return_value=())
         self.set_enable_partial_rollout = _RemoteMethod(return_value=None)
         self.validate_registered_workers_to_proxy = _RemoteMethod(return_value=_AwaitableValue(None))
 
@@ -123,19 +123,24 @@ class _FakeTrainController:
         self.fit_steps: list[int] = []
         self.saved_checkpoints: list[Path] = []
         self.resume_checkpoint_paths: list[Path] = []
-        self.train_rollout_mode = None
+        self.weight_transport_type = None
         self.update_weights_count = 0
         self.rollout_info = None
 
-    def update_rollout_info(
-            self,
-            info,
-            train_rollout_mode,
-            weight_update_host,
-            weight_update_port
-        ):
-        self.rollout_info = info
-        self.train_rollout_mode = train_rollout_mode
+    def bind_rollout_weight_update(
+        self,
+        *,
+        targets,
+        rollout_config,
+        weight_transport_type,
+        weight_update_host=None,
+        weight_update_port=None,
+    ):
+        self.rollout_info = {
+            "targets": targets,
+            "rollout_config": rollout_config,
+        }
+        self.weight_transport_type = weight_transport_type
         self.weight_update_host = weight_update_host
         self.weight_update_port = weight_update_port
 

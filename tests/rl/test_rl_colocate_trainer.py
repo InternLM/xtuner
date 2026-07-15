@@ -75,7 +75,7 @@ def _build_fake_rollout_controller():
     rollout_ctl = MagicMock()
     rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
     rollout_ctl.pause_generation.remote = AsyncMock(return_value=None)
-    rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+    rollout_ctl.get_weight_update_targets.remote = AsyncMock(return_value=())
     return rollout_ctl
 
 
