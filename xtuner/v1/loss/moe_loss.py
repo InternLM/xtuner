@@ -5,30 +5,11 @@ import torch.nn as nn
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from torch import distributed as dist
-from torch.distributed._functional_collectives import all_reduce
 
 from xtuner.v1.utils.device import get_device
 
 
 DEVICE = get_device()
-
-
-class _AllReduce(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, op, group, tensor):
-        ctx.group = group
-        ctx.op = op
-        tensor = tensor.clone(memory_format=torch.contiguous_format)
-        tensor = all_reduce(tensor, op, group=group)
-        return tensor
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return (None, None) + (_AllReduce.apply(ctx.op, ctx.group, grad_output),)
-
-
-def all_reduce_autograd(tensor, op, group):
-    return _AllReduce.apply(op, group, tensor)
 
 
 class BalancingLossConfig(BaseModel):
@@ -139,11 +120,11 @@ class BalancingLossContext(nn.Module):
             non_pad_token (int): Number of non-padding tokens on this rank.
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor]: ``(balancing_loss, local_balancing_loss)``. The first
-            carries the autograd graph used for backward; in the global-average branch it is reduced
-            across ranks via ``all_reduce_autograd``. The second is a detached, per-rank local
-            component for logging whose cross-rank SUM reproduces the first (used by the display
-            pipeline so that logged curves stay global once backward switches to the local component).
+            tuple[torch.Tensor, torch.Tensor]: ``(balancing_loss, local_balancing_loss)``. Both are
+            this rank's per-rank local component (computed from its own ``local_gating_sum`` with the
+            global detached statistics); the first carries the autograd graph for backward, aggregated
+            across ranks by the SUM gradient reduction, while the second is detached for the display
+            pipeline whose cross-rank SUM restores the global balancing loss.
         """
         routing_weights_sum_list = self.routing_weights_sum_list
         self.routing_weights_sum_list = []
@@ -260,7 +241,6 @@ class ZLossContext(nn.Module):
         router_logits: torch.Tensor,
         num_tokens_local: int,
         num_tokens_global: torch.Tensor | None,
-        world_size: int,
     ) -> torch.Tensor:
         """Compute z-loss for one layer and return it as a scalar with autograd
         attached.
@@ -278,8 +258,6 @@ class ZLossContext(nn.Module):
             num_tokens_global (torch.Tensor | None): All-reduced non-padding token count across
                 ranks, as an int64 scalar tensor. ``None`` when ``z_loss_global_average`` is off
                 or the process group is not initialized.
-            world_size (int): Number of ranks contributing to ``num_tokens_global``. Ignored when
-                ``num_tokens_global`` is ``None``.
 
         Returns:
             torch.Tensor: Per-layer z-loss as a 0-d tensor with autograd graph back to

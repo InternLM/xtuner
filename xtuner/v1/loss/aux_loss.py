@@ -91,7 +91,6 @@ class AuxLossContext(nn.Module):
         z_ctx: list[ZLossContext] | ZLossContext | None = None,
         num_tokens_local: int = 0,
         num_tokens_global: torch.Tensor | None = None,
-        world_size: int = 1,
     ) -> torch.Tensor:
         """Accumulate routing statistics for one layer and inject z-loss into
         the main graph.
@@ -113,7 +112,6 @@ class AuxLossContext(nn.Module):
             num_tokens_global (torch.Tensor | None): All-reduced non-padding token count across
                 ranks (int64 scalar). Pass ``None`` when ``z_loss_global_average`` is off or no
                 process group is initialized.
-            world_size (int): World size that produced ``num_tokens_global``.
 
         Returns:
             torch.Tensor: ``hidden_states`` augmented with the per-layer z-loss autograd hook.
@@ -139,7 +137,6 @@ class AuxLossContext(nn.Module):
                 router_logits=selected_router_logits,
                 num_tokens_local=num_tokens_local,
                 num_tokens_global=num_tokens_global,
-                world_size=world_size,
             )
             hidden_states = AuxLossScaler.apply(hidden_states, z_loss_l)
 

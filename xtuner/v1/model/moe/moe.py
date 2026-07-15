@@ -248,24 +248,23 @@ class MoE(BaseModel):
         z_ctx: list[ZLossContext] | ZLossContext | None,
         num_tokens_local: int,
         device: torch.device | str | int,
-    ) -> tuple[torch.Tensor | None, int]:
+    ) -> torch.Tensor | None:
         """Compute the cross-rank non-padding token count needed by the z-loss
         inline path.
 
-        Returns ``(num_tokens_global, world_size)``. ``num_tokens_global`` is ``None`` (i.e. skip
-        global averaging) when there is no z-loss context, when the configured z-loss is not
-        global-average, or when no process group is initialized.
+        Returns the global non-padding token count, or ``None`` (i.e. skip global averaging) when
+        there is no z-loss context, when the configured z-loss is not global-average, or when no
+        process group is initialized.
         """
         if z_ctx is None:
-            return None, 1
+            return None
         first = z_ctx[0] if isinstance(z_ctx, list) else z_ctx
         if not first.loss_cfg.z_loss_global_average or not dist.is_initialized():
-            return None, 1
+            return None
         n = torch.tensor(num_tokens_local, device=device, dtype=torch.int64)
         group = dist.group.WORLD
         assert group is not None
-        n_global = all_reduce(n, "sum", group)
-        return n_global, dist.get_world_size()
+        return all_reduce(n, "sum", group)
 
     def _extract_aux_loss_ctx(
         self,
@@ -487,7 +486,7 @@ class MoE(BaseModel):
             [{} for _ in range(len(seq_ctx_list))] if keep_router else []
         )
         balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx_list)
-        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, cat_mask.device)
+        num_tokens_global = self._z_loss_dist_token_count(z_ctx, non_pad_token, cat_mask.device)
 
         # Process through layers
         cat_seq_ctx: SequenceContext | None = None
@@ -569,7 +568,6 @@ class MoE(BaseModel):
                     z_ctx=z_ctx,
                     num_tokens_local=non_pad_token,
                     num_tokens_global=num_tokens_global,
-                    world_size=z_world_size,
                 )
 
         assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
@@ -754,7 +752,7 @@ class MoE(BaseModel):
         # Hoisted out of the per-layer accumulate path: mask is constant across layers.
         nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
         non_pad_token = nonpad_indices.numel()
-        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
+        num_tokens_global = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
 
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
@@ -796,7 +794,6 @@ class MoE(BaseModel):
                     z_ctx=z_ctx,
                     num_tokens_local=non_pad_token,
                     num_tokens_global=num_tokens_global,
-                    world_size=z_world_size,
                 )
 
             if self.config.return_hidden_states:
@@ -827,9 +824,7 @@ class MoE(BaseModel):
             # MTP uses its own mask; main mask's non-pad indices do not apply.
             mtp_nonpad_indices = torch.nonzero(mtp_seq_ctx.mask, as_tuple=True)[1]
             mtp_non_pad_token = mtp_nonpad_indices.numel()
-            mtp_num_tokens_global, mtp_z_world_size = self._z_loss_dist_token_count(
-                z_ctx, mtp_non_pad_token, mtp_seq_ctx.mask.device
-            )
+            mtp_num_tokens_global = self._z_loss_dist_token_count(z_ctx, mtp_non_pad_token, mtp_seq_ctx.mask.device)
 
             # Forward through MTP block
             mtp_outputs = self.mtp_block(
@@ -861,7 +856,6 @@ class MoE(BaseModel):
                     z_ctx=z_ctx,
                     num_tokens_local=mtp_non_pad_token,
                     num_tokens_global=mtp_num_tokens_global,
-                    world_size=mtp_z_world_size,
                 )
                 mtp_loss, (_, mtp_extra) = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
                 mtp_losses += mtp_loss
