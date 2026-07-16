@@ -1066,6 +1066,7 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
                 boundaries,
                 gamma=ppo_cfg.actor_gamma,
                 gae_lambda=ppo_cfg.actor_lambda,
+                length_adaptive_alpha=ppo_cfg.actor_length_adaptive_alpha,
             )
             critic_advantages = action_gae(
                 old_values,

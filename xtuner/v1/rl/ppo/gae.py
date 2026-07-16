@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 
 import torch
@@ -63,6 +64,7 @@ def action_gae(
     cu_seq_lens: torch.Tensor,
     gamma: float = 1.0,
     gae_lambda: float = 0.95,
+    length_adaptive_alpha: float | None = None,
 ) -> torch.Tensor:
     """Compute GAE along controllable actions while skipping observation tokens.
 
@@ -76,12 +78,18 @@ def action_gae(
         cu_seq_lens (torch.Tensor): Cumulative packed boundaries ``[0, ..., T]``.
         gamma (float): Reward discount factor.
         gae_lambda (float): Generalized advantage estimation lambda.
+        length_adaptive_alpha (float | None): When enabled, replace the fixed
+            lambda for each trajectory with ``clamp(1 - 1 / (alpha * action_length), 0, 1)``.
 
     Returns:
         torch.Tensor: Float32 advantages at action positions and zero elsewhere.
     """
     _validate_discount("gamma", gamma)
     _validate_discount("gae_lambda", gae_lambda)
+    if length_adaptive_alpha is not None and (
+        not math.isfinite(length_adaptive_alpha) or length_adaptive_alpha <= 0
+    ):
+        raise ValueError("length_adaptive_alpha must be finite and positive when enabled.")
     if old_values.shape != token_rewards.shape or old_values.shape != action_mask.shape:
         raise ValueError(
             "old_values, token_rewards, and action_mask must have the same shape, got "
@@ -103,12 +111,20 @@ def action_gae(
         if action_indices.numel() == 0:
             continue
 
+        trajectory_lambda = gae_lambda
+        if length_adaptive_alpha is not None:
+            action_length = int(action_indices.numel())
+            trajectory_lambda = max(
+                0.0,
+                min(1.0, 1.0 - 1.0 / (length_adaptive_alpha * action_length)),
+            )
+
         next_value = torch.zeros((), dtype=torch.float32, device=flat_values.device)
         next_advantage = torch.zeros((), dtype=torch.float32, device=flat_values.device)
         for action_idx_tensor in action_indices.flip(0):
             action_idx = int(action_idx_tensor.item())
             delta = flat_rewards[action_idx] + gamma * next_value - flat_values[action_idx]
-            advantage = delta + gamma * gae_lambda * next_advantage
+            advantage = delta + gamma * trajectory_lambda * next_advantage
             flat_advantages[action_idx] = advantage
             next_value = flat_values[action_idx]
             next_advantage = advantage
@@ -125,6 +141,7 @@ def compute_ppo_targets(
     actor_lambda: float = 0.95,
     critic_gamma: float = 1.0,
     critic_lambda: float = 1.0,
+    actor_length_adaptive_alpha: float | None = None,
 ) -> PPOTargets:
     """Compute decoupled actor GAE and critic returns from terminal rewards.
 
@@ -137,6 +154,8 @@ def compute_ppo_targets(
         actor_lambda (float): Actor GAE lambda.
         critic_gamma (float): Critic GAE discount factor.
         critic_lambda (float): Critic GAE lambda.
+        actor_length_adaptive_alpha (float | None): Optional Actor-only
+            Length-Adaptive GAE alpha.
 
     Returns:
         PPOTargets: Detached float32 actor advantages, critic advantages, returns, and sparse rewards.
@@ -154,6 +173,7 @@ def compute_ppo_targets(
         cu_seq_lens,
         gamma=actor_gamma,
         gae_lambda=actor_lambda,
+        length_adaptive_alpha=actor_length_adaptive_alpha,
     )
     critic_advantages = action_gae(
         frozen_values,

@@ -74,6 +74,85 @@ class TestActionOnlyGAE:
             torch.tensor([[1.0, 0.0, 1.0, 0.0, 1.0]]),
         )
 
+    @pytest.mark.parametrize(
+        ("action_count", "alpha"),
+        [(3, 0.05), (2, 0.5)],
+    )
+    def test_length_adaptive_lambda_clamps_at_zero(self, action_count: int, alpha: float) -> None:
+        values = torch.zeros(1, action_count)
+        rewards = torch.zeros_like(values)
+        rewards[0, -1] = 1.0
+        advantages = action_gae(
+            old_values=values,
+            token_rewards=rewards,
+            action_mask=torch.ones_like(values, dtype=torch.bool),
+            cu_seq_lens=torch.tensor([0, action_count]),
+            gae_lambda=0.95,
+            length_adaptive_alpha=alpha,
+        )
+        expected = torch.zeros_like(values)
+        expected[0, -1] = 1.0
+
+        torch.testing.assert_close(advantages, expected)
+
+    def test_length_adaptive_lambda_is_per_trajectory_and_action_only(self) -> None:
+        values = torch.zeros(1, 10)
+        action_mask = torch.tensor(
+            [[True, False, True, True, False, True, False, True, False, True]]
+        )
+        boundaries = torch.tensor([0, 3, 10])
+        rewards = terminal_rewards(torch.tensor([1.0, 1.0]), action_mask, boundaries)
+        advantages = action_gae(
+            old_values=values,
+            token_rewards=rewards,
+            action_mask=action_mask,
+            cu_seq_lens=boundaries,
+            gae_lambda=0.95,
+            length_adaptive_alpha=0.4,
+        )
+
+        torch.testing.assert_close(
+            advantages,
+            torch.tensor([[0.0, 0.0, 1.0, 0.052734375, 0.0, 0.140625, 0.0, 0.375, 0.0, 1.0]]),
+        )
+
+    def test_length_adaptive_lambda_changes_actor_only(self) -> None:
+        values = torch.zeros(1, 5)
+        action_mask = torch.tensor([[True, False, True, False, True]])
+        targets = compute_ppo_targets(
+            old_values=values,
+            reward_scores=torch.tensor([1.0]),
+            action_mask=action_mask,
+            cu_seq_lens=torch.tensor([0, 5]),
+            actor_lambda=0.95,
+            critic_lambda=1.0,
+            actor_length_adaptive_alpha=0.4,
+        )
+
+        torch.testing.assert_close(
+            targets.actor_advantages,
+            torch.tensor([[1.0 / 36.0, 0.0, 1.0 / 6.0, 0.0, 1.0]]),
+        )
+        torch.testing.assert_close(
+            targets.critic_advantages,
+            torch.tensor([[1.0, 0.0, 1.0, 0.0, 1.0]]),
+        )
+        torch.testing.assert_close(
+            targets.critic_returns,
+            torch.tensor([[1.0, 0.0, 1.0, 0.0, 1.0]]),
+        )
+
+    @pytest.mark.parametrize("alpha", [0.0, -0.1, float("nan"), float("inf")])
+    def test_action_gae_rejects_invalid_length_adaptive_alpha(self, alpha: float) -> None:
+        with pytest.raises(ValueError, match="finite and positive"):
+            action_gae(
+                old_values=torch.zeros(1, 1),
+                token_rewards=torch.zeros(1, 1),
+                action_mask=torch.ones(1, 1, dtype=torch.bool),
+                cu_seq_lens=torch.tensor([0, 1]),
+                length_adaptive_alpha=alpha,
+            )
+
     def test_padding_trajectory_without_actions_is_skipped(self) -> None:
         values = torch.tensor([[0.1, 9.0, 0.2, 8.0, 7.0]])
         action_mask = torch.tensor([[True, False, True, False, False]])
@@ -87,6 +166,7 @@ class TestActionOnlyGAE:
             token_rewards=rewards,
             action_mask=action_mask,
             cu_seq_lens=torch.tensor([0, 3, 5]),
+            length_adaptive_alpha=0.05,
         )
 
         assert rewards.tolist() == [[0.0, 0.0, 1.0, 0.0, 0.0]]
