@@ -20,7 +20,7 @@ from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, discard_rollout_state
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
@@ -451,6 +451,10 @@ class RLColocateTrainerConfig(BaseRLTrainerConfig):
             validation. Defaults to False.
         exp_tracker (Literal["tensorboard", "jsonl"]): Experiment tracker type.
             Defaults to "tensorboard".
+        discard_initial_rollout_batches (int): Number of initial complete
+            rollout batches to consume and discard before the first optimizer
+            update. Aborted partial rollouts remain in the replay buffer.
+            Defaults to 0.
         resources (AcceleratorResourcesConfig): Shared accelerator resources
             used by both training and rollout workers.
 
@@ -472,6 +476,7 @@ class RLColocateTrainerConfig(BaseRLTrainerConfig):
 
     agent_loop_manager_cfg: AgentLoopManagerConfig
     resources: AcceleratorResourcesConfig
+    discard_initial_rollout_batches: int = Field(default=0, ge=0)
 
     def build(self) -> "RLColocateTrainer":
         return RLColocateTrainer(self)
@@ -1954,6 +1959,12 @@ class RLColocateTrainer(BaseRLTrainer):
         self._init_common(cfg, meta_path=self._META_PATH, logger_tag="RLTrainer")
         self._num_workers = float(cfg.resources.num_workers)
         self._rollout_num_workers = float(cfg.resources.num_workers)
+        self._discard_initial_rollout_batches = cfg.discard_initial_rollout_batches
+        self._initial_rollout_burn_in_remaining = (
+            0
+            if self._load_checkpoint_cfg.checkpoint_path is not None
+            else cfg.discard_initial_rollout_batches
+        )
 
         self._pg = AutoAcceleratorWorkers.build_placement_group(cfg.resources)
         self._cpu_resource_manager = CPUResourceManager(self._pg)
@@ -2024,6 +2035,81 @@ class RLColocateTrainer(BaseRLTrainer):
         ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         self.logger.info("Rollout workers updated weights from train workers.")
 
+    async def _run_initial_rollout_burn_in(self, *, train_step: int, model_step: int) -> None:
+        """Discard complete cold-start batches while preserving partial rollouts."""
+
+        burn_in_index = self._discard_initial_rollout_batches - self._initial_rollout_burn_in_remaining + 1
+        self.logger.info(
+            f"Initial rollout burn-in {burn_in_index}/{self._discard_initial_rollout_batches} "
+            f"start with train_step={train_step} model_step={model_step}"
+        )
+        discarded_groups: list[list[RolloutState]] = []
+        returned_group_count = 0
+        leftover_group_count = 0
+        preserved_aborted_group_count = 0
+        try:
+            produce_result = await self.agent_loop_manager.produce_batch(
+                self.train_batch_size,
+                train_step=train_step,
+                model_step=model_step,
+            )
+            discarded_groups.extend(produce_result.rollout_states)
+            returned_group_count = len(produce_result.rollout_states)
+
+            task_names = self.agent_loop_manager.task_names
+            completed_counts = await self.agent_loop_manager.replay_buffer.count_statuses(
+                task_names,
+                [Status.COMPLETED],
+            )
+            completed_batch_sizes = {
+                task_name: completed_counts[task_name][Status.COMPLETED]
+                for task_name in task_names
+            }
+            leftover_by_task, consumed_counts = await self.agent_loop_manager.replay_buffer.take_batch(
+                completed_batch_sizes,
+                group_status=Status.COMPLETED,
+            )
+            for task_name in task_names:
+                discarded_groups.extend(leftover_by_task[task_name])
+                leftover_group_count += consumed_counts[task_name]
+
+            remaining_counts = await self.agent_loop_manager.replay_buffer.count_statuses(
+                task_names,
+                [Status.COMPLETED, Status.ABORTED],
+            )
+            remaining_completed_group_count = sum(
+                remaining_counts[task_name][Status.COMPLETED]
+                for task_name in task_names
+            )
+            if remaining_completed_group_count:
+                raise RuntimeError(
+                    "Initial rollout burn-in failed to drain all completed leftovers: "
+                    f"remaining_completed_groups={remaining_completed_group_count}"
+                )
+            preserved_aborted_group_count = sum(
+                remaining_counts[task_name][Status.ABORTED]
+                for task_name in task_names
+            )
+
+            burn_in_dir = self.exp_dir / "burnin_rollout"
+            burn_in_dir.mkdir(parents=True, exist_ok=True)
+            burn_in_path = burn_in_dir / f"burnin_rollout_{burn_in_index}.jsonl"
+            self._save_trajectories(discarded_groups, burn_in_path)
+            self.logger.info(
+                f"Initial rollout burn-in {burn_in_index} saved to {burn_in_path} and discarded: "
+                f"returned_groups={returned_group_count}, "
+                f"leftover_completed_groups={leftover_group_count}, "
+                f"total_groups={len(discarded_groups)}, "
+                f"preserved_aborted_groups={preserved_aborted_group_count}"
+            )
+        finally:
+            for group in discarded_groups:
+                for rollout_state in group:
+                    discard_rollout_state(rollout_state)
+            self._release_trace_store()
+
+        self._initial_rollout_burn_in_remaining -= 1
+
     def fit(self):
         self.logger.info("Start RL training")
         if self._cur_step >= self._total_train_steps:
@@ -2036,6 +2122,21 @@ class RLColocateTrainer(BaseRLTrainer):
 
         if self._enable_initial_evaluate and not self._debug_rollout:
             asyncio_run(self._run_initial_evaluate())
+
+        if (
+            not self._debug_rollout
+            and self._cur_step == 0
+            and self._initial_rollout_burn_in_remaining > 0
+        ):
+            burn_in_train_step = 1
+            burn_in_model_step = self._get_colocate_rollout_model_step(burn_in_train_step)
+            while self._initial_rollout_burn_in_remaining > 0:
+                asyncio_run(
+                    self._run_initial_rollout_burn_in(
+                        train_step=burn_in_train_step,
+                        model_step=burn_in_model_step,
+                    )
+                )
 
         self._benchmark_start_time_s = time.perf_counter()
         self._benchmark_training_samples = 0

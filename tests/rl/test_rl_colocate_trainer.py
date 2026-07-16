@@ -33,7 +33,7 @@ from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, ProduceB
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import AgentLoopManager
 from xtuner.v1.rl.agent_loop_manager.produce_utils import _TaskRunner
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SerializedRayObjectRef
-from xtuner.v1.train.rl_trainer import RLColocateTrainer, RLThroughputBenchmark
+from xtuner.v1.train.rl_trainer import RLColocateTrainer, RLColocateTrainerConfig, RLThroughputBenchmark
 
 
 class _FakeRolloutState:
@@ -114,14 +114,18 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer._global_train_step = 0
         trainer.train_batch_size = 1
         trainer._sync_weights_interval = sync_weights_interval
+        trainer._discard_initial_rollout_batches = 0
+        trainer._initial_rollout_burn_in_remaining = 0
         trainer._debug_rollout = False
         trainer._debug_rollout_dir = None
+        trainer._rollout_exporter = None
+        trainer._save_debug_rollout_pt = True
         trainer._debug_train = False
         trainer._enable_evaluate = False
         trainer._enable_initial_evaluate = False
         trainer._evaluate_step = 1
         trainer._cpu_resource_manager = None
-        trainer._train_worker_cfg = SimpleNamespace(pack_max_length=16)
+        trainer._train_worker_cfg = SimpleNamespace(pack_max_length=16, critic_cfg=None)
         trainer._meta = SimpleNamespace(
             latest_exp=SimpleNamespace(exp_dir=str(Path(self.temp_dir.name) / "exp")),
         )
@@ -169,6 +173,12 @@ class TestRLColocateTrainer(unittest.TestCase):
             ),
         )
         return trainer
+
+    def test_initial_rollout_burn_in_defaults_to_disabled(self):
+        self.assertEqual(
+            RLColocateTrainerConfig.model_fields["discard_initial_rollout_batches"].default,
+            0,
+        )
 
     def test_fit_accepts_async_strategy_manager_on_colocate_path(self):
         # 验证 colocate fit 可以通过公开入口消费 async manager 产出的 batch。
@@ -243,6 +253,124 @@ class TestRLColocateTrainer(unittest.TestCase):
 
         self.assertEqual(produce_calls, [(1, 1, 0), (1, 2, 0), (1, 3, 2)])
         self.assertEqual(trainer._cur_step, 3)
+
+    def test_fit_discards_initial_completed_groups_and_preserves_partial_rollouts(self):
+        replay_buffer = AsyncReplayBufferConfig().build()
+        produce_calls = []
+        selected_completed = RolloutState(
+            rollout_id=101,
+            group_id=101,
+            message=[{"role": "user", "content": "selected"}],
+            response="short selected",
+            response_ids=[1, 2],
+            reward={"score": 1.0},
+            status=Status.COMPLETED,
+            finish_reason="stop",
+        )
+        leftover_completed = RolloutState(
+            rollout_id=102,
+            group_id=102,
+            message=[{"role": "user", "content": "leftover"}],
+            response="short leftover",
+            response_ids=[3, 4],
+            reward={"score": 0.0},
+            status=Status.COMPLETED,
+            finish_reason="stop",
+        )
+        partial = RolloutState(
+            rollout_id=103,
+            group_id=103,
+            message=[{"role": "user", "content": "partial"}],
+            response="long partial",
+            response_ids=[5, 6, 7],
+            status=Status.ABORTED,
+            finish_reason="abort",
+        )
+        official = SimpleNamespace(group_id=104, rollout_id=104)
+
+        async def _produce_batch(batch_size, train_step, *, model_step):
+            produce_calls.append((batch_size, train_step, model_step))
+            if len(produce_calls) == 1:
+                await replay_buffer.put([leftover_completed], "train_task")
+                await replay_buffer.put([partial], "train_task")
+                return ProduceBatchResult(rollout_states=[[selected_completed]])
+
+            self.assertEqual(await replay_buffer.count("train_task", Status.COMPLETED), 0)
+            self.assertEqual(await replay_buffer.count("train_task", Status.ABORTED), 1)
+            return ProduceBatchResult(rollout_states=[[official]])
+
+        manager = SimpleNamespace(
+            produce_batch=_produce_batch,
+            replay_buffer=replay_buffer,
+            task_names=["train_task"],
+        )
+        trainer = self._make_trainer(manager)
+        trainer._discard_initial_rollout_batches = 1
+        trainer._initial_rollout_burn_in_remaining = 1
+
+        with (
+            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+        ):
+            trainer.fit()
+
+        self.assertEqual(produce_calls, [(1, 1, 0), (1, 1, 0)])
+        trainer.train_controller.fit.assert_called_once()
+        trainer._sync_weights_and_save.assert_called_once()
+        trainer._log_step.assert_called_once()
+        self.assertEqual(trainer._cur_step, 1)
+        self.assertEqual(trainer._initial_rollout_burn_in_remaining, 0)
+        self.assertEqual(asyncio.run(replay_buffer.count("train_task", Status.COMPLETED)), 0)
+        self.assertEqual(asyncio.run(replay_buffer.count("train_task", Status.ABORTED)), 1)
+
+        self.assertIsNone(selected_completed.response)
+        self.assertIsNone(leftover_completed.response)
+        self.assertEqual(partial.response, "long partial")
+        self.assertEqual(partial.response_ids, [5, 6, 7])
+
+        burn_in_batch, burn_in_path = trainer._save_trajectories.call_args_list[0].args
+        self.assertEqual(len(burn_in_batch), 2)
+        self.assertEqual(burn_in_path.name, "burnin_rollout_1.jsonl")
+        self.assertEqual(burn_in_path.parent.name, "burnin_rollout")
+        info_messages = [call.args[0] for call in trainer.logger.info.call_args_list]
+        self.assertIn(
+            "Initial rollout burn-in 1/1 start with train_step=1 model_step=0",
+            info_messages,
+        )
+        self.assertTrue(
+            any(
+                "returned_groups=1, leftover_completed_groups=1, total_groups=2, "
+                "preserved_aborted_groups=1" in message
+                for message in info_messages
+            )
+        )
+
+    def test_fit_does_not_repeat_initial_rollout_burn_in_after_resume(self):
+        produce_calls = []
+
+        async def _produce_batch(batch_size, train_step, *, model_step):
+            produce_calls.append((batch_size, train_step, model_step))
+            return ProduceBatchResult(
+                rollout_states=[[SimpleNamespace(group_id=train_step, rollout_id=train_step)]]
+            )
+
+        trainer = self._make_trainer(
+            SimpleNamespace(produce_batch=_produce_batch),
+            total_train_steps=2,
+        )
+        trainer._cur_step = 1
+        trainer._discard_initial_rollout_batches = 1
+        trainer._initial_rollout_burn_in_remaining = 0
+
+        with (
+            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+        ):
+            trainer.fit()
+
+        self.assertEqual(produce_calls, [(1, 2, 1)])
+        trainer.train_controller.fit.assert_called_once()
+        self.assertEqual(trainer._cur_step, 2)
 
     def test_debug_rollout_saves_raw_batch_and_skips_training(self):
         # 验证 debug_rollout 通过 fit() 将原始 rollout batch 落盘且不启动训练。
