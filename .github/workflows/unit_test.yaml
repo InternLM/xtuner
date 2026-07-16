@@ -10,6 +10,16 @@ on:
       - ".github/workflows/ete_test_gpu.yaml"
       - ".github/workflows/ete_test_npu.yaml"
       - ".github/workflows/lint.yml"
+  push:
+    branches:
+      - "xtuner-yehc-dev"
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "autotest/**"
+      - ".github/workflows/ete_test_gpu.yaml"
+      - ".github/workflows/ete_test_npu.yaml"
+      - ".github/workflows/lint.yml"
 env:
   WORKSPACE_PREFIX: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-5)
   WORKSPACE_PREFIX_SHORT: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-3)
