@@ -163,6 +163,7 @@ def bind_train_rollout(
     weight_transport_type,
     weight_update_host=None,
     weight_update_port=None,
+    disk_weight_path=None,
 ) -> None:
     """Bind the training and rollout workers for updating weights.
 
@@ -183,6 +184,7 @@ def bind_train_rollout(
                 weight_transport_type=weight_transport_type,
                 weight_update_host=weight_update_host,
                 weight_update_port=weight_update_port,
+                disk_weight_path=disk_weight_path,
             )
             for worker in train_workers
         ]

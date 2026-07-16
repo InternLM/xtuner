@@ -6,11 +6,14 @@ from .data import (
     WeightUpdateBatch,
 )
 from .transport import (
+    DiskBackendAdapter,
+    DiskWeightTransport,
     IPCBackendAdapter,
     IPCWeightTransport,
     LMDeployIPCBackendAdapter,
     NCCLBackendAdapter,
     NCCLWeightTransport,
+    SGLangDiskBackendAdapter,
     SGLangIPCBackendAdapter,
     SGLangNCCLBackendAdapter,
     WeightTransport,
@@ -21,6 +24,8 @@ from .weight_iterator import WeightIterator
 
 
 __all__ = [
+    "DiskBackendAdapter",
+    "DiskWeightTransport",
     "IPCBackendAdapter",
     "IPCWeightTransport",
     "LMDeployIPCBackendAdapter",
@@ -29,6 +34,7 @@ __all__ = [
     "RolloutBackend",
     "RolloutWeightUpdateTarget",
     "RolloutWeightUpdateInfo",
+    "SGLangDiskBackendAdapter",
     "SGLangIPCBackendAdapter",
     "SGLangNCCLBackendAdapter",
     "UpdateWeighter",

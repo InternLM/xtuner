@@ -9,7 +9,7 @@ from .data import (
     RolloutWeightUpdateTarget,
     WeightTransportType,
 )
-from .transport import IPCWeightTransport, NCCLWeightTransport, WeightTransport
+from .transport import DiskWeightTransport, IPCWeightTransport, NCCLWeightTransport, WeightTransport
 from .weight_iterator import WeightIterator
 
 
@@ -37,6 +37,7 @@ class UpdateWeighter:
         weight_transport_type: WeightTransportType,
         weight_update_host: str | None = None,
         weight_update_port: int | None = None,
+        disk_weight_path: str | None = None,
     ):
         """Bind this train worker to rollout weight-update targets."""
 
@@ -47,6 +48,7 @@ class UpdateWeighter:
             weight_transport_type=weight_transport_type,
             weight_update_host=weight_update_host,
             weight_update_port=weight_update_port,
+            disk_weight_path=disk_weight_path,
         )
 
         new_transport_signature = self.rollout_info.transport_signature
@@ -90,6 +92,8 @@ class UpdateWeighter:
             )
         elif rollout_info.transport_type == "nccl":
             self._transport = NCCLWeightTransport(rank=self.rank, logger=self.logger, rollout_info=rollout_info)
+        elif rollout_info.transport_type == "disk":
+            self._transport = DiskWeightTransport(rank=self.rank, logger=self.logger, rollout_info=rollout_info)
         else:
             raise NotImplementedError
 

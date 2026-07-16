@@ -838,3 +838,105 @@ class NCCLWeightTransport(WeightTransport):
         self.group_name = None
         self.engine_urls = []
         self.external_group_world_size = None
+
+
+class DiskBackendAdapter:
+    def build_weight_update_payload(self, hf_weight_path: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def build_request(
+        self,
+        payload: dict[str, Any],
+    ) -> WeightUpdateRequest:
+        raise NotImplementedError
+
+    def update(self, weight_iterator: Any) -> None:
+        raise NotImplementedError
+
+    def teardown(self) -> None:
+        return
+
+
+class SGLangDiskBackendAdapter(DiskBackendAdapter):
+    def __init__(self, *, rank: int, rollout_info: RolloutWeightUpdateInfo):
+        self.rank = rank
+        self.rollout_info = rollout_info
+        self.executor: ThreadPoolExecutor | None = None
+
+    def build_weight_update_payload(self, hf_weight_path: str) -> dict[str, Any]:
+        # SGLang already owns the disk reload path. XTuner only needs to pass
+        # the HF checkpoint directory to the rollout server.
+        return {
+            "model_path": hf_weight_path,
+            "load_format": "safetensors",
+            "abort_all_requests": True,
+            "flush_cache": True,
+        }
+
+    def build_request(
+        self,
+        payload: dict[str, Any],
+    ) -> WeightUpdateRequest:
+        return WeightUpdateRequest(endpoint="update_weights_from_disk", body=payload)
+
+    def update(self, weight_iterator: Any) -> None:
+        # SGLang consumes the checkpoint path on the rollout server side.
+        del weight_iterator
+
+        disk_weight_path = self.rollout_info.disk_weight_path
+        if not disk_weight_path:
+            raise RuntimeError("Disk weight update requires rollout_info.disk_weight_path from rollout_config.")
+
+        try:
+            if dist.get_rank() != 0:
+                dist.barrier()
+                return
+
+            target_urls = [t.server_url for t in self.rollout_info.active_update_targets]
+            if not target_urls:
+                raise RuntimeError("Disk weight update requires at least one rollout server url.")
+            payload = self.build_weight_update_payload(disk_weight_path)
+            request = self.build_request(payload)
+            self.executor = ThreadPoolExecutor(max_workers=max(1, len(target_urls)))
+            futures = [
+                self.executor.submit(
+                    WeightTransport.post_json,
+                    url,
+                    request.endpoint,
+                    request.body,
+                    api_key=self.rollout_info.api_key,
+                )
+                for url in target_urls
+            ]
+            for future in futures:
+                result = future.result()
+                assert result.get("success", True), f"disk weight update failed: {result.get('message', result)}"
+            dist.barrier()
+        finally:
+            self.teardown()
+            DEVICE_MODULE.empty_cache()
+
+    def teardown(self) -> None:
+        if self.executor is not None:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+            self.executor = None
+
+
+class DiskWeightTransport(WeightTransport):
+    _disk_adapter: DiskBackendAdapter
+
+    def __init__(self, *, rank: int, logger: Any, rollout_info: RolloutWeightUpdateInfo, config: Any | None = None):
+        super().__init__(rank=rank, logger=logger, rollout_info=rollout_info)
+        self.config = config
+        self._disk_adapter = self._build_adapter()
+
+    def _build_adapter(self) -> DiskBackendAdapter:
+        if self.backend == "sglang":
+            return SGLangDiskBackendAdapter(rank=self.rank, rollout_info=self.rollout_info)
+        raise ValueError(f"Unsupported disk weight update backend: {self.backend!r}")
+
+    def update(self, weight_iterator: Any) -> None:
+        self._disk_adapter.update(weight_iterator)
+
+    def send(self, batch: WeightUpdateBatch) -> None:
+        raise NotImplementedError("DiskWeightTransport bypasses WeightIterator batches.")
