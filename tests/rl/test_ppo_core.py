@@ -11,6 +11,7 @@ from xtuner.v1.rl.ppo import (
     normalize_advantages,
     terminal_rewards,
 )
+from xtuner.v1.rl.trainer.ppo_config import PPOConfig
 
 
 class TestNextTokenAlignment:
@@ -115,6 +116,33 @@ class TestPPOMasks:
             [True, False],
         ]
 
+    def test_uniform_reward_group_can_be_dropped_from_critic(self) -> None:
+        action_masks = [torch.tensor([False, True]), torch.tensor([True, False])]
+        masks = build_group_loss_masks(
+            action_masks,
+            rewards=[1.0, 1.0],
+            keep_uniform_groups=False,
+        )
+
+        assert masks.is_uniform
+        assert masks.critic_is_uniform
+        assert not any(mask.any() for mask in masks.actor)
+        assert not any(mask.any() for mask in masks.critic)
+
+    def test_actor_and_critic_truncation_eligibility_are_independent(self) -> None:
+        action_masks = [torch.tensor([True]), torch.tensor([True]), torch.tensor([True])]
+        masks = build_group_loss_masks(
+            action_masks,
+            rewards=[0.0, 1.0, 0.0],
+            sample_eligible=[True, True, False],
+            critic_sample_eligible=[True, True, True],
+        )
+
+        assert masks.sample_eligible == (True, True, False)
+        assert masks.critic_sample_eligible == (True, True, True)
+        assert [mask.item() for mask in masks.actor] == [True, True, False]
+        assert [mask.item() for mask in masks.critic] == [True, True, True]
+
     def test_deterministic_selection_keeps_one_length_trajectory(self) -> None:
         reasons = ["length", "stop", "length", "length"]
         rollout_ids = ["a", "normal", "b", "c"]
@@ -136,6 +164,49 @@ class TestPPOMasks:
         assert first == second
         assert first[1]
         assert sum(first[index] for index in (0, 2, 3)) == 1
+
+    @pytest.mark.parametrize(
+        ("limit", "expected_retained"),
+        [(None, 3), (0, 0), (1, 1), (2, 2)],
+    )
+    def test_truncated_limit_is_configurable(
+        self,
+        limit: int | None,
+        expected_retained: int,
+    ) -> None:
+        mask = deterministic_truncated_keep_mask(
+            ["length", "stop", "length", "length"],
+            ["a", "normal", "b", "c"],
+            max_truncated_per_group=limit,
+        )
+
+        assert mask[1]
+        assert sum(mask[index] for index in (0, 2, 3)) == expected_retained
+
+    def test_negative_truncated_limit_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="non-negative"):
+            deterministic_truncated_keep_mask(
+                ["length"],
+                ["a"],
+                max_truncated_per_group=-1,
+            )
+
+
+class TestPPOConfig:
+    def test_critic_selection_defaults_keep_uniform_and_all_truncated(self) -> None:
+        config = PPOConfig()
+
+        assert config.keep_uniform_groups is True
+        assert config.max_truncated_per_group is None
+
+    def test_negative_truncated_limit_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="non-negative"):
+            PPOConfig(max_truncated_per_group=-1)
+
+    @pytest.mark.parametrize("alpha", [0.0, -0.1, float("nan"), float("inf")])
+    def test_invalid_length_adaptive_alpha_is_rejected(self, alpha: float) -> None:
+        with pytest.raises(ValueError, match="finite and positive"):
+            PPOConfig(actor_length_adaptive_alpha=alpha)
 
 
 class TestAdvantageNormalization:

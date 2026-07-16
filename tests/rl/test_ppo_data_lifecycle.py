@@ -47,7 +47,9 @@ def test_truncated_siblings_do_not_free_retained_pixel_ref() -> None:
             )
 
         trainer = BaseRLTrainer.__new__(BaseRLTrainer)
-        trainer._train_worker_cfg = SimpleNamespace(ppo_cfg=PPOConfig(selection_seed=42))
+        trainer._train_worker_cfg = SimpleNamespace(
+            ppo_cfg=PPOConfig(selection_seed=42, max_truncated_per_group=1)
+        )
         trainer._cur_step = 0
         trainer.logger = MagicMock()
         trainer.tokenizer = MagicMock()
@@ -57,12 +59,65 @@ def test_truncated_siblings_do_not_free_retained_pixel_ref() -> None:
         assert len(data_batches) == 1
         assert info["ppo/retained_truncated"] == 1.0
         assert info["ppo/dropped_truncated"] == 7.0
+        assert info["ppo/critic_retained_truncated"] == 1.0
+        assert info["ppo/critic_dropped_truncated"] == 7.0
         assert sum(state.routed_experts is not None for state in group) == 1
         retained_pixel_ref = data_batches[0]["seq_ctx"].pixel_values
         np.testing.assert_array_equal(ray.get(retained_pixel_ref), shared_pixels)
     finally:
         if started_ray:
             ray.shutdown()
+
+
+def test_actor_only_truncated_sample_keeps_terminal_reward() -> None:
+    group = [
+        RolloutState(
+            rollout_id=0,
+            group_id=0,
+            message=[{"role": "user", "content": "prompt"}],
+            prompt_ids=[10, 11],
+            response="response",
+            response_ids=[20, 21],
+            response_mask=[1, 1],
+            logprobs=[-0.1, -0.2],
+            reward={"score": 0.0},
+            status=Status.COMPLETED,
+            finish_reason="stop",
+            position_ids=np.array([[[0, 1]], [[0, 1]], [[0, 1]]], dtype=np.int64),
+        ),
+        RolloutState(
+            rollout_id=1,
+            group_id=0,
+            message=[{"role": "user", "content": "prompt"}],
+            prompt_ids=[10, 11],
+            response="response",
+            response_ids=[22, 23],
+            response_mask=[1, 1],
+            logprobs=[-0.1, -0.2],
+            reward={"score": 1.0},
+            status=Status.COMPLETED,
+            finish_reason="length",
+            position_ids=np.array([[[0, 1]], [[0, 1]], [[0, 1]]], dtype=np.int64),
+        ),
+    ]
+    trainer = BaseRLTrainer.__new__(BaseRLTrainer)
+    trainer._train_worker_cfg = SimpleNamespace(
+        ppo_cfg=PPOConfig(max_truncated_per_group=0)
+    )
+    trainer._cur_step = 0
+    trainer.logger = MagicMock()
+    trainer.tokenizer = MagicMock()
+
+    data_batches, info = trainer._prepare_ppo_train_data([group], pack_max_length=16)
+    actor_only_batch = next(
+        batch
+        for batch in data_batches
+        if batch["actor_loss_mask"].any() and not batch["critic_loss_mask"].any()
+    )
+
+    assert actor_only_batch["token_rewards"].sum().item() == 1.0
+    assert info["ppo/retained_truncated"] == 1.0
+    assert info["ppo/critic_retained_truncated"] == 0.0
 
 
 def test_failed_fit_does_not_manual_free_pixels_while_sibling_workers_may_run() -> None:

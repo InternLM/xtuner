@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 from typing import Literal
 
@@ -51,6 +52,7 @@ class PPOConfig(BaseModel):
 
     actor_gamma: float = 1.0
     actor_lambda: float = 0.95
+    actor_length_adaptive_alpha: float | None = None
     critic_gamma: float = 1.0
     critic_lambda: float = 1.0
     normalize_actor_advantage: bool = True
@@ -58,6 +60,8 @@ class PPOConfig(BaseModel):
     normalize_reward: bool = False
     actor_num_passes: int = 1
     selection_seed: int = 0
+    keep_uniform_groups: bool = True
+    max_truncated_per_group: int | None = None
 
     # Keep the current sampled-token surprisal heuristic for the Actor only.
     surprisal_upper_bound: float = 0.65
@@ -75,6 +79,12 @@ class PPOConfig(BaseModel):
             raise ValueError("Critic return normalization is intentionally disabled.")
         if self.normalize_reward:
             raise ValueError("Reward normalization is intentionally disabled.")
+        if self.max_truncated_per_group is not None and self.max_truncated_per_group < 0:
+            raise ValueError("max_truncated_per_group must be non-negative or None.")
+        if self.actor_length_adaptive_alpha is not None and (
+            not math.isfinite(self.actor_length_adaptive_alpha) or self.actor_length_adaptive_alpha <= 0
+        ):
+            raise ValueError("actor_length_adaptive_alpha must be finite and positive when enabled.")
         for name in ("actor_gamma", "actor_lambda", "critic_gamma", "critic_lambda"):
             value = getattr(self, name)
             if not 0 <= value <= 1:

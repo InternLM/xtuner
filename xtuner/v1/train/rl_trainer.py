@@ -1301,6 +1301,8 @@ class BaseRLTrainer:
         nonuniform_groups = 0
         retained_truncated = 0
         dropped_truncated = 0
+        critic_retained_truncated = 0
+        critic_dropped_truncated = 0
         actor_valid_tokens = 0
         critic_valid_tokens = 0
         uniform_actor_valid_tokens = 0
@@ -1414,24 +1416,43 @@ class BaseRLTrainer:
                 item["state"].rollout_id if item["state"].rollout_id is not None else index
                 for index, item in enumerate(aligned_items)
             ]
-            sample_eligible = deterministic_truncated_keep_mask(
+            actor_sample_eligible = deterministic_truncated_keep_mask(
                 [item["state"].finish_reason for item in aligned_items],
                 rollout_ids,
                 selection_seed=ppo_cfg.selection_seed,
                 step=self._cur_step + 1,
                 group_id=group[0].group_id if group[0].group_id is not None else group_index,
+                max_truncated_per_group=1,
             )
-            for item, eligible in zip(aligned_items, sample_eligible):
+            critic_sample_eligible = deterministic_truncated_keep_mask(
+                [item["state"].finish_reason for item in aligned_items],
+                rollout_ids,
+                selection_seed=ppo_cfg.selection_seed,
+                step=self._cur_step + 1,
+                group_id=group[0].group_id if group[0].group_id is not None else group_index,
+                max_truncated_per_group=ppo_cfg.max_truncated_per_group,
+            )
+            for item, actor_eligible, critic_eligible in zip(
+                aligned_items,
+                actor_sample_eligible,
+                critic_sample_eligible,
+            ):
                 if item["state"].finish_reason == "length":
-                    if eligible:
+                    if actor_eligible:
                         retained_truncated += 1
                     else:
                         dropped_truncated += 1
+                    if critic_eligible:
+                        critic_retained_truncated += 1
+                    else:
+                        critic_dropped_truncated += 1
 
             group_masks = build_group_loss_masks(
                 [item["action_mask"] for item in aligned_items],
                 rewards,
-                sample_eligible,
+                actor_sample_eligible,
+                critic_sample_eligible=critic_sample_eligible,
+                keep_uniform_groups=ppo_cfg.keep_uniform_groups,
             )
             uniform_groups += int(group_masks.is_uniform)
             nonuniform_groups += int(not group_masks.is_uniform)
@@ -1469,9 +1490,9 @@ class BaseRLTrainer:
                     continue
                 actor_labels = item["shifted_labels"].masked_fill(~actor_mask, -100)
                 token_rewards = torch.zeros_like(item["action_mask"], dtype=torch.float32)
-                critic_indices = torch.nonzero(critic_mask.reshape(-1), as_tuple=False).flatten()
-                if critic_indices.numel() > 0:
-                    token_rewards.reshape(-1)[critic_indices[-1]] = reward
+                action_indices = torch.nonzero(item["action_mask"].reshape(-1), as_tuple=False).flatten()
+                if action_indices.numel() > 0:
+                    token_rewards.reshape(-1)[action_indices[-1]] = reward
                 scale_shape = item["action_mask"].shape
                 data_batches.append(
                     {
@@ -1524,6 +1545,8 @@ class BaseRLTrainer:
             "ppo/nonuniform_groups": float(nonuniform_groups),
             "ppo/retained_truncated": float(retained_truncated),
             "ppo/dropped_truncated": float(dropped_truncated),
+            "ppo/critic_retained_truncated": float(critic_retained_truncated),
+            "ppo/critic_dropped_truncated": float(critic_dropped_truncated),
             "ppo/actor_valid_tokens": float(actor_valid_tokens),
             "ppo/critic_valid_tokens": float(critic_valid_tokens),
             "ppo/uniform_actor_valid_tokens": float(uniform_actor_valid_tokens),
