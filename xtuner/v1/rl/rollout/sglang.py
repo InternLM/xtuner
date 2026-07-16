@@ -14,6 +14,7 @@ from xtuner.v1.utils import XTUNER_DETERMINISTIC
 from .rollout_topology import RolloutEngine, RolloutServerProcess, RolloutTopology
 from .worker import RolloutConfig, RolloutWorker
 
+
 SHARED_STORE = "shared_store"
 SHARED_STORE_NAMESPACE = "sglang"
 
@@ -345,6 +346,7 @@ class SGLangWorker(RolloutWorker):
             try:
                 if self.sglang_actor is None:
                     self.sglang_actor = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
+                assert self.sglang_actor is not None, "SGLang actor should be available in the shared store."
                 routed_experts_data = await self.sglang_actor.get.remote(routed_experts)
                 if hasattr(routed_experts_data, "detach"):
                     routed_experts_data = routed_experts_data.detach().cpu().numpy()
