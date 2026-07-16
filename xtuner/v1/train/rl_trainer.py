@@ -72,6 +72,12 @@ PG_READY_TIMEOUT = 30
 RL_TRAINER_RAY_GET_TIMEOUT = 3600
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
+# Both values are globally reduced before their worker-0 log is returned to the
+# controller. Keep the TensorBoard names explicit about their training meaning.
+_CRITIC_TENSORBOARD_METRIC_NAMES = {
+    "reduced_llm_loss": "value_loss",
+    "grad_norm": "reduced_grad_norm",
+}
 
 
 def _is_routed_agent_loop_config(agent_loop_config: Any) -> bool:
@@ -1720,7 +1726,8 @@ class BaseRLTrainer:
                 critic_metrics: dict[str, List[float]] = {}
                 for critic_log in log_item.get("critic_train_metrics", []):
                     for key, value in critic_log.items():
-                        critic_metrics.setdefault(key, []).append(cast(float, value))
+                        metric_name = _CRITIC_TENSORBOARD_METRIC_NAMES.get(key, key)
+                        critic_metrics.setdefault(metric_name, []).append(cast(float, value))
                 for key, values in critic_metrics.items():
                     all_scalars[f"critic_metrics/worker_{worker_idx}/step_avg_{key}"] = sum(values) / len(values)
 

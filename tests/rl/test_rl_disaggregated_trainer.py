@@ -362,6 +362,30 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertAlmostEqual(scalars["throughput/rollout_sgs"], 0.5)
         self.assertAlmostEqual(scalars["throughput/rollout_tgs"], 15.0)
 
+    def test_log_step_renames_global_critic_metrics_for_tensorboard(self):
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer._log_step = RLDisaggregatedTrainer._log_step.__get__(trainer, RLDisaggregatedTrainer)
+        train_info = self._minimal_train_info(training_samples=2, training_tokens=16)
+        train_info["workers_log_item"][0]["critic_train_metrics"] = [
+            {"reduced_llm_loss": 2.0, "grad_norm": 6.0, "lr": 5e-6},
+            {"reduced_llm_loss": 4.0, "grad_norm": 10.0, "lr": 3e-6},
+        ]
+
+        trainer._log_step(
+            train_step=1,
+            step_timer_dict={},
+            produce_result=ProduceBatchResult(rollout_states=[]),
+            train_info=train_info,
+            eval_info={},
+        )
+
+        scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
+        self.assertAlmostEqual(scalars["critic_metrics/worker_0/step_avg_value_loss"], 3.0)
+        self.assertAlmostEqual(scalars["critic_metrics/worker_0/step_avg_reduced_grad_norm"], 8.0)
+        self.assertAlmostEqual(scalars["critic_metrics/worker_0/step_avg_lr"], 4e-6)
+        self.assertNotIn("critic_metrics/worker_0/step_avg_reduced_llm_loss", scalars)
+        self.assertNotIn("critic_metrics/worker_0/step_avg_grad_norm", scalars)
+
     def test_update_weights_pauses_generation_without_onloading_rollout(self):
         manager = _FakeManager([])
         trainer = self._make_trainer(manager)
