@@ -1,9 +1,9 @@
 diff --git a/python/sglang/srt/managers/detokenizer_manager.py b/python/sglang/srt/managers/detokenizer_manager.py
-index 065546088a..1e34cbce7c 100644
 --- a/python/sglang/srt/managers/detokenizer_manager.py
 +++ b/python/sglang/srt/managers/detokenizer_manager.py
-@@ -36,6 +36,9 @@ from sglang.srt.managers.io_struct import (
-     FreezeGCReq,
+@@ -37,7 +37,10 @@ from sglang.srt.managers.io_struct import (
+     sock_recv,
+     sock_send,
  )
  from sglang.srt.managers.multi_tokenizer_mixin import MultiHttpWorkerDetokenizerMixin
 +from sglang.srt.managers.routed_experts_shared_store import (
@@ -12,7 +12,7 @@ index 065546088a..1e34cbce7c 100644
  from sglang.srt.observability.cpu_monitor import start_cpu_monitor_thread
  from sglang.srt.server_args import PortArgs, ServerArgs
  from sglang.srt.utils import configure_logger, freeze_gc, kill_itself_when_parent_died
-@@ -403,7 +406,7 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
+@@ -410,7 +413,7 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
              if len(recv_obj.rids) > 0
              else []
          )
@@ -23,7 +23,6 @@ index 065546088a..1e34cbce7c 100644
              rids=recv_obj.rids,
 diff --git a/python/sglang/srt/managers/routed_experts_shared_store.py b/python/sglang/srt/managers/routed_experts_shared_store.py
 new file mode 100644
-index 0000000000..a7404ecae8
 --- /dev/null
 +++ b/python/sglang/srt/managers/routed_experts_shared_store.py
 @@ -0,0 +1,111 @@
@@ -139,10 +138,9 @@ index 0000000000..a7404ecae8
 +        encode_routed_experts(item) if item is not None else None for item in data_list
 +    ]
 diff --git a/python/sglang/srt/managers/tokenizer_manager.py b/python/sglang/srt/managers/tokenizer_manager.py
-index 357e3c4675..d71966f7e5 100644
 --- a/python/sglang/srt/managers/tokenizer_manager.py
 +++ b/python/sglang/srt/managers/tokenizer_manager.py
-@@ -78,6 +78,7 @@ from sglang.srt.managers.io_struct import (
+@@ -85,6 +85,7 @@ from sglang.srt.managers.io_struct import (
  from sglang.srt.managers.load_snapshot import create_load_snapshot_reader
  from sglang.srt.managers.mm_utils import TensorTransportMode, wrap_shm_features
  from sglang.srt.managers.multimodal_processor import get_mm_processor, import_processors
@@ -150,7 +148,10 @@ index 357e3c4675..d71966f7e5 100644
  from sglang.srt.managers.schedule_batch import MultimodalDataItem
  from sglang.srt.managers.scheduler_input_blocker import input_blocker_guard_region
  from sglang.srt.managers.tokenizer_control_mixin import TokenizerControlMixin
-@@ -1896,7 +1897,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
+@@ -1953,10 +1954,10 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
+             if getattr(recv_obj, "routed_experts", None):
+                 val = recv_obj.routed_experts[i]
+                 if val is not None:
                      # BatchStrOutput is pre-encoded by the detokenizer;
                      # BatchTokenIDOutput (skip_tokenizer_init) bypasses it.
                      if isinstance(val, torch.Tensor):
