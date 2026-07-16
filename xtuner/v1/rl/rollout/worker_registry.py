@@ -6,6 +6,8 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from xtuner.v1.utils import get_logger
+
 
 if TYPE_CHECKING:
     from xtuner.v1.rl.weight_update.data import RolloutWeightUpdateTarget
@@ -19,6 +21,8 @@ __all__ = [
     "WorkerLifecycleState",
     "WorkerSnapshot",
 ]
+
+logger = get_logger()
 
 
 class WorkerLifecycleState(str, Enum):
@@ -155,18 +159,36 @@ class RolloutWorkerRegistry:
             for group_ranks in grouped_ranks
         }
 
-    def claim_inactive_groups_for_recovery(self) -> tuple[WorkerGroup, ...]:
-        """Claim non-active worker groups by moving them to recovering
+    def inactive_worker_groups(self) -> tuple[WorkerGroup, ...]:
+        """Return lifecycle groups containing inactive workers without changing
         state."""
         with self._lock:
             worker_groups = self._build_worker_groups()
             inactive_groups = [
                 group
                 for group in worker_groups.values()
-                if any(worker.lifecycle_state is not WorkerLifecycleState.ACTIVE for worker in group.workers)
+                if any(worker.lifecycle_state is WorkerLifecycleState.INACTIVE for worker in group.workers)
+            ]
+            return tuple(sorted(inactive_groups, key=lambda group: group.ranks))
+
+    def claim_inactive_groups_for_recovery(self) -> tuple[WorkerGroup, ...]:
+        """Claim inactive worker groups by moving them to RECOVERING state."""
+        with self._lock:
+            worker_groups = self._build_worker_groups()
+            inactive_groups = [
+                group
+                for group in worker_groups.values()
+                if any(worker.lifecycle_state is WorkerLifecycleState.INACTIVE for worker in group.workers)
             ]
             sorted_groups = tuple(sorted(inactive_groups, key=lambda group: group.ranks))
             for group in sorted_groups:
+                inactive_ranks = sorted(
+                    worker.rank for worker in group.workers if worker.lifecycle_state is WorkerLifecycleState.INACTIVE
+                )
+                logger.warning(
+                    f"Claimed inactive rollout worker ranks={inactive_ranks} "
+                    f"in worker_group_ranks={group.ranks} for recovery."
+                )
                 for rank in group.ranks:
                     worker = self._workers.get(rank)
                     if worker is not None:
@@ -196,7 +218,7 @@ class RolloutWorkerRegistry:
         group: WorkerGroup,
         *,
         recovered: bool,
-    ) -> WorkerGroup | None:
+    ) -> WorkerGroup:
         """Apply the final lifecycle state for a completed group recovery
         attempt and return the updated group snapshot."""
         with self._lock:
@@ -206,7 +228,13 @@ class RolloutWorkerRegistry:
                 if worker is not None:
                     self._workers[rank] = replace(worker, lifecycle_state=lifecycle_state)
             worker_groups = self._build_worker_groups()
-            return worker_groups.get(group.ranks)
+            recorded_group = worker_groups.get(group.ranks)
+            if recorded_group is None:
+                raise RuntimeError(
+                    f"Failed to finalize rollout worker group recovery because group_ranks={group.ranks} "
+                    "is not registered."
+                )
+            return recorded_group
 
     def weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
         """Return weight-update targets resolved with current runtime state."""

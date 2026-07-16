@@ -41,6 +41,7 @@ from xtuner.v1.rl.replay_buffer import (
 )
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.trace import TraceConfig, close_trace, configure_trace
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
 from xtuner.v1.rl.utils import (
@@ -362,6 +363,7 @@ class BaseRLTrainerConfig(BaseModel):
     debug_train: bool = False
     skip_checkpoint_validation: bool = False
     exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard"
+    trace_config: TraceConfig = Field(default_factory=TraceConfig)
 
     @model_validator(mode="after")
     def _validate_sync_intervals(self):
@@ -585,6 +587,7 @@ class BaseRLTrainer:
         self._init_load_source(cfg)
         self._init_save_config(cfg)
         log_dir = self._init_logger(cfg, logger_tag)
+        self._init_trace(cfg)
         self._save_runtime_environment(log_dir)
         self._init_train_state(cfg)
         self._init_train_worker_config(cfg, log_dir)
@@ -634,6 +637,12 @@ class BaseRLTrainer:
         if cfg.skip_checkpoint_validation:
             patch_default_save_plan()
         return log_dir
+
+    def _init_trace(self, cfg: BaseRLTrainerConfig) -> None:
+        trace_config = cfg.trace_config
+        if trace_config.output_dir is None:
+            trace_config = trace_config.model_copy(update={"output_dir": self.exp_dir / "otel"})
+        self._trace_runtime = configure_trace(trace_config)
 
     def _save_runtime_environment(self, log_dir: Path) -> None:
         if get_rank() != 0:
@@ -1630,6 +1639,7 @@ class RLColocateTrainer(BaseRLTrainer):
             self._fit()
         finally:
             self._exp_tracker.close()
+            close_trace()
 
     def _fit(self):
         self.logger.info("Start RL training")
@@ -1860,6 +1870,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             return asyncio_run(self._fit())
         finally:
             self._exp_tracker.close()
+            close_trace()
 
     async def _get_batch_or_raise_producer_failure(
         self,

@@ -1,0 +1,116 @@
+---
+name: xtuner-trace
+description: Use when the user wants to instrument, inspect, or debug XTuner traces to reconstruct a sample/request execution path, follow cross-process call chains, or identify latency hotspots, bottleneck stages, and abnormal paths from span data.
+---
+
+# XTuner Trace
+
+Use this skill for the current trace layer in this repository: OpenTelemetry runtime setup, the basic public API, local setup scripts, and the trace viewer.
+
+## Current Boundary
+
+Keep this package infrastructure-only:
+
+- Runtime/configuration: `xtuner/v1/rl/trace/runtime.py`
+- OTel SDK adapter: `xtuner/v1/rl/trace/otel_utils.py`
+- Public facade: `xtuner/v1/rl/trace/__init__.py`
+- Basic API: `xtuner/v1/rl/trace/api.py`
+- Rollout starter preset: `xtuner/v1/rl/trace/rollout_api.py`
+- Local trace tooling and viewer: `recipe/trace/`
+
+Do not add rollout, agent, judger, Ray remote, HTTP proxy, reward, status, or session-server business semantics to `api.py`, `runtime.py`, or `otel_utils.py`. Keep rollout-specific starter behavior inside `rollout_api.py` and gated by `TraceConfig.enable_rollout_trace`.
+
+## Viewer Choice
+
+Choose the viewer by the observation question:
+
+- Use `recipe/trace/viewer` when the user wants rollout-oriented inspection, such as comparing samples within a training step by stage duration, status, reward/filter metadata, or recorded sample call chain.
+- Use Jaeger when the question is not sample/step-centric, such as inspecting raw spans, service boundaries, cross-process causality, backend/client calls, collector/export behavior, or custom instrumentation that does not emit the rollout/sample attributes expected by the recipe viewer.
+
+The recipe viewer reads `traces.jsonl` and adds XTuner rollout/sample aggregation. Jaeger remains the raw trace drill-down surface for the same traced run.
+
+## Basic API
+
+These are the interfaces defined in `xtuner/v1/rl/trace/api.py` and re-exported
+from `xtuner.v1.rl.trace`:
+
+- `trace_span(name, attributes=None, parent_carrier=None)`
+- `trace_function(name=None, attributes=None)`
+- `trace_event(name, attributes=None)`
+- `set_trace_attributes(attributes)`
+- `inject_trace_context(carrier=None)`
+
+## Runtime API
+
+Use these `xtuner/v1/rl/trace/runtime.py` interfaces for explicit trace
+runtime setup:
+
+- `TraceConfig`
+- `configure_trace(...)`
+- `close_trace()`
+
+## Rollout Starter Preset
+
+`TraceConfig(enable_rollout_trace=True)` enables the built-in rollout starter
+trace. Its helpers live in `xtuner/v1/rl/trace/rollout_api.py`:
+
+- `trace_rollout_endpoint(...)`
+- `trace_rollout_remote(...)`
+
+Keep this layer narrow: it may depend on `RolloutState` and Ray call boundaries,
+but it must not leak those dependencies into the basic API.
+
+Rollout endpoint `xtuner.span_name_path` is a sample call chain, not just the
+current process context stack. `trace_rollout_endpoint(...)` should append the
+endpoint span name to an internal trace-only chain carried in
+`RolloutState.extra_fields`, pass that state through remote rollout boundaries,
+and clean the internal field at the outermost endpoint. For example, after a
+sample generates and then judges, `judger.run` should record a path like
+`single_turn_agent_loop.run -> rollout.controller.generate -> rollout.worker.generate -> judger.run`
+even though the local active context at judge time may only be
+`single_turn_agent_loop.run -> judger.run`. Keep this behavior in
+`rollout_api.py` and viewer tests; do not add rollout call-chain semantics to
+the basic trace API.
+
+## Add Trace Workflow
+
+When adding trace instrumentation to an XTuner run:
+
+1. Ask for or locate the launch script and training config before editing.
+2. In the launch script, source `recipe/trace/setup_trace.sh` when
+   `XTUNER_TRACE_ENABLED=1`.
+3. In the training config, add `TraceConfig` and set `enabled=True`; set
+   `xtuner_viewer_enabled=True` when the user needs interactive sample/step inspection. Set
+   `enable_rollout_trace=True` only when the user wants the built-in rollout
+   starter trace.
+4. Before adding any `trace_span(...)` instrumentation, you must ask the user which
+   stages they want to observe and which metrics each stage should expose.
+   Do not infer default stages unless the user explicitly asks you to choose.
+5. Add `trace_span(...)` only around the user-confirmed observed stages. Put fields known at span
+   start in initial attributes, and update runtime or final fields with
+   `set_trace_attributes(...)`.
+6. For cross-process or request boundaries, inject a carrier with
+   `inject_trace_context(...)` and pass it to downstream
+   `trace_span(..., parent_carrier=carrier)`.
+7. Keep transport-specific propagation at the caller boundary; do not move
+   rollout, agent, judger, Ray, or HTTP semantics into the basic trace package.
+8. Ensure the main training log includes the trace output path, XTuner viewer URL,
+   and equivalent manual viewer command when the XTuner viewer is enabled.
+
+## Guardrails
+
+- Do not recreate `trace_utils.py`, `context_propagation.py`, span-name registries, or business attribute builders under `xtuner/v1/rl/trace`.
+- Do not import `RolloutState`, agent item classes, judgers, rollout workers, Ray actors, aiohttp clients, or trainer configs from the basic trace package.
+- Do not call OpenTelemetry SDK directly from business code; use the basic API only when trace instrumentation is explicitly requested.
+- Do not record prompts, responses, full configs, secrets, raw headers, stack traces, or large payloads as attributes.
+- Viewer stage grouping must come from span attributes such as `xtuner.stage`, `stage`, or `stage.name`; otherwise fall back to the raw span name.
+
+For concrete patterns, read [references/trace-patterns.md](references/trace-patterns.md) before editing trace code.
+
+## Verification
+
+Use focused checks:
+
+- `PYTHONPATH=. python -m compileall -q xtuner/v1/rl/trace recipe/trace`
+- `PYTHONPATH=. python -m unittest discover -s tests/rl -p 'test_trace*.py' -v` when the trace tests exist in the worktree.
+- `git diff --check`
