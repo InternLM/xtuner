@@ -29,6 +29,22 @@ Choose the viewer by the observation question:
 
 The recipe viewer reads `traces.jsonl` and adds XTuner rollout/sample aggregation. Jaeger remains the raw trace drill-down surface for the same traced run.
 
+## Black-Box Agent Trace Routing
+
+When the trace request involves an agent, first ask whether this is a black-box
+agent trace. In this mode, XTuner exposes an OpenAI-compatible inference endpoint
+to the agent through `SessionServer`; the agent runs its native loop and calls
+that endpoint for LLM generation. Tool execution, environment interaction, and
+observation handling happen inside the agent runtime and are not directly
+instrumented by XTuner.
+
+If the answer is yes, or the request mentions trajectory reconstruction,
+`SessionServer` request gaps, `record_synthetic_span(...)`,
+`reconstructed_agent_run`, `reconstructed_tool_call.N`, XTuner viewer plus
+Jaeger display of recovered tool calls, read
+[references/blackbox-agent-trace.md](references/blackbox-agent-trace.md) before
+planning or editing.
+
 ## Basic API
 
 These are the interfaces defined in `xtuner/v1/rl/trace/api.py` and re-exported
