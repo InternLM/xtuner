@@ -3,6 +3,7 @@ import json
 import math
 import os
 import time
+from concurrent.futures import Future
 from contextlib import contextmanager
 from pathlib import Path
 from typing import (
@@ -242,6 +243,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         if not worker_cfg.fsdp_cfg.torch_compile:
             worker_cfg.model_cfg.compile_cfg = False
         self._engine = self._build_engine(worker_cfg)
+        self._pending_hf_export: Future[Path] | None = None
 
         self._has_ref = False
         if worker_cfg.loss_cfg.use_kl_loss:
@@ -941,6 +943,28 @@ class TrainingWorker(SingleAcceleratorWorker):
     @ray_method
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         self._engine.save_hf(hf_dir, save_dtype)
+
+    @ray_method
+    def start_hf_export(
+        self,
+        hf_dir: str,
+        save_dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        self._pending_hf_export = self._engine.async_save_hf(hf_dir, save_dtype)
+
+    @ray_method
+    def is_hf_export_done(self) -> bool:
+        pending = cast(Future[Path], self._pending_hf_export)
+        return pending.done()
+
+    @ray_method
+    def wait_hf_export(self) -> str:
+        pending = cast(Future[Path], self._pending_hf_export)
+        try:
+            finalized_path = pending.result()
+        finally:
+            self._pending_hf_export = None
+        return str(finalized_path)
 
     @ray_method
     def get_data_replicate_size(self) -> int:

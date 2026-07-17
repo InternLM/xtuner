@@ -4,6 +4,7 @@ import os
 import random
 import re
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from shutil import rmtree
@@ -41,7 +42,7 @@ from xtuner.v1.rl.replay_buffer import (
 )
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.trace import TraceConfig, close_trace, configure_trace
+from xtuner.v1.rl.trace import TraceConfig, configure_trace
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
 from xtuner.v1.rl.utils import (
@@ -63,6 +64,7 @@ from xtuner.v1.utils.env_check import get_rollout_engine_version
 # TODO: Move DEVICE to `xtuner.utils.device`
 PG_READY_TIMEOUT = 30
 RL_TRAINER_RAY_GET_TIMEOUT = 3600
+HF_EXPORT_POLL_INTERVAL_S = 1.0
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
@@ -354,6 +356,7 @@ class BaseRLTrainerConfig(BaseModel):
     checkpoint_maxkeep: int | None = -1
     hf_interval: int | None = -1
     hf_max_keep: int | None = -1
+    enable_immediate_recovery: bool = False
     checkpoint_no_save_optimizer: bool = False
     checkpoint_no_save_replay_buffer: bool = False
     log_dir: Path | str | None = None
@@ -439,6 +442,9 @@ class RLColocateTrainerConfig(BaseRLTrainerConfig):
             Defaults to -1.
         hf_max_keep (int | None): Maximum number of Hugging Face checkpoints to
             keep. Defaults to -1.
+        enable_immediate_recovery (bool): Whether rollout worker recovery may
+            use fresh ready HF exports before the next weight update. Defaults
+            to False.
         checkpoint_no_save_optimizer (bool): Whether to skip optimizer states
             when saving checkpoints. Defaults to False.
         checkpoint_no_save_replay_buffer (bool): Whether to skip replay buffer
@@ -527,6 +533,9 @@ class RLDisaggregatedTrainerConfig(BaseRLTrainerConfig):
             Defaults to -1.
         hf_max_keep (int | None): Maximum number of Hugging Face checkpoints to
             keep. Defaults to -1.
+        enable_immediate_recovery (bool): Whether rollout worker recovery may
+            use fresh ready HF exports before the next weight update. Defaults
+            to False.
         checkpoint_no_save_optimizer (bool): Whether to skip optimizer states
             when saving checkpoints. Defaults to False.
         checkpoint_no_save_replay_buffer (bool): Whether to skip replay buffer
@@ -622,6 +631,14 @@ class BaseRLTrainer:
     def _init_save_config(self, cfg: BaseRLTrainerConfig) -> None:
         self._hf_max_keep = cfg.hf_max_keep
         self._hf_interval = cfg.hf_interval
+        self._enable_immediate_recovery = cfg.enable_immediate_recovery
+        self._hf_export_executor = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="rl-hf-export")
+            if self._enable_immediate_recovery
+            else None
+        )
+        self._pending_hf_export: Future[Path | None] | None = None
+        self._ready_recovery_hf_path: Path | None = None
 
         self._checkpoint_interval = cfg.checkpoint_interval
         self._checkpoint_maxkeep = cfg.checkpoint_maxkeep
@@ -857,6 +874,96 @@ class BaseRLTrainer:
         # save tokenizer
         if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
             self.tokenizer.save_pretrained(str(save_hf_path))
+
+    def _maybe_save_recovery_hf(self, cur_step: int) -> None:
+        if not self._enable_immediate_recovery:
+            return
+
+        reuse_regular_hf = (
+            self._hf_interval is not None
+            and self._hf_interval != -1
+            and (cur_step % self._hf_interval == 0 or cur_step == self._total_train_steps)
+        )
+        tokenizer_path = self._rollout_config.tokenizer_path or self._rollout_config.model_path
+        previous_ready_hf_path = self._ready_recovery_hf_path
+        ray.get(
+            self.rollout_controller.clear_ready_recovery_hf.remote(),
+            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+        )
+        self._ready_recovery_hf_path = None
+        if (
+            previous_ready_hf_path is not None
+            and str(previous_ready_hf_path) not in self._meta.latest_exp.hf_checkpoint_list
+        ):
+            rmtree(previous_ready_hf_path, ignore_errors=True)
+
+        save_hf_path = self.exp_dir / self._HF_DIR / f"hf-step-{cur_step}"
+        if reuse_regular_hf:
+            try:
+                ray.get(
+                    self.rollout_controller.set_ready_recovery_hf.remote(
+                        model_path=str(save_hf_path),
+                        tokenizer_path=str(tokenizer_path),
+                    ),
+                    timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+                )
+            except Exception:
+                self.logger.exception(f"Failed to publish recovery HF: path={save_hf_path}.")
+                return
+
+            self._ready_recovery_hf_path = save_hf_path
+            return
+
+        save_hf_path.mkdir(parents=True, exist_ok=True)
+        self.train_controller.start_hf_export(str(save_hf_path))
+        executor = cast(ThreadPoolExecutor, self._hf_export_executor)
+
+        def wait_and_publish_recovery_hf() -> Path | None:
+            try:
+                while not self.train_controller.is_hf_export_done():
+                    time.sleep(HF_EXPORT_POLL_INTERVAL_S)
+                finalized_hf_path = Path(self.train_controller.wait_hf_export())
+                ray.get(
+                    self.rollout_controller.set_ready_recovery_hf.remote(
+                        model_path=str(finalized_hf_path),
+                        tokenizer_path=str(tokenizer_path),
+                    ),
+                    timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+                )
+            except Exception:
+                self.logger.exception(f"Async recovery HF export failed: path={save_hf_path}.")
+                return None
+
+            self._ready_recovery_hf_path = finalized_hf_path
+            return finalized_hf_path
+
+        self._pending_hf_export = executor.submit(wait_and_publish_recovery_hf)
+
+    def _wait_or_disable_immediate_recovery(self) -> None:
+        pending = self._pending_hf_export
+        if pending is None:
+            return
+
+        disable_immediate_recovery = not pending.done()
+        if disable_immediate_recovery:
+            self._enable_immediate_recovery = False
+            self.logger.warning(
+                "Disable immediate recovery because the previous recovery HF "
+                "export did not finish before the next weight sync."
+            )
+
+        finalized_hf_path = pending.result()
+        self._pending_hf_export = None
+        if not disable_immediate_recovery:
+            return
+
+        ray.get(
+            self.rollout_controller.clear_ready_recovery_hf.remote(),
+            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+        )
+        self._ready_recovery_hf_path = None
+        if finalized_hf_path is not None:
+            rmtree(finalized_hf_path, ignore_errors=True)
 
     async def _run_initial_evaluate(self) -> None:
         try:
@@ -1639,7 +1746,8 @@ class RLColocateTrainer(BaseRLTrainer):
             self._fit()
         finally:
             self._exp_tracker.close()
-            close_trace()
+            if self._hf_export_executor is not None:
+                self._hf_export_executor.shutdown(wait=True)
 
     def _fit(self):
         self.logger.info("Start RL training")
@@ -1748,6 +1856,8 @@ class RLColocateTrainer(BaseRLTrainer):
 
     def _sync_weights_and_save(self, train_step: int, step_timer_dict: dict) -> bool:
         """保存后切回共卡 rollout 资源。"""
+        self._wait_or_disable_immediate_recovery()
+
         should_sync_weights = train_step % self._sync_weights_interval == 0
         will_evaluate = self._enable_evaluate and train_step % self._evaluate_step == 0
         needs_rollout_ready = train_step < self._total_train_steps or will_evaluate
@@ -1781,6 +1891,7 @@ class RLColocateTrainer(BaseRLTrainer):
                 )
                 self.train_controller.update_weights()
                 self.logger.info("Rollout workers update weights successfully in colocate mode")
+                self._maybe_save_recovery_hf(train_step)
                 self.train_controller.offload(target="model")
             else:
                 self.train_controller.offload(target="model")
@@ -1870,7 +1981,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             return asyncio_run(self._fit())
         finally:
             self._exp_tracker.close()
-            close_trace()
+            if self._hf_export_executor is not None:
+                self._hf_export_executor.shutdown(wait=True)
 
     async def _get_batch_or_raise_producer_failure(
         self,
@@ -2007,12 +2119,16 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
     async def _sync_weights_and_save(self, model_step: int, step_timer_dict: dict):
         # producer 已暂停；保持 save -> bind -> update 顺序。
+        self._wait_or_disable_immediate_recovery()
+
         with timer("save_ckpt", step_timer_dict):
             await self._maybe_save_checkpoint(model_step)
             self._maybe_save_hf(model_step)
 
-        # TODO: 非共卡需要额外加健康检查恢复worker的逻辑，共卡是在训练之前恢复，但是非共卡不需要在训练之前恢复,挂掉就恢复或者更新权重前恢复，需要评估一下哪种方式更合理。
         with timer("sync_weight", step_timer_dict):
+            # 非共卡在权重更新前恢复 inactive workers；如果没有 ready
+            # recovery HF，HealthManager 会用空权重启动并等待本次 update。
+            await self.rollout_controller.restart_inactive_workers.remote()  # type: ignore[attr-defined]
             bind_train_rollout(
                 train_controller=self.train_controller,
                 rollout_controller=self.rollout_controller,
@@ -2022,6 +2138,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 weight_update_port=self._rollout_config.weight_update_port,
             )
             self.update_weights()
+            self._maybe_save_recovery_hf(model_step)
 
     def update_weights(self):
         # rollout 恢复由 AgentLoopManager 控制。

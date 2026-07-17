@@ -101,6 +101,12 @@ class _WorkerHealthFailureTracker:
         return failed_ranks
 
 
+@dataclass(frozen=True)
+class _ReadyRecoveryHF:
+    model_path: str
+    tokenizer_path: str | None = None
+
+
 class RolloutHealthManager:
     """Own worker health state and recovery after controller startup.
 
@@ -127,10 +133,26 @@ class RolloutHealthManager:
         self._thread: threading.Thread | None = None
         self._lifecycle_operation_lock = threading.Lock()
         self._worker_health_failure_tracker = _WorkerHealthFailureTracker(threshold=self._check_failure_threshold)
+        self._ready_recovery_hf: _ReadyRecoveryHF | None = None
 
     # ------------------------------------------------------------------
     # Public lifecycle
     # ------------------------------------------------------------------
+    def set_ready_recovery_hf(
+        self,
+        *,
+        model_path: str,
+        tokenizer_path: str | None = None,
+    ) -> None:
+        self._ready_recovery_hf = _ReadyRecoveryHF(
+            model_path=model_path,
+            tokenizer_path=tokenizer_path,
+        )
+        logger.info(f"Ready rollout recovery HF updated: model_path={model_path}, tokenizer_path={tokenizer_path}.")
+
+    def clear_ready_recovery_hf(self) -> None:
+        self._ready_recovery_hf = None
+        logger.info("Ready rollout recovery HF cleared.")
 
     def start(self) -> None:
         health_thread_alive = self._thread is not None and self._thread.is_alive()
@@ -466,8 +488,7 @@ class RolloutHealthManager:
         self,
         group: WorkerGroup,
     ) -> bool:
-        """Shutdown, restart with empty-init, and health-check one complete
-        worker group."""
+        """Shutdown, restart, and health-check one complete worker group."""
         if not group.workers or len(group.workers) != len(group.ranks):
             logger.error(f"Cannot restart incomplete rollout worker group: ranks={group.ranks}.")
             return False
@@ -481,34 +502,38 @@ class RolloutHealthManager:
             restart_cleanup_needed = True
 
             self._checkpoint_not_stopping()
-            with self._skip_load_weights_during_restart(group):
-                self._checkpoint_not_stopping()
-                ray.get(
-                    [
-                        # reinit() reuses the server launch spec bound during
-                        # controller startup.
-                        worker.actor.reinit.remote()  # type: ignore[attr-defined]
-                        for worker in group.workers
-                    ],
-                    timeout=ROLLOUT_RAY_GET_TIMEOUT,
+            ready_recovery_hf = self._ready_recovery_hf
+            if ready_recovery_hf is None:
+                reinit_kwargs: dict[str, object] = {"skip_load_weights": True}
+            else:
+                reinit_kwargs = {
+                    "model_path": ready_recovery_hf.model_path,
+                    "tokenizer_path": ready_recovery_hf.tokenizer_path,
+                    "skip_load_weights": False,
+                }
+
+            ray.get(
+                [
+                    worker.actor.reinit.remote(**reinit_kwargs)  # type: ignore[attr-defined]
+                    for worker in group.workers
+                ],
+                timeout=ROLLOUT_RAY_GET_TIMEOUT,
+            )
+
+            self._checkpoint_not_stopping()
+            health_results = self._check_workers_health(group.workers)
+            unhealthy_ranks = [worker.rank for worker in group.workers if not health_results.get(worker.rank, False)]
+            if unhealthy_ranks:
+                logger.error(
+                    f"Restarted rollout worker group ranks={group.ranks} has unhealthy ranks={unhealthy_ranks}."
                 )
+                self._shutdown_worker_group(group, wait_server_down=False)
+                return False
 
+            if ready_recovery_hf is None:
                 self._checkpoint_not_stopping()
-                health_results = self._check_workers_health(group.workers)
-                unhealthy_ranks = [
-                    worker.rank for worker in group.workers if not health_results.get(worker.rank, False)
-                ]
-                if unhealthy_ranks:
-                    logger.error(
-                        f"Restarted rollout worker group ranks={group.ranks} has unhealthy ranks={unhealthy_ranks}."
-                    )
-                    self._shutdown_worker_group(group, wait_server_down=False)
-                    return False
-
-                self._checkpoint_not_stopping()
-                # Newly restarted workers should return to the same offloaded/sleep
-                # baseline as the other colocated rollout workers before the sync
-                # path wakes weights/KV back up.
+                # Weight-update recovery returns to the offloaded baseline
+                # before the sync path wakes weights and KV cache back up.
                 ray.get(
                     [worker.actor.offload.remote() for worker in group.workers],  # type: ignore[attr-defined]
                     timeout=ROLLOUT_RAY_GET_TIMEOUT,
@@ -525,31 +550,6 @@ class RolloutHealthManager:
             if restart_cleanup_needed:
                 self._shutdown_worker_group(group, wait_server_down=False)
             return False
-
-    @contextmanager
-    def _skip_load_weights_during_restart(self, group: WorkerGroup):
-        try:
-            ray.get(
-                [
-                    worker.actor.set_skip_load_weights.remote(True)  # type: ignore[attr-defined]
-                    for worker in group.workers
-                ],
-                timeout=ROLLOUT_RAY_GET_TIMEOUT,
-            )
-            yield
-        finally:
-            try:
-                ray.get(
-                    [
-                        worker.actor.restore_skip_load_weights.remote()  # type: ignore[attr-defined]
-                        for worker in group.workers
-                    ],
-                    timeout=ROLLOUT_RAY_GET_TIMEOUT,
-                )
-            except Exception:
-                logger.exception(
-                    f"Failed to restore rollout worker skip_load_weights after restart: group_ranks={group.ranks}."
-                )
 
     def _shutdown_worker_group(
         self,

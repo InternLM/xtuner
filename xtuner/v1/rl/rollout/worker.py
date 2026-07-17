@@ -536,7 +536,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                 Defaults to "GPU".
         """
         self.config = config
-        self._default_skip_load_weights = config.skip_load_weights
         self.rank = rank
         self.master_addr = master_addr  # ray master
         self.master_port = master_port
@@ -594,9 +593,25 @@ class RolloutWorker(SingleAcceleratorWorker):
         self._bind_server_launch_spec(server_launch_spec)
         return self._init_server()
 
-    def reinit(self) -> RolloutWorkerInitResult:
+    def reinit(
+        self,
+        *,
+        model_path: str | Path | None = None,
+        tokenizer_path: str | Path | None = None,
+        skip_load_weights: bool | None = None,
+    ) -> RolloutWorkerInitResult:
         """Reinitialize the rollout server using the previously bound launch
         spec."""
+        config_updates: dict[str, object] = {}
+        if model_path is not None:
+            config_updates["model_path"] = str(model_path)
+        if tokenizer_path is not None:
+            config_updates["tokenizer_path"] = str(tokenizer_path)
+        if skip_load_weights is not None:
+            config_updates["skip_load_weights"] = skip_load_weights
+
+        if config_updates:
+            self.config = self.config.model_copy(update=config_updates)
         return self._init_server()
 
     def _init_server(self) -> RolloutWorkerInitResult:
@@ -615,12 +630,6 @@ class RolloutWorker(SingleAcceleratorWorker):
             server_url=self.server_url,
             session_url=self.session_server_url,
         )
-
-    def set_skip_load_weights(self, skip_load_weights: bool) -> None:
-        self.config = self.config.model_copy(update={"skip_load_weights": skip_load_weights})
-
-    def restore_skip_load_weights(self) -> None:
-        self.config = self.config.model_copy(update={"skip_load_weights": self._default_skip_load_weights})
 
     def init_dist_port(self) -> tuple[int, str]:
         """Initialize distributed communication ports.

@@ -161,6 +161,20 @@ class RolloutController:
         """Restart inactive groups before a sync-step weight update."""
         await asyncio.to_thread(self.health_manager.restart_inactive_workers)
 
+    def set_ready_recovery_hf(
+        self,
+        *,
+        model_path: str,
+        tokenizer_path: str | None = None,
+    ) -> None:
+        self.health_manager.set_ready_recovery_hf(
+            model_path=model_path,
+            tokenizer_path=tokenizer_path,
+        )
+
+    def clear_ready_recovery_hf(self) -> None:
+        self.health_manager.clear_ready_recovery_hf()
+
     def continue_generation(self):
         self._broadcast_to_active_workers("continue_generation")
         self.health_manager.resume()
