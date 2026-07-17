@@ -178,6 +178,7 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     max_concurrent_samples: int | None = None
     mode: Literal["train", "eval"] = "train"
     requires_rollout_proxy: bool = True
+    process_advantage_builder: str | None = None
 
     def build_local(
         self, rollout_controller: RolloutController | None = None, judger: Judger | None = None, logger=None
@@ -190,6 +191,7 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
             logger=logger,
             max_concurrent_samples=self.max_concurrent_samples,
             mode=self.mode,
+            process_advantage_builder=self.process_advantage_builder,
         )
 
 
@@ -203,6 +205,7 @@ class AgentInSandboxLoop(AgentLoop):
         logger=None,
         max_concurrent_samples: int | None = None,
         mode: Literal["train", "eval"] = "train",
+        process_advantage_builder: str | None = None,
     ):
         if hf_checkpoint is None:
             raise ValueError("hf_checkpoint must be provided for AgentInSandboxLoop.")
@@ -210,6 +213,9 @@ class AgentInSandboxLoop(AgentLoop):
         self.max_concurrent_samples = max_concurrent_samples
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
         self.mode = mode
+        self.process_advantage_builder = (
+            _import_from_path(process_advantage_builder) if process_advantage_builder is not None else None
+        )
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> list[RolloutState]:
@@ -313,6 +319,16 @@ class AgentInSandboxLoop(AgentLoop):
             data = await trace_store.export_training_trace.remote(str(rollout_state.session_id), prompt_text)
             segment_state.input_ids = data["input_ids"]
             segment_state.labels = data["labels"]
+            segment_state.extra_fields["agent_trace_segments"] = data.get("segments", [])
+            if self.process_advantage_builder is not None:
+                segment_state.advantage_weight, process_adv_summary = self.process_advantage_builder(
+                    messages,
+                    data["labels"],
+                    data.get("segments"),
+                )
+                segment_state.extra_fields["process_adv"] = process_adv_summary
+            else:
+                segment_state.advantage_weight = None
             # Agentic training consumes input_ids/labels directly. response_ids is
             # filled here only so rollout throughput logging can print rollout_tgs.
             segment_state.response_ids = [
@@ -341,6 +357,7 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.routed_experts = None
         rollout_state.response_mask = None
         rollout_state.response_model_steps = None
+        rollout_state.advantage_weight = None
         rollout_state.extra_fields["agent_status"] = item.status.value
         selected_agent = _selected_agent(item)
         if selected_agent is not None:
