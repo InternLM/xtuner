@@ -43,6 +43,7 @@ class MHAConfig(BaseModel):
     sliding_window: Annotated[int | None, Parameter(group="attention")] = -1
     with_sink: Annotated[bool, Parameter(group="attention")] = False
     with_gate: Annotated[bool, Parameter(group="attention")] = False
+    head_gate: Annotated[bool, Parameter(group="attention")] = False
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):
@@ -128,6 +129,7 @@ class MultiHeadAttention(nn.Module):
         o_bias: bool = False,
         with_sink: bool = False,
         with_gate: bool = False,
+        head_gate: bool = False,
         attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention",
         rope_scaling_cfg: RopeScalingConfig | None = None,
         float8_cfg: Float8Config | None = None,
@@ -155,6 +157,8 @@ class MultiHeadAttention(nn.Module):
         self.float8_cfg = float8_cfg
         self.layer_idx = layer_idx
         self.with_gate = with_gate
+        self.head_gate = head_gate
+        assert not (with_gate and head_gate), "`with_gate` and `head_gate` are mutually exclusive."
 
         self.q_proj = build_linear(
             self.hidden_size,
@@ -182,6 +186,17 @@ class MultiHeadAttention(nn.Module):
             bias=self.o_bias,
             float8_cfg=self.float8_cfg,
         )
+
+        if self.head_gate:
+            # Head-wise output gate: one sigmoid scalar per attention head (broadcast over head_dim),
+            # produced by a dedicated projection. Distinct from `with_gate`, which fuses a
+            # per-(head, head_dim) gate into a doubled q_proj.
+            self.g_proj = build_linear(
+                self.hidden_size,
+                self.num_attention_heads,
+                bias=self.qkv_bias,
+                float8_cfg=self.float8_cfg,
+            )
 
         if self.qk_norm:
             self.q_norm = RMSNorm(self.head_dim, eps=self.rms_norm_eps, type=self.rms_norm_type)
@@ -430,6 +445,12 @@ class MultiHeadAttention(nn.Module):
         if self.with_gate:
             assert gate is not None
             raw_output = raw_output * torch.sigmoid(gate)
+        elif self.head_gate:
+            # Per-head sigmoid gate (one scalar per head), broadcast over head_dim.
+            gate_score = torch.sigmoid(self.g_proj(hidden_states))  # [b, seq, n_head]
+            raw_output = (
+                raw_output.view(*input_shape, self.num_attention_heads, self.head_dim) * gate_score.unsqueeze(-1)
+            ).reshape(*input_shape, -1)
 
         projected_output = self.o_proj(raw_output)
         attn_outputs: AttnOutputs = {
