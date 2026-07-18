@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import itertools
 from typing import cast
 
 import torch
@@ -6,6 +7,60 @@ from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
 from .utils import gather_for_sequence_parallel, pad_to_multiple_of, split_for_sequence_parallel
+
+
+_DSA_TOPK_CONTEXT_IDS = itertools.count()
+
+
+class DSATopKCacheState:
+    """Mutable DSA cross-layer top-k cache, scoped to one microbatch."""
+
+    indices: dict[int, torch.Tensor]
+    offloaded: dict[int, str]
+    released_sources: set[int]
+    pending_offloads: set[int]
+    pending_releases: set[int]
+    checkpoint_active: bool
+    context_id: int
+    mtp_iteration_reuse_sources: set[int]
+    mtp_iteration_recompute_remaining: dict[int, int]
+    mtp_iteration_source_compute_contexts: set[tuple[int, int]]
+    recompute_release_layers: dict[int, int]
+
+    def __init__(
+        self,
+        *,
+        indices: dict[int, torch.Tensor] | None = None,
+        offloaded: dict[int, str] | None = None,
+        released_sources: set[int] | None = None,
+        pending_offloads: set[int] | None = None,
+        pending_releases: set[int] | None = None,
+        checkpoint_active: bool = False,
+        context_id: int | None = None,
+        mtp_iteration_reuse_sources: set[int] | None = None,
+        mtp_iteration_recompute_remaining: dict[int, int] | None = None,
+        mtp_iteration_source_compute_contexts: set[tuple[int, int]] | None = None,
+        recompute_release_layers: dict[int, int] | None = None,
+    ) -> None:
+        # topk_indices format: {source_layer_idx: [seq_len, kv_group, topk]}.
+        # Invalid/padded sparse slots are represented by -1.
+        self.indices = {} if indices is None else indices
+        self.offloaded = {} if offloaded is None else offloaded
+        self.released_sources = set() if released_sources is None else released_sources
+        self.pending_offloads = set() if pending_offloads is None else pending_offloads
+        self.pending_releases = set() if pending_releases is None else pending_releases
+        self.checkpoint_active = checkpoint_active
+        self.context_id = next(_DSA_TOPK_CONTEXT_IDS) if context_id is None else context_id
+        self.mtp_iteration_reuse_sources = (
+            set() if mtp_iteration_reuse_sources is None else mtp_iteration_reuse_sources
+        )
+        self.mtp_iteration_recompute_remaining = (
+            {} if mtp_iteration_recompute_remaining is None else mtp_iteration_recompute_remaining
+        )
+        self.mtp_iteration_source_compute_contexts = (
+            set() if mtp_iteration_source_compute_contexts is None else mtp_iteration_source_compute_contexts
+        )
+        self.recompute_release_layers = {} if recompute_release_layers is None else recompute_release_layers
 
 
 # Avoid using dataclass decorator here to get rid of extra ops called in pytorch 2.8 and above
@@ -50,6 +105,7 @@ class SequenceContext:
     # moe routed_experts
     rollout_routed_experts: torch.Tensor | None
     offload_rollout_routed_experts: bool
+    dsa_topk_cache: DSATopKCacheState
 
     # Private backing attributes for SP shard reconstruction
     _raw_input_ids: torch.LongTensor | None
@@ -79,6 +135,7 @@ class SequenceContext:
         num_img_tokens: list[list[int]] | None = None,
         rollout_routed_experts: torch.Tensor | None = None,
         offload_rollout_routed_experts: bool = False,
+        dsa_topk_cache: DSATopKCacheState | None = None,
         # SP shard metadata: private, accessed via properties below
         raw_input_ids: torch.LongTensor | None = None,
         raw_inputs_embeds: torch.FloatTensor | None = None,
@@ -113,6 +170,7 @@ class SequenceContext:
         self.num_img_tokens = num_img_tokens
         self.rollout_routed_experts = rollout_routed_experts
         self.offload_rollout_routed_experts = offload_rollout_routed_experts
+        self.dsa_topk_cache = DSATopKCacheState() if dsa_topk_cache is None else dsa_topk_cache
         self._raw_input_ids = raw_input_ids
         self._raw_inputs_embeds = raw_inputs_embeds
         self._shard_start = shard_start
@@ -141,6 +199,23 @@ class SequenceContext:
     @property
     def sp_rank(self):
         return self._sp_rank
+
+    def packed_causal_query_ranges(
+        self,
+        query_len: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return global ``[start, end)`` KV ranges for local packed
+        queries."""
+        cu_seq_lens = self.cu_seq_lens_q.to(device)
+        query_positions = torch.arange(query_len, device=device) + self._shard_start
+        sequence_indices = torch.searchsorted(cu_seq_lens, query_positions, right=True) - 1
+
+        # Keep range construction tensorized because DSA indexers may run under
+        # torch.compile and cannot read CUDA sequence boundaries as Python scalars.
+        starts = cu_seq_lens[sequence_indices]
+        ends = query_positions + 1
+        return starts.to(torch.int32), ends.to(torch.int32)
 
     @classmethod
     def from_input_ids(
@@ -319,6 +394,52 @@ class SequenceContext:
             offload_rollout_routed_experts=offload_rollout_routed_experts,
         )
 
+    def split_dsa_topk_indices_to(
+        self,
+        sequence_context_list: list["SequenceContext"],
+        *,
+        recompute_release_layer_idx: int | None = None,
+    ) -> None:
+        if not self.dsa_topk_cache.indices:
+            return
+
+        lengths = []
+        for seq_ctx in sequence_context_list:
+            if seq_ctx.input_ids is not None:
+                lengths.append(seq_ctx.input_ids.shape[1])
+            elif seq_ctx.inputs_embeds is not None:
+                lengths.append(seq_ctx.inputs_embeds.shape[1])
+            else:
+                assert seq_ctx.position_ids is not None
+                lengths.append(seq_ctx.position_ids.shape[-1])
+
+        # Dense prefix layers run on a concatenated SequenceContext. When later
+        # sparse layers switch back to per-microbatch contexts, shared-indexer
+        # DSA layers need the full-indexer cache split back by microbatch.
+        for layer_idx, topk_indices in self.dsa_topk_cache.indices.items():
+            assert sum(lengths) == topk_indices.shape[0]
+            start = 0
+            for seq_ctx, length, single_topk_indices in zip(
+                sequence_context_list, lengths, topk_indices.split(lengths, dim=0)
+            ):
+                # Top-k values were computed in the concatenated dense-prefix
+                # token coordinate system. Sparse micro-batches build local KV
+                # tensors, so shared indices must be rebased to local offsets.
+                if start:
+                    offset = single_topk_indices.new_tensor(start)
+                    single_topk_indices = torch.where(
+                        single_topk_indices == -1,
+                        single_topk_indices,
+                        single_topk_indices - offset,
+                    )
+                seq_ctx.dsa_topk_cache.indices[layer_idx] = single_topk_indices
+                if recompute_release_layer_idx is not None:
+                    # The source layer ran on the concatenated context, so its
+                    # per-microbatch cache must be released at the first sparse
+                    # consumer encountered during backward replay.
+                    seq_ctx.dsa_topk_cache.recompute_release_layers[layer_idx] = recompute_release_layer_idx
+                start += length
+
     @property
     def mask(self) -> torch.BoolTensor:
         mask: torch.BoolTensor
@@ -484,6 +605,7 @@ class SequenceContext:
             offload_rollout_routed_experts=overrides.get(
                 "offload_rollout_routed_experts", self.offload_rollout_routed_experts
             ),
+            dsa_topk_cache=overrides.get("dsa_topk_cache", self.dsa_topk_cache),
             raw_input_ids=overrides.get("raw_input_ids", self._raw_input_ids),
             raw_inputs_embeds=overrides.get("raw_inputs_embeds", self._raw_inputs_embeds),
             shard_start=overrides.get("shard_start", self._shard_start),
@@ -575,4 +697,5 @@ class SequenceContext:
             "num_img_tokens": self.num_img_tokens,
             "rollout_routed_experts": self.rollout_routed_experts,
             "offload_rollout_routed_experts": self.offload_rollout_routed_experts,
+            "dsa_topk_cache": self.dsa_topk_cache,
         }
