@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable, Protocol, cast
 
 import torch
@@ -265,6 +266,8 @@ class CrossLayerTopKSharingRuntime:
         source_layer_idx = layer.source_layer_idx
         if self._is_checkpoint_original_forward(layer):
             if layer.dsa_topk_last_use.get(source_layer_idx) == layer.layer_idx:
+                if not self._is_last_mtp_forward_use(seq_ctx, source_layer_idx):
+                    return
                 # Reentrant checkpoint original forward runs under no_grad, so
                 # SparseMLA has no autograd ctx. Keep/offload source top-k for
                 # backward recompute, then release after source replay consumes it.
@@ -297,7 +300,7 @@ class CrossLayerTopKSharingRuntime:
             cache.released_sources.add(source_layer_idx)
             cache.micro_batch_recompute_release_overrides.pop(source_layer_idx, None)
 
-    def prepare_mtp_iteration_topk_sharing(
+    def register_mtp_iteration_topk_sharing(
         self,
         *,
         seq_ctx: SequenceContext,
@@ -308,8 +311,8 @@ class CrossLayerTopKSharingRuntime:
             return
 
         cache = seq_ctx.dsa_topk_cache
-        cache.mtp_iteration_reuse_sources.add(source_layer_idx)
-        cache.mtp_iteration_recompute_remaining[source_layer_idx] = num_iterations
+        cache.mtp_forward_uses_remaining[source_layer_idx] = num_iterations
+        cache.mtp_replays_remaining[source_layer_idx] = num_iterations
 
     def before_layer_forward(self, *, layer: DSATopKSharingLayerProtocol, seq_ctx: SequenceContext) -> None:
         if not isinstance(self._residency(), ActivationOffloadedTopKResidency):
@@ -356,25 +359,39 @@ class CrossLayerTopKSharingRuntime:
         source_layer_idx: int,
         residency: GpuTopKResidency,
     ) -> bool:
-        return source_layer_idx in seq_ctx.dsa_topk_cache.mtp_iteration_reuse_sources and residency.has_cache(
+        return source_layer_idx in seq_ctx.dsa_topk_cache.mtp_replays_remaining and residency.has_cache(
             seq_ctx, source_layer_idx
         )
+
+    def _is_last_mtp_forward_use(self, seq_ctx: SequenceContext, source_layer_idx: int) -> bool:
+        cache = seq_ctx.dsa_topk_cache
+        remaining = cache.mtp_forward_uses_remaining.get(source_layer_idx)
+        if remaining is None:
+            return True
+
+        remaining -= 1
+        if remaining == 0:
+            cache.mtp_forward_uses_remaining.pop(source_layer_idx)
+            return True
+
+        cache.mtp_forward_uses_remaining[source_layer_idx] = remaining
+        return False
 
     def _should_release_after_mtp_iteration_recompute(
         self,
         seq_ctx: SequenceContext,
         source_layer_idx: int,
     ) -> bool:
-        remaining = seq_ctx.dsa_topk_cache.mtp_iteration_recompute_remaining.get(source_layer_idx)
+        remaining = seq_ctx.dsa_topk_cache.mtp_replays_remaining.get(source_layer_idx)
         if remaining is None:
             return True
 
         remaining -= 1
-        if remaining <= 0:
-            seq_ctx.dsa_topk_cache.mtp_iteration_recompute_remaining.pop(source_layer_idx, None)
+        if remaining == 0:
+            seq_ctx.dsa_topk_cache.mtp_replays_remaining.pop(source_layer_idx)
             return True
 
-        seq_ctx.dsa_topk_cache.mtp_iteration_recompute_remaining[source_layer_idx] = remaining
+        seq_ctx.dsa_topk_cache.mtp_replays_remaining[source_layer_idx] = remaining
         return False
 
     def _assert_source_present(
@@ -400,20 +417,6 @@ def get_dsa_topk_sharing_runtime() -> CrossLayerTopKSharingRuntime:
     return _DSA_TOPK_SHARING_RUNTIME
 
 
-@torch.compiler.disable
-def prepare_mtp_iteration_topk_sharing(
-    *,
-    seq_ctx: SequenceContext,
-    source_layer_idx: int,
-    num_iterations: int,
-) -> None:
-    get_dsa_topk_sharing_runtime().prepare_mtp_iteration_topk_sharing(
-        seq_ctx=seq_ctx,
-        source_layer_idx=source_layer_idx,
-        num_iterations=num_iterations,
-    )
-
-
 def configure_dsa_topk_decoder_lifecycle(
     *,
     decoder_layer: torch.nn.Module,
@@ -425,6 +428,28 @@ def configure_dsa_topk_decoder_lifecycle(
     attention.dsa_topk_last_use = release_plan.forward_last_use
     attention.dsa_topk_recompute_release = release_plan.recompute_release
     register_dsa_topk_decoder_lifecycle_hooks(decoder_layer)
+
+
+def configure_dsa_mtp_iteration_lifecycle(
+    *,
+    mtp_block: torch.nn.Module,
+    attention: DSATopKSharingLayerProtocol,
+    num_iterations: int,
+) -> None:
+    if num_iterations <= 1:
+        return
+
+    # The outer MTP block runs once per model forward, while its checkpointed
+    # physical layer replays once per logical depth during backward. Register
+    # the shared cache ownership before either sequence starts.
+    mtp_block.register_forward_pre_hook(
+        partial(
+            _dsa_mtp_iteration_lifecycle_pre_hook,
+            source_layer_idx=attention.source_layer_idx,
+            num_iterations=num_iterations,
+        ),
+        with_kwargs=True,
+    )
 
 
 @torch.compiler.disable
@@ -476,6 +501,28 @@ def _dsa_topk_decoder_lifecycle_post_hook(
     if seq_ctx is None:
         return
     flush_dsa_topk_decoder_pending(seq_ctx)
+
+
+@torch.compiler.disable
+def _dsa_mtp_iteration_lifecycle_pre_hook(
+    _module: torch.nn.Module,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    source_layer_idx: int,
+    num_iterations: int,
+) -> None:
+    seq_ctx = _get_seq_ctx_from_forward(args, kwargs)
+    if seq_ctx is None:
+        return
+
+    runtime = get_dsa_topk_sharing_runtime()
+    for ctx in seq_ctx if isinstance(seq_ctx, list) else [seq_ctx]:
+        runtime.register_mtp_iteration_topk_sharing(
+            seq_ctx=ctx,
+            source_layer_idx=source_layer_idx,
+            num_iterations=num_iterations,
+        )
 
 
 def register_dsa_topk_decoder_lifecycle_hooks(decoder_layer: torch.nn.Module) -> None:

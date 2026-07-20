@@ -15,7 +15,6 @@ from xtuner.v1.module.attention import DSAMLAConfig, dsa_mla
 from xtuner.v1.module.attention.dsa_topk_sharing import (
     before_dsa_topk_decoder_forward,
     get_dsa_topk_sharing_runtime,
-    prepare_mtp_iteration_topk_sharing,
     register_dsa_topk_decoder_lifecycle_hooks,
 )
 from xtuner.v1.ops.sparse_mla import dsa_topk_indices, sparse_mla, torch_sparse_mla
@@ -272,9 +271,7 @@ class TestDSASequenceParallel(DeterministicDDPTestCase):
                 actual.backward(output_grad[shard_start:shard_end])
                 dist.all_reduce(global_kv.grad, group=sp_mesh.get_group())
 
-                torch.testing.assert_close(
-                    actual, expected[shard_start:shard_end], atol=BF16_ATOL, rtol=BF16_RTOL
-                )
+                torch.testing.assert_close(actual, expected[shard_start:shard_end], atol=BF16_ATOL, rtol=BF16_RTOL)
                 torch.testing.assert_close(
                     local_q.grad,
                     full_q.grad[shard_start:shard_end],
@@ -859,15 +856,18 @@ def test_dsa_topk_mtp_iteration_recompute_releases_after_last_logical_depth():
         compute_calls += 1
         return source_topk
 
-    runtime.prepare_mtp_iteration_topk_sharing(seq_ctx=seq_ctx, source_layer_idx=3, num_iterations=3)
+    runtime.register_mtp_iteration_topk_sharing(seq_ctx=seq_ctx, source_layer_idx=3, num_iterations=3)
 
     with torch.no_grad():
         for _ in range(3):
-            assert runtime.get_or_compute(
-                layer=FakeFullLayer(),
-                seq_ctx=seq_ctx,
-                compute_source_topk=compute_source_topk,
-            ) is source_topk
+            assert (
+                runtime.get_or_compute(
+                    layer=FakeFullLayer(),
+                    seq_ctx=seq_ctx,
+                    compute_source_topk=compute_source_topk,
+                )
+                is source_topk
+            )
             runtime.after_sparse_mla_use(layer=FakeFullLayer(), seq_ctx=seq_ctx)
 
     assert compute_calls == 1
@@ -875,20 +875,26 @@ def test_dsa_topk_mtp_iteration_recompute_releases_after_last_logical_depth():
     assert seq_ctx.dsa_topk_cache.indices[3] is source_topk
 
     for _ in range(2):
-        assert runtime.get_or_compute(
-            layer=FakeFullLayer(),
-            seq_ctx=seq_ctx,
-            compute_source_topk=compute_source_topk,
-        ) is source_topk
+        assert (
+            runtime.get_or_compute(
+                layer=FakeFullLayer(),
+                seq_ctx=seq_ctx,
+                compute_source_topk=compute_source_topk,
+            )
+            is source_topk
+        )
         runtime.after_sparse_mla_use(layer=FakeFullLayer(), seq_ctx=seq_ctx)
         assert seq_ctx.dsa_topk_cache.indices[3] is source_topk
         assert seq_ctx.dsa_topk_cache.released_sources == set()
 
-    assert runtime.get_or_compute(
-        layer=FakeFullLayer(),
-        seq_ctx=seq_ctx,
-        compute_source_topk=compute_source_topk,
-    ) is source_topk
+    assert (
+        runtime.get_or_compute(
+            layer=FakeFullLayer(),
+            seq_ctx=seq_ctx,
+            compute_source_topk=compute_source_topk,
+        )
+        is source_topk
+    )
     runtime.after_sparse_mla_use(layer=FakeFullLayer(), seq_ctx=seq_ctx)
 
     assert compute_calls == 1
@@ -913,7 +919,11 @@ def test_dsa_topk_mtp_iteration_checkpoint_reuses_forward_topk():
         checkpoint_impl=CheckpointImpl.REENTRANT,
     )
     seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
-    prepare_mtp_iteration_topk_sharing(seq_ctx=seq_ctx, source_layer_idx=0, num_iterations=2)
+    get_dsa_topk_sharing_runtime().register_mtp_iteration_topk_sharing(
+        seq_ctx=seq_ctx,
+        source_layer_idx=0,
+        num_iterations=2,
+    )
     hidden_states = torch.randn(1, 4, 4, requires_grad=True)
     position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
 
@@ -954,27 +964,33 @@ def test_dsa_topk_mtp_iteration_sharing_with_topk_offload(monkeypatch):
         compute_calls += 1
         return source_topk
 
-    runtime.prepare_mtp_iteration_topk_sharing(seq_ctx=seq_ctx, source_layer_idx=3, num_iterations=3)
+    runtime.register_mtp_iteration_topk_sharing(seq_ctx=seq_ctx, source_layer_idx=3, num_iterations=3)
     layer = FakeFullLayer()
 
     # Reentrant checkpoint original forward runs under no_grad. With top-k
     # offload enabled, later MTP depths should read the first depth's top-k from
-    # the offloaded residency instead of recomputing the DSA indexer.
+    # GPU residency instead of recomputing or transferring it between depths.
     with torch.no_grad():
-        for _ in range(3):
+        for iteration in range(3):
+            runtime.before_layer_forward(layer=layer, seq_ctx=seq_ctx)
             runtime.get_or_compute(layer=layer, seq_ctx=seq_ctx, compute_source_topk=compute_source_topk)
             runtime.after_sparse_mla_use(layer=layer, seq_ctx=seq_ctx)
+            if iteration < 2:
+                assert set(seq_ctx.dsa_topk_cache.indices) == {3}
+                assert seq_ctx.dsa_topk_cache.offloaded == {}
 
     assert compute_calls == 1
     assert seq_ctx.dsa_topk_cache.indices == {}
     assert set(seq_ctx.dsa_topk_cache.offloaded) == {3}
 
     for _ in range(2):
+        runtime.before_layer_forward(layer=layer, seq_ctx=seq_ctx)
         runtime.get_or_compute(layer=layer, seq_ctx=seq_ctx, compute_source_topk=compute_source_topk)
         runtime.after_sparse_mla_use(layer=layer, seq_ctx=seq_ctx)
         assert set(seq_ctx.dsa_topk_cache.indices) == {3}
         assert seq_ctx.dsa_topk_cache.released_sources == set()
 
+    runtime.before_layer_forward(layer=layer, seq_ctx=seq_ctx)
     runtime.get_or_compute(layer=layer, seq_ctx=seq_ctx, compute_source_topk=compute_source_topk)
     runtime.after_sparse_mla_use(layer=layer, seq_ctx=seq_ctx)
 
@@ -982,6 +998,8 @@ def test_dsa_topk_mtp_iteration_sharing_with_topk_offload(monkeypatch):
     assert seq_ctx.dsa_topk_cache.indices == {}
     assert seq_ctx.dsa_topk_cache.offloaded == {}
     assert seq_ctx.dsa_topk_cache.released_sources == {3}
+    assert seq_ctx.dsa_topk_cache.mtp_forward_uses_remaining == {}
+    assert seq_ctx.dsa_topk_cache.mtp_replays_remaining == {}
     torch.cuda.synchronize()
 
 

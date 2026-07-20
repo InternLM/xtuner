@@ -100,7 +100,6 @@ def _tiny_glm52_sp_mtp_config(dispatcher: str | None, ep_size: int) -> Glm52MoEC
     cfg.mtp_config = MTPConfig(
         num_layers=2,
         share_weights=True,
-        index_share_for_mtp_iteration=True,
     )
     cfg.lm_loss_cfg = CELossConfig(mode="eager")
     return cfg

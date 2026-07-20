@@ -19,6 +19,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import Glm52MoEConfig, get_model_config, get_model_config_from_hf
 from xtuner.v1.module.attention import DSAMLAConfig, MLAConfig
+from xtuner.v1.module.attention.dsa_topk_sharing import configure_dsa_mtp_iteration_lifecycle
 from xtuner.v1.module.mtp import MTPBlock, MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 from xtuner.v1.utils.compile import is_compiled_function
@@ -159,9 +160,9 @@ def test_glm52_config_from_hf_preserves_native_v1_fields():
     assert isinstance(config.mtp_config, MTPConfig)
     assert config.mtp_config.num_layers == hf_config.num_nextn_predict_layers
     assert config.mtp_config.share_weights
-    assert config.mtp_config.index_share_for_mtp_iteration
     assert config.num_nextn_predict_layers == hf_config.num_nextn_predict_layers
     assert config.model_dump()["num_key_value_heads"] == hf_config.num_key_value_heads
+    assert config.hf_config.indexer_types == hf_config.indexer_types
 
 
 def test_glm52_config_from_hf_preserves_cropped_30b_mtp(tmp_path):
@@ -178,7 +179,6 @@ def test_glm52_config_from_hf_preserves_cropped_30b_mtp(tmp_path):
     assert isinstance(config.mtp_config, MTPConfig)
     assert config.mtp_config.num_layers == 1
     assert config.mtp_config.share_weights
-    assert config.mtp_config.index_share_for_mtp_iteration
     assert config.num_nextn_predict_layers == 1
     assert config.attention.indexer_types == hf_config.indexer_types[:5] + ["full"]
     assert config.layers_type == [
@@ -365,6 +365,54 @@ def test_glm52_mtp_layer_extends_dsa_topk_release_plan():
     assert hasattr(mtp_attn, "indexer")
 
 
+@pytest.mark.parametrize("indexer_types", [None, ["full", "full", "full"]])
+def test_glm52_mtp_physical_layer_is_full_independent_of_main_indexer_schedule(indexer_types):
+    config = _tiny_glm52_config()
+    config.attention.indexer_types = indexer_types
+    config.attention.index_skip_topk_offset = 3
+    config.attention.index_topk_freq = 4
+    config.mtp_config = MTPConfig(
+        num_layers=3,
+        share_weights=True,
+    )
+
+    model = config.build()
+
+    mtp_attn = model.mtp_block.layers[0].decoder_layer.self_attn  # type: ignore[union-attr]
+    assert config.attention.indexer_types == ["full", "full", "full", "full"]
+    assert mtp_attn.layer_idx == 3
+    assert mtp_attn.source_layer_idx == 3
+    assert hasattr(mtp_attn, "indexer")
+    assert mtp_attn.dsa_topk_last_use[3] == 3
+    assert mtp_attn.dsa_topk_recompute_release[3] == 3
+
+
+def test_glm52_rejects_shared_physical_mtp_indexer():
+    config = _tiny_glm52_config()
+    config.attention.indexer_types = ["full", "full", "full", "shared"]
+    config.mtp_config = MTPConfig(num_layers=1, share_weights=True)
+
+    with pytest.raises(ValueError, match="physical MTP indexer_types"):
+        config.build()
+
+
+def test_glm52_multiple_physical_mtp_layers_share_first_mtp_indexer():
+    config = _tiny_glm52_config()
+    config.attention.indexer_types = ["full", "full", "full"]
+    config.mtp_config = MTPConfig(num_layers=3)
+
+    model = config.build()
+
+    mtp_attentions = [layer.decoder_layer.self_attn for layer in model.mtp_block.layers]  # type: ignore[union-attr]
+    assert config.attention.indexer_types == ["full", "full", "full", "full", "shared", "shared"]
+    assert [attention.source_layer_idx for attention in mtp_attentions] == [3, 3, 3]
+    assert hasattr(mtp_attentions[0], "indexer")
+    assert not hasattr(mtp_attentions[1], "indexer")
+    assert not hasattr(mtp_attentions[2], "indexer")
+    assert mtp_attentions[0].dsa_topk_last_use[3] == 5
+    assert mtp_attentions[0].dsa_topk_recompute_release[3] == 3
+
+
 def test_glm52_mtp_iteration_shares_first_depth_topk():
     class TinyDsaMTPLayer(torch.nn.Module):
         def __init__(self):
@@ -393,10 +441,15 @@ def test_glm52_mtp_iteration_shares_first_depth_topk():
 
     hidden_size = 4
     mtp_block = MTPBlock(
-        mtp_config=MTPConfig(num_layers=3, share_weights=True, index_share_for_mtp_iteration=True),
+        mtp_config=MTPConfig(num_layers=3, share_weights=True),
         mtp_layers=[TinyDsaMTPLayer()],
     )
     assert len(mtp_block.layers) == 1
+    configure_dsa_mtp_iteration_lifecycle(
+        mtp_block=mtp_block,
+        attention=mtp_block.layers[0].decoder_layer.self_attn,
+        num_iterations=3,
+    )
     indexer_calls = 0
 
     def count_indexer_call(_module, _args, _output):
@@ -420,7 +473,6 @@ def test_glm52_mtp_iteration_shares_first_depth_topk():
     assert len(outputs) == 3
     assert indexer_calls == 1
     assert set(seq_ctx.dsa_topk_cache.indices) == {3}
-    assert seq_ctx.dsa_topk_cache.mtp_iteration_reuse_sources == {3}
 
 
 def test_tiny_glm52_hf_checkpoint_load_reports_loaded_missing_and_ignored_keys():
@@ -725,7 +777,6 @@ class TestGlm52MoE(DeterministicDDPTestCase):
         cfg.mtp_config = MTPConfig(
             num_layers=2,
             share_weights=True,
-            index_share_for_mtp_iteration=True,
         )
         cfg.lm_loss_cfg = CELossConfig(mode="eager")
         cfg.dispatcher = None
@@ -1025,12 +1076,8 @@ class TestGlm52MoE(DeterministicDDPTestCase):
             ):
                 for step in range(2):
                     input_ids = ((torch.arange(257, device="cuda") + step) % 30 + 2).unsqueeze(0)
-                    seq_ctx_list = [
-                        SequenceContext.from_input_ids(input_ids=(input_ids[:, :-1],)) for _ in range(2)
-                    ]
-                    data_batch = [
-                        {"seq_ctx": seq_ctx, "shifted_labels": input_ids[:, 1:]} for seq_ctx in seq_ctx_list
-                    ]
+                    seq_ctx_list = [SequenceContext.from_input_ids(input_ids=(input_ids[:, :-1],)) for _ in range(2)]
+                    data_batch = [{"seq_ctx": seq_ctx, "shifted_labels": input_ids[:, 1:]} for seq_ctx in seq_ctx_list]
                     loss_ctx_list = model.build_loss_ctx_batch(data_batch, sp_mesh=None)
                     self.assertTrue(all(loss_ctx["mtp"] is not None for loss_ctx in loss_ctx_list))
 

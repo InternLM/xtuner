@@ -1,15 +1,11 @@
 """Multi-Token Prediction (MTP) Block implementation."""
 
-from typing import Callable, cast
+from typing import Callable
 
 import torch
 import torch.nn as nn
 
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.module.attention.dsa_topk_sharing import (
-    DSATopKSharingLayerProtocol,
-    prepare_mtp_iteration_topk_sharing,
-)
 
 from .config import MTPConfig
 from .mtp_layer import MTPLayer
@@ -74,12 +70,7 @@ class MTPBlock(nn.Module):
         >>> # outputs_per_mb[mb_idx][depth_idx] -> (hidden, router_logits, router_weights)
     """
 
-    def __init__(
-        self,
-        *,
-        mtp_config: MTPConfig,
-        mtp_layers: list[MTPLayer],
-    ):
+    def __init__(self, *, mtp_config: MTPConfig, mtp_layers: list[MTPLayer]):
         super().__init__()
         if not mtp_layers:
             raise ValueError("mtp_layers cannot be empty")
@@ -182,7 +173,6 @@ class MTPBlock(nn.Module):
         current_seq_ctx = seq_ctx
 
         num_steps = self.mtp_config.num_layers
-        self._prepare_dsa_topk_sharing_for_mtp_iterations(seq_ctx, num_steps)
         for step in range(num_steps):
             layer = self.layers[0] if self.mtp_config.share_weights else self.layers[step]
             # Roll each packed sequence independently so we get the (i+k)-th token while
@@ -219,8 +209,6 @@ class MTPBlock(nn.Module):
         current_seq_ctx_list = list(seq_ctx_list)
 
         num_steps = self.mtp_config.num_layers
-        for seq_ctx in seq_ctx_list:
-            self._prepare_dsa_topk_sharing_for_mtp_iterations(seq_ctx, num_steps)
         for step in range(num_steps):
             layer = self.layers[0] if self.mtp_config.share_weights else self.layers[step]
 
@@ -256,19 +244,3 @@ class MTPBlock(nn.Module):
         if seq_ctx.inputs_embeds is None:
             return embed_tokens_fn(seq_ctx.input_ids)  # type: ignore[arg-type]
         return seq_ctx.inputs_embeds
-
-    def _prepare_dsa_topk_sharing_for_mtp_iterations(self, seq_ctx: SequenceContext, num_steps: int) -> None:
-        if not self.mtp_config.index_share_for_mtp_iteration or not self.mtp_config.share_weights or num_steps <= 1:
-            return
-
-        self_attn = getattr(self.layers[0].decoder_layer, "self_attn", None)
-        if not hasattr(self_attn, "source_layer_idx"):
-            return
-
-        # GLM-5.2's MTP IndexShare is across logical prediction depths, not a
-        # request to make the physical MTP layer reuse a main-stack indexer.
-        prepare_mtp_iteration_topk_sharing(
-            seq_ctx=seq_ctx,
-            source_layer_idx=cast(DSATopKSharingLayerProtocol, self_attn).source_layer_idx,
-            num_iterations=num_steps,
-        )

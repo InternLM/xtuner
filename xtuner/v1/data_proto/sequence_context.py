@@ -22,8 +22,10 @@ class DSATopKCacheState:
     pending_releases: set[int]
     checkpoint_active: bool
     context_id: int
-    mtp_iteration_reuse_sources: set[int]
-    mtp_iteration_recompute_remaining: dict[int, int]
+    # Shared-weight MTP invokes one physical DSA layer at several logical
+    # depths. These counters delay transfer/release until the final use/replay.
+    mtp_forward_uses_remaining: dict[int, int]
+    mtp_replays_remaining: dict[int, int]
     # The model-wide release plan lives on each attention layer. A cache split
     # out of the concatenated dense-prefix context needs a context-local release
     # point because its micro-batch context never replays the dense source layer.
@@ -39,8 +41,8 @@ class DSATopKCacheState:
         pending_releases: set[int] | None = None,
         checkpoint_active: bool = False,
         context_id: int | None = None,
-        mtp_iteration_reuse_sources: set[int] | None = None,
-        mtp_iteration_recompute_remaining: dict[int, int] | None = None,
+        mtp_forward_uses_remaining: dict[int, int] | None = None,
+        mtp_replays_remaining: dict[int, int] | None = None,
         micro_batch_recompute_release_overrides: dict[int, int] | None = None,
     ) -> None:
         # topk_indices format: {source_layer_idx: [seq_len, kv_group, topk]}.
@@ -52,12 +54,8 @@ class DSATopKCacheState:
         self.pending_releases = set() if pending_releases is None else pending_releases
         self.checkpoint_active = checkpoint_active
         self.context_id = next(_DSA_TOPK_CONTEXT_IDS) if context_id is None else context_id
-        self.mtp_iteration_reuse_sources = (
-            set() if mtp_iteration_reuse_sources is None else mtp_iteration_reuse_sources
-        )
-        self.mtp_iteration_recompute_remaining = (
-            {} if mtp_iteration_recompute_remaining is None else mtp_iteration_recompute_remaining
-        )
+        self.mtp_forward_uses_remaining = {} if mtp_forward_uses_remaining is None else mtp_forward_uses_remaining
+        self.mtp_replays_remaining = {} if mtp_replays_remaining is None else mtp_replays_remaining
         self.micro_batch_recompute_release_overrides = (
             {} if micro_batch_recompute_release_overrides is None else micro_batch_recompute_release_overrides
         )

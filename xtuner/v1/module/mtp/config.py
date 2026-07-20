@@ -23,10 +23,6 @@ class MTPConfig(BaseModel):
         share_weights (bool): Whether to share the weights of the MTP layers.
             If True, the weights of the MTP layers are shared across all layers.
             Default: False.
-        index_share_for_mtp_iteration (bool): Whether later logical MTP prediction
-            depths reuse the first depth's DSA top-k indices. This is separate
-            from weight sharing, although GLM-5.2 uses both together.
-            Default: False.
         detach_mtp_lm_head_weight (bool): Whether to detach the LM head weight.
             This is used in RL training. Default is False.
         detach_mtp_inputs (bool): Whether to detach the input embeddings and hidden states.
@@ -51,7 +47,6 @@ class MTPConfig(BaseModel):
 
     num_layers: Annotated[int, Parameter(group="model")]
     share_weights: Annotated[bool, Parameter(group="model")] = False
-    index_share_for_mtp_iteration: Annotated[bool, Parameter(group="model")] = False
     detach_mtp_lm_head_weight: Annotated[bool, Parameter(group="model")] = False
     detach_mtp_inputs: Annotated[bool, Parameter(group="model")] = False
     loss_scaling_factor: Annotated[float, Parameter(group="model")] = 0.1

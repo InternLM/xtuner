@@ -13,7 +13,9 @@ from xtuner.v1.module.attention import DSAMLAConfig
 from xtuner.v1.module.attention.dsa_topk_sharing import (
     DSATopKSharingLayerProtocol,
     build_dsa_topk_release_plan,
+    configure_dsa_mtp_iteration_lifecycle,
     configure_dsa_topk_decoder_lifecycle,
+    dsa_topk_source_layer,
 )
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.rope import RopeParametersConfig
@@ -60,19 +62,23 @@ class Glm52MoE(MoE):
     @override
     def _configure_model_specific_layer_lifecycle(self) -> None:
         dsa_layers: list[tuple[torch.nn.Module, DSATopKSharingLayerProtocol]] = []
+        mtp_attention: DSATopKSharingLayerProtocol | None = None
         for decoder_layer in self.layers.values():
             self_attn = getattr(decoder_layer, "self_attn", None)
             if hasattr(self_attn, "dsa_topk_last_use"):
                 dsa_layers.append((decoder_layer, cast(DSATopKSharingLayerProtocol, self_attn)))
 
-        num_mtp_layers = 0
+        num_physical_mtp_layers = 0
         if self.mtp_block is not None and self.config.mtp_config is not None:
-            num_mtp_layers = 1 if self.config.mtp_config.share_weights else self.config.mtp_config.num_layers
-            for mtp_idx in range(num_mtp_layers):
+            num_physical_mtp_layers = 1 if self.config.mtp_config.share_weights else self.config.mtp_config.num_layers
+            for mtp_idx in range(num_physical_mtp_layers):
                 decoder_layer = cast(torch.nn.Module, self.mtp_block.layers[mtp_idx].decoder_layer)
                 self_attn = getattr(decoder_layer, "self_attn", None)
                 if hasattr(self_attn, "dsa_topk_last_use"):
-                    dsa_layers.append((decoder_layer, cast(DSATopKSharingLayerProtocol, self_attn)))
+                    typed_attention = cast(DSATopKSharingLayerProtocol, self_attn)
+                    dsa_layers.append((decoder_layer, typed_attention))
+                    if mtp_idx == 0:
+                        mtp_attention = typed_attention
 
         if not dsa_layers:
             return
@@ -80,7 +86,7 @@ class Glm52MoE(MoE):
         sample_attn = dsa_layers[0][1]
         release_plan = build_dsa_topk_release_plan(
             num_main_layers=self.config.num_hidden_layers,
-            num_mtp_layers=num_mtp_layers,
+            num_mtp_layers=num_physical_mtp_layers,
             indexer_types=sample_attn.indexer_types,
             index_skip_topk_offset=sample_attn.index_skip_topk_offset,
             index_topk_freq=sample_attn.index_topk_freq,
@@ -89,11 +95,24 @@ class Glm52MoE(MoE):
             # DSA top-k sharing spans dense prefix, sparse MoE layers, and the
             # optional MTP layer. The attention-local default release maps only
             # see the main-stack indexer_types, so GLM-5.2 injects a model-level
-            # plan with the full logical layer topology.
+            # plan with the full physical layer topology.
             configure_dsa_topk_decoder_lifecycle(
                 decoder_layer=decoder_layer,
                 attention=self_attn,
                 release_plan=release_plan,
+            )
+
+        if (
+            self.mtp_block is not None
+            and self.config.mtp_config is not None
+            and self.config.mtp_config.share_weights
+            and self.config.index_share_for_mtp_iteration
+            and mtp_attention is not None
+        ):
+            configure_dsa_mtp_iteration_lifecycle(
+                mtp_block=self.mtp_block,
+                attention=mtp_attention,
+                num_iterations=self.config.mtp_config.num_layers,
             )
 
     def to_hf_key_list(self, key: str) -> list[str]:
@@ -241,38 +260,46 @@ class Glm52MoEConfig(MoEConfig):
         return self.attention.num_attention_heads
 
     def build(self) -> Glm52MoE:
+        self._normalize_physical_mtp_indexer_types()
         return Glm52MoE(self)
 
-    @staticmethod
-    def _indexer_types_with_mtp_physical_layer(cfg: HFGlmMoeDsaConfig) -> list[str] | None:
-        if cfg.indexer_types is None:
-            return None
+    def _normalize_physical_mtp_indexer_types(self) -> None:
+        if self.mtp_config is None:
+            return
 
-        indexer_types = list(cfg.indexer_types)
-        num_nextn_predict_layers = int(getattr(cfg, "num_nextn_predict_layers", 0) or 0)
-        if num_nextn_predict_layers == 0:
-            return indexer_types
+        indexer_types = self.attention.indexer_types
+        if indexer_types is None:
+            indexer_types = [
+                "full"
+                if dsa_topk_source_layer(
+                    layer_idx=layer_idx,
+                    indexer_types=None,
+                    index_skip_topk_offset=self.attention.index_skip_topk_offset,
+                    index_topk_freq=self.attention.index_topk_freq,
+                )
+                == layer_idx
+                else "shared"
+                for layer_idx in range(self.num_hidden_layers)
+            ]
+        else:
+            indexer_types = list(indexer_types)
 
-        if num_nextn_predict_layers != 1:
-            raise ValueError("GLM-5.2 MTP HF loading expects exactly one checkpoint-backed MTP physical layer.")
-
-        if len(indexer_types) == cfg.num_hidden_layers:
-            # Official GLM-5.2 config lists only the main stack, while the HF
-            # checkpoint stores the MTP decoder as model.layers.{num_hidden_layers}
-            # with its own indexer weights. Append the physical MTP layer as full;
-            # logical MTP iteration sharing is handled separately during forward.
-            indexer_types.append("full")
-        elif len(indexer_types) != cfg.num_hidden_layers + num_nextn_predict_layers:
+        num_physical_mtp_layers = 1 if self.mtp_config.share_weights else self.mtp_config.num_layers
+        expected_mtp_types = ["full"] + ["shared"] * (num_physical_mtp_layers - 1)
+        if len(indexer_types) == self.num_hidden_layers:
+            indexer_types.extend(expected_mtp_types)
+        elif (
+            len(indexer_types) != self.num_hidden_layers + num_physical_mtp_layers
+            or indexer_types[self.num_hidden_layers :] != expected_mtp_types
+        ):
             raise ValueError(
-                "GLM-5.2 indexer_types must cover the main stack or the main stack plus the MTP physical layer; "
-                f"got len={len(indexer_types)}, num_hidden_layers={cfg.num_hidden_layers}, "
-                f"num_nextn_predict_layers={num_nextn_predict_layers}."
+                "GLM-5.2 physical MTP indexer_types must start with 'full' and share that indexer in any "
+                f"remaining physical MTP layers; got {indexer_types[self.num_hidden_layers :]}."
             )
 
-        if not bool(getattr(cfg, "index_share_for_mtp_iteration", False)):
-            raise ValueError("GLM-5.2 MTP requires index_share_for_mtp_iteration=True.")
-
-        return indexer_types
+        # HF lists only the main stack. XTuner also builds the checkpoint-backed
+        # physical MTP decoder, so attention construction needs its effective type.
+        self.attention.indexer_types = indexer_types
 
     @classmethod
     def from_hf(cls, hf_path: str | Path) -> Self:
@@ -281,8 +308,10 @@ class Glm52MoEConfig(MoEConfig):
         assert isinstance(cfg, HFGlmMoeDsaConfig)
 
         rope_parameters_cfg = RopeParametersConfig.from_hf_config(cfg)
-        indexer_types = cls._indexer_types_with_mtp_physical_layer(cfg)
-        return cls(
+        if getattr(cfg, "num_nextn_predict_layers", 0) and not cfg.index_share_for_mtp_iteration:
+            raise ValueError("GLM-5.2 MTP requires index_share_for_mtp_iteration=True.")
+
+        config = cls(
             vocab_size=cfg.vocab_size,
             max_position_embeddings=cfg.max_position_embeddings,
             pad_token_id=getattr(cfg, "pad_token_id", None),
@@ -313,7 +342,7 @@ class Glm52MoEConfig(MoEConfig):
                 index_topk_freq=cfg.index_topk_freq,
                 index_skip_topk_offset=cfg.index_skip_topk_offset,
                 indexer_rope_interleave=cfg.indexer_rope_interleave,
-                indexer_types=indexer_types,
+                indexer_types=list(cfg.indexer_types) if cfg.indexer_types is not None else None,
             ),
             hf_head_dim=cfg.head_dim,
             qk_head_dim=cfg.qk_head_dim,
@@ -337,11 +366,12 @@ class Glm52MoEConfig(MoEConfig):
             mtp_config=MTPConfig(
                 num_layers=cfg.num_nextn_predict_layers,
                 share_weights=True,
-                index_share_for_mtp_iteration=cfg.index_share_for_mtp_iteration,
             )
             if getattr(cfg, "num_nextn_predict_layers", 0)
             else None,
         )
+        config._normalize_physical_mtp_indexer_types()
+        return config
 
     @property
     def hf_config(self) -> HFGlmMoeDsaConfig:
@@ -390,7 +420,9 @@ class Glm52MoEConfig(MoEConfig):
             index_skip_topk_offset=attention.index_skip_topk_offset,
             index_share_for_mtp_iteration=self.index_share_for_mtp_iteration,
             indexer_rope_interleave=attention.indexer_rope_interleave,
-            indexer_types=attention.indexer_types,
+            indexer_types=(
+                attention.indexer_types[: self.num_hidden_layers] if attention.indexer_types is not None else None
+            ),
             num_nextn_predict_layers=self.num_nextn_predict_layers,
             dtype=torch.bfloat16,
         )
