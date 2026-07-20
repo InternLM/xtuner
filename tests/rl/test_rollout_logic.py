@@ -631,6 +631,9 @@ class TestRolloutWorkerRegistry(unittest.TestCase):
         self.assertEqual(unhealthy_groups[0].ranks, (0, 1))
         self.assertEqual(tuple(worker.rank for worker in registry.inactive_workers()), (0, 1))
         self.assertEqual(registry.active_entrypoints(), ())
+        inactive_groups = registry.inactive_worker_groups()
+        self.assertEqual(inactive_groups[0].ranks, (0, 1))
+        self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.INACTIVE)
         claimed_groups = registry.claim_inactive_groups_for_recovery()
         self.assertEqual(claimed_groups[0].ranks, (0, 1))
         self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.RECOVERING)
@@ -1109,30 +1112,30 @@ class TestRolloutHealthManager(unittest.TestCase):
             worker_lifecycle_listeners=[listener],
         )
 
-        manager._check_and_deactivate_failed_worker_groups()
+        manager.run_once()
 
         self.assertTrue(self._worker_by_rank(registry, 0).is_active())
         self.assertEqual(actor.check_health.calls, [()])
         self.assertEqual(inactive_groups, [])
 
-        manager._check_and_deactivate_failed_worker_groups()
+        manager.run_once()
 
         self.assertFalse(self._worker_by_rank(registry, 0).is_active())
         self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.INACTIVE)
         self.assertEqual(actor.check_health.calls, [(), ()])
         self.assertEqual([group.ranks for group in inactive_groups], [(0,)])
 
-    def test_inactive_listener_runs_under_operation_lock(self):
+    def test_inactive_listener_runs_outside_lifecycle_operation_lock(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(False))
         worker_info = WorkerSnapshot(rank=0, actor=actor, url="http://worker-0")
         lock_acquired_by_listener = []
         manager, _ = self._build_manager({0: worker_info}, failure_threshold=1)
 
         def on_worker_group_inactive(group):
-            acquired = manager._operation_lock.acquire(blocking=False)
+            acquired = manager._lifecycle_operation_lock.acquire(blocking=False)
             lock_acquired_by_listener.append(acquired)
             if acquired:
-                manager._operation_lock.release()
+                manager._lifecycle_operation_lock.release()
 
         manager._worker_lifecycle_listeners = (
             SimpleNamespace(
@@ -1141,12 +1144,53 @@ class TestRolloutHealthManager(unittest.TestCase):
             ),
         )
 
-        manager._check_and_deactivate_failed_worker_groups()
+        manager.run_once()
 
-        self.assertEqual(lock_acquired_by_listener, [False])
+        self.assertEqual(lock_acquired_by_listener, [True])
 
     def test_inactive_worker_is_not_cleaned_up_again(self):
-        # 已 inactive 的 worker 不再重复健康检查。
+        # 已 inactive 的 worker 不再重复健康检查，也不再重复触发 inactive 通知。
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
+        workers_info = {
+            0: WorkerSnapshot(
+                rank=0,
+                actor=actor,
+                url="http://worker-0",
+                lifecycle_state=WorkerLifecycleState.INACTIVE,
+            )
+        }
+        inactive_groups = []
+        listener = SimpleNamespace(
+            on_worker_group_inactive=inactive_groups.append,
+            on_worker_group_recovered=MagicMock(),
+        )
+        manager, _ = self._build_manager(workers_info, worker_lifecycle_listeners=[listener])
+
+        manager.run_once()
+
+        self.assertEqual(actor.check_health.calls, [])
+        self.assertEqual(inactive_groups, [])
+
+    def test_health_check_threshold_zero_disables_periodic_health_check(self):
+        # threshold <= 0 表示关闭周期健康监测，不应把 active worker 直接判 inactive。
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(False))
+        worker_info = WorkerSnapshot(rank=0, actor=actor, url="http://worker-0")
+        manager, registry = self._build_manager({0: worker_info}, failure_threshold=0)
+
+        with patch("xtuner.v1.rl.rollout.health_manager.threading.Thread") as thread_cls:
+            manager.start()
+
+        thread_cls.assert_not_called()
+        self.assertIsNone(manager._thread)
+        self.assertTrue(self._worker_by_rank(registry, 0).is_active())
+        self.assertEqual(actor.check_health.calls, [])
+
+        manager.run_once()
+
+        self.assertTrue(self._worker_by_rank(registry, 0).is_active())
+        self.assertEqual(actor.check_health.calls, [])
+
+    def test_run_once_does_not_log_error_when_no_active_workers(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
         workers_info = {
             0: WorkerSnapshot(
@@ -1158,31 +1202,32 @@ class TestRolloutHealthManager(unittest.TestCase):
         }
         manager, _ = self._build_manager(workers_info)
 
-        checked_count = manager._check_and_deactivate_failed_worker_groups()
+        with patch("xtuner.v1.rl.rollout.health_manager.logger.error") as log_error:
+            manager.run_once()
 
-        self.assertEqual(checked_count, 0)
+        log_error.assert_not_called()
         self.assertEqual(actor.check_health.calls, [])
 
-    def test_health_check_threshold_zero_disables_periodic_health_check(self):
-        # threshold <= 0 表示关闭周期健康监测，不应把 active worker 直接判 inactive。
+    def test_run_once_does_not_log_error_when_last_active_worker_becomes_inactive(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(False))
         worker_info = WorkerSnapshot(rank=0, actor=actor, url="http://worker-0")
-        manager, registry = self._build_manager({0: worker_info}, failure_threshold=0)
+        manager, registry = self._build_manager({0: worker_info}, failure_threshold=1)
 
-        checked_count = manager._check_and_deactivate_failed_worker_groups()
+        with patch("xtuner.v1.rl.rollout.health_manager.logger.error") as log_error:
+            manager.run_once()
 
-        self.assertEqual(checked_count, 0)
-        self.assertTrue(self._worker_by_rank(registry, 0).is_active())
-        self.assertEqual(actor.check_health.calls, [])
+        log_error.assert_not_called()
+        self.assertFalse(self._worker_by_rank(registry, 0).is_active())
+        self.assertEqual(actor.check_health.calls, [()])
 
     def test_fail_fast_health_check_still_runs_when_periodic_health_check_is_disabled(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(False))
         worker_info = WorkerSnapshot(rank=0, actor=actor, url="http://worker-0")
         manager, registry = self._build_manager({0: worker_info}, failure_threshold=0)
 
-        checked_count = manager._check_and_deactivate_failed_worker_groups(fail_fast=True)
+        with patch.object(manager, "_shutdown_worker_group", return_value=True):
+            manager.check_and_shutdown_inactive_workers()
 
-        self.assertEqual(checked_count, 1)
         self.assertFalse(self._worker_by_rank(registry, 0).is_active())
         self.assertEqual(actor.check_health.calls, [()])
 
@@ -1197,9 +1242,39 @@ class TestRolloutHealthManager(unittest.TestCase):
             return await awaitable
 
         with patch("xtuner.v1.rl.rollout.health_manager.asyncio.wait_for", side_effect=fake_wait_for):
-            manager._check_and_deactivate_failed_worker_groups()
+            manager.run_once()
 
         self.assertEqual(observed_timeouts, [2.5])
+
+    def test_wait_until_next_check_waits_for_resume_when_paused_during_interval(self):
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
+        worker_info = WorkerSnapshot(rank=0, actor=actor, url="http://worker-0")
+        manager, _ = self._build_manager({0: worker_info})
+        manager._check_interval = 0.01
+        manager._pause_event = threading.Event()
+
+        class _FakeStopEvent:
+            def __init__(self):
+                self.wait_calls = []
+                self._paused_once = False
+
+            def is_set(self):
+                return False
+
+            def wait(self, timeout=None):
+                self.wait_calls.append(timeout)
+                if timeout == manager._check_interval and not self._paused_once:
+                    self._paused_once = True
+                    manager._pause_event.set()
+                elif timeout == 0.5:
+                    manager._pause_event.clear()
+                return False
+
+        stop_event = _FakeStopEvent()
+        manager._stop_event = stop_event
+
+        self.assertTrue(manager._wait_until_next_check())
+        self.assertEqual(stop_event.wait_calls, [manager._check_interval, 0.5, manager._check_interval])
 
     def test_shutdown_barrier_keeps_failed_shutdown_group_inactive(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
@@ -1211,17 +1286,10 @@ class TestRolloutHealthManager(unittest.TestCase):
         )
         manager, registry = self._build_manager({0: worker_info})
 
-        with (
-            patch.object(manager, "_shutdown_worker_group", return_value=False),
-            patch("xtuner.v1.rl.rollout.health_manager.logger.error") as log_error,
-        ):
+        with patch.object(manager, "_shutdown_worker_group", return_value=False):
             manager.check_and_shutdown_inactive_workers()
 
         self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.INACTIVE)
-        self.assertTrue(
-            any("training can continue" in call.args[0] for call in log_error.call_args_list),
-            f"Expected shutdown failure log to explain why it is non-fatal, got: {log_error.call_args_list}",
-        )
 
     def test_restart_barrier_keeps_failed_recovery_group_inactive(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
@@ -1271,6 +1339,55 @@ class TestRolloutHealthManager(unittest.TestCase):
         self.assertEqual([group.ranks for group in recovered_groups], [(0,)])
         self.assertTrue(all(worker.is_active() for worker in recovered_groups[0].workers))
 
+    def test_restart_barrier_cleans_claimed_groups_when_stopping(self):
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
+        worker_info = WorkerSnapshot(
+            rank=0,
+            actor=actor,
+            url="http://worker-0",
+            lifecycle_state=WorkerLifecycleState.INACTIVE,
+        )
+        manager, registry = self._build_manager({0: worker_info})
+
+        def stop_after_restart(groups):
+            manager._stop_event.set()
+            return {group.ranks: False for group in groups}
+
+        with (
+            patch.object(manager, "_restart_worker_groups", side_effect=stop_after_restart),
+            patch.object(manager, "_shutdown_worker_group", return_value=True) as shutdown_group,
+        ):
+            manager.restart_inactive_workers()
+
+        shutdown_group.assert_called_once()
+        self.assertEqual(shutdown_group.call_args.args[0].ranks, (0,))
+        self.assertEqual(shutdown_group.call_args.kwargs, {"wait_server_down": False})
+        self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.INACTIVE)
+
+    def test_shutdown_without_waiting_server_down_does_not_probe_worker_server(self):
+        actor = SimpleNamespace(
+            shutdown=_FakeAsyncRemoteMethod(None),
+            check_health=_FakeAsyncRemoteMethod(True),
+        )
+        worker_info = WorkerSnapshot(
+            rank=0,
+            actor=actor,
+            url="http://worker-0",
+            lifecycle_state=WorkerLifecycleState.INACTIVE,
+        )
+        manager, registry = self._build_manager({0: worker_info})
+        group = registry.claim_inactive_groups_for_recovery()[0]
+
+        def fake_ray_get(ref, timeout=None):
+            del timeout
+            return asyncio.run(ref)
+
+        with patch("xtuner.v1.rl.rollout.health_manager.ray.get", side_effect=fake_ray_get):
+            self.assertTrue(manager._shutdown_worker_group(group, wait_server_down=False))
+
+        self.assertEqual(actor.shutdown.calls, [()])
+        self.assertEqual(actor.check_health.calls, [])
+
     def test_restart_worker_group_uses_reinit(self):
         init_result = RolloutWorkerInitResult(
             rank=0,
@@ -1313,7 +1430,7 @@ class TestRolloutHealthManager(unittest.TestCase):
         self.assertEqual(actor.offload.calls, [()])
         self.assertEqual(actor.restore_skip_load_weights.calls, [()])
 
-    def test_recovered_listener_runs_under_operation_lock(self):
+    def test_recovered_listener_runs_outside_lifecycle_operation_lock(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
         worker_info = WorkerSnapshot(
             rank=0,
@@ -1325,10 +1442,10 @@ class TestRolloutHealthManager(unittest.TestCase):
         manager, _ = self._build_manager({0: worker_info})
 
         def on_worker_group_recovered(group):
-            acquired = manager._operation_lock.acquire(blocking=False)
+            acquired = manager._lifecycle_operation_lock.acquire(blocking=False)
             lock_acquired_by_listener.append(acquired)
             if acquired:
-                manager._operation_lock.release()
+                manager._lifecycle_operation_lock.release()
 
         manager._worker_lifecycle_listeners = (
             SimpleNamespace(
@@ -1340,7 +1457,7 @@ class TestRolloutHealthManager(unittest.TestCase):
         with patch.object(manager, "_restart_worker_group", return_value=True):
             manager.restart_inactive_workers()
 
-        self.assertEqual(lock_acquired_by_listener, [False])
+        self.assertEqual(lock_acquired_by_listener, [True])
 
 
 class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):

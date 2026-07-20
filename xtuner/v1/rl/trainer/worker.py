@@ -109,6 +109,8 @@ class WorkerConfig(BaseModel):
             updated weights to rollout workers. Defaults to 0.5.
         seed (int | None): Training worker random seed. When None, the RL
             trainer seed is used. Defaults to None.
+        offload_rollout_routed_experts (bool): Keep rollout routed experts on
+            CPU and move each layer's slice to device during forward. Defaults to False.
 
     **Examples:**
 
@@ -148,6 +150,7 @@ class WorkerConfig(BaseModel):
     profile_time: bool = True
     profile_memory: bool = False
     free_rollout_routed_experts_in_worker: bool = True  # 默认不需要用户配置
+    offload_rollout_routed_experts: bool = False
 
     # sft config
     sft_dataloader_cfg: DataloaderConfig | None = None
@@ -187,6 +190,8 @@ class WorkerTrainLogItem(TypedDict, total=False):
     step_consumed_tokens: int
     efficient_attn_ratio: float
     grad_norm: float
+    max_memory: float
+    reserved_memory: float
 
 
 class WorkerLogItem(TypedDict):
@@ -566,6 +571,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             if rollout_routed_experts is not None:
                 self._add_rollout_routed_experts(seq_ctx, rollout_routed_experts)
 
+            seq_ctx.offload_rollout_routed_experts = self.config.offload_rollout_routed_experts
             seq_ctx = data["seq_ctx"].to(DEVICE)
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(self.sp_mesh)
@@ -788,12 +794,16 @@ class TrainingWorker(SingleAcceleratorWorker):
             }
             extra_info_dict = finalize_train_policy_metrics(extra_info_dict, DEVICE)
             train_step_info.pop("total_loss")  # type: ignore[misc]
+            max_memory = DEVICE_MODULE.max_memory_allocated() / (1024**3)  # type: ignore[attr-defined]
+            reserved_memory = DEVICE_MODULE.max_memory_reserved() / (1024**3)  # type: ignore[attr-defined]
 
             train_log_item = WorkerTrainLogItem(
                 **engine_logs_info,  # type: ignore[typeddict-item]
                 **train_step_info,
                 **extra_info_dict,
                 grad_norm=grad_norm.item(),
+                max_memory=max_memory,
+                reserved_memory=reserved_memory,
             )
             worker_log_item["train_metrics"].append(train_log_item)
 
