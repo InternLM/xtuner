@@ -518,7 +518,7 @@ class MoE(BaseModel):
                     if cat_seq_ctx is not None:
                         cat_seq_ctx.split_dsa_topk_indices_to(
                             seq_ctx_list,
-                            recompute_release_layer_idx=layer_idx,
+                            micro_batch_recompute_release_layer_idx=layer_idx,
                         )
                     # TODO: `i.clone()` here is weird. However, the current Implementation of
                     # `async_save_on_cpu` is not friendly with `chunk` op (maybe caused by shared storage? not sure),

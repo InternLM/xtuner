@@ -24,7 +24,10 @@ class DSATopKCacheState:
     context_id: int
     mtp_iteration_reuse_sources: set[int]
     mtp_iteration_recompute_remaining: dict[int, int]
-    recompute_release_layers: dict[int, int]
+    # The model-wide release plan lives on each attention layer. A cache split
+    # out of the concatenated dense-prefix context needs a context-local release
+    # point because its micro-batch context never replays the dense source layer.
+    micro_batch_recompute_release_overrides: dict[int, int]
 
     def __init__(
         self,
@@ -38,7 +41,7 @@ class DSATopKCacheState:
         context_id: int | None = None,
         mtp_iteration_reuse_sources: set[int] | None = None,
         mtp_iteration_recompute_remaining: dict[int, int] | None = None,
-        recompute_release_layers: dict[int, int] | None = None,
+        micro_batch_recompute_release_overrides: dict[int, int] | None = None,
     ) -> None:
         # topk_indices format: {source_layer_idx: [seq_len, kv_group, topk]}.
         # Invalid/padded sparse slots are represented by -1.
@@ -55,7 +58,9 @@ class DSATopKCacheState:
         self.mtp_iteration_recompute_remaining = (
             {} if mtp_iteration_recompute_remaining is None else mtp_iteration_recompute_remaining
         )
-        self.recompute_release_layers = {} if recompute_release_layers is None else recompute_release_layers
+        self.micro_batch_recompute_release_overrides = (
+            {} if micro_batch_recompute_release_overrides is None else micro_batch_recompute_release_overrides
+        )
 
 
 # Avoid using dataclass decorator here to get rid of extra ops called in pytorch 2.8 and above
@@ -393,8 +398,30 @@ class SequenceContext:
         self,
         sequence_context_list: list["SequenceContext"],
         *,
-        recompute_release_layer_idx: int | None = None,
+        micro_batch_recompute_release_layer_idx: int | None = None,
     ) -> None:
+        """Split concatenated DSA top-k caches into micro-batch contexts.
+
+        For example, suppose dense layer 2 owns a full indexer and sparse
+        layers 3 and 4 share its top-k. The static backward replay order is
+        4 -> 3 -> 2, so the concatenated context releases source 2 at layer 2.
+        ``_micro_batch_forward`` runs layer 2 on the concatenated context but
+        layers 3 and 4 on the split contexts. Those contexts only replay
+        4 -> 3, so they need a context-local source 2 release override at
+        layer 3.
+
+        The same logical source 2 therefore has three cache owners::
+
+            Context        Backward replay     Correct release
+            =============  ==================  ===============
+            cat_seq_ctx    layer 2             layer 2
+            micro-batch 0  layer 4 -> layer 3  layer 3
+            micro-batch 1  layer 4 -> layer 3  layer 3
+            =============  ==================  ===============
+
+        The model-wide static plan describes the concatenated owner. Each
+        split owner needs its own override because it never replays layer 2.
+        """
         if not self.dsa_topk_cache.indices:
             return
 
@@ -428,11 +455,13 @@ class SequenceContext:
                         single_topk_indices - offset,
                     )
                 seq_ctx.dsa_topk_cache.indices[layer_idx] = single_topk_indices
-                if recompute_release_layer_idx is not None:
-                    # The source layer ran on the concatenated context, so its
-                    # per-microbatch cache must be released at the first sparse
-                    # consumer encountered during backward replay.
-                    seq_ctx.dsa_topk_cache.recompute_release_layers[layer_idx] = recompute_release_layer_idx
+                if micro_batch_recompute_release_layer_idx is not None:
+                    # The static plan releases at the dense source layer, but
+                    # this split context only replays the sparse suffix. Release
+                    # its cache at the micro-batch boundary instead.
+                    seq_ctx.dsa_topk_cache.micro_batch_recompute_release_overrides[layer_idx] = (
+                        micro_batch_recompute_release_layer_idx
+                    )
                 start += length
 
     @property

@@ -278,7 +278,9 @@ class CrossLayerTopKSharingRuntime:
         if not self._is_checkpoint_recompute(seq_ctx):
             return
 
-        release_layer_idx = cache.recompute_release_layers.get(
+        # Split micro-batch contexts never replay the concatenated dense source,
+        # so their boundary override takes precedence over the model-wide plan.
+        release_layer_idx = cache.micro_batch_recompute_release_overrides.get(
             source_layer_idx,
             layer.dsa_topk_recompute_release.get(source_layer_idx),
         )
@@ -293,7 +295,7 @@ class CrossLayerTopKSharingRuntime:
         else:
             residency.after_recompute_release(seq_ctx, source_layer_idx)
             cache.released_sources.add(source_layer_idx)
-            cache.recompute_release_layers.pop(source_layer_idx, None)
+            cache.micro_batch_recompute_release_overrides.pop(source_layer_idx, None)
 
     def prepare_mtp_iteration_topk_sharing(
         self,
@@ -331,7 +333,7 @@ class CrossLayerTopKSharingRuntime:
         for source_layer_idx in tuple(cache.pending_releases):
             self._offloaded_residency.after_recompute_release(seq_ctx, source_layer_idx)
             cache.released_sources.add(source_layer_idx)
-            cache.recompute_release_layers.pop(source_layer_idx, None)
+            cache.micro_batch_recompute_release_overrides.pop(source_layer_idx, None)
             cache.pending_releases.remove(source_layer_idx)
 
     def _residency(self) -> GpuTopKResidency:
