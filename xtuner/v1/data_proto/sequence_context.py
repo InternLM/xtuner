@@ -24,7 +24,6 @@ class DSATopKCacheState:
     context_id: int
     mtp_iteration_reuse_sources: set[int]
     mtp_iteration_recompute_remaining: dict[int, int]
-    mtp_iteration_source_compute_contexts: set[tuple[int, int]]
     recompute_release_layers: dict[int, int]
 
     def __init__(
@@ -39,7 +38,6 @@ class DSATopKCacheState:
         context_id: int | None = None,
         mtp_iteration_reuse_sources: set[int] | None = None,
         mtp_iteration_recompute_remaining: dict[int, int] | None = None,
-        mtp_iteration_source_compute_contexts: set[tuple[int, int]] | None = None,
         recompute_release_layers: dict[int, int] | None = None,
     ) -> None:
         # topk_indices format: {source_layer_idx: [seq_len, kv_group, topk]}.
@@ -56,9 +54,6 @@ class DSATopKCacheState:
         )
         self.mtp_iteration_recompute_remaining = (
             {} if mtp_iteration_recompute_remaining is None else mtp_iteration_recompute_remaining
-        )
-        self.mtp_iteration_source_compute_contexts = (
-            set() if mtp_iteration_source_compute_contexts is None else mtp_iteration_source_compute_contexts
         )
         self.recompute_release_layers = {} if recompute_release_layers is None else recompute_release_layers
 

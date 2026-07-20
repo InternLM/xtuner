@@ -1,9 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
 import types
-from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Callable, Literal, Self, Sequence, TypedDict, cast
+from typing import TYPE_CHECKING, Annotated, Literal, Self, Sequence, TypedDict, cast
 
 import torch
 import torch.distributed as dist
@@ -75,11 +74,6 @@ if TYPE_CHECKING:
 
 DEVICE = get_device()
 logger = get_logger()
-
-MTPCheckpointContextFn = Callable[
-    [],
-    tuple[AbstractContextManager[None], AbstractContextManager[None]],
-]
 
 
 MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
@@ -231,9 +225,6 @@ class MoE(BaseModel):
 
     def _configure_model_specific_layer_lifecycle(self) -> None:
         return
-
-    def _mtp_checkpoint_context_fn(self, mtp_layer: MTPLayer) -> MTPCheckpointContextFn | None:
-        return None
 
     def _z_loss_dist_token_count(
         self,
@@ -1154,17 +1145,7 @@ class MoE(BaseModel):
                 if self._should_recompute(None, mtp_idx=mtp_idx) or (
                     self.config.mtp_config is not None and self.config.mtp_config.share_weights
                 ):  # share mtp head must recompute
-                    # Multi-microbatch MTP reaches the shared decoder from
-                    # multiple loss branches, which requires one autograd graph.
-                    checkpoint_kwargs = {}
-                    context_fn = self._mtp_checkpoint_context_fn(mtp_layer)
-                    if context_fn is not None:
-                        checkpoint_kwargs["context_fn"] = context_fn
-                    mtp_layer = checkpoint_wrapper(
-                        mtp_layer,
-                        checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-                        **checkpoint_kwargs,
-                    )
+                    mtp_layer = checkpoint_wrapper(mtp_layer, checkpoint_impl=CheckpointImpl.REENTRANT)
                 self.mtp_block.layers[mtp_idx] = mtp_layer
 
                 reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1

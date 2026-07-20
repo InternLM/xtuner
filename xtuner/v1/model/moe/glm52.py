@@ -14,13 +14,12 @@ from xtuner.v1.module.attention.dsa_topk_sharing import (
     DSATopKSharingLayerProtocol,
     build_dsa_topk_release_plan,
     configure_dsa_topk_decoder_lifecycle,
-    dsa_topk_checkpoint_context_fn,
 )
-from xtuner.v1.module.mtp import MTPConfig, MTPLayer
+from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 
-from .moe import MoE, MTPCheckpointContextFn
+from .moe import MoE
 
 
 # GLM DSA attention records cross-layer top-k indices in SequenceContext.
@@ -57,14 +56,6 @@ class Glm52MoE(MoE):
         if self.config.ep_size > 1:
             return MOE_EP_COMPILE_CFG
         return MOE_NON_EP_COMPILE_CFG
-
-    @override
-    def _mtp_checkpoint_context_fn(self, mtp_layer: MTPLayer) -> MTPCheckpointContextFn | None:
-        if hasattr(getattr(mtp_layer.decoder_layer, "self_attn", None), "source_layer_idx"):
-            # MTP Iteration Top-K Sharing is stateful across logical depths;
-            # identify non-reentrant replay so it reproduces the forward path.
-            return dsa_topk_checkpoint_context_fn
-        return None
 
     @override
     def _configure_model_specific_layer_lifecycle(self) -> None:

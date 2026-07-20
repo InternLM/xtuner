@@ -14,7 +14,6 @@ from xtuner.v1.model.utils import checkpoint_wrapper
 from xtuner.v1.module.attention import DSAMLAConfig, dsa_mla
 from xtuner.v1.module.attention.dsa_topk_sharing import (
     before_dsa_topk_decoder_forward,
-    dsa_topk_checkpoint_context_fn,
     get_dsa_topk_sharing_runtime,
     prepare_mtp_iteration_topk_sharing,
     register_dsa_topk_decoder_lifecycle_hooks,
@@ -897,15 +896,21 @@ def test_dsa_topk_mtp_iteration_recompute_releases_after_last_logical_depth():
     assert seq_ctx.dsa_topk_cache.released_sources == {3}
 
 
-def test_dsa_topk_mtp_iteration_sharing_matches_non_reentrant_checkpoint_recompute():
+def test_dsa_topk_mtp_iteration_checkpoint_reuses_forward_topk():
     torch.manual_seed(0)
     attention = _tiny_dsa_attention(indexer_types=["full"], layer_idx=0)
     attention.dsa_topk_last_use = {0: 0}
     attention.dsa_topk_recompute_release = {0: 0}
+    indexer_calls = 0
+
+    def count_indexer_calls(*_args):
+        nonlocal indexer_calls
+        indexer_calls += 1
+
+    attention.indexer.register_forward_hook(count_indexer_calls)
     block = checkpoint_wrapper(
         _TinyDsaDecoderBlock(attention),
-        checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-        context_fn=dsa_topk_checkpoint_context_fn,
+        checkpoint_impl=CheckpointImpl.REENTRANT,
     )
     seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
     prepare_mtp_iteration_topk_sharing(seq_ctx=seq_ctx, source_layer_idx=0, num_iterations=2)
@@ -920,6 +925,7 @@ def test_dsa_topk_mtp_iteration_sharing_matches_non_reentrant_checkpoint_recompu
 
     assert hidden_states.grad is not None
     assert torch.isfinite(hidden_states.grad).all()
+    assert indexer_calls == 1
     assert seq_ctx.dsa_topk_cache.indices == {}
     assert seq_ctx.dsa_topk_cache.released_sources == {0}
 

@@ -1,31 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
-from contextlib import AbstractContextManager, contextmanager, nullcontext
-from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Protocol, cast
+from typing import Any, Callable, Protocol, cast
 
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.utils.activation_offload import OffloadManager, SwapTensor
-
-
-_DSA_TOPK_NON_REENTRANT_RECOMPUTE = ContextVar("dsa_topk_non_reentrant_recompute", default=False)
-
-
-@contextmanager
-def _dsa_topk_non_reentrant_recompute_context() -> Iterator[None]:
-    token = _DSA_TOPK_NON_REENTRANT_RECOMPUTE.set(True)
-    try:
-        yield
-    finally:
-        _DSA_TOPK_NON_REENTRANT_RECOMPUTE.reset(token)
-
-
-def dsa_topk_checkpoint_context_fn() -> tuple[AbstractContextManager[None], AbstractContextManager[None]]:
-    """Identify replay of a DSA layer wrapped by non-reentrant checkpoint."""
-    return nullcontext(), _dsa_topk_non_reentrant_recompute_context()
 
 
 class DSATopKSharingLayerProtocol(Protocol):
@@ -257,32 +238,23 @@ class CrossLayerTopKSharingRuntime:
         cache = seq_ctx.dsa_topk_cache
         source_layer_idx = layer.source_layer_idx
 
-        if self._should_recompute_mtp_iteration_source(seq_ctx, source_layer_idx):
-            # The first logical MTP depth computed the shared indexer in the
-            # original forward. Its checkpoint replay must take the same path.
-            residency.after_recompute_release(seq_ctx, source_layer_idx)
-
         if source_layer_idx != layer.layer_idx:
             self._assert_source_present(layer, seq_ctx, residency)
             return residency.read(seq_ctx, source_layer_idx)
 
         if (
-            self._is_reentrant_checkpoint_recompute(seq_ctx)
+            self._is_checkpoint_recompute(seq_ctx)
             and layer.layer_idx not in cache.released_sources
             and residency.has_cache(seq_ctx, source_layer_idx)
         ):
+            # Top-k indices are discrete and need no autograd graph. Reentrant
+            # replay can reuse the original forward cache without rerunning the indexer.
             return residency.read(seq_ctx, source_layer_idx)
 
         if self._can_reuse_mtp_iteration_topk(seq_ctx, source_layer_idx, residency):
             return residency.read(seq_ctx, source_layer_idx)
 
         topk_indices = compute_source_topk()
-        if (
-            source_layer_idx in cache.mtp_iteration_reuse_sources
-            and not self._is_reentrant_checkpoint_recompute(seq_ctx)
-            and not _DSA_TOPK_NON_REENTRANT_RECOMPUTE.get()
-        ):
-            cache.mtp_iteration_source_compute_contexts.add((source_layer_idx, id(seq_ctx)))
         if layer.layer_idx not in cache.released_sources:
             residency.store_gpu(seq_ctx, layer.layer_idx, topk_indices)
         return topk_indices
@@ -341,8 +313,6 @@ class CrossLayerTopKSharingRuntime:
         if not isinstance(self._residency(), ActivationOffloadedTopKResidency):
             return
         source_layer_idx = layer.source_layer_idx
-        if self._should_recompute_mtp_iteration_source(seq_ctx, source_layer_idx):
-            return
         if source_layer_idx not in seq_ctx.dsa_topk_cache.offloaded:
             return
         self._offloaded_residency.prefetch(seq_ctx, source_layer_idx)
@@ -375,24 +345,8 @@ class CrossLayerTopKSharingRuntime:
     def _is_checkpoint_original_forward(self, layer: DSATopKSharingLayerProtocol) -> bool:
         return layer.training and not torch.is_grad_enabled()
 
-    def _is_reentrant_checkpoint_recompute(self, seq_ctx: SequenceContext) -> bool:
-        return seq_ctx.dsa_topk_cache.checkpoint_active and torch.is_grad_enabled()
-
     def _is_checkpoint_recompute(self, seq_ctx: SequenceContext) -> bool:
-        cache = seq_ctx.dsa_topk_cache
-        return self._is_reentrant_checkpoint_recompute(seq_ctx) or (
-            _DSA_TOPK_NON_REENTRANT_RECOMPUTE.get() and bool(cache.mtp_iteration_reuse_sources)
-        )
-
-    def _should_recompute_mtp_iteration_source(self, seq_ctx: SequenceContext, source_layer_idx: int) -> bool:
-        return (
-            _DSA_TOPK_NON_REENTRANT_RECOMPUTE.get()
-            and (
-                source_layer_idx,
-                id(seq_ctx),
-            )
-            in seq_ctx.dsa_topk_cache.mtp_iteration_source_compute_contexts
-        )
+        return seq_ctx.dsa_topk_cache.checkpoint_active and torch.is_grad_enabled()
 
     def _can_reuse_mtp_iteration_topk(
         self,
@@ -416,11 +370,6 @@ class CrossLayerTopKSharingRuntime:
         remaining -= 1
         if remaining <= 0:
             seq_ctx.dsa_topk_cache.mtp_iteration_recompute_remaining.pop(source_layer_idx, None)
-            seq_ctx.dsa_topk_cache.mtp_iteration_source_compute_contexts = {
-                key
-                for key in seq_ctx.dsa_topk_cache.mtp_iteration_source_compute_contexts
-                if key[0] != source_layer_idx
-            }
             return True
 
         seq_ctx.dsa_topk_cache.mtp_iteration_recompute_remaining[source_layer_idx] = remaining
