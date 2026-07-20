@@ -5,30 +5,11 @@ import torch.nn as nn
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from torch import distributed as dist
-from torch.distributed._functional_collectives import all_reduce
 
 from xtuner.v1.utils.device import get_device
 
 
 DEVICE = get_device()
-
-
-class _AllReduce(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, op, group, tensor):
-        ctx.group = group
-        ctx.op = op
-        tensor = tensor.clone(memory_format=torch.contiguous_format)
-        tensor = all_reduce(tensor, op, group=group)
-        return tensor
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return (None, None) + (_AllReduce.apply(ctx.op, ctx.group, grad_output),)
-
-
-def all_reduce_autograd(tensor, op, group):
-    return _AllReduce.apply(op, group, tensor)
 
 
 class BalancingLossConfig(BaseModel):
@@ -84,6 +65,8 @@ class BalancingLossContext(nn.Module):
         # Per-layer differentiable accumulator. tokens_per_expert is owned by AuxLossContext
         # and passed in at finalize() time to avoid duplicate storage / duplicate all_reduce.
         self.routing_weights_sum_list: list[torch.Tensor] = []
+        # Detached per-rank display value set by finalize(), returned by calibrate().
+        self._calibrated: torch.Tensor | None = None
 
     @staticmethod
     def build_batches(
@@ -139,34 +122,61 @@ class BalancingLossContext(nn.Module):
             non_pad_token (int): Number of non-padding tokens on this rank.
 
         Returns:
-            torch.Tensor: Final balancing loss.
+            torch.Tensor: This rank's balancing loss carrying the autograd graph for backward. Under
+            reduce-sum it is computed from this rank's own ``local_gating_sum`` with global detached
+            statistics; cross-rank aggregation happens on the gradients (FSDP / scale_and_reduce_grad
+            SUM), so summing over ranks reproduces the global balancing loss. The per-rank display
+            value is computed separately by ``calibrate()`` from local statistics.
         """
         routing_weights_sum_list = self.routing_weights_sum_list
         self.routing_weights_sum_list = []
         if self.loss_cfg.balancing_loss_alpha == 0 or not routing_weights_sum_list:
-            return torch.tensor(0.0, device=tokens_per_expert_local.device, dtype=torch.float32)
+            self._calibrated = torch.tensor(0.0, device=tokens_per_expert_local.device, dtype=torch.float32)
+            return self._calibrated
 
         local_gating_sum = torch.stack(routing_weights_sum_list, dim=0)
+        alpha = self.loss_cfg.balancing_loss_alpha
 
         if self.loss_cfg.balancing_loss_global_average and dist.is_initialized():
-            group = dist.group.WORLD
-            assert group is not None
             tokens_global = tokens_per_expert_global.sum(-1)
             seqlen_global = tokens_global // num_experts_per_tok
-
-            routing_weights_sum_global = all_reduce_autograd(local_gating_sum, "sum", group)
-            routing_weights_mean_global = routing_weights_sum_global / seqlen_global.unsqueeze(-1)
             scale_global = n_routed_experts / tokens_global
-            tokens_per_expert_for_loss = tokens_per_expert_global
+            routing_weights_mean = local_gating_sum / seqlen_global.unsqueeze(-1)
+            loss_vec = scale_global * (tokens_per_expert_global * routing_weights_mean).sum(-1)
         else:
             valid_tokens = max(non_pad_token, 1)
             scale_global = n_routed_experts / (valid_tokens * num_experts_per_tok)
             routing_weights_mean_global = local_gating_sum / valid_tokens
-            tokens_per_expert_for_loss = tokens_per_expert_local
+            loss_vec = scale_global * (tokens_per_expert_local * routing_weights_mean_global).sum(-1)
 
-        loss = scale_global * (tokens_per_expert_for_loss * routing_weights_mean_global).sum(-1)
-        loss = loss.sum() * self.loss_cfg.balancing_loss_alpha
-        return loss / self._batch_size
+        loss = loss_vec.sum() * alpha / self._batch_size
+        # Display value (detached, no all_reduce): this rank's balancing loss from LOCAL statistics
+        # (its own tokens_per_expert / seqlen), a readable per-rank number. This is a display-only
+        # computation, NOT a backward mode -- it does not reintroduce the removed non-global averaging.
+        self._calibrated = self._local_balancing_loss(
+            local_gating_sum, tokens_per_expert_local, n_routed_experts, num_experts_per_tok, non_pad_token
+        )
+        return loss
+
+    def _local_balancing_loss(
+        self,
+        local_gating_sum: torch.Tensor,
+        tokens_per_expert_local: torch.Tensor,
+        n_routed_experts: int,
+        num_experts_per_tok: int,
+        non_pad_token: int,
+    ) -> torch.Tensor:
+        valid_tokens = max(non_pad_token, 1)
+        scale_local = n_routed_experts / (valid_tokens * num_experts_per_tok)
+        routing_weights_mean_local = local_gating_sum.detach() / valid_tokens
+        loss = scale_local * (tokens_per_expert_local * routing_weights_mean_local).sum(-1)
+        return (loss.sum() * self.loss_cfg.balancing_loss_alpha / self._batch_size).detach()
+
+    def calibrate(self) -> torch.Tensor:
+        """This rank's balancing loss (from local statistics) for display
+        (detached, no all_reduce)."""
+        assert self._calibrated is not None, "finalize() must be called before calibrate()"
+        return self._calibrated
 
     @property
     def batch_size(self) -> int:
@@ -215,11 +225,13 @@ class ZLossContext(nn.Module):
         self.loss_cfg = loss_cfg
         self.loss_kwargs = loss_kwargs
         self._batch_size = 1
-        # Z-loss is folded into a running detached scalar for logging only. The differentiable
-        # per-layer scalar is injected back into the main forward graph via AuxLossScaler at
-        # accumulate() time, so we never need to keep per-layer logsum tensors around. This is
-        # the memory-saving pattern adapted from Megatron's MoEAuxLossAutoScaler.
+        # Z-loss is backward-only: the differentiable per-layer scalar is injected into the main graph
+        # via AuxLossScaler at accumulate() time (memory-saving pattern from Megatron's
+        # MoEAuxLossAutoScaler). For display we self-maintain a single detached running scalar holding
+        # THIS RANK's z-loss mean (the raw `logsumexp^2` mean per layer, without the reduce-sum
+        # `num_tokens_local/denom_global` factor), i.e. a clean world-size-independent per-rank value.
         self._running_loss_for_log: torch.Tensor | None = None
+        self._calibrated: torch.Tensor | None = None
 
     @staticmethod
     def build_batches(
@@ -245,7 +257,6 @@ class ZLossContext(nn.Module):
         router_logits: torch.Tensor,
         num_tokens_local: int,
         num_tokens_global: torch.Tensor | None,
-        world_size: int,
     ) -> torch.Tensor:
         """Compute z-loss for one layer and return it as a scalar with autograd
         attached.
@@ -263,8 +274,6 @@ class ZLossContext(nn.Module):
             num_tokens_global (torch.Tensor | None): All-reduced non-padding token count across
                 ranks, as an int64 scalar tensor. ``None`` when ``z_loss_global_average`` is off
                 or the process group is not initialized.
-            world_size (int): Number of ranks contributing to ``num_tokens_global``. Ignored when
-                ``num_tokens_global`` is ``None``.
 
         Returns:
             torch.Tensor: Per-layer z-loss as a 0-d tensor with autograd graph back to
@@ -276,30 +285,41 @@ class ZLossContext(nn.Module):
             return zero
 
         denom_local = max(num_tokens_local, 1)
-        loss = torch.logsumexp(router_logits, dim=-1).square().sum() / denom_local
+        base = torch.logsumexp(router_logits, dim=-1).square().sum() / denom_local
 
+        loss = base
         if self.loss_cfg.z_loss_global_average and num_tokens_global is not None:
-            # Equivalent to scaling each layer's local loss by num_tokens_local * world_size /
-            # num_tokens_global, matching the original list-based finalize formula.
+            # Under reduce-sum gradients the injected z-loss stays as this rank's local component
+            # (its share of the global-average z-loss, WITHOUT any `× world_size`). Cross-rank
+            # aggregation happens on the gradients via the FSDP SUM reduce-scatter; summing this
+            # local component over ranks reproduces the global z-loss.
             denom_global = torch.clamp(num_tokens_global, min=1)
-            loss = loss * num_tokens_local * world_size / denom_global
+            loss = base * num_tokens_local / denom_global
 
         loss = loss * self.loss_cfg.z_loss_alpha / self._batch_size
-        self._update_running(loss.detach())
+        # Display value: this rank's raw z-loss mean (drop the `num_tokens_local/denom_global`
+        # reduce-sum factor), which is world-size independent and readable per rank.
+        self._update_running((base * self.loss_cfg.z_loss_alpha / self._batch_size).detach())
         return loss
 
     def finalize(self) -> torch.Tensor:
-        """Return the accumulated z-loss as a detached scalar for logging only.
+        """Return this rank's accumulated z-loss mean as a detached scalar for
+        the output field.
 
-        The differentiable contribution has already been injected into the main forward graph at
-        each ``accumulate()`` call, so this value carries no autograd graph; it exists purely to
-        populate the logging field on the model output.
+        The differentiable contribution was injected into the main graph at each ``accumulate()``
+        call, so this value carries no autograd graph. It is this rank's own z-loss mean (no
+        cross-rank all_reduce); ``calibrate()`` returns the same value for the display pipeline.
         """
         value = self._running_loss_for_log
         self._running_loss_for_log = None
-        if value is None:
-            return torch.tensor(0.0, device=DEVICE, dtype=torch.float32)
-        return value
+        self._calibrated = value if value is not None else torch.tensor(0.0, device=DEVICE, dtype=torch.float32)
+        return self._calibrated
+
+    def calibrate(self) -> torch.Tensor:
+        """This rank's z-loss mean for display (detached, no cross-rank
+        all_reduce)."""
+        assert self._calibrated is not None, "finalize() must be called before calibrate()"
+        return self._calibrated
 
     def _update_running(self, value: torch.Tensor) -> None:
         if self._running_loss_for_log is None:

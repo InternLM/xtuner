@@ -1,12 +1,14 @@
 import os
 import re
+from typing import cast
 
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.loss import LMHeadLossContext
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 
-from .moe import MoELossContextDict, MoEModelOutputs
+from .moe import MoELossContextDict, MoEModelOutputs, _build_calibrated_losses
 from .qwen3 import Qwen3MoE, Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
 
 
@@ -148,7 +150,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
         # Hoisted out of the per-layer accumulate path: mask is constant across layers.
         nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
         non_pad_token = nonpad_indices.numel()
-        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
+        num_tokens_global = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
 
         # =====================================================
         deepstack_visual_embeds = seq_ctx.deepstack_visual_embeds
@@ -196,7 +198,6 @@ class Qwen3VLTextMoE(Qwen3MoE):
                     z_ctx=z_ctx,
                     num_tokens_local=non_pad_token,
                     num_tokens_global=num_tokens_global,
-                    world_size=z_world_size,
                 )
 
             if deepstack_visual_embeds is not None and ((idx := int(idx)) in range(len(deepstack_visual_embeds))):
@@ -215,16 +216,20 @@ class Qwen3VLTextMoE(Qwen3MoE):
         output["logits"] = logits
         output["extra_info"] = extra_info
 
-        balancing_loss, z_loss, tokens_per_expert_global = self.aux_loss.finalize(
+        aux_out = self.aux_loss.finalize(
             balancing_ctx=balancing_ctx,
             z_ctx=z_ctx,
             non_pad_token=non_pad_token,
         )
-        if balancing_loss is not None:
-            output["balancing_loss"] = balancing_loss
-        if z_loss is not None:
-            output["z_loss"] = z_loss
-        output["tokens_per_expert_global"] = tokens_per_expert_global
+        if aux_out["balancing_loss"] is not None:
+            output["balancing_loss"] = aux_out["balancing_loss"]
+        if aux_out["z_loss"] is not None:
+            output["z_loss"] = aux_out["z_loss"]
+        output["tokens_per_expert_global"] = aux_out["tokens_per_expert_global"]
+        if lm_loss_ctx is not None:
+            output["calibrated_losses"] = _build_calibrated_losses(
+                cast(LMHeadLossContext, lm_loss_ctx).calibrate(), balancing_ctx, z_ctx, None
+            )
 
         if keep_router:
             # TODO: Moving router logits to CPU is costly.

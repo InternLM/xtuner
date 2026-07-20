@@ -216,7 +216,10 @@ class TrainEngine:
         micro_batch_results = []
 
         data_batch_info = self.model.pre_micro_batch_forward(data_batches)
-        total_loss = torch.tensor(0.0, device=DEVICE)
+        # Display total loss: sum of every loss term's per-rank display value (from each loss ctx's
+        # calibrate(), stored on output.calibrated_losses) across micro-batches -- NO cross-rank
+        # all_reduce, so each rank reports its own loss (equal to the global loss at world size 1).
+        display_total_loss = torch.tensor(0.0, device=DEVICE)
 
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             ProberList.set_micro_batch_iter(micro_batch_iter)
@@ -240,12 +243,13 @@ class TrainEngine:
 
             loss = self._get_total_loss(output)
             loss.backward()
-            total_loss += loss.detach()
+            for value in (output.calibrated_losses or {}).values():
+                display_total_loss += value.detach().float()
             # call dump_forward_records after backward to record the recomputed activations
             ProberList.after_micro_iter_forward()
 
         batch_forward_info = self.model.post_micro_batch_forward(micro_batch_results)
-        return TrainStepInfo(total_loss=total_loss.item(), **data_batch_info, **batch_forward_info)
+        return TrainStepInfo(total_loss=display_total_loss.item(), **data_batch_info, **batch_forward_info)
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):
         self.model.from_hf(hf_path=hf_path, strict=strict)

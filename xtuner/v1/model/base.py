@@ -404,6 +404,10 @@ class ModelOutputs(PydanticBaseModel):
     logits: torch.Tensor | None = None
     loss: torch.Tensor | None = None  # TODO: `forward_only` mode for RL
     extra_info: ModelForwardExtraLogInfo | dict | None = None  # TODO: `forward_only` mode for RL
+    # Detached per-rank display value per loss term (from each loss ctx's ``calibrate()``), keyed by
+    # the loss name (e.g. ``"llm_loss"``, ``"balancing_loss"``). Aggregated per-rank for logging with
+    # NO cross-rank all_reduce; each rank displays its own loss.
+    calibrated_losses: dict[str, torch.Tensor] | None = None
 
     def free_nongrad_feature(self):
         """Release large intermediate tensors not needed for backward or
@@ -576,7 +580,31 @@ class BaseModel(nn.Module):
         return loaded_keys, unloaded_keys, missing_keys
 
     def scale_and_reduce_grad(self):
-        return
+        # Params excluded from FSDP sharding (e.g. fp32 ``ignored_params`` matched by
+        # ``fp32_keys_pattern``) are distributed as ``Replicate`` DTensors, so they get no
+        # reduce-scatter. Under reduce-sum their gradient is this rank's local component; without a
+        # cross-rank reduction the replicated copies would carry different grads and diverge. SUM
+        # (no divide) their grads over the replicate group here. FSDP-sharded params are handled by
+        # the reduce-scatter and are skipped (no Replicate placement).
+        self._reduce_replicated_ignored_grads(self.trainable_parameters())
+
+    def _reduce_replicated_ignored_grads(self, params: Iterable[tuple[str, nn.Parameter]]) -> None:
+        # Bucket grads by the process group of each Replicate mesh dim, then issue one coalesced SUM
+        # all_reduce per group. Meshes are indexed by dim (not name): fp32 ignored params land on an
+        # unnamed 1D world mesh, so a name-based lookup would fail. A param replicated on multiple mesh
+        # dims is reduced over each dim's group in turn, which sums it over the full product of ranks.
+        grads_by_group: dict[dist.ProcessGroup, list[torch.Tensor]] = {}
+        for _, param in params:
+            if param.grad is None or not isinstance(param, DTensor):
+                continue
+            grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+            for dim, placement in enumerate(param.placements):
+                if isinstance(placement, Replicate):
+                    grads_by_group.setdefault(param.device_mesh.get_group(dim), []).append(grad)
+        for group, grads in grads_by_group.items():
+            with dist._coalescing_manager(group=group):
+                for grad in grads:
+                    dist.all_reduce(grad, dist.ReduceOp.SUM, group=group)
 
     def to_hf_key_list(self, key: str) -> list[str]:
         raise NotImplementedError()
@@ -584,6 +612,41 @@ class BaseModel(nn.Module):
     def trainable_parameters(self):
         params = [(name, param) for name, param in self.named_parameters() if param.requires_grad]
         return params
+
+    def set_gradient_reduce_sum(self) -> None:
+        """Switch every sharded ``FSDPModule`` under this model to pure SUM
+        gradient reduction.
+
+        FSDP2 reduce-scatters gradients with ``ReduceOp.AVG`` (divide by the sharding group size)
+        by default. This helper sets the gradient divide factor to 1 and forces plain
+        ``ReduceOp.SUM`` communication, so the reduce-scatter accumulates each rank's local-component
+        gradient without any division.
+
+        The two calls must be paired. Setting only the divide factor routes FSDP through
+        ``_make_nccl_premul_sum(1 / factor)``, whose NCCL PreMulSum silently reduces bf16 gradients to
+        all-zeros on torch 2.10; ``set_force_sum_reduction_for_comms(True)`` instead keeps a plain
+        ``ReduceOp.SUM`` that is exact in bf16 without upcasting the reduction dtype.
+
+        ``fully_shard`` wraps modules in place, so nested sharded children remain reachable through
+        ``self.modules()``; one root-level pass therefore covers every layer sharded during
+        ``fully_shard``.
+        """
+        if not (
+            hasattr(FSDPModule, "set_gradient_divide_factor")
+            and hasattr(FSDPModule, "set_force_sum_reduction_for_comms")
+        ):
+            raise RuntimeError(
+                "set_gradient_reduce_sum requires the FSDP2 gradient-reduction APIs "
+                "`FSDPModule.set_gradient_divide_factor` and `FSDPModule.set_force_sum_reduction_for_comms`, "
+                "available since torch 2.10. The installed torch does not expose them, and falling back to "
+                "`set_gradient_divide_factor` alone would silently zero bf16 gradients."
+            )
+        for module in self.modules():
+            if isinstance(module, FSDPModule):
+                # torch < 2.10 type stubs do not declare these FSDP2 setters; guarded by the
+                # hasattr check above, they exist at runtime on torch >= 2.10.
+                module.set_gradient_divide_factor(1.0)  # type: ignore[operator]
+                module.set_force_sum_reduction_for_comms(True)  # type: ignore[operator]
 
     def fully_shard(
         self,
@@ -621,6 +684,10 @@ class BaseModel(nn.Module):
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
+        # Reduce-scatter gradients with pure SUM (no divide). Combined with the loss forwards no
+        # longer injecting x world_size, each param's gradient is the sum of per-rank local-component
+        # gradients, i.e. the global loss gradient. Covers nested/child FSDP modules via self.modules().
+        self.set_gradient_reduce_sum()
         return self
 
     def _fully_shard(
@@ -1305,41 +1372,33 @@ class BaseModel(nn.Module):
 
     def post_micro_batch_forward(self, batch_outputs: Sequence[ModelOutputs]) -> BatchForwardInfo:
         train_engine_extra_info = ModelForwardExtraLogInfo()
-
-        local_total_loss = torch.tensor(0.0, device=DEVICE)
-        reduced_other_losses: dict[str, float] = {}
-
+        logs_info = self.reduce_display_losses(batch_outputs)
         for output in batch_outputs:
-            output_copy = output.model_copy()
-            for name in output_copy.model_fields:
-                obj = getattr(output_copy, name)
-                if "loss" in name and isinstance(obj, torch.Tensor):
-                    loss_item = obj.item()
-                    local_total_loss += loss_item
-                    reduced_name = f"reduced_{name}"
+            if "extra_info" in output:
+                train_engine_extra_info.append(output["extra_info"])
+        return BatchForwardInfo(logs_info=logs_info, extra_info=train_engine_extra_info)
 
-                    if reduced_name not in reduced_other_losses:
-                        reduced_other_losses[reduced_name] = loss_item
-                    else:
-                        reduced_other_losses[reduced_name] += loss_item
+    def reduce_display_losses(self, batch_outputs: Sequence[ModelOutputs]) -> dict[str, float]:
+        """Aggregate each loss term's per-rank display value across micro-
+        batches for logging.
 
-            if "extra_info" in output_copy:
-                extra_info = output["extra_info"]
-                train_engine_extra_info.append(extra_info)
+        Each loss context computes its own detached per-rank display value via ``calibrate()`` (this
+        rank's per-token / per-rank mean, no cross-rank all_reduce); the model forward stores those on
+        ``output.calibrated_losses``. Here we sum them over the step's micro-batches, so every rank
+        logs ITS OWN loss (equal to the global loss at world size 1). Subclasses may override.
 
-        for name, loss in reduced_other_losses.items():
-            tensor_loss = torch.tensor(loss, device=DEVICE)
-            dist.all_reduce(tensor_loss.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
-            reduced_other_losses[name] = tensor_loss.item()
+        Args:
+            batch_outputs (Sequence[ModelOutputs]): The per-micro-batch model outputs of one step.
 
-        if "reduced_loss" in reduced_other_losses:
-            reduced_other_losses["reduced_llm_loss"] = reduced_other_losses.pop("reduced_loss")
-
-        ret = BatchForwardInfo(
-            logs_info=reduced_other_losses,
-            extra_info=train_engine_extra_info,
-        )
-        return ret
+        Returns:
+            dict[str, float]: ``reduced_<name>`` -> this rank's display loss for each term.
+        """
+        summed: dict[str, torch.Tensor] = {}
+        for output in batch_outputs:
+            for name, value in (output.calibrated_losses or {}).items():
+                contribution = value.detach().float()
+                summed[name] = contribution if name not in summed else summed[name] + contribution
+        return {f"reduced_{name}": value.item() for name, value in summed.items()}
 
     def _get_save_dtype(self, name: str, dtype: torch.dtype) -> torch.dtype:
         patterns = self.config.hf_save_cfg.fp32_keys_pattern

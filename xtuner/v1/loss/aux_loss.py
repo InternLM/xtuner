@@ -3,8 +3,20 @@ import torch.nn as nn
 from pydantic import BaseModel, ConfigDict
 from torch import distributed as dist
 from torch.distributed._functional_collectives import all_reduce
+from typing_extensions import TypedDict
 
 from xtuner.v1.loss.moe_loss import BalancingLossContext, ZLossContext
+
+
+class AuxLossFinalizeOutput(TypedDict):
+    """Backward-relevant outputs of :meth:`AuxLossContext.finalize`.
+
+    Per-rank display values are not returned here; each loss context exposes them via ``calibrate()``.
+    """
+
+    balancing_loss: torch.Tensor | None
+    z_loss: torch.Tensor | None
+    tokens_per_expert_global: torch.Tensor
 
 
 class AuxLossScaler(torch.autograd.Function):
@@ -91,7 +103,6 @@ class AuxLossContext(nn.Module):
         z_ctx: list[ZLossContext] | ZLossContext | None = None,
         num_tokens_local: int = 0,
         num_tokens_global: torch.Tensor | None = None,
-        world_size: int = 1,
     ) -> torch.Tensor:
         """Accumulate routing statistics for one layer and inject z-loss into
         the main graph.
@@ -113,7 +124,6 @@ class AuxLossContext(nn.Module):
             num_tokens_global (torch.Tensor | None): All-reduced non-padding token count across
                 ranks (int64 scalar). Pass ``None`` when ``z_loss_global_average`` is off or no
                 process group is initialized.
-            world_size (int): World size that produced ``num_tokens_global``.
 
         Returns:
             torch.Tensor: ``hidden_states`` augmented with the per-layer z-loss autograd hook.
@@ -139,7 +149,6 @@ class AuxLossContext(nn.Module):
                 router_logits=selected_router_logits,
                 num_tokens_local=num_tokens_local,
                 num_tokens_global=num_tokens_global,
-                world_size=world_size,
             )
             hidden_states = AuxLossScaler.apply(hidden_states, z_loss_l)
 
@@ -151,15 +160,20 @@ class AuxLossContext(nn.Module):
         balancing_ctx: list[BalancingLossContext] | BalancingLossContext | None,
         z_ctx: list[ZLossContext] | ZLossContext | None,
         non_pad_token: int,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor]:
-        """Finalize split auxiliary losses and expert counts from runtime
-        state."""
+    ) -> "AuxLossFinalizeOutput":
+        """Finalize auxiliary losses and expert counts from runtime state.
+
+        Returns:
+            AuxLossFinalizeOutput: ``balancing_loss`` / ``z_loss`` carry the backward graph and the
+            globally reduced ``tokens_per_expert_global``. Per-rank display values are produced by
+            each context's ``calibrate()``, not returned here.
+        """
         tokens_per_expert_local, tokens_per_expert_global = self._cal_tokens_per_expert()
 
         balancing_loss: torch.Tensor | None = None
         balancing_list = _as_list(balancing_ctx)
         if balancing_list:
-            partials = [
+            losses = [
                 ctx.finalize(
                     tokens_per_expert_local=tokens_per_expert_local,
                     tokens_per_expert_global=tokens_per_expert_global,
@@ -169,15 +183,19 @@ class AuxLossContext(nn.Module):
                 )
                 for ctx in balancing_list
             ]
-            balancing_loss = partials[0] if len(partials) == 1 else torch.stack(partials).sum(dim=0)
+            balancing_loss = losses[0] if len(losses) == 1 else torch.stack(losses).sum(dim=0)
 
         z_loss: torch.Tensor | None = None
         z_list = _as_list(z_ctx)
         if z_list:
-            partials = [ctx.finalize() for ctx in z_list]
-            z_loss = partials[0] if len(partials) == 1 else torch.stack(partials).sum(dim=0)
+            z_losses = [ctx.finalize() for ctx in z_list]
+            z_loss = z_losses[0] if len(z_losses) == 1 else torch.stack(z_losses).sum(dim=0)
 
-        return balancing_loss, z_loss, tokens_per_expert_global
+        return AuxLossFinalizeOutput(
+            balancing_loss=balancing_loss,
+            z_loss=z_loss,
+            tokens_per_expert_global=tokens_per_expert_global,
+        )
 
     def _cal_tokens_per_expert(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Stack per-layer expert counts and produce both local and globally
