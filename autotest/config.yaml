@@ -26,32 +26,6 @@ default_config:
                 - HF_HUB_OFFLINE=1
 
 case: 
-    qwen3-5-sft-recompute:
-        -
-            type: sft
-            parameters:
-                config: autotest/config/qwen3_5_recompute.py
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                num_nodes: 2
-                cpus_per_task: 80
-                envs:
-                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/openhermes2_5_cleaned_openhermes2_5_cleaned_1_openai.jsonl
-                    - XTUNER_DETERMINISTIC=true
-            assert_info:
-                base_metric: qwen3-5-sft-recompute/tracker.jsonl
-                check_metrics:
-                    grad_norm: 0.02
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
-            timeout: 1500
-
     qwen3-5-sft-tp2:
         -
             type: sft
@@ -155,6 +129,33 @@ case:
                     lr: 0
             timeout: 1500
 
+    qwen3-5-sft-recompute:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_5_recompute.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                cpus_per_task: 80
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/openhermes2_5_cleaned_openhermes2_5_cleaned_1_openai.jsonl
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-5-sft-recompute/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.02
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1500
+
+
     qwen3-5-sft-fp8-vl:
         -
             type: sft
@@ -211,7 +212,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500
 
-            
+
     qwen3-5-sft-tp2-vl:
         -
             type: sft
