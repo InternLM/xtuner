@@ -273,14 +273,13 @@ class MoE(BaseModel):
         """Compute the cross-rank non-padding token count needed by the z-loss
         inline path.
 
-        Returns the global non-padding token count, or ``None`` (i.e. skip global averaging) when
-        there is no z-loss context, when the configured z-loss is not global-average, or when no
-        process group is initialized.
+        Returns the global non-padding token count, or ``None`` when there is no z-loss context or no
+        process group is initialized (single-process reference / eval, which is the world-size-1
+        case).
         """
         if z_ctx is None:
             return None
-        first = z_ctx[0] if isinstance(z_ctx, list) else z_ctx
-        if not first.loss_cfg.z_loss_global_average or not dist.is_initialized():
+        if not dist.is_initialized():
             return None
         n = torch.tensor(num_tokens_local, device=device, dtype=torch.int64)
         group = dist.group.WORLD
