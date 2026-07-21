@@ -196,6 +196,24 @@ class TestPPOMasks:
             [True, False],
         ]
 
+    def test_uniform_reward_group_can_train_actor(self) -> None:
+        action_masks = [torch.tensor([False, True, True]), torch.tensor([True, False])]
+        masks = build_group_loss_masks(
+            action_masks,
+            rewards=[1.0, 1.0],
+            train_actor_on_uniform_groups=True,
+        )
+
+        assert masks.is_uniform
+        assert [mask.tolist() for mask in masks.actor] == [
+            [False, True, True],
+            [True, False],
+        ]
+        assert [mask.tolist() for mask in masks.critic] == [
+            [False, True, True],
+            [True, False],
+        ]
+
     def test_uniform_reward_group_can_be_dropped_from_critic(self) -> None:
         action_masks = [torch.tensor([False, True]), torch.tensor([True, False])]
         masks = build_group_loss_masks(
@@ -277,6 +295,7 @@ class TestPPOConfig:
         config = PPOConfig()
 
         assert config.keep_uniform_groups is True
+        assert config.train_actor_on_uniform_groups is False
         assert config.max_truncated_per_group is None
 
     def test_negative_truncated_limit_is_rejected(self) -> None:

@@ -61,6 +61,7 @@ class PPOConfig(BaseModel):
     actor_num_passes: int = 1
     selection_seed: int = 0
     keep_uniform_groups: bool = True
+    train_actor_on_uniform_groups: bool = False
     max_truncated_per_group: int | None = None
 
     # Keep the current sampled-token surprisal heuristic for the Actor only.

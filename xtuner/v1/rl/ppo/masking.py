@@ -87,12 +87,14 @@ def build_group_loss_masks(
     *,
     critic_sample_eligible: Sequence[bool] | None = None,
     keep_uniform_groups: bool = True,
+    train_actor_on_uniform_groups: bool = False,
 ) -> GroupLossMasks:
     """Build independent Actor and Critic masks for one rollout group.
 
-    Uniform Actor groups are always masked from policy training. Critic
-    eligibility is independent, and uniform Critic groups are retained only
-    when ``keep_uniform_groups`` is enabled.
+    Uniform Actor groups are masked from policy training unless
+    ``train_actor_on_uniform_groups`` is enabled. Critic eligibility is
+    independent, and uniform Critic groups are retained only when
+    ``keep_uniform_groups`` is enabled.
 
     Args:
         action_masks (Sequence[torch.Tensor]): Per-trajectory controllable-action masks.
@@ -103,6 +105,8 @@ def build_group_loss_masks(
             eligibility. When omitted, it follows Actor eligibility for
             backward compatibility.
         keep_uniform_groups (bool): Whether uniform-reward groups train Critic.
+        train_actor_on_uniform_groups (bool): Whether uniform-reward groups
+            train Actor.
 
     Returns:
         GroupLossMasks: Actor masks, critic masks, and group-level eligibility metadata.
@@ -142,7 +146,7 @@ def build_group_loss_masks(
     unique_rewards = {float(rewards[idx]) for idx in actor_candidates}
     is_uniform = len(unique_rewards) < 2
     actor_masks = tuple(
-        mask if is_eligible and not is_uniform else torch.zeros_like(mask)
+        mask if is_eligible and (train_actor_on_uniform_groups or not is_uniform) else torch.zeros_like(mask)
         for mask, is_eligible in zip(bool_action_masks, eligible)
     )
     critic_candidates = [

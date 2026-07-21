@@ -1464,6 +1464,7 @@ class BaseRLTrainer:
                 actor_sample_eligible,
                 critic_sample_eligible=critic_sample_eligible,
                 keep_uniform_groups=ppo_cfg.keep_uniform_groups,
+                train_actor_on_uniform_groups=ppo_cfg.train_actor_on_uniform_groups,
             )
             uniform_groups += int(group_masks.is_uniform)
             nonuniform_groups += int(not group_masks.is_uniform)
