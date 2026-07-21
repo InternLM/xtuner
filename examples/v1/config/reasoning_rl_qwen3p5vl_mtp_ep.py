@@ -62,7 +62,7 @@ checkpoint_interval = 50
 evaluate_step = 5
 enable_initial_evaluate = os.environ.get("ENABLE_INITIAL_EVALUATE", False)
 train_ep_size=4
-swap_optimizer = os.environ.get("SWAP_OPTIMIZER", False).lower() in ("1", "true", "yes", "on")
+swap_optimizer = os.environ.get("SWAP_OPTIMIZER", "0").lower() in ("1", "true", "yes", "on")
 
 # 1. resources
 resources = AcceleratorResourcesConfig(

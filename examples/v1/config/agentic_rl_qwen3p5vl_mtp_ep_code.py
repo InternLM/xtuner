@@ -128,7 +128,7 @@ skip_load_weights = True
 checkpoint_interval = 50
 enable_initial_evaluate = os.environ.get("ENABLE_INITIAL_EVALUATE", False)
 evaluate_step = 5
-swap_optimizer = os.environ.get("SWAP_OPTIMIZER", False).lower() in ("1", "true", "yes", "on")
+swap_optimizer = os.environ.get("SWAP_OPTIMIZER", "0").lower() in ("1", "true", "yes", "on")
 
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
