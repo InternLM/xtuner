@@ -132,3 +132,18 @@ skip-magic-trailing-comma = false
 
 # Like Black, automatically detect the appropriate line ending.
 line-ending = "auto"
+
+[tool.pytest.ini_options]
+# Device markers gate whether a test can run on a given machine (`-m "not gpu"`
+# on a CPU box); `smoke` selects the fast wiring-only subset as a quick gate.
+# Intent (parity/correctness/smoke as a *class*) is expressed by the base class
+# and the class name, not by a marker — only `smoke` doubles as a selectable
+# marker because it has a real "run the fast subset" use.
+markers = [
+    "gpu: requires a CUDA device",
+    "npu: requires an Ascend NPU device",
+    "smoke: fast wiring/shape smoke test (no oracle)",
+]
+# `gpu` is the only custom marker used before this section; strict mode is safe
+# and turns a future typo'd marker into an error instead of a silent no-op.
+addopts = "--strict-markers"
