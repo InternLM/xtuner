@@ -82,6 +82,44 @@ class TestSparseAttn:
         # output is ~zero.
         assert out_nz.abs().max() < 1e-3
 
+    def test_backward_matches_dense(self) -> None:
+        # sparse_attn is a differentiable production kernel (pure PyTorch gather
+        # + softmax), so it owns a backward test, not just forward. With a
+        # full top-k the gather path must produce the same gradients as the
+        # dense reference for all three differentiable inputs — q, kv, and the
+        # sink logit (the sink is dropped from the output but still shapes the
+        # softmax normaliser, so it carries a real gradient).
+        torch.manual_seed(4)
+        bsz, seq, num_heads, head_dim = 1, 8, 2, 16
+        t_total = seq
+        ref_inputs = (
+            torch.randn(bsz, seq, num_heads, head_dim, dtype=torch.float32),
+            torch.randn(bsz, t_total, head_dim, dtype=torch.float32),
+            torch.randn(num_heads, dtype=torch.float32),
+        )
+        ref_inputs = tuple(t.requires_grad_(True) for t in ref_inputs)
+        sparse_inputs = tuple(t.detach().clone().requires_grad_(True) for t in ref_inputs)
+
+        softmax_scale = head_dim**-0.5
+        topk_idxs = torch.arange(t_total).view(1, 1, t_total).expand(1, seq, t_total).contiguous().long()
+        cu = torch.tensor([0, seq], dtype=torch.int32)
+
+        out_dense = _dense_attention(ref_inputs[0], ref_inputs[1], ref_inputs[2], softmax_scale)
+        out_sparse = sparse_attn(sparse_inputs[0], sparse_inputs[1], sparse_inputs[2], topk_idxs, softmax_scale, cu)
+
+        grad_out = torch.randn_like(out_dense)
+        out_dense.backward(grad_out)
+        out_sparse.backward(grad_out)
+
+        names = ["grad_q", "grad_kv", "grad_attn_sink"]
+        for name, ref_t, sparse_t in zip(names, ref_inputs, sparse_inputs):
+            assert ref_t.grad is not None and sparse_t.grad is not None, f"{name} missing"
+            # Gather-vs-dense reductions reorder the same fp32 terms, so allow a
+            # small relative divergence rather than requiring bit-identity.
+            denom = ref_t.grad.abs().max().item() + 1e-9
+            rel = (ref_t.grad - sparse_t.grad).abs().max().item() / denom
+            assert rel < 1e-4, f"{name} rel diff {rel:.3e} too large"
+
     def test_masked_minus_one_ignored(self) -> None:
         # Marking half of topk_idxs as -1 should produce the same output as
         # running sparse_attn with the unmasked-half-only index list.

@@ -242,6 +242,34 @@ class TestDeepSeekSparseAttention:
             atol=0.0,
         )
 
+    @pytest.mark.parametrize("compress_ratio", [0, 4])
+    def test_backward_smoke(self, compress_ratio: int) -> None:
+        # Assembly-level smoke: the DSA block wires hc_pre → q/kv projections →
+        # (compressor/indexer) → sparse_attn → grouped O-LoRA, and the whole
+        # chain must run backward without error, not just forward. Correctness
+        # of each piece is owned by the op/module tests; this guards the wiring
+        # so a shape or dtype regression in the backward graph fails here rather
+        # than only in whole-model training. The Indexer produces integer top-k
+        # indices with no gradient path, so we assert grads on the always-in-path
+        # attention weights (wo_b) and on the hidden input instead.
+        hidden_size = 128
+        seq_len = 64
+        dsa = _make_dsa(compress_ratio=compress_ratio, hidden_size=hidden_size, sliding_window=16)
+
+        torch.manual_seed(3)
+        hidden = torch.randn(1, seq_len, hidden_size, dtype=torch.float32, requires_grad=True)
+        cos, sin = _make_position_embeddings(seq_len, dsa.qk_rope_head_dim)
+        cos_c, sin_c = _make_position_embeddings(seq_len, dsa.qk_rope_head_dim, base=160000.0)
+        pe_compressed = None if compress_ratio == 0 else (cos_c, sin_c)
+        seq_ctx = _make_seq_ctx([0, seq_len])
+
+        out = dsa(hidden, (cos, sin), pe_compressed, seq_ctx)
+        out["projected_output"].sum().backward()
+
+        assert hidden.grad is not None and torch.isfinite(hidden.grad).all()
+        assert dsa.wo_b.weight.grad is not None and torch.isfinite(dsa.wo_b.weight.grad).all()
+        assert dsa.wo_b.weight.grad.abs().sum().item() > 0.0
+
     def test_attn_sink_absorbs_mass(self) -> None:
         # If KV is exactly zero and the sink logit dominates, the softmax
         # routes all mass to the sink slot which is dropped from the output,
