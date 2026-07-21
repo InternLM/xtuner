@@ -32,14 +32,15 @@ from xtuner.v1.utils.device import get_device
 from xtuner.v1.utils.test_utils import init_data_mesh
 
 
-GLM5_2_TINY_MOE_PATH = Path(
-    os.environ.get("GLM5_2_TINY_MOE_PATH", "/mnt/shared-storage-user/zhaopenghao/slime0701/ckpts/GLM-5.2-tiny-4L")
-)
+GLM5_2_TINY_MOE_PATH = Path(os.environ["GLM5_2_TINY_MOE_PATH"])
 DEVICE = get_device()
 
 
 def _glm52_engine_config(dispatcher: str | None, ep_size: int) -> Glm52MoEConfig:
     cfg: Glm52MoEConfig = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
+    # These engine regressions isolate the base LM path; MTP training is covered
+    # separately by test_sequence_parallel_mtp_train_step.
+    cfg.mtp_config = None
     cfg.compile_cfg = False
     cfg.dispatcher = dispatcher
     cfg.ep_size = ep_size
@@ -158,7 +159,7 @@ def _run_tiny_engine_loss_curve(
     num_steps: int = 3,
 ) -> torch.Tensor:
     engine = _build_engine(dispatcher=dispatcher, ep_size=ep_size, float8_cfg=float8_cfg)
-    engine.from_hf(GLM5_2_TINY_MOE_PATH)
+    engine.from_hf(GLM5_2_TINY_MOE_PATH, strict=False)
     loss_cfg = CELossConfig()
     lr_cfg = LRConfig()
     warmup_steps = 1000 * lr_cfg.warmup_ratio
@@ -295,7 +296,7 @@ class TestGlm52MoEEngine(DeterministicDDPTestCase):
         self.create_pg(device)
 
         engine = _build_engine(dispatcher=dispatcher, ep_size=ep_size)
-        engine.from_hf(GLM5_2_TINY_MOE_PATH)
+        engine.from_hf(GLM5_2_TINY_MOE_PATH, strict=False)
         tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
         loss_cfg = CELossConfig()
         lr_cfg = LRConfig()
@@ -318,7 +319,7 @@ class TestGlm52MoEEngine(DeterministicDDPTestCase):
             # TODO: Replace this temporary baseline with the official GLM-5.2
             # engine-training reference once it is available.
             losses_ref = torch.tensor(
-                [12.5259, 12.5333, 12.5516, 12.5002, 12.4089, 12.3696, 11.9864, 11.8645, 10.7606, 10.3792]
+                [11.9815, 11.9940, 12.0483, 11.9849, 11.8578, 11.8326, 11.3845, 11.2681, 10.2004, 9.8985]
             )
             self._check_loss_curve(torch.tensor(losses), losses_ref)
         finally:
@@ -334,7 +335,7 @@ class TestGlm52MoEEngine(DeterministicDDPTestCase):
         self.create_pg(device)
 
         engine = _build_engine(dispatcher=dispatcher, ep_size=ep_size)
-        engine.from_hf(GLM5_2_TINY_MOE_PATH)
+        engine.from_hf(GLM5_2_TINY_MOE_PATH, strict=False)
         tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
         loss_cfg = CELossConfig()
 
@@ -415,7 +416,7 @@ class TestGlm52MoEEngine(DeterministicDDPTestCase):
         temp_dir = Path(syncdir[0])
         try:
             engine = _build_engine(dispatcher=None, ep_size=ep_size, hsdp_sharding_size=hsdp_sharding_size)
-            engine.from_hf(GLM5_2_TINY_MOE_PATH)
+            engine.from_hf(GLM5_2_TINY_MOE_PATH, strict=False)
             engine.save_hf(hf_dir=str(temp_dir), save_dtype=torch.bfloat16)
             dist.barrier()
             time.sleep(1)

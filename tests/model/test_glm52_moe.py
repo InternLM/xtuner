@@ -28,9 +28,7 @@ from xtuner.v1.utils.test_utils import init_data_mesh
 
 
 GLM5_2_MOE_PATH = os.environ["GLM5_2_MOE_PATH"]
-GLM5_2_TINY_MOE_PATH = Path(
-    os.environ.get("GLM5_2_TINY_MOE_PATH", "/mnt/shared-storage-user/zhaopenghao/slime0701/ckpts/GLM-5.2-tiny-4L")
-)
+GLM5_2_TINY_MOE_PATH = Path(os.environ["GLM5_2_TINY_MOE_PATH"])
 
 
 def _tiny_glm52_config() -> Glm52MoEConfig:
@@ -487,14 +485,21 @@ def test_tiny_glm52_hf_checkpoint_load_reports_loaded_missing_and_ignored_keys()
     loaded_keys, unloaded_keys, missing_keys = model.from_hf(GLM5_2_TINY_MOE_PATH, strict=False)
     ignored_hf_keys = set(checkpoint_loader.weight_map) - expected_hf_keys
 
-    assert config.num_hidden_layers == 4
+    assert config.num_hidden_layers == 5
     assert config.first_k_dense_replace == 3
+    assert config.mtp_config is not None
+    assert config.mtp_config.num_layers == 1
+    assert config.mtp_config.share_weights
     assert "layers.0.self_attn.indexer.wq_b.weight" in loaded_keys
     assert "layers.1.self_attn.indexer.wk.weight" in loaded_keys
     assert "layers.2.self_attn.indexer.weights_proj.weight" in loaded_keys
     assert "layers.3.self_attn.indexer.wq_b.weight" not in model.state_dict()
+    assert "layers.4.self_attn.indexer.wq_b.weight" not in model.state_dict()
     assert "layers.3.experts.fused_w1w3.weight" in loaded_keys
     assert "layers.3.experts.fused_w2.weight" in loaded_keys
+    assert "layers.4.experts.fused_w1w3.weight" in loaded_keys
+    assert "mtp_block.layers.0.decoder_layer.self_attn.indexer.wq_b.weight" in loaded_keys
+    assert "mtp_block.layers.0.decoder_layer.experts.fused_w1w3.weight" in loaded_keys
     assert unloaded_keys == set()
     assert missing_keys == set()
     assert ignored_hf_keys == set()
@@ -506,12 +511,18 @@ def test_tiny_glm52_native_forward_matches_hf_numeric_oracle():
     input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
 
     hf_model = load_glm52_hf_oracle_model(GLM5_2_TINY_MOE_PATH)
+    hf_pre_norm_hidden_states = []
+    hf_pre_norm_hook = hf_model.model.norm.register_forward_pre_hook(
+        lambda _module, args: hf_pre_norm_hidden_states.append(args[0].detach().cpu())
+    )
     try:
         with torch.no_grad():
             hf_logits = hf_model(input_ids=input_ids, use_cache=False).logits.detach().cpu()
     finally:
+        hf_pre_norm_hook.remove()
         del hf_model
         torch.cuda.empty_cache()
+    assert len(hf_pre_norm_hidden_states) == 1
 
     with torch.device("meta"):
         config = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
@@ -520,6 +531,10 @@ def test_tiny_glm52_native_forward_matches_hf_numeric_oracle():
         config.ep_size = 1
         model = config.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
+    native_pre_norm_hidden_states = []
+    native_pre_norm_hook = model.norm.register_forward_pre_hook(
+        lambda _module, args: native_pre_norm_hidden_states.append(args[0].detach().cpu())
+    )
     try:
         model.from_hf(GLM5_2_TINY_MOE_PATH)
         model.eval()
@@ -530,10 +545,35 @@ def test_tiny_glm52_native_forward_matches_hf_numeric_oracle():
             output = model(seq_ctx=seq_ctx, loss_ctx=None)
 
         native_logits = output["logits"].detach().to(hf_logits.dtype).cpu()
-        # HF expands K/V and runs dense attention, while native uses absorbed MLA.
-        # They are mathematically equivalent, but bf16 accumulates in different
-        # matmul orders, so keep torch.testing's bf16 rtol and allow the observed
-        # logit-scale absolute drift from that accumulation difference.
+        assert len(native_pre_norm_hidden_states) == 1
+        torch.testing.assert_close(
+            native_pre_norm_hidden_states[0],
+            hf_pre_norm_hidden_states[0],
+            rtol=1.6e-2,
+            atol=1e-3,
+        )
+
+        # Diagnostic baseline for the default GLM-5.2-30B-MTP-new checkpoint:
+        #
+        #   Position             Max absolute error
+        #   Embedding                            0
+        #   Decoder layer 0                3.66e-4
+        #   Decoder layer 1/2              4.88e-4
+        #   Decoder layer 3/4              9.77e-4
+        #   Final RMSNorm                     0.125
+        #   Logits                            0.125
+        #
+        # The three DSA source layers select exactly the same effective top-k for
+        # every query. Feeding the HF norm output directly to the native LM head
+        # also produces bitwise-equal logits, ruling out weight mapping and LM-head
+        # errors. Decoder error grows smoothly instead of jumping at one layer.
+        # The final RMSNorm input RMS is only 0.0087-0.0134, so normalization
+        # amplifies the preceding 1e-3 BF16 drift by roughly 70-110x. HF uses
+        # expanded K/V BF16 attention, while native SparseMLA uses absorbed MLA
+        # and accumulates scores and values in FP32 at
+        # xtuner/v1/ops/sparse_mla/pytorch.py:39. These paths are mathematically
+        # equivalent but have different accumulation orders. Keep a strict check
+        # on pre-norm hidden states above and allow the resulting logit-scale drift.
         torch.testing.assert_close(native_logits, hf_logits, rtol=1.6e-2, atol=1e-1)
         assert sorted(seq_ctx.dsa_topk_cache.indices) == [0, 1, 2]
 
@@ -544,6 +584,7 @@ def test_tiny_glm52_native_forward_matches_hf_numeric_oracle():
             assert topk_indices.device.type == "cuda"
             assert (topk_indices == -1).any()
     finally:
+        native_pre_norm_hook.remove()
         del model
         torch.cuda.empty_cache()
 
