@@ -1,12 +1,14 @@
 import inspect
 from types import UnionType
-from typing import Union, get_args, get_origin
+from typing import Any, Callable, Union, get_args, get_origin
 
 import torch
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
+from torch.utils._pytree import tree_flatten, tree_unflatten
+from torch.utils.checkpoint import checkpoint
 
 from xtuner.v1.utils import copy_signature
 
@@ -90,3 +92,19 @@ def _check_signature_of_forward(module: nn.Module):
 def checkpoint_wrapper(module: nn.Module, *args, **kwargs):
     _check_signature_of_forward(module)
     return ptd_checkpoint_wrapper(module, *args, **kwargs)
+
+
+def pytree_reentrant_checkpoint(
+    function: Callable[..., torch.Tensor | tuple[torch.Tensor, ...]],
+    *args: Any,
+    **kwargs: Any,
+) -> torch.Tensor | tuple[torch.Tensor, ...]:
+    """Run reentrant checkpoint with every nested Tensor as an autograd
+    input."""
+    flat_inputs, input_spec = tree_flatten((args, kwargs))
+
+    def run_function(*replayed_flat_inputs: Any) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        replayed_args, replayed_kwargs = tree_unflatten(list(replayed_flat_inputs), input_spec)
+        return function(*replayed_args, **replayed_kwargs)
+
+    return checkpoint(run_function, *flat_inputs, use_reentrant=True)

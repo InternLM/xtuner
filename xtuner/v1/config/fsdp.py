@@ -18,6 +18,10 @@ class FSDPConfig(BaseModel):
     recompute_ratio: Annotated[float, Parameter(help="Gradient checkpointing ratio for memory optimization")] = 1.0
     vision_recompute_ratio: Annotated[float, Parameter(help="Recompute ratio for vision modules")] = 1.0
     checkpoint_preserve_rng_state: Annotated[bool, Parameter(help="Preserve RNG state during checkpointing")] = True
+    mtp_checkpoint_use_reentrant: Annotated[
+        bool,
+        Parameter(help="Use reentrant checkpointing for MTP layers"),
+    ] = True
     # Training-time FSDP CPU offload is version-sensitive for XTuner model configs
     # that keep selected fp32 trainable parameters outside FSDP via
     # fp32_keys_pattern. The Qwen3.5-VL MoE RL path was verified to run on Torch

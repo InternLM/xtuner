@@ -45,7 +45,12 @@ from xtuner.v1.model.base import (
     TorchCompileOption,
     TransformerConfig,
 )
-from xtuner.v1.model.utils import ModelForwardExtraLogInfo, checkpoint_wrapper, module_dict_repr
+from xtuner.v1.model.utils import (
+    ModelForwardExtraLogInfo,
+    checkpoint_wrapper,
+    module_dict_repr,
+    pytree_reentrant_checkpoint,
+)
 from xtuner.v1.module import (
     GatedDeltaNetConfig,
     GreedyRouterConfig,
@@ -1183,7 +1188,21 @@ class MoE(BaseModel):
                 if self._should_recompute(None, mtp_idx=mtp_idx) or (
                     self.config.mtp_config is not None and self.config.mtp_config.share_weights
                 ):  # share mtp head must recompute
-                    mtp_layer = checkpoint_wrapper(mtp_layer, checkpoint_impl=CheckpointImpl.REENTRANT)
+                    # Pytree flattening makes every nested Tensor a real
+                    # CheckpointFunction input, so all MTP micro-batches can use
+                    # the DSA lifecycle's native reentrant checkpoint mode.
+                    use_reentrant = self.fsdp_config.mtp_checkpoint_use_reentrant
+                    if use_reentrant:
+                        mtp_layer = checkpoint_wrapper(
+                            mtp_layer,
+                            checkpoint_impl=CheckpointImpl.REENTRANT,
+                            checkpoint_fn=pytree_reentrant_checkpoint,
+                        )
+                    else:
+                        mtp_layer = checkpoint_wrapper(
+                            mtp_layer,
+                            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+                        )
                 self.mtp_block.layers[mtp_idx] = mtp_layer
 
                 reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1
