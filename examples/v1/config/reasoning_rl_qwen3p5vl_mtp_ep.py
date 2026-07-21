@@ -61,6 +61,8 @@ hf_interval = 15
 checkpoint_interval = 50
 evaluate_step = 5
 enable_initial_evaluate = os.environ.get("ENABLE_INITIAL_EVALUATE", False)
+train_ep_size=4
+swap_optimizer = os.environ.get("SWAP_OPTIMIZER", False).lower() in ("1", "true", "yes", "on")
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
@@ -210,7 +212,7 @@ judger_config = ComposedJudgerConfig(
 # 5. train worker
 model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
 model_cfg.float8_cfg = None
-model_cfg.text_config.ep_size = 1
+model_cfg.text_config.ep_size = train_ep_size
 model_cfg.text_config.z_loss_cfg = None
 model_cfg.text_config.balancing_loss_cfg = None
 model_cfg.text_config.freeze_routers = True
@@ -221,7 +223,7 @@ model_cfg.text_config.mtp_config = MTPConfig(
     detach_mtp_inputs=True,
     share_weights=True,
 )
-optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False)
+optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False, swap_optimizer=swap_optimizer)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(
         cliprange_high=0.28,
@@ -246,7 +248,7 @@ loss_cfg = GRPOLossConfig(
     ),
 )
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
-fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1, fp32_lm_head=True)
+fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=train_ep_size, fp32_lm_head=True)
 train_worker_cfg = WorkerConfig(
     model_cfg=model_cfg,
     load_from=model_path,
