@@ -62,7 +62,8 @@ hf_interval = 15
 checkpoint_interval = 50
 evaluate_step = 5
 enable_initial_evaluate = os.environ.get("ENABLE_INITIAL_EVALUATE", False)
-train_ep_size = 4
+train_ep_size=4
+swap_optimizer = os.environ.get("SWAP_OPTIMIZER", "0").lower() in ("1", "true", "yes", "on")
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
@@ -229,7 +230,7 @@ model_cfg.text_config.mtp_config = MTPConfig(
     detach_mtp_inputs=True,
     share_weights=True,
 )
-optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False)
+optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False, swap_optimizer=swap_optimizer)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(
         cliprange_high=0.28,

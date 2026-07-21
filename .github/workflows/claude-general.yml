@@ -123,7 +123,7 @@ jobs:
             const issue = context.payload.issue;
             const isPR = issue && issue.pull_request;
 
-            let author, headRef, headRepo;
+            let headRef, headRepo;
 
             if (isPR) {
               // This is a PR comment, fetch PR details
@@ -132,19 +132,21 @@ jobs:
                 repo: context.repo.repo,
                 pull_number: context.issue.number,
               });
-              author = pr.data.user.login;
               headRef = pr.data.head.ref;
               headRepo = pr.data.head.repo.full_name;
-            } else {
-              // This is a pure issue comment
-              author = issue.user.login;
             }
 
+            // Authenticate as the commenter, never as the PR/issue author. This job is reachable by
+            // anyone (allowed_non_write_users: "*"), so keying the PAT off the PR author would let an
+            // arbitrary commenter drive Claude with that author's push credentials. CONTRIBUTOR_PATS
+            // doubles as the authorization allowlist: an unlisted commenter must not reach Claude.
+            const commenter = context.payload.comment.user.login;
+
             const pats = JSON.parse(process.env.CONTRIBUTOR_PATS);
-            const token = pats[author];
+            const token = pats[commenter];
 
             if (!token) {
-              core.setFailed(`No PAT found for user: ${author}`);
+              core.setFailed(`No PAT found for user: ${commenter}`);
               return;
             }
 

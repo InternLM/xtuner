@@ -535,24 +535,24 @@ class TrainEngine:
                 options=set_options,
             )
 
-    def put_model_to_device(self, device: torch.device | str):
+    def put_model_to_device(self, device: torch.device | str) -> bool:
         """Put the model to the given device."""
         self.model.to_device(device)
-        return
+        return True
 
-    def put_optimizer_to_device(self, device: torch.device | str):
+    def put_optimizer_to_device(self, device: torch.device | str) -> bool:
         """Put the optimizer to the given device."""
-        if self.fsdp_cfg.cpu_offload or self.optim_cfg.swap_optimizer:
-            return
+        if getattr(self.optim_cfg, "swap_optimizer", False):
+            return False
         if not self.optimizer.state:
-            return
+            return False
         for state in self.optimizer.state.values():
             if isinstance(state, dict):
                 for key, val in state.items():
                     if isinstance(val, torch.Tensor):
                         state[key] = val.to(device, non_blocking=True)
         DEVICE_MODULE.synchronize()
-        return
+        return True
 
     def _maybe_precompute_float8_dynamic_scale_for_fsdp(self):
         for model in self.model.modules():

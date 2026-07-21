@@ -128,6 +128,7 @@ skip_load_weights = True
 checkpoint_interval = 50
 enable_initial_evaluate = os.environ.get("ENABLE_INITIAL_EVALUATE", False)
 evaluate_step = 5
+swap_optimizer = os.environ.get("SWAP_OPTIMIZER", "0").lower() in ("1", "true", "yes", "on")
 
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
@@ -232,6 +233,7 @@ optim_cfg = AdamWConfig(
     foreach=False,
     skip_grad_norm_threshold=5,
     eps=1e-15,
+    swap_optimizer=swap_optimizer,
 )
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(

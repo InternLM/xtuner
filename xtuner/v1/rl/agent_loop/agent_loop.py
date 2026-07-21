@@ -13,6 +13,9 @@ from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.constants import AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
+from xtuner.v1.rl.trace.rollout_api import (
+    trace_rollout_endpoint,
+)
 from xtuner.v1.rl.utils import (
     JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S,
     CPUActorLauncher,
@@ -204,6 +207,7 @@ class AgentLoop(ABC):
     @overload
     async def run_judger(self, rollout_state: list[RolloutState]) -> list[RolloutState]: ...
 
+    @trace_rollout_endpoint("judger.run")
     async def run_judger(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:
         assert self.judger is not None
         if isinstance(rollout_state, list):
