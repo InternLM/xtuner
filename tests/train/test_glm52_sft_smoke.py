@@ -169,6 +169,14 @@ class TestTinyGlm52SFTSmoke(DeterministicDDPTestCase):
             def record_loss(train_step_info, step, epoch, total_step, total_epoch) -> None:
                 loss = float(train_step_info["logs_info"]["reduced_llm_loss"])
                 assert math.isfinite(loss), f"loss must be finite, got {loss}"
+                global_tokens = torch.tensor(train_step_info["step_consumed_tokens"], device="cuda")
+                dist.all_reduce(global_tokens)
+                expected_mean = (
+                    global_tokens.item()
+                    * trainer_cfg.model_cfg.num_experts_per_tok
+                    / trainer_cfg.model_cfg.n_routed_experts
+                )
+                assert train_step_info["model_metrics"]["moe_load_balance/expert_tokens_mean"] == expected_mean
                 losses.append(loss)
 
             trainer_cfg.hooks_config = HooksConfig(after_train_step=record_loss)
@@ -190,7 +198,19 @@ class TestTinyGlm52SFTSmoke(DeterministicDDPTestCase):
                 hf_checkpoint = Path(trainer.meta.latest_exp.hf_checkpoint_list[0])
                 assert (hf_checkpoint / "config.json").exists()
                 assert (trainer.exp_dir / "hf-latest").exists()
-                assert (trainer.exp_dir / "logs" / "exp_tracking" / "rank0" / "tracker.jsonl").exists()
+                tracker_path = trainer.exp_dir / "logs" / "exp_tracking" / "rank0" / "tracker.jsonl"
+                assert tracker_path.exists()
+                tracker_records = [json.loads(line) for line in tracker_path.read_text().splitlines()]
+                assert len(tracker_records) == 3
+                for record in tracker_records:
+                    assert record["runtime_info/seqlen_tokens"] == 256
+                    assert record["runtime_info/seqlen_tgs"] >= record["runtime_info/tgs"]
+                    expert_loads = [
+                        record[f"moe_load_balance/expert_tokens_{stat}"]
+                        for stat in ("min", "p5", "p25", "median", "p75", "p95", "max")
+                    ]
+                    assert expert_loads == sorted(expert_loads)
+                    assert expert_loads[0] <= record["moe_load_balance/expert_tokens_mean"] <= expert_loads[-1]
             dist.barrier()
             completed = True
         finally:

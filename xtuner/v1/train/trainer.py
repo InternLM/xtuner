@@ -105,10 +105,12 @@ class ExpHistory(TypedDict):
 
 class PerformanceStatistics(TypedDict):
     local_step_consumed_tokens: int
+    local_step_seqlen_tokens: int
     local_step_consumed_img_tokens: int | None
     local_total_consumed_tokens: int
     approximate_total_consumed_tokens: int
     tgs: float
+    seqlen_tgs: float
     exp_tgs: float
     eta_seconds: float
     eta_hms: str
@@ -868,6 +870,7 @@ class Trainer:
             # Compute training metrics
             training_metrics = self._compute_performance_metrics(
                 local_step_consumed_tokens=step_tokens,
+                local_step_seqlen_tokens=train_step_info["step_seqlen_tokens"],
                 local_step_consumed_img_tokens=train_step_info.get("step_consumed_img_tokens"),
                 step_time=step_time,
             )
@@ -1627,6 +1630,7 @@ class Trainer:
     def _compute_performance_metrics(
         self,
         local_step_consumed_tokens: int,
+        local_step_seqlen_tokens: int,
         local_step_consumed_img_tokens: int | None,
         step_time: float,
     ) -> PerformanceStatistics:
@@ -1634,6 +1638,8 @@ class Trainer:
 
         Args:
             local_step_consumed_tokens (int): Tokens consumed in current step on current rank.
+            local_step_seqlen_tokens (int): Sequence slots processed in current step on current rank,
+                including soft-pack padding.
             local_step_consumed_img_tokens (int | None): Image tokens consumed in current step on current rank.
             step_time (float): Time spent on current training step in seconds.
 
@@ -1643,6 +1649,7 @@ class Trainer:
         e2e_train_time = self._train_time + self._train_time_offset
 
         tgs = local_step_consumed_tokens / step_time
+        seqlen_tgs = local_step_seqlen_tokens / step_time
         approximate_total_consumed_tokens = (
             self._init_total_tokens + self._local_total_consumed_tokens * self.world_size
         )
@@ -1659,10 +1666,12 @@ class Trainer:
 
         return PerformanceStatistics(
             local_step_consumed_tokens=local_step_consumed_tokens,
+            local_step_seqlen_tokens=local_step_seqlen_tokens,
             local_step_consumed_img_tokens=local_step_consumed_img_tokens,
             local_total_consumed_tokens=self._local_total_consumed_tokens,
             approximate_total_consumed_tokens=approximate_total_consumed_tokens,
             tgs=tgs,
+            seqlen_tgs=seqlen_tgs,
             exp_tgs=exp_tgs,
             eta_seconds=eta_seconds,
             eta_hms=eta_hms,
@@ -1695,6 +1704,9 @@ class Trainer:
         loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_logs_info.items()]
         loss_log_str = ", ".join(loss_log_list)
 
+        model_metrics = train_step_info.pop("model_metrics", {})
+        model_metrics_str = " ".join(f"{key}: {value:.1f}" for key, value in model_metrics.items())
+
         extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]
         extra_info_log_list = [f"{k}: {v:.4f}" for k, v in extra_info.get().items()]
         extra_info_str = ", ".join(extra_info_log_list)
@@ -1716,7 +1728,8 @@ class Trainer:
         self.logger.info(
             f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} "
             f"data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
-            f"text_tokens: {training_metrics['local_step_consumed_tokens']} {img_tokens_str}"
+            f"text_tokens: {training_metrics['local_step_consumed_tokens']} "
+            f"seqlen_tokens: {training_metrics['local_step_seqlen_tokens']} {img_tokens_str}"
             f"approximate_total_consumed_tokens: {training_metrics['approximate_total_consumed_tokens']} "
             f"{loss_log_str} "
             f"{data_info_str} "
@@ -1725,7 +1738,9 @@ class Trainer:
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
             f"tgs: {training_metrics['tgs']:.1f} "
+            f"seqlen_tgs: {training_metrics['seqlen_tgs']:.1f} "
             f"exp_tgs: {training_metrics['exp_tgs']:.1f} "
+            f"{model_metrics_str} "
             f"eta: {training_metrics['eta_hms']} "
         )
 
@@ -1736,14 +1751,17 @@ class Trainer:
             "time/train_time": round(self._train_time, 4),
             "time/eta_seconds": round(training_metrics["eta_seconds"], 1),
             "runtime_info/text_tokens": training_metrics["local_step_consumed_tokens"],
+            "runtime_info/seqlen_tokens": training_metrics["local_step_seqlen_tokens"],
             "runtime_info/approximate_total_consumed_tokens": training_metrics["approximate_total_consumed_tokens"],
             "runtime_info/tgs": training_metrics["tgs"],
+            "runtime_info/seqlen_tgs": training_metrics["seqlen_tgs"],
             "runtime_info/exp_tgs": training_metrics["exp_tgs"],
             "runtime_info/efficient_attn_ratio": train_step_info["efficient_attn_ratio"],
             "runtime_info/img_efficient_attn_ratio": train_step_info["img_efficient_attn_ratio"],
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
             "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
             "grad_norm": grad_norm,
+            **model_metrics,
             **flattened_internal_metrics,
         }
         log_scalars.update({f"loss/{k}": v for k, v in loss_logs_info.items()})
