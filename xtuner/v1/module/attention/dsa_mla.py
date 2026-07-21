@@ -266,8 +266,12 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         key_states = torch.cat([kv_compressed, k_pe.transpose(1, 2).squeeze(2)], dim=-1)
         key_states = key_states.squeeze(0).unsqueeze(1).contiguous()
 
-        # DSA has one compressed KV group. Gathering that small representation
-        # keeps every attention head local while exposing the full key sequence.
+        # Keep queries sequence-sharded instead of using MHA's Ulysses layout.
+        # DSA has only one compressed KV group, so head-to-sequence all-to-all
+        # would first have to replicate that group and would not reduce KV memory.
+        # Its top-k is also head-independent: every head shard would need the full
+        # [global_seq, 1, topk] cache, plus query/output all-to-all. Gathering only
+        # the small compressed KV keeps all heads and the large top-k cache local.
         key_states = gather_for_sequence_parallel(key_states, dim=0, sp_mesh=seq_ctx.sequence_parallel_mesh)
 
         topk_indices = get_dsa_topk_sharing_runtime().get_or_compute(
