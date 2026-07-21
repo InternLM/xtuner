@@ -7,6 +7,7 @@ import shutil
 import threading
 import time
 import traceback
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, List, cast
@@ -158,6 +159,7 @@ class TrainEngine:
         self.has_freeze_params = self.__has_freeze_params()
         self._async_checkpoint_pg: dist.ProcessGroup | None = None
         self._async_state_dict_cache: dict[str, Any] | None = None
+        self._grad_norm_observer: Callable[..., None] | None = None
 
     def __has_freeze_params(self) -> bool:
         has_freeze_params = False
@@ -253,6 +255,11 @@ class TrainEngine:
     def init_model_weights(self):
         self.model.init_weights()
 
+    def set_grad_norm_observer(self, observer: Callable[..., None] | None) -> None:
+        """Install an optional pre-clip observer; disabled by default."""
+
+        self._grad_norm_observer = observer
+
     @_no_grad
     def clip_grad_norm(self, do_clip: bool = True, dtype=torch.float32):
         ProberList.before_clip_grad_norm(self.model)
@@ -260,6 +267,8 @@ class TrainEngine:
         params = self.model.trainable_parameters()
         grads = [p.grad for _, p in params if p.grad is not None]
         grad_norm, grouped_grads = cal_grad_norm(grads, dtype=dtype)
+        if self._grad_norm_observer is not None:
+            self._grad_norm_observer(params=params, grad_norm=grad_norm)
         if do_clip:
             clip_coef = self.optim_cfg.max_grad_norm / (grad_norm + 1e-6)
             clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
