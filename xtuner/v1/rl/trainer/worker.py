@@ -92,6 +92,52 @@ def calculate_entropy(
     return avg_sum_entropy
 
 
+def calculate_actor_global_flat_ev(
+    advantages_list: Sequence[torch.Tensor],
+    old_values_list: Sequence[torch.Tensor],
+    masks_list: Sequence[torch.Tensor],
+    *,
+    contribute: bool = True,
+    distributed: bool = True,
+    eps: float = 1e-12,
+) -> float | None:
+    """Compute globally flattened EV from raw Actor GAE targets."""
+    if not (len(advantages_list) == len(old_values_list) == len(masks_list)):
+        raise ValueError("advantages, old values, and masks must contain the same number of tensors.")
+
+    # count, sum(A), sum(A^2), sum(G), sum(G^2), where G = A + V.
+    stats = torch.zeros(5, dtype=torch.float64)
+    if contribute:
+        for advantages, old_values, mask in zip(advantages_list, old_values_list, masks_list):
+            if not (advantages.shape == old_values.shape == mask.shape):
+                raise ValueError("advantages, old values, and masks must have identical shapes.")
+            valid_mask = mask.bool()
+            valid_advantages = advantages.masked_select(valid_mask).to(dtype=torch.float64)
+            valid_returns = valid_advantages + old_values.masked_select(valid_mask).to(dtype=torch.float64)
+            stats += torch.stack(
+                (
+                    valid_mask.sum().to(dtype=torch.float64),
+                    valid_advantages.sum(),
+                    valid_advantages.square().sum(),
+                    valid_returns.sum(),
+                    valid_returns.square().sum(),
+                )
+            ).cpu()
+
+    if distributed and dist.is_available() and dist.is_initialized():
+        stats = stats.to(DEVICE)
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+
+    count = stats[0]
+    if count.item() < 2:
+        return None
+    advantage_variance = torch.clamp(stats[2] / count - (stats[1] / count).square(), min=0.0)
+    return_variance = torch.clamp(stats[4] / count - (stats[3] / count).square(), min=0.0)
+    if return_variance.item() <= eps:
+        return None
+    return float((1.0 - advantage_variance / return_variance).item())
+
+
 class WorkerConfig(BaseModel):
     """Training worker configuration for XTuner RL.
 
@@ -210,6 +256,7 @@ class WorkerTrainLogItem(TypedDict, total=False):
 
 class WorkerLogItem(TypedDict):
     train_entropy: float
+    actor_global_flat_ev: NotRequired[float]
     rollout_entropy: NotRequired[float]
     mismatch_metrics: NotRequired[dict[str, float]]
     rollout_is_metrics: NotRequired[dict[str, float]]
@@ -1049,6 +1096,7 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
         del critic_seq_ctx, output, values
 
         actor_advantages_list: list[torch.Tensor] = []
+        raw_actor_advantages_list: list[torch.Tensor] = []
         critic_returns_list: list[torch.Tensor] = []
         for seq_ctx, old_values, token_rewards, action_mask, positive_scale, negative_scale in zip(
             seq_ctx_list,
@@ -1076,6 +1124,7 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
                 gamma=ppo_cfg.critic_gamma,
                 gae_lambda=ppo_cfg.critic_lambda,
             )
+            raw_actor_advantages_list.append(actor_advantages.detach())
             actor_advantages = torch.where(
                 actor_advantages > 0,
                 actor_advantages * positive_scale,
@@ -1085,6 +1134,17 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
             critic_returns_list.append(
                 torch.where(action_mask, critic_advantages + old_values, torch.zeros_like(old_values)).detach()
             )
+
+        data_replicate_size = self._engine.data_replicate_size * self.sp_mesh.size()
+        actor_global_flat_ev = calculate_actor_global_flat_ev(
+            raw_actor_advantages_list,
+            old_values_list,
+            actor_loss_mask_list,
+            contribute=self.rank % data_replicate_size == 0,
+        )
+        if actor_global_flat_ev is not None:
+            worker_log_item["actor_global_flat_ev"] = actor_global_flat_ev
+        del raw_actor_advantages_list
 
         if ppo_cfg.normalize_actor_advantage:
             sizes = [advantages.numel() for advantages in actor_advantages_list]

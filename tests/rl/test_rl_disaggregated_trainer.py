@@ -386,6 +386,24 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertNotIn("critic_metrics/worker_0/step_avg_reduced_llm_loss", scalars)
         self.assertNotIn("critic_metrics/worker_0/step_avg_grad_norm", scalars)
 
+    def test_log_step_records_actor_global_flat_ev(self):
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer._log_step = RLDisaggregatedTrainer._log_step.__get__(trainer, RLDisaggregatedTrainer)
+        train_info = self._minimal_train_info(training_samples=2, training_tokens=16)
+        train_info["workers_log_item"][0]["actor_global_flat_ev"] = 0.75
+
+        trainer._log_step(
+            train_step=3,
+            step_timer_dict={},
+            produce_result=ProduceBatchResult(rollout_states=[]),
+            train_info=train_info,
+            eval_info={},
+        )
+
+        self.assertEqual(trainer._exp_tracker.add_scalars.call_args.kwargs["global_step"], 3)
+        scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
+        self.assertAlmostEqual(scalars["actor_metrics/global_flat_explained_variance"], 0.75)
+
     def test_update_weights_pauses_generation_without_onloading_rollout(self):
         manager = _FakeManager([])
         trainer = self._make_trainer(manager)

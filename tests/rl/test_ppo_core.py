@@ -12,6 +12,7 @@ from xtuner.v1.rl.ppo import (
     terminal_rewards,
 )
 from xtuner.v1.rl.trainer.ppo_config import PPOConfig
+from xtuner.v1.rl.trainer.worker import calculate_actor_global_flat_ev
 
 
 class TestNextTokenAlignment:
@@ -320,3 +321,38 @@ class TestAdvantageNormalization:
             normalized,
             torch.tensor([-1.2247449, 0.0, 1.2247449, 0.0]),
         )
+
+
+class TestActorGlobalFlatEV:
+    def test_uses_raw_actor_advantages_and_masked_lambda_returns(self) -> None:
+        explained_variance = calculate_actor_global_flat_ev(
+            [torch.tensor([0.0, 1.0, 2.0, 100.0])],
+            [torch.tensor([0.0, 1.0, 2.0, -100.0])],
+            [torch.tensor([True, True, True, False])],
+            distributed=False,
+        )
+
+        assert explained_variance == pytest.approx(0.75)
+
+    @pytest.mark.parametrize(
+        ("advantages", "old_values", "mask"),
+        [
+            ([1.0], [0.0], [True]),
+            ([0.0, 0.0], [1.0, 1.0], [True, True]),
+            ([1.0, 2.0], [0.0, 0.0], [False, False]),
+        ],
+    )
+    def test_returns_none_when_explained_variance_is_undefined(
+        self,
+        advantages: list[float],
+        old_values: list[float],
+        mask: list[bool],
+    ) -> None:
+        explained_variance = calculate_actor_global_flat_ev(
+            [torch.tensor(advantages)],
+            [torch.tensor(old_values)],
+            [torch.tensor(mask)],
+            distributed=False,
+        )
+
+        assert explained_variance is None

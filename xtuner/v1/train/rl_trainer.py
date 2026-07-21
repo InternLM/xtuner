@@ -1717,6 +1717,8 @@ class BaseRLTrainer:
             all_scalars.update({f"{k}": v for k, v in rank0_mismatch_metrics.items()})
             all_scalars.update({"entropy/rollout": rank0_rollout_entropy})
             all_scalars.update({"entropy/train": rank0_log_item["train_entropy"]})
+            if (actor_global_flat_ev := rank0_log_item.get("actor_global_flat_ev")) is not None:
+                all_scalars["actor_metrics/global_flat_explained_variance"] = actor_global_flat_ev
             for worker_idx, log_item in enumerate(train_info["workers_log_item"]):
                 if not self._display_all_workers_log and worker_idx > 0:
                     break
