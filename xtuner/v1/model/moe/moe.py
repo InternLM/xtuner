@@ -607,50 +607,61 @@ class MoE(BaseModel):
                 seq_ctx=mtp_seq_ctx_list,
             )
 
-            cat_mtp_mask = torch.cat([ctx.mask for ctx in mtp_seq_ctx_list], dim=1)
-            mtp_nonpad_indices = torch.nonzero(cat_mtp_mask, as_tuple=True)[1]
-            mtp_non_pad_token = mtp_nonpad_indices.numel()
-            mtp_num_tokens_global, mtp_z_world_size = self._z_loss_dist_token_count(
-                z_ctx, mtp_non_pad_token, cat_mtp_mask.device
-            )
             mtp_losses = torch.tensor(0.0, device=DEVICE)
             has_mtp_loss = False
-            for mtp_idx in range(self.config.mtp_config.num_layers):
-                mtp_outputs = [outputs[mtp_idx] for outputs in mtp_outputs_per_mb]
-                cat_mtp_router_logits = torch.cat([outputs[1] for outputs in mtp_outputs], dim=0)
-                cat_mtp_router_weights = torch.cat([outputs[2] for outputs in mtp_outputs], dim=0)
-                # Match the main MoE micro-batch path: aggregate all micro-batches for one
-                # logical MTP depth into a single aux-loss record, so router-bias updates
-                # still see one row per logical routed layer.
-                mtp_hidden_states_0 = self.aux_loss.accumulate(
-                    selected_router_weights=cat_mtp_router_weights.index_select(0, mtp_nonpad_indices)
-                    .contiguous()
-                    .float(),
-                    selected_router_logits=cat_mtp_router_logits.index_select(0, mtp_nonpad_indices)
-                    .contiguous()
-                    .float(),
-                    hidden_states=mtp_outputs[0][0],
-                    balancing_ctx=balancing_ctx,
-                    z_ctx=z_ctx,
-                    num_tokens_local=mtp_non_pad_token,
-                    num_tokens_global=mtp_num_tokens_global,
-                    world_size=mtp_z_world_size,
-                )
+            for micro_batch_idx, (loss_ctx_dict, mtp_outputs) in enumerate(zip(loss_ctx_list, mtp_outputs_per_mb)):
+                mtp_loss_ctx_list = loss_ctx_dict.get("mtp")
+                if mtp_loss_ctx_list is None:
+                    continue
 
-                for micro_batch_idx, (loss_ctx_dict, mtp_hidden) in enumerate(zip(loss_ctx_list, mtp_outputs)):
-                    mtp_loss_ctx_list = loss_ctx_dict.get("mtp")
-                    if mtp_loss_ctx_list is None:
-                        continue
+                micro_batch_mtp_losses = torch.tensor(0.0, device=DEVICE)
+                for mtp_idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
                     mtp_hidden_states, mtp_router_results, _ = mtp_hidden
-                    if micro_batch_idx == 0:
-                        mtp_hidden_states = mtp_hidden_states_0
-                    mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_loss_ctx_list[mtp_idx]))
-                    mtp_losses += mtp_loss / len(mtp_loss_ctx_list)
-                    has_mtp_loss = True
+                    mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
+                    micro_batch_mtp_losses += mtp_loss
+
                     if keep_router:
                         router_logits_list[micro_batch_idx][f"mtp_layer{mtp_idx}"] = mtp_router_results
 
+                mtp_losses += micro_batch_mtp_losses / len(mtp_loss_ctx_list)
+                has_mtp_loss = True
+
             if has_mtp_loss:
+                # MTP routed experts feed the same balancing / z aux loss as the main MoE layers
+                # (mirrors the single-microbatch path in `_forward`); without this they are silently
+                # excluded from the aux loss and from `tokens_per_expert` in this path. Unlike the LM
+                # loss above, balancing cannot be summed per micro-batch: it must combine all micro-
+                # batches into one row per MTP depth, because `finalize` multiplies tokens_per_expert
+                # by the router-weight mean per row and that product over a combined token pool
+                # differs from the sum of per-microbatch products (it would also drift with
+                # intra_layer_micro_batch, a perf knob). So we concatenate the per-microbatch router
+                # results per depth and accumulate once, exactly like the main layer loop above does
+                # per layer. MTP shares the main micro-batch masks (mtp_seq_ctx_list is copied from
+                # seq_ctx_list), so the main nonpad indices and token counts apply directly. The
+                # z-loss carrier is hidden_states_list[0], the same main-loss path the per-layer aux
+                # loss already rides on, so backward traverses each MTP aux node exactly once.
+                for mtp_idx in range(self.config.mtp_config.num_layers):
+                    cat_mtp_router_weights = torch.cat(
+                        [mb_outputs[mtp_idx][2] for mb_outputs in mtp_outputs_per_mb], dim=0
+                    )
+                    cat_mtp_router_logits = torch.cat(
+                        [mb_outputs[mtp_idx][1] for mb_outputs in mtp_outputs_per_mb], dim=0
+                    )
+                    hidden_states_list[0] = self.aux_loss.accumulate(
+                        selected_router_weights=cat_mtp_router_weights.index_select(0, nonpad_indices)
+                        .contiguous()
+                        .float(),
+                        selected_router_logits=cat_mtp_router_logits.index_select(0, nonpad_indices)
+                        .contiguous()
+                        .float(),
+                        hidden_states=hidden_states_list[0],
+                        balancing_ctx=balancing_ctx,
+                        z_ctx=z_ctx,
+                        num_tokens_local=non_pad_token,
+                        num_tokens_global=num_tokens_global,
+                        world_size=z_world_size,
+                    )
+
                 output["mtp_loss"] = mtp_losses * self.config.mtp_config.loss_scaling_factor
 
         # Apply final norm to all micro-batches
