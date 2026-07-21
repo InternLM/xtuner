@@ -28,14 +28,20 @@ def _summarize_process_group_results(results: list[dict[str, Any]]) -> str:
     if not results:
         return "ranks=0"
 
-    count_key = "destroyed" if "destroyed" in results[0] else "reloaded"
+    count_key = next(
+        (key for key in ("suspended", "resumed", "destroyed", "reloaded") if key in results[0]),
+        "count",
+    )
     counts = [result.get(count_key, 0) for result in results]
     count_summary = f"{counts[0]} on all ranks" if len(set(counts)) == 1 else f"by_rank={counts}"
+    skipped_counts = [result.get("skipped", 0) for result in results]
     result_errors = [error for result in results for error in result.get("errors", [])]
-    unwrapped = sum(len(result.get("unwrapped_nccl_groups", [])) for result in results)
     summary = f"ranks={len(results)}, {count_key}={count_summary}"
-    if unwrapped:
-        summary += f", unwrapped_nccl_groups={unwrapped}"
+    if any(skipped_counts):
+        skipped_summary = (
+            f"{skipped_counts[0]} on all ranks" if len(set(skipped_counts)) == 1 else f"by_rank={skipped_counts}"
+        )
+        summary += f", skipped={skipped_summary}"
     if result_errors:
         summary += f", errors={len(result_errors)}, first_error={result_errors[0]}"
     return summary
@@ -338,24 +344,24 @@ class TrainingController:
         ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
 
-    def destroy_train_nccl_process_groups(self):
-        """Destroy train-side NCCL process groups after weight sync."""
+    def suspend_train_nccl_process_groups(self):
+        """Suspend train-side NCCL process groups after weight sync."""
         handles = [
-            worker.destroy_train_nccl_process_groups.remote()  # type: ignore[attr-defined]
+            worker.suspend_train_nccl_process_groups.remote()  # type: ignore[attr-defined]
             for worker in self.workers
         ]
         results = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
-        self.logger.info(f"Destroyed train NCCL process groups: {_summarize_process_group_results(results)}")
+        self.logger.info(f"Suspended train NCCL process groups: {_summarize_process_group_results(results)}")
         return results
 
-    def reload_train_nccl_process_groups(self):
-        """Reload train-side reloadable NCCL process groups before training."""
+    def resume_train_nccl_process_groups(self):
+        """Resume train-side NCCL process groups before training."""
         handles = [
-            worker.reload_train_nccl_process_groups.remote()  # type: ignore[attr-defined]
+            worker.resume_train_nccl_process_groups.remote()  # type: ignore[attr-defined]
             for worker in self.workers
         ]
         results = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
-        self.logger.info(f"Reloaded train NCCL process groups: {_summarize_process_group_results(results)}")
+        self.logger.info(f"Resumed train NCCL process groups: {_summarize_process_group_results(results)}")
         return results
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):

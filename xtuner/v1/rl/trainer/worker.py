@@ -59,12 +59,7 @@ from xtuner.v1.utils import (
 )
 from xtuner.v1.utils.activation_offload import OffloadManager
 from xtuner.v1.utils.fsdp import release_deferred_fsdp_all_gathers
-from xtuner.v1.utils.reloadable_process_group import (
-    destroy_reloadable_process_groups,
-    monkey_patch_reloadable_process_groups,
-    process_group_name,
-    reload_process_groups,
-)
+from xtuner.v1.utils.nccl_process_group import resume_nccl_process_groups, suspend_nccl_process_groups
 
 from ..rollout_is import merge_rollout_is_metrics
 
@@ -229,7 +224,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.config = cast(WorkerConfig, self.config)
         torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
         self.rank = rank
-        monkey_patch_reloadable_process_groups()
 
         # TODO: add lr scheduler
         log_dir = worker_cfg.log_dir
@@ -288,69 +282,40 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
     @ray_method
-    def destroy_train_nccl_process_groups(self) -> dict[str, object]:
-        """Destroy reloadable train-side NCCL PG inners after weight sync and
-        train offload."""
+    def suspend_train_nccl_process_groups(self) -> dict[str, object]:
+        """Suspend train-side NCCL PG backends after weight sync and train
+        offload."""
 
-        details = destroy_reloadable_process_groups()
-        errors: list[str] = []
-        unwrapped_nccl_groups: list[dict[str, object]] = []
-
-        try:
-            import torch.distributed.distributed_c10d as c10d
-        except Exception as exc:
-            errors.append(f"import distributed_c10d {type(exc).__name__}: {exc}")
-            c10d = None  # type: ignore
-
-        groups: list[tuple[dist.ProcessGroup, list[int], str]] = []
-        default_group = dist.group.WORLD if dist.is_initialized() else None
-        if c10d is not None:
-            for group, rank_map in list(c10d._world.pg_group_ranks.items()):
-                if group is default_group:
-                    continue
-                try:
-                    backend = str(dist.get_backend(group)).lower()
-                except ValueError:
-                    # The c10d registry may still contain entries for groups
-                    # just destroyed by the reloadable wrapper. They are not
-                    # actionable unwrapped NCCL groups.
-                    continue
-                except Exception as exc:
-                    errors.append(f"get_backend {type(exc).__name__}: {exc}")
-                    continue
-                if "nccl" not in backend:
-                    continue
-                ranks = [global_rank for global_rank, _ in sorted(rank_map.items(), key=lambda item: item[1])]
-                groups.append((group, ranks, backend))
-
-        for group, ranks, backend in groups:
-            if group.__class__.__name__ == "ReloadableProcessGroup":
-                continue
-            unwrapped_nccl_groups.append({"ranks": ranks, "backend": backend, "group_name": process_group_name(group)})
-
+        include_default = (
+            os.getenv(
+                "XTUNER_SUSPEND_TRAIN_NCCL_INCLUDE_DEFAULT",
+                os.getenv("XTUNER_DESTROY_TRAIN_NCCL_INCLUDE_DEFAULT", "0"),
+            )
+            == "1"
+        )
+        details = suspend_nccl_process_groups(include_default=include_default)
+        errors = [str(detail["error"]) for detail in details if "error" in detail]
         DEVICE_MODULE.empty_cache()
         result = {
             "rank": self.rank,
-            "destroyed": len(details),
-            "unwrapped_nccl_groups": unwrapped_nccl_groups,
+            "suspended": sum("error" not in detail and not detail.get("skipped", False) for detail in details),
+            "skipped": sum(bool(detail.get("skipped", False)) for detail in details),
+            "details": details,
             "errors": errors,
         }
         return result
 
     @ray_method
-    def reload_train_nccl_process_groups(self) -> dict[str, object]:
-        """Reload train-side NCCL PG inners before FSDP2 runs again."""
+    def resume_train_nccl_process_groups(self) -> dict[str, object]:
+        """Resume train-side NCCL PG backends before FSDP2 runs again."""
 
-        errors: list[str] = []
-        try:
-            details = reload_process_groups()
-        except Exception as exc:
-            details = []
-            errors.append(f"reload {type(exc).__name__}: {exc}")
+        details = resume_nccl_process_groups()
+        errors = [str(detail["error"]) for detail in details if "error" in detail]
         DEVICE_MODULE.empty_cache()
         result = {
             "rank": self.rank,
-            "reloaded": len(details),
+            "resumed": sum("error" not in detail for detail in details),
+            "details": details,
             "errors": errors,
         }
         return result

@@ -922,12 +922,10 @@ class BaseRLTrainer:
             )
             ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         if onload_train_before_train:
-            if getattr(self, "_train_nccl_destroyed", False):
-                # FSDP2 keeps DeviceMesh/PG references alive. Recreate the
-                # wrapped NCCL inners before loading train weights again.
-                with timer("reload_train_nccl", step_timer_dict):
-                    self.train_controller.reload_train_nccl_process_groups()
-                self._train_nccl_destroyed = False
+            if getattr(self, "_train_nccl_suspended", False):
+                with timer("resume_train_nccl", step_timer_dict):
+                    self.train_controller.resume_train_nccl_process_groups()
+                self._train_nccl_suspended = False
             with timer("onload", step_timer_dict):
                 self.train_controller.onload(target="all")
                 self.logger.info("Training controller loaded")
@@ -1788,15 +1786,18 @@ class RLColocateTrainer(BaseRLTrainer):
                 self.train_controller.update_weights()
                 self.logger.info("Rollout workers update weights successfully in colocate mode")
                 self.train_controller.offload(target="model")
-                destroy_train_nccl = os.getenv("XTUNER_DESTROY_TRAIN_NCCL_AFTER_SYNC", "0") == "1"
-                already_destroyed = getattr(self, "_train_nccl_destroyed", False)
-                if destroy_train_nccl and not already_destroyed:
-                    # This runs only after rollout weights have been updated
-                    # and the train model has been offloaded. Only replayable
-                    # non-default NCCL groups are destroyed.
-                    with timer("destroy_train_nccl", step_timer_dict):
-                        self.train_controller.destroy_train_nccl_process_groups()
-                    self._train_nccl_destroyed = True
+                suspend_train_nccl = (
+                    os.getenv(
+                        "XTUNER_SUSPEND_TRAIN_NCCL_AFTER_SYNC",
+                        os.getenv("XTUNER_DESTROY_TRAIN_NCCL_AFTER_SYNC", "0"),
+                    )
+                    == "1"
+                )
+                already_suspended = getattr(self, "_train_nccl_suspended", False)
+                if suspend_train_nccl and not already_suspended:
+                    with timer("suspend_train_nccl", step_timer_dict):
+                        self.train_controller.suspend_train_nccl_process_groups()
+                    self._train_nccl_suspended = True
             else:
                 self.train_controller.offload(target="model")
                 ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
