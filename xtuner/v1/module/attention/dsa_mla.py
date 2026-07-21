@@ -287,7 +287,6 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             self.softmax_scale,
             value_dim=self.kv_lora_rank,
         )
-        get_dsa_topk_sharing_runtime().after_sparse_mla_use(layer=self, seq_ctx=seq_ctx)
         raw_output = sparse_mla_outputs.raw_output
         softmax_lse = sparse_mla_outputs.softmax_lse
         raw_output = torch.einsum("shm,hdm->shd", raw_output, w_vc)

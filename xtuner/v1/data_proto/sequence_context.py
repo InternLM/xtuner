@@ -18,8 +18,6 @@ class DSATopKCacheState:
     indices: dict[int, torch.Tensor]
     offloaded: dict[int, str]
     released_sources: set[int]
-    pending_offloads: set[int]
-    pending_releases: set[int]
     checkpoint_active: bool
     context_id: int
     # Shared-weight MTP invokes one physical DSA layer at several logical
@@ -37,8 +35,6 @@ class DSATopKCacheState:
         indices: dict[int, torch.Tensor] | None = None,
         offloaded: dict[int, str] | None = None,
         released_sources: set[int] | None = None,
-        pending_offloads: set[int] | None = None,
-        pending_releases: set[int] | None = None,
         checkpoint_active: bool = False,
         context_id: int | None = None,
         mtp_forward_uses_remaining: dict[int, int] | None = None,
@@ -50,8 +46,6 @@ class DSATopKCacheState:
         self.indices = {} if indices is None else indices
         self.offloaded = {} if offloaded is None else offloaded
         self.released_sources = set() if released_sources is None else released_sources
-        self.pending_offloads = set() if pending_offloads is None else pending_offloads
-        self.pending_releases = set() if pending_releases is None else pending_releases
         self.checkpoint_active = checkpoint_active
         self.context_id = next(_DSA_TOPK_CONTEXT_IDS) if context_id is None else context_id
         self.mtp_forward_uses_remaining = {} if mtp_forward_uses_remaining is None else mtp_forward_uses_remaining

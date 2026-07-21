@@ -272,10 +272,7 @@ class CrossLayerTopKSharingRuntime:
                 # SparseMLA has no autograd ctx. Keep/offload source top-k for
                 # backward recompute, then release after source replay consumes it.
                 cache.checkpoint_active = True
-                if self._should_defer_transfer():
-                    cache.pending_offloads.add(source_layer_idx)
-                else:
-                    residency.after_original_forward_last_use(seq_ctx, source_layer_idx)
+                residency.after_original_forward_last_use(seq_ctx, source_layer_idx)
             return
 
         if not self._is_checkpoint_recompute(seq_ctx):
@@ -293,12 +290,9 @@ class CrossLayerTopKSharingRuntime:
         if not self._should_release_after_mtp_iteration_recompute(seq_ctx, source_layer_idx):
             return
 
-        if self._should_defer_transfer():
-            cache.pending_releases.add(source_layer_idx)
-        else:
-            residency.after_recompute_release(seq_ctx, source_layer_idx)
-            cache.released_sources.add(source_layer_idx)
-            cache.micro_batch_recompute_release_overrides.pop(source_layer_idx, None)
+        residency.after_recompute_release(seq_ctx, source_layer_idx)
+        cache.released_sources.add(source_layer_idx)
+        cache.micro_batch_recompute_release_overrides.pop(source_layer_idx, None)
 
     def register_mtp_iteration_topk_sharing(
         self,
@@ -322,30 +316,10 @@ class CrossLayerTopKSharingRuntime:
             return
         self._offloaded_residency.prefetch(seq_ctx, source_layer_idx)
 
-    def flush_pending(self, seq_ctx: SequenceContext) -> None:
-        cache = seq_ctx.dsa_topk_cache
-        if not isinstance(self._residency(), ActivationOffloadedTopKResidency):
-            cache.pending_offloads.clear()
-            cache.pending_releases.clear()
-            return
-
-        for source_layer_idx in tuple(cache.pending_offloads):
-            self._offloaded_residency.after_original_forward_last_use(seq_ctx, source_layer_idx)
-            cache.pending_offloads.remove(source_layer_idx)
-
-        for source_layer_idx in tuple(cache.pending_releases):
-            self._offloaded_residency.after_recompute_release(seq_ctx, source_layer_idx)
-            cache.released_sources.add(source_layer_idx)
-            cache.micro_batch_recompute_release_overrides.pop(source_layer_idx, None)
-            cache.pending_releases.remove(source_layer_idx)
-
     def _residency(self) -> GpuTopKResidency:
         if _dsa_topk_offload_enabled() and torch.cuda.is_available():
             return self._offloaded_residency
         return self._gpu_residency
-
-    def _should_defer_transfer(self) -> bool:
-        return torch.compiler.is_compiling() and isinstance(self._residency(), ActivationOffloadedTopKResidency)
 
     def _is_checkpoint_original_forward(self, layer: DSATopKSharingLayerProtocol) -> bool:
         return layer.training and not torch.is_grad_enabled()
@@ -463,10 +437,13 @@ def before_dsa_topk_decoder_forward(attention: object, seq_ctx: SequenceContext 
 
 
 @torch.compiler.disable
-def flush_dsa_topk_decoder_pending(seq_ctx: SequenceContext | list[SequenceContext]) -> None:
+def after_dsa_topk_decoder_forward(attention: object, seq_ctx: SequenceContext | list[SequenceContext]) -> None:
+    if not hasattr(attention, "dsa_topk_last_use"):
+        return
+
     runtime = get_dsa_topk_sharing_runtime()
     for ctx in seq_ctx if isinstance(seq_ctx, list) else [seq_ctx]:
-        runtime.flush_pending(ctx)
+        runtime.after_sparse_mla_use(layer=cast(DSATopKSharingLayerProtocol, attention), seq_ctx=ctx)
 
 
 def _get_seq_ctx_from_forward(
@@ -500,7 +477,7 @@ def _dsa_topk_decoder_lifecycle_post_hook(
     seq_ctx = _get_seq_ctx_from_forward(args, kwargs)
     if seq_ctx is None:
         return
-    flush_dsa_topk_decoder_pending(seq_ctx)
+    after_dsa_topk_decoder_forward(getattr(module, "self_attn", None), seq_ctx)
 
 
 @torch.compiler.disable
@@ -532,9 +509,19 @@ def register_dsa_topk_decoder_lifecycle_hooks(decoder_layer: torch.nn.Module) ->
     if not hasattr(self_attn, "dsa_topk_last_use"):
         return
 
-    # Hooks run around the decoder module call, so reentrant checkpoint replay
-    # triggers them again while the compiled decoder/attention forward stays
-    # free of offload stream and pinned-memory side effects.
+    # Pinned-memory, CUDA-stream and OffloadManager side effects cannot run in
+    # an Inductor graph. The previous in-attention implementation therefore
+    # recorded only pending actions and flushed them later. Remove that
+    # transient state by keeping the entire residency transition at the decoder
+    # boundary: the pre-hook launches H2D and the post-hook directly runs
+    # after_sparse_mla_use. Reentrant checkpoint replay invokes the decoder
+    # module and these hooks again, so main, micro-batch and MTP callers do not
+    # need separate lifecycle handling.
+    #
+    # This deliberately delays eager D2H until the decoder returns, losing its
+    # overlap with attention projection and MoE compute; lifecycle is also no
+    # longer adjacent to SparseMLA's exact last use. Direct attention callers
+    # must therefore run through a decoder with these hooks registered.
     decoder_layer.register_forward_pre_hook(_dsa_topk_decoder_lifecycle_pre_hook, with_kwargs=True)
     decoder_layer.register_forward_hook(_dsa_topk_decoder_lifecycle_post_hook, with_kwargs=True)
     object.__setattr__(decoder_layer, "_dsa_topk_decoder_lifecycle_hooks_registered", True)

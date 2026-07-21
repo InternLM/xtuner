@@ -814,22 +814,24 @@ def test_dsa_attention_checkpoint_recompute_reuses_and_releases_source_topk():
     torch.manual_seed(0)
     source_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0)
     shared_attn = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1)
+    source_block = _TinyDsaDecoderBlock(source_attn)
+    shared_block = _TinyDsaDecoderBlock(shared_attn)
     hidden_states = torch.randn(1, 4, 4)
     position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
     seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
 
     with torch.no_grad():
-        source_attn(hidden_states, position_embeddings, seq_ctx)
-        shared_attn(hidden_states, position_embeddings, seq_ctx)
+        source_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
+        shared_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
 
     source_topk = seq_ctx.dsa_topk_cache.indices[0]
     assert seq_ctx.dsa_topk_cache.checkpoint_active
 
     recompute_hidden_states = hidden_states.detach().clone().requires_grad_()
-    shared_attn(recompute_hidden_states, position_embeddings, seq_ctx)
+    shared_block(recompute_hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
     assert seq_ctx.dsa_topk_cache.indices[0] is source_topk
 
-    source_attn(recompute_hidden_states, position_embeddings, seq_ctx)
+    source_block(recompute_hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
 
     assert seq_ctx.dsa_topk_cache.indices == {}
     assert seq_ctx.dsa_topk_cache.released_sources == {0}
@@ -1156,6 +1158,13 @@ def test_dsa_attention_activation_offload_decoder_hooks_onload_and_clear_topk(mo
         torch.zeros(1, 4, 2, device="cuda"),
     )
     seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cuda")
+    cache_during_shared_attention = []
+
+    def record_cache_before_decoder_post_hook(_module, _args, _output):
+        cache = seq_ctx.dsa_topk_cache
+        cache_during_shared_attention.append((set(cache.indices), set(cache.offloaded)))
+
+    shared_attn.register_forward_hook(record_cache_before_decoder_post_hook)
 
     with torch.no_grad():
         source_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
@@ -1163,6 +1172,7 @@ def test_dsa_attention_activation_offload_decoder_hooks_onload_and_clear_topk(mo
         shared_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
     torch.cuda.synchronize()
 
+    assert cache_during_shared_attention == [({0}, set())]
     assert seq_ctx.dsa_topk_cache.indices == {}
     assert set(seq_ctx.dsa_topk_cache.offloaded) == {0}
     assert seq_ctx.dsa_topk_cache.offloaded[0] == f"dsa_topk_{seq_ctx.dsa_topk_cache.context_id}_0"
@@ -1204,7 +1214,6 @@ def test_dsa_attention_activation_offload_compile_keeps_pin_memory_out_of_graph(
     torch.cuda.synchronize()
 
     assert seq_ctx.dsa_topk_cache.indices == {}
-    assert seq_ctx.dsa_topk_cache.pending_offloads == set()
     assert set(seq_ctx.dsa_topk_cache.offloaded) == {0}
 
     recompute_hidden_states = hidden_states.detach().clone().requires_grad_()
@@ -1217,7 +1226,6 @@ def test_dsa_attention_activation_offload_compile_keeps_pin_memory_out_of_graph(
 
     assert seq_ctx.dsa_topk_cache.indices == {}
     assert seq_ctx.dsa_topk_cache.offloaded == {}
-    assert seq_ctx.dsa_topk_cache.pending_releases == set()
     assert seq_ctx.dsa_topk_cache.released_sources == {0}
 
 
