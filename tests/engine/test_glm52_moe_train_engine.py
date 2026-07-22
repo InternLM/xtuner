@@ -249,7 +249,7 @@ class TestGlm52MoEEngine(DeterministicDDPTestCase):
 
             with mock.patch.dict(
                 os.environ,
-                {"XTUNER_ACTIVATION_OFFLOAD": "1", "XTUNER_DSA_TOPK_OFFLOAD": "0"},
+                {"XTUNER_ACTIVATION_OFFLOAD": "1", "XTUNER_DSA_TOPK_OFFLOAD": "1"},
             ):
                 step_info = engine.train_step(data_batches)
                 grad_norm = engine.clip_grad_norm()

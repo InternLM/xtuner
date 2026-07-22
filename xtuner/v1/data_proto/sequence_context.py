@@ -19,11 +19,10 @@ class DSATopKCacheState:
     its original forward stores ``indices[2]``. After layer 4's no-grad
     checkpoint forward, ``checkpoint_active`` becomes true and top-k offload may
     replace that entry with ``offloaded[2]``. Backward then replays layers 4, 3,
-    and 2; layer 2 removes the cache and adds 2 to ``released_sources``. A split
-    microbatch that only replays layers 4 and 3 instead records
-    ``micro_batch_recompute_release_overrides[2] = 3``. If one physical MTP
-    source is reused at two logical depths, both MTP counters start at 2 so the
-    cache is transferred and released only after the second use in each phase.
+    and 2; layer 2 removes the cache and adds 2 to ``released_sources``. If one
+    physical MTP source is reused at two logical depths, both MTP counters start
+    at 2 so the cache is transferred and released only after the second use in
+    each phase.
     """
 
     indices: dict[int, torch.Tensor]  # GPU-resident top-k, keyed by source layer.
@@ -33,8 +32,6 @@ class DSATopKCacheState:
     context_id: int  # Process-local identifier used to make offload keys unique.
     mtp_forward_uses_remaining: dict[int, int]  # Original-forward MTP uses left per shared source.
     mtp_replays_remaining: dict[int, int]  # Backward MTP replays left per shared source.
-    # Context-local release layer for a cache split after the dense-prefix forward.
-    micro_batch_recompute_release_overrides: dict[int, int]
 
     def __init__(
         self,
@@ -46,7 +43,6 @@ class DSATopKCacheState:
         context_id: int | None = None,
         mtp_forward_uses_remaining: dict[int, int] | None = None,
         mtp_replays_remaining: dict[int, int] | None = None,
-        micro_batch_recompute_release_overrides: dict[int, int] | None = None,
     ) -> None:
         # topk_indices format: {source_layer_idx: [seq_len, kv_group, topk]}.
         # Invalid/padded sparse slots are represented by -1.
@@ -57,9 +53,6 @@ class DSATopKCacheState:
         self.context_id = next(_DSA_TOPK_CONTEXT_IDS) if context_id is None else context_id
         self.mtp_forward_uses_remaining = {} if mtp_forward_uses_remaining is None else mtp_forward_uses_remaining
         self.mtp_replays_remaining = {} if mtp_replays_remaining is None else mtp_replays_remaining
-        self.micro_batch_recompute_release_overrides = (
-            {} if micro_batch_recompute_release_overrides is None else micro_batch_recompute_release_overrides
-        )
 
 
 # Avoid using dataclass decorator here to get rid of extra ops called in pytorch 2.8 and above
@@ -392,76 +385,6 @@ class SequenceContext:
             rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None,  # type: ignore
             offload_rollout_routed_experts=offload_rollout_routed_experts,
         )
-
-    def split_dsa_topk_indices_to(
-        self,
-        sequence_context_list: list["SequenceContext"],
-        *,
-        micro_batch_recompute_release_layer_idx: int | None = None,
-    ) -> None:
-        """Split concatenated DSA top-k caches into micro-batch contexts.
-
-        For example, suppose dense layer 2 owns a full indexer and sparse
-        layers 3 and 4 share its top-k. The static backward replay order is
-        4 -> 3 -> 2, so the concatenated context releases source 2 at layer 2.
-        ``_micro_batch_forward`` runs layer 2 on the concatenated context but
-        layers 3 and 4 on the split contexts. Those contexts only replay
-        4 -> 3, so they need a context-local source 2 release override at
-        layer 3.
-
-        The same logical source 2 therefore has three cache owners::
-
-            Context        Backward replay     Correct release
-            =============  ==================  ===============
-            cat_seq_ctx    layer 2             layer 2
-            micro-batch 0  layer 4 -> layer 3  layer 3
-            micro-batch 1  layer 4 -> layer 3  layer 3
-            =============  ==================  ===============
-
-        The model-wide static plan describes the concatenated owner. Each
-        split owner needs its own override because it never replays layer 2.
-        """
-        if not self.dsa_topk_cache.indices:
-            return
-
-        lengths = []
-        for seq_ctx in sequence_context_list:
-            if seq_ctx.input_ids is not None:
-                lengths.append(seq_ctx.input_ids.shape[1])
-            elif seq_ctx.inputs_embeds is not None:
-                lengths.append(seq_ctx.inputs_embeds.shape[1])
-            else:
-                assert seq_ctx.position_ids is not None
-                lengths.append(seq_ctx.position_ids.shape[-1])
-
-        # Dense prefix layers run on a concatenated SequenceContext. When later
-        # sparse layers switch back to per-microbatch contexts, shared-indexer
-        # DSA layers need the full-indexer cache split back by microbatch.
-        for layer_idx, topk_indices in self.dsa_topk_cache.indices.items():
-            assert sum(lengths) == topk_indices.shape[0]
-            start = 0
-            for seq_ctx, length, single_topk_indices in zip(
-                sequence_context_list, lengths, topk_indices.split(lengths, dim=0)
-            ):
-                # Top-k values were computed in the concatenated dense-prefix
-                # token coordinate system. Sparse micro-batches build local KV
-                # tensors, so shared indices must be rebased to local offsets.
-                if start:
-                    offset = single_topk_indices.new_tensor(start)
-                    single_topk_indices = torch.where(
-                        single_topk_indices == -1,
-                        single_topk_indices,
-                        single_topk_indices - offset,
-                    )
-                seq_ctx.dsa_topk_cache.indices[layer_idx] = single_topk_indices
-                if micro_batch_recompute_release_layer_idx is not None:
-                    # The static plan releases at the dense source layer, but
-                    # this split context only replays the sparse suffix. Release
-                    # its cache at the micro-batch boundary instead.
-                    seq_ctx.dsa_topk_cache.micro_batch_recompute_release_overrides[layer_idx] = (
-                        micro_batch_recompute_release_layer_idx
-                    )
-                start += length
 
     @property
     def mask(self) -> torch.BoolTensor:

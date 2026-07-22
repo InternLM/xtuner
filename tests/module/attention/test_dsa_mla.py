@@ -85,15 +85,6 @@ def _cudnn_dsa_sparse_mla_inputs():
     return q, kv, indices
 
 
-def _cat_microbatch_topk_indices(seq_len: int, topk: int, device: str):
-    local_rows = torch.arange(seq_len, device=device, dtype=torch.int64).view(seq_len, 1)
-    topk_offsets = torch.arange(topk, device=device, dtype=torch.int64).view(1, topk)
-    local_topk = local_rows - topk_offsets
-    first = local_topk.clamp_min(-1)
-    second = torch.where(local_topk >= 0, local_topk + seq_len, torch.full_like(local_topk, -1))
-    return torch.cat([first, second], dim=0).unsqueeze(1).contiguous()
-
-
 def _tiny_dsa_attention(
     indexer_types: list[str] | None = None,
     layer_idx: int = 0,
@@ -500,54 +491,6 @@ def test_sparse_mla_cudnn_dsa_compile_backward_matches_tilelang_sparse_mla():
     torch.testing.assert_close(kv_cudnn.grad, kv_tilelang.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
 
 
-@pytest.mark.skipif(
-    not (_tilelang_sparse_mla_available() and _cudnn_dsa_sparse_mla_available()),
-    reason="requires CUDA, TileLang, and cuDNN DSA sparse attention backward",
-)
-def test_sparse_mla_cudnn_dsa_compile_backward_matches_after_microbatch_topk_split():
-    seq_len = 64
-    topk = 64
-    seq_ctx_list = [
-        SequenceContext.from_input_ids((torch.arange(seq_len, device="cuda").view(1, -1),), device="cuda"),
-        SequenceContext.from_input_ids(
-            (torch.arange(seq_len, 2 * seq_len, device="cuda").view(1, -1),),
-            device="cuda",
-        ),
-    ]
-    cat_seq_ctx = SequenceContext.cat(seq_ctx_list)
-    cat_seq_ctx.dsa_topk_cache.indices[0] = _cat_microbatch_topk_indices(seq_len, topk, "cuda")
-    cat_seq_ctx.split_dsa_topk_indices_to(seq_ctx_list)
-    indices = seq_ctx_list[1].dsa_topk_cache.indices[0]
-    valid_indices = indices[indices != -1]
-    assert valid_indices.max().item() < seq_len
-
-    q, kv, _ = _cudnn_dsa_sparse_mla_inputs()
-    scaling = 0.0625
-
-    def compiled_sparse_mla(q: torch.Tensor, kv: torch.Tensor, backend: str) -> torch.Tensor:
-        out, _ = sparse_mla(q, kv, indices, scaling=scaling, value_dim=512, backend=backend)
-        return out
-
-    compiled_sparse_mla = torch.compile(compiled_sparse_mla, fullgraph=False)
-    q_tilelang = q.detach().clone().requires_grad_()
-    kv_tilelang = kv.detach().clone().requires_grad_()
-    q_cudnn = q.detach().clone().requires_grad_()
-    kv_cudnn = kv.detach().clone().requires_grad_()
-
-    tilelang_out = compiled_sparse_mla(q_tilelang, kv_tilelang, "tilelang")
-    cudnn_out = compiled_sparse_mla(q_cudnn, kv_cudnn, "cudnn_dsa")
-    grad_output = torch.randn_like(tilelang_out)
-
-    tilelang_out.backward(grad_output)
-    cudnn_out.backward(grad_output)
-
-    assert torch.isfinite(q_cudnn.grad).all()
-    assert torch.isfinite(kv_cudnn.grad).all()
-    torch.testing.assert_close(cudnn_out, tilelang_out, atol=BF16_ATOL, rtol=BF16_RTOL)
-    torch.testing.assert_close(q_cudnn.grad, q_tilelang.grad, atol=CUDNN_DQ_ATOL, rtol=CUDNN_DQ_RTOL)
-    torch.testing.assert_close(kv_cudnn.grad, kv_tilelang.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
-
-
 def test_dsa_attention_topk_respects_packed_causal_boundaries():
     torch.manual_seed(0)
     attn = _tiny_dsa_attention(indexer_types=["full"], layer_idx=0)
@@ -717,100 +660,6 @@ def test_dsa_attention_shares_topk_within_microbatch_only():
 
     assert other_seq_ctx.dsa_topk_cache.indices is not seq_ctx.dsa_topk_cache.indices
     assert set(other_seq_ctx.dsa_topk_cache.indices) == {0}
-
-
-def test_sequence_context_splits_cat_dsa_topk_cache_to_microbatches():
-    seq_len0 = 2
-    seq_len1 = 3
-    seq_ctx_list = [
-        SequenceContext.from_input_ids((torch.arange(seq_len0).view(1, -1),), device="cpu"),
-        SequenceContext.from_input_ids((torch.arange(seq_len0, seq_len0 + seq_len1).view(1, -1),), device="cpu"),
-    ]
-    assert seq_ctx_list[0].dsa_topk_cache.indices == {}
-    assert seq_ctx_list[0].dsa_topk_cache.indices is not seq_ctx_list[1].dsa_topk_cache.indices
-
-    cat_seq_ctx = SequenceContext.cat(seq_ctx_list)
-    layer0_topk = torch.tensor(
-        [
-            [[0, -1, -1, -1]],
-            [[1, 0, -1, -1]],
-            [[2, -1, -1, -1]],
-            [[3, 2, -1, -1]],
-            [[4, 3, 2, -1]],
-        ],
-        dtype=torch.int64,
-    )
-    layer2_topk = layer0_topk.clone()
-    cat_seq_ctx.dsa_topk_cache.indices[0] = layer0_topk
-    cat_seq_ctx.dsa_topk_cache.indices[2] = layer2_topk
-
-    cat_seq_ctx.split_dsa_topk_indices_to(seq_ctx_list)
-
-    assert set(seq_ctx_list[0].dsa_topk_cache.indices) == {0, 2}
-    assert set(seq_ctx_list[1].dsa_topk_cache.indices) == {0, 2}
-    torch.testing.assert_close(seq_ctx_list[0].dsa_topk_cache.indices[0], layer0_topk[:2])
-    torch.testing.assert_close(
-        seq_ctx_list[1].dsa_topk_cache.indices[0],
-        torch.tensor(
-            [
-                [[0, -1, -1, -1]],
-                [[1, 0, -1, -1]],
-                [[2, 1, 0, -1]],
-            ],
-            dtype=torch.int64,
-        ),
-    )
-    torch.testing.assert_close(seq_ctx_list[0].dsa_topk_cache.indices[2], layer2_topk[:2])
-    torch.testing.assert_close(
-        seq_ctx_list[1].dsa_topk_cache.indices[2],
-        torch.tensor(
-            [
-                [[0, -1, -1, -1]],
-                [[1, 0, -1, -1]],
-                [[2, 1, 0, -1]],
-            ],
-            dtype=torch.int64,
-        ),
-    )
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA DSA top-k offload")
-def test_dsa_topk_offload_keeps_cat_cache_after_microbatch_split(monkeypatch):
-    monkeypatch.setenv("XTUNER_DSA_TOPK_OFFLOAD", "1")
-    seq_len0 = 2
-    seq_len1 = 3
-    seq_ctx_list = [
-        SequenceContext.from_input_ids((torch.arange(seq_len0, device="cuda").view(1, -1),), device="cuda"),
-        SequenceContext.from_input_ids(
-            (torch.arange(seq_len0, seq_len0 + seq_len1, device="cuda").view(1, -1),),
-            device="cuda",
-        ),
-    ]
-    cat_seq_ctx = SequenceContext.cat(seq_ctx_list)
-    topk = torch.tensor(
-        [
-            [[0, -1, -1, -1]],
-            [[1, 0, -1, -1]],
-            [[2, -1, -1, -1]],
-            [[3, 2, -1, -1]],
-            [[4, 3, 2, -1]],
-        ],
-        dtype=torch.int64,
-        device="cuda",
-    )
-    expected_topk = topk.clone()
-    cat_seq_ctx.dsa_topk_cache.indices[0] = topk
-    cat_seq_ctx.split_dsa_topk_indices_to(seq_ctx_list)
-
-    runtime = get_dsa_topk_sharing_runtime()
-    source_attn = _tiny_dsa_attention(indexer_types=["full"], layer_idx=0).cuda()
-    with torch.no_grad():
-        runtime.after_sparse_mla_use(layer=source_attn, seq_ctx=seq_ctx_list[0])
-    torch.cuda.synchronize()
-
-    torch.testing.assert_close(cat_seq_ctx.dsa_topk_cache.indices[0], expected_topk)
-    runtime.after_sparse_mla_use(layer=source_attn, seq_ctx=seq_ctx_list[0])
-    torch.cuda.synchronize()
 
 
 def test_dsa_attention_mtp_physical_layer_uses_own_full_indexer():

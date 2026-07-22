@@ -177,14 +177,6 @@ class ActivationOffloadedTopKResidency(GpuTopKResidency):
             cache.indices[source_layer_idx] = topk_indices
             return
 
-        # Micro-batch top-k entries can be split views of the concatenated
-        # dense-prefix cache. SwapTensor releases its input storage after D2H,
-        # so offload must own the storage it is going to resize.
-        storage_nbytes = topk_indices.untyped_storage().nbytes()
-        expected_nbytes = topk_indices.numel() * topk_indices.element_size()
-        if storage_nbytes != expected_nbytes or topk_indices.storage_offset() != 0:
-            topk_indices = topk_indices.clone()
-
         key = self._offload_key(seq_ctx, source_layer_idx)
         cpu_buffer = OffloadManager().get_or_create_pin_memory(key, topk_indices.shape, topk_indices.dtype)
         swap_tensor = SwapTensor(topk_indices, key, tensor_cpu=cpu_buffer)
@@ -278,12 +270,7 @@ class CrossLayerTopKSharingRuntime:
         if not self._is_checkpoint_recompute(seq_ctx):
             return
 
-        # Split micro-batch contexts never replay the concatenated dense source,
-        # so their boundary override takes precedence over the model-wide plan.
-        release_layer_idx = cache.micro_batch_recompute_release_overrides.get(
-            source_layer_idx,
-            layer.dsa_topk_recompute_release.get(source_layer_idx),
-        )
+        release_layer_idx = layer.dsa_topk_recompute_release.get(source_layer_idx)
         if release_layer_idx != layer.layer_idx:
             return
 
@@ -292,7 +279,6 @@ class CrossLayerTopKSharingRuntime:
 
         residency.after_recompute_release(seq_ctx, source_layer_idx)
         cache.released_sources.add(source_layer_idx)
-        cache.micro_batch_recompute_release_overrides.pop(source_layer_idx, None)
 
     def register_mtp_iteration_topk_sharing(
         self,
