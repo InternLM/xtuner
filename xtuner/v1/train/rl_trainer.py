@@ -33,7 +33,10 @@ from xtuner.v1.rl.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.on_policy_distillation import OPDConfig, compute_pg_opd_token_advantages
+from xtuner.v1.rl.on_policy_distillation import (
+    OPDConfig,
+    compute_pg_opd_token_advantages,
+)
 from xtuner.v1.rl.replay_buffer import (
     AsyncReplayBufferConfig,
     SyncReplayBufferConfig,
@@ -711,6 +714,7 @@ class BaseRLTrainer:
             replay_buffer=replay_buffer,
             logger=self.logger,
             sync_weights_interval=cfg.sync_weights_interval,
+            opd_config=self._opd_config,
         )
         self.agent_loop_manager = cast(AgentLoopManager | DisaggAgentLoopManager, agent_loop_manager)
 
@@ -725,6 +729,7 @@ class BaseRLTrainer:
                     replay_buffer=replay_buffer,
                     logger=self.logger,
                     sync_weights_interval=cfg.sync_weights_interval,
+                    opd_config=None,
                 ),
             )
 
