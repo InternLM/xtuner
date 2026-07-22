@@ -27,6 +27,7 @@ from .produce_utils import (
     _MANAGER_STATE_PATH,
     _STATUS_POLL_INTERVAL_S,
     _TASK_CHECKPOINT_DIR,
+    IsValidSampleFn,
     ProduceBatchResult,
     ProduceBatchStatus,
     _TaskRunner,
@@ -69,6 +70,7 @@ class DisaggAgentLoopManagerConfig(BaseModel):
         replay_buffer: ReplayBuffer,
         logger=None,
         sync_weights_interval: int = 1,
+        distillation_config: DistillationConfig | None = None,
     ) -> "DisaggAgentLoopManager":
         tasks = self.tasks if isinstance(self.tasks, list) else [self.tasks]
         if not tasks:
@@ -86,6 +88,7 @@ class DisaggAgentLoopManagerConfig(BaseModel):
                 judger=build_judger(task_cfg.judger_config) if task_cfg.judger_config is not None else None,
                 logger=logger,
                 is_valid_sample_fn=task_cfg.is_valid_sample_fn,
+                distillation_config=distillation_config,
             )
             produce_strategy = task_cfg.produce_strategy_config.build(
                 sync_weights_interval=sync_weights_interval,
@@ -98,6 +101,7 @@ class DisaggAgentLoopManagerConfig(BaseModel):
                     agent_loop=agent_loop,
                     produce_strategy=produce_strategy,
                     sampler=sampler,
+                    is_valid_sample_fn=task_cfg.filter_func,
                     weight=task_cfg.weight,
                     order=order,
                 )

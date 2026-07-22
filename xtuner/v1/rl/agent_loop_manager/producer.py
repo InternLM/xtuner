@@ -283,7 +283,7 @@ class SyncProduceStrategy(ProduceStrategy):
 
         for _ in range(ctx.task_batch_size):
             rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
-            task = create_task(ctx.generate_group(rollout_state))
+            task = create_task(ctx.collect_rollout_group(rollout_state))
             pending_tasks.add(task)
 
         logger.info(f"[SyncProduceStrategy] Started {len(pending_tasks)} initial tasks.")
@@ -316,7 +316,7 @@ class SyncProduceStrategy(ProduceStrategy):
                 completed_sample_count, ctx.task_batch_size
             ):
                 rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
-                task = create_task(ctx.generate_group(rollout_state))
+                task = create_task(ctx.collect_rollout_group(rollout_state))
                 pending_tasks.add(task)
         progress_displayer.close()
 
@@ -405,7 +405,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         async def spawn_one() -> asyncio.Task:
             rollout_state = await ctx.sample_group(from_expired_pool=sample_expired)
             return create_task(
-                ctx.generate_group(
+                ctx.collect_rollout_group(
                     rollout_state,
                     enable_partial_rollout=self.enable_partial_rollout,
                 )
