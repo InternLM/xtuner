@@ -507,6 +507,12 @@ class MoE(BaseModel):
             raise NotImplementedError
 
         assert len(seq_ctx_list) == len(loss_ctx_list), "seq_ctx and loss_ctx must have same length"
+        first_position_ids = seq_ctx_list[0].position_ids
+        assert first_position_ids is not None
+        assert all(
+            seq_ctx.position_ids is not None and seq_ctx.position_ids.shape[-1] == first_position_ids.shape[-1]
+            for seq_ctx in seq_ctx_list
+        ), "intra-layer micro-batches must have the same local sequence length"
 
         # Prepare input embeddings for all micro-batches
         if seq_ctx_list[0].input_ids is None:
@@ -525,6 +531,11 @@ class MoE(BaseModel):
                 cat_position_embeddings[1].chunk(len(seq_ctx_list), dim=1),
             )
         )
+        hidden_states_list = list(cat_hidden_states.chunk(len(seq_ctx_list), dim=1))
+        if self.config.first_k_dense_replace == 0:
+            # Activation offload resizes saved tensors after D2H. A chunk view
+            # cannot release its shared embedding storage independently.
+            hidden_states_list = [hidden_states.clone() for hidden_states in hidden_states_list]
         cat_mask = torch.cat([ctx.mask for ctx in seq_ctx_list], dim=1)
         # Hoisted out of the per-layer accumulate path: mask is constant across layers,
         # so the non-pad index lookup runs once per forward instead of once per (layer, ctx).
@@ -543,12 +554,6 @@ class MoE(BaseModel):
         balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx_list)
         num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, cat_mask.device)
 
-        # Process through layers
-        cat_seq_ctx: SequenceContext | None = None
-
-        hidden_states_list: list[torch.Tensor] = []
-        moe_forward = False
-
         for seq_ctx in seq_ctx_list:
             self._mark_dynamic(seq_ctx)
 
@@ -556,58 +561,16 @@ class MoE(BaseModel):
             layer_idx = int(idx)
 
             if layer_idx < self.config.first_k_dense_replace:
-                if seq_ctx_list[0].sequence_parallel_mesh is not None:
-                    # Keep each micro-batch on its own SP layout. For two micro-batches
-                    # A and B split over two SP ranks, the local shards are:
-                    #
-                    #   rank 0: [A0, B0]
-                    #   rank 1: [A1, B1]
-                    #
-                    # Concatenating locally before the attention all-gather produces
-                    # [A0, B0, A1, B1], but the two sequences require
-                    # [A0, A1, B0, B1]. Run the dense prefix separately to preserve
-                    # that layout; the sparse suffix still overlaps them through domino EP.
-                    if not hidden_states_list:
-                        hidden_states_list = list(cat_hidden_states.chunk(len(seq_ctx_list), dim=1))
-                    hidden_states_list = [
-                        decoder_layer(
-                            hidden_states,
-                            position_embeddings=position_embeddings,
-                            seq_ctx=seq_ctx,
-                        )
-                        for hidden_states, position_embeddings, seq_ctx in zip(
-                            hidden_states_list,
-                            position_embeddings_list,
-                            seq_ctx_list,
-                        )
-                    ]
-                else:
-                    if cat_seq_ctx is None:
-                        cat_seq_ctx = SequenceContext.cat(seq_ctx_list)
-                        self._mark_dynamic(cat_seq_ctx)
-                    # Dense decoder layer - process concatenated hidden states.
-                    cat_hidden_states = decoder_layer(
-                        cat_hidden_states,
-                        position_embeddings=cat_position_embeddings,
-                        seq_ctx=cat_seq_ctx,
+                # Keep each micro-batch in its own SequenceContext while issuing
+                # one outer layer call, so FSDP materializes dense weights once.
+                hidden_states_list = list(
+                    decoder_layer(
+                        *hidden_states_list,
+                        position_embeddings=position_embeddings_list,
+                        seq_ctx=seq_ctx_list,
                     )
+                )
             else:
-                if not moe_forward:
-                    if cat_seq_ctx is not None:
-                        cat_seq_ctx.split_dsa_topk_indices_to(
-                            seq_ctx_list,
-                            micro_batch_recompute_release_layer_idx=layer_idx,
-                        )
-                    # TODO: `i.clone()` here is weird. However, the current Implementation of
-                    # `async_save_on_cpu` is not friendly with `chunk` op (maybe caused by shared storage? not sure),
-                    # resulting in nan grad norm. So we have to clone the chunked tensors here to make sure each
-                    # hidden state has its own storage. This workaround may introduce extra memory and time cost, and
-                    # should be optimized in the future.
-                    if not hidden_states_list:
-                        hidden_states_list = [i.clone() for i in cat_hidden_states.chunk(len(seq_ctx_list), dim=1)]
-                    moe_forward = True
-                assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
-
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
                     with async_save_on_cpu(
                         h2d_stream=self.offload_stream,

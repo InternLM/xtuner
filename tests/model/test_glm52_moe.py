@@ -662,101 +662,6 @@ def test_tiny_glm52_native_compile_forward_matches_hf_numeric_oracle():
         torch.cuda.empty_cache()
 
 
-@pytest.mark.parametrize("sequence_parallel", [False, True])
-def test_glm52_micro_batch_forward_preserves_dense_prefix_dsa_topk_cache_before_sparse_layers(sequence_parallel):
-    class FakeEmbedding(torch.nn.Module):
-        def __init__(self, hidden_size: int):
-            super().__init__()
-            self.hidden_size = hidden_size
-
-        def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-            return input_ids.float().unsqueeze(-1).expand(*input_ids.shape, self.hidden_size)
-
-    class FakeRotaryEmbedding(torch.nn.Module):
-        def forward(self, hidden_states: torch.Tensor, position_ids: torch.Tensor):
-            cos = torch.ones(hidden_states.shape[0], hidden_states.shape[1], 1, device=hidden_states.device)
-            sin = torch.zeros_like(cos)
-            return cos, sin
-
-    class FakeDensePrefixLayer(torch.nn.Module):
-        def forward(self, hidden_states: torch.Tensor, *, position_embeddings, seq_ctx: SequenceContext):
-            seq_len = hidden_states.shape[1]
-            seq_ctx.dsa_topk_cache.indices[0] = torch.arange(seq_len, device=hidden_states.device).view(seq_len, 1, 1)
-            return hidden_states
-
-    class FakeSparseSharedLayer(torch.nn.Module):
-        def forward(self, *hidden_states_list: torch.Tensor, position_embeddings, seq_ctx: list[SequenceContext]):
-            assert len(hidden_states_list) == len(seq_ctx)
-            for micro_batch_idx, micro_batch_seq_ctx in enumerate(seq_ctx):
-                assert set(micro_batch_seq_ctx.dsa_topk_cache.indices) == {0}
-                topk_indices = micro_batch_seq_ctx.dsa_topk_cache.indices[0]
-                assert topk_indices.shape[0] == micro_batch_seq_ctx.input_ids.shape[1]
-                # Sparse micro-batches own local KV tensors, so cached indices
-                # must be local whether the dense prefix ran concatenated or under SP.
-                torch.testing.assert_close(
-                    topk_indices.flatten(),
-                    torch.arange(micro_batch_seq_ctx.input_ids.shape[1]),
-                )
-
-            router_logits = tuple(
-                torch.zeros(hidden_states.shape[1], 1, device=hidden_states.device)
-                for hidden_states in hidden_states_list
-            )
-            router_weights = tuple(
-                torch.ones(hidden_states.shape[1], 1, device=hidden_states.device)
-                for hidden_states in hidden_states_list
-            )
-            return (*hidden_states_list, *router_logits, *router_weights)
-
-    class FakeAuxLoss(torch.nn.Module):
-        def accumulate(self, *, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
-            return hidden_states
-
-        def finalize(self, **kwargs):
-            return None, None, torch.zeros(1, 1)
-
-    class FakeLossCtx:
-        @classmethod
-        def cat(cls, chunks):
-            return cls()
-
-    class FakeLMHead(torch.nn.Module):
-        def forward(self, hidden_states: torch.Tensor, loss_ctx):
-            return hidden_states.sum() * 0, (hidden_states, None)
-
-    cfg = _tiny_glm52_config()
-    model = cfg.build()
-    model.embed_tokens = FakeEmbedding(cfg.hidden_size)
-    model.rotary_emb = FakeRotaryEmbedding()
-    model.layers = torch.nn.ModuleDict(
-        {
-            "0": FakeDensePrefixLayer(),
-            "1": FakeSparseSharedLayer(),
-        }
-    )
-    model.norm = torch.nn.Identity()
-    model.lm_head = FakeLMHead()
-    model.aux_loss = FakeAuxLoss()
-    model.mtp_block = None
-
-    second_input_ids = torch.tensor([[3, 4]]) if sequence_parallel else torch.tensor([[3, 4, 5]])
-    seq_ctx_list = [
-        SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu"),
-        SequenceContext.from_input_ids((second_input_ids,), device="cpu"),
-    ]
-    if sequence_parallel:
-        sp_mesh = mock.Mock()
-        sp_mesh.get_local_rank.return_value = 0
-        sp_mesh.size.return_value = 4
-        for seq_ctx in seq_ctx_list:
-            seq_ctx.set_sp_mesh(sp_mesh)
-    loss_ctx_list = [{"lm": FakeLossCtx()}, {"lm": FakeLossCtx()}]
-
-    output = model(seq_ctx=seq_ctx_list, loss_ctx=loss_ctx_list)
-
-    assert torch.isfinite(output["loss"])
-
-
 def test_glm52_micro_batch_forward_accumulates_mtp_aux_stats_once_per_depth():
     class FakeEmbedding(torch.nn.Module):
         def __init__(self, hidden_size: int):
@@ -773,7 +678,7 @@ def test_glm52_micro_batch_forward_accumulates_mtp_aux_stats_once_per_depth():
             return cos, sin
 
     class FakeDensePrefixLayer(torch.nn.Module):
-        def forward(self, hidden_states: torch.Tensor, *, position_embeddings, seq_ctx: SequenceContext):
+        def forward(self, *hidden_states: torch.Tensor, position_embeddings, seq_ctx: list[SequenceContext]):
             return hidden_states
 
     class FakeSparseSharedLayer(torch.nn.Module):
@@ -836,7 +741,7 @@ def test_glm52_micro_batch_forward_accumulates_mtp_aux_stats_once_per_depth():
 
     seq_ctx_list = [
         SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu"),
-        SequenceContext.from_input_ids((torch.tensor([[3, 4, 5]]),), device="cpu"),
+        SequenceContext.from_input_ids((torch.tensor([[3, 4]]),), device="cpu"),
     ]
     loss_ctx_list = [
         {"lm": FakeLossCtx(), "mtp": [FakeLossCtx()]},
