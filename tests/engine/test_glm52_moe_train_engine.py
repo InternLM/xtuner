@@ -209,6 +209,64 @@ def _assert_tiny_checkpoint_engine_uses_shared_indexer(engine: TrainEngine) -> N
     f"requires at least 8 CUDA devices and tiny GLM-5.2 checkpoint at {GLM5_2_TINY_MOE_PATH}",
 )
 class TestGlm52MoEEngine(DeterministicDDPTestCase):
+    def test_sequence_parallel_intra_layer_micro_batch_train_step(self):
+        self.create_pg("cuda")
+
+        model_cfg = _tiny_glm52_sp_mtp_config(dispatcher="all2all", ep_size=4)
+        model_cfg.compile_cfg = None
+        engine = TrainEngine(
+            model_cfg=model_cfg,
+            optim_cfg=AdamWConfig(lr=1e-3, foreach=False),
+            fsdp_cfg=FSDPConfig(
+                ep_size=4,
+                cpu_offload=False,
+                recompute_ratio=1.0,
+                torch_compile=True,
+            ),
+            intra_layer_micro_batch=2,
+        )
+        engine.init_model_weights()
+        with torch.no_grad():
+            for module in engine.model.modules():
+                if isinstance(module, NoAuxRouter):
+                    module.e_score_correction_bias.zero_()
+
+        sp_mesh = init_data_mesh(str(DEVICE), sp_size=2)["sp"]
+        data_batches = []
+        seq_ctx_list = []
+        try:
+            # Four items exercise two gradient-accumulation backwards, while each
+            # model call runs two sequence-parallel contexts through the same layers.
+            for micro_batch_idx in range(4):
+                start = 2 + micro_batch_idx * 12
+                input_ids = torch.arange(start, start + 10).view(1, -1) % model_cfg.vocab_size
+                full_seq_ctx = SequenceContext.from_input_ids((input_ids[:, :-1],), device=DEVICE)
+                data = {"seq_ctx": full_seq_ctx, "shifted_labels": input_ids[:, 1:]}
+                loss_ctx = engine.model.build_loss_ctx_batch([data], sp_mesh=sp_mesh)[0]
+                seq_ctx = full_seq_ctx.split(sp_mesh)
+                seq_ctx_list.append(seq_ctx)
+                data_batches.append(ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx))
+
+            with mock.patch.dict(
+                os.environ,
+                {"XTUNER_ACTIVATION_OFFLOAD": "1", "XTUNER_DSA_TOPK_OFFLOAD": "0"},
+            ):
+                step_info = engine.train_step(data_batches)
+                grad_norm = engine.clip_grad_norm()
+                engine.step_optimizer(grad_norm)
+
+            self.assertTrue(math.isfinite(step_info["total_loss"]))
+            self.assertTrue(math.isfinite(step_info["logs_info"]["reduced_llm_loss"]))
+            self.assertTrue(math.isfinite(step_info["logs_info"]["reduced_mtp_loss"]))
+            self.assertTrue(math.isfinite(float(grad_norm)))
+            self.assertTrue(engine.optimizer.state)
+            for seq_ctx in seq_ctx_list:
+                self.assertEqual(seq_ctx.dsa_topk_cache.indices, {})
+                self.assertEqual(seq_ctx.dsa_topk_cache.offloaded, {})
+        finally:
+            del engine
+            torch.cuda.empty_cache()
+
     @parametrize.parametrize(
         "compile_and_offload,dispatcher,ep_size",
         [

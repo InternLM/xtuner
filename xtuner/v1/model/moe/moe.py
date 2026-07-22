@@ -536,15 +536,41 @@ class MoE(BaseModel):
             layer_idx = int(idx)
 
             if layer_idx < self.config.first_k_dense_replace:
-                if cat_seq_ctx is None:
-                    cat_seq_ctx = SequenceContext.cat(seq_ctx_list)
-                    self._mark_dynamic(cat_seq_ctx)
-                # Dense decoder layer - process concated hidden states
-                cat_hidden_states = decoder_layer(
-                    cat_hidden_states,
-                    position_embeddings=cat_position_embeddings,
-                    seq_ctx=cat_seq_ctx,
-                )
+                if seq_ctx_list[0].sequence_parallel_mesh is not None:
+                    # Keep each micro-batch on its own SP layout. For two micro-batches
+                    # A and B split over two SP ranks, the local shards are:
+                    #
+                    #   rank 0: [A0, B0]
+                    #   rank 1: [A1, B1]
+                    #
+                    # Concatenating locally before the attention all-gather produces
+                    # [A0, B0, A1, B1], but the two sequences require
+                    # [A0, A1, B0, B1]. Run the dense prefix separately to preserve
+                    # that layout; the sparse suffix still overlaps them through domino EP.
+                    if not hidden_states_list:
+                        hidden_states_list = list(cat_hidden_states.chunk(len(seq_ctx_list), dim=1))
+                    hidden_states_list = [
+                        decoder_layer(
+                            hidden_states,
+                            position_embeddings=position_embeddings,
+                            seq_ctx=seq_ctx,
+                        )
+                        for hidden_states, position_embeddings, seq_ctx in zip(
+                            hidden_states_list,
+                            position_embeddings_list,
+                            seq_ctx_list,
+                        )
+                    ]
+                else:
+                    if cat_seq_ctx is None:
+                        cat_seq_ctx = SequenceContext.cat(seq_ctx_list)
+                        self._mark_dynamic(cat_seq_ctx)
+                    # Dense decoder layer - process concatenated hidden states.
+                    cat_hidden_states = decoder_layer(
+                        cat_hidden_states,
+                        position_embeddings=cat_position_embeddings,
+                        seq_ctx=cat_seq_ctx,
+                    )
             else:
                 if not moe_forward:
                     if cat_seq_ctx is not None:
@@ -557,7 +583,8 @@ class MoE(BaseModel):
                     # resulting in nan grad norm. So we have to clone the chunked tensors here to make sure each
                     # hidden state has its own storage. This workaround may introduce extra memory and time cost, and
                     # should be optimized in the future.
-                    hidden_states_list = [i.clone() for i in cat_hidden_states.chunk(len(seq_ctx_list), dim=1)]
+                    if not hidden_states_list:
+                        hidden_states_list = [i.clone() for i in cat_hidden_states.chunk(len(seq_ctx_list), dim=1)]
                     moe_forward = True
                 assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
 

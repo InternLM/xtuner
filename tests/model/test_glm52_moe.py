@@ -628,7 +628,8 @@ def test_tiny_glm52_native_compile_forward_matches_hf_numeric_oracle():
         torch.cuda.empty_cache()
 
 
-def test_glm52_micro_batch_forward_splits_dense_prefix_dsa_topk_cache_before_sparse_layers():
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+def test_glm52_micro_batch_forward_preserves_dense_prefix_dsa_topk_cache_before_sparse_layers(sequence_parallel):
     class FakeEmbedding(torch.nn.Module):
         def __init__(self, hidden_size: int):
             super().__init__()
@@ -656,12 +657,12 @@ def test_glm52_micro_batch_forward_splits_dense_prefix_dsa_topk_cache_before_spa
                 assert set(micro_batch_seq_ctx.dsa_topk_cache.indices) == {0}
                 topk_indices = micro_batch_seq_ctx.dsa_topk_cache.indices[0]
                 assert topk_indices.shape[0] == micro_batch_seq_ctx.input_ids.shape[1]
-                if micro_batch_idx == 0:
-                    torch.testing.assert_close(topk_indices.flatten(), torch.tensor([0, 1]))
-                else:
-                    # Sparse micro-batches own local KV tensors, so cached
-                    # indices are rebased from packed-global to local offsets.
-                    torch.testing.assert_close(topk_indices.flatten(), torch.tensor([0, 1, 2]))
+                # Sparse micro-batches own local KV tensors, so cached indices
+                # must be local whether the dense prefix ran concatenated or under SP.
+                torch.testing.assert_close(
+                    topk_indices.flatten(),
+                    torch.arange(micro_batch_seq_ctx.input_ids.shape[1]),
+                )
 
             router_logits = tuple(
                 torch.zeros(hidden_states.shape[1], 1, device=hidden_states.device)
@@ -704,10 +705,17 @@ def test_glm52_micro_batch_forward_splits_dense_prefix_dsa_topk_cache_before_spa
     model.aux_loss = FakeAuxLoss()
     model.mtp_block = None
 
+    second_input_ids = torch.tensor([[3, 4]]) if sequence_parallel else torch.tensor([[3, 4, 5]])
     seq_ctx_list = [
         SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu"),
-        SequenceContext.from_input_ids((torch.tensor([[3, 4, 5]]),), device="cpu"),
+        SequenceContext.from_input_ids((second_input_ids,), device="cpu"),
     ]
+    if sequence_parallel:
+        sp_mesh = mock.Mock()
+        sp_mesh.get_local_rank.return_value = 0
+        sp_mesh.size.return_value = 4
+        for seq_ctx in seq_ctx_list:
+            seq_ctx.set_sp_mesh(sp_mesh)
     loss_ctx_list = [{"lm": FakeLossCtx()}, {"lm": FakeLossCtx()}]
 
     output = model(seq_ctx=seq_ctx_list, loss_ctx=loss_ctx_list)
