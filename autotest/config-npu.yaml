@@ -1,6 +1,6 @@
 base_path:
     base_output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
-    base_baseline_path: /mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_baseline
+    base_baseline_path: /mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_baselines/latest
 
 default_config:
     train: 
@@ -98,7 +98,7 @@ case:
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
-                base_metric: npu-qwen3-sft-ep8_resume/tracker.jsonl
+                base_metric: npu-qwen3-sft-ep8/tracker-resume.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/reduced_llm_loss: 0.000001
