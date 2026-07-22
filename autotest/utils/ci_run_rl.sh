@@ -156,7 +156,7 @@ elif [ "$ACCELERATOR" = "NPU" ]; then
         --dashboard-host=0.0.0.0 \
         --dashboard-port=$RAY_DASHBOARD_PORT \
         --include-dashboard=true \
-        --disable-usage-stats \
+        --disable-usage-stats
     else
         RAY_RESOLVED_IP=$(nslookup $MASTER_ADDR | awk '/^Address: / { addr=$2 } END { print addr }')
         if [ -z "$RAY_RESOLVED_IP" ]; then
