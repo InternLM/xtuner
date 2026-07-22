@@ -347,6 +347,40 @@ def test_glm52_update_bias_covers_main_and_mtp_moe_gates():
         torch.testing.assert_close(bias, expected)
 
 
+def test_glm52_update_bias_aggregates_shared_mtp_depths_once():
+    config = _tiny_glm52_config()
+    config.mtp_config = MTPConfig(num_layers=2, share_weights=True)
+    model = config.build()
+    assert model.mtp_block is not None
+
+    main_routers = [model.layers[str(idx)].gate.router for idx in (1, 2)]
+    mtp_router = model.mtp_block.layers[0].decoder_layer.gate.router
+    for router in [*main_routers, mtp_router]:
+        router.e_score_correction_bias.zero_()
+
+    device = mtp_router.e_score_correction_bias.device
+    expert_counts = torch.tensor(
+        [
+            [1, 1, 1, 1],
+            [1, 1, 1, 1],
+            # These logical depths disagree on experts 0 and 1. The shared
+            # physical gate must derive one update from their aggregate load.
+            [4, 0, 0, 0],
+            [0, 3, 1, 0],
+        ],
+        device=device,
+    )
+    model.update_bias(expert_counts, expert_counts.float().mean(dim=1))
+
+    update_speed = config.router.router_bias_update_speed
+    for router in main_routers:
+        torch.testing.assert_close(router.e_score_correction_bias, torch.zeros(4, device=device))
+    torch.testing.assert_close(
+        mtp_router.e_score_correction_bias,
+        torch.tensor([-update_speed, -update_speed, update_speed, update_speed], device=device),
+    )
+
+
 def test_glm52_mtp_layer_extends_dsa_topk_release_plan():
     config = _tiny_glm52_config()
     config.mtp_config = MTPConfig(num_layers=1)

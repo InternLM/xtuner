@@ -62,7 +62,7 @@ from xtuner.v1.module import (
     RMSNorm,
 )
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
-from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer, MoEGate
 from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
 from xtuner.v1.utils import (
     get_device,
@@ -298,30 +298,50 @@ class MoE(BaseModel):
         n_layer, _ = total_expert_counts_pre_iter.size()
 
         # AuxLoss accumulates MoE stats in forward order: main MoE layers first,
-        # then logical MTP depths. MTP layers live outside self.layers, so collect
-        # the matching NoAux gates explicitly before applying the layer-wise stats.
-        gates = []
+        # then logical MTP depths. Shared-weight MTP has one physical gate for
+        # several rows, so aggregate those rows before updating that gate once.
+        gate_loads: list[tuple[MoEGate, torch.Tensor, torch.Tensor]] = []
+        stats_idx = 0
         for layer_idx, layer in self.layers.items():
             if int(layer_idx) < first_k_dense_replace:
                 continue
-            gate = getattr(layer, "gate", None)
-            if gate is not None:
-                gates.append(gate)
+            gate_loads.append(
+                (
+                    layer.gate,
+                    total_expert_counts_pre_iter[stats_idx],
+                    expected_loads[stats_idx],
+                )
+            )
+            stats_idx += 1
+
         if self.mtp_block is not None and self.config.mtp_config is not None:
-            for mtp_idx in range(self.config.mtp_config.num_layers):
-                mtp_layer_idx = 0 if self.config.mtp_config.share_weights else mtp_idx
-                decoder_layer = getattr(self.mtp_block.layers[mtp_layer_idx], "decoder_layer", None)
-                gate = getattr(decoder_layer, "gate", None)
-                if gate is not None:
-                    gates.append(gate)
+            mtp_config = self.config.mtp_config
+            if mtp_config.share_weights:
+                end = stats_idx + mtp_config.num_layers
+                gate_loads.append(
+                    (
+                        self.mtp_block.layers[0].decoder_layer.gate,
+                        total_expert_counts_pre_iter[stats_idx:end].sum(dim=0),
+                        expected_loads[stats_idx:end].sum(dim=0),
+                    )
+                )
+                stats_idx = end
+            else:
+                for mtp_layer in self.mtp_block.layers:
+                    gate_loads.append(
+                        (
+                            mtp_layer.decoder_layer.gate,
+                            total_expert_counts_pre_iter[stats_idx],
+                            expected_loads[stats_idx],
+                        )
+                    )
+                    stats_idx += 1
 
-        if len(gates) != n_layer:
-            raise RuntimeError(f"MoE bias update expected {n_layer} routed layers, but found {len(gates)} gates.")
+        if stats_idx != n_layer:
+            raise RuntimeError(f"MoE bias update expected {n_layer} routed layers, but consumed {stats_idx} rows.")
 
-        for i_layer, gate in enumerate(gates):
+        for gate, current_loads, expected_load in gate_loads:
             e_score_correction_bias = cast(NoAuxRouter, gate.router).e_score_correction_bias
-            expected_load = expected_loads[i_layer]
-            current_loads = total_expert_counts_pre_iter[i_layer]
 
             load_diff = current_loads - expected_load
             update_mask = load_diff != 0  # 只更新需要调整的专家
