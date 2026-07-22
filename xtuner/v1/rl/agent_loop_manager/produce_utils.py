@@ -127,7 +127,7 @@ class BaseProduceContext:
         group_status = [Status.EXPIRED, Status.ABORTED] if from_expired_pool else [Status.ABORTED]
         return await self.sampler.sample(task_name=self.task_name, group_status=group_status)
 
-    async def generate_group(
+    async def collect_rollout_group(
         self,
         rollout_state: list[RolloutState],
         *,
@@ -141,13 +141,15 @@ class BaseProduceContext:
 
         start = time.perf_counter()
         if isinstance(self.agent_loop, ray.actor.ActorHandle):
-            result = await self.agent_loop.generate_group.remote(
+            result = await self.agent_loop.collect_rollout_group.remote(
                 rollout_state,
+                is_valid_sample_func=self.is_valid_sample_fn,
                 enable_partial_rollout=enable_partial_rollout,
             )
         else:
-            result = await self.agent_loop.generate_group(
+            result = await self.agent_loop.collect_rollout_group(
                 rollout_state,
+                is_valid_sample_func=self.is_valid_sample_fn,
                 enable_partial_rollout=enable_partial_rollout,
             )
         elapsed = time.perf_counter() - start
@@ -168,9 +170,6 @@ class BaseProduceContext:
             rewards_count = 0
             for item in group:
                 if item.reward is None or "score" not in item.reward:
-                    logger.warning(
-                        f"Missing reward score in item (rollout_id: {item.rollout_id}) of generated group for task {self.task_name}. This item will be skipped in reward statistics."
-                    )
                     continue
                 # TODO: 在 agent 存在一拆多的情况下，这个 raw reward 统计会不准，但是考虑到在这区分有点 hard code，应该暂时不处理
                 rewards_sum += float(item.reward["score"])
@@ -257,6 +256,7 @@ class _TaskRunner:
     agent_loop: AgentLoopSpec
     produce_strategy: Any
     sampler: Sampler
+    is_valid_sample_fn: IsValidSampleFn | None = None
     weight: float = 1.0
     order: int = 0
 

@@ -11,6 +11,12 @@ from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
+from xtuner.v1.rl.distillation import (
+    DistillationConfig,
+    RolloutTeacherClient,
+    route_rollout_teacher_client,
+    validate_opd_sample_params,
+)
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.constants import AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
@@ -78,6 +84,7 @@ class AgentLoopConfig(ABC, BaseModel):
         logger=None,
         *,
         is_valid_sample_fn: IsValidSampleFn | None = None,
+        distillation_config: DistillationConfig | None = None,
     ) -> AgentLoopSpec:
         if self.cpu_resources is None:
             agent_loop = self.build_local(
@@ -86,6 +93,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 logger=logger,
             )
             agent_loop.is_valid_sample_fn = is_valid_sample_fn
+            agent_loop.configure_distillation(distillation_config)
             return agent_loop
 
         concurrency = AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
@@ -103,6 +111,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 judger=judger,
                 logger=logger,
                 is_valid_sample_fn=is_valid_sample_fn,
+                distillation_config=distillation_config,
             )
         return self._build_ray_actor(
             rollout_controller=rollout_controller,
@@ -111,6 +120,7 @@ class AgentLoopConfig(ABC, BaseModel):
             judger=judger,
             logger=logger,
             is_valid_sample_fn=is_valid_sample_fn,
+            distillation_config=distillation_config,
         )
 
     @abstractmethod
@@ -130,6 +140,7 @@ class AgentLoopConfig(ABC, BaseModel):
         judger: Judger | None = None,
         logger=None,
         is_valid_sample_fn: IsValidSampleFn | None = None,
+        distillation_config: DistillationConfig | None = None,
     ) -> RayAgentLoopProxy:
         ray_agent_loop = ray.remote(
             concurrency_groups={
@@ -149,6 +160,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 actor_memory=cpu_resources.cpu_memory_per_worker,
                 capture_child_tasks=True,
                 is_valid_sample_fn=is_valid_sample_fn,
+                distillation_config=distillation_config,
             ),
         )
 
@@ -162,6 +174,7 @@ class AgentLoopConfig(ABC, BaseModel):
         logger=None,
         start_bundle_idx: int = 0,
         is_valid_sample_fn: IsValidSampleFn | None = None,
+        distillation_config: DistillationConfig | None = None,
     ) -> list[RayAgentLoopProxy]:
         ray_agent_loop = ray.remote(
             concurrency_groups={
@@ -182,6 +195,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 actor_memory_per_worker=cpu_resources.cpu_memory_per_worker,
                 capture_child_tasks=True,
                 is_valid_sample_fn=is_valid_sample_fn,
+                distillation_config=distillation_config,
             ),
         )
 
@@ -195,6 +209,7 @@ class AgentLoopConfig(ABC, BaseModel):
         logger=None,
         start_bundle_idx: int = 0,
         is_valid_sample_fn: IsValidSampleFn | None = None,
+        distillation_config: DistillationConfig | None = None,
     ) -> RouterAgentLoop:
         return RouterAgentLoop(
             workers=self._build_ray_actors(
@@ -206,6 +221,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 logger=logger,
                 start_bundle_idx=start_bundle_idx,
                 is_valid_sample_fn=is_valid_sample_fn,
+                distillation_config=distillation_config,
             ),
             rollout_ctl=rollout_controller,
         )
@@ -234,6 +250,18 @@ class AgentLoop(ABC):
         else:
             self.logger = logger
         self._judger_pause_event = asyncio.Event()
+        self.teacher_clients: dict[str, RolloutTeacherClient] = {}
+        self.data_source_teacher_map: dict[str, str] = {}
+
+    def configure_distillation(self, distillation_config: DistillationConfig | None) -> None:
+        if distillation_config is None:
+            return
+
+        validate_opd_sample_params(self.sample_params)
+        self.teacher_clients = {
+            teacher.name: RolloutTeacherClient(teacher) for teacher in distillation_config.rollout_teachers
+        }
+        self.data_source_teacher_map = dict(distillation_config.data_source_teacher_map)
 
     @abstractmethod
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
@@ -258,6 +286,48 @@ class AgentLoop(ABC):
                 group_samples = await self.run_judger(group_samples)
         # Keep sample validation as the final group-generation step.
         return maybe_filter_invalid_sample(group_samples, self.is_valid_sample_fn, self.logger)
+
+    async def collect_rollout_group(
+        self,
+        rollout_state: list[RolloutState],
+        *,
+        is_valid_sample_func: Callable[[list[RolloutState]], bool] | None = None,
+        **kwargs,
+    ) -> list[RolloutState]:
+        if is_valid_sample_func is None and self.teacher_clients:
+            teacher = route_rollout_teacher_client(
+                rollout_state[0],
+                data_source_teacher_map=self.data_source_teacher_map,
+                teacher_clients=self.teacher_clients,
+            )
+
+            async def generate_and_score(state: RolloutState) -> RolloutState:
+                state.sample_params = self.sample_params
+                state = await self.generate_sample(state, **kwargs)
+                if state.status == Status.COMPLETED:
+                    state = await teacher.compute_logprobs(state)
+                return state
+
+            group = list(await asyncio.gather(*(create_task(generate_and_score(state)) for state in rollout_state)))
+            if self.judger is not None and self.enable_batch_judge and get_group_status(group) == Status.COMPLETED:
+                group = await self.run_judger(group)
+            return group
+
+        group = await self.generate_group(rollout_state, **kwargs)
+        if get_group_status(group) != Status.COMPLETED:
+            return group
+        if is_valid_sample_func is not None and not is_valid_sample_func(group):
+            for state in group:
+                state.status = Status.FILTERED
+            return group
+        if self.teacher_clients:
+            teacher = route_rollout_teacher_client(
+                group[0],
+                data_source_teacher_map=self.data_source_teacher_map,
+                teacher_clients=self.teacher_clients,
+            )
+            group = list(await asyncio.gather(*(create_task(teacher.compute_logprobs(state)) for state in group)))
+        return group
 
     @overload
     async def run_judger(self, rollout_state: RolloutState) -> RolloutState: ...
@@ -345,6 +415,13 @@ class RouterAgentLoop:
         finally:
             await self._release_worker(worker)
 
+    async def collect_rollout_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
+        worker = await self._pick_worker()
+        try:
+            return await worker.collect_rollout_group.remote(rollout_state, **kwargs)
+        finally:
+            await self._release_worker(worker)
+
     def get_worker_status(self) -> dict[str, int]:
         return {str(worker): load for worker, load in self._worker_loads.items()}
 
@@ -373,6 +450,8 @@ class AgentLoopActor:
         judger: Judger | None = None,
         logger=None,
         is_valid_sample_fn: IsValidSampleFn | None = None,
+        *,
+        distillation_config: DistillationConfig | None = None,
     ):
         self.agent_loop = agent_loop_config.build_local(
             rollout_controller=rollout_controller,
@@ -380,6 +459,7 @@ class AgentLoopActor:
             logger=logger,
         )
         self.agent_loop.is_valid_sample_fn = is_valid_sample_fn
+        self.agent_loop.configure_distillation(distillation_config)
 
     @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
@@ -388,6 +468,10 @@ class AgentLoopActor:
     @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         return await self.agent_loop.generate_group(rollout_state, **kwargs)
+
+    @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
+    async def collect_rollout_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
+        return await self.agent_loop.collect_rollout_group(rollout_state, **kwargs)
 
     @ray_method
     async def get_rollout_ctl(self):

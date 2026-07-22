@@ -109,6 +109,8 @@ class RolloutState(BaseModel):
     tool_calls: list[RolloutToolCall] | None = None
     response_ids: list[int] | None = None
     logprobs: list[float] | None = None
+    teacher_tokens: list[int] | None = None
+    teacher_logprobs: list[float] | None = None
     routed_experts: np.ndarray | RayObjectRef | list[RayObjectRef] | None = None
     finish_reason: str | None = None
     # response_mask: 记录response_ids中哪个token算loss, 与response_ids长度相同，每轮rollout在 agent_loop.generate 中覆盖写
@@ -244,6 +246,8 @@ def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
     rollout_state.response = ""
     rollout_state.response_ids = []
     rollout_state.logprobs = []
+    rollout_state.teacher_tokens = None
+    rollout_state.teacher_logprobs = None
     rollout_state.routed_experts = None
     rollout_state.finish_reason = None
     rollout_state.response_mask = None

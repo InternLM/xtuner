@@ -2,6 +2,7 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+from pydantic import Field
 from torch.distributed.device_mesh import DeviceMesh
 
 from xtuner.v1.rl.utils.misc import gather_logprobs
@@ -91,3 +92,75 @@ class LogProbContext(BaseLossContext):
         else:
             logprobs, _ = self.loss_fn(hidden_states, head_weight, head_bias, self.loss_kwargs)
         return logprobs, (None, {})
+
+
+class TopKLogProbConfig(BaseLossConfig):
+    """Select model Top-K tokens and compute their exact full-softmax log
+    probabilities."""
+
+    top_k: int = Field(gt=0)
+
+    @property
+    def loss_ctx_cls(self) -> type["TopKLogProbContext"]:
+        return TopKLogProbContext
+
+    @property
+    def _loss_kwargs_cls(self) -> type[BaseLossKwargs]:
+        return BaseLossKwargs
+
+    def build(self, data: dict, sp_mesh: DeviceMesh | None = None) -> "TopKLogProbContext":
+        del data, sp_mesh
+        return self.loss_ctx_cls(self, self._loss_kwargs_cls())
+
+
+class TopKLogProbContext(BaseLossContext):
+    """Select model Top-K IDs without storing full log-softmax."""
+
+    loss_cfg: TopKLogProbConfig
+    loss_kwargs: BaseLossKwargs
+
+    def loss_fn(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        head_bias: torch.Tensor | None,
+        loss_kwargs: BaseLossKwargs,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, dict[str, Any]]]:
+        del loss_kwargs
+        logits = F.linear(hidden_states, head_weight, head_bias).float()
+        selected_logits, token_ids = torch.topk(logits, k=self.loss_cfg.top_k, dim=-1)
+        selected_logprobs = selected_logits - torch.logsumexp(logits, dim=-1, keepdim=True)
+        return selected_logprobs, (token_ids, {})
+
+    def chunk_mode(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        head_bias: torch.Tensor | None,
+        loss_kwargs: BaseLossKwargs,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, dict[str, Any]]]:
+        assert self.loss_cfg.chunk_size is not None, "chunk_size must be set in chunk mode"
+
+        logprob_chunks = []
+        token_id_chunks = []
+        for hidden_states_chunk in torch.split(hidden_states, self.loss_cfg.chunk_size, dim=1):
+            logprobs, (token_ids, _) = self.loss_fn(
+                hidden_states_chunk,
+                head_weight,
+                head_bias,
+                loss_kwargs,
+            )
+            logprob_chunks.append(logprobs)
+            token_id_chunks.append(token_ids)
+        return torch.cat(logprob_chunks, dim=1), (torch.cat(token_id_chunks, dim=1), {})
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        head_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, dict[str, Any]]]:
+        if self.loss_cfg.mode == "chunk":
+            return self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
+        else:
+            return self.loss_fn(hidden_states, head_weight, head_bias, self.loss_kwargs)

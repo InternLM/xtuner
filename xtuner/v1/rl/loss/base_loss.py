@@ -304,4 +304,5 @@ def finalize_train_policy_metrics(extra_info_dict: dict[str, Any], device: str |
     extra_info_dict["reduced_train_policy_ratio_min"] = ratio_min
     # legacy metric，keep here
     extra_info_dict["max_ratio"] = ratio_max
+
     return extra_info_dict
