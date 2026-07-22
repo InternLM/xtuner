@@ -125,10 +125,15 @@ class AuxLossContext(nn.Module):
         """
         # The router is the single source of truth for assignments: grouped or
         # rollout routing is not equivalent to another global Top-K over weights.
-        tokens_per_expert_l = torch.bincount(
-            selected_experts.reshape(-1),
-            minlength=self.n_routed_experts,
-        )
+        # Keep the fixed output range explicit. CUDA bincount determines its
+        # output size with a host-visible max and synchronizes the training
+        # stream, which breaks compute/communication overlap.
+        tokens_per_expert_l = torch.histc(
+            selected_experts.float(),
+            bins=self.n_routed_experts,
+            min=0,
+            max=self.n_routed_experts,
+        ).to(torch.long)
         self._local_load_logits_list.append(tokens_per_expert_l)
 
         for ctx in _as_list(balancing_ctx):
