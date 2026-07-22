@@ -99,11 +99,21 @@ def pytree_reentrant_checkpoint(
     *args: Any,
     **kwargs: Any,
 ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-    """Run reentrant checkpoint with every nested Tensor as an autograd
-    input."""
+    """让嵌套 Tensor 也成为 reentrant checkpoint 的 autograd 输入。"""
+    # CheckpointWrapper 只打包一层。例如：
+    #   future_embeddings=[embedding_0, embedding_1]
+    # 对原生 CheckpointFunction 来说只是“一个 list 参数”，它看不到 list 里的
+    # 两个 Tensor，也就不会 detach 它们。这可能会造成反向传播的错误，因为这两个
+    # Tensor 的梯度应该交由 CheckpointFunction.backward 的返回值交回原始 Tensor，
+    # 而不是由他们自己来传递梯度。
+    # tree_flatten 会把输入变成近似：
+    #   hidden, embedding_0, embedding_1
+    # 这样 checkpoint 能逐个 detach；tree_unflatten 再在 replay 前把 list 还原。
     flat_inputs, input_spec = tree_flatten((args, kwargs))
 
     def run_function(*replayed_flat_inputs: Any) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        # 这里只还原参数结构，不会把 detached Tensor 重新连接到旧 graph；梯度由
+        # CheckpointFunction.backward 的返回值交回原始 Tensor。
         replayed_args, replayed_kwargs = tree_unflatten(list(replayed_flat_inputs), input_spec)
         return function(*replayed_args, **replayed_kwargs)
 

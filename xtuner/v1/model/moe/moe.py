@@ -1188,9 +1188,27 @@ class MoE(BaseModel):
                 if self._should_recompute(None, mtp_idx=mtp_idx) or (
                     self.config.mtp_config is not None and self.config.mtp_config.share_weights
                 ):  # share mtp head must recompute
-                    # Pytree flattening makes every nested Tensor a real
-                    # CheckpointFunction input, so all MTP micro-batches can use
-                    # the DSA lifecycle's native reentrant checkpoint mode.
+                    # MTP 默认使用 reentrant 的原因：
+                    #   Case 1：最小触发条件是 compile, topk offload, MTP share weights and depth > 1.
+                    #   多个 logical depth 共用 top-k cache。reentrant 的 original
+                    #   关闭 grad、replay 开启 grad，DSA 能据此正确更新 cache 计数。
+                    #   original 不建立内部图，所以 replay 可以安全复用离散 top-k。
+                    #   non-reentrant 的两次执行都开启 grad，却仍沿用该复用策略，
+                    #   因而出现 original=COMPUTE、replay=REUSE，无法重建相同清单。
+                    #
+                    #   indexer 本身始终 no_grad。不开 compile 时，多执行/少执行一次
+                    #   indexer 不会改变 eager autograd 的保存清单；开启 compile 后，
+                    #   COMPUTE/REUSE 经过不同 graph break 和 compiled block，才可能让
+                    #   checkpoint 保存槽位错位并报 different metadata。例如 original
+                    #   保存 [A, B, C]、replay 保存 [A, X, C] 时，槽位 1 的 metadata
+                    #   不同。后续若显式记录 ORIGINAL/REPLAY phase，可再让
+                    #   non-reentrant 正确推进 cache 状态。
+                    #
+                    # 使用 reentrant 时还必须用 pytree_reentrant_checkpoint：
+                    #   Case 2：触发条件是 EP > 1, intra-layer micro-batch > 1（例如 micro2）.
+                    #   micro2 传入 [embedding_0, embedding_1]；pytree 把 list 内 Tensor
+                    #   展开后，checkpoint 才能在 replay 前逐个 detach，并在 backward
+                    #   中把梯度交回原始 embedding graph。
                     use_reentrant = self.fsdp_config.mtp_checkpoint_use_reentrant
                     if use_reentrant:
                         mtp_layer = checkpoint_wrapper(

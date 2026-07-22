@@ -109,9 +109,16 @@ class DSAIndexer(nn.Module):
         k = torch.cat([k_pe, k_nope], dim=-1)
         weights = self.weights_proj(hidden_states).float() * (self.index_n_heads**-0.5)
 
-        # Top-k indices are discrete and carry no gradient. Keep the entire
-        # indexer outside autograd instead of building transient projection graphs.
-        # Index Q stays sharded by query token; only K is needed globally.
+        # Top-k 索引是整数，不需要梯度，所以整个 indexer 都放在 no_grad 下。
+        # 这解释了 Case 1 为什么只在 compile 下显错：
+        #   eager COMPUTE: indexer 不产生槽位 -> SparseMLA 保存 [A, B, C]
+        #   eager REUSE:   cache read 不产生槽位 -> SparseMLA 保存 [A, B, C]
+        # original/replay 虽然走了不同分支，但 checkpoint 看到的保存清单仍能对齐。
+        # compile 会把 indexer 周围的可求导计算按 compiled block 打包；COMPUTE 与
+        # REUSE 经过不同 graph break 后，可能分别保存 [A, B, C, D] 和
+        # [A, X, C, D]，同一槽位的 metadata 不同才触发 CheckpointError。
+        # 这里的字母只表示保存槽位，不表示真实变量或 Tensor 数值。
+        # Index Q 按 query token 保持分片，只有 K 需要全局 gather。
         k = gather_for_sequence_parallel(k, dim=1, sp_mesh=seq_ctx.sequence_parallel_mesh)
         return self.dsa_topk_indices_func(
             q,

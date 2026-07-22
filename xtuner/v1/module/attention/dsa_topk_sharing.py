@@ -322,6 +322,15 @@ class CrossLayerTopKSharingRuntime:
         return self._gpu_residency
 
     def _is_checkpoint_original_forward(self, layer: DSATopKSharingLayerProtocol) -> bool:
+        # 这里通过 grad 是否开启来判断当前阶段：
+        #   reentrant:     original=False，replay=True，可以区分；
+        #   non-reentrant: original=True， replay=True，无法区分。
+        # 例如 MTP depth2 需要在两次 original 和两次 replay 中分别更新 cache 计数；
+        # non-reentrant 识别不到 original，计数没有正确更新，depth1 replay 就会
+        # 沿用仅适合 reentrant 的 cache-reuse 路径。reentrant original 不建内部图，
+        # replay 复用离散 top-k 是安全的；non-reentrant 则必须重建相同保存清单。
+        # compile 只会把 COMPUTE/REUSE 的分支差异暴露为 saved-tensor metadata
+        # mismatch；即使关闭 compile 不报错，这里的 cache 状态仍然是错误的。
         return layer.training and not torch.is_grad_enabled()
 
     def _is_checkpoint_recompute(self, seq_ctx: SequenceContext) -> bool:

@@ -1,4 +1,4 @@
-"""Minimal counterexamples for MTP checkpoint modes and the no-MTP boundary."""
+"""MTP 两种 checkpoint 反例及无 MTP 边界的最小真实训练测试。"""
 
 import math
 import os
@@ -116,6 +116,19 @@ def test_mtp_checkpoint_defaults_to_reentrant():
 class TestGlm52MTPCheckpointRepro(DeterministicDDPTestCase):
     def test_non_reentrant_checkpoint_fails_for_compiled_shared_mtp_depths(self):
         self.create_pg("cuda")
+        # Case 1：compile, topk offload, MTP share weights and depth > 1
+        # 两个 logical depth 共用一个物理 MTP layer。depth1 original 在
+        # cache 为空时计算 indexer；由于 non-reentrant 无法正确更新 cache 计数，
+        # depth1 replay 却误用了 depth2 留下的 cache，即 original=COMPUTE、
+        # replay=REUSE。
+        #
+        # indexer 始终 no_grad，所以不开 compile 时可以简化为：
+        #   original: indexer -> SparseMLA 保存 [A, B, C]
+        #   replay:   cache   -> SparseMLA 保存 [A, B, C]
+        # 两张清单仍能对齐。compile + top-k offload 会让两条路径经过不同的 graph
+        # break 和 compiled block，例如保存 [A, B, C, D] 与 [A, X, C, D]；
+        # checkpoint 按槽位比较 metadata，发现 B 与 X 不同后才抛出错误。
+        # 字母仅表示保存槽位，不代表真实 Tensor，也不表示 checkpoint 比较数值。
         engine = _build_engine(
             intra_layer_micro_batch=1,
             use_reentrant=False,
@@ -136,6 +149,11 @@ class TestGlm52MTPCheckpointRepro(DeterministicDDPTestCase):
 
     def test_reentrant_checkpoint_supports_compiled_shared_mtp_depths(self):
         self.create_pg("cuda")
+        # Case 1：compile, topk offload, MTP share weights and depth > 1
+        # 使用默认 reentrant 重跑相同配置。original 不建立内部 autograd graph，
+        # 因而不需要和 replay 核对保存清单；replay 可以复用 original 的离散 top-k。
+        # DSA 又能正确统计两次 replay，并在最后一次使用后释放 cache，所以训练应
+        # 正常完成。
         engine = _build_engine(
             intra_layer_micro_batch=1,
             ep_size=1,
@@ -163,6 +181,10 @@ class TestGlm52MTPCheckpointRepro(DeterministicDDPTestCase):
 class TestGlm52DecoderCheckpointRepro(DeterministicDDPTestCase):
     def test_non_reentrant_checkpoint_fails_without_mtp_for_shared_dsa_cache(self):
         self.create_pg("cuda")
+        # Case 1 的根因不依赖 MTP：普通 full decoder 生产 top-k、后续 shared
+        # decoder 消费同一 cache，只要二者都用 non-reentrant checkpoint，也能构造
+        # original=COMPUTE、replay=REUSE。compile + offload 再把这个状态错误暴露为
+        # compiled block 的保存槽位错位。
         config = _tiny_mtp_config(ep_size=1, mtp_num_layers=1, compile_model=True)
         config.first_k_dense_replace = 2
         config.mlp_layer_types = ["dense", "dense"]
@@ -218,6 +240,11 @@ class TestGlm52DecoderCheckpointRepro(DeterministicDDPTestCase):
 class TestGlm52MTPMicroBatchCheckpointRepro(DeterministicDDPTestCase):
     def test_reentrant_checkpoint_supports_two_mtp_micro_batches(self):
         self.create_pg("cuda")
+        # Case 2：ep>1, intra layer micro batch > 1 (eg. = 2)
+        # micro2 传入 [embedding_0, embedding_1]。修复前 checkpoint 只看到
+        # 外层 list，看不到里面两个 Tensor，所以 replay 前不会 detach 它们。replay
+        # 的内部 backward 先使用一次原 embedding graph；外层 backward 再使用一次，
+        # 就会报 backward through graph twice。
         engine = _build_engine(
             intra_layer_micro_batch=2,
             ep_size=2,
@@ -229,6 +256,9 @@ class TestGlm52MTPMicroBatchCheckpointRepro(DeterministicDDPTestCase):
                 os.environ,
                 {"XTUNER_ACTIVATION_OFFLOAD": "0", "XTUNER_DSA_TOPK_OFFLOAD": "0"},
             ):
+                # pytree wrapper 先展开成两个顶层 Tensor，checkpoint 因而能逐个
+                # detach。replay 不再直接进入旧 graph；算出的梯度由 checkpoint
+                # backward 返回，并与 main LM/MTP 的梯度正常汇合。
                 step_info = engine.train_step([_model_item(engine, 2), _model_item(engine, 14)])
             assert math.isfinite(step_info["total_loss"])
             assert math.isfinite(step_info["logs_info"]["reduced_mtp_loss"])
