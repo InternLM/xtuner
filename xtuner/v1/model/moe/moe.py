@@ -605,7 +605,8 @@ class MoE(BaseModel):
                     )
                 hidden_states = layer_results[: len(hidden_states_list)]
                 router_logits = layer_results[len(hidden_states_list) : len(hidden_states_list) * 2]
-                router_weights = layer_results[len(hidden_states_list) * 2 :]
+                router_weights = layer_results[len(hidden_states_list) * 2 : len(hidden_states_list) * 3]
+                router_topk_ids = layer_results[len(hidden_states_list) * 3 :]
 
                 # Update hidden states and (optionally) collect router logits.
                 # router_weights are only consumed by aux_loss.accumulate below, so we
@@ -617,12 +618,14 @@ class MoE(BaseModel):
 
                 cat_router_weights = torch.cat(router_weights, dim=0)
                 cat_router_logits = torch.cat(router_logits, dim=0)
+                cat_router_topk_ids = torch.cat(router_topk_ids, dim=0)
                 # Pin the per-layer z-loss to MB0's hidden_states stream. With multiple MBs, only
                 # one carrier may be chosen — all MBs converge into the same total_loss backward,
                 # so MB0's path traverses every aux-loss node exactly once.
                 hidden_states_list[0] = self.aux_loss.accumulate(
                     selected_router_weights=cat_router_weights.index_select(0, nonpad_indices).contiguous().float(),
                     selected_router_logits=cat_router_logits.index_select(0, nonpad_indices).contiguous().float(),
+                    selected_experts=cat_router_topk_ids.index_select(0, nonpad_indices).contiguous(),
                     hidden_states=hidden_states_list[0],
                     balancing_ctx=balancing_ctx,
                     z_ctx=z_ctx,
@@ -668,7 +671,7 @@ class MoE(BaseModel):
 
                 micro_batch_mtp_losses = torch.tensor(0.0, device=DEVICE)
                 for mtp_idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
-                    mtp_hidden_states, mtp_router_results, _ = mtp_hidden
+                    mtp_hidden_states, mtp_router_results, _, _ = mtp_hidden
                     mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
                     micro_batch_mtp_losses += mtp_loss
 
@@ -699,6 +702,9 @@ class MoE(BaseModel):
                     cat_mtp_router_logits = torch.cat(
                         [mb_outputs[mtp_idx][1] for mb_outputs in mtp_outputs_per_mb], dim=0
                     )
+                    cat_mtp_router_topk_ids = torch.cat(
+                        [mb_outputs[mtp_idx][3] for mb_outputs in mtp_outputs_per_mb], dim=0
+                    )
                     hidden_states_list[0] = self.aux_loss.accumulate(
                         selected_router_weights=cat_mtp_router_weights.index_select(0, nonpad_indices)
                         .contiguous()
@@ -706,6 +712,7 @@ class MoE(BaseModel):
                         selected_router_logits=cat_mtp_router_logits.index_select(0, nonpad_indices)
                         .contiguous()
                         .float(),
+                        selected_experts=cat_mtp_router_topk_ids.index_select(0, nonpad_indices).contiguous(),
                         hidden_states=hidden_states_list[0],
                         balancing_ctx=balancing_ctx,
                         z_ctx=z_ctx,
@@ -835,13 +842,14 @@ class MoE(BaseModel):
                         position_embeddings=position_embeddings,
                         seq_ctx=seq_ctx,
                     )
-                hidden_states, router_results, router_weights = layer_results
+                hidden_states, router_results, router_weights, router_topk_ids = layer_results
                 if keep_router:
                     output["router_logits"][f"layer{idx}"] = self._maybe_offload_router(router_results)
                     output["router_weights"][f"layer{idx}"] = self._maybe_offload_router(router_weights)
                 hidden_states = self.aux_loss.accumulate(
                     selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
                     selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
+                    selected_experts=router_topk_ids.index_select(0, nonpad_indices).contiguous(),
                     hidden_states=hidden_states,
                     balancing_ctx=balancing_ctx,
                     z_ctx=z_ctx,
@@ -893,7 +901,7 @@ class MoE(BaseModel):
             # Compute MTP losses for each depth
             mtp_losses = torch.tensor(0.0, device=DEVICE)
             for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
-                mtp_hidden_states, mtp_router_results, mtp_router_weights = mtp_hidden
+                mtp_hidden_states, mtp_router_results, mtp_router_weights, mtp_router_topk_ids = mtp_hidden
 
                 if keep_router:
                     output["router_logits"][f"mtp_layer{idx}"] = mtp_router_results
@@ -905,6 +913,7 @@ class MoE(BaseModel):
                     .contiguous()
                     .float(),
                     selected_router_logits=mtp_router_results.index_select(0, mtp_nonpad_indices).contiguous().float(),
+                    selected_experts=mtp_router_topk_ids.index_select(0, mtp_nonpad_indices).contiguous(),
                     hidden_states=mtp_hidden_states,
                     balancing_ctx=balancing_ctx,
                     z_ctx=z_ctx,

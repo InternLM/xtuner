@@ -85,12 +85,12 @@ class MTPLayer(nn.Module):
         future_embeddings: torch.Tensor | list[torch.Tensor],
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
         seq_ctx: SequenceContext | list[SequenceContext],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[torch.Tensor, ...]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | tuple[torch.Tensor, ...]:
         """Forward pass through the MTP layer.
 
         Mirrors :meth:`MoEDecoderLayer.forward`: when a single ``hidden_states`` tensor is
-        provided, the layer runs the regular single-microbatch path and returns a 3-tuple
-        ``(hidden, router_logits, router_weights)``. When ``N`` hidden states are provided
+        provided, the layer runs the regular single-microbatch path and returns a 4-tuple
+        ``(hidden, router_logits, router_weights, router_topk_ids)``. When ``N`` hidden states are provided
         (intra-layer micro-batching / domino EP), ``future_embeddings``, ``position_embeddings``
         and ``seq_ctx`` must be lists of length ``N``; the per-microbatch preprocessing
         (enorm/hnorm/eh_proj) is run independently and a single underlying decoder forward
@@ -107,11 +107,12 @@ class MTPLayer(nn.Module):
             seq_ctx (SequenceContext | list[SequenceContext]): Sequence context per micro-batch.
 
         Returns:
-            tuple: For single-microbatch input, a 3-tuple
-                ``(hidden_states, router_logits, router_weights)``.
-                For ``N`` micro-batches, a flat tuple of length ``3 * N`` matching the
+            tuple: For single-microbatch input, a 4-tuple
+                ``(hidden_states, router_logits, router_weights, router_topk_ids)``.
+                For ``N`` micro-batches, a flat tuple of length ``4 * N`` matching the
                 convention used by :meth:`MoEDecoderLayer._micro_batch_forward`:
-                ``(hidden_0, ..., hidden_{N-1}, router_logits_0, ..., router_weights_{N-1})``.
+                ``(hidden_0, ..., hidden_{N-1}, router_logits_0, ...,
+                router_weights_{N-1}, router_topk_ids_0, ..., router_topk_ids_{N-1})``.
         """
         if len(hidden_states) == 1:
             assert isinstance(future_embeddings, torch.Tensor), (
@@ -152,17 +153,17 @@ class MTPLayer(nn.Module):
         future_embeddings: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         projected = self._preprocess(hidden_states=hidden_states, future_embeddings=future_embeddings)
 
-        hidden_states, router_results, router_weights = self.decoder_layer(
+        hidden_states, router_results, router_weights, router_topk_ids = self.decoder_layer(
             projected,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
         )
 
         hidden_states = self.final_layernorm(hidden_states)
-        return hidden_states, router_results, router_weights
+        return hidden_states, router_results, router_weights, router_topk_ids
 
     def _micro_batch_forward(
         self,
@@ -189,16 +190,17 @@ class MTPLayer(nn.Module):
             position_embeddings=position_embeddings_list,
             seq_ctx=seq_ctx_list,
         )
-        assert isinstance(layer_results, tuple) and len(layer_results) == 3 * n, (
+        assert isinstance(layer_results, tuple) and len(layer_results) == 4 * n, (
             "Multi-microbatch MTP requires the wrapped decoder layer to return a flat "
-            f"(hidden..., router_logits..., router_weights...) tuple of length {3 * n}; "
+            f"(hidden..., router_logits..., router_weights..., router_topk_ids...) tuple of length {4 * n}; "
             f"got length {len(layer_results) if isinstance(layer_results, tuple) else type(layer_results)}"
         )
 
         hidden_out = [self.final_layernorm(h) for h in layer_results[:n]]
         router_logits = list(layer_results[n : 2 * n])
-        router_weights = list(layer_results[2 * n :])
-        return tuple(hidden_out + router_logits + router_weights)
+        router_weights = list(layer_results[2 * n : 3 * n])
+        router_topk_ids = list(layer_results[3 * n :])
+        return tuple(hidden_out + router_logits + router_weights + router_topk_ids)
 
     def _preprocess(
         self,

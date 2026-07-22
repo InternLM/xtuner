@@ -495,7 +495,8 @@ def test_glm52_mtp_iteration_shares_first_depth_topk():
             projected_output = outputs["projected_output"]
             router_logits = torch.zeros(projected_output.shape[1], 1, device=projected_output.device)
             router_weights = torch.ones_like(router_logits)
-            return projected_output, router_logits, router_weights
+            router_topk_ids = torch.zeros_like(router_logits, dtype=torch.long)
+            return projected_output, router_logits, router_weights, router_topk_ids
 
     hidden_size = 4
     mtp_block = MTPBlock(
@@ -680,15 +681,15 @@ def test_tiny_glm52_native_compile_forward_matches_hf_numeric_oracle():
         with torch.no_grad():
             output = model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
 
-        # GLM keeps decoder-layer interfaces unchanged and lets seq_ctx cache writes
-        # graph-break, while the heavy pure sub-functions remain compiled.
+        # GLM lets seq_ctx DSA cache writes graph-break while the heavy pure
+        # sub-functions remain compiled.
         torch.testing.assert_close(output["loss"], expected_loss.to(output["loss"].dtype), rtol=5e-2, atol=5e-2)
     finally:
         del model
         torch.cuda.empty_cache()
 
 
-def test_glm52_micro_batch_forward_accumulates_mtp_aux_stats_once_per_depth():
+def test_glm52_forward_counts_actual_experts_for_main_and_mtp_paths():
     class FakeEmbedding(torch.nn.Module):
         def __init__(self, hidden_size: int):
             super().__init__()
@@ -705,40 +706,35 @@ def test_glm52_micro_batch_forward_accumulates_mtp_aux_stats_once_per_depth():
 
     class FakeDensePrefixLayer(torch.nn.Module):
         def forward(self, *hidden_states: torch.Tensor, position_embeddings, seq_ctx: list[SequenceContext]):
-            return hidden_states
+            return hidden_states if len(hidden_states) > 1 else hidden_states[0]
 
     class FakeSparseSharedLayer(torch.nn.Module):
         def forward(self, *hidden_states_list: torch.Tensor, position_embeddings, seq_ctx: list[SequenceContext]):
             router_logits = tuple(
-                torch.zeros(hidden_states.shape[1], 1, device=hidden_states.device)
+                torch.zeros(hidden_states.shape[1], 4, device=hidden_states.device)
                 for hidden_states in hidden_states_list
             )
             router_weights = tuple(
-                torch.ones(hidden_states.shape[1], 1, device=hidden_states.device)
+                torch.tensor([4.0, 3.0, 2.0, 1.0], device=hidden_states.device).expand(hidden_states.shape[1], -1)
                 for hidden_states in hidden_states_list
             )
-            return (*hidden_states_list, *router_logits, *router_weights)
+            selected_experts = tuple(
+                torch.tensor([2, 3], device=hidden_states.device).expand(hidden_states.shape[1], -1)
+                for hidden_states in hidden_states_list
+            )
+            return (*hidden_states_list, *router_logits, *router_weights, *selected_experts)
 
     class FakeMTPBlock(torch.nn.Module):
         def forward(self, *hidden_states_list: torch.Tensor, embed_tokens_fn, position_embeddings, seq_ctx):
             outputs = []
             for hidden_states in hidden_states_list:
-                router_logits = torch.zeros(hidden_states.shape[1], 1, device=hidden_states.device)
-                router_weights = torch.ones(hidden_states.shape[1], 1, device=hidden_states.device)
-                outputs.append([(hidden_states, router_logits, router_weights)])
+                router_logits = torch.zeros(hidden_states.shape[1], 4, device=hidden_states.device)
+                router_weights = torch.tensor([4.0, 3.0, 2.0, 1.0], device=hidden_states.device).expand(
+                    hidden_states.shape[1], -1
+                )
+                selected_experts = torch.tensor([0, 3], device=hidden_states.device).expand(hidden_states.shape[1], -1)
+                outputs.append([(hidden_states, router_logits, router_weights, selected_experts)])
             return outputs
-
-    class FakeAuxLoss(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.accumulate_calls = 0
-
-        def accumulate(self, *, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
-            self.accumulate_calls += 1
-            return hidden_states
-
-        def finalize(self, **kwargs):
-            return None, None, torch.zeros(self.accumulate_calls, 1)
 
     class FakeLossCtx:
         @classmethod
@@ -751,7 +747,8 @@ def test_glm52_micro_batch_forward_accumulates_mtp_aux_stats_once_per_depth():
 
     cfg = _tiny_glm52_config()
     cfg.mtp_config = MTPConfig(num_layers=1)
-    model = cfg.build()
+    with mock.patch("torch.cuda.Stream"):
+        model = cfg.build()
     model.embed_tokens = FakeEmbedding(cfg.hidden_size)
     model.rotary_emb = FakeRotaryEmbedding()
     model.layers = torch.nn.ModuleDict(
@@ -762,13 +759,13 @@ def test_glm52_micro_batch_forward_accumulates_mtp_aux_stats_once_per_depth():
     )
     model.norm = torch.nn.Identity()
     model.lm_head = FakeLMHead()
-    model.aux_loss = FakeAuxLoss()
     model.mtp_block = FakeMTPBlock()
 
     seq_ctx_list = [
         SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu"),
         SequenceContext.from_input_ids((torch.tensor([[3, 4]]),), device="cpu"),
     ]
+    seq_ctx_list[1].num_padding = 1
     loss_ctx_list = [
         {"lm": FakeLossCtx(), "mtp": [FakeLossCtx()]},
         {"lm": FakeLossCtx(), "mtp": [FakeLossCtx()]},
@@ -776,8 +773,22 @@ def test_glm52_micro_batch_forward_accumulates_mtp_aux_stats_once_per_depth():
 
     output = model(seq_ctx=seq_ctx_list, loss_ctx=loss_ctx_list)
 
-    assert model.aux_loss.accumulate_calls == 2
-    assert output["tokens_per_expert_global"].shape[0] == 2
+    torch.testing.assert_close(
+        output["tokens_per_expert_global"],
+        torch.tensor(
+            [
+                [0, 0, 3, 3],
+                [3, 0, 0, 3],
+            ]
+        ),
+    )
+
+    single_seq_ctx = SequenceContext.from_input_ids((torch.tensor([[5, 6]]),), device="cpu")
+    single_output = model(seq_ctx=single_seq_ctx, loss_ctx=None)
+    torch.testing.assert_close(
+        single_output["tokens_per_expert_global"],
+        torch.tensor([[0, 0, 2, 2]]),
+    )
 
 
 class TestGlm52MoE(DeterministicDDPTestCase):
