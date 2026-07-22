@@ -6,9 +6,11 @@ import time
 from typing import Literal, cast
 
 import httpx
+import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.rl.advantage import AdvantageEstimator
 
 
 class OPDTeacherConfig(BaseModel):
@@ -127,3 +129,54 @@ def route_teacher_client(
     data_source = state.extra_fields["origin_data_source"]
     teacher_name = data_source_teacher_map[data_source]
     return teacher_clients[teacher_name]
+
+
+def compute_pg_opd_token_advantages(
+    group: list[RolloutState],
+    *,
+    config: OPDConfig,
+    task_adv_estimator: AdvantageEstimator | None,
+) -> list[torch.Tensor]:
+    opd_advantages: list[torch.Tensor] = []
+    response_masks: list[torch.Tensor] = []
+    for state in group:
+        response_ids = cast(list[int], state.response_ids)
+        behavior_logprobs = cast(list[float], state.logprobs)
+        teacher_logprobs = cast(list[float], state.teacher_logprobs)
+
+        behavior_logprobs_t = torch.tensor(behavior_logprobs, dtype=torch.float32)
+        teacher_logprobs_t = torch.tensor(teacher_logprobs, dtype=torch.float32)
+        response_mask = state.response_mask
+        if not response_mask:
+            response_mask_t = torch.ones(len(response_ids), dtype=torch.float32)
+        else:
+            response_mask_t = torch.tensor(response_mask, dtype=torch.float32)
+        opd_advantages.append(teacher_logprobs_t - behavior_logprobs_t)
+        response_masks.append(response_mask_t)
+
+    task_advantages = [0.0] * len(group)
+    if config.task_adv_weight > 0:
+        rewards: list[float] = []
+        for state in group:
+            if state.reward is None or "score" not in state.reward:
+                raise ValueError(f"Reward score is required for mixed PG-OPD rollout {state.rollout_id}")
+            rewards.append(float(state.reward["score"]))
+
+        task_advantages = (
+            cast(AdvantageEstimator, task_adv_estimator)
+            .compute(
+                torch.tensor(rewards, dtype=torch.float32),
+                group,
+            )
+            .tolist()
+        )
+
+    return [
+        (config.task_adv_weight * task_advantage + config.opd_adv_weight * opd_advantage) * response_mask
+        for task_advantage, opd_advantage, response_mask in zip(
+            task_advantages,
+            opd_advantages,
+            response_masks,
+            strict=True,
+        )
+    ]
