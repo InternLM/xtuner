@@ -16,6 +16,7 @@ from xtuner.v1.rl.on_policy_distillation import (
     OPDConfig,
     TeacherLogprobClient,
     route_teacher_client,
+    validate_opd_sample_params,
 )
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.constants import AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
@@ -214,6 +215,7 @@ class AgentLoop(ABC):
         if opd_config is None:
             return
 
+        validate_opd_sample_params(self.sample_params)
         self.teacher_clients = {teacher.name: TeacherLogprobClient(teacher) for teacher in opd_config.teachers}
         self.data_source_teacher_map = dict(opd_config.data_source_teacher_map)
 
@@ -325,9 +327,6 @@ class AgentLoop(ABC):
         finally:
             self._judger_pause_event.clear()
 
-    async def close(self) -> None:
-        await asyncio.gather(*(client.close() for client in self.teacher_clients.values()))
-
 
 class RouterAgentLoop:
     def __init__(self, workers: list[RayAgentLoopProxy], rollout_ctl: RolloutController):
@@ -379,9 +378,6 @@ class RouterAgentLoop:
             *(worker.pause.remote() for worker in self.workers),
         )
 
-    async def close(self) -> None:
-        await asyncio.gather(*(worker.close.remote() for worker in self.workers))
-
 
 async def get_agent_loop_rollout_ctl(agent_loop: AgentLoopSpec) -> RolloutController:
     rollout_ctl = getattr(agent_loop, "rollout_ctl", None)
@@ -430,10 +426,6 @@ class AgentLoopActor:
     @ray_method
     async def pause(self) -> None:
         return await self.agent_loop.pause()
-
-    @ray_method
-    async def close(self) -> None:
-        return await self.agent_loop.close()
 
 
 RayAgentLoop = cast(

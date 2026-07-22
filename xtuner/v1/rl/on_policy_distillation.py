@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import httpx
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.advantage import AdvantageEstimator
 
 
@@ -44,8 +44,29 @@ class OPDConfig(BaseModel):
         return self
 
 
+def validate_opd_sample_params(sample_params: SampleParams) -> None:
+    identity_sampling_params: dict[str, Any] = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 0,
+        "repetition_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "min_tokens": 0,
+    }
+    non_identity_params = {
+        name: getattr(sample_params, name)
+        for name, expected in identity_sampling_params.items()
+        if getattr(sample_params, name) != expected
+    }
+    if non_identity_params:
+        raise ValueError(f"PG-OPD requires identity student sampling, got {non_identity_params}")
+    if not sample_params.return_logprob or not sample_params.return_token_ids:
+        raise ValueError("PG-OPD requires return_logprob=True and return_token_ids=True")
+
+
 class TeacherLogprobClient:
-    """Minimal asynchronous client for one external SGLang teacher."""
+    """Asynchronous SGLang teacher client scoped to one AgentLoop."""
 
     def __init__(self, config: OPDTeacherConfig) -> None:
         self.config = config
@@ -115,9 +136,6 @@ class TeacherLogprobClient:
         if not all(math.isfinite(logprob) for logprob in teacher_logprobs):
             raise ValueError("Teacher logprobs contain NaN or Inf")
         return teacher_tokens, teacher_logprobs
-
-    async def close(self) -> None:
-        await self._client.aclose()
 
 
 def route_teacher_client(
