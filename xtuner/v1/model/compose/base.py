@@ -138,6 +138,12 @@ class BaseComposeModel(BaseModel):
         self.language_model.set_modules_to_forward_prefetch([self.language_model.layers["0"]])  # type: ignore
 
         self._to_empty_meta()
+        # Reduce-scatter gradients with pure SUM for every sharded submodule. The vision tower,
+        # projector, and this compose root are sharded by their own fully_shard overrides / the root
+        # wrap above, none of which set reduce-sum; a single root-level pass over self.modules()
+        # covers them all (and is idempotent for the language model, already set). Without this the
+        # vision/projector grads silently fall back to FSDP AVG and lose a 1/fsdp_size factor.
+        self.set_gradient_reduce_sum()
         return self
 
     def from_hf(self, hf_path: str | Path, strict=True):
@@ -293,7 +299,16 @@ class BaseComposeModel(BaseModel):
         return self.language_model.post_micro_batch_forward(batch_outputs)
 
     def scale_and_reduce_grad(self):
+        # The language model reduces its own grads (MoE all_reduces replicated params; Dense uses the
+        # BaseModel replicate reduction). This compose model's OWN params -- vision tower, projector,
+        # and the root wrap -- may also hold replicated fp32 ignored_params that get no reduce-scatter,
+        # so SUM-reduce those here. Exclude the language model's params (handled above) to avoid a
+        # double reduction.
         self.language_model.scale_and_reduce_grad()
+        own_params = [
+            (name, param) for name, param in self.trainable_parameters() if not name.startswith("language_model.")
+        ]
+        self._reduce_replicated_ignored_grads(own_params)
 
     @override
     def build_loss_ctx_batch(  # type: ignore[override]

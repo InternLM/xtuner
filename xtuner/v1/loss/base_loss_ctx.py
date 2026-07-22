@@ -22,20 +22,21 @@ from torch.distributed.device_mesh import DeviceMesh
 # 1. Compute the global loss mask sum among dp, sp and grad accumulation:
 #    global_loss_mask_sum = all_reduce(sum([loss_mask.sum() for loss_mask in loss_masks_grad_acc]), op=dist.ReduceOp.SUM, group=world)
 #                           = (m00 + m01 + m02 + m03 + m10 + m11 + m12 + m13)
-# 2. Compute the iter loss, take rank0 iter0 as an example:
+# 2. Compute the iter loss (this rank's local component), take rank0 iter0 as an example:
 #    a. loss_{rank0iter0} = (l00 * w00 * m00 + l01 * w01 * m01)
 #    b. loss_{rank0iter0} = loss_{rank0iter0} / global_loss_mask_sum
 #                         = (l00 * w00 * m00 + l01 * w01 * m01) /
 #                           (m00 + m01 + m02 + m03 + m10 + m11 + m12 + m13)
-#    c. loss_{rank0iter0} = all_reduce_autograd(loss_{rank0iter0}, op=dist.ReduceOp.SUM, group=world)
-#                         = (l00 * w00 * m00 + l01 * w01 * m01 + l02 * w02 * m02 + l03 * w03 * m03) /
-#                           (m00 + m01 + m02 + m03 + m10 + m11 + m12 + m13)
-# 3. Compute the step loss:
+#       Under reduce-sum gradients this stays a local component: it is NOT all-reduced across ranks.
+#       Each rank keeps its own numerator over the shared (detached) global denominator; the
+#       cross-rank aggregation happens on the gradients (FSDP / scale_and_reduce_grad SUM), whose
+#       sum over ranks equals the global-batch loss gradient.
+# 3. Compute the step loss (this rank's local component summed over grad-acc iters):
 #    step_loss = loss_{rank0iter0} + loss_{rank0iter1}
-#              = (l00 * w00 * m00 + l01 * w01 * m01 + l02 * w02 * m02 + l03 * w03 * m03 +
-#                 l10 * w10 * m10 + l11 * w11 * m11 + l12 * w12 * m12 + l13 * w13 * m13) /
+#              = (l00 * w00 * m00 + l01 * w01 * m01 + l10 * w10 * m10 + l11 * w11 * m11) /
 #                (m00 + m01 + m02 + m03 + m10 + m11 + m12 + m13)
-#    It's equivalent to loss calculation in sp1, dp1 and grad acc 1.
+#    Its SUM over all ranks equals the sp1/dp1/grad-acc-1 loss; that global value is restored for
+#    display by a separate detached SUM all_reduce (see the reduce-sum design's logging section).
 
 
 class BaseLossKwargs(BaseModel):

@@ -63,9 +63,6 @@ class ModelForwardExtraLogInfo(dict):
     # Tensor to store the maximum model params update ratio.
     # Shape: `(n_chunk, intra_layer_micro_batch, 1)` if intra_layer_micro_batch > 1 else `(n_chunk, 1)`
     max_ratio: torch.Tensor
-    # Tensor to store the ranking loss for logging.
-    # Shape: `(intra_layer_micro_batch, 1)` if intra_layer_micro_batch > 1 else `(1,)`
-    local_base_loss: torch.Tensor
 
     def __init__(self, init_dict: dict[str, Any] = {}):
         super().__init__()
@@ -101,7 +98,6 @@ class ModelForwardExtraLogInfo(dict):
         return_dict = {}
         # 当增加新的字段时，需要在这里添加相应的处理逻辑
         sum_keys = (
-            "local_base_loss",
             "reduced_train_policy_ratio_abs_dev_sum",
             "reduced_train_policy_clip_low_count",
             "reduced_train_policy_clip_high_count",

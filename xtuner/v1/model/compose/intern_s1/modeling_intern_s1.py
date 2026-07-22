@@ -98,6 +98,10 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
         self.language_model.set_modules_to_forward_prefetch([self.language_model.layers["0"]])  # type: ignore
 
         self._to_empty_meta()
+        # Reduce-scatter gradients with pure SUM for every sharded submodule (vision tower, projector,
+        # compose root); their own fully_shard overrides do not set reduce-sum. One root-level pass
+        # over self.modules() covers them all (idempotent for the already-set language model).
+        self.set_gradient_reduce_sum()
         return self
 
     def extract_feature(self, pixel_values):

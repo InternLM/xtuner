@@ -1,12 +1,14 @@
 import os
 import re
+from typing import cast
 
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.loss import LMHeadLossContext
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 
-from .moe import MoELossContextDict, MoEModelOutputs
+from .moe import MoELossContextDict, MoEModelOutputs, _build_loss_log, _total_backward_loss
 from .qwen3 import Qwen3MoE, Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
 
 
@@ -144,11 +146,13 @@ class Qwen3VLTextMoE(Qwen3MoE):
             output["router_weights"] = None
 
         self._mark_dynamic(seq_ctx)
-        balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
-        # Hoisted out of the per-layer accumulate path: mask is constant across layers.
-        nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
-        non_pad_token = nonpad_indices.numel()
-        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
+        # Whole-batch aux hub (single micro-batch here): padding removal / stat accumulation / z-loss
+        # injection all happen inside it; the model feeds each layer's raw router outputs as
+        # single-element lists and the hub zips them against its own nonpad_list.
+        aux_ctx = self._resolve_aux_ctx(loss_ctx, seq_ctx)
+        # Dense 0-based ordinal of the MoE layers actually processed; keys the aux hub's per-layer
+        # slots. Immune to PP layer subsets / the absolute dict index.
+        moe_layer_ordinal = 0
 
         # =====================================================
         deepstack_visual_embeds = seq_ctx.deepstack_visual_embeds
@@ -188,16 +192,13 @@ class Qwen3VLTextMoE(Qwen3MoE):
                 if keep_router:
                     output["router_logits"][f"layer{idx}"] = router_results
                     output["router_weights"][f"layer{idx}"] = router_weights
-                hidden_states = self.aux_loss.accumulate(
-                    selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
-                    selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
-                    hidden_states=hidden_states,
-                    balancing_ctx=balancing_ctx,
-                    z_ctx=z_ctx,
-                    num_tokens_local=non_pad_token,
-                    num_tokens_global=num_tokens_global,
-                    world_size=z_world_size,
-                )
+                hidden_states = aux_ctx.accumulate(
+                    layer_idx=moe_layer_ordinal,
+                    router_weights_list=[router_weights],
+                    router_logits_list=[router_results],
+                    hidden_states_list=[hidden_states],
+                )[0]
+                moe_layer_ordinal += 1
 
             if deepstack_visual_embeds is not None and ((idx := int(idx)) in range(len(deepstack_visual_embeds))):
                 assert visual_pos_masks is not None
@@ -211,20 +212,20 @@ class Qwen3VLTextMoE(Qwen3MoE):
         # Get LM loss context from dict
         lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
         loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
-        output["loss"] = loss
         output["logits"] = logits
         output["extra_info"] = extra_info
 
-        balancing_loss, z_loss, tokens_per_expert_global = self.aux_loss.finalize(
-            balancing_ctx=balancing_ctx,
-            z_ctx=z_ctx,
-            non_pad_token=non_pad_token,
-        )
-        if balancing_loss is not None:
-            output["balancing_loss"] = balancing_loss
-        if z_loss is not None:
-            output["z_loss"] = z_loss
-        output["tokens_per_expert_global"] = tokens_per_expert_global
+        aux_out = aux_ctx.finalize()
+        output["tokens_per_expert_global"] = aux_out["tokens_per_expert_global"]
+        if lm_loss_ctx is not None:
+            assert loss is not None
+            # output.loss is the single total the engine backprops; per-term values are display-only.
+            output["loss"] = _total_backward_loss(loss, aux_out["balancing_loss"], None)
+            output["loss_log"] = _build_loss_log(
+                cast(LMHeadLossContext, lm_loss_ctx).calibrate(),
+                aux_ctx.calibrate(),
+                None,
+            )
 
         if keep_router:
             # TODO: Moving router logits to CPU is costly.
