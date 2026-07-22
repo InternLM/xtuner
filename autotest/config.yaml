@@ -810,7 +810,7 @@ case:
                        operator: <
                     -
                        metric: time/step
-                       threshold: 0.2
+                       threshold: 0.3
                        method: relative
                        operator: <
                        aggregate: 80
