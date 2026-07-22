@@ -213,7 +213,7 @@ case:
             parameters:
                 config: autotest/config/npu_rl_qwen3_30B_grpo_vllm.py
                 infer_backend: vllm
-                acceleator: NPU
+                accelerator: NPU
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cic/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:rl_s1_vllm
