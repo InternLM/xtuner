@@ -18,6 +18,7 @@ from .produce_utils import (
     _MANAGER_STATE_PATH,
     _STATUS_POLL_INTERVAL_S,
     _TASK_CHECKPOINT_DIR,
+    IsValidSampleFn,
     ProduceBatchResult,
     _TaskRunner,
     _TaskSamplerView,
@@ -55,6 +56,8 @@ class TaskSpecConfig(BaseModel):
         judger_config (JudgerConfig | ComposedJudgerConfig | None): Optional
             judger configuration used to score generated samples. Defaults to
             None.
+        filter_func (IsValidSampleFn | None): Optional group filter applied by the
+            agent loop after generation. Defaults to None.
         produce_strategy_config (ProduceStrategyConfig): Strategy used to
             produce rollout samples. Defaults to ``SyncProduceStrategyConfig``.
         sampler_config (SamplerConfig): Dataset sampler configuration for this
@@ -82,6 +85,7 @@ class TaskSpecConfig(BaseModel):
     weight: float = Field(default=1.0, ge=0.0)
     agent_loop_config: AgentLoopConfig
     judger_config: JudgerConfig | ComposedJudgerConfig | None = None
+    filter_func: IsValidSampleFn | None = None
     produce_strategy_config: ProduceStrategyConfig = SyncProduceStrategyConfig()
     sampler_config: SamplerConfig
 
@@ -154,6 +158,7 @@ class AgentLoopManagerConfig(BaseModel):
                     agent_loop=agent_loop,
                     produce_strategy=produce_strategy,
                     sampler=sampler,
+                    is_valid_sample_fn=task_cfg.filter_func,
                     weight=task_cfg.weight,
                     order=order,
                 )
