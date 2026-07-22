@@ -19,7 +19,7 @@ from xtuner.v1.model.moe.glm52 import Glm52MoEConfig
 from xtuner.v1.model.utils import checkpoint_wrapper
 from xtuner.v1.module.attention import DSAMLAConfig
 from xtuner.v1.module.mtp import MTPConfig
-from xtuner.v1.module.router.noaux_router import NoAuxRouter, NoAuxRouterConfig
+from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 
 
 def _tiny_mtp_config(ep_size: int, mtp_num_layers: int, compile_model: bool) -> Glm52MoEConfig:
@@ -93,10 +93,6 @@ def _build_engine(
         intra_layer_micro_batch=intra_layer_micro_batch,
     )
     engine.init_model_weights()
-    with torch.no_grad():
-        for module in engine.model.modules():
-            if isinstance(module, NoAuxRouter):
-                module.e_score_correction_bias.zero_()
     return engine
 
 

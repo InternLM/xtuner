@@ -347,6 +347,32 @@ def test_glm52_update_bias_covers_main_and_mtp_moe_gates():
         torch.testing.assert_close(bias, expected)
 
 
+def test_glm52_scratch_init_zeroes_main_and_mtp_router_biases():
+    config = _tiny_glm52_config()
+    config.mtp_config = MTPConfig(num_layers=1)
+    # Model construction only stores this external CUDA stream; initialization
+    # itself is device-agnostic and can exercise the real model path on CPU.
+    with mock.patch("torch.cuda.Stream"):
+        model = config.build()
+    assert model.mtp_block is not None
+
+    routers = [
+        model.layers["1"].gate.router,
+        model.layers["2"].gate.router,
+        model.mtp_block.layers[0].decoder_layer.gate.router,
+    ]
+    for router in routers:
+        router.e_score_correction_bias.fill_(1.0)
+
+    model.init_weights()
+
+    for router in routers:
+        torch.testing.assert_close(
+            router.e_score_correction_bias,
+            torch.zeros_like(router.e_score_correction_bias),
+        )
+
+
 def test_glm52_update_bias_aggregates_shared_mtp_depths_once():
     config = _tiny_glm52_config()
     config.mtp_config = MTPConfig(num_layers=2, share_weights=True)

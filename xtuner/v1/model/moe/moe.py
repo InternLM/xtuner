@@ -223,6 +223,16 @@ class MoE(BaseModel):
             num_experts_per_tok=self.config.num_experts_per_tok,
         )
 
+    @override
+    @torch.no_grad()
+    def init_weights(self) -> None:
+        super().init_weights()
+        # This persistent buffer is loaded from pretrained checkpoints, but the
+        # from-scratch path must initialize it after meta tensors are materialized.
+        for module in self.modules():
+            if isinstance(module, NoAuxRouter):
+                module.e_score_correction_bias.zero_()
+
     def _maybe_offload_router(self, tensor: torch.Tensor) -> torch.Tensor:
         if self.config.router_async_offload:
             return async_offload_to_cpu(tensor, self.offload_stream)

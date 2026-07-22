@@ -226,10 +226,6 @@ class TestGlm52MoEEngine(DeterministicDDPTestCase):
             intra_layer_micro_batch=2,
         )
         engine.init_model_weights()
-        with torch.no_grad():
-            for module in engine.model.modules():
-                if isinstance(module, NoAuxRouter):
-                    module.e_score_correction_bias.zero_()
 
         sp_mesh = init_data_mesh(str(DEVICE), sp_size=2)["sp"]
         data_batches = []
@@ -297,13 +293,6 @@ class TestGlm52MoEEngine(DeterministicDDPTestCase):
             ),
         )
         engine.init_model_weights()
-        # Scratch initialization covers parameters, while production loads this
-        # persistent router buffer from HF. Give the synthetic fixture the same
-        # well-defined starting state instead of retaining torch.empty contents.
-        with torch.no_grad():
-            for module in engine.model.modules():
-                if isinstance(module, NoAuxRouter):
-                    module.e_score_correction_bias.zero_()
 
         sequence_0 = torch.arange(2, 12).view(1, -1)
         sequence_1 = torch.arange(20, 28).view(1, -1)
