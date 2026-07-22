@@ -137,6 +137,10 @@ class _FileLockingFileSystem(FileSystem):
 
 
 class XtunerCacheWriter(FileSystemWriter):
+    # Declared here because BlockingAsyncStager.__init__ is untyped, so mypy
+    # cannot see state_dict_cache from the parent class.
+    state_dict_cache: dict[str, Any] | None
+
     # Save write results for the current rank as computed by `write_data` API
     # Cached on the local rank.
     _cache_write_results: dict[str, list[WriteResult]] = {}
