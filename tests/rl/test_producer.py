@@ -118,6 +118,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             return rs
 
         mock_agent_loop.generate_group = mock_gen
+        mock_agent_loop.teacher_clients = {}
         mock_agent_loop.collect_rollout_group = AgentLoop.collect_rollout_group.__get__(mock_agent_loop)
         return mock_agent_loop
 
