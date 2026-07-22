@@ -1,11 +1,10 @@
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 import torch
 import torch.nn as nn
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from torch import distributed as dist
-from torch.distributed._functional_collectives import all_reduce
 
 from xtuner.v1.utils.device import get_device
 
@@ -13,38 +12,17 @@ from xtuner.v1.utils.device import get_device
 DEVICE = get_device()
 
 
-class _AllReduce(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, op, group, tensor):
-        ctx.group = group
-        ctx.op = op
-        tensor = tensor.clone(memory_format=torch.contiguous_format)
-        tensor = all_reduce(tensor, op, group=group)
-        return tensor
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return (None, None) + (_AllReduce.apply(ctx.op, ctx.group, grad_output),)
-
-
-def all_reduce_autograd(tensor, op, group):
-    return _AllReduce.apply(op, group, tensor)
-
-
 class BalancingLossConfig(BaseModel):
     """Balancing loss configuration for MoE models.
 
     Args:
         balancing_loss_alpha (float): Weight for the balancing loss. Defaults to 0.001.
-        balancing_loss_global_average (bool): Whether to perform global averaging across all ranks.
-            Defaults to True.
         router_scoring_func (str): Router scoring function type. Options are "sigmoid" and "softmax".
             Defaults to "softmax".
     """
 
     model_config = ConfigDict(extra="forbid")
     balancing_loss_alpha: Annotated[float, Parameter(help="weight for balancing loss")] = 0.001
-    balancing_loss_global_average: Annotated[bool, Parameter(help="global average for balancing loss")] = True
     router_scoring_func: Annotated[Literal["sigmoid", "softmax"], Parameter(help="router scoring function")] = (
         "softmax"
     )
@@ -80,43 +58,72 @@ class BalancingLossContext(nn.Module):
         super().__init__()
         self.loss_cfg = loss_cfg
         self.loss_kwargs = loss_kwargs
-        self._batch_size = 1
-        # Per-layer differentiable accumulator. tokens_per_expert is owned by AuxLossContext
-        # and passed in at finalize() time to avoid duplicate storage / duplicate all_reduce.
-        self.routing_weights_sum_list: list[torch.Tensor] = []
+        # Per-layer differentiable accumulator keyed by dense MoE-layer ordinal. Under
+        # intra_layer_micro_batch a layer is accumulated once per micro-batch; the per-micro-batch
+        # router-weight sums add into the same slot (the sum is linear over the token pool), so the
+        # result equals concatenating the micro-batches and accumulating once. tokens_per_expert is
+        # owned by AuxLossContext and passed in at finalize() time to avoid duplicate storage /
+        # duplicate all_reduce.
+        self.routing_weights_sum: dict[int, torch.Tensor] = {}
+        # Detached display values set by finalize(). `_calibrated` is this rank's local balancing loss
+        # (calibrate()); `_calibrated_global` is the cross-rank balancing loss over the whole token
+        # pool (global_calibrate()), the semantically meaningful load-balance signal.
+        self._calibrated: torch.Tensor | None = None
+        self._calibrated_global: torch.Tensor | None = None
+        # This rank's non-padding token count, set at build time by set_non_pad_token()
+        # (see MoE._build_aux_ctx) and summed across micro-batches in cat().
+        self._non_pad_token: int = 1
 
-    @staticmethod
-    def build_batches(
-        loss_ctx_list: list["BalancingLossContext"],
-    ) -> list["BalancingLossContext"]:
-        """Build batches for balancing loss contexts.
-
-        For balancing loss, we set the batch size for proper gradient accumulation.
+    def set_non_pad_token(self, non_pad_token: int) -> None:
+        """Set this rank's non-padding token count for the current batch.
 
         Args:
-            loss_ctx_list (list[BalancingLossContext]): List of loss contexts.
+            non_pad_token (int): Non-padding token count on this rank.
+        """
+        self._non_pad_token = non_pad_token
+
+    @staticmethod
+    def cat(chunks: list["BalancingLossContext"]) -> "BalancingLossContext":
+        """Merge per-micro-batch balancing contexts into one whole-batch
+        context.
+
+        Balancing loss is a whole-batch quantity (its expert-load statistics are bilinear in the
+        token pool, so a per-micro-batch sum is not the batch value). Under
+        ``intra_layer_micro_batch`` the micro-batches are concatenated into one forward and their
+        router statistics are fed to a single context. The differentiable accumulators are still empty
+        at merge time -- accumulation runs per layer afterwards -- but the build-time non-padding token
+        count is per-micro-batch, so it is summed here to recover the whole-batch count.
+
+        Args:
+            chunks (list[BalancingLossContext]): Per-micro-batch contexts (identical config).
 
         Returns:
-            list[BalancingLossContext]: The same list with batch_size set.
+            BalancingLossContext: A single whole-batch context.
         """
-        for loss_ctx in loss_ctx_list:
-            loss_ctx._batch_size = len(loss_ctx_list)
-        return loss_ctx_list
+        assert len(chunks) > 0, "chunks must not be empty."
+        merged = BalancingLossContext(chunks[0].loss_cfg, BalancingLossKwargs())
+        merged._non_pad_token = sum(chunk._non_pad_token for chunk in chunks)
+        return merged
 
     def accumulate(
         self,
         *,
+        layer_idx: int,
         router_weights: torch.Tensor,
     ) -> None:
         """Update the per-layer differentiable accumulator for balancing loss.
 
         Args:
+            layer_idx (int): Dense MoE-layer ordinal (0-based). Same-layer micro-batches add into the
+                same slot, so the accumulated sum matches concatenating them and accumulating once.
             router_weights (torch.Tensor): Router weights with non-padding tokens already selected.
                 Shape: ``(non_pad, n_routed_experts)``.
         """
         # router_weights.sum(dim=0) is [n_routed_experts]; sum's backward does not save the input
         # tensor, so the [non_pad, n_routed_experts] activation is not pinned by this accumulator.
-        self.routing_weights_sum_list.append(router_weights.sum(dim=0))
+        layer_sum = router_weights.sum(dim=0)
+        prev = self.routing_weights_sum.get(layer_idx)
+        self.routing_weights_sum[layer_idx] = layer_sum if prev is None else prev + layer_sum
 
     def finalize(
         self,
@@ -125,52 +132,124 @@ class BalancingLossContext(nn.Module):
         tokens_per_expert_global: torch.Tensor,
         n_routed_experts: int,
         num_experts_per_tok: int,
-        non_pad_token: int,
     ) -> torch.Tensor:
         """Finalize balancing loss from accumulators.
 
+        The non-padding token count was set at build time via ``set_non_pad_token()``.
+
         Args:
             tokens_per_expert_local (torch.Tensor): Per-layer expert token counts on this rank,
-                ``(num_layers, n_routed_experts)``. Used by the non-global-average branch.
+                ``(num_layers, n_routed_experts)``. Used by the single-process branch.
             tokens_per_expert_global (torch.Tensor): All-reduced ``tokens_per_expert``,
                 ``(num_layers, n_routed_experts)``. Used by the global-average branch.
             n_routed_experts (int): Number of routed experts.
             num_experts_per_tok (int): Number of experts selected per token.
-            non_pad_token (int): Number of non-padding tokens on this rank.
 
         Returns:
-            torch.Tensor: Final balancing loss.
+            torch.Tensor: This rank's balancing loss carrying the autograd graph for backward. Under
+            reduce-sum it is computed from this rank's own ``local_gating_sum`` with global detached
+            statistics; cross-rank aggregation happens on the gradients (FSDP / scale_and_reduce_grad
+            SUM), so summing over ranks reproduces the global balancing loss. The per-rank display
+            value is computed separately by ``calibrate()`` from local statistics.
         """
-        routing_weights_sum_list = self.routing_weights_sum_list
-        self.routing_weights_sum_list = []
-        if self.loss_cfg.balancing_loss_alpha == 0 or not routing_weights_sum_list:
-            return torch.tensor(0.0, device=tokens_per_expert_local.device, dtype=torch.float32)
+        routing_weights_sum = self.routing_weights_sum
+        self.routing_weights_sum = {}
+        if self.loss_cfg.balancing_loss_alpha == 0 or not routing_weights_sum:
+            zero = torch.tensor(0.0, device=tokens_per_expert_local.device, dtype=torch.float32)
+            self._calibrated = zero
+            self._calibrated_global = zero
+            return zero
 
-        local_gating_sum = torch.stack(routing_weights_sum_list, dim=0)
+        # Stack in ascending layer-ordinal order so the rows align with tokens_per_expert_local /
+        # tokens_per_expert_global (both keyed by the same dense MoE-layer ordinal).
+        local_gating_sum = torch.stack([routing_weights_sum[k] for k in sorted(routing_weights_sum)], dim=0)
+        alpha = self.loss_cfg.balancing_loss_alpha
 
-        if self.loss_cfg.balancing_loss_global_average and dist.is_initialized():
-            group = dist.group.WORLD
-            assert group is not None
+        if dist.is_initialized():
             tokens_global = tokens_per_expert_global.sum(-1)
             seqlen_global = tokens_global // num_experts_per_tok
-
-            routing_weights_sum_global = all_reduce_autograd(local_gating_sum, "sum", group)
-            routing_weights_mean_global = routing_weights_sum_global / seqlen_global.unsqueeze(-1)
             scale_global = n_routed_experts / tokens_global
-            tokens_per_expert_for_loss = tokens_per_expert_global
+            routing_weights_mean = local_gating_sum / seqlen_global.unsqueeze(-1)
+            loss_vec = scale_global * (tokens_per_expert_global * routing_weights_mean).sum(-1)
         else:
-            valid_tokens = max(non_pad_token, 1)
+            # Single-process path (no process group). Numerically identical to the distributed branch
+            # at world size 1: tokens_per_expert_global == tokens_per_expert_local, tokens_global ==
+            # valid_tokens * num_experts_per_tok, and seqlen_global == valid_tokens, so scale / mean /
+            # loss match term for term. Kept so reference / eval (dist uninitialized) still works.
+            valid_tokens = max(self._non_pad_token, 1)
             scale_global = n_routed_experts / (valid_tokens * num_experts_per_tok)
-            routing_weights_mean_global = local_gating_sum / valid_tokens
-            tokens_per_expert_for_loss = tokens_per_expert_local
+            routing_weights_mean = local_gating_sum / valid_tokens
+            loss_vec = scale_global * (tokens_per_expert_local * routing_weights_mean).sum(-1)
 
-        loss = scale_global * (tokens_per_expert_for_loss * routing_weights_mean_global).sum(-1)
-        loss = loss.sum() * self.loss_cfg.balancing_loss_alpha
-        return loss / self._batch_size
+        loss = loss_vec.sum() * alpha
+        # Display values (detached). `_calibrated`: this rank's balancing loss from LOCAL statistics
+        # (its own tokens_per_expert / seqlen), a readable per-rank number. `_calibrated_global`: the
+        # balancing loss over the whole cross-rank token pool (one all_reduce of the gating sum), which
+        # is the load-balance signal that actually matters -- a per-rank number cannot show whether
+        # experts are balanced across EP ranks. Both are display-only, NOT backward modes; they do not
+        # reintroduce the removed non-global averaging.
+        self._calibrated = self._local_balancing_loss(
+            local_gating_sum, tokens_per_expert_local, n_routed_experts, num_experts_per_tok
+        )
+        self._calibrated_global = self._global_balancing_loss(
+            local_gating_sum, tokens_per_expert_global, n_routed_experts, num_experts_per_tok
+        )
+        return loss
 
-    @property
-    def batch_size(self) -> int:
-        return self._batch_size
+    def _local_balancing_loss(
+        self,
+        local_gating_sum: torch.Tensor,
+        tokens_per_expert_local: torch.Tensor,
+        n_routed_experts: int,
+        num_experts_per_tok: int,
+    ) -> torch.Tensor:
+        valid_tokens = max(self._non_pad_token, 1)
+        scale_local = n_routed_experts / (valid_tokens * num_experts_per_tok)
+        routing_weights_mean_local = local_gating_sum.detach() / valid_tokens
+        loss = scale_local * (tokens_per_expert_local * routing_weights_mean_local).sum(-1)
+        return (loss.sum() * self.loss_cfg.balancing_loss_alpha).detach()
+
+    def calibrate(self) -> torch.Tensor:
+        """This rank's balancing loss (from local statistics) for display
+        (detached, no all_reduce).
+
+        Returns:
+            torch.Tensor: This rank's local balancing loss.
+        """
+        assert self._calibrated is not None, "finalize() must be called before calibrate()"
+        return self._calibrated
+
+    def global_calibrate(self) -> torch.Tensor:
+        """The balancing loss over the whole cross-rank token pool for display
+        (detached).
+
+        Reflects whether experts are balanced across all ranks, which the per-rank ``calibrate()``
+        value cannot show. Costs one all_reduce of the gating sum, done at ``finalize()`` time.
+
+        Returns:
+            torch.Tensor: The global balancing loss.
+        """
+        assert self._calibrated_global is not None, "finalize() must be called before global_calibrate()"
+        return self._calibrated_global
+
+    def _global_balancing_loss(
+        self,
+        local_gating_sum: torch.Tensor,
+        tokens_per_expert_global: torch.Tensor,
+        n_routed_experts: int,
+        num_experts_per_tok: int,
+    ) -> torch.Tensor:
+        # Mirror finalize()'s global-average branch but on the ALL-REDUCED gating sum, so the value is
+        # the true global balancing loss rather than this rank's backward component.
+        global_gating_sum = local_gating_sum.detach().clone()
+        if dist.is_initialized():
+            dist.all_reduce(global_gating_sum, op=dist.ReduceOp.SUM)
+        tokens_global = tokens_per_expert_global.sum(-1).clamp_min(1)
+        seqlen_global = (tokens_global // num_experts_per_tok).clamp_min(1)
+        scale_global = n_routed_experts / tokens_global
+        routing_weights_mean = global_gating_sum / seqlen_global.unsqueeze(-1)
+        loss = scale_global * (tokens_per_expert_global * routing_weights_mean).sum(-1)
+        return (loss.sum() * self.loss_cfg.balancing_loss_alpha).detach()
 
 
 class ZLossConfig(BaseModel):
@@ -178,13 +257,10 @@ class ZLossConfig(BaseModel):
 
     Args:
         z_loss_alpha (float): Weight for the z-loss. Defaults to 0.001.
-        z_loss_global_average (bool): Whether to perform global averaging across all ranks.
-            Defaults to True.
     """
 
     model_config = ConfigDict(extra="forbid")
     z_loss_alpha: Annotated[float, Parameter(help="weight for z-loss")] = 0.001
-    z_loss_global_average: Annotated[bool, Parameter(help="global average for z-loss")] = True
 
     def build(self) -> "ZLossContext":
         """Build ZLossContext.
@@ -214,38 +290,65 @@ class ZLossContext(nn.Module):
         super().__init__()
         self.loss_cfg = loss_cfg
         self.loss_kwargs = loss_kwargs
-        self._batch_size = 1
-        # Z-loss is folded into a running detached scalar for logging only. The differentiable
-        # per-layer scalar is injected back into the main forward graph via AuxLossScaler at
-        # accumulate() time, so we never need to keep per-layer logsum tensors around. This is
-        # the memory-saving pattern adapted from Megatron's MoEAuxLossAutoScaler.
+        # Z-loss is backward-only: the differentiable per-layer scalar is injected into the main graph
+        # via AuxLossScaler at accumulate() time (memory-saving pattern from Megatron's
+        # MoEAuxLossAutoScaler). For display we self-maintain a single detached running scalar holding
+        # THIS RANK's z-loss mean (the raw `logsumexp^2` mean per layer, without the reduce-sum
+        # `num_tokens_local/denom_global` factor), i.e. a clean world-size-independent per-rank value.
         self._running_loss_for_log: torch.Tensor | None = None
+        self._calibrated: torch.Tensor | None = None
+        # Token counts set at build time by set_token_counts() (see MoE._build_aux_ctx) and summed
+        # across micro-batches in cat(). Used as the z-loss normalization denominators.
+        self._num_tokens_local: int = 1
+        self._num_tokens_global: torch.Tensor | None = None
 
     @staticmethod
-    def build_batches(
-        loss_ctx_list: list["ZLossContext"],
-    ) -> list["ZLossContext"]:
-        """Build batches for z-loss contexts.
+    def cat(chunks: list["ZLossContext"]) -> "ZLossContext":
+        """Merge per-micro-batch z-loss contexts into one whole-batch context.
 
-        For z-loss, we set the batch size for proper gradient accumulation.
+        Mirrors :meth:`BalancingLossContext.cat`: under ``intra_layer_micro_batch`` the concatenated
+        router logits are fed to a single context, so the per-micro-batch contexts collapse to one.
+        The differentiable accumulators are empty at merge time, but the build-time token counts are
+        per-micro-batch, so both the local count and the (linear) cross-rank count are summed here to
+        recover the whole-batch denominators.
 
         Args:
-            loss_ctx_list (list[ZLossContext]): List of loss contexts.
+            chunks (list[ZLossContext]): Per-micro-batch contexts (identical config).
 
         Returns:
-            list[ZLossContext]: The same list with batch_size set.
+            ZLossContext: A single whole-batch context.
         """
-        for loss_ctx in loss_ctx_list:
-            loss_ctx._batch_size = len(loss_ctx_list)
-        return loss_ctx_list
+        assert len(chunks) > 0, "chunks must not be empty."
+        merged = ZLossContext(chunks[0].loss_cfg, ZLossKwargs())
+        merged._num_tokens_local = sum(chunk._num_tokens_local for chunk in chunks)
+        # num_tokens_global is None iff no process group is initialized -- identical across chunks
+        # (shared config). all_reduce is linear, so summing per-chunk globals == all_reduce of the
+        # summed local counts, i.e. the whole-batch global token total.
+        if chunks[0]._num_tokens_global is None:
+            merged._num_tokens_global = None
+        else:
+            merged._num_tokens_global = torch.stack(
+                [cast(torch.Tensor, chunk._num_tokens_global) for chunk in chunks]
+            ).sum()
+        return merged
+
+    def set_token_counts(self, num_tokens_local: int, num_tokens_global: torch.Tensor | None) -> None:
+        """Set this rank's non-padding token counts (local and cross-rank) for
+        the current batch.
+
+        Args:
+            num_tokens_local (int): Non-padding token count on this rank.
+            num_tokens_global (torch.Tensor | None): All-reduced non-padding token count across ranks
+                (int64 scalar), or ``None`` when no process group is initialized (single-process
+                reference / eval).
+        """
+        self._num_tokens_local = num_tokens_local
+        self._num_tokens_global = num_tokens_global
 
     def accumulate(
         self,
         *,
         router_logits: torch.Tensor,
-        num_tokens_local: int,
-        num_tokens_global: torch.Tensor | None,
-        world_size: int,
     ) -> torch.Tensor:
         """Compute z-loss for one layer and return it as a scalar with autograd
         attached.
@@ -253,60 +356,65 @@ class ZLossContext(nn.Module):
         The caller is expected to inject the returned scalar back into the main forward graph
         via :class:`AuxLossScaler`; the autograd graph behind this scalar (logsumexp -> square ->
         sum -> scaling) is then released as soon as the corresponding layer is reached during
-        backward, instead of being pinned until a global ``finalize()``.
+        backward, instead of being pinned until a global ``finalize()``. Token counts were set at
+        build time via ``set_token_counts()``.
 
         Args:
             router_logits (torch.Tensor): Router logits with non-padding tokens already selected.
                 Shape ``(non_pad, n_routed_experts)``.
-            num_tokens_local (int): Number of non-padding tokens on this rank for the current
-                forward (constant across MoE layers in a single forward).
-            num_tokens_global (torch.Tensor | None): All-reduced non-padding token count across
-                ranks, as an int64 scalar tensor. ``None`` when ``z_loss_global_average`` is off
-                or the process group is not initialized.
-            world_size (int): Number of ranks contributing to ``num_tokens_global``. Ignored when
-                ``num_tokens_global`` is ``None``.
 
         Returns:
             torch.Tensor: Per-layer z-loss as a 0-d tensor with autograd graph back to
             ``router_logits``.
         """
+        num_tokens_local = self._num_tokens_local
+        num_tokens_global = self._num_tokens_global
         if self.loss_cfg.z_loss_alpha == 0:
             zero = torch.tensor(0.0, device=router_logits.device, dtype=torch.float32)
             self._update_running(zero)
             return zero
 
         denom_local = max(num_tokens_local, 1)
-        loss = torch.logsumexp(router_logits, dim=-1).square().sum() / denom_local
+        base = torch.logsumexp(router_logits, dim=-1).square().sum() / denom_local
 
-        if self.loss_cfg.z_loss_global_average and num_tokens_global is not None:
-            # Equivalent to scaling each layer's local loss by num_tokens_local * world_size /
-            # num_tokens_global, matching the original list-based finalize formula.
+        # Single-process (dist uninitialized): num_tokens_global is None, so the loss stays `base`,
+        # which equals the distributed branch at world size 1 (denom_global == num_tokens_local).
+        loss = base
+        if num_tokens_global is not None:
+            # Under reduce-sum gradients the injected z-loss stays as this rank's local component
+            # (its share of the global z-loss, WITHOUT any `× world_size`). Cross-rank aggregation
+            # happens on the gradients via the FSDP SUM reduce-scatter; summing this local component
+            # over ranks reproduces the global z-loss.
             denom_global = torch.clamp(num_tokens_global, min=1)
-            loss = loss * num_tokens_local * world_size / denom_global
+            loss = base * num_tokens_local / denom_global
 
-        loss = loss * self.loss_cfg.z_loss_alpha / self._batch_size
-        self._update_running(loss.detach())
+        loss = loss * self.loss_cfg.z_loss_alpha
+        # Display value: this rank's raw z-loss mean (drop the `num_tokens_local/denom_global`
+        # reduce-sum factor), which is world-size independent and readable per rank.
+        self._update_running((base * self.loss_cfg.z_loss_alpha).detach())
         return loss
 
     def finalize(self) -> torch.Tensor:
-        """Return the accumulated z-loss as a detached scalar for logging only.
+        """Return this rank's accumulated z-loss mean as a detached scalar for
+        the output field.
 
-        The differentiable contribution has already been injected into the main forward graph at
-        each ``accumulate()`` call, so this value carries no autograd graph; it exists purely to
-        populate the logging field on the model output.
+        The differentiable contribution was injected into the main graph at each ``accumulate()``
+        call, so this value carries no autograd graph. It is this rank's own z-loss mean (no
+        cross-rank all_reduce); ``calibrate()`` returns the same value for the display pipeline.
         """
         value = self._running_loss_for_log
         self._running_loss_for_log = None
-        if value is None:
-            return torch.tensor(0.0, device=DEVICE, dtype=torch.float32)
-        return value
+        self._calibrated = value if value is not None else torch.tensor(0.0, device=DEVICE, dtype=torch.float32)
+        return self._calibrated
+
+    def calibrate(self) -> torch.Tensor:
+        """This rank's z-loss mean for display (detached, no cross-rank
+        all_reduce)."""
+        assert self._calibrated is not None, "finalize() must be called before calibrate()"
+        return self._calibrated
 
     def _update_running(self, value: torch.Tensor) -> None:
         if self._running_loss_for_log is None:
             self._running_loss_for_log = value.clone()
         else:
             self._running_loss_for_log = self._running_loss_for_log + value
-
-    @property
-    def batch_size(self) -> int:
-        return self._batch_size

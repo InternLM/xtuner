@@ -35,7 +35,6 @@ from xtuner.v1.model.base import (
     BatchForwardInfo,
     DataBatchInfo,
     ModelItem,
-    ModelOutputs,
     XTunerBaseModelConfig,
 )
 from xtuner.v1.patch.xtuner_storage import XtunerCacheWriter, _get_async_dcp_save_timeout
@@ -51,7 +50,7 @@ from xtuner.v1.utils.grad_norm import cal_grad_norm
 
 
 class TrainStepInfo(DataBatchInfo, BatchForwardInfo):
-    total_loss: float
+    pass
 
 
 logger = get_logger()
@@ -216,7 +215,6 @@ class TrainEngine:
         micro_batch_results = []
 
         data_batch_info = self.model.pre_micro_batch_forward(data_batches)
-        total_loss = torch.tensor(0.0, device=DEVICE)
 
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             ProberList.set_micro_batch_iter(micro_batch_iter)
@@ -238,14 +236,15 @@ class TrainEngine:
 
             micro_batch_results.append(output)
 
-            loss = self._get_total_loss(output)
-            loss.backward()
-            total_loss += loss.detach()
+            # The model folds every loss term (LM/policy + aux + MTP) into output.loss; the engine
+            # just backprops it. Per-term display values ride on output.loss_log.
+            assert output.loss is not None, "model forward must return a loss in training mode"
+            output.loss.backward()
             # call dump_forward_records after backward to record the recomputed activations
             ProberList.after_micro_iter_forward()
 
         batch_forward_info = self.model.post_micro_batch_forward(micro_batch_results)
-        return TrainStepInfo(total_loss=total_loss.item(), **data_batch_info, **batch_forward_info)
+        return TrainStepInfo(**data_batch_info, **batch_forward_info)
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):
         self.model.from_hf(hf_path=hf_path, strict=strict)
@@ -558,17 +557,3 @@ class TrainEngine:
         for model in self.model.modules():
             if isinstance(model, BaseModel) and model.float8_handler is not None:
                 model.float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)
-
-    def _get_total_loss(self, model_outputs: ModelOutputs) -> torch.Tensor:
-        # TODO: This logic should be moved into the model layer. The model should be responsible
-        # for aggregating all losses (CE loss, balancing loss, z loss, etc.) and returning a
-        # single total_loss. The engine should only call model.forward() and use the returned
-        # total_loss directly, rather than iterating through fields to sum losses here.
-        # This would provide better separation of concerns and make the loss computation logic
-        # more explicit and maintainable.
-        loss = torch.tensor(0.0, device=DEVICE)
-        for key in model_outputs.model_fields:
-            value = getattr(model_outputs, key)
-            if "loss" in key and isinstance(value, torch.Tensor):
-                loss += value
-        return loss

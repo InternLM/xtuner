@@ -6,7 +6,6 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from cyclopts import Parameter
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.nn.functional import all_reduce
 
 from xtuner.v1.utils.device import get_device
 
@@ -106,6 +105,11 @@ class LMHeadLossContext(BaseLossContext):
     loss_cfg: CELossConfig
     loss_kwargs: CELossKwargs
 
+    # Display state for calibrate(): coefficient stashed by build_batches (global_denom /
+    # rank_denom) and this rank's detached backward loss stashed by forward().
+    _display_coeff: torch.Tensor
+    _backward_loss: torch.Tensor
+
     def __init__(self, loss_cfg: CELossConfig, loss_kwargs: CELossKwargs):
         super().__init__(loss_cfg, loss_kwargs)
 
@@ -171,17 +175,28 @@ class LMHeadLossContext(BaseLossContext):
             loss_ctx.loss_kwargs.loss_weight = loss_weight
             loss_weight_list.append(loss_weight)
 
-        # Compute the denominator used in the global calibration of the loss
+        # Denominators for calibration. rank_denominator is this rank's local weight sum; clone before
+        # the in-place all_reduce so global_denominator does not overwrite it (same tensor otherwise).
         rank_denominator = sum(loss_weight.sum() for loss_weight in loss_weight_list)
         rank_denominator = cast(torch.Tensor, rank_denominator)
-        global_denominator = rank_denominator
+        global_denominator = rank_denominator.clone()
         if dist.is_initialized():
             dist.all_reduce(global_denominator, op=dist.ReduceOp.SUM)
+
+        # Coefficient to turn each rank's backward loss (local weighted sum / global_denominator) back
+        # into this rank's own reduction-correct mean for display: multiply by global_denominator,
+        # divide by this rank's own weight sum. The weight sum is the right per-rank denominator for
+        # every reduction -- token (weight==1, so it equals the grad-token count), sample, and square
+        # alike -- whereas a raw grad-token count is only correct for token reduction. Summing
+        # `calibrate()` over the micro-batches yields this rank's mean with no cross-rank all_reduce,
+        # equal to the global loss when world size is 1 (global_denominator == rank_denominator).
+        display_coeff = (global_denominator / rank_denominator.clamp_min(1e-12)).detach()
 
         for loss_ctx in loss_ctx_list:
             loss_ctx._batch_size = len(loss_ctx_list)
             assert loss_ctx.loss_kwargs.loss_weight is not None
             loss_ctx.loss_kwargs.loss_weight /= global_denominator + 1e-12
+            loss_ctx._display_coeff = display_coeff
         return loss_ctx_list
 
     def loss_fn(
@@ -280,13 +295,17 @@ class LMHeadLossContext(BaseLossContext):
         if not isinstance(extra_info, ModelForwardExtraLogInfo):
             extra_info = ModelForwardExtraLogInfo(extra_info)
 
-        extra_info["local_base_loss"] = loss.detach().clone()
-
-        # Step 2.c in the loss calculation: reduce the loss over all ranks using all_reduce with autograd support
-        if dist.is_initialized():
-            loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
-
+        # Under reduce-sum gradients the loss stays as this rank's local component (local token sum
+        # over the global token denominator). Cross-rank aggregation happens on the gradients via the
+        # FSDP SUM reduce-scatter, so no autograd WORLD all_reduce is injected here. The per-rank
+        # display value is produced by `calibrate()`; stash the detached loss for it.
+        self._backward_loss = loss.detach()
         return loss, (logits, extra_info)
+
+    def calibrate(self) -> torch.Tensor:
+        """This rank's per-token-mean CE for display (detached, no cross-rank
+        all_reduce)."""
+        return self._backward_loss * self._display_coeff
 
 
 # Deprecated: Use LMHeadLossContext instead. Will be removed in version 1.1.0
