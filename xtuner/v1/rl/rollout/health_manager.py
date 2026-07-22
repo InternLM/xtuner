@@ -24,6 +24,7 @@ ROLLOUT_RAY_GET_TIMEOUT = int(os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", str(5 
 ROLLOUT_RECOVERY_MAX_PARALLEL_GROUPS = 4
 HEALTH_MANAGER_STOP_JOIN_TIMEOUT = 30.0
 SHUTDOWN_SERVER_DOWN_MAX_ATTEMPTS = 60
+_IMMEDIATE_RECOVERY_EXPERIMENT_ENABLED = os.getenv("XTUNER_TEST_IMMEDIATE_RECOVERY", "0") == "1"  # default disabled
 logger = get_logger()
 
 __all__ = [
@@ -130,6 +131,7 @@ class RolloutHealthManager:
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()
+        self._health_loop_wakeup_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lifecycle_operation_lock = threading.Lock()
         self._worker_health_failure_tracker = _WorkerHealthFailureTracker(threshold=self._check_failure_threshold)
@@ -149,6 +151,9 @@ class RolloutHealthManager:
             tokenizer_path=tokenizer_path,
         )
         logger.info(f"Ready rollout recovery HF updated: model_path={model_path}, tokenizer_path={tokenizer_path}.")
+        # The background health loop owns automatic recovery. Wake it so an
+        # already-inactive group does not wait for the next periodic check.
+        self._health_loop_wakeup_event.set()
 
     def clear_ready_recovery_hf(self) -> None:
         self._ready_recovery_hf = None
@@ -160,6 +165,7 @@ class RolloutHealthManager:
             return
 
         self._stop_event.clear()
+        self._health_loop_wakeup_event.clear()
         self._pause_event.set()
         if not self._periodic_health_checks_enabled:
             logger.info("Rollout worker periodic health check is disabled.")
@@ -171,6 +177,7 @@ class RolloutHealthManager:
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._health_loop_wakeup_event.set()
         self._pause_event.clear()
         thread = self._thread
         if not thread:
@@ -191,10 +198,12 @@ class RolloutHealthManager:
 
     def pause(self) -> None:
         self._pause_event.set()
+        self._health_loop_wakeup_event.set()
         logger.info("RolloutHealthManager paused.")
 
     def resume(self) -> None:
         self._pause_event.clear()
+        self._health_loop_wakeup_event.set()
         logger.info("RolloutHealthManager resumed.")
 
     # ------------------------------------------------------------------
@@ -215,13 +224,12 @@ class RolloutHealthManager:
         try:
             worker_health_results = self._check_active_workers_health()
             failed_ranks = self._worker_health_failure_tracker.update_failed_ranks(worker_health_results)
-            if not failed_ranks:
-                return
-            try:
-                self._checkpoint_not_stopping()
-            except _HealthManagerStopping:
-                return
-            failed_groups = self._registry.mark_unhealthy_ranks(failed_ranks)
+            if failed_ranks:
+                try:
+                    self._checkpoint_not_stopping()
+                except _HealthManagerStopping:
+                    return
+                failed_groups = self._registry.mark_unhealthy_ranks(failed_ranks)
         finally:
             self._lifecycle_operation_lock.release()
 
@@ -232,23 +240,40 @@ class RolloutHealthManager:
             event_name="inactive",
             notify_listener=lambda listener, group: listener.on_worker_group_inactive(group),
         )
+        # Ready-HF recovery is owned by the health manager.  Without a ready
+        # snapshot, inactive groups stay down until the normal sync-step
+        # restart path supplies fresh weights.
+        self._restart_inactive_workers(require_ready_recovery_hf=True)
 
     def restart_inactive_workers(self) -> None:
         """Synchronously restart inactive groups before the next sync-step
         weight update."""
+        self._restart_inactive_workers(require_ready_recovery_hf=False)
+
+    def _restart_inactive_workers(
+        self,
+        *,
+        require_ready_recovery_hf: bool,
+    ) -> None:
+        recovery_started_at = time.perf_counter()
         recovered_groups: list[WorkerGroup] = []
         groups_to_recover: tuple[WorkerGroup, ...] = ()
 
         try:
             with self._paused_lifecycle_operation():
+                ready_recovery_hf = self._ready_recovery_hf
+                if require_ready_recovery_hf and ready_recovery_hf is None:
+                    return
                 groups_to_recover = self._registry.claim_inactive_groups_for_recovery()
                 if groups_to_recover:
-                    recovered_groups = self._restart_claimed_recovery_groups(groups_to_recover)
+                    recovered_groups = self._restart_claimed_recovery_groups(
+                        groups_to_recover,
+                        ready_recovery_hf=ready_recovery_hf,
+                    )
         except _HealthManagerStopping:
             return
 
         if not groups_to_recover:
-            logger.info("No failed rollout workers detected during recovery.")
             return
 
         self._notify_worker_lifecycle_listeners(
@@ -259,6 +284,13 @@ class RolloutHealthManager:
         inactive_workers = [f"rank={worker.rank}, url={worker.url}" for worker in self._registry.inactive_workers()]
         if inactive_workers:
             logger.error("inactive rollout workers before sync-step weight update: " + ", ".join(inactive_workers))
+        if _IMMEDIATE_RECOVERY_EXPERIMENT_ENABLED:
+            logger.info(
+                "[ImmediateRecoveryExperiment] recovery_summary "
+                f"group_ranks={[group.ranks for group in groups_to_recover]} "
+                f"recovered_ranks={[group.ranks for group in recovered_groups]} "
+                f"recovery_total_s={time.perf_counter() - recovery_started_at:.3f}"
+            )
 
     def check_and_shutdown_inactive_workers(self) -> None:
         """Fail-fast health-check active workers, mark failures inactive, and
@@ -307,15 +339,20 @@ class RolloutHealthManager:
 
     def _wait_until_next_check(self) -> bool:
         while True:
-            while self._pause_event.is_set() and not self._stop_event.is_set():
-                self._stop_event.wait(timeout=0.5)
-
             if self._stop_event.is_set():
                 return False
 
-            if self._stop_event.wait(self._check_interval):
-                return False
+            if self._pause_event.is_set():
+                self._health_loop_wakeup_event.wait(timeout=0.5)
+                self._health_loop_wakeup_event.clear()
+                if self._stop_event.is_set():
+                    return False
+                if not self._pause_event.is_set():
+                    return True
+                continue
 
+            self._health_loop_wakeup_event.wait(timeout=self._check_interval)
+            self._health_loop_wakeup_event.clear()
             if not self._pause_event.is_set() and not self._stop_event.is_set():
                 return True
 
@@ -331,12 +368,12 @@ class RolloutHealthManager:
     def _background_health_checks_paused(self):
         was_paused = self._pause_event.is_set()
         if not was_paused:
-            self.pause()
+            self._pause_event.set()
         try:
             yield
         finally:
             if not was_paused:
-                self.resume()
+                self._pause_event.clear()
 
     @contextmanager
     def _paused_lifecycle_operation(self):
@@ -409,12 +446,27 @@ class RolloutHealthManager:
     # Worker group recovery state
     # ------------------------------------------------------------------
 
-    def _restart_claimed_recovery_groups(self, groups: tuple[WorkerGroup, ...]) -> list[WorkerGroup]:
+    def _restart_claimed_recovery_groups(
+        self,
+        groups: tuple[WorkerGroup, ...],
+        *,
+        ready_recovery_hf: _ReadyRecoveryHF | None,
+    ) -> list[WorkerGroup]:
         groups_needing_cleanup = {group.ranks: group for group in groups}
 
         try:
-            group_recovery_results = self._restart_worker_groups(groups)
+            if self._abort_claimed_recovery_groups_if_hf_changed(groups, ready_recovery_hf):
+                groups_needing_cleanup.clear()
+                return []
+
+            group_recovery_results = self._restart_worker_groups(
+                groups,
+                ready_recovery_hf=ready_recovery_hf,
+            )
             self._checkpoint_not_stopping()
+            if self._abort_claimed_recovery_groups_if_hf_changed(groups, ready_recovery_hf):
+                groups_needing_cleanup.clear()
+                return []
 
             recovered_groups: list[WorkerGroup] = []
             for group in groups:
@@ -438,6 +490,21 @@ class RolloutHealthManager:
             self._cleanup_unfinalized_recovery_groups(tuple(groups_needing_cleanup.values()))
             raise
 
+    def _abort_claimed_recovery_groups_if_hf_changed(
+        self,
+        groups: tuple[WorkerGroup, ...],
+        ready_recovery_hf: _ReadyRecoveryHF | None,
+    ) -> bool:
+        if self._ready_recovery_hf is ready_recovery_hf:
+            return False
+
+        logger.warning(
+            "Ready rollout recovery HF changed while worker groups were recovering; "
+            f"keeping group_ranks={[group.ranks for group in groups]} inactive."
+        )
+        self._cleanup_unfinalized_recovery_groups(groups)
+        return True
+
     def _cleanup_unfinalized_recovery_groups(self, groups: tuple[WorkerGroup, ...]) -> None:
         for group in groups:
             try:
@@ -456,6 +523,8 @@ class RolloutHealthManager:
     def _restart_worker_groups(
         self,
         groups_to_recover: tuple[WorkerGroup, ...],
+        *,
+        ready_recovery_hf: _ReadyRecoveryHF | None,
     ) -> dict[tuple[int, ...], bool]:
         logger.info(
             f"Restarting rollout worker groups in parallel: "
@@ -472,6 +541,7 @@ class RolloutHealthManager:
                 pool.submit(
                     self._restart_worker_group,
                     group,
+                    ready_recovery_hf=ready_recovery_hf,
                 ): group
                 for group in groups_to_recover
             }
@@ -487,6 +557,8 @@ class RolloutHealthManager:
     def _restart_worker_group(
         self,
         group: WorkerGroup,
+        *,
+        ready_recovery_hf: _ReadyRecoveryHF | None,
     ) -> bool:
         """Shutdown, restart, and health-check one complete worker group."""
         if not group.workers or len(group.workers) != len(group.ranks):
@@ -494,15 +566,23 @@ class RolloutHealthManager:
             return False
 
         restart_cleanup_needed = False
+        recovery_started_at = time.perf_counter()
 
         try:
             self._checkpoint_not_stopping()
+            if self._ready_recovery_hf is not ready_recovery_hf:
+                logger.warning(
+                    f"Ready rollout recovery HF changed before restarting worker group ranks={group.ranks}."
+                )
+                return False
+
+            shutdown_started_at = time.perf_counter()
             if not self._shutdown_worker_group(group):
                 return False
+            shutdown_s = time.perf_counter() - shutdown_started_at
             restart_cleanup_needed = True
 
             self._checkpoint_not_stopping()
-            ready_recovery_hf = self._ready_recovery_hf
             if ready_recovery_hf is None:
                 reinit_kwargs: dict[str, object] = {"skip_load_weights": True}
             else:
@@ -512,6 +592,7 @@ class RolloutHealthManager:
                     "skip_load_weights": False,
                 }
 
+            reinit_started_at = time.perf_counter()
             ray.get(
                 [
                     worker.actor.reinit.remote(**reinit_kwargs)  # type: ignore[attr-defined]
@@ -519,9 +600,12 @@ class RolloutHealthManager:
                 ],
                 timeout=ROLLOUT_RAY_GET_TIMEOUT,
             )
+            reinit_s = time.perf_counter() - reinit_started_at
 
             self._checkpoint_not_stopping()
+            health_check_started_at = time.perf_counter()
             health_results = self._check_workers_health(group.workers)
+            health_check_s = time.perf_counter() - health_check_started_at
             unhealthy_ranks = [worker.rank for worker in group.workers if not health_results.get(worker.rank, False)]
             if unhealthy_ranks:
                 logger.error(
@@ -539,7 +623,20 @@ class RolloutHealthManager:
                     timeout=ROLLOUT_RAY_GET_TIMEOUT,
                 )
 
+            if self._ready_recovery_hf is not ready_recovery_hf:
+                logger.warning(f"Ready rollout recovery HF changed while restarting worker group ranks={group.ranks}.")
+                return False
+
             logger.info(f"Successfully restarted rollout worker group ranks={group.ranks}.")
+            if _IMMEDIATE_RECOVERY_EXPERIMENT_ENABLED:
+                recovery_source = "ready_hf" if ready_recovery_hf is not None else "weight_update_baseline"
+                logger.info(
+                    "[ImmediateRecoveryExperiment] recovery_group "
+                    f"ranks={group.ranks} source={recovery_source} "
+                    f"shutdown_s={shutdown_s:.3f} reinit_s={reinit_s:.3f} "
+                    f"health_check_s={health_check_s:.3f} "
+                    f"total_s={time.perf_counter() - recovery_started_at:.3f}"
+                )
             return True
         except _HealthManagerStopping:
             if restart_cleanup_needed:

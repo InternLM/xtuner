@@ -42,7 +42,7 @@ from xtuner.v1.rl.replay_buffer import (
 )
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.trace import TraceConfig, configure_trace
+from xtuner.v1.rl.trace import TraceConfig, close_trace, configure_trace
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
 from xtuner.v1.rl.utils import (
@@ -934,7 +934,6 @@ class BaseRLTrainer:
                 self.logger.exception(f"Async recovery HF export failed: path={save_hf_path}.")
                 return None
 
-            self._ready_recovery_hf_path = finalized_hf_path
             return finalized_hf_path
 
         self._pending_hf_export = executor.submit(wait_and_publish_recovery_hf)
@@ -955,6 +954,7 @@ class BaseRLTrainer:
         finalized_hf_path = pending.result()
         self._pending_hf_export = None
         if not disable_immediate_recovery:
+            self._ready_recovery_hf_path = finalized_hf_path
             return
 
         ray.get(
@@ -1748,6 +1748,7 @@ class RLColocateTrainer(BaseRLTrainer):
             self._exp_tracker.close()
             if self._hf_export_executor is not None:
                 self._hf_export_executor.shutdown(wait=True)
+            close_trace()
 
     def _fit(self):
         self.logger.info("Start RL training")
@@ -1983,6 +1984,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             self._exp_tracker.close()
             if self._hf_export_executor is not None:
                 self._hf_export_executor.shutdown(wait=True)
+            close_trace()
 
     async def _get_batch_or_raise_producer_failure(
         self,
