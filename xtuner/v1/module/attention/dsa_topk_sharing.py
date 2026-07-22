@@ -437,8 +437,7 @@ def configure_dsa_mtp_iteration_lifecycle(
 
 @torch.compiler.disable
 def before_dsa_topk_decoder_forward(attention: object, seq_ctx: SequenceContext | list[SequenceContext]) -> None:
-    if not hasattr(attention, "dsa_topk_last_use"):
-        return
+    assert hasattr(attention, "dsa_topk_last_use"), "DSA top-k lifecycle requires a DSA attention module."
 
     runtime = get_dsa_topk_sharing_runtime()
     for ctx in seq_ctx if isinstance(seq_ctx, list) else [seq_ctx]:
@@ -447,8 +446,7 @@ def before_dsa_topk_decoder_forward(attention: object, seq_ctx: SequenceContext 
 
 @torch.compiler.disable
 def after_dsa_topk_decoder_forward(attention: object, seq_ctx: SequenceContext | list[SequenceContext]) -> None:
-    if not hasattr(attention, "dsa_topk_last_use"):
-        return
+    assert hasattr(attention, "dsa_topk_last_use"), "DSA top-k lifecycle requires a DSA attention module."
 
     runtime = get_dsa_topk_sharing_runtime()
     for ctx in seq_ctx if isinstance(seq_ctx, list) else [seq_ctx]:
@@ -458,12 +456,15 @@ def after_dsa_topk_decoder_forward(attention: object, seq_ctx: SequenceContext |
 def _get_seq_ctx_from_forward(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
-) -> SequenceContext | list[SequenceContext] | None:
-    if "seq_ctx" in kwargs:
-        return kwargs["seq_ctx"]
-    if len(args) >= 3 and isinstance(args[2], SequenceContext | list):
-        return args[2]
-    return None
+) -> SequenceContext | list[SequenceContext]:
+    seq_ctx = kwargs.get("seq_ctx")
+    if seq_ctx is None and len(args) >= 3:
+        seq_ctx = args[2]
+    assert seq_ctx is not None, "DSA top-k lifecycle requires seq_ctx in decoder forward."
+    assert isinstance(seq_ctx, SequenceContext | list), (
+        f"DSA top-k lifecycle expected SequenceContext or list, got {type(seq_ctx).__name__}."
+    )
+    return seq_ctx
 
 
 def _dsa_topk_decoder_lifecycle_pre_hook(
@@ -472,9 +473,7 @@ def _dsa_topk_decoder_lifecycle_pre_hook(
     kwargs: dict[str, Any],
 ) -> None:
     seq_ctx = _get_seq_ctx_from_forward(args, kwargs)
-    if seq_ctx is None:
-        return
-    before_dsa_topk_decoder_forward(getattr(module, "self_attn", None), seq_ctx)
+    before_dsa_topk_decoder_forward(module.self_attn, seq_ctx)  # type: ignore[attr-defined]
 
 
 def _dsa_topk_decoder_lifecycle_post_hook(
@@ -484,9 +483,7 @@ def _dsa_topk_decoder_lifecycle_post_hook(
     _output: Any,
 ) -> None:
     seq_ctx = _get_seq_ctx_from_forward(args, kwargs)
-    if seq_ctx is None:
-        return
-    after_dsa_topk_decoder_forward(getattr(module, "self_attn", None), seq_ctx)
+    after_dsa_topk_decoder_forward(module.self_attn, seq_ctx)  # type: ignore[attr-defined]
 
 
 @torch.compiler.disable
@@ -499,8 +496,6 @@ def _dsa_mtp_iteration_lifecycle_pre_hook(
     num_iterations: int,
 ) -> None:
     seq_ctx = _get_seq_ctx_from_forward(args, kwargs)
-    if seq_ctx is None:
-        return
 
     runtime = get_dsa_topk_sharing_runtime()
     for ctx in seq_ctx if isinstance(seq_ctx, list) else [seq_ctx]:
@@ -514,9 +509,10 @@ def _dsa_mtp_iteration_lifecycle_pre_hook(
 def register_dsa_topk_decoder_lifecycle_hooks(decoder_layer: torch.nn.Module) -> None:
     if getattr(decoder_layer, "_dsa_topk_decoder_lifecycle_hooks_registered", False):
         return
-    self_attn = getattr(decoder_layer, "self_attn", None)
-    if not hasattr(self_attn, "dsa_topk_last_use"):
-        return
+    assert hasattr(decoder_layer, "self_attn"), "DSA top-k lifecycle requires decoder_layer.self_attn."
+    assert hasattr(decoder_layer.self_attn, "dsa_topk_last_use"), (  # type: ignore[attr-defined]
+        "DSA top-k lifecycle requires a DSA attention module."
+    )
 
     # Pinned-memory, CUDA-stream and OffloadManager side effects cannot run in
     # an Inductor graph. The previous in-attention implementation therefore

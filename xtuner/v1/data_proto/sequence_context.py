@@ -13,20 +13,27 @@ _DSA_TOPK_CONTEXT_IDS = itertools.count()
 
 
 class DSATopKCacheState:
-    """Mutable DSA cross-layer top-k cache, scoped to one microbatch."""
+    """Mutable DSA cross-layer top-k cache, scoped to one microbatch.
 
-    indices: dict[int, torch.Tensor]
-    offloaded: dict[int, str]
-    released_sources: set[int]
-    checkpoint_active: bool
-    context_id: int
-    # Shared-weight MTP invokes one physical DSA layer at several logical
-    # depths. These counters delay transfer/release until the final use/replay.
-    mtp_forward_uses_remaining: dict[int, int]
-    mtp_replays_remaining: dict[int, int]
-    # The model-wide release plan lives on each attention layer. A cache split
-    # out of the concatenated dense-prefix context needs a context-local release
-    # point because its micro-batch context never replays the dense source layer.
+    For example, if source layer 2 provides top-k indices to layers 2, 3, and 4,
+    its original forward stores ``indices[2]``. After layer 4's no-grad
+    checkpoint forward, ``checkpoint_active`` becomes true and top-k offload may
+    replace that entry with ``offloaded[2]``. Backward then replays layers 4, 3,
+    and 2; layer 2 removes the cache and adds 2 to ``released_sources``. A split
+    microbatch that only replays layers 4 and 3 instead records
+    ``micro_batch_recompute_release_overrides[2] = 3``. If one physical MTP
+    source is reused at two logical depths, both MTP counters start at 2 so the
+    cache is transferred and released only after the second use in each phase.
+    """
+
+    indices: dict[int, torch.Tensor]  # GPU-resident top-k, keyed by source layer.
+    offloaded: dict[int, str]  # OffloadManager key for each CPU-resident source.
+    released_sources: set[int]  # Sources whose backward replay lifetime has ended.
+    checkpoint_active: bool  # Whether checkpoint forward retained this cache for replay.
+    context_id: int  # Process-local identifier used to make offload keys unique.
+    mtp_forward_uses_remaining: dict[int, int]  # Original-forward MTP uses left per shared source.
+    mtp_replays_remaining: dict[int, int]  # Backward MTP replays left per shared source.
+    # Context-local release layer for a cache split after the dense-prefix forward.
     micro_batch_recompute_release_overrides: dict[int, int]
 
     def __init__(

@@ -135,6 +135,23 @@ class _TinyDsaDecoderBlock(nn.Module):
         return outputs["projected_output"]
 
 
+def test_dsa_decoder_lifecycle_rejects_non_dsa_attention():
+    decoder = nn.Module()
+    decoder.self_attn = nn.Identity()
+
+    with pytest.raises(AssertionError, match="DSA top-k lifecycle"):
+        register_dsa_topk_decoder_lifecycle_hooks(decoder)
+
+
+def test_dsa_decoder_lifecycle_requires_sequence_context():
+    decoder = _TinyDsaDecoderBlock(_tiny_dsa_attention(indexer_types=["full"]))
+    hidden_states = torch.randn(1, 2, 4)
+    position_embeddings = (torch.ones(1, 2, 2), torch.zeros(1, 2, 2))
+
+    with pytest.raises(AssertionError, match="seq_ctx"):
+        decoder(hidden_states, position_embeddings)
+
+
 class TestDSASequenceParallel(DeterministicDDPTestCase):
     def test_packed_forward_topk_and_input_gradient_match_full_sequence(self):
         self.create_pg("cuda")

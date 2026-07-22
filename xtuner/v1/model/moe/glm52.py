@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 import torch
 from pydantic import Field, computed_field
@@ -9,15 +9,14 @@ from typing_extensions import Self, override
 from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as HFGlmMoeDsaConfig
 from xtuner.v1.model.base import DEFAULT_FLOAT8_CFG, TorchCompileOption
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
-from xtuner.v1.module.attention import DSAMLAConfig
+from xtuner.v1.module.attention import DSAMLAConfig, DSAMultiLatentAttention
 from xtuner.v1.module.attention.dsa_topk_sharing import (
-    DSATopKSharingLayerProtocol,
     build_dsa_topk_release_plan,
     configure_dsa_mtp_iteration_lifecycle,
     configure_dsa_topk_decoder_lifecycle,
     dsa_topk_source_layer,
 )
-from xtuner.v1.module.mtp import MTPConfig
+from xtuner.v1.module.mtp import MTPConfig, MTPLayer
 from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 
@@ -61,27 +60,29 @@ class Glm52MoE(MoE):
 
     @override
     def _configure_model_specific_layer_lifecycle(self) -> None:
-        dsa_layers: list[tuple[torch.nn.Module, DSATopKSharingLayerProtocol]] = []
-        mtp_attention: DSATopKSharingLayerProtocol | None = None
+        dsa_layers: list[tuple[torch.nn.Module, DSAMultiLatentAttention]] = []
+        mtp_attention: DSAMultiLatentAttention | None = None
         for decoder_layer in self.layers.values():
-            self_attn = getattr(decoder_layer, "self_attn", None)
-            if hasattr(self_attn, "dsa_topk_last_use"):
-                dsa_layers.append((decoder_layer, cast(DSATopKSharingLayerProtocol, self_attn)))
+            self_attn = decoder_layer.self_attn  # type: ignore[attr-defined]
+            assert isinstance(self_attn, DSAMultiLatentAttention), (
+                f"GLM-5.2 requires DSAMultiLatentAttention, got {type(self_attn).__name__}."
+            )
+            dsa_layers.append((decoder_layer, self_attn))
 
         num_physical_mtp_layers = 0
         if self.mtp_block is not None and self.config.mtp_config is not None:
             num_physical_mtp_layers = 1 if self.config.mtp_config.share_weights else self.config.mtp_config.num_layers
             for mtp_idx in range(num_physical_mtp_layers):
-                decoder_layer = cast(torch.nn.Module, self.mtp_block.layers[mtp_idx].decoder_layer)
-                self_attn = getattr(decoder_layer, "self_attn", None)
-                if hasattr(self_attn, "dsa_topk_last_use"):
-                    typed_attention = cast(DSATopKSharingLayerProtocol, self_attn)
-                    dsa_layers.append((decoder_layer, typed_attention))
-                    if mtp_idx == 0:
-                        mtp_attention = typed_attention
-
-        if not dsa_layers:
-            return
+                mtp_layer = self.mtp_block.layers[mtp_idx]
+                assert isinstance(mtp_layer, MTPLayer)
+                decoder_layer = mtp_layer.decoder_layer
+                self_attn = decoder_layer.self_attn  # type: ignore[attr-defined]
+                assert isinstance(self_attn, DSAMultiLatentAttention), (
+                    f"GLM-5.2 MTP requires DSAMultiLatentAttention, got {type(self_attn).__name__}."
+                )
+                dsa_layers.append((decoder_layer, self_attn))
+                if mtp_idx == 0:
+                    mtp_attention = self_attn
 
         sample_attn = dsa_layers[0][1]
         release_plan = build_dsa_topk_release_plan(
@@ -107,8 +108,8 @@ class Glm52MoE(MoE):
             and self.config.mtp_config is not None
             and self.config.mtp_config.share_weights
             and self.config.index_share_for_mtp_iteration
-            and mtp_attention is not None
         ):
+            assert mtp_attention is not None
             configure_dsa_mtp_iteration_lifecycle(
                 mtp_block=self.mtp_block,
                 attention=mtp_attention,
