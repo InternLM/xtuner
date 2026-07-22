@@ -33,6 +33,7 @@ from xtuner.v1.rl.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
 from xtuner.v1.rl.evaluator import EvaluatorConfig
+from xtuner.v1.rl.on_policy_distillation import OPDConfig, compute_pg_opd_token_advantages
 from xtuner.v1.rl.replay_buffer import (
     AsyncReplayBufferConfig,
     SyncReplayBufferConfig,
@@ -342,6 +343,7 @@ class BaseRLTrainerConfig(BaseModel):
     total_epochs: int | None = None
     train_batch_size: int
     advantage_estimator_config: BaseAdvantageConfig = Field(default_factory=GRPOAdvantageConfig)
+    opd_config: OPDConfig | None = None
     sync_weights_interval: int = 1
 
     enable_evaluate: bool = True
@@ -594,6 +596,7 @@ class BaseRLTrainer:
         self._init_rollout_config(cfg, log_dir)
         self._ensure_rollout_proxy_config(cfg)
         self._init_runtime_flags(cfg)
+        self._opd_config = cfg.opd_config
         self._advantage_estimator = cfg.advantage_estimator_config.build()
         self._cpu_resource_manager: CPUResourceManager | None = None
         self._num_workers = 1.0
@@ -1014,13 +1017,14 @@ class BaseRLTrainer:
         rewards_list = []
         # Per-session rewards for distribution metrics. Agentic sessions may split into several
         # trainable segments that share one reward; counting that reward once per session keeps
-        # rewards/* from being weighted by segment count. rewards_list stays per-segment for counts.
+        # rewards/* from being weighted by segment count.
         cluster_rewards_list: list[float] = []
         advantages_list = []
         prompt_len_list = []
         response_len_list = []
         tool_turns_list: list[int] = []
         training_tokens = 0
+        training_samples = 0
 
         data_batches = []
 
@@ -1028,7 +1032,10 @@ class BaseRLTrainer:
             if not is_valid_for_training(group, self.logger):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
+            training_samples += len(group)
 
+            # When opd_config is not None, PG-OPD currently supports only single-turn rollouts.
+            opd_config = self._opd_config
             prompt_ids = None
             if any(data.input_ids is None for data in group):
                 is_vlm_model = "train_prompt_ids" in group[0].extra_fields
@@ -1040,39 +1047,57 @@ class BaseRLTrainer:
                 assert prompt_ids is not None and len(prompt_ids) > 0, (
                     f"Prompt ids cannot be None or empty in data: {group[0]}"
                 )
-            rewards = []
-            # Agentic rollouts may split one model session into multiple trainable segments.
-            # Compute the group advantage once per session, then broadcast it back to each segment.
-            cluster_index_by_key: dict[Any, int] = {}
-            cluster_rewards: list[float] = []
-            cluster_representatives: list[RolloutState] = []
-            sample_cluster_indices: list[int] = []
             for data in group:
-                assert data.reward is not None and "score" in data.reward, (
-                    f"Reward is missing or does not contain 'score' key in data: {data}"
-                )
-                reward = float(data.reward["score"])
-                rewards.append(reward)
-                # session_id is only set by agentic loops / XTUNER_DETERMINISTIC; plain RL falls back
-                # to rollout_id, which the sampler always assigns. Segments of one session share a key.
-                cluster_key = data.session_id if data.session_id is not None else data.rollout_id
-                cluster_index = cluster_index_by_key.get(cluster_key)
-                if cluster_index is None:
-                    cluster_index = len(cluster_rewards)
-                    cluster_index_by_key[cluster_key] = cluster_index
-                    cluster_rewards.append(reward)
-                    cluster_representatives.append(data)
-                sample_cluster_indices.append(cluster_index)
                 # 有可能有重复，但是没有其他更好办法
                 turns = data.extra_fields.get("agent_tool_turns")
                 if isinstance(turns, int):
                     tool_turns_list.append(turns)
 
-            rewards_list.extend(rewards)
-            cluster_rewards_list.extend(cluster_rewards)
-            rewards_tensor = torch.tensor(cluster_rewards, dtype=torch.float32)
-            cluster_advantages = self._advantage_estimator.compute(rewards_tensor, cluster_representatives)
-            sample_advantages = [cluster_advantages[cluster_index].item() for cluster_index in sample_cluster_indices]
+            opd_token_advantages: list[torch.Tensor] | None = None
+            if opd_config is not None:
+                opd_token_advantages = compute_pg_opd_token_advantages(
+                    group,
+                    config=opd_config,
+                    task_adv_estimator=self._advantage_estimator,
+                )
+                sample_advantages: list[float] = []
+
+                if opd_config.task_adv_weight > 0:
+                    rewards = [float(cast(dict[str, Any], data.reward)["score"]) for data in group]
+                    rewards_list.extend(rewards)
+                    cluster_rewards_list.extend(rewards)
+            else:
+                rewards = []
+                # Agentic rollouts may split one model session into multiple trainable segments.
+                # Compute the group advantage once per session, then broadcast it back to each segment.
+                cluster_index_by_key: dict[Any, int] = {}
+                cluster_rewards: list[float] = []
+                cluster_representatives: list[RolloutState] = []
+                sample_cluster_indices: list[int] = []
+                for data in group:
+                    assert data.reward is not None and "score" in data.reward, (
+                        f"Reward is missing or does not contain 'score' key in data: {data}"
+                    )
+                    reward = float(data.reward["score"])
+                    rewards.append(reward)
+                    # session_id is only set by agentic loops / XTUNER_DETERMINISTIC; plain RL falls back
+                    # to rollout_id, which the sampler always assigns. Segments of one session share a key.
+                    cluster_key = data.session_id if data.session_id is not None else data.rollout_id
+                    cluster_index = cluster_index_by_key.get(cluster_key)
+                    if cluster_index is None:
+                        cluster_index = len(cluster_rewards)
+                        cluster_index_by_key[cluster_key] = cluster_index
+                        cluster_rewards.append(reward)
+                        cluster_representatives.append(data)
+                    sample_cluster_indices.append(cluster_index)
+
+                rewards_list.extend(rewards)
+                cluster_rewards_list.extend(cluster_rewards)
+                rewards_tensor = torch.tensor(cluster_rewards, dtype=torch.float32)
+                cluster_advantages = self._advantage_estimator.compute(rewards_tensor, cluster_representatives)
+                sample_advantages = [
+                    cluster_advantages[cluster_index].item() for cluster_index in sample_cluster_indices
+                ]
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
@@ -1177,12 +1202,15 @@ class BaseRLTrainer:
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_labels
                 shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
-                # 根据 response_mask 计算新的 advantages
-                advatnages_val = sample_advantages[i]
-                actual_advantages = [advatnages_val] * len(prompt_ids) + [
-                    0.0 if mask == 0 else advatnages_val for mask in response_mask
-                ]
-                advantages_list.extend(actual_advantages[:-1])
+                if opd_token_advantages is None:
+                    advatnages_val = sample_advantages[i]
+                    actual_advantages = [advatnages_val] * len(prompt_ids) + [
+                        0.0 if mask == 0 else advatnages_val for mask in response_mask
+                    ]
+                    advantages_list.extend(actual_advantages[:-1])
+                else:
+                    actual_advantages = [0.0] * (len(prompt_ids) - 1) + opd_token_advantages[i].tolist()
+                    advantages_list.extend(actual_advantages)
 
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 training_tokens += len(input_ids)
@@ -1214,8 +1242,8 @@ class BaseRLTrainer:
         if not XTUNER_DETERMINISTIC:
             random.shuffle(data_batches)
 
-        # rewards/* report the per-session reward distribution; batch_size/training_samples below
-        # still use rewards_list (per-segment) so counts reflect the actual training samples.
+        # rewards/* report the per-session reward distribution; batch_size/training_samples
+        # count the valid rollout segments included in training.
         rewards_t = torch.tensor(cluster_rewards_list).float() if cluster_rewards_list else torch.tensor([0.0]).float()
         advantages_t = torch.tensor(advantages_list).float() if advantages_list else torch.tensor([0.0]).float()
         prompt_len_t = torch.tensor(prompt_len_list).float() if prompt_len_list else torch.tensor([0.0]).float()
@@ -1223,8 +1251,8 @@ class BaseRLTrainer:
 
         raw_rewards_mean = raw_rewards_sum / raw_rewards_count if raw_rewards_count > 0 else rewards_t.mean().item()
         info_dict = {
-            "batch_size": len(rewards_list),
-            "training_samples": len(rewards_list),
+            "batch_size": training_samples,
+            "training_samples": training_samples,
             "training_tokens": training_tokens,
             "rewards/mean": rewards_t.mean().item(),
             "rewards/min": rewards_t.min().item(),

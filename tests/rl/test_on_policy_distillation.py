@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import socket
 import threading
 import time
@@ -10,6 +11,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from unittest.mock import MagicMock
 
+import torch
+
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     SampleParams,
@@ -17,13 +20,18 @@ from xtuner.v1.data_proto.rl_data import (
     get_group_status,
     reset_rollout_response,
 )
+from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.rl.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
+from xtuner.v1.rl.loss import GRPOLossConfig, GRPOLossContext
 from xtuner.v1.rl.on_policy_distillation import (
     OPDConfig,
     OPDTeacherConfig,
     TeacherLogprobClient,
+    compute_pg_opd_token_advantages,
 )
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
+from xtuner.v1.rl.rollout_is import RolloutImportanceSampling
+from xtuner.v1.rl.trainer.controller import TrainingController
 
 
 @dataclass
@@ -151,6 +159,25 @@ def _opd_config(endpoint_by_name: dict[str, str], data_source_teacher_map: dict[
         ],
         data_source_teacher_map=data_source_teacher_map,
     )
+
+
+def _algorithm_config(*, task_adv_weight: float = 0.0, opd_adv_weight: float = 1.0) -> OPDConfig:
+    return OPDConfig(
+        task_adv_weight=task_adv_weight,
+        opd_adv_weight=opd_adv_weight,
+        teachers=[OPDTeacherConfig(name="teacher", endpoint="http://127.0.0.1:1")],
+        data_source_teacher_map={"math": "teacher"},
+    )
+
+
+class _FixedAdvantageEstimator:
+    def __init__(self, values: list[float]) -> None:
+        self.values = values
+        self.calls: list[tuple[torch.Tensor, list[RolloutState]]] = []
+
+    def compute(self, rewards: torch.Tensor, group: list[RolloutState]) -> torch.Tensor:
+        self.calls.append((rewards.clone(), group))
+        return torch.tensor(self.values[: len(group)], dtype=torch.float32)
 
 
 class TestTeacherLogprobClient(unittest.IsolatedAsyncioTestCase):
@@ -428,6 +455,245 @@ class TestOPDRolloutData(unittest.IsolatedAsyncioTestCase):
         reset_rollout_response(replayed)
         self.assertIsNone(replayed.teacher_tokens)
         self.assertIsNone(replayed.teacher_logprobs)
+
+
+class TestPGOPDTokenAdvantages(unittest.TestCase):
+    @staticmethod
+    def _scored_state(
+        rollout_id: int,
+        *,
+        behavior_logprobs: list[float],
+        teacher_logprobs: list[float],
+        reward: float | None = None,
+        response_mask: list[int] | None = None,
+    ) -> RolloutState:
+        response_ids = list(range(100, 100 + len(behavior_logprobs)))
+        state = _state(rollout_id, response_ids=response_ids)
+        state.logprobs = behavior_logprobs
+        state.teacher_tokens = response_ids
+        state.teacher_logprobs = teacher_logprobs
+        state.reward = None if reward is None else {"score": reward}
+        state.response_mask = response_mask
+        return state
+
+    def test_pure_opd_uses_token_delta_and_response_mask_without_reward(self):
+        state = self._scored_state(
+            1,
+            behavior_logprobs=[-1.0, -2.0, -3.0],
+            teacher_logprobs=[-0.5, -2.5, -3.0],
+            response_mask=[1, 0, 1],
+        )
+
+        advantages = compute_pg_opd_token_advantages(
+            [state],
+            config=_algorithm_config(task_adv_weight=0.0, opd_adv_weight=2.0),
+            task_adv_estimator=None,
+        )
+
+        torch.testing.assert_close(advantages[0], torch.tensor([1.0, 0.0, 0.0]))
+        self.assertFalse(advantages[0].requires_grad)
+
+        state.response_mask = []
+        unmasked = compute_pg_opd_token_advantages(
+            [state],
+            config=_algorithm_config(),
+            task_adv_estimator=None,
+        )
+        torch.testing.assert_close(unmasked[0], torch.tensor([0.5, -0.5, 0.0]))
+
+    def test_mixed_opd_combines_per_sample_task_advantage(self):
+        first = self._scored_state(
+            1,
+            behavior_logprobs=[-1.0],
+            teacher_logprobs=[-0.75],
+            reward=10.0,
+        )
+        second = self._scored_state(
+            2,
+            behavior_logprobs=[-1.0],
+            teacher_logprobs=[-1.25],
+            reward=10.0,
+        )
+        third = self._scored_state(
+            3,
+            behavior_logprobs=[-1.0],
+            teacher_logprobs=[-0.5],
+            reward=-1.0,
+        )
+        estimator = _FixedAdvantageEstimator([2.0, 2.0, -2.0])
+
+        advantages = compute_pg_opd_token_advantages(
+            [first, second, third],
+            config=_algorithm_config(task_adv_weight=0.5, opd_adv_weight=2.0),
+            task_adv_estimator=estimator,
+        )
+
+        torch.testing.assert_close(torch.cat(advantages), torch.tensor([1.5, 0.5, 0.0]))
+        self.assertEqual(estimator.calls[0][0].tolist(), [10.0, 10.0, -1.0])
+        self.assertEqual(estimator.calls[0][1], [first, second, third])
+
+    def test_mixed_opd_requires_reward(self):
+        state = self._scored_state(
+            1,
+            behavior_logprobs=[-1.0],
+            teacher_logprobs=[-0.5],
+        )
+        config = _algorithm_config(task_adv_weight=1.0)
+
+        with self.assertRaisesRegex(ValueError, "Reward score is required"):
+            compute_pg_opd_token_advantages(
+                [state],
+                config=config,
+                task_adv_estimator=_FixedAdvantageEstimator([1.0]),
+            )
+
+    def test_token_advantages_survive_packing_and_define_denominator(self):
+        state = self._scored_state(
+            1,
+            behavior_logprobs=[-1.0, -2.0, -3.0],
+            teacher_logprobs=[-0.5, -2.5, -2.0],
+            response_mask=[1, 0, 1],
+        )
+        response_advantages = compute_pg_opd_token_advantages(
+            [state],
+            config=_algorithm_config(),
+            task_adv_estimator=None,
+        )[0]
+        data_batches = [
+            {
+                "seq_ctx": SequenceContext.from_input_ids((torch.tensor([[10, 11, 20, 21]]),), device="cpu"),
+                "shifted_labels": torch.tensor([[-100, 100, -100, 102]]),
+                "advantage": [0.0] + response_advantages.tolist(),
+                "rollout_logprobs": torch.tensor([[0.0, -1.0, -2.0, -3.0]]),
+            }
+        ]
+
+        controller = TrainingController.__new__(TrainingController)
+        packed = controller._packing(data_batches, pack_max_length=6, language_cfg=None)
+
+        self.assertEqual(packed[0]["shifted_labels"].shape, packed[0]["advantages"].shape)
+        self.assertEqual(packed[0]["advantages"].tolist(), [[0.0, 0.5, 0.0, 1.0, -100.0, -100.0]])
+
+        loss_config = GRPOLossConfig(
+            policy_loss_cfg={"loss_type": "vanilla", "cliprange_low": 0.2, "cliprange_high": 0.2}
+        )
+        loss_context = loss_config.build(
+            {
+                "shifted_labels": packed[0]["shifted_labels"],
+                "advantages": packed[0]["advantages"],
+                "old_logprobs": torch.zeros_like(packed[0]["advantages"]),
+            }
+        )
+        assert isinstance(loss_context, GRPOLossContext)
+        GRPOLossContext.build_batches([loss_context])
+        torch.testing.assert_close(
+            loss_context.loss_kwargs.policy_loss_weight.cpu(),
+            torch.tensor([[0.0, 0.5, 0.0, 0.5, 0.0, 0.0]]),
+        )
+
+    def test_teacher_signal_changes_student_gradient(self):
+        def gradient(teacher_logprob: float) -> torch.Tensor:
+            state = self._scored_state(
+                1,
+                behavior_logprobs=[-1.0],
+                teacher_logprobs=[teacher_logprob],
+            )
+            advantage = compute_pg_opd_token_advantages(
+                [state],
+                config=_algorithm_config(),
+                task_adv_estimator=None,
+            )[0].unsqueeze(0)
+            current_logprob = torch.tensor([[-1.0]], requires_grad=True)
+            old_logprob = torch.tensor([[-1.0]])
+            loss_config = GRPOLossConfig(
+                policy_loss_cfg={"loss_type": "vanilla", "cliprange_low": 0.2, "cliprange_high": 0.2}
+            )
+            context = loss_config.build(
+                {
+                    "shifted_labels": torch.tensor([[100]]),
+                    "advantages": advantage,
+                    "old_logprobs": old_logprob,
+                }
+            )
+            assert isinstance(context, GRPOLossContext)
+            GRPOLossContext.build_batches([context])
+            device = context.loss_kwargs.advantages.device
+            current_logprob = current_logprob.to(device).detach().requires_grad_()
+            loss = context.policy_loss_fn(
+                current_logprob,
+                context.loss_kwargs.old_logprobs,
+                context.loss_kwargs.advantages,
+                context.loss_kwargs.policy_loss_weight,
+                loss_config.policy_loss_cfg,
+            )
+            loss.backward()
+            return current_logprob.grad.detach().cpu().clone()
+
+        positive_signal_gradient = gradient(-0.5)
+        stronger_signal_gradient = gradient(0.0)
+
+        self.assertFalse(torch.equal(positive_signal_gradient, stronger_signal_gradient))
+
+    def test_pure_and_mixed_opd_support_rollout_is_off_and_on(self):
+        for task_adv_weight in (0.0, 1.0):
+            for enable_is in (False, True):
+                with self.subTest(task_adv_weight=task_adv_weight, enable_is=enable_is):
+                    state = self._scored_state(
+                        1,
+                        behavior_logprobs=[-1.0, -1.0],
+                        teacher_logprobs=[0.0, 0.0],
+                        reward=1.0 if task_adv_weight else None,
+                    )
+                    estimator = _FixedAdvantageEstimator([1.0]) if task_adv_weight else None
+                    advantages = compute_pg_opd_token_advantages(
+                        [state],
+                        config=_algorithm_config(task_adv_weight=task_adv_weight),
+                        task_adv_estimator=estimator,
+                    )[0].unsqueeze(0)
+                    rollout_is = (
+                        RolloutImportanceSampling(
+                            rollout_is_mode="mask",
+                            rollout_is_threshold=(2.0, 0.5),
+                            rollout_is_mask_threshold=(2.0, 0.5),
+                        )
+                        if enable_is
+                        else RolloutImportanceSampling()
+                    )
+                    loss_config = GRPOLossConfig(
+                        policy_loss_cfg={"loss_type": "vanilla", "cliprange_low": 0.2, "cliprange_high": 0.2},
+                        rollout_is=rollout_is,
+                    )
+                    context = loss_config.build(
+                        {
+                            "shifted_labels": torch.tensor([[100, 101]]),
+                            "advantages": advantages,
+                            "rollout_logprobs": torch.tensor([[-1.0, -1.0]]),
+                            "old_logprobs": torch.tensor([[-1.0, -1.0 + math.log(10.0)]]),
+                        }
+                    )
+                    assert isinstance(context, GRPOLossContext)
+                    context.compute_rollout_is(None, torch.tensor([2]))  # type: ignore[arg-type]
+                    GRPOLossContext.build_batches([context])
+
+                    device = context.loss_kwargs.advantages.device
+                    current_logprobs = torch.tensor([[-1.0, -1.0]], device=device, requires_grad=True)
+                    loss = context.policy_loss_fn(
+                        current_logprobs,
+                        context.loss_kwargs.old_logprobs,
+                        context.loss_kwargs.advantages,
+                        context.loss_kwargs.policy_loss_weight,
+                        loss_config.policy_loss_cfg,
+                    )
+                    loss.backward()
+
+                    if enable_is:
+                        self.assertIsNotNone(context.loss_kwargs.is_weights)
+                        self.assertEqual(context.loss_kwargs.shifted_labels.tolist(), [[100, -100]])
+                        self.assertEqual(current_logprobs.grad[0, 1].item(), 0.0)
+                    else:
+                        self.assertIsNone(context.loss_kwargs.is_weights)
+                        self.assertEqual(context.loss_kwargs.shifted_labels.tolist(), [[100, 101]])
+                        self.assertNotEqual(current_logprobs.grad[0, 1].item(), 0.0)
 
 
 class TestOPDConfig(unittest.TestCase):
