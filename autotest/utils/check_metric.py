@@ -24,6 +24,25 @@ RL_PERCENTILE_METRICS: dict[str, int] = {
     "response/rewards/mean": 80,
 }
 
+# SFT metrics may opt into percentile aggregation via config:
+#   metric: {threshold: 0.2, aggregate: 80}
+# Without ``aggregate``, behavior stays step-by-step relative error.
+
+
+def _normalize_sft_metric_cfg(metric: str, value) -> tuple[float, int | None]:
+    """Accept ``metric: threshold`` or ``metric: {threshold, aggregate}``.
+
+    Percentile aggregation is opt-in only (explicit ``aggregate`` in config).
+    """
+    if isinstance(value, dict):
+        if "threshold" not in value:
+            raise ValueError(f"SFT check_metrics[{metric}] dict must include 'threshold'")
+        threshold = float(value["threshold"])
+        aggregate = value.get("aggregate")
+        return threshold, int(aggregate) if aggregate is not None else None
+
+    return float(value), None
+
 
 def extract_value(file, metrics):
     metric_all = {metric: [] for metric in metrics}
@@ -158,16 +177,18 @@ def detect_memory_upward_gradient(values: list[float]) -> tuple[bool, str]:
 
 def check_result(case_name, base_path, cur_path, check_metric, phase=None):
     fail_metric = {}
-    metric_list = list(check_metric.keys())
+    metric_cfgs = {metric: _normalize_sft_metric_cfg(metric, value) for metric, value in check_metric.items()}
+    metric_list = list(metric_cfgs.keys())
+    threshold_dict = {metric: cfg[0] for metric, cfg in metric_cfgs.items()}
     base_steps, base_metrics = extract_value(base_path, metric_list)
     cur_steps, cur_metrics = extract_value(cur_path, metric_list)
     assert cur_steps == base_steps, (
         f"current steps is not equal to base steps, current steps: {cur_steps}, base steps: {base_steps}"
     )
 
-    publish_comparison_report(case_name, check_metric, base_metrics, cur_metrics, base_path, cur_path, phase=phase)
+    publish_comparison_report(case_name, threshold_dict, base_metrics, cur_metrics, base_path, cur_path, phase=phase)
 
-    for metric, threshold in check_metric.items():
+    for metric, (threshold, percentile) in metric_cfgs.items():
         max_error = 0.0
         max_error_idx = 0
         check_flag = True
@@ -216,6 +237,22 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
                 if has_gradient:
                     fail_metric[metric] = f"{metric} shows sustained upward gradient in current run, {gradient_info}"
                     check_flag = False
+        elif percentile is not None:
+            check_flag, agg_error, detail = _percentile_error_passes(
+                base_metrics[metric],
+                cur_metrics[metric],
+                method="relative",
+                threshold=threshold,
+                operator="<",
+                percentile=percentile,
+            )
+            if not check_flag:
+                fail_metric[metric] = (
+                    f"{metric} relative error bigger than {threshold} ({detail})"
+                )
+            else:
+                logger.info(f"✓ {metric} check pass，{detail}, threshold={threshold}")
+            continue
         else:
             for idx, (old, cur) in enumerate(zip(base_metrics[metric], cur_metrics[metric])):
                 if abs(old) < 1e-10:
