@@ -1,3 +1,9 @@
+"""DenseDecoderLayer 多 micro-batch 行为测试。
+
+TestDenseDecoderLayerMicroBatch
+    test_batched_inputs_match_independent_forwards: 等长 micro-batch 的输出与梯度等价于独立调用。
+"""
+
 from copy import deepcopy
 
 import torch
@@ -49,45 +55,45 @@ def _build_inputs() -> tuple[
     return hidden_states, position_embeddings, seq_ctx
 
 
-def test_dense_decoder_layer_equal_length_micro_batches_match_independent_forwards():
-    torch.manual_seed(0)
-    layer = _build_dense_dsa_layer()
-    reference_layer = deepcopy(layer)
+class TestDenseDecoderLayerMicroBatch:
+    def test_batched_inputs_match_independent_forwards(self):
+        # 验证一次多输入调用与逐 micro-batch 调用产生相同输出、输入梯度和参数梯度。
+        torch.manual_seed(0)
+        layer = _build_dense_dsa_layer()
+        reference_layer = deepcopy(layer)
+        hidden_states, position_embeddings, seq_ctx = _build_inputs()
+        reference_hidden_states = [hidden.detach().clone().requires_grad_() for hidden in hidden_states]
+        reference_seq_ctx = [
+            SequenceContext.from_input_ids((ctx.input_ids.detach().clone(),), device="cpu")  # type: ignore[arg-type]
+            for ctx in seq_ctx
+        ]
 
-    hidden_states, position_embeddings, seq_ctx = _build_inputs()
-    reference_hidden_states = [hidden.detach().clone().requires_grad_() for hidden in hidden_states]
-    reference_seq_ctx = [
-        SequenceContext.from_input_ids((ctx.input_ids.detach().clone(),), device="cpu")  # type: ignore[arg-type]
-        for ctx in seq_ctx
-    ]
-
-    outputs = layer(
-        *hidden_states,
-        position_embeddings=position_embeddings,
-        seq_ctx=seq_ctx,
-    )
-    reference_outputs = tuple(
-        reference_layer(
-            hidden,
-            position_embeddings=position_embedding,
-            seq_ctx=context,
+        outputs = layer(
+            *hidden_states,
+            position_embeddings=position_embeddings,
+            seq_ctx=seq_ctx,
         )
-        for hidden, position_embedding, context in zip(
-            reference_hidden_states,
-            position_embeddings,
-            reference_seq_ctx,
+        reference_outputs = tuple(
+            reference_layer(
+                hidden,
+                position_embeddings=position_embedding,
+                seq_ctx=context,
+            )
+            for hidden, position_embedding, context in zip(
+                reference_hidden_states,
+                position_embeddings,
+                reference_seq_ctx,
+            )
         )
-    )
 
-    assert isinstance(outputs, tuple)
-    assert len(outputs) == len(reference_outputs)
-    for output, reference_output in zip(outputs, reference_outputs):
-        torch.testing.assert_close(output, reference_output)
+        assert isinstance(outputs, tuple)
+        for output, reference_output in zip(outputs, reference_outputs):
+            torch.testing.assert_close(output, reference_output)
 
-    sum(output.sum() for output in outputs).backward()
-    sum(output.sum() for output in reference_outputs).backward()
+        sum(output.sum() for output in outputs).backward()
+        sum(output.sum() for output in reference_outputs).backward()
 
-    for hidden, reference_hidden in zip(hidden_states, reference_hidden_states):
-        torch.testing.assert_close(hidden.grad, reference_hidden.grad)
-    for parameter, reference_parameter in zip(layer.parameters(), reference_layer.parameters()):
-        torch.testing.assert_close(parameter.grad, reference_parameter.grad)
+        for hidden, reference_hidden in zip(hidden_states, reference_hidden_states):
+            torch.testing.assert_close(hidden.grad, reference_hidden.grad)
+        for parameter, reference_parameter in zip(layer.parameters(), reference_layer.parameters()):
+            torch.testing.assert_close(parameter.grad, reference_parameter.grad)

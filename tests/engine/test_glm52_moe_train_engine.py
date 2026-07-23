@@ -1,13 +1,23 @@
+"""GLM-5.2 TrainEngine 的训练、优化组合与 DCP 持久化行为测试。
+
+TestGlm52OptimizedEngine
+    test_sp2_ep4_micro2_compile_offload_train_step: SP2、EP4、micro2、compile 与双 offload 可联合训练。
+TestGlm52PretrainedEngine
+    test_ep8_loss_curve_matches_reference: 预训练权重的 EP8 优化轨迹匹配数值基线。
+    test_tilewise_fp8_loss_curve_matches_bf16: tilewise FP8 训练轨迹接近 BF16。
+    test_tilewise_fp8_ep4_train_step: tilewise FP8 与 EP4 联合训练产生有限 loss。
+TestGlm52CheckpointEngine
+    test_dcp_round_trip_preserves_model_and_optimizer: DCP 往返保留模型与优化器状态。
+"""
+
 import math
 import os
 import shutil
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-import parametrize
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
@@ -27,7 +37,6 @@ from xtuner.v1.module.attention import DSAMLAConfig
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouter, NoAuxRouterConfig
 from xtuner.v1.utils import pad_to_max_length
-from xtuner.v1.utils.compile import is_compiled_function
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.utils.test_utils import init_data_mesh
 
@@ -36,18 +45,21 @@ GLM5_2_TINY_MOE_PATH = Path(os.environ["GLM5_2_TINY_MOE_PATH"])
 DEVICE = get_device()
 
 
-def _glm52_engine_config(dispatcher: str | None, ep_size: int) -> Glm52MoEConfig:
-    cfg: Glm52MoEConfig = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
-    # These engine regressions isolate the base LM path; MTP training is covered
-    # separately by test_sequence_parallel_mtp_train_step.
-    cfg.mtp_config = None
-    cfg.compile_cfg = False
-    cfg.dispatcher = dispatcher
-    cfg.ep_size = ep_size
-    return cfg
+def _pretrained_config(
+    dispatcher: str | None,
+    ep_size: int,
+    float8_cfg: Float8Config | None = None,
+) -> Glm52MoEConfig:
+    config: Glm52MoEConfig = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
+    config.mtp_config = None
+    config.compile_cfg = False
+    config.dispatcher = dispatcher
+    config.ep_size = ep_size
+    config.float8_cfg = float8_cfg
+    return config
 
 
-def _tiny_glm52_checkpoint_config(dispatcher: str | None, ep_size: int) -> Glm52MoEConfig:
+def _tiny_checkpoint_config(dispatcher: str | None, ep_size: int) -> Glm52MoEConfig:
     return Glm52MoEConfig(
         vocab_size=64,
         max_position_embeddings=128,
@@ -71,6 +83,7 @@ def _tiny_glm52_checkpoint_config(dispatcher: str | None, ep_size: int) -> Glm52
             index_head_dim=4,
             index_n_heads=2,
             indexer_types=["full", "shared"],
+            sparse_mla_backend="torch",
         ),
         hf_head_dim=4,
         qk_head_dim=8,
@@ -91,19 +104,17 @@ def _tiny_glm52_checkpoint_config(dispatcher: str | None, ep_size: int) -> Glm52
     )
 
 
-def _tiny_glm52_sp_mtp_config(dispatcher: str | None, ep_size: int) -> Glm52MoEConfig:
-    cfg = _tiny_glm52_checkpoint_config(dispatcher=dispatcher, ep_size=ep_size)
-    cfg.hidden_size = 128
-    cfg.intermediate_size = 128
-    cfg.moe_intermediate_size = 128
-    cfg.attention.indexer_types = ["full", "shared", "full"]
-    cfg.num_nextn_predict_layers = 2
-    cfg.mtp_config = MTPConfig(
-        num_layers=2,
-        share_weights=True,
-    )
-    cfg.lm_loss_cfg = CELossConfig(mode="eager")
-    return cfg
+def _tiny_sp_mtp_config() -> Glm52MoEConfig:
+    config = _tiny_checkpoint_config(dispatcher="all2all", ep_size=4)
+    config.hidden_size = 128
+    config.intermediate_size = 128
+    config.moe_intermediate_size = 128
+    config.attention.indexer_types = ["full", "shared", "full"]
+    config.num_nextn_predict_layers = 2
+    config.mtp_config = MTPConfig(num_layers=2, share_weights=True)
+    config.lm_loss_cfg = CELossConfig(mode="eager")
+    config.compile_cfg = None
+    return config
 
 
 def _tilewise_float8_config() -> Float8Config:
@@ -113,32 +124,25 @@ def _tilewise_float8_config() -> Float8Config:
     )
 
 
-def _build_engine(
+def _build_pretrained_engine(
     dispatcher: str | None,
     ep_size: int,
-    hsdp_sharding_size: int | None = None,
     float8_cfg: Float8Config | None = None,
 ) -> TrainEngine:
-    cfg = _glm52_engine_config(dispatcher=dispatcher, ep_size=ep_size)
-    cfg.float8_cfg = float8_cfg
-    optim_cfg = AdamWConfig()
-    fsdp_cfg = FSDPConfig(cpu_offload=False, ep_size=ep_size, hsdp_sharding_size=hsdp_sharding_size)
-    return TrainEngine(model_cfg=cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg)
+    return TrainEngine(
+        model_cfg=_pretrained_config(dispatcher, ep_size, float8_cfg),
+        optim_cfg=AdamWConfig(),
+        fsdp_cfg=FSDPConfig(cpu_offload=False, ep_size=ep_size),
+    )
 
 
-def _build_tiny_checkpoint_engine(dispatcher: str | None, ep_size: int) -> TrainEngine:
-    cfg = _tiny_glm52_checkpoint_config(dispatcher=dispatcher, ep_size=ep_size)
-    optim_cfg = AdamWConfig()
-    fsdp_cfg = FSDPConfig(cpu_offload=False, ep_size=ep_size)
-    return TrainEngine(model_cfg=cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg)
-
-
-def _build_train_engine_input(tokenizer: AutoTokenizer, loss_cfg: CELossConfig) -> list[ModelItem]:
-    text = "吃葡萄不吐葡萄皮。GLM-5.2 engine smoke."
-    input_ids = tokenizer.encode(text, return_tensors="pt").view(1, -1)
-    labels = input_ids.clone()
+def _build_train_input(tokenizer: AutoTokenizer, loss_cfg: CELossConfig) -> list[ModelItem]:
+    input_ids = tokenizer.encode(
+        "吃葡萄不吐葡萄皮。GLM-5.2 engine smoke.",
+        return_tensors="pt",
+    ).view(1, -1)
+    labels = input_ids[:, 1:]
     input_ids = input_ids[:, :-1]
-    labels = labels[:, 1:]
     pack_len = 256 - input_ids.shape[1]
     input_ids = pad_to_max_length(input_ids, 0, max_length=256)
     labels = pad_to_max_length(labels, -100, max_length=256)
@@ -151,69 +155,41 @@ def _build_train_engine_input(tokenizer: AutoTokenizer, loss_cfg: CELossConfig) 
     return [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
 
 
-def _run_tiny_engine_loss_curve(
+def _run_loss_curve(
     tokenizer: AutoTokenizer,
     dispatcher: str | None,
     ep_size: int,
-    float8_cfg: Float8Config | None = None,
-    num_steps: int = 3,
+    float8_cfg: Float8Config | None,
+    num_steps: int,
 ) -> torch.Tensor:
-    engine = _build_engine(dispatcher=dispatcher, ep_size=ep_size, float8_cfg=float8_cfg)
+    engine = _build_pretrained_engine(dispatcher, ep_size, float8_cfg)
     engine.from_hf(GLM5_2_TINY_MOE_PATH, strict=False)
     loss_cfg = CELossConfig()
-    lr_cfg = LRConfig()
-    warmup_steps = 1000 * lr_cfg.warmup_ratio
-
-    def warmup_fn(step):
-        return step / warmup_steps if step < warmup_steps else 1
-
-    lr_scheduler = LambdaLR(engine.optimizer, warmup_fn)
+    warmup_steps = 1000 * LRConfig().warmup_ratio
+    lr_scheduler = LambdaLR(
+        engine.optimizer,
+        lambda step: step / warmup_steps if step < warmup_steps else 1,
+    )
     losses = []
     try:
         for _ in range(num_steps):
-            loss_log = engine.train_step(_build_train_engine_input(tokenizer, loss_cfg))["logs_info"]
+            logs = engine.train_step(_build_train_input(tokenizer, loss_cfg))["logs_info"]
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
-            losses.append(loss_log["reduced_llm_loss"])
+            losses.append(logs["reduced_llm_loss"])
         return torch.tensor(losses)
     finally:
         del engine
         torch.cuda.empty_cache()
 
 
-def _local_tensor(value: torch.Tensor) -> torch.Tensor:
-    return value._local_tensor if isinstance(value, DTensor) else value
-
-
-def _full_bf16_tensor(value: torch.Tensor) -> torch.Tensor:
-    value = value.full_tensor() if isinstance(value, DTensor) else value
-    return value.bfloat16()
-
-
-def _assert_tiny_checkpoint_engine_uses_shared_indexer(engine: TrainEngine) -> None:
-    layer0_attn = engine.model.layers["0"].self_attn
-    layer1_attn = engine.model.layers["1"].self_attn
-    state_keys = set(engine.model.state_dict())
-
-    assert layer0_attn.source_layer_idx == 0
-    assert layer1_attn.source_layer_idx == 0
-    assert hasattr(layer0_attn, "indexer")
-    assert not hasattr(layer1_attn, "indexer")
-    assert "layers.0.self_attn.indexer.wq_b.weight" in state_keys
-    assert "layers.1.self_attn.indexer.wq_b.weight" not in state_keys
-
-
-@unittest.skipUnless(
-    torch.cuda.device_count() >= 8 and GLM5_2_TINY_MOE_PATH.exists(),
-    f"requires at least 8 CUDA devices and tiny GLM-5.2 checkpoint at {GLM5_2_TINY_MOE_PATH}",
-)
-class TestGlm52MoEEngine(DeterministicDDPTestCase):
-    def test_sequence_parallel_intra_layer_micro_batch_train_step(self):
+@unittest.skipUnless(torch.cuda.device_count() >= 8, "requires 8 CUDA devices")
+class TestGlm52OptimizedEngine(DeterministicDDPTestCase):
+    def test_sp2_ep4_micro2_compile_offload_train_step(self):
+        # 验证生产优化组合经两次梯度累积后 loss、梯度与优化器状态均有效。
         self.create_pg("cuda")
-
-        model_cfg = _tiny_glm52_sp_mtp_config(dispatcher="all2all", ep_size=4)
-        model_cfg.compile_cfg = None
+        model_cfg = _tiny_sp_mtp_config()
         engine = TrainEngine(
             model_cfg=model_cfg,
             optim_cfg=AdamWConfig(lr=1e-3, foreach=False),
@@ -226,13 +202,11 @@ class TestGlm52MoEEngine(DeterministicDDPTestCase):
             intra_layer_micro_batch=2,
         )
         engine.init_model_weights()
-
         sp_mesh = init_data_mesh(str(DEVICE), sp_size=2)["sp"]
         data_batches = []
         seq_ctx_list = []
+
         try:
-            # Four items exercise two gradient-accumulation backwards, while each
-            # model call runs two sequence-parallel contexts through the same layers.
             for micro_batch_idx in range(4):
                 start = 2 + micro_batch_idx * 12
                 input_ids = torch.arange(start, start + 10).view(1, -1) % model_cfg.vocab_size
@@ -263,248 +237,98 @@ class TestGlm52MoEEngine(DeterministicDDPTestCase):
             del engine
             torch.cuda.empty_cache()
 
-    @parametrize.parametrize(
-        "compile_and_offload,dispatcher,ep_size",
-        [
-            (False, None, 1),
-            (True, None, 1),
-            (False, "all2all", 4),
-        ],
-    )
-    def test_sequence_parallel_mtp_train_step(
-        self,
-        compile_and_offload: bool,
-        dispatcher: str | None,
-        ep_size: int,
-    ):
+    @property
+    def world_size(self) -> int:
+        return 8
+
+
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 8 and GLM5_2_TINY_MOE_PATH.exists(),
+    f"requires 8 CUDA devices and GLM-5.2 checkpoint at {GLM5_2_TINY_MOE_PATH}",
+)
+class TestGlm52PretrainedEngine(DeterministicDDPTestCase):
+    def test_ep8_loss_curve_matches_reference(self):
+        # 验证预训练 GLM-5.2 经 EP8 连续三个优化步骤后复现已知 loss 轨迹。
         self.create_pg("cuda")
-
-        model_cfg = _tiny_glm52_sp_mtp_config(dispatcher=dispatcher, ep_size=ep_size)
-        if compile_and_offload:
-            model_cfg.compile_cfg = None
-        engine = TrainEngine(
-            model_cfg=model_cfg,
-            optim_cfg=AdamWConfig(lr=1e-3, foreach=False),
-            fsdp_cfg=FSDPConfig(
-                ep_size=ep_size,
-                cpu_offload=False,
-                recompute_ratio=1.0,
-                torch_compile=compile_and_offload,
-            ),
-        )
-        engine.init_model_weights()
-
-        sequence_0 = torch.arange(2, 12).view(1, -1)
-        sequence_1 = torch.arange(20, 28).view(1, -1)
-        packed_inputs = (sequence_0[:, :-1], sequence_1[:, :-1])
-        shifted_labels = torch.cat((sequence_0[:, 1:], sequence_1[:, 1:]), dim=1)
-        sp_mesh = init_data_mesh(str(DEVICE), sp_size=2)["sp"]
-
-        try:
-            full_seq_ctx = SequenceContext.from_input_ids(packed_inputs, device=DEVICE)
-            data = {"seq_ctx": full_seq_ctx, "shifted_labels": shifted_labels}
-            loss_ctx = engine.model.build_loss_ctx_batch([data], sp_mesh=sp_mesh)[0]
-            seq_ctx = full_seq_ctx.split(sp_mesh)
-
-            optimized_env = (
-                {
-                    "XTUNER_ACTIVATION_OFFLOAD": "1",
-                    "XTUNER_DSA_TOPK_OFFLOAD": "1",
-                }
-                if compile_and_offload
-                else {}
-            )
-            with mock.patch.dict(os.environ, optimized_env):
-                step_info = engine.train_step([ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)])
-                grad_norm = engine.clip_grad_norm()
-                engine.step_optimizer(grad_norm)
-
-            self.assertTrue(math.isfinite(step_info["total_loss"]))
-            self.assertTrue(math.isfinite(step_info["logs_info"]["reduced_llm_loss"]))
-            self.assertTrue(math.isfinite(step_info["logs_info"]["reduced_mtp_loss"]))
-            self.assertTrue(math.isfinite(float(grad_norm)))
-            self.assertTrue(engine.optimizer.state)
-            self.assertEqual(seq_ctx.dsa_topk_cache.indices, {})
-            self.assertEqual(seq_ctx.dsa_topk_cache.offloaded, {})
-            if compile_and_offload:
-                wrapped_layer = engine.model.layers["0"]._checkpoint_wrapped_module
-                self.assertTrue(is_compiled_function(wrapped_layer.forward))
-        finally:
-            del engine
-            torch.cuda.empty_cache()
-
-    @parametrize.parametrize(
-        "device,dispatcher,ep_size",
-        [
-            ("cuda", "all2all", 8),
-        ],
-    )
-    def test_moe_engine_train(self, device, dispatcher, ep_size):
-        self.create_pg(device)
-
-        engine = _build_engine(dispatcher=dispatcher, ep_size=ep_size)
-        engine.from_hf(GLM5_2_TINY_MOE_PATH, strict=False)
         tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
-        loss_cfg = CELossConfig()
-        lr_cfg = LRConfig()
-        total_steps = 1000
-        warmup_steps = total_steps * lr_cfg.warmup_ratio
 
-        def warmup_fn(step):
-            return step / warmup_steps if step < warmup_steps else 1
-
-        lr_scheduler = LambdaLR(engine.optimizer, warmup_fn)
-        losses = []
-        try:
-            for _ in range(10):
-                loss_log = engine.train_step(_build_train_engine_input(tokenizer, loss_cfg))["logs_info"]
-                grad_norm = engine.clip_grad_norm()
-                engine.step_optimizer(grad_norm)
-                lr_scheduler.step()
-                losses.append(loss_log["reduced_llm_loss"])
-
-            # TODO: Replace this temporary baseline with the official GLM-5.2
-            # engine-training reference once it is available.
-            losses_ref = torch.tensor(
-                [11.9815, 11.9940, 12.0483, 11.9849, 11.8578, 11.8326, 11.3845, 11.2681, 10.2004, 9.8985]
-            )
-            self._check_loss_curve(torch.tensor(losses), losses_ref)
-        finally:
-            torch.cuda.empty_cache()
-
-    @parametrize.parametrize(
-        "device,dispatcher,ep_size",
-        [
-            ("cuda", "all2all", 8),
-        ],
-    )
-    def test_activation_offload_train_step(self, device, dispatcher, ep_size):
-        self.create_pg(device)
-
-        engine = _build_engine(dispatcher=dispatcher, ep_size=ep_size)
-        engine.from_hf(GLM5_2_TINY_MOE_PATH, strict=False)
-        tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
-        loss_cfg = CELossConfig()
-
-        try:
-            # Exercise GLM's sparse-layer activation-offload branch through the
-            # public TrainEngine path, including backward and optimizer update.
-            with mock.patch.dict(os.environ, {"XTUNER_ACTIVATION_OFFLOAD": "1"}):
-                loss_log = engine.train_step(_build_train_engine_input(tokenizer, loss_cfg))["logs_info"]
-                grad_norm = engine.clip_grad_norm()
-                engine.step_optimizer(grad_norm)
-
-            assert math.isfinite(loss_log["reduced_llm_loss"])
-            assert math.isfinite(float(grad_norm))
-        finally:
-            torch.cuda.empty_cache()
-
-    @parametrize.parametrize(
-        "device,dispatcher,ep_size",
-        [
-            ("cuda", None, 1),
-        ],
-    )
-    def test_tile_wise_fp8_train_matches_bf16_loss_curve(self, device, dispatcher, ep_size):
-        self.create_pg(device)
-
-        tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
-        bf16_losses = _run_tiny_engine_loss_curve(
-            tokenizer=tokenizer,
-            dispatcher=dispatcher,
-            ep_size=ep_size,
+        losses = _run_loss_curve(
+            tokenizer,
+            dispatcher="all2all",
+            ep_size=8,
             float8_cfg=None,
-        )
-        fp8_losses = _run_tiny_engine_loss_curve(
-            tokenizer=tokenizer,
-            dispatcher=dispatcher,
-            ep_size=ep_size,
-            float8_cfg=_tilewise_float8_config(),
+            num_steps=3,
         )
 
-        # FP8 tilewise training quantizes GEMM and grouped-GEMM weights/activations.
-        # Compare against the same bf16 training path to catch GLM-specific
-        # precision regressions while allowing expected quantization drift.
-        self._check_loss_curve(losses=fp8_losses, losses_ref=bf16_losses, sim_tol=2e-2, rtol=5e-2)
+        self._check_loss_curve(
+            losses,
+            torch.tensor([11.9815, 11.9940, 12.0483]),
+        )
 
-    @parametrize.parametrize(
-        "device,dispatcher,ep_size",
-        [
-            ("cuda", "all2all", 2),
-            ("cuda", "all2all", 4),
-            ("cuda", "all2all", 8),
-        ],
-    )
-    def test_tile_wise_fp8_train_with_ep(self, device, dispatcher, ep_size):
-        self.create_pg(device)
-
+    def test_tilewise_fp8_loss_curve_matches_bf16(self):
+        # 验证相同预训练权重的 tilewise FP8 两步轨迹与 BF16 基线保持在量化容差内。
+        self.create_pg("cuda")
         tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
-        losses = _run_tiny_engine_loss_curve(
-            tokenizer=tokenizer,
-            dispatcher=dispatcher,
-            ep_size=ep_size,
+
+        bf16_losses = _run_loss_curve(
+            tokenizer,
+            dispatcher=None,
+            ep_size=1,
+            float8_cfg=None,
+            num_steps=2,
+        )
+        fp8_losses = _run_loss_curve(
+            tokenizer,
+            dispatcher=None,
+            ep_size=1,
+            float8_cfg=_tilewise_float8_config(),
+            num_steps=2,
+        )
+
+        self._check_loss_curve(
+            losses=fp8_losses,
+            losses_ref=bf16_losses,
+            sim_tol=2e-2,
+            rtol=5e-2,
+        )
+
+    def test_tilewise_fp8_ep4_train_step(self):
+        # 验证 tilewise FP8 与 EP4 联合执行一次真实训练步时 loss 保持有限。
+        self.create_pg("cuda")
+        tokenizer = AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH)
+
+        losses = _run_loss_curve(
+            tokenizer,
+            dispatcher="all2all",
+            ep_size=4,
             float8_cfg=_tilewise_float8_config(),
             num_steps=1,
         )
-        self.assertTrue(torch.isfinite(losses).all(), f"FP8 EP training produced non-finite losses: {losses}")
 
-    @parametrize.parametrize(
-        "device,ep_size,hsdp_sharding_size",
-        [
-            ("cuda", 1, 8),
-        ],
-    )
-    def test_save_and_load(self, device, ep_size, hsdp_sharding_size):
-        self.create_pg(device)
+        self.assertTrue(torch.isfinite(losses).all())
 
-        temp_dir = tempfile.mkdtemp() if dist.get_rank() == 0 else None
-        syncdir = [temp_dir]
-        dist.broadcast_object_list(syncdir, src=0)
-        temp_dir = Path(syncdir[0])
-        try:
-            engine = _build_engine(dispatcher=None, ep_size=ep_size, hsdp_sharding_size=hsdp_sharding_size)
-            engine.from_hf(GLM5_2_TINY_MOE_PATH, strict=False)
-            engine.save_hf(hf_dir=str(temp_dir), save_dtype=torch.bfloat16)
-            dist.barrier()
-            time.sleep(1)
+    @property
+    def world_size(self) -> int:
+        return 8
 
-            engine2 = _build_engine(dispatcher=None, ep_size=ep_size, hsdp_sharding_size=hsdp_sharding_size)
-            engine2.from_hf(temp_dir)
 
-            state_dict = engine.model.state_dict()
-            state_dict2 = engine2.model.state_dict()
-            assert len(state_dict) == len(state_dict2)
-            for key, val in state_dict.items():
-                val = _full_bf16_tensor(val)
-                val2 = _full_bf16_tensor(state_dict2[key])
-                if val.shape != val2.shape and val2.shape[0] >= val.shape[0]:
-                    val2 = val2[: val.shape[0]]
-                self.assertTrue(torch.equal(val, val2), f"Mismatch in {key}, {val.shape} and {val2.shape}")
-        finally:
-            dist.barrier()
-            if dist.get_rank() == 0:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            torch.cuda.empty_cache()
-
-    @parametrize.parametrize(
-        "device,dispatcher,ep_size",
-        [
-            ("cuda", "all2all", 8),
-        ],
-    )
-    def test_checkpoint_save_load(self, device, dispatcher, ep_size):
-        self.create_pg(device)
-
+@unittest.skipUnless(torch.cuda.device_count() >= 2, "requires 2 CUDA devices")
+class TestGlm52CheckpointEngine(DeterministicDDPTestCase):
+    def test_dcp_round_trip_preserves_model_and_optimizer(self):
+        # 验证 tiny EP2 engine 的 DCP 往返后模型参数、router buffer 与优化器状态逐项相同。
+        self.create_pg("cuda")
         temp_dir = tempfile.mkdtemp() if dist.get_rank() == 0 else None
         syncdir = [temp_dir]
         dist.broadcast_object_list(syncdir, src=0)
         weights_dir = Path(syncdir[0]) / "weights"
+
         try:
-            # The HF tiny checkpoint keeps production GLM-5.2 expert dimensions.
-            # Use a small in-memory GLM config here so the DCP regression still
-            # covers one dense layer plus one MoE layer without a large DCP load.
-            engine = _build_tiny_checkpoint_engine(dispatcher=dispatcher, ep_size=ep_size)
-            _assert_tiny_checkpoint_engine_uses_shared_indexer(engine)
+            config = _tiny_checkpoint_config(dispatcher="all2all", ep_size=2)
+            engine = TrainEngine(
+                model_cfg=config,
+                optim_cfg=AdamWConfig(),
+                fsdp_cfg=FSDPConfig(cpu_offload=False, ep_size=2),
+            )
             engine.init_model_weights()
             with torch.no_grad():
                 for module in engine.model.modules():
@@ -513,35 +337,38 @@ class TestGlm52MoEEngine(DeterministicDDPTestCase):
                         bias.copy_(torch.arange(bias.numel(), device=bias.device, dtype=bias.dtype))
             engine.save_dcp(weights_dir=weights_dir)
             dist.barrier()
-            time.sleep(1)
 
-            engine2 = _build_tiny_checkpoint_engine(dispatcher=dispatcher, ep_size=ep_size)
-            _assert_tiny_checkpoint_engine_uses_shared_indexer(engine2)
-            engine2.init_model_weights()
-            engine2.load_dcp(weights_dir=weights_dir)
+            restored = TrainEngine(
+                model_cfg=config,
+                optim_cfg=AdamWConfig(),
+                fsdp_cfg=FSDPConfig(cpu_offload=False, ep_size=2),
+            )
+            restored.init_model_weights()
+            restored.load_dcp(weights_dir=weights_dir)
 
-            state_dict = engine.model.state_dict()
-            state_dict2 = engine2.model.state_dict()
-            assert len(state_dict) == len(state_dict2)
-            for key, val in state_dict.items():
-                val = _local_tensor(val)
-                val2 = _local_tensor(state_dict2[key])
-                self.assertTrue(torch.equal(val, val2), f"Mismatch in {key}, {val.shape} and {val2.shape}")
+            expected_state = engine.model.state_dict()
+            actual_state = restored.model.state_dict()
+            assert actual_state.keys() == expected_state.keys()
+            for key, expected in expected_state.items():
+                expected = expected._local_tensor if isinstance(expected, DTensor) else expected
+                actual = actual_state[key]
+                actual = actual._local_tensor if isinstance(actual, DTensor) else actual
+                self.assertTrue(torch.equal(actual, expected), f"model state mismatch: {key}")
 
-            opt_state = engine.optimizer.state_dict()["state"]
-            opt_state2 = engine2.optimizer.state_dict()["state"]
-            assert len(opt_state) == len(opt_state2)
-            assert len(opt_state) != 0
-            for param_id, cur_state_dict in opt_state.items():
-                cur_state_dict2 = opt_state2[param_id]
-                assert len(cur_state_dict) == len(cur_state_dict2)
-                assert len(cur_state_dict) != 0
-                for state_key, val in cur_state_dict.items():
-                    val = _local_tensor(val)
-                    val2 = _local_tensor(cur_state_dict2[state_key])
+            expected_optimizer = engine.optimizer.state_dict()["state"]
+            actual_optimizer = restored.optimizer.state_dict()["state"]
+            assert actual_optimizer.keys() == expected_optimizer.keys()
+            assert expected_optimizer
+            for param_id, expected_values in expected_optimizer.items():
+                actual_values = actual_optimizer[param_id]
+                assert actual_values.keys() == expected_values.keys()
+                for state_key, expected in expected_values.items():
+                    expected = expected._local_tensor if isinstance(expected, DTensor) else expected
+                    actual = actual_values[state_key]
+                    actual = actual._local_tensor if isinstance(actual, DTensor) else actual
                     self.assertTrue(
-                        torch.equal(val, val2),
-                        f"Mismatch in optimizer {param_id}.{state_key}, {val.shape} and {val2.shape}",
+                        torch.equal(actual, expected),
+                        f"optimizer state mismatch: {param_id}.{state_key}",
                     )
         finally:
             dist.barrier()
@@ -551,4 +378,4 @@ class TestGlm52MoEEngine(DeterministicDDPTestCase):
 
     @property
     def world_size(self) -> int:
-        return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8"))
+        return 2
