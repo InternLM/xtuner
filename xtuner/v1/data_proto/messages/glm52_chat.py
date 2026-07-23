@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import json
 from collections.abc import Mapping
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -121,14 +121,14 @@ def _assistant_generated_segments(
     message: Mapping[str, Any],
     message_index: int,
     last_user_index: int,
-    clear_thinking: bool | None,
+    clear_thinking: bool,
 ) -> list[str]:
     if not message.get("loss", True):
         return []
 
     content, reasoning_content = _assistant_content_and_reasoning(message)
     segments = []
-    if reasoning_content is not None and (clear_thinking is False or message_index > last_user_index):
+    if reasoning_content is not None and (not clear_thinking or message_index > last_user_index):
         # The opening <think> is template scaffolding. The trace and its closing tag are model-generated.
         segments.append(reasoning_content + "</think>")
     if content.strip():
@@ -142,10 +142,11 @@ def render_glm52_chat(
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]] = None,
     add_generation_prompt: bool = False,
-    enable_thinking: bool | None = None,
-    reasoning_effort: str | None = None,
-    clear_thinking: bool | None = None,
+    enable_thinking: bool = True,
+    reasoning_effort: Literal["high", "max"] = "max",
+    clear_thinking: bool = False,
 ) -> tuple[str, list[bool]]:
+    """渲染 GLM-5.2 对话；XTuner 默认保留多轮历史 reasoning 用于 SFT。"""
     text = ""
     loss_mask: list[bool] = []
 
@@ -155,7 +156,7 @@ def render_glm52_chat(
         loss_mask.extend([loss] * len(value))
 
     append("[gMASK]<sop>", False)
-    if enable_thinking is not False:
+    if enable_thinking:
         effective_reasoning_effort = "high" if reasoning_effort == "high" else "max"
         append(f"<|system|>Reasoning Effort: {effective_reasoning_effort.capitalize()}", False)
     if tools:
@@ -175,7 +176,7 @@ def render_glm52_chat(
         elif role == "assistant":
             content, reasoning_content = _assistant_content_and_reasoning(message)
             loss = bool(message.get("loss", True))
-            render_reasoning = reasoning_content is not None and (clear_thinking is False or index > last_user_index)
+            render_reasoning = reasoning_content is not None and (not clear_thinking or index > last_user_index)
             loss = loss and (reasoning_content is None or render_reasoning)
 
             append("<|assistant|>", False)
@@ -185,7 +186,7 @@ def render_glm52_chat(
                 append(reasoning_content + "</think>", loss)
             else:
                 append("<think>", False)
-                append("</think>", loss and enable_thinking is not False)
+                append("</think>", loss and enable_thinking)
             if content.strip():
                 append(content.strip(), loss)
             if message.get("tool_calls"):
@@ -197,7 +198,7 @@ def render_glm52_chat(
 
     if add_generation_prompt:
         append("<|assistant|>", False)
-        append("<think></think>" if enable_thinking is False else "<think>", False)
+        append("<think>" if enable_thinking else "<think></think>", False)
 
     return text, loss_mask
 
@@ -226,9 +227,9 @@ def glm52_tokenize_fn_fastspeed(
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]] = None,
     add_generation_prompt: bool = False,
-    enable_thinking: bool | None = None,
-    reasoning_effort: str | None = None,
-    clear_thinking: bool | None = None,
+    enable_thinking: bool = True,
+    reasoning_effort: Literal["high", "max"] = "max",
+    clear_thinking: bool = False,
     **kwargs,
 ) -> tuple[list[int], list[int]]:
     text, loss_mask = render_glm52_chat(
@@ -247,9 +248,9 @@ def glm52_tokenize_fn_slowspeed(
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]] = None,
     add_generation_prompt: bool = False,
-    enable_thinking: bool | None = None,
-    reasoning_effort: str | None = None,
-    clear_thinking: bool | None = None,
+    enable_thinking: bool = True,
+    reasoning_effort: Literal["high", "max"] = "max",
+    clear_thinking: bool = False,
     **kwargs,
 ) -> tuple[list[int], list[int]]:
     """慢速 golden 参考实现：基于 token 级别前缀 diff 对齐 labels。
@@ -260,17 +261,15 @@ def glm52_tokenize_fn_slowspeed(
     3. 再渲染“历史 + 当前 assistant”，用 token 前缀差得到当前 assistant 应监督的 suffix。
     4. 从上次命中位置开始在 total_ids 里顺序查找 suffix，找到后复制到 labels。
     """
+    # 显式传递确定值，避免 Jinja 将已定义的 None 解释成 False。
     hf_kwargs: dict[str, Any] = dict(
         tokenize=False,
         add_generation_prompt=add_generation_prompt,
         tools=tools,
+        enable_thinking=enable_thinking,
+        reasoning_effort=reasoning_effort,
+        clear_thinking=clear_thinking,
     )
-    if enable_thinking is not None:
-        hf_kwargs["enable_thinking"] = enable_thinking
-    if reasoning_effort is not None:
-        hf_kwargs["reasoning_effort"] = reasoning_effort
-    if clear_thinking is not None:
-        hf_kwargs["clear_thinking"] = clear_thinking
     hf_kwargs.update(kwargs)
 
     full_text = tokenizer.apply_chat_template(messages, **hf_kwargs)
@@ -325,9 +324,9 @@ class Glm52ChatMessages(BaseModel):
         tokenizer: PreTrainedTokenizer,
         chat_template=None,
         add_generation_prompt: bool = False,
-        enable_thinking: bool | None = None,
-        reasoning_effort: str | None = None,
-        clear_thinking: bool | None = None,
+        enable_thinking: bool = True,
+        reasoning_effort: Literal["high", "max"] = "max",
+        clear_thinking: bool = False,
         **kwargs,
     ) -> Dict:
         # Keep default-system semantics aligned with the Qwen3.5 message path.

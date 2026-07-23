@@ -2,7 +2,7 @@
 
 TestGlm52Rendering
     test_plain_text_matches_hf_and_golden_labels: 普通对话与 HF 模板及慢速 golden 对齐。
-    test_multiturn_reasoning_masks_history_and_supervises_latest_answer: 多轮推理只监督有效生成内容。
+    test_multiturn_reasoning_defaults_to_preserved_and_can_be_cleared: 默认保留历史推理且支持显式清除。
     test_tools_and_loss_switch_follow_template_masking: 工具对话与 loss 开关生成正确标签。
 TestGlm52MessageOptions
     test_generation_prompt_matches_hf_and_is_masked: generation prompt 与 HF 一致且不计 loss。
@@ -21,6 +21,11 @@ from xtuner.v1.datasets import OpenaiTokenizeFunctionConfig
 
 
 GLM52_TOKENIZER = os.environ["GLM5_2_MOE_PATH"]
+GLM52_TEMPLATE_DEFAULTS = {
+    "enable_thinking": True,
+    "reasoning_effort": "max",
+    "clear_thinking": False,
+}
 
 
 @pytest.fixture(scope="module")
@@ -33,9 +38,12 @@ def tokenize_fn(tokenizer):
     return OpenaiTokenizeFunctionConfig(chat_template="glm5.2").build(tokenizer)
 
 
-def _ids_from_hf_render(tokenizer, messages, **kwargs):
-    text = tokenizer.apply_chat_template(messages, tokenize=False, **kwargs)
-    return tokenizer.encode(text, add_special_tokens=False)
+def _render_from_hf(tokenizer, messages, **kwargs):
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        **{**GLM52_TEMPLATE_DEFAULTS, **kwargs},
+    )
 
 
 def _label_flags_for_span(tokenizer, text, labels, substring):
@@ -56,7 +64,8 @@ class TestGlm52Rendering:
         tokenized = tokenize_fn({"messages": messages})
         slow_input_ids, slow_labels = glm52_tokenize_fn_slowspeed(tokenizer, messages)
 
-        assert tokenized["input_ids"] == _ids_from_hf_render(tokenizer, messages, add_generation_prompt=False)
+        rendered = _render_from_hf(tokenizer, messages, add_generation_prompt=False)
+        assert tokenized["input_ids"] == tokenizer.encode(rendered, add_special_tokens=False)
         assert tokenized["input_ids"] == slow_input_ids
         assert tokenized["labels"] == slow_labels
         assert (
@@ -67,8 +76,8 @@ class TestGlm52Rendering:
             == "</think>Hi there."
         )
 
-    def test_multiturn_reasoning_masks_history_and_supervises_latest_answer(self, tokenizer, tokenize_fn):
-        # 验证多轮对话清除历史 thinking，并只监督当前推理、答案和应训练的历史答案。
+    def test_multiturn_reasoning_defaults_to_preserved_and_can_be_cleared(self, tokenizer, tokenize_fn):
+        # 验证默认保留并监督历史 thinking，同时 clear_thinking=True 可恢复清除语义。
         messages = [
             {"role": "user", "content": "Question one"},
             {"role": "assistant", "reasoning_content": "old trace", "content": "Old answer."},
@@ -77,17 +86,37 @@ class TestGlm52Rendering:
         ]
 
         tokenized = tokenize_fn({"messages": messages})
-        rendered = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+        rendered = _render_from_hf(tokenizer, messages, add_generation_prompt=False)
         slow_input_ids, slow_labels = glm52_tokenize_fn_slowspeed(tokenizer, messages)
 
-        assert "old trace" not in rendered
+        assert "old trace" in rendered
         assert tokenized["input_ids"] == tokenizer.encode(rendered, add_special_tokens=False)
         assert tokenized["input_ids"] == slow_input_ids
         assert tokenized["labels"] == slow_labels
-        assert not any(_label_flags_for_span(tokenizer, rendered, tokenized["labels"], "<think></think>"))
-        assert not any(_label_flags_for_span(tokenizer, rendered, tokenized["labels"], "Old answer."))
+        assert all(_label_flags_for_span(tokenizer, rendered, tokenized["labels"], "old trace</think>"))
+        assert all(_label_flags_for_span(tokenizer, rendered, tokenized["labels"], "Old answer."))
         assert all(_label_flags_for_span(tokenizer, rendered, tokenized["labels"], "new trace</think>"))
         assert all(_label_flags_for_span(tokenizer, rendered, tokenized["labels"], "Final answer."))
+
+        cleared = Glm52ChatMessages(messages=messages).tokenize(tokenizer, clear_thinking=True)
+        cleared_rendered = _render_from_hf(
+            tokenizer,
+            messages,
+            add_generation_prompt=False,
+            clear_thinking=True,
+        )
+        cleared_slow_ids, cleared_slow_labels = glm52_tokenize_fn_slowspeed(
+            tokenizer,
+            messages,
+            clear_thinking=True,
+        )
+
+        assert "old trace" not in cleared_rendered
+        assert cleared["input_ids"] == tokenizer.encode(cleared_rendered, add_special_tokens=False)
+        assert cleared["input_ids"] == cleared_slow_ids
+        assert cleared["labels"] == cleared_slow_labels
+        assert not any(_label_flags_for_span(tokenizer, cleared_rendered, cleared["labels"], "Old answer."))
+        assert all(_label_flags_for_span(tokenizer, cleared_rendered, cleared["labels"], "new trace</think>"))
 
     def test_tools_and_loss_switch_follow_template_masking(self, tokenizer, tokenize_fn):
         # 验证工具定义与结果被掩码、assistant 工具调用被监督，且 loss=False 可关闭监督。
@@ -123,7 +152,12 @@ class TestGlm52Rendering:
         ]
 
         tokenized = tokenize_fn({"messages": messages, "tools": tools})
-        rendered = tokenizer.apply_chat_template(messages, tools=tools, tokenize=False, add_generation_prompt=False)
+        rendered = _render_from_hf(
+            tokenizer,
+            messages,
+            tools=tools,
+            add_generation_prompt=False,
+        )
         slow_input_ids, slow_labels = glm52_tokenize_fn_slowspeed(tokenizer, messages, tools=tools)
 
         assert tokenized["input_ids"] == tokenizer.encode(rendered, add_special_tokens=False)
@@ -153,7 +187,11 @@ class TestGlm52MessageOptions:
         messages = [{"role": "user", "content": "Write a short answer."}]
 
         tokenized = Glm52ChatMessages(messages=messages).tokenize(tokenizer, add_generation_prompt=True)
-        rendered = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        rendered = _render_from_hf(
+            tokenizer,
+            messages,
+            add_generation_prompt=True,
+        )
 
         assert tokenized["input_ids"] == tokenizer.encode(rendered, add_special_tokens=False)
         assert all(label == -100 for label in tokenized["labels"])
@@ -176,7 +214,11 @@ class TestGlm52MessageOptions:
             {"role": "system", "content": "Default system instruction."},
             *inserted_messages,
         ]
-        rendered = tokenizer.apply_chat_template(expected_messages, tokenize=False, add_generation_prompt=False)
+        rendered = _render_from_hf(
+            tokenizer,
+            expected_messages,
+            add_generation_prompt=False,
+        )
 
         expected_ids = tokenizer.encode(rendered, add_special_tokens=False)
         assert inserted["input_ids"] == expected_ids
