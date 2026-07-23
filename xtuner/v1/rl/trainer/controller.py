@@ -369,6 +369,22 @@ class TrainingController:
         ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
 
+    def start_hf_export(
+        self,
+        hf_dir: str,
+        save_dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        handles = [worker.start_hf_export.remote(hf_dir, save_dtype) for worker in self.workers]
+        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+
+    def is_hf_export_done(self) -> bool:
+        handles = [worker.is_hf_export_done.remote() for worker in self.workers]
+        return all(ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT))
+
+    def wait_hf_export(self) -> str:
+        handles = [worker.wait_hf_export.remote() for worker in self.workers]
+        return ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)[0]
+
     def resume(self, load_checkpoint_cfg: LoadCheckpointConfig):
         """Resume the training workers from the checkpoint."""
         handles = [worker.resume.remote(load_checkpoint_cfg) for worker in self.workers]  # type: ignore

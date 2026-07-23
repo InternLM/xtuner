@@ -536,7 +536,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                 Defaults to "GPU".
         """
         self.config = config
-        self._default_skip_load_weights = config.skip_load_weights
         self.rank = rank
         self.master_addr = master_addr  # ray master
         self.master_port = master_port
@@ -594,9 +593,25 @@ class RolloutWorker(SingleAcceleratorWorker):
         self._bind_server_launch_spec(server_launch_spec)
         return self._init_server()
 
-    def reinit(self) -> RolloutWorkerInitResult:
+    def reinit(
+        self,
+        *,
+        model_path: str | Path | None = None,
+        tokenizer_path: str | Path | None = None,
+        skip_load_weights: bool | None = None,
+    ) -> RolloutWorkerInitResult:
         """Reinitialize the rollout server using the previously bound launch
         spec."""
+        config_updates: dict[str, object] = {}
+        if model_path is not None:
+            config_updates["model_path"] = str(model_path)
+        if tokenizer_path is not None:
+            config_updates["tokenizer_path"] = str(tokenizer_path)
+        if skip_load_weights is not None:
+            config_updates["skip_load_weights"] = skip_load_weights
+
+        if config_updates:
+            self.config = self.config.model_copy(update=config_updates)
         return self._init_server()
 
     def _init_server(self) -> RolloutWorkerInitResult:
@@ -615,12 +630,6 @@ class RolloutWorker(SingleAcceleratorWorker):
             server_url=self.server_url,
             session_url=self.session_server_url,
         )
-
-    def set_skip_load_weights(self, skip_load_weights: bool) -> None:
-        self.config = self.config.model_copy(update={"skip_load_weights": skip_load_weights})
-
-    def restore_skip_load_weights(self) -> None:
-        self.config = self.config.model_copy(update={"skip_load_weights": self._default_skip_load_weights})
 
     def init_dist_port(self) -> tuple[int, str]:
         """Initialize distributed communication ports.
@@ -681,6 +690,46 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.server_process = None
             self.logger.debug(f"Worker {self.rank} server process and its children terminated.")
             return
+
+    def inject_backend_crash_for_test(self) -> bool:
+        """Force-stop the backend server for the immediate-recovery test."""
+        if os.environ.get("XTUNER_TEST_IMMEDIATE_RECOVERY", "0") != "1":
+            raise RuntimeError("Rollout test fault injection requires XTUNER_TEST_IMMEDIATE_RECOVERY=1.")
+        self.logger.warning(
+            f"[ImmediateRecoveryExperiment] crashing_backend_server rank={self.rank} url={self.server_url}"
+        )
+
+        if self.server_task is not None:
+            server_task = self.server_task
+            ray.cancel(server_task, force=True, recursive=True)
+            try:
+                ray.get(server_task, timeout=60)
+            except ray.exceptions.GetTimeoutError:
+                self.logger.warning(f"Worker {self.rank} server task did not stop within crash timeout.")
+                raise
+            except Exception as e:
+                self.logger.debug(f"Worker {self.rank} server task stopped after injected crash: {e}")
+            self.server_task = None
+            return True
+
+        if self.server_process is not None:
+            import psutil
+
+            try:
+                parent = psutil.Process(self.server_process.pid)
+            except psutil.NoSuchProcess:
+                self.server_process = None
+                return True
+            children = parent.children(recursive=True)
+            for child in children:
+                child.kill()
+            parent.kill()
+            parent.wait(timeout=5)
+            self.server_process = None
+            self.logger.debug(f"Worker {self.rank} server process and its children killed.")
+            return True
+
+        return False
 
     def _start_session_server(self) -> None:
         """Start the per-worker SessionServer proxy."""

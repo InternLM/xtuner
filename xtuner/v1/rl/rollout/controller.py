@@ -161,6 +161,34 @@ class RolloutController:
         """Restart inactive groups before a sync-step weight update."""
         await asyncio.to_thread(self.health_manager.restart_inactive_workers)
 
+    def set_ready_recovery_hf(
+        self,
+        *,
+        model_path: str,
+        tokenizer_path: str | None = None,
+    ) -> None:
+        self.health_manager.set_ready_recovery_hf(
+            model_path=model_path,
+            tokenizer_path=tokenizer_path,
+        )
+
+    def clear_ready_recovery_hf(self) -> None:
+        self.health_manager.clear_ready_recovery_hf()
+
+    def inject_backend_crash_for_test(self, *, rank: int = 0) -> None:
+        """Crash one active rollout backend for the immediate-recovery test."""
+        worker = self.registry.active_entrypoint_by_rank(rank)
+        if worker is None:
+            raise RuntimeError(f"No active rollout request entrypoint found for test fault injection: rank={rank}.")
+
+        accepted = ray.get(
+            worker.actor.inject_backend_crash_for_test.remote(),  # type: ignore[attr-defined]
+            timeout=ROLLOUT_RAY_GET_TIMEOUT,
+        )
+        if not accepted:
+            raise RuntimeError(f"Rollout worker rejected test fault injection: rank={rank}, url={worker.url}.")
+        self.logger.warning(f"[ImmediateRecoveryExperiment] backend_crash_injected rank={rank} url={worker.url}")
+
     def continue_generation(self):
         self._broadcast_to_active_workers("continue_generation")
         self.health_manager.resume()
