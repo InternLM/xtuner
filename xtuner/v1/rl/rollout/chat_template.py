@@ -15,6 +15,9 @@ def canonicalize_messages_for_chat_template(messages: list[dict]) -> list[dict]:
     template-renderable shape before ``apply_chat_template``. It must not
     mutate model responses returned to the agent/client, nor the generated
     token ids, labels, or raw rollout artifacts used for training.
+
+    ``tool_calls[].function.arguments`` strings are parsed to dicts so the
+    template's ``tojson`` filter sees a real object.
     """
 
     messages = copy.deepcopy(messages)
