@@ -8,6 +8,7 @@ import torch.distributed as dist
 import tqdm
 from torch.distributed.tensor import DTensor
 
+from xtuner.v1.model.adapter.lora import LoraModel
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.model.moe.moe import MoE
@@ -177,6 +178,8 @@ class WeightIterator:
         """Update the model weights."""
 
         model = self._engine.model
+        if isinstance(model, LoraModel):
+            model = model.base_model
         if submodule:
             model = getattr(model, submodule)
 
@@ -235,11 +238,20 @@ class WeightIterator:
 
         for name_list, fused_param_list in fused_gen:
             state_dict = {name: param.detach() for name, param in zip(name_list, fused_param_list)}
+            # 过滤掉 LoRA 参数：当前推理引擎只接收全量参数（base + merged LoRA），
+            # 不需要单独的 lora_A/lora_B 参数。LoRA 参数在训练侧保留，通过 merge/unmerge
+            # 在推理时临时合并进 base weight。
+            for key in list(state_dict.keys()):
+                if "lora_" in key:
+                    del state_dict[key]
             yield WeightUpdateBatch(state_dict, train_enable_ep=train_enable_ep, finished=False)
             del state_dict, name_list, fused_param_list
 
         for name_list, param_list in chain(same_gen, shard_gen):
             state_dict = {name: param.detach() for name, param in zip(name_list, param_list)}
+            for key in list(state_dict.keys()):
+                if "lora_" in key:
+                    del state_dict[key]
             yield WeightUpdateBatch(state_dict, train_enable_ep=train_enable_ep, finished=False)
             del state_dict, name_list, param_list
 
@@ -255,6 +267,8 @@ class WeightIterator:
         """Update the model weights."""
 
         model = self._engine.model
+        if isinstance(model, LoraModel):
+            model = model.base_model
         DEVICE_MODULE.empty_cache()
 
         if isinstance(model.config, BaseComposeConfig):
@@ -295,6 +309,8 @@ class WeightIterator:
             tensor_list = []
             name_list = []
             for sub_name, param in layer.state_dict().items():
+                if "lora_A." in sub_name or "lora_B." in sub_name:
+                    continue
                 if isinstance(model.config, BaseComposeConfig):
                     saved_list.append(f"language_model.layers.{i}.{sub_name}")
                 else:
@@ -302,11 +318,12 @@ class WeightIterator:
                 local_tensor = param._local_tensor if isinstance(param, DTensor) else param
                 local_tensor = local_tensor.bfloat16()
                 load_spec = language_model.load_spec_mapping.get(f"layers.{i}.{sub_name}")
+                export_sub_name = sub_name.replace(".base_layer.", ".")
 
                 if isinstance(model.config, BaseComposeConfig):
-                    name = f"model.language_model.layers.{i}.{sub_name}"
+                    name = f"model.language_model.layers.{i}.{export_sub_name}"
                 else:
-                    name = f"model.layers.{i}.{sub_name}"
+                    name = f"model.layers.{i}.{export_sub_name}"
 
                 if ".experts." in name and ".mlp.experts." not in name:
                     name = name.replace(".experts.", ".mlp.experts.")
@@ -321,28 +338,31 @@ class WeightIterator:
         for name, param in model.state_dict().items():
             if name in saved_list:
                 continue
+            if "lora_A." in name or "lora_B." in name:
+                continue
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.bfloat16()
             load_spec = model.load_spec_mapping.get(name)
+            export_name = name.replace(".base_layer.", ".")
 
             if isinstance(model.config, BaseComposeConfig):
-                if "vision_tower." in name:
-                    name = name.replace("vision_tower.", vision_hf_prefix)
-                elif "multi_modal_projector." in name:
-                    name = name.replace("multi_modal_projector.", projector_hf_prefix)
-                elif name == "language_model.norm.weight":
-                    name = "model.language_model.norm.weight"
-                elif name == "language_model.embed_tokens.weight":
-                    name = "model.language_model.embed_tokens.weight"
-                elif name == "language_model.lm_head.weight":
-                    name = "lm_head.weight"
+                if "vision_tower." in export_name:
+                    export_name = export_name.replace("vision_tower.", vision_hf_prefix)
+                elif "multi_modal_projector." in export_name:
+                    export_name = export_name.replace("multi_modal_projector.", projector_hf_prefix)
+                elif export_name == "language_model.norm.weight":
+                    export_name = "model.language_model.norm.weight"
+                elif export_name == "language_model.embed_tokens.weight":
+                    export_name = "model.language_model.embed_tokens.weight"
+                elif export_name == "language_model.lm_head.weight":
+                    export_name = "lm_head.weight"
             else:
-                if name == "norm.weight":
-                    name = "model.norm.weight"
-                elif name == "embed_tokens.weight":
-                    name = "model.embed_tokens.weight"
+                if export_name == "norm.weight":
+                    export_name = "model.norm.weight"
+                elif export_name == "embed_tokens.weight":
+                    export_name = "model.embed_tokens.weight"
             tensor_list = [(local_tensor, load_spec)]
-            name_list = [name]
+            name_list = [export_name]
             fsdp_unshard_tensor_list, name_list = get_params(tensor_list, name_list, dtype)
             state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
             yield WeightUpdateBatch(state_dict)
