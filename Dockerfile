@@ -28,7 +28,7 @@ ARG PYTORCH_WHEELS_URL
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     --mount=type=secret,id=NO_PROXY,env=no_proxy \
     if [ -n "${TORCH_VERSION}" ]; then \
-        pip install torchvision torch==${TORCH_VERSION} \
+        pip install torchvision==0.27.1 torch==${TORCH_VERSION} \
         -i ${PYTORCH_WHEELS_URL}/cu132 \
         --no-cache-dir; \
     fi
@@ -67,8 +67,8 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 
 WORKDIR ${CODESPACE}/flash-attention
 
+# 只编译 FA3(hopper)，与 pt121 conda 一致（环境只装了 flash_attn_3，无 flash_attn 2.x）。
 RUN cd hopper && FLASH_ATTENTION_FORCE_BUILD=TRUE pip wheel -w ${FLASH_ATTN3_DIR} -v --no-deps .
-RUN FLASH_ATTENTION_FORCE_BUILD=TRUE pip wheel -w ${FLASH_ATTN_DIR} -v --no-deps .
 
 # compile adaptive_gemm
 FROM setup_env AS adaptive_gemm
@@ -202,7 +202,6 @@ ARG DEEP_GEMM_DIR
 ARG CAUSAL_CONV1D_DIR
 
 COPY --from=flash_attn ${FLASH_ATTN3_DIR} ${FLASH_ATTN3_DIR}
-COPY --from=flash_attn ${FLASH_ATTN_DIR} ${FLASH_ATTN_DIR}
 COPY --from=adaptive_gemm ${ADAPTIVE_GEMM_DIR} ${ADAPTIVE_GEMM_DIR}
 COPY --from=grouped_gemm ${GROUPED_GEMM_DIR} ${GROUPED_GEMM_DIR}
 COPY --from=deep_ep ${DEEP_EP_DIR} ${DEEP_EP_DIR}
@@ -210,7 +209,6 @@ COPY --from=deep_ep ${DEEP_EP_DIR} ${DEEP_EP_DIR}
 COPY --from=deep_gemm ${DEEP_GEMM_DIR} ${DEEP_GEMM_DIR}
 COPY --from=causal_conv1d ${CAUSAL_CONV1D_DIR} ${CAUSAL_CONV1D_DIR}
 
-RUN unzip ${FLASH_ATTN_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${FLASH_ATTN3_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${ADAPTIVE_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${GROUPED_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
@@ -235,7 +233,7 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
         partial_json_parser 'ray[default]<3' shortuuid uvicorn pybase64 \
         tilelang==0.1.11 \
         'pydantic>2' openai_harmony dlblas --no-cache-dir -i ${DEFAULT_PYPI_URL} && \
-    pip install xgrammar==0.1.32 timm!=1.0.23 --no-cache-dir -i ${DEFAULT_PYPI_URL} --no-deps && \
+    pip install xgrammar==0.2.3 timm==1.0.28 --no-cache-dir -i ${DEFAULT_PYPI_URL} --no-deps && \
     if [ -n "${LMDEPLOY_VERSION}" ]; then \
         pip install lmdeploy==${LMDEPLOY_VERSION} --no-deps --no-cache-dir -i ${DEFAULT_PYPI_URL}; \
     else \
