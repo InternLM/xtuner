@@ -30,6 +30,7 @@ from xtuner.v1.rl.agent_loop_manager import (
 import ray
 
 # export LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
+# export XTUNER_ACTIVATION_OFFLOAD=1
 
 def _as_list(value):
     return value if isinstance(value, list) else [value]
@@ -91,7 +92,7 @@ rollout_config = RolloutConfig(
         lmdeploy_uvicorn_log_level="INFO",
         lmdeploy_speculative_algorithm='qwen3_5_mtp',
         # MTP draft tokens trade throughput for extra activation memory; try 3 if still tight.
-        lmdeploy_speculative_num_draft_tokens=4,
+        lmdeploy_speculative_num_draft_tokens=3,
     ),
     health_check_interval_seconds=300,
     health_check_failure_threshold=3,
@@ -209,15 +210,21 @@ judger_config = ComposedJudgerConfig(
     },
 )
 
+from xtuner.v1.float8 import Float8Config, ScalingGranularity
 # 5. train worker
 model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
-model_cfg.float8_cfg = None
+float8_cfg = Float8Config(
+    scaling_granularity_gemm=None,
+    scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+)
+model_cfg.float8_cfg = float8_cfg
 model_cfg.text_config.ep_size = train_ep_size
 model_cfg.text_config.z_loss_cfg = None
 model_cfg.text_config.balancing_loss_cfg = None
 model_cfg.text_config.freeze_routers = True
+model_cfg.compile_cfg = None
 model_cfg.text_config.mtp_config = MTPConfig(
-    num_layers=4, 
+    num_layers=3, 
     loss_scaling_factor=1.0,
     detach_mtp_lm_head_weight=True,
     detach_mtp_inputs=True,

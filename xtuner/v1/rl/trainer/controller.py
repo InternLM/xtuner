@@ -1,6 +1,6 @@
 import math
 import os
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 import ray
 import torch
@@ -22,6 +22,29 @@ class ColateItem(TypedDict):
     shifted_labels: torch.Tensor
     advantage: float
     rollout_logprobs: torch.Tensor | None
+
+
+def _summarize_process_group_results(results: list[dict[str, Any]]) -> str:
+    if not results:
+        return "ranks=0"
+
+    count_key = next(
+        (key for key in ("suspended", "resumed", "destroyed", "reloaded") if key in results[0]),
+        "count",
+    )
+    counts = [result.get(count_key, 0) for result in results]
+    count_summary = f"{counts[0]} on all ranks" if len(set(counts)) == 1 else f"by_rank={counts}"
+    skipped_counts = [result.get("skipped", 0) for result in results]
+    result_errors = [error for result in results for error in result.get("errors", [])]
+    summary = f"ranks={len(results)}, {count_key}={count_summary}"
+    if any(skipped_counts):
+        skipped_summary = (
+            f"{skipped_counts[0]} on all ranks" if len(set(skipped_counts)) == 1 else f"by_rank={skipped_counts}"
+        )
+        summary += f", skipped={skipped_summary}"
+    if result_errors:
+        summary += f", errors={len(result_errors)}, first_error={result_errors[0]}"
+    return summary
 
 
 class TrainingController:
@@ -246,8 +269,6 @@ class TrainingController:
             pad_data_samples = [pad_data for _ in range(pad_num)]
             packed_data_batches = packed_data_batches + pad_data_samples
 
-        print(f"len(packed_data_batches): {len(packed_data_batches)}")
-
         handles = []
         data_batch_refs = {}
         for worker_idx, worker in enumerate(self.workers):
@@ -322,6 +343,26 @@ class TrainingController:
         handles = [worker.update_weights.remote() for worker in self.workers]
         ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
+
+    def suspend_train_nccl_process_groups(self):
+        """Suspend train-side NCCL process groups after weight sync."""
+        handles = [
+            worker.suspend_train_nccl_process_groups.remote()  # type: ignore[attr-defined]
+            for worker in self.workers
+        ]
+        results = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        self.logger.info(f"Suspended train NCCL process groups: {_summarize_process_group_results(results)}")
+        return results
+
+    def resume_train_nccl_process_groups(self):
+        """Resume train-side NCCL process groups before training."""
+        handles = [
+            worker.resume_train_nccl_process_groups.remote()  # type: ignore[attr-defined]
+            for worker in self.workers
+        ]
+        results = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        self.logger.info(f"Resumed train NCCL process groups: {_summarize_process_group_results(results)}")
+        return results
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         handles = [worker.save_hf.remote(hf_dir, save_dtype) for worker in self.workers]  # type: ignore

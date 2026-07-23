@@ -57,6 +57,9 @@ from xtuner.v1.utils import (
     ray_method,
     set_deterministic,
 )
+from xtuner.v1.utils.activation_offload import OffloadManager
+from xtuner.v1.utils.fsdp import release_deferred_fsdp_all_gathers
+from xtuner.v1.utils.nccl_process_group import resume_nccl_process_groups, suspend_nccl_process_groups
 
 from ..rollout_is import merge_rollout_is_metrics
 
@@ -277,6 +280,45 @@ class TrainingWorker(SingleAcceleratorWorker):
             config=self.config,
             engine=self._engine,
         )
+
+    @ray_method
+    def suspend_train_nccl_process_groups(self) -> dict[str, object]:
+        """Suspend train-side NCCL PG backends after weight sync and train
+        offload."""
+
+        include_default = (
+            os.getenv(
+                "XTUNER_SUSPEND_TRAIN_NCCL_INCLUDE_DEFAULT",
+                os.getenv("XTUNER_DESTROY_TRAIN_NCCL_INCLUDE_DEFAULT", "0"),
+            )
+            == "1"
+        )
+        details = suspend_nccl_process_groups(include_default=include_default)
+        errors = [str(detail["error"]) for detail in details if "error" in detail]
+        DEVICE_MODULE.empty_cache()
+        result = {
+            "rank": self.rank,
+            "suspended": sum("error" not in detail and not detail.get("skipped", False) for detail in details),
+            "skipped": sum(bool(detail.get("skipped", False)) for detail in details),
+            "details": details,
+            "errors": errors,
+        }
+        return result
+
+    @ray_method
+    def resume_train_nccl_process_groups(self) -> dict[str, object]:
+        """Resume train-side NCCL PG backends before FSDP2 runs again."""
+
+        details = resume_nccl_process_groups()
+        errors = [str(detail["error"]) for detail in details if "error" in detail]
+        DEVICE_MODULE.empty_cache()
+        result = {
+            "rank": self.rank,
+            "resumed": sum("error" not in detail for detail in details),
+            "details": details,
+            "errors": errors,
+        }
+        return result
 
     @ray_method
     def bind_rollout_weight_update(self, *args, **kwargs):
@@ -679,6 +721,13 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         only_calc_mismatch_ratio = os.environ.get("ONLY_CALC_MISMATCH_RATIO", "0") == "1"
         if only_calc_mismatch_ratio:
+            # This early-return path skips the MTP forward. FSDP may have
+            # prefetched the MTP module already, leaving its all-gather result
+            # cached until we release it explicitly. The normal training branch
+            # can leave the same residue, but it is outside the peak-memory
+            # path and can be ignored.
+            self._release_deferred_fsdp_all_gathers(f"rollout_{rollout_idx}/only_calc_mismatch")
+            DEVICE_MODULE.empty_cache()
             return worker_log_item
 
         # compute reference logprobs
@@ -772,6 +821,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 train_step_info = self._engine.train_step(
                     data_batches=engine_input,
                 )
+                OffloadManager().clear()
             self.logger.debug(
                 f"Rank{self.rank} Rollout {rollout_idx} GlobalStep {global_train_step} "
                 f"train_step[{i}].engine_train_step elapsed={time.perf_counter() - train_step_begin:.4f}s"
@@ -954,10 +1004,30 @@ class TrainingWorker(SingleAcceleratorWorker):
         model_cfg = self._engine.model_cfg
         return model_cfg
 
+    def _clear_cublas_workspaces(self) -> None:
+        clear_fn = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
+        if clear_fn is None:
+            self.logger.warning("torch._C._cuda_clearCublasWorkspaces is unavailable")
+            return
+        try:
+            clear_fn()
+            DEVICE_MODULE.empty_cache()
+        except Exception as e:
+            self.logger.warning(f"Failed to clear cuBLAS workspaces: {e}")
+
+    def _release_deferred_fsdp_all_gathers(self, log_tag: str) -> None:
+        comm_states, param_groups = release_deferred_fsdp_all_gathers(self._engine.model)
+        if comm_states or param_groups:
+            self.logger.debug(
+                f"[{log_tag}] released deferred FSDP all-gathers: "
+                f"comm_states={comm_states}, param_groups={param_groups}"
+            )
+
     @ray_method
     def offload_model(self):
         model_moved = self._engine.put_model_to_device("cpu")
         DEVICE_MODULE.empty_cache()
+        self._clear_cublas_workspaces()
         if not model_moved:
             self.logger.info("Skip model offload because model placement is unchanged.")
             return
