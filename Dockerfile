@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.10.0
 # builder
-ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.03-py3
+# 26.03-py3 = CUDA 13.2.0（匹配 pt121 实测栈）；由 image_build.sh 覆盖传入
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.03-py3
 
 ## build base env
 FROM ${BASE_IMAGE} AS setup_env
@@ -28,8 +29,7 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     --mount=type=secret,id=NO_PROXY,env=no_proxy \
     if [ -n "${TORCH_VERSION}" ]; then \
         pip install torchvision torch==${TORCH_VERSION} \
-        -i ${PYTORCH_WHEELS_URL}/cu128 \
-        --extra-index-url ${PYTORCH_WHEELS_URL}/cu126 \
+        -i ${PYTORCH_WHEELS_URL}/cu132 \
         --no-cache-dir; \
     fi
 # set reasonable default for CUDA architectures when building ngc image
@@ -84,6 +84,17 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     git submodule update --init --recursive --force
 
 WORKDIR ${CODESPACE}/AdaptiveGEMM
+
+# Blocker1(GLM-5.2/cu13): CUDA 13 从 <cudaTypedefs.h> 移除了无版本号的
+# PFN_cuTensorMapEncodeTiled，只留 _v12000。adaptive_gemm 的 JIT 头文件(tma_utils.cuh)
+# 仍用旧名，在 cu13.2 下 nvcc 会 "identifier undefined"。这里在打 wheel 前把旧名别名回
+# 版本化符号（#if CUDA_VERSION>=13000 才生效，cu12 无副作用）。补丁进头文件、随 wheel 分发、
+# 运行时 JIT 读取。10411e0 本身不含此补丁，故必须在此注入。
+RUN sed -i '/^namespace adaptive_gemm {/i\
+#if (CUDA_VERSION >= 13000) && !defined(PFN_cuTensorMapEncodeTiled)\
+#define PFN_cuTensorMapEncodeTiled PFN_cuTensorMapEncodeTiled_v12000\
+#endif' adaptive_gemm/include/adaptive_gemm/tma_utils.cuh && \
+    grep -q "PFN_cuTensorMapEncodeTiled_v12000" adaptive_gemm/include/adaptive_gemm/tma_utils.cuh
 
 RUN pip wheel -w ${ADAPTIVE_GEMM_DIR} -v --no-deps .
 
