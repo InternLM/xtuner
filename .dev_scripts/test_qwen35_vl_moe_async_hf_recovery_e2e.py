@@ -1,6 +1,6 @@
 """Real Qwen3.5 VLM MoE async-HF recovery E2E test.
 
-This opt-in test focuses only on the recovery protocol:
+This test focuses only on the recovery protocol:
 
 1. train step 1 starts an asynchronous recovery-HF export;
 2. the test waits until that export has been published as ready;
@@ -8,15 +8,14 @@ This opt-in test focuses only on the recovery protocol:
 4. RolloutHealthManager detects the failure and reloads the ready HF;
 5. train step 2 and the post-recovery train step 3 both complete.
 
-Run with ``XTUNER_RUN_ASYNC_HF_RECOVERY_E2E=1`` in the same 8-GPU
-environment used by the Qwen3.5 VLM MoE async-training E2E test.
+Run in the same 8-GPU environment used by the Qwen3.5 VLM MoE
+async-training E2E test.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-import tempfile
 import threading
 import time
 import unittest
@@ -25,16 +24,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-RUN_E2E_ENV = "XTUNER_RUN_ASYNC_HF_RECOVERY_E2E"
-RUN_E2E = os.environ.get(RUN_E2E_ENV, "0") == "1"
-
 # These values are consumed while XTuner modules are imported.
 os.environ["XTUNER_DETERMINISTIC"] = "false"
-if RUN_E2E:
-    os.environ["XTUNER_USE_LMDEPLOY"] = "1"
-    os.environ["XTUNER_USE_SGLANG"] = "0"
-    os.environ["XTUNER_USE_VLLM"] = "0"
-    os.environ["XTUNER_TEST_IMMEDIATE_RECOVERY"] = "1"
+os.environ["XTUNER_USE_LMDEPLOY"] = "1"
+os.environ["XTUNER_USE_SGLANG"] = "0"
+os.environ["XTUNER_USE_VLLM"] = "0"
+os.environ["XTUNER_TEST_IMMEDIATE_RECOVERY"] = "1"
 
 import ray
 
@@ -63,7 +58,7 @@ from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
 
 EXPERIMENT_NAME = "qwen35_vl_moe_async_hf_recovery_e2e"
 TOTAL_TRAIN_STEPS = 3
-TRAIN_BATCH_SIZE_BY_STEP = {1: 8, 2: 64, 3: 8}
+TRAIN_BATCH_SIZE_BY_STEP = {1: 8, 2: 128, 3: 8}
 PROMPT_REPEAT_K = 2
 MAX_PROMPT_LENGTH = 4096
 MAX_RESPONSE_LENGTH = 2048
@@ -73,21 +68,16 @@ RAY_GET_TIMEOUT_S = 600.0
 POLL_INTERVAL_S = 0.5
 
 
-@unittest.skipUnless(
-    RUN_E2E,
-    f"Set {RUN_E2E_ENV}=1 to run the real 8-GPU async-HF recovery E2E test.",
-)
 class TestQwen35VLMoEAsyncHFRecoveryE2E(unittest.TestCase):
     def setUp(self) -> None:
         self.model_path = self._required_path("QWEN3_5_MOE_PATH")
         self.media_root = self._required_path("GEO3K_MEDIA_ROOT")
         self.data_path = self._required_path("GEO3K_LONGTAIL_DATA_PATH")
 
-        self.temp_dir = tempfile.TemporaryDirectory(
-            prefix=f"{EXPERIMENT_NAME}_{time.strftime('%Y%m%d%H%M%S')}_{os.getpid()}_"
+        default_work_dir = (
+            Path.cwd() / "work_dirs" / f"{EXPERIMENT_NAME}_{time.strftime('%Y%m%d%H%M%S')}_{os.getpid()}"
         )
-        self.addCleanup(self.temp_dir.cleanup)
-        self.work_dir = Path(self.temp_dir.name) / "work_dir"
+        self.work_dir = Path(os.environ.get("WORK_DIR", str(default_work_dir)))
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
         self._events: list[str] = []

@@ -915,6 +915,7 @@ class BaseRLTrainer:
             return
 
         save_hf_path.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"Starting async recovery HF export: path={save_hf_path}.")
         self.train_controller.start_hf_export(str(save_hf_path))
         executor = cast(ThreadPoolExecutor, self._hf_export_executor)
 
@@ -930,6 +931,7 @@ class BaseRLTrainer:
                     ),
                     timeout=RL_TRAINER_RAY_GET_TIMEOUT,
                 )
+                self.logger.info(f"Async recovery HF export completed and published: path={finalized_hf_path}.")
             except Exception:
                 self.logger.exception(f"Async recovery HF export failed: path={save_hf_path}.")
                 return None
@@ -962,8 +964,6 @@ class BaseRLTrainer:
             timeout=RL_TRAINER_RAY_GET_TIMEOUT,
         )
         self._ready_recovery_hf_path = None
-        if finalized_hf_path is not None:
-            rmtree(finalized_hf_path, ignore_errors=True)
 
     async def _run_initial_evaluate(self) -> None:
         try:

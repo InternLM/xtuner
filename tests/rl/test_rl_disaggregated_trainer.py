@@ -113,6 +113,9 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._enable_initial_evaluate = False
         trainer._evaluate_step = 1
         trainer._debug_rollout = False
+        trainer._enable_immediate_recovery = False
+        trainer._hf_export_executor = None
+        trainer._pending_hf_export = None
         trainer._display_all_workers_log = False
         trainer._num_workers = 1.0
         trainer._rollout_num_workers = 1.0
@@ -150,7 +153,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             check_and_shutdown_inactive_workers=SimpleNamespace(
                 remote=MagicMock(return_value="rollout_inactive_workers_shutdown")
             ),
-            restart_inactive_workers=SimpleNamespace(remote=MagicMock(return_value="rollout_restarted")),
+            restart_inactive_workers=SimpleNamespace(remote=AsyncMock(return_value=None)),
             pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause")),
             continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue")),
             onload_weights=SimpleNamespace(remote=MagicMock(return_value="onload_weights")),
@@ -160,7 +163,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         return trainer
 
     def _run_fit(self, trainer):
-        with patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run):
+        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
             trainer.fit()
 
     def _minimal_train_info(self, *, training_samples: int, training_tokens: int, benchmark_end_time_s: float = 108.0):
@@ -202,7 +205,6 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         )
 
         with (
-            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
             patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
             patch("xtuner.v1.train.rl_trainer.bind_train_rollout"),
         ):
@@ -263,10 +265,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer = self._make_trainer(manager)
         trainer._rollout_config = SimpleNamespace(weight_update_host="10.0.0.1", weight_update_port=23456)
 
-        with (
-            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_trainer.bind_train_rollout") as bind_train_rollout_mock,
-        ):
+        with patch("xtuner.v1.train.rl_trainer.bind_train_rollout") as bind_train_rollout_mock:
             trainer.fit()
 
         bind_train_rollout_mock.assert_called_once_with(

@@ -417,11 +417,11 @@ class TestImmediateRecoverySlowExportFallback(unittest.TestCase):
         测试流程：
         1. 构造尚未完成的 recovery HF Future，模拟异步保存跨过下一次同步点。
         2. 执行完整的 colocate save/sync 编排，等待旧 Future 收尾并清空 ready HF。
-        3. 确认 immediate recovery 被关闭、未完成快照被删除且没有启动下一次异步保存。
+        3. 确认 immediate recovery 被关闭且没有启动下一次异步保存。
         4. 确认 inactive group 的恢复发生在 bind/update_weights 之前，走权重更新基线。
         """
         events: list[str] = []
-        pending, recovery_hf_path = self._build_pending_export(events, "colocate-hf-step-1")
+        pending, _ = self._build_pending_export(events, "colocate-hf-step-1")
         trainer = RLColocateTrainer.__new__(RLColocateTrainer)
         trainer.logger = MagicMock()
         trainer._enable_immediate_recovery = True
@@ -459,7 +459,6 @@ class TestImmediateRecoverySlowExportFallback(unittest.TestCase):
         self.assertFalse(trainer._enable_immediate_recovery)
         self.assertIsNone(trainer._pending_hf_export)
         self.assertIsNone(trainer._ready_recovery_hf_path)
-        self.assertFalse(recovery_hf_path.exists())
         self.assertEqual(
             events,
             [
@@ -483,11 +482,11 @@ class TestImmediateRecoverySlowExportFallback(unittest.TestCase):
         测试流程：
         1. 构造跨过下一次同步点的 pending recovery HF Future。
         2. 执行 disaggregated 的 save -> restart -> bind -> update_weights 编排。
-        3. 确认同步点先等待并撤销 ready HF，然后关闭 immediate recovery、删除旧快照。
+        3. 确认同步点先等待并撤销 ready HF，然后关闭 immediate recovery。
         4. 确认只恢复 inactive group 并直接进入本轮权重更新，不再启动 recovery HF。
         """
         events: list[str] = []
-        pending, recovery_hf_path = self._build_pending_export(events, "disaggregated-hf-step-1")
+        pending, _ = self._build_pending_export(events, "disaggregated-hf-step-1")
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
         trainer.logger = MagicMock()
         trainer._enable_immediate_recovery = True
@@ -517,7 +516,6 @@ class TestImmediateRecoverySlowExportFallback(unittest.TestCase):
         self.assertFalse(trainer._enable_immediate_recovery)
         self.assertIsNone(trainer._pending_hf_export)
         self.assertIsNone(trainer._ready_recovery_hf_path)
-        self.assertFalse(recovery_hf_path.exists())
         self.assertEqual(
             events,
             [
