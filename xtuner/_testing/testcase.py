@@ -5,6 +5,7 @@ import threading
 import sys
 import os
 import re
+import tempfile
 import contextlib
 import inspect
 import unittest
@@ -19,7 +20,24 @@ class DeterministicDDPTestCase(DistributedTestBase):
     def prepare(self):
         return
 
+    def _isolate_compiler_cache(self):
+        # Each rank of a distributed test compiles the *same* Triton kernels
+        # (e.g. ``m_grouped_gemm_kernel``). When every rank shares one
+        # ``TRITON_CACHE_DIR`` (the CI default ``/tmp/.triton``) they race on the
+        # same cache files: a rank can read a half-written IR that another rank is
+        # still emitting, which surfaces as ``RuntimeError: PassManager::run failed``
+        # in ``make_ttgir`` under torch2.12/triton3.7's heavier compile pipeline.
+        # Giving each rank its own cache dir removes the shared file entirely.
+        # triton reads ``TRITON_CACHE_DIR`` afresh on every compile, so setting it
+        # here (before the test body compiles anything) takes effect per-rank.
+        base = os.environ.get("TRITON_CACHE_DIR") or os.path.join(tempfile.gettempdir(), ".triton")
+        cache_dir = os.path.join(base, f"r{getattr(self, 'rank', 0)}_p{os.getpid()}")
+        os.makedirs(cache_dir, exist_ok=True)
+        os.environ["TRITON_CACHE_DIR"] = cache_dir
+        os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", cache_dir + "_inductor")
+
     def run_func(self, test_name):
+        self._isolate_compiler_cache()
         enable_full_determinism()
         monkey_patch_hf_modules_cache()
         self.prepare()
