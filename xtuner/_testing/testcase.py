@@ -30,11 +30,22 @@ class DeterministicDDPTestCase(DistributedTestBase):
         # Giving each rank its own cache dir removes the shared file entirely.
         # triton reads ``TRITON_CACHE_DIR`` afresh on every compile, so setting it
         # here (before the test body compiles anything) takes effect per-rank.
+        # Always re-assign TORCHINDUCTOR_CACHE_DIR too: the pytest parent may have
+        # already set a shared value via conftest, and setdefault would keep it.
         base = os.environ.get("TRITON_CACHE_DIR") or os.path.join(tempfile.gettempdir(), ".triton")
+        # Strip any pytest_p* / r*_p* leaf so ranks nest under a stable root.
+        while True:
+            leaf = os.path.basename(base)
+            if leaf.startswith("pytest_p") or re.match(r"r\d+_p\d+$", leaf):
+                base = os.path.dirname(base) or base
+                continue
+            break
         cache_dir = os.path.join(base, f"r{getattr(self, 'rank', 0)}_p{os.getpid()}")
         os.makedirs(cache_dir, exist_ok=True)
         os.environ["TRITON_CACHE_DIR"] = cache_dir
-        os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", cache_dir + "_inductor")
+        inductor_dir = cache_dir + "_inductor"
+        os.makedirs(inductor_dir, exist_ok=True)
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_dir
 
     def run_func(self, test_name):
         self._isolate_compiler_cache()
