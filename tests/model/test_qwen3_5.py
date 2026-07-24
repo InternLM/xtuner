@@ -255,11 +255,11 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         self.create_pg(device)
         self._patch_xtuner_fast_pos_embed_interpolate()
 
+        # pt29 + transformers 5.2.0 with XTUNER_DETERMINISTIC=true, which pins Triton autotune.
         loss_reference = {
-            "text": 1.5416,
+            "text": 1.4981,
             "image": 3.6920,
-            # "video": 8.2165, # pt28+tf4.57.0
-            "video": 8.8627, # pt29+tf5.2.0
+            "video": 8.5910,
         }
 
         QWEN3_VL_MOE_PATH = os.environ["QWEN3_5_MOE_PATH"]
