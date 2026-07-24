@@ -58,11 +58,13 @@ def build_grouped_linear(
     float8_cfg: Float8Config | None = None,
 ):
     """Build a grouped linear layer with optional float8 support."""
-    if float8_cfg is None or float8_cfg.scaling_granularity_gemm is None:
+    if float8_cfg is None or float8_cfg.scaling_granularity_grouped_gemm is None:
         return GroupedLinear(in_features, out_features, num_routed_experts, moe_bias=moe_bias, ep_mesh=ep_mesh)
     elif float8_cfg.scaling_granularity_grouped_gemm == ScalingGranularity.TILEWISE:
         return TileWiseFloat8GroupedLinear(
             in_features, out_features, num_routed_experts, moe_bias=moe_bias, ep_mesh=ep_mesh
         )
     else:
-        raise NotImplementedError(f"Unsupported float8 scaling granularity: {float8_cfg.scaling_granularity_gemm}")
+        raise NotImplementedError(
+            f"Unsupported grouped GEMM float8 scaling granularity: {float8_cfg.scaling_granularity_grouped_gemm}"
+        )

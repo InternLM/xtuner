@@ -35,6 +35,7 @@ dependencies = [
   "scipy",
   "SentencePiece",
   "tiktoken",
+  "tilelang==0.1.11",
   "torch>=2.6.0",
   "torchvision",
   "transformers==5.2.0",

@@ -12,7 +12,7 @@ from .mtp_layer import MTPLayer
 from .utils import roll_sequence_context
 
 
-MTPDepthOutput = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+MTPDepthOutput = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 class MTPBlock(nn.Module):
@@ -67,7 +67,7 @@ class MTPBlock(nn.Module):
         ...     position_embeddings=[pos_emb_0, pos_emb_1],
         ...     seq_ctx=[ctx_0, ctx_1],
         ... )
-        >>> # outputs_per_mb[mb_idx][depth_idx] -> (hidden, router_logits, router_weights)
+        >>> # outputs_per_mb[mb_idx][depth_idx] -> (hidden, router_logits, router_weights, router_topk_ids)
     """
 
     def __init__(self, *, mtp_config: MTPConfig, mtp_layers: list[MTPLayer]):
@@ -107,9 +107,11 @@ class MTPBlock(nn.Module):
             seq_ctx (SequenceContext | list[SequenceContext]): Sequence context per micro-batch.
 
         Returns:
-            list: For single-microbatch input, ``list[(hidden, router_logits, router_weights)]``
+            list: For single-microbatch input,
+                ``list[(hidden, router_logits, router_weights, router_topk_ids)]``
                 of length ``D``, where ``outputs[k]`` is the prediction for token ``i+k+1``.
-                For ``N`` micro-batches, ``list[list[(hidden, router_logits, router_weights)]]``
+                For ``N`` micro-batches,
+                ``list[list[(hidden, router_logits, router_weights, router_topk_ids)]]``
                 with outer length ``N`` and inner length ``D``: ``outputs[mb_idx][depth_idx]``.
         """
         if len(hidden_states) == 1:
@@ -162,8 +164,9 @@ class MTPBlock(nn.Module):
                 attention mask, etc.
 
         Returns:
-            list[MTPDepthOutput]: List of 3-tuples
-                (hidden_states, router_logits, router_weights) for each MTP depth.
+            list[MTPDepthOutput]: List of 4-tuples
+                (hidden_states, router_logits, router_weights, router_topk_ids)
+                for each MTP depth.
                 Length equals num_layers.
                 - outputs[0]: Outputs for predicting token at position (i+1)
                 - outputs[k]: Outputs for predicting token at position (i+k+1)
@@ -183,13 +186,13 @@ class MTPBlock(nn.Module):
             if self.mtp_config.detach_mtp_inputs:
                 future_embeddings = future_embeddings.detach()
 
-            current_hidden_states, router_logits, router_weights = layer(
+            current_hidden_states, router_logits, router_weights, router_topk_ids = layer(
                 current_hidden_states,
                 future_embeddings=future_embeddings,
                 position_embeddings=position_embeddings,
                 seq_ctx=current_seq_ctx,
             )
-            mtp_outputs.append((current_hidden_states, router_logits, router_weights))
+            mtp_outputs.append((current_hidden_states, router_logits, router_weights, router_topk_ids))
 
         return mtp_outputs
 
@@ -221,16 +224,19 @@ class MTPBlock(nn.Module):
                 position_embeddings=position_embeddings_list,
                 seq_ctx=current_seq_ctx_list,
             )
-            assert isinstance(layer_results, tuple) and len(layer_results) == 3 * n, (
-                f"MTPLayer multi-microbatch forward should return a flat tuple of length {3 * n}, "
+            assert isinstance(layer_results, tuple) and len(layer_results) == 4 * n, (
+                f"MTPLayer multi-microbatch forward should return a flat tuple of length {4 * n}, "
                 f"got {len(layer_results) if isinstance(layer_results, tuple) else type(layer_results)}"
             )
             new_hidden = list(layer_results[:n])
             router_logits = list(layer_results[n : 2 * n])
-            router_weights = list(layer_results[2 * n :])
+            router_weights = list(layer_results[2 * n : 3 * n])
+            router_topk_ids = list(layer_results[3 * n :])
 
             for mb_idx in range(n):
-                outputs_per_mb[mb_idx].append((new_hidden[mb_idx], router_logits[mb_idx], router_weights[mb_idx]))
+                outputs_per_mb[mb_idx].append(
+                    (new_hidden[mb_idx], router_logits[mb_idx], router_weights[mb_idx], router_topk_ids[mb_idx])
+                )
 
             current_hidden_states_list = new_hidden
 

@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import itertools
 from typing import cast
 
 import torch
@@ -6,6 +7,52 @@ from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
 from .utils import gather_for_sequence_parallel, pad_to_multiple_of, split_for_sequence_parallel
+
+
+_DSA_TOPK_CONTEXT_IDS = itertools.count()
+
+
+class DSATopKCacheState:
+    """Mutable DSA cross-layer top-k cache, scoped to one microbatch.
+
+    For example, if source layer 2 provides top-k indices to layers 2, 3, and 4,
+    its original forward stores ``indices[2]``. After layer 4's no-grad
+    checkpoint forward, ``checkpoint_active`` becomes true and top-k offload may
+    replace that entry with ``offloaded[2]``. Backward then replays layers 4, 3,
+    and 2; layer 2 removes the cache and adds 2 to ``released_sources``. If one
+    physical MTP source is reused at two logical depths, both MTP counters start
+    at 2 so the cache is transferred and released only after the second use in
+    each phase.
+    """
+
+    indices: dict[int, torch.Tensor]  # GPU-resident top-k, keyed by source layer.
+    offloaded: dict[int, str]  # OffloadManager key for each CPU-resident source.
+    released_sources: set[int]  # Sources whose backward replay lifetime has ended.
+    checkpoint_active: bool  # Whether checkpoint forward retained this cache for replay.
+    context_id: int  # Process-local identifier used to make offload keys unique.
+    mtp_forward_uses_remaining: dict[int, int]  # Original-forward MTP uses left per shared source.
+    mtp_replays_remaining: dict[int, int]  # Backward MTP replays left per shared source.
+
+    def __init__(
+        self,
+        *,
+        indices: dict[int, torch.Tensor] | None = None,
+        offloaded: dict[int, str] | None = None,
+        released_sources: set[int] | None = None,
+        checkpoint_active: bool = False,
+        context_id: int | None = None,
+        mtp_forward_uses_remaining: dict[int, int] | None = None,
+        mtp_replays_remaining: dict[int, int] | None = None,
+    ) -> None:
+        # topk_indices format: {source_layer_idx: [seq_len, kv_group, topk]}.
+        # Invalid/padded sparse slots are represented by -1.
+        self.indices = {} if indices is None else indices
+        self.offloaded = {} if offloaded is None else offloaded
+        self.released_sources = set() if released_sources is None else released_sources
+        self.checkpoint_active = checkpoint_active
+        self.context_id = next(_DSA_TOPK_CONTEXT_IDS) if context_id is None else context_id
+        self.mtp_forward_uses_remaining = {} if mtp_forward_uses_remaining is None else mtp_forward_uses_remaining
+        self.mtp_replays_remaining = {} if mtp_replays_remaining is None else mtp_replays_remaining
 
 
 # Avoid using dataclass decorator here to get rid of extra ops called in pytorch 2.8 and above
@@ -50,6 +97,7 @@ class SequenceContext:
     # moe routed_experts
     rollout_routed_experts: torch.Tensor | None
     offload_rollout_routed_experts: bool
+    dsa_topk_cache: DSATopKCacheState
 
     # Private backing attributes for SP shard reconstruction
     _raw_input_ids: torch.LongTensor | None
@@ -79,6 +127,7 @@ class SequenceContext:
         num_img_tokens: list[list[int]] | None = None,
         rollout_routed_experts: torch.Tensor | None = None,
         offload_rollout_routed_experts: bool = False,
+        dsa_topk_cache: DSATopKCacheState | None = None,
         # SP shard metadata: private, accessed via properties below
         raw_input_ids: torch.LongTensor | None = None,
         raw_inputs_embeds: torch.FloatTensor | None = None,
@@ -113,6 +162,7 @@ class SequenceContext:
         self.num_img_tokens = num_img_tokens
         self.rollout_routed_experts = rollout_routed_experts
         self.offload_rollout_routed_experts = offload_rollout_routed_experts
+        self.dsa_topk_cache = DSATopKCacheState() if dsa_topk_cache is None else dsa_topk_cache
         self._raw_input_ids = raw_input_ids
         self._raw_inputs_embeds = raw_inputs_embeds
         self._shard_start = shard_start
@@ -141,6 +191,23 @@ class SequenceContext:
     @property
     def sp_rank(self):
         return self._sp_rank
+
+    def packed_causal_query_ranges(
+        self,
+        query_len: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return global ``[start, end)`` KV ranges for local packed
+        queries."""
+        cu_seq_lens = self.cu_seq_lens_q.to(device)
+        query_positions = torch.arange(query_len, device=device) + self._shard_start
+        sequence_indices = torch.searchsorted(cu_seq_lens, query_positions, right=True) - 1
+
+        # Keep range construction tensorized because DSA indexers may run under
+        # torch.compile and cannot read CUDA sequence boundaries as Python scalars.
+        starts = cu_seq_lens[sequence_indices]
+        ends = query_positions + 1
+        return starts.to(torch.int32), ends.to(torch.int32)
 
     @classmethod
     def from_input_ids(
@@ -484,6 +551,7 @@ class SequenceContext:
             offload_rollout_routed_experts=overrides.get(
                 "offload_rollout_routed_experts", self.offload_rollout_routed_experts
             ),
+            dsa_topk_cache=overrides.get("dsa_topk_cache", self.dsa_topk_cache),
             raw_input_ids=overrides.get("raw_input_ids", self._raw_input_ids),
             raw_inputs_embeds=overrides.get("raw_inputs_embeds", self._raw_inputs_embeds),
             shard_start=overrides.get("shard_start", self._shard_start),
@@ -575,4 +643,5 @@ class SequenceContext:
             "num_img_tokens": self.num_img_tokens,
             "rollout_routed_experts": self.rollout_routed_experts,
             "offload_rollout_routed_experts": self.offload_rollout_routed_experts,
+            "dsa_topk_cache": self.dsa_topk_cache,
         }

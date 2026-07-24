@@ -119,10 +119,10 @@ class NoAuxRouter(nn.Module, RouterProtocol):
         if rollout_routed_experts is not None:
             # seq_l, expert
             topk_ids = rollout_routed_experts
-            # seq_l, expert
-            topk_weight = scores.gather(dim=1, index=topk_ids)
         else:
-            topk_weight = scores.gather(1, topk_idx)
+            topk_ids = topk_idx
+        # seq_l, expert
+        topk_weight = scores.gather(dim=1, index=topk_ids)
 
         # The returned `router_weights` is only used for computing balance loss
         # It should be normalized
@@ -135,7 +135,7 @@ class NoAuxRouter(nn.Module, RouterProtocol):
 
         # TODO: (yehaochen) `Dispatcher` calculate the distribution duplicatedly
         tokens_per_expert = torch.histc(
-            topk_idx,
+            topk_ids.float(),
             bins=self.n_routed_experts,
             min=0,
             max=self.n_routed_experts,
@@ -145,7 +145,7 @@ class NoAuxRouter(nn.Module, RouterProtocol):
             "logits": logits,
             "router_weights": scores_for_choice,
             "topk_weights": topk_weight,
-            "topk_ids": topk_idx,
+            "topk_ids": topk_ids,
             "topkens_per_expert": tokens_per_expert,
         }
 
@@ -210,11 +210,10 @@ class NoAuxGroupedRouter(NoAuxRouter):
         if rollout_routed_experts is not None:
             # seq_l, expert
             topk_ids = rollout_routed_experts
-            # seq_l, expert
-            topk_weight = scores.gather(dim=1, index=topk_ids)
         else:
-            topk_idx = topk_idx.view(seq, -1)  # [seq, top_k]
-            topk_weight = scores.gather(1, topk_idx)  # [seq, n_groups]
+            topk_ids = topk_idx.view(seq, -1)  # [seq, top_k]
+        # seq_l, expert
+        topk_weight = scores.gather(dim=1, index=topk_ids)
         scores_for_choice = scores_for_choice.view(seq, self.n_routed_experts)
 
         # The returned `router_weights` is only used for computing balance loss
@@ -227,7 +226,7 @@ class NoAuxGroupedRouter(NoAuxRouter):
         topk_weight = topk_weight * self.router_scaling_factor  # must multiply the scaling factor
 
         tokens_per_expert = torch.histc(
-            topk_idx,
+            topk_ids.float(),
             bins=self.n_routed_experts,
             min=0,
             max=self.n_routed_experts,
@@ -237,6 +236,6 @@ class NoAuxGroupedRouter(NoAuxRouter):
             "logits": logits,
             "router_weights": scores_for_choice,
             "topk_weights": topk_weight,
-            "topk_ids": topk_idx,
+            "topk_ids": topk_ids,
             "topkens_per_expert": tokens_per_expert,
         }

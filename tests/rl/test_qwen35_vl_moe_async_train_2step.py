@@ -26,10 +26,6 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-# XTUNER_DETERMINISTIC is read during xtuner imports. Keep it disabled for
-# this 2-step test because FA3 deterministic backward does not support hdim=256.
-os.environ["XTUNER_DETERMINISTIC"] = "false"
-
 import ray
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
@@ -53,6 +49,25 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import RolloutImportanceSampling, WorkerConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
+
+
+# Keep determinism disabled while this module runs because FA3 deterministic
+# backward does not support hdim=256. Scoping the override to pytest's module
+# lifecycle prevents collection from leaking it into subsequently spawned tests.
+_original_xtuner_deterministic: str | None = None
+
+
+def setup_module() -> None:
+    global _original_xtuner_deterministic
+    _original_xtuner_deterministic = os.environ.get("XTUNER_DETERMINISTIC")
+    os.environ["XTUNER_DETERMINISTIC"] = "false"
+
+
+def teardown_module() -> None:
+    if _original_xtuner_deterministic is None:
+        os.environ.pop("XTUNER_DETERMINISTIC", None)
+    else:
+        os.environ["XTUNER_DETERMINISTIC"] = _original_xtuner_deterministic
 
 
 MODEL_PATH = Path(os.environ["QWEN3_5_MOE_PATH"])

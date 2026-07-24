@@ -172,14 +172,14 @@ class Qwen3VLTextMoE(Qwen3MoE):
                         depth=len(self.layers),
                         custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
                     ):
-                        hidden_states, router_results, router_weights = decoder_layer(
+                        hidden_states, router_results, router_weights, router_topk_ids = decoder_layer(
                             hidden_states,
                             position_embeddings=position_embeddings,
                             seq_ctx=seq_ctx,
                         )
 
                 else:
-                    hidden_states, router_results, router_weights = decoder_layer(
+                    hidden_states, router_results, router_weights, router_topk_ids = decoder_layer(
                         hidden_states,
                         position_embeddings=position_embeddings,
                         seq_ctx=seq_ctx,
@@ -191,6 +191,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
                 hidden_states = self.aux_loss.accumulate(
                     selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
                     selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
+                    selected_experts=router_topk_ids.index_select(0, nonpad_indices).contiguous(),
                     hidden_states=hidden_states,
                     balancing_ctx=balancing_ctx,
                     z_ctx=z_ctx,

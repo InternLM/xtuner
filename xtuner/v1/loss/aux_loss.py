@@ -86,6 +86,7 @@ class AuxLossContext(nn.Module):
         *,
         selected_router_weights: torch.Tensor,
         selected_router_logits: torch.Tensor,
+        selected_experts: torch.Tensor,
         hidden_states: torch.Tensor,
         balancing_ctx: list[BalancingLossContext] | BalancingLossContext | None = None,
         z_ctx: list[ZLossContext] | ZLossContext | None = None,
@@ -101,6 +102,8 @@ class AuxLossContext(nn.Module):
                 selected. Shape: ``(non_pad, n_routed_experts)``.
             selected_router_logits (torch.Tensor): Router logits with non-padding tokens already
                 selected. Shape: ``(non_pad, n_routed_experts)``.
+            selected_experts (torch.Tensor): Expert IDs assigned by the router, with non-padding
+                tokens already selected. Shape: ``(non_pad, num_experts_per_tok)``.
             hidden_states (torch.Tensor): A carrier tensor on the main forward path. Z-loss is
                 attached to it via :class:`AuxLossScaler` so that backward through the main loss
                 releases this layer's logsumexp saved tensor inline.
@@ -120,11 +123,13 @@ class AuxLossContext(nn.Module):
             Identical in value to the input; the caller must replace its handle so the hook is
             preserved on the main forward graph.
         """
-        # tokens_per_expert is non-differentiable (topk + histc) and shared between
-        # logging output and BalancingLossContext.finalize. Owned here as the single source of truth.
-        _, selected_experts = torch.topk(selected_router_weights, self.num_experts_per_tok, dim=-1)
+        # The router is the single source of truth for assignments: grouped or
+        # rollout routing is not equivalent to another global Top-K over weights.
+        # Keep the fixed output range explicit. CUDA bincount determines its
+        # output size with a host-visible max and synchronizes the training
+        # stream, which breaks compute/communication overlap.
         tokens_per_expert_l = torch.histc(
-            selected_experts.view(-1),
+            selected_experts.float(),
             bins=self.n_routed_experts,
             min=0,
             max=self.n_routed_experts,
