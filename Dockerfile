@@ -222,7 +222,7 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     pip install fastapi fire openai outlines \
         pyzmq aiohttp cloudpickle prometheus_client protobuf numpy pillow einops tiktoken sentencepiece \
         partial_json_parser 'ray[default]<3' shortuuid uvicorn pybase64 \
-        tilelang \
+        tilelang==0.1.11 \
         'pydantic>2' openai_harmony dlblas --no-cache-dir -i ${DEFAULT_PYPI_URL} && \
     pip install xgrammar==0.1.32 timm!=1.0.23 --no-cache-dir -i ${DEFAULT_PYPI_URL} --no-deps && \
     if [ -n "${LMDEPLOY_VERSION}" ]; then \
