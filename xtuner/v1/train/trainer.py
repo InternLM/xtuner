@@ -1704,9 +1704,6 @@ class Trainer:
         loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_logs_info.items()]
         loss_log_str = ", ".join(loss_log_list)
 
-        model_metrics = train_step_info.pop("model_metrics", {})
-        model_metrics_str = " ".join(f"{key}: {value:.1f}" for key, value in model_metrics.items())
-
         extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]
         extra_info_log_list = [f"{k}: {v:.4f}" for k, v in extra_info.get().items()]
         extra_info_str = ", ".join(extra_info_log_list)
@@ -1740,7 +1737,6 @@ class Trainer:
             f"tgs: {training_metrics['tgs']:.1f} "
             f"seqlen_tgs: {training_metrics['seqlen_tgs']:.1f} "
             f"exp_tgs: {training_metrics['exp_tgs']:.1f} "
-            f"{model_metrics_str} "
             f"eta: {training_metrics['eta_hms']} "
         )
 
@@ -1761,7 +1757,6 @@ class Trainer:
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
             "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
             "grad_norm": grad_norm,
-            **model_metrics,
             **flattened_internal_metrics,
         }
         log_scalars.update({f"loss/{k}": v for k, v in loss_logs_info.items()})

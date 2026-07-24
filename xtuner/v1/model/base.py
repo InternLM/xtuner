@@ -88,7 +88,6 @@ class DataBatchInfo(TypedDict):
 class BatchForwardInfo(TypedDict):
     logs_info: dict[str, float]
     extra_info: ModelForwardExtraLogInfo
-    model_metrics: NotRequired[dict[str, float]]
 
 
 class _HFSavePlan(TypedDict):

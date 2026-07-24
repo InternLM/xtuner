@@ -467,34 +467,7 @@ class MoE(BaseModel):
         max_load_i, _ = torch.max(tokens_per_expert_global, dim=1)
         maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
         maxvio = maxvio_all_layers.mean()
-
-        # Each (routed layer, expert) pair is one load sample. Aggregating layers
-        # first would hide a hot expert in one layer behind a cold expert in another.
-        expert_tokens = tokens_per_expert_global.float().flatten()
-        quantiles = torch.quantile(
-            expert_tokens,
-            torch.tensor([0.05, 0.25, 0.5, 0.75, 0.95], device=expert_tokens.device),
-        )
-        maxvio_value, mean, maximum, minimum, p5, p25, median, p75, p95 = torch.cat(
-            (
-                maxvio.view(1),
-                expert_tokens.mean().view(1),
-                expert_tokens.max().view(1),
-                expert_tokens.min().view(1),
-                quantiles,
-            )
-        ).tolist()
-        logs_info["maxvio"] = maxvio_value
-        base_info["model_metrics"] = {
-            "moe_load_balance/expert_tokens_mean": mean,
-            "moe_load_balance/expert_tokens_max": maximum,
-            "moe_load_balance/expert_tokens_min": minimum,
-            "moe_load_balance/expert_tokens_median": median,
-            "moe_load_balance/expert_tokens_p5": p5,
-            "moe_load_balance/expert_tokens_p25": p25,
-            "moe_load_balance/expert_tokens_p75": p75,
-            "moe_load_balance/expert_tokens_p95": p95,
-        }
+        logs_info["maxvio"] = maxvio.item()
 
         if self.need_update_bias:
             self.update_bias(tokens_per_expert_global, avg_count_load)  # type: ignore
