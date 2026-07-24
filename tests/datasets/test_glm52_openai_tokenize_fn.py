@@ -20,7 +20,7 @@ from xtuner.v1.data_proto.templates import HybridChatTemplate
 from xtuner.v1.datasets import OpenaiTokenizeFunctionConfig
 
 
-GLM5_2_MODEL_PATH = os.environ["GLM5_2_MODEL_PATH"]
+GLM5_2_TINY_MOE_PATH = os.environ["GLM5_2_TINY_MOE_PATH"]
 GLM52_TEMPLATE_DEFAULTS = {
     "enable_thinking": True,
     "reasoning_effort": "max",
@@ -30,7 +30,7 @@ GLM52_TEMPLATE_DEFAULTS = {
 
 @pytest.fixture(scope="module")
 def tokenizer():
-    return AutoTokenizer.from_pretrained(GLM5_2_MODEL_PATH, trust_remote_code=True)
+    return AutoTokenizer.from_pretrained(GLM5_2_TINY_MOE_PATH, trust_remote_code=True)
 
 
 @pytest.fixture(scope="module")

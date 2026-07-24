@@ -33,7 +33,7 @@ from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 from xtuner.v1.utils.test_utils import init_data_mesh
 
 
-GLM5_2_MODEL_PATH = Path(os.environ["GLM5_2_MODEL_PATH"])
+GLM5_2_TINY_MOE_PATH = Path(os.environ["GLM5_2_TINY_MOE_PATH"])
 
 
 def _tiny_glm52_config() -> Glm52MoEConfig:
@@ -83,9 +83,9 @@ def _tiny_glm52_config() -> Glm52MoEConfig:
 class TestGlm52Config:
     def test_from_hf_preserves_glm_specific_behavior(self):
         # 验证公共 HF 配置转换保留 GLM-5.2 的 DSA、router、MTP 及回写语义。
-        hf_config = HFGlmMoeDsaConfig.from_pretrained(GLM5_2_MODEL_PATH)
+        hf_config = HFGlmMoeDsaConfig.from_pretrained(GLM5_2_TINY_MOE_PATH)
 
-        config = get_model_config_from_hf(GLM5_2_MODEL_PATH)
+        config = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
 
         assert isinstance(config, Glm52MoEConfig)
         assert isinstance(get_model_config("glm-5.2"), Glm52MoEConfig)
