@@ -80,6 +80,18 @@ attention / router / layer onto the matching one.
   - Also: rope, rms_norm, etc.
 - **ops layer** (`xtuner/v1/ops`) — kernels such as attention and rms_norm.
 
+> **Caveat — don't reach for deprecated config classes.** `RopeScalingConfig` is
+> **deprecated**; `RopeParametersConfig` (`xtuner/v1/module/rope/rope.py`, re-exported from
+> `xtuner/v1/model/base.py`) is the source of truth — use it everywhere (your IDE/pyright will flag
+> the deprecated one). Note the decoder-layer / `MHAConfig.build` signatures still *type* their rope
+> argument as `RopeScalingConfig` for backward compatibility, so don't satisfy them by constructing
+> the deprecated class. When a per-layer value is only needed to select **one module behavior** (e.g.
+> `partial_rotary_factor` only chooses which `apply_rotary_emb` the attention uses), set that behavior
+> **directly on the module** instead of threading a config through `build` — e.g. in your model's
+> decoder layer, `self.self_attn.apply_rotary_emb = get_apply_rotary_emb(None,
+> enable_partial_rotary=...)` (`xtuner/v1/ops`). This keeps per-layer behavior contained (the §C
+> per-profile-RoPE pattern) and avoids the deprecated API entirely.
+
 ### Existing models to copy from
 
 Pick the one whose attention + (router) match yours; the closer it is, the
@@ -527,10 +539,13 @@ FSDP shard/reduce chain — and the file doubles as the example users copy when 
 model into their own training pipeline. Mirror `ci/config/qwen3_moe_30BA3.py` (MoE) or
 `ci/config/qwen3_dense.py` (dense), keeping its structure: one `<NewSizeConfig>()` (from §3.2)
 fed into a `TrainerConfig` alongside `optim_cfg` / `lr_cfg` / `fsdp_cfg` / `dataset_cfg` /
-`dataloader_cfg` / `loss_cfg`. `load_from` and `tokenizer_path` read from an env var (§7.4 —
-typically the same one as the parity test). Verify by running ~50 steps and confirming the
-loss drops monotonically into a plausible range for that model size; record the trajectory
-in the PR body alongside the §6 convergence trace.
+`dataloader_cfg` / `loss_cfg`. Set `loss_cfg = CELossConfig(mode="chunk")` — the chunked
+cross-entropy keeps the `logits → loss` peak memory bounded (it never materializes the full
+`(seq, vocab)` logits), which matters for the large-vocab models this skill targets; do **not** leave
+it on the `"eager"` default. `load_from` and `tokenizer_path` read from an env var (§7.4 — typically
+the same one as the parity test). Verify by running ~50 steps and confirming the loss drops
+monotonically into a plausible range for that model size; record the trajectory in the PR body
+alongside the §6 convergence trace.
 
 ---
 

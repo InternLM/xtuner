@@ -52,7 +52,7 @@ class MoEActFnProtocol(Protocol):
 
 class MoEActFnConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    act_type: Literal["clipped_swiglu", "swiglu"] = "swiglu"
+    act_type: Literal["clipped_swiglu", "swiglu", "swiglu_clip"] = "swiglu"
 
     clip_alpha: float | None = None
     clip_limit: float | None = None
@@ -62,6 +62,8 @@ class MoEActFnConfig(BaseModel):
 
         if self.act_type == "clipped_swiglu":
             act_fn = partial(act_fn, alpha=self.clip_alpha, limit=self.clip_limit)
+        elif self.act_type == "swiglu_clip":
+            act_fn = partial(act_fn, limit=self.clip_limit)
         return act_fn
 
 
@@ -75,6 +77,7 @@ class MoEMLP(nn.Module):
         hidden_act: str,
         mlp_bias: bool = False,
         float8_cfg: Float8Config | None = None,
+        swiglu_limit: float | None = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -83,10 +86,17 @@ class MoEMLP(nn.Module):
         self.up_proj = build_linear(self.hidden_size, self.intermediate_size, bias=mlp_bias, float8_cfg=float8_cfg)
         self.down_proj = build_linear(self.intermediate_size, self.hidden_size, bias=mlp_bias, float8_cfg=float8_cfg)
         self.act_fn = get_act_fn(hidden_act)
+        # When set, clamp the activated gate (max) and the raw up projection (±limit) before the
+        # element-wise product, matching Step3.5's per-layer SwiGLU clipping on the shared expert.
+        self.swiglu_limit = swiglu_limit
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
+        gate = self.act_fn(self.gate_proj(x))
+        up = self.up_proj(x)
+        if self.swiglu_limit is not None:
+            gate = gate.clamp(max=self.swiglu_limit)
+            up = up.clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
+        return self.down_proj(gate * up)
 
 
 class MoEGate(nn.Module):

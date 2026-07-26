@@ -25,6 +25,7 @@ from .moe.deepseek_v3 import DeepSeekV3Config
 from .moe.gpt_oss import GptOss21BA3P6Config, GptOss117BA5P8Config, GptOssConfig
 from .moe.moe import BalancingLossConfig, MoE, MoEConfig, MoEModelOutputs, ZLossConfig
 from .moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig, Qwen3MoEFoPEConfig
+from .moe.step3p5 import Step3p5FlashConfig, Step3p5MoEConfig
 
 
 model_mapping = {
@@ -39,6 +40,7 @@ model_mapping = {
     "internvl-3.5-1b-hf": InternVL3P5Dense1BConfig(),
     "internvl-3.5-30b-a3b-hf": InternVL3P5MoE30BA3Config(),
     "qwen3.5-vl-4b": Qwen3_5_VLDense4BConfig(),
+    "step-3.5-flash": Step3p5FlashConfig(),
 }
 
 
@@ -63,6 +65,8 @@ def get_model_config_from_hf(model_path: Path):
         return GptOssConfig.from_hf(model_path)
     elif cfg.model_type == "deepseek_v3":
         return DeepSeekV3Config.from_hf(model_path)
+    elif cfg.model_type == "step3p5":
+        return Step3p5MoEConfig.from_hf(model_path)
     else:
         raise ValueError(f"Unsupported model type: {cfg.model_type}")
 
@@ -75,6 +79,8 @@ __all__ = [
     "Qwen3Dense8BConfig",
     "Qwen3MoEConfig",
     "Qwen3MoE30BA3Config",
+    "Step3p5MoEConfig",
+    "Step3p5FlashConfig",
     "InternS1Config",
     "InternS1MiniConfig",
     "InternS1BaseConfig",
