@@ -1,4 +1,4 @@
-"""Composable localhost stages."""
+"""Composable sandbox validation stages."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from typing import Any
 
 from lagent.utils import create_object
 
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import SandboxPool
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
     RolloutError,
@@ -15,9 +16,13 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
 )
 
 
-class LocalhostComposeStage:
-    """Compose multiple local validation stages behind ``run(item, record) ->
-    float``."""
+class SandboxComposeStage:
+    """Compose multiple sandbox validation stages behind ``run(...) -> float``.
+
+    Stages with ``weight=0`` still run, but do not contribute to the returned
+    score. This is used for process-adv annotators that mutate rollout
+    artifacts without changing outcome reward.
+    """
 
     def __init__(
         self,
@@ -27,12 +32,12 @@ class LocalhostComposeStage:
         weight: float = 1.0,
     ):
         if not stages:
-            raise ValueError("LocalhostComposeStage.stages is empty")
+            raise ValueError("SandboxComposeStage.stages is empty")
         self.name = name
         self.stages = [create_object(stage) for stage in stages]
         self.weight = weight
 
-    async def run(self, item: AgentRolloutItem, record: StageRecord) -> float:
+    async def run(self, item: AgentRolloutItem, pool: SandboxPool, record: StageRecord) -> float:
         record.status = StageStatus.RUNNING
         record.started_at = record.started_at or time.monotonic()
         record.judger_name = self.name
@@ -42,7 +47,7 @@ class LocalhostComposeStage:
             for stage in self.stages:
                 name = getattr(stage, "name", stage.__class__.__name__)
                 child_record = item.judgers.setdefault(name, StageRecord(judger_name=name))
-                score = float(await stage.run(item, child_record))
+                score = float(await stage.run(item, pool, child_record))
                 stage_weight = max(float(getattr(stage, "weight", 1.0)), 0.0)
                 weighted_score += score * stage_weight
                 total_weight += stage_weight
@@ -70,4 +75,4 @@ class LocalhostComposeStage:
             record.finished_at = time.monotonic()
 
 
-__all__ = ["LocalhostComposeStage"]
+__all__ = ["SandboxComposeStage"]

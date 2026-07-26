@@ -323,7 +323,7 @@ class RolloutTraceStore:
 
         Returns:
             dict: The trace dictionary containing `input_ids`, `labels`, `logprobs`,
-                and `routed_experts`.
+                `routed_experts`, and per-segment token spans.
 
         Raises:
             ValueError: If the prompt_text does not completely match the trace keys in the session.
@@ -353,17 +353,34 @@ class RolloutTraceStore:
                 f"prompt_len={len(prompt_text)} matched_len={len(key)} key_count={len(session_keys)}. "
                 "See the logged '[TraceStore] prompt mismatch' report for the full diff."
             )
-        trace: dict[str, list[Any]] = {"input_ids": [], "labels": [], "logprobs": [], "routed_experts": []}
+        trace: dict[str, list[Any]] = {
+            "input_ids": [],
+            "labels": [],
+            "logprobs": [],
+            "routed_experts": [],
+            "segments": [],
+        }
         for node in nodes:
             node_val = node.value
             if not isinstance(node_val, TokenizedSegment):
                 raise TypeError(f"Unexpected trace node value type: {type(node_val)!r}")
             assert node_val.labels is not None
             assert node_val.logprobs is not None
+            start = len(trace["input_ids"])
+            end = start + len(node_val.token_ids)
+            trainable = any(label != -100 for label in node_val.labels)
             trace["input_ids"].extend(node_val.token_ids)
             trace["labels"].extend(node_val.labels)
             trace["logprobs"].extend(node_val.logprobs)
             trace["routed_experts"].append(node_val.expert_key)
+            trace["segments"].append(
+                {
+                    "start": start,
+                    "end": end,
+                    "trainable": trainable,
+                    "kind": "assistant_response" if trainable else "context_delta",
+                }
+            )
         return trace
 
     def get_objects(self, keys: list[str]) -> list[ray.ObjectRef]:

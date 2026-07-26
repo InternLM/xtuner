@@ -4,6 +4,7 @@ from typing import Any
 
 
 _RAW_ARGUMENTS_KEY = "__xtuner_raw_arguments__"
+_PROCESS_ONLY_MESSAGE_KEYS = ("finish_reason", "metainfo")
 
 
 def canonicalize_messages_for_chat_template(messages: list[dict]) -> list[dict]:
@@ -19,6 +20,8 @@ def canonicalize_messages_for_chat_template(messages: list[dict]) -> list[dict]:
 
     messages = copy.deepcopy(messages)
     for message in messages:
+        for key in _PROCESS_ONLY_MESSAGE_KEYS:
+            message.pop(key, None)
         tool_calls = message.get("tool_calls")
         if not isinstance(tool_calls, list):
             continue

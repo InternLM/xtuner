@@ -120,6 +120,10 @@ class RolloutState(BaseModel):
 
     input_ids: list[int] | None = None
     labels: list[int] | None = None
+    # Per-token multiplier applied to positive advantages after outcome reward
+    # advantage estimation. Coordinates match input_ids / labels; trainer uses
+    # advantage_weight[1:] to align with shifted_labels.
+    advantage_weight: list[float] | None = None
 
     #  --- Judger 输出 ---
     reward: dict[str, Any] | None = None
@@ -248,6 +252,7 @@ def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
     rollout_state.finish_reason = None
     rollout_state.response_mask = []
     rollout_state.response_model_steps = []
+    rollout_state.advantage_weight = None
     rollout_state.reward = None
     rollout_state.error_msg = None
     return rollout_state
