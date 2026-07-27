@@ -70,11 +70,6 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
         self.multi_modal_projector.fully_shard(self.fsdp_config)
         # TODO: 判断其余模块是否已经被 fsdp 切分了
 
-        # NOTE: 暂时只能在这个地方进行 checkpoint_wrapper
-        # TODO: 当只训练某个部分时候，不能开启 checkpoint，否则 grad 是 None, 后续有需要再支持。
-        # self.multi_modal_projector = checkpoint_wrapper(self.multi_modal_projector,  # type: ignore
-        #                                                     checkpoint_impl=CheckpointImpl.REENTRANT)
-
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )

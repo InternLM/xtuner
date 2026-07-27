@@ -6,9 +6,7 @@ TestPytreeReentrantCheckpoint
 
 import torch
 from torch import nn
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
-
-from xtuner.v1.model.utils import checkpoint_wrapper, pytree_reentrant_checkpoint
+from xtuner.v1.model.utils import apply_legacy_reentrant_checkpointing
 
 
 class NestedTensorBlock(nn.Module):
@@ -23,11 +21,7 @@ class TestPytreeReentrantCheckpoint:
         nested_source = torch.tensor([5.0], requires_grad=True)
         direct = direct_source * 2
         nested = nested_source * 3
-        block = checkpoint_wrapper(
-            NestedTensorBlock(),
-            checkpoint_impl=CheckpointImpl.REENTRANT,
-            checkpoint_fn=pytree_reentrant_checkpoint,
-        )
+        block = apply_legacy_reentrant_checkpointing(NestedTensorBlock())
 
         loss = block(direct, nested=[nested]).sum() + nested.square().sum()
         loss.backward()
