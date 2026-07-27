@@ -1,5 +1,14 @@
 import torch
 import torch.distributed as dist
+from torch.distributed._functional_collectives import all_gather_tensor_autograd
+from torch.distributed.device_mesh import DeviceMesh
+
+
+def gather_for_sequence_parallel(input: torch.Tensor, dim: int, sp_mesh: DeviceMesh | None) -> torch.Tensor:
+    """Gather sequence shards while reducing gradients back to their owners."""
+    if sp_mesh is None or sp_mesh.size() == 1:
+        return input
+    return all_gather_tensor_autograd(input, gather_dim=dim, group=sp_mesh)
 
 
 def split_for_sequence_parallel(input, dim: int, sp_mesh):

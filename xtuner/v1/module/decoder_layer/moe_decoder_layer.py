@@ -43,6 +43,7 @@ from ..linear import build_linear
 
 RouterLogits: TypeAlias = torch.Tensor
 RouterWeights: TypeAlias = torch.Tensor
+RouterTopKIds: TypeAlias = torch.Tensor
 HiddenStates: TypeAlias = torch.Tensor
 
 
@@ -293,7 +294,7 @@ class MoEDecoderLayer(nn.Module):
         *hidden_states: torch.Tensor,
         seq_ctx: SequenceContext | list[SequenceContext],
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]] | None = None,
-    ) -> tuple[HiddenStates, RouterResults] | tuple[torch.Tensor, ...]:
+    ) -> tuple[HiddenStates, RouterLogits, RouterWeights, RouterTopKIds] | tuple[torch.Tensor, ...]:
         """Forward pass of the MoE decoder layer.
 
         Args:
@@ -303,7 +304,8 @@ class MoEDecoderLayer(nn.Module):
             past_key_values (list[list[torch.Tensor]], optional): Past key values for pre-filling or decoding.
 
         Returns:
-            tuple[torch.Tensor, RouterResults]: Output hidden states and router results.
+            tuple: Output hidden states, router logits, router weights, and the
+                expert IDs selected by the router.
         """
         if len(hidden_states) == 1:
             assert isinstance(seq_ctx, SequenceContext), (
@@ -374,7 +376,7 @@ class MoEDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         seq_ctx: SequenceContext,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-    ) -> tuple[HiddenStates, RouterLogits, RouterWeights]:
+    ) -> tuple[HiddenStates, RouterLogits, RouterWeights, RouterTopKIds]:
         residual, hidden_states, router_results = self._pre_moe_forward(
             hidden_states=hidden_states,
             seq_ctx=seq_ctx,
@@ -459,14 +461,19 @@ class MoEDecoderLayer(nn.Module):
             residual=residual,
             shared_experts_out=shared_experts_out,
         )
-        return hidden_states, router_results["logits"], router_results["router_weights"]
+        return (
+            hidden_states,
+            router_results["logits"],
+            router_results["router_weights"],
+            router_results["topk_ids"],
+        )
 
     def _micro_batch_forward(
         self,
         hidden_states_list: list[torch.Tensor],
         seq_ctx_list: list[SequenceContext],
         position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
-    ) -> tuple[torch.Tensor, ...]:  # (HiddenStates, HiddenStates, RouterLogits, RouterLogits)
+    ) -> tuple[torch.Tensor, ...]:
         origin_shape = hidden_states_list[0].shape
         assert all(hidden_states.shape == origin_shape for hidden_states in hidden_states_list), (
             "All hidden states should have the same shape"
@@ -593,7 +600,8 @@ class MoEDecoderLayer(nn.Module):
 
         router_logits = [router_results["logits"] for router_results in router_results_list]
         router_weights = [router_results["router_weights"] for router_results in router_results_list]
-        return tuple(hidden_states_out_list + router_logits + router_weights)
+        router_topk_ids = [router_results["topk_ids"] for router_results in router_results_list]
+        return tuple(hidden_states_out_list + router_logits + router_weights + router_topk_ids)
 
     def _pre_moe_forward(
         self,

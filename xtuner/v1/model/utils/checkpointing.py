@@ -1,12 +1,14 @@
 import inspect
 from types import UnionType
-from typing import Union, get_args, get_origin
+from typing import Any, Callable, Union, get_args, get_origin
 
 import torch
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
+from torch.utils._pytree import tree_flatten, tree_unflatten
+from torch.utils.checkpoint import checkpoint
 
 from xtuner.v1.utils import copy_signature
 
@@ -90,3 +92,29 @@ def _check_signature_of_forward(module: nn.Module):
 def checkpoint_wrapper(module: nn.Module, *args, **kwargs):
     _check_signature_of_forward(module)
     return ptd_checkpoint_wrapper(module, *args, **kwargs)
+
+
+def pytree_reentrant_checkpoint(
+    function: Callable[..., torch.Tensor | tuple[torch.Tensor, ...]],
+    *args: Any,
+    **kwargs: Any,
+) -> torch.Tensor | tuple[torch.Tensor, ...]:
+    """让嵌套 Tensor 也成为 reentrant checkpoint 的 autograd 输入。"""
+    # CheckpointWrapper 只打包一层。例如：
+    #   future_embeddings=[embedding_0, embedding_1]
+    # 对原生 CheckpointFunction 来说只是“一个 list 参数”，它看不到 list 里的
+    # 两个 Tensor，也就不会 detach 它们。这可能会造成反向传播的错误，因为这两个
+    # Tensor 的梯度应该交由 CheckpointFunction.backward 的返回值交回原始 Tensor，
+    # 而不是由他们自己来传递梯度。
+    # tree_flatten 会把输入变成近似：
+    #   hidden, embedding_0, embedding_1
+    # 这样 checkpoint 能逐个 detach；tree_unflatten 再在 replay 前把 list 还原。
+    flat_inputs, input_spec = tree_flatten((args, kwargs))
+
+    def run_function(*replayed_flat_inputs: Any) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        # 这里只还原参数结构，不会把 detached Tensor 重新连接到旧 graph；梯度由
+        # CheckpointFunction.backward 的返回值交回原始 Tensor。
+        replayed_args, replayed_kwargs = tree_unflatten(list(replayed_flat_inputs), input_spec)
+        return function(*replayed_args, **replayed_kwargs)
+
+    return checkpoint(run_function, *flat_inputs, use_reentrant=True)

@@ -48,7 +48,7 @@ class TrainingArguments(BaseModel):
         Parameter(group=model_group, help="model config path or name, choose one of from ['qwen3-moe-30BA3']"),
     ] = None
     chat_template: Annotated[
-        Literal["internlm2", "qwen3", "gpt-oss", "deepseek-v3"],
+        Literal["internlm2", "qwen3", "gpt-oss", "deepseek-v3", "glm5.2"],
         Parameter(group=model_group, help="chat template name"),
     ]
     tokenize_fn: Annotated[

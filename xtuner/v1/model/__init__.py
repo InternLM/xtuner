@@ -22,6 +22,7 @@ from .dense.dense import Dense
 from .dense.qwen2 import Qwen2Dense7BConfig, Qwen2DenseConfig
 from .dense.qwen3 import Qwen3Dense0P6BConfig, Qwen3Dense4BConfig, Qwen3Dense8BConfig, Qwen3DenseConfig
 from .moe.deepseek_v3 import DeepSeekV3Config
+from .moe.glm52 import Glm52MoEConfig
 from .moe.gpt_oss import GptOss21BA3P6Config, GptOss117BA5P8Config, GptOssConfig
 from .moe.moe import BalancingLossConfig, MoE, MoEConfig, MoEModelOutputs, ZLossConfig
 from .moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig, Qwen3MoEFoPEConfig
@@ -39,6 +40,7 @@ model_mapping = {
     "internvl-3.5-1b-hf": InternVL3P5Dense1BConfig(),
     "internvl-3.5-30b-a3b-hf": InternVL3P5MoE30BA3Config(),
     "qwen3.5-vl-4b": Qwen3_5_VLDense4BConfig(),
+    "glm-5.2": Glm52MoEConfig(),
 }
 
 
@@ -63,6 +65,8 @@ def get_model_config_from_hf(model_path: Path):
         return GptOssConfig.from_hf(model_path)
     elif cfg.model_type == "deepseek_v3":
         return DeepSeekV3Config.from_hf(model_path)
+    elif cfg.model_type == "glm_moe_dsa":
+        return Glm52MoEConfig.from_hf(model_path)
     else:
         raise ValueError(f"Unsupported model type: {cfg.model_type}")
 
@@ -75,6 +79,7 @@ __all__ = [
     "Qwen3Dense8BConfig",
     "Qwen3MoEConfig",
     "Qwen3MoE30BA3Config",
+    "Glm52MoEConfig",
     "InternS1Config",
     "InternS1MiniConfig",
     "InternS1BaseConfig",

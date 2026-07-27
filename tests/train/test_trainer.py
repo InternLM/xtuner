@@ -61,6 +61,7 @@ class FakeEngine:
         return {
             "total_loss": 1.8,
             "step_consumed_tokens": 100,
+            "step_seqlen_tokens": 128,
             "step_consumed_img_tokens": 0.0,
             "grad_norm": torch.tensor(1.0),
             "efficient_attn_ratio": 0.5,

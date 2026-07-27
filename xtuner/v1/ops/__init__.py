@@ -9,6 +9,15 @@ from .flash_attn import flash_attn_varlen_func
 from .moe import group_gemm, permute, unpermute
 from .rms_norm import rms_norm, zero_centered_rms_norm
 from .rotary_emb import get_apply_rotary_emb
+from .sparse_mla import (
+    DSATopKIndicesProtocol,
+    SparseMLAOutputs,
+    SparseMLAProtocol,
+    dsa_topk_indices,
+    get_dsa_topk_indices,
+    get_sparse_mla,
+    sparse_mla,
+)
 from .tensor_parallel import attn_column_parallel, attn_row_parallel
 
 

@@ -1,3 +1,4 @@
+import os
 import pickle
 import time
 from contextlib import contextmanager
@@ -14,6 +15,19 @@ logger = get_logger()
 
 
 MEMORY_SNAPSHOT_MAX_ENTRIES = 10000000
+
+
+def _rank() -> int:
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank()
+    return int(os.environ.get("RANK", "0"))
+
+
+def _should_profile_rank() -> bool:
+    ranks = os.environ.get("PROFILE_RANKS", "all").strip().lower()
+    if ranks == "all":
+        return True
+    return _rank() in {int(rank.strip()) for rank in ranks.split(",") if rank.strip()}
 
 
 class TimeProfiler:
@@ -98,12 +112,18 @@ class MemoryProfiler:
 
 @contextmanager
 def profiling_time(profile_dir: Path):
-    with TimeProfiler(profile_dir=profile_dir):
+    if _should_profile_rank():
+        with TimeProfiler(profile_dir=profile_dir):
+            yield
+    else:
         yield
 
 
 @contextmanager
 def profiling_memory(profile_dir: Path):
+    if not _should_profile_rank():
+        yield
+        return
     profiler = MemoryProfiler(profile_dir)
     yield
     try:

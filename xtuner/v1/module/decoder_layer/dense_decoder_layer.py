@@ -74,6 +74,39 @@ class DenseDecoderLayer(nn.Module):
 
     def forward(
         self,
+        *hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
+        seq_ctx: SequenceContext | list[SequenceContext],
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        """Run equal-shaped training micro-batches in one layer invocation.
+
+        Keeping the micro-batch loop inside the decoder layer lets outer FSDP
+        and checkpoint wrappers materialize the layer only once, while each
+        attention call keeps its own ``SequenceContext``.
+        """
+        if len(hidden_states) == 1:
+            assert isinstance(position_embeddings, tuple) and len(position_embeddings) == 2
+            assert isinstance(seq_ctx, SequenceContext)
+            return self._forward(
+                hidden_states=hidden_states[0],
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+            )
+
+        assert isinstance(position_embeddings, list) and len(position_embeddings) == len(hidden_states)
+        assert isinstance(seq_ctx, list) and len(seq_ctx) == len(hidden_states)
+        assert all(hidden.shape == hidden_states[0].shape for hidden in hidden_states)
+        return tuple(
+            self._forward(
+                hidden_states=hidden,
+                position_embeddings=position_embedding,
+                seq_ctx=context,
+            )
+            for hidden, position_embedding, context in zip(hidden_states, position_embeddings, seq_ctx)
+        )
+
+    def _forward(
+        self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,

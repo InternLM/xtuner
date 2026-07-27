@@ -100,8 +100,8 @@ class Dense(BaseModel):
         for idx, decoder_layer in self.layers.items():
             hidden_states = decoder_layer(
                 hidden_states,
-                position_embeddings,
-                seq_ctx,
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
             )
 
             if self.config.return_hidden_states:

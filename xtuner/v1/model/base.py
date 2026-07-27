@@ -79,6 +79,7 @@ def compute_local_shape_and_global_offset(*args, **kwargs):
 
 class DataBatchInfo(TypedDict):
     step_consumed_tokens: int
+    step_seqlen_tokens: int
     step_consumed_img_tokens: float
     efficient_attn_ratio: float
     img_efficient_attn_ratio: float
@@ -1267,6 +1268,7 @@ class BaseModel(nn.Module):
 
     def pre_micro_batch_forward(self, data_batches: Sequence[ModelItem]) -> DataBatchInfo:
         step_consumed_tokens = torch.tensor(0, device=DEVICE)
+        step_seqlen_tokens = 0
         step_consumed_img_tokens = torch.tensor(0.0, device=DEVICE)
         efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
         total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
@@ -1275,7 +1277,9 @@ class BaseModel(nn.Module):
 
         for data in data_batches:
             seq_ctx = data["seq_ctx"]
-            step_consumed_tokens += seq_ctx.mask.sum()
+            mask = seq_ctx.mask
+            step_consumed_tokens += mask.sum()
+            step_seqlen_tokens += mask.numel()
             num_tokens = seq_ctx.cu_seq_lens_k[1:] - seq_ctx.cu_seq_lens_k[:-1]
             efficient_forward_tokens += (num_tokens.long() ** 2).sum()
             total_forward_tokens += (num_tokens.long().sum()) ** 2
@@ -1297,6 +1301,7 @@ class BaseModel(nn.Module):
 
         batch_info: DataBatchInfo = {
             "step_consumed_tokens": cast(int, step_consumed_tokens.item()),
+            "step_seqlen_tokens": step_seqlen_tokens,
             "step_consumed_img_tokens": cast(float, step_consumed_img_tokens.item()),
             "efficient_attn_ratio": cast(float, efficient_attn_ratio.item()),
             "img_efficient_attn_ratio": cast(float, img_efficient_attn_ratio.item()),
