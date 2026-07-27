@@ -33,10 +33,7 @@ from xtuner.v1.rl.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.on_policy_distillation import (
-    OPDConfig,
-    compute_pg_opd_token_advantages,
-)
+from xtuner.v1.rl.on_policy_distillation import OPDConfig
 from xtuner.v1.rl.replay_buffer import (
     AsyncReplayBufferConfig,
     SyncReplayBufferConfig,
@@ -681,6 +678,7 @@ class BaseRLTrainer:
             cfg.train_worker_cfg.free_rollout_routed_experts_in_worker = False
         cfg.train_worker_cfg.load_from = cfg.load_from
         cfg.train_worker_cfg.log_dir = log_dir
+        cfg.train_worker_cfg.opd_config = cfg.opd_config
         self._train_worker_cfg = cfg.train_worker_cfg
 
     def _init_rollout_config(self, cfg: BaseRLTrainerConfig, log_dir: Path) -> None:
@@ -1048,6 +1046,7 @@ class BaseRLTrainer:
 
             # When opd_config is not None, PG-OPD currently supports only single-turn rollouts.
             opd_config = self._opd_config
+            task_adv_weight = opd_config.task_adv_weight if opd_config is not None else 1.0
             prompt_ids = None
             if any(data.input_ids is None for data in group):
                 is_vlm_model = "train_prompt_ids" in group[0].extra_fields
@@ -1065,19 +1064,8 @@ class BaseRLTrainer:
                 if isinstance(turns, int):
                     tool_turns_list.append(turns)
 
-            opd_token_advantages: list[torch.Tensor] | None = None
-            if opd_config is not None:
-                opd_token_advantages = compute_pg_opd_token_advantages(
-                    group,
-                    config=opd_config,
-                    task_adv_estimator=self._advantage_estimator,
-                )
-                sample_advantages: list[float] = []
-
-                if opd_config.task_adv_weight > 0:
-                    rewards = [float(cast(dict[str, Any], data.reward)["score"]) for data in group]
-                    rewards_list.extend(rewards)
-                    cluster_rewards_list.extend(rewards)
+            if task_adv_weight == 0:
+                sample_advantages = [0.0] * len(group)
             else:
                 rewards = []
                 # Agentic rollouts may split one model session into multiple trainable segments.
@@ -1110,6 +1098,7 @@ class BaseRLTrainer:
                 sample_advantages = [
                     cluster_advantages[cluster_index].item() for cluster_index in sample_cluster_indices
                 ]
+                sample_advantages = [task_adv_weight * sample_advantage for sample_advantage in sample_advantages]
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
@@ -1214,15 +1203,9 @@ class BaseRLTrainer:
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_labels
                 shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
-                if opd_token_advantages is None:
-                    advatnages_val = sample_advantages[i]
-                    actual_advantages = [advatnages_val] * len(prompt_ids) + [
-                        0.0 if mask == 0 else advatnages_val for mask in response_mask
-                    ]
-                    advantages_list.extend(actual_advantages[:-1])
-                else:
-                    actual_advantages = [0.0] * (len(prompt_ids) - 1) + opd_token_advantages[i].tolist()
-                    advantages_list.extend(actual_advantages)
+                base_advantage = sample_advantages[i]
+                actual_advantages = [0.0 if label == -100 else base_advantage for label in shifted_labels]
+                advantages_list.extend(actual_advantages)
 
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 training_tokens += len(input_ids)
@@ -1247,6 +1230,12 @@ class BaseRLTrainer:
                     "advantage": actual_advantages,
                     "rollout_logprobs": rollout_logprobs,
                 }
+                if opd_config is not None:
+                    response_teacher_logprobs = cast(list[float], group[i].teacher_logprobs)
+                    data_dict["teacher_logprobs"] = torch.tensor(
+                        [0.0] * (len(prompt_ids) - 1) + response_teacher_logprobs,
+                        dtype=torch.float32,
+                    ).unsqueeze(0)
 
                 seq_ctx.rollout_routed_experts = group[i].routed_experts  # n,layer*expert
 
@@ -1403,6 +1392,8 @@ class BaseRLTrainer:
             all_scalars.update({f"{k}": v for k, v in rank0_mismatch_metrics.items()})
             all_scalars.update({"entropy/rollout": rank0_rollout_entropy})
             all_scalars.update({"entropy/train": rank0_log_item["train_entropy"]})
+            if "opd_reverse_kl" in rank0_log_item:
+                all_scalars["opd_reverse_kl"] = rank0_log_item["opd_reverse_kl"]
             for worker_idx, log_item in enumerate(train_info["workers_log_item"]):
                 if not self._display_all_workers_log and worker_idx > 0:
                     break

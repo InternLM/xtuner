@@ -7,9 +7,6 @@
 - VLM 样本使用 train_prompt_ids，并保留 multimodal 训练字段。
 - 无效 rollout group 会被跳过。
 - 缺失 reward、logprob/mask 长度不一致、pack_max_length 过小时 fail fast。
-
-注意：当前训练 contract 中 data_dict["advantage"] 比 shifted_labels 多 1 个元素；
-metric 统计使用 actual_advantages[:-1]，测试会显式固定这个行为。
 """
 
 import unittest
@@ -19,7 +16,6 @@ import numpy as np
 import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.on_policy_distillation import OPDConfig, OPDTeacherConfig
 from xtuner.v1.train.rl_trainer import BaseRLTrainer
 
 
@@ -34,22 +30,13 @@ class _FakeAdvantageEstimator:
 
 
 class TestPrepareTrainData(unittest.TestCase):
-    def _build_trainer(self, advantages: list[float], opd_config: OPDConfig | None = None):
+    def _build_trainer(self, advantages: list[float]):
         trainer = BaseRLTrainer.__new__(BaseRLTrainer)
         trainer._advantage_estimator = _FakeAdvantageEstimator(advantages)
-        trainer._opd_config = opd_config
+        trainer._opd_config = None
         trainer.tokenizer = MagicMock(return_value={"input_ids": torch.tensor([[999]])})
         trainer.logger = MagicMock()
         return trainer
-
-    @staticmethod
-    def _opd_config(*, task_adv_weight: float = 0.0, opd_adv_weight: float = 1.0) -> OPDConfig:
-        return OPDConfig(
-            task_adv_weight=task_adv_weight,
-            opd_adv_weight=opd_adv_weight,
-            teachers=[OPDTeacherConfig(name="teacher", endpoint="http://127.0.0.1:1")],
-            data_source_teacher_map={"math": "teacher"},
-        )
 
     def _state(
         self,
@@ -113,8 +100,8 @@ class TestPrepareTrainData(unittest.TestCase):
             batch["rollout_logprobs"],
             torch.tensor([[0.0, 0.0, 0.1, 0.2, 0.3]], dtype=torch.float32),
         )
-        self.assertEqual(batch["advantage"], [1.5, 1.5, 1.5, 1.5, 0.0, 1.5])
-        self.assertEqual(len(batch["advantage"]), batch["shifted_labels"].numel() + 1)
+        self.assertEqual(batch["advantage"], [0.0, 0.0, 1.5, 0.0, 1.5])
+        self.assertEqual(len(batch["advantage"]), batch["shifted_labels"].numel())
         self.assertIs(batch["seq_ctx"].rollout_routed_experts, routed_experts)
         self.assertEqual(info["training_samples"], 1)
         self.assertEqual(info["training_tokens"], 5)
@@ -131,8 +118,8 @@ class TestPrepareTrainData(unittest.TestCase):
         data_batches, info = self._prepare(trainer, [[first, second]])
 
         self.assertEqual(len(data_batches), 2)
-        self.assertEqual(data_batches[0]["advantage"], [1.5, 1.5, 1.5, 1.5, 1.5])
-        self.assertEqual(data_batches[1]["advantage"], [-2.0, -2.0, -2.0, -2.0, -2.0])
+        self.assertEqual(data_batches[0]["advantage"], [0.0, 0.0, 1.5, 1.5])
+        self.assertEqual(data_batches[1]["advantage"], [0.0, 0.0, -2.0, -2.0])
         self.assertEqual(info["batch_size"], 2)
         self.assertEqual(info["rewards/min"], -1.0)
         self.assertEqual(info["rewards/max"], 3.0)
@@ -140,68 +127,6 @@ class TestPrepareTrainData(unittest.TestCase):
         self.assertEqual(info["advantages/min"], -2.0)
         self.assertEqual(info["advantages/max"], 1.5)
         self.assertEqual(trainer._advantage_estimator.calls[0][0].tolist(), [3.0, -1.0])
-
-    def test_pure_opd_builds_aligned_token_advantages_without_reward(self):
-        trainer = self._build_trainer([99.0], self._opd_config())
-        state = self._state(
-            prompt_ids=[10, 11],
-            response_ids=[20, 21, 2],
-            logprobs=[-1.0, -2.0, -3.0],
-            response_mask=[1, 0, 1],
-        )
-        state.reward = None
-        state.teacher_tokens = [20, 21, 2]
-        state.teacher_logprobs = [-0.5, -2.5, -2.0]
-
-        data_batches, info = self._prepare(trainer, [[state]])
-
-        self.assertEqual(data_batches[0]["seq_ctx"].input_ids.tolist(), [[10, 11, 20, 21]])
-        self.assertEqual(data_batches[0]["shifted_labels"].tolist(), [[-100, 20, -100, 2]])
-        self.assertEqual(data_batches[0]["advantage"], [0.0, 0.5, 0.0, 1.0])
-        self.assertEqual(len(data_batches[0]["advantage"]), data_batches[0]["shifted_labels"].numel())
-        self.assertEqual(trainer._advantage_estimator.calls, [])
-        self.assertEqual(info["training_samples"], 1)
-        self.assertEqual(info["rewards/mean"], 0.0)
-
-    def test_mixed_opd_combines_cluster_task_and_token_advantages(self):
-        trainer = self._build_trainer(
-            [2.0, -1.0],
-            self._opd_config(task_adv_weight=0.5, opd_adv_weight=2.0),
-        )
-        first = self._state(
-            uid=1,
-            response_ids=[20, 2],
-            logprobs=[-1.0, -1.0],
-            reward={"score": 3.0},
-        )
-        first.teacher_tokens = [20, 2]
-        first.teacher_logprobs = [-0.5, -1.0]
-        second = self._state(
-            uid=2,
-            response_ids=[30, 2],
-            logprobs=[-1.0, -1.0],
-            reward={"score": -1.0},
-        )
-        second.teacher_tokens = [30, 2]
-        second.teacher_logprobs = [-1.5, -0.5]
-
-        data_batches, info = self._prepare(trainer, [[first, second]])
-
-        self.assertEqual(data_batches[0]["advantage"], [0.0, 0.0, 2.0, 1.0])
-        self.assertEqual(data_batches[1]["advantage"], [0.0, 0.0, -1.5, 0.5])
-        self.assertEqual(trainer._advantage_estimator.calls[0][0].tolist(), [3.0, -1.0])
-        self.assertEqual(info["rewards/min"], -1.0)
-        self.assertEqual(info["rewards/max"], 3.0)
-
-    def test_mixed_opd_missing_reward_fails_fast(self):
-        trainer = self._build_trainer([1.0], self._opd_config(task_adv_weight=1.0))
-        state = self._state(response_ids=[20], logprobs=[-1.0])
-        state.reward = None
-        state.teacher_tokens = [20]
-        state.teacher_logprobs = [-0.5]
-
-        with self.assertRaisesRegex(ValueError, "Reward score is required"):
-            self._prepare(trainer, [[state]])
 
     def test_vlm_path_uses_train_prompt_ids_and_preserves_multimodal_fields(self):
         # VLM 分支使用 extra_fields["train_prompt_ids"] 作为训练 prompt，并把图像字段带进 SequenceContext。
