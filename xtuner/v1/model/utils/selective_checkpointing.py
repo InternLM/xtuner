@@ -15,6 +15,8 @@ the SAC engine and the config layer respectively.
 
 from typing import TypeAlias
 
+import torch
+
 from xtuner.v1.utils.enum_helper import StrEnum
 
 
@@ -87,12 +89,19 @@ def checkpoint_record(name: str) -> None:
 
     Outside an active SAC session the call is a no-op, so models may be instrumented independently
     of whether selective checkpointing is enabled. It carries no autograd semantics and is safe to
-    call under ``torch.compile`` and during recomputation.
+    call during recomputation.
 
     Args:
         name (str): Marker name, unique within a layer's forward. Use a dotted, structural name
             such as ``"attn.core"`` or ``"moe.dispatch"`` so that ``default_recompute_cfg`` entries
             read as coordinates into the architecture.
     """
-    # Intentionally empty: the SAC engine replaces this no-op with a contextvars-backed session.
+    # The marker session is backed by contextvars, which Dynamo cannot trace: reading a ContextVar
+    # inside a `fullgraph=True` region is a hard compile error rather than a graph break, and xtuner
+    # compiles several MoE forward methods that way. Dynamo constant-folds this check, so the body
+    # never enters the graph and instrumented models stay compilable.
+    if torch.compiler.is_compiling():
+        return
+
+    # The rest is intentionally empty: the SAC engine implements the session behind this marker.
     # Remove this stub only together with that implementation.
