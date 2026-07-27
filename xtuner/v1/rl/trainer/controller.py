@@ -22,6 +22,7 @@ class ColateItem(TypedDict):
     shifted_labels: torch.Tensor
     advantage: float
     rollout_logprobs: torch.Tensor | None
+    teacher_logprobs: torch.Tensor | None
 
 
 class TrainingController:
@@ -98,6 +99,10 @@ class TrainingController:
             if "rollout_logprobs" in data_batches[0] and data_batches[0]["rollout_logprobs"] is not None:
                 rollout_logprobs_list = [data_batches[i]["rollout_logprobs"] for i in indices]
 
+            teacher_logprobs_list = None
+            if "teacher_logprobs" in data_batches[0] and data_batches[0]["teacher_logprobs"] is not None:
+                teacher_logprobs_list = [data_batches[i]["teacher_logprobs"] for i in indices]
+
             if pad_len > 0:
                 # Reduce the attn calculation time by using multiple short sequence packs
                 pad_tokens = tuple(
@@ -139,6 +144,14 @@ class TrainingController:
                         device=data_batches[0]["shifted_labels"].device,
                     )
                     rollout_logprobs_list.append(pad_rollout_logprobs)
+                if teacher_logprobs_list is not None:
+                    pad_teacher_logprobs = torch.zeros(
+                        1,
+                        pad_len,
+                        dtype=data_batches[0]["teacher_logprobs"].dtype,
+                        device=data_batches[0]["shifted_labels"].device,
+                    )
+                    teacher_logprobs_list.append(pad_teacher_logprobs)
 
             seq_ctx = SequenceContext.cat(seq_ctx_list)
             shifted_labels = torch.cat(label_list, dim=1)  # (1, max_len)
@@ -149,12 +162,17 @@ class TrainingController:
             if rollout_logprobs_list is not None:
                 rollout_logprobs = torch.cat(rollout_logprobs_list, dim=1)  # (1, max_len)
 
+            teacher_logprobs = None
+            if teacher_logprobs_list is not None:
+                teacher_logprobs = torch.cat(teacher_logprobs_list, dim=1)  # (1, max_len)
+
             packed_data_batches.append(
                 {
                     "seq_ctx": seq_ctx,
                     "shifted_labels": shifted_labels,
                     "advantages": advantages,
                     "rollout_logprobs": rollout_logprobs,
+                    "teacher_logprobs": teacher_logprobs,
                 }
             )
         return packed_data_batches
@@ -237,11 +255,17 @@ class TrainingController:
                 pad_rollout_logprobs = torch.zeros(
                     1, pack_max_length, dtype=packed_data_batches[0]["rollout_logprobs"].dtype, device="cpu"
                 )
+            pad_teacher_logprobs = None
+            if "teacher_logprobs" in packed_data_batches[0] and packed_data_batches[0]["teacher_logprobs"] is not None:
+                pad_teacher_logprobs = torch.zeros(
+                    1, pack_max_length, dtype=packed_data_batches[0]["teacher_logprobs"].dtype, device="cpu"
+                )
             pad_data = {
                 "seq_ctx": pad_seq_ctx,
                 "shifted_labels": pad_shifted_labels,
                 "advantages": pad_advantages,
                 "rollout_logprobs": pad_rollout_logprobs,
+                "teacher_logprobs": pad_teacher_logprobs,
             }
             pad_data_samples = [pad_data for _ in range(pad_num)]
             packed_data_batches = packed_data_batches + pad_data_samples

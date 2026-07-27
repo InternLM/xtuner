@@ -10,7 +10,7 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
-from xtuner.v1.rl.advantage import AdvantageEstimator
+from xtuner.v1.rl.loss.base_loss import BaseRLLossContext
 
 
 class OPDTeacherConfig(BaseModel):
@@ -88,11 +88,11 @@ class TeacherLogprobClient:
                 "input_ids": prompt_ids + response_ids,
                 "sampling_params": {
                     "max_new_tokens": 0,
-                    "temperature": 1.0,
+                    "temperature": 0,
                     "skip_special_tokens": False,
                 },
                 "return_logprob": True,
-                "logprob_start_len": max(len(prompt_ids) - 1, 0),
+                "logprob_start_len": 0,
                 "top_logprobs_num": 0,
                 "stream": False,
             }
@@ -124,12 +124,13 @@ class TeacherLogprobClient:
     ) -> tuple[list[int], list[float]]:
         try:
             raw_logprobs = response.json()["meta_info"]["input_token_logprobs"]
-            teacher_tokens = [item[1] for item in raw_logprobs[1:]]
-            teacher_logprobs = [float(item[0]) for item in raw_logprobs[1:]]
+            response_logprobs = raw_logprobs[-len(response_ids) :]
+            teacher_tokens = [item[1] for item in response_logprobs]
+            teacher_logprobs = [float(item[0]) for item in response_logprobs]
         except (KeyError, TypeError, IndexError) as exc:
             raise ValueError("Invalid teacher response") from exc
 
-        if len(raw_logprobs) != len(response_ids) + 1:
+        if len(teacher_logprobs) != len(response_ids):
             raise ValueError("Teacher logprob length mismatch")
         if teacher_tokens != response_ids:
             raise ValueError("Teacher token ids mismatch")
@@ -149,52 +150,22 @@ def route_teacher_client(
     return teacher_clients[teacher_name]
 
 
-def compute_pg_opd_token_advantages(
-    group: list[RolloutState],
+def apply_opd_kl_to_advantages(
+    loss_ctx: BaseRLLossContext,
     *,
     config: OPDConfig,
-    task_adv_estimator: AdvantageEstimator | None,
-) -> list[torch.Tensor]:
-    opd_advantages: list[torch.Tensor] = []
-    response_masks: list[torch.Tensor] = []
-    for state in group:
-        response_ids = cast(list[int], state.response_ids)
-        behavior_logprobs = cast(list[float], state.logprobs)
-        teacher_logprobs = cast(list[float], state.teacher_logprobs)
-
-        behavior_logprobs_t = torch.tensor(behavior_logprobs, dtype=torch.float32)
-        teacher_logprobs_t = torch.tensor(teacher_logprobs, dtype=torch.float32)
-        response_mask = state.response_mask
-        if not response_mask:
-            response_mask_t = torch.ones(len(response_ids), dtype=torch.float32)
-        else:
-            response_mask_t = torch.tensor(response_mask, dtype=torch.float32)
-        opd_advantages.append(teacher_logprobs_t - behavior_logprobs_t)
-        response_masks.append(response_mask_t)
-
-    task_advantages = [0.0] * len(group)
-    if config.task_adv_weight > 0:
-        rewards: list[float] = []
-        for state in group:
-            if state.reward is None or "score" not in state.reward:
-                raise ValueError(f"Reward score is required for mixed PG-OPD rollout {state.rollout_id}")
-            rewards.append(float(state.reward["score"]))
-
-        task_advantages = (
-            cast(AdvantageEstimator, task_adv_estimator)
-            .compute(
-                torch.tensor(rewards, dtype=torch.float32),
-                group,
-            )
-            .tolist()
-        )
-
-    return [
-        (config.task_adv_weight * task_advantage + config.opd_adv_weight * opd_advantage) * response_mask
-        for task_advantage, opd_advantage, response_mask in zip(
-            task_advantages,
-            opd_advantages,
-            response_masks,
-            strict=True,
-        )
-    ]
+) -> torch.Tensor:
+    """Apply the OPD reverse-KL penalty and return its valid-token sum."""
+    loss_kwargs = loss_ctx.loss_kwargs
+    old_logprobs = cast(torch.Tensor, loss_kwargs.old_logprobs)
+    teacher_logprobs = cast(torch.Tensor, loss_kwargs.teacher_logprobs)
+    response_mask = loss_kwargs.shifted_labels != loss_ctx.loss_cfg.ignore_idx
+    reverse_kl = old_logprobs - teacher_logprobs
+    reverse_kl_sum = (reverse_kl * response_mask).sum().detach()
+    loss_kwargs.advantages = torch.where(
+        response_mask,
+        loss_kwargs.advantages - config.opd_adv_weight * reverse_kl,
+        loss_kwargs.advantages,
+    )
+    loss_kwargs.teacher_logprobs = None
+    return reverse_kl_sum
