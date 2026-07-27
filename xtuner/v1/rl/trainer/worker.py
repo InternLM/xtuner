@@ -275,6 +275,7 @@ class PPOPhase(str, Enum):
 class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
     _SAVE_WEIGHTS_DIR = "weights"
     _SAVE_CRITIC_WEIGHTS_DIR = "critic_weights"
+    _SAVE_CRITIC_HF_DIR = "critic"
     _SAVE_PPO_STATE_DIR = "ppo_worker_state"
     _SAVE_SFT_DATALOADER_DIR = "sft_dataloader"
     _SAVE_SFT_TRAIN_STATE_PATH = "sft_train_state.json"
@@ -1549,7 +1550,11 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
 
     @ray_method
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
+        """Save Actor HF weights and, for PPO workers, Critic HF weights."""
         self._engine.save_hf(hf_dir, save_dtype)
+        if self._critic_engine is not None:
+            critic_hf_dir = Path(hf_dir) / self._SAVE_CRITIC_HF_DIR
+            self._critic_engine.save_hf(str(critic_hf_dir), save_dtype)
 
     @ray_method
     def get_data_replicate_size(self) -> int:
