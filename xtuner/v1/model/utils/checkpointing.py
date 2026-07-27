@@ -1,111 +1,195 @@
-import inspect
-from types import UnionType
-from typing import Any, Callable, Union, get_args, get_origin
+"""Gradient checkpointing (activation recomputation) entry points."""
+
+from contextlib import AbstractContextManager
+from typing import Any, Callable
 
 import torch
 import torch.nn as nn
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    checkpoint_wrapper as ptd_checkpoint_wrapper,
-)
 from torch.utils._pytree import tree_flatten, tree_unflatten
 from torch.utils.checkpoint import checkpoint
 
-from xtuner.v1.utils import copy_signature
+
+__all__ = [
+    "apply_gradient_checkpointing",
+    "apply_legacy_reentrant_checkpointing",
+    "checkpoint_flattened",
+    "install_checkpointing",
+    "CheckpointModule",
+]
 
 
-# TODO: Currently xtuner uses the internal, outdated `torch.distributed.algorithms._checkpoint.checkpoint_wrapper` interface
-# We should look for opportunities to use the public, updated interface in the future
-
-# NOTE:
-# PyTorch's `torch.distributed.algorithms._checkpoint.checkpoint_wrapper` has some limitations. Modules decorated with `checkpoint_wrapper`
-# must have forward interfaces that conform to the specifications of `torch.autograd.function.Function`.
-# Specifically, for input parameters, the `forward` interface must explicitly accept parameters of type `torch.Tensor` to ensure proper gradient backpropagation.
-# For return values, the `forward` interface must return either `torch.Tensor` or tuple[torch.Tensor, ...].
-# For example If the forward interface is declared as:
-# def forward(self, x: tuple[torch.Tensor], y: list[torch.Tensor]) -> torch.Tensor | tuple[torch.Tensor, ...]:
-# This interface will break the gradient graph because the inputs don't meet the requirements. For instance, x and y are not of type `torch.Tensor`
-# `_check_signature_of_forward` will check (not exhaustively) whether the signature of the `forward` interface meets the requirements to identify issues early.
+ContextFn = Callable[[], tuple[AbstractContextManager, AbstractContextManager]]
 
 
-def _check_signature_of_forward(module: nn.Module):
-    def _is_tensor_or_tuple_tensor(arg_type: type):
-        if arg_type is torch.Tensor:
-            return True
+def apply_gradient_checkpointing(
+    module: nn.Module,
+    *,
+    preserve_rng_state: bool = True,
+    context_fn: ContextFn | None = None,
+) -> nn.Module:
+    """Make ``module``'s forward recomputed during backward instead of kept in
+    memory.
 
-        origin_type = get_origin(arg_type)
+    Recomputation uses ``use_reentrant=False``, which is implemented with saved-tensor hooks rather
+    than an ``autograd.Function``. Gradients therefore flow correctly through arbitrary forward
+    signatures -- nested containers, ``TypedDict`` returns, keyword-only arguments -- none of which
+    the reentrant implementation supported.
 
-        if not origin_type or origin_type not in (tuple, UnionType, Union):
-            return False
+    Args:
+        module (nn.Module): Module whose forward should be recomputed during backward.
+        preserve_rng_state (bool): Restore the RNG state before recomputing, so dropout and other
+            stochastic ops replay identically. Defaults to True.
+        context_fn (Callable | None): Factory returning the ``(forward_context, recompute_context)``
+            pair that ``torch.utils.checkpoint.checkpoint`` enters around the two passes. This is
+            the seam for selective checkpointing: passing the contexts built by
+            ``create_selective_checkpoint_contexts`` turns whole-module recompute into a per-op
+            decision. Defaults to None, i.e. recompute everything.
 
-        if origin_type in [UnionType, Union]:
-            type_list = get_args(arg_type)
-            return any(_is_tensor_or_tuple_tensor(t) for t in type_list)
+    Returns:
+        nn.Module: ``module`` itself, now checkpointed.
+    """
+    # A real `context_fn` compiles fine, but forwarding torch's own `noop_context_fn` as the
+    # "no policy" default does not: Dynamo's checkpoint higher-order op rejects it with
+    # `NotImplementedError: ... LazyVariableTracker context_fn`. Omit the kwarg entirely instead,
+    # which is also what leaves the default recompute-everything behaviour to torch.
+    extra: dict[str, Any] = {} if context_fn is None else {"context_fn": context_fn}
 
-        else:
-            type_list = get_args(arg_type)
-            return any(t is torch.Tensor for t in type_list)
+    def checkpointed_call(original_call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return checkpoint_flattened(original_call, *args, preserve_rng_state=preserve_rng_state, **extra, **kwargs)
 
-    def _has_missing_type(arg_type: type):
-        if arg_type is inspect._empty:
-            return True
-        origin_arg = get_origin(arg_type)
-        return any(_has_missing_type(t) for t in get_args(origin_arg))
-
-    input_type = inspect.signature(module.forward).parameters
-    ret_type = inspect.signature(module.forward).return_annotation
-
-    for name, arg_type in input_type.items():
-        if _has_missing_type(arg_type.annotation):
-            raise TypeError(
-                f"The type of argument '{name}' of {module.__class__.__name__}.forward must be annotated, but got "
-                f"{name} unannotated."
-            )
-
-    if _has_missing_type(ret_type):
-        raise TypeError(
-            f"The return type of {module.__class__.__name__}.forward must be annotated, but got {ret_type}"
-        )
-
-    for arg_type in input_type.values():
-        origin_arg = get_origin(arg_type.annotation)
-        # Union[Tensor, None] or Optional[Tensor] is legal
-        if origin_arg:
-            if torch.Tensor in origin_arg:
-                break
-        else:
-            if arg_type.annotation is torch.Tensor:
-                break
-    else:
-        raise TypeError(
-            f"The type of all arguments of the {module.__class__.__name__}.forward must be torch.Tensor, but got "
-            f"{input_type}"
-        )
-
-    if not _is_tensor_or_tuple_tensor(ret_type):
-        raise TypeError(
-            f"The return type of {module.__class__.__name__}.forward must be torch.Tensor or tuple of torch.Tensor, "
-            f"but got {ret_type}"
-        )
+    return install_checkpointing(module, checkpointed_call)
 
 
-@copy_signature(ptd_checkpoint_wrapper)
-def checkpoint_wrapper(module: nn.Module, *args, **kwargs):
-    _check_signature_of_forward(module)
-    return ptd_checkpoint_wrapper(module, *args, **kwargs)
+def apply_legacy_reentrant_checkpointing(module: nn.Module, *, preserve_rng_state: bool = True) -> nn.Module:
+    """Wrap ``module`` with the legacy reentrant checkpoint implementation.
+
+    Prefer :func:`apply_gradient_checkpointing`. Reentrant checkpointing runs the original pass
+    under ``no_grad`` and only the replay with grad enabled, which is required by the MTP layers of
+    DSA-based models: several logical MTP depths share one top-k cache, and only a grad-free
+    original pass lets the cache advance consistently across the two passes. This function can be
+    removed once the DSA top-k cache tracks the original/replay phase explicitly and the
+    ``mtp_checkpoint_use_reentrant`` config switch goes away.
+
+    Args:
+        module (nn.Module): Module whose forward should be recomputed during backward.
+        preserve_rng_state (bool): Restore the RNG state before recomputing. Defaults to True.
+
+    Returns:
+        nn.Module: A module that runs ``module`` under reentrant gradient checkpointing.
+    """
+
+    def checkpointed_call(original_call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return _pytree_reentrant_checkpoint(original_call, *args, preserve_rng_state=preserve_rng_state, **kwargs)
+
+    return install_checkpointing(module, checkpointed_call)
 
 
-def pytree_reentrant_checkpoint(
-    function: Callable[..., torch.Tensor | tuple[torch.Tensor, ...]],
+def checkpoint_flattened(
+    function: Callable[..., Any],
     *args: Any,
+    preserve_rng_state: bool = True,
     **kwargs: Any,
-) -> torch.Tensor | tuple[torch.Tensor, ...]:
+) -> Any:
+    """Run ``function`` under a non-reentrant checkpoint, with its inputs
+    flattened first.
+
+    Flattening is not about gradient correctness -- non-reentrant checkpointing handles nested
+    inputs either way -- but about **who else gets to see the input tensors**.
+    ``_CheckpointFrame.save_inputs`` wraps only *top-level* tensor arguments into a
+    ``SavedVariable``, and constructing one is what fires the ambient ``saved_tensors_hooks``. It
+    runs just before the checkpoint installs its own hooks, so those ambient hooks are still the
+    caller's -- which is how activation offloading gets hold of a layer's inputs. A tensor nested in
+    a list, or passed by keyword, is stored as a plain reference instead, reaches no hook, and is
+    silently never offloaded.
+
+    Args:
+        function (Callable): The callable to run inside the checkpointed region.
+        preserve_rng_state (bool): Restore the RNG state before recomputing. Defaults to True.
+        **kwargs (Any): Forwarded to ``function``, except ``context_fn`` which goes to
+            ``torch.utils.checkpoint.checkpoint``.
+
+    Returns:
+        Any: Whatever ``function`` returns.
+    """
+    context_fn = kwargs.pop("context_fn", None)
+    checkpoint_kwargs: dict[str, Any] = {"use_reentrant": False, "preserve_rng_state": preserve_rng_state}
+    if context_fn is not None:
+        checkpoint_kwargs["context_fn"] = context_fn
+
+    flat_inputs, input_spec = tree_flatten((args, kwargs))
+
+    def call_with_original_signature(*replayed: Any) -> Any:
+        replayed_args, replayed_kwargs = tree_unflatten(list(replayed), input_spec)
+        return function(*replayed_args, **replayed_kwargs)
+
+    return checkpoint(call_with_original_signature, *flat_inputs, **checkpoint_kwargs)
+
+
+def install_checkpointing(module: nn.Module, checkpointed_call: Callable[..., Any]) -> nn.Module:
+    """Give ``module`` a checkpointed ``__call__`` by extending its own class.
+
+    Following ``fully_shard``, this inserts :class:`CheckpointModule` leftmost in the module's MRO
+    rather than wrapping the module in a new one. The module therefore stays itself: ``isinstance``
+    still holds, attributes and container protocols resolve natively, and parameter names and
+    ``state_dict`` keys are untouched -- so a checkpointed model loads from, and saves into, a
+    checkpoint produced without checkpointing.
+
+    Args:
+        module (nn.Module): The module to checkpoint.
+        checkpointed_call (Callable): Called as ``checkpointed_call(original_call, *args, **kwargs)``;
+            it is responsible for invoking ``original_call`` inside a checkpoint region.
+
+    Returns:
+        nn.Module: ``module`` itself.
+    """
+    cls = type(module)
+    checkpoint_cls = _CHECKPOINT_CLASSES.get(cls)
+    if checkpoint_cls is None:
+        checkpoint_cls = type(f"Checkpoint{cls.__name__}", (CheckpointModule, cls), {})
+        _CHECKPOINT_CLASSES[cls] = checkpoint_cls
+
+    module.__class__ = checkpoint_cls
+    module._checkpointed_call = checkpointed_call  # type: ignore[assignment]
+    return module
+
+
+class CheckpointModule:
+    """Mixin that routes a module's call through a checkpoint function.
+
+    Installed by :func:`install_checkpointing`; do not inherit from it directly.
+
+    It overrides ``__call__`` rather than ``forward`` on purpose. Hooks registered on the module run
+    inside ``nn.Module.__call__``, so replacing ``forward`` would leave them *outside* the
+    checkpointed region -- and hooks that maintain per-forward state, such as the DSA top-k cache
+    lifecycle, must see the recompute pass too.
+    """
+
+    _checkpointed_call: Callable[..., Any]
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        def original_call(*replayed_args: Any, **replayed_kwargs: Any) -> Any:
+            return super(CheckpointModule, self).__call__(*replayed_args, **replayed_kwargs)  # type: ignore[misc]
+
+        return self._checkpointed_call(original_call, *args, **kwargs)
+
+
+# One checkpoint class per original class: checkpointing N layers of the same type must not build N
+# classes, and two checkpointed layers of the same type should stay `isinstance`-comparable.
+_CHECKPOINT_CLASSES: dict[type, type] = {}
+
+
+def _pytree_reentrant_checkpoint(
+    function: Callable[..., Any],
+    *args: Any,
+    preserve_rng_state: bool = True,
+    **kwargs: Any,
+) -> Any:
     """让嵌套 Tensor 也成为 reentrant checkpoint 的 autograd 输入。"""
-    # CheckpointWrapper 只打包一层。例如：
+    # 原生 CheckpointFunction 只看得到顶层位置参数。例如：
     #   future_embeddings=[embedding_0, embedding_1]
-    # 对原生 CheckpointFunction 来说只是“一个 list 参数”，它看不到 list 里的
-    # 两个 Tensor，也就不会 detach 它们。这可能会造成反向传播的错误，因为这两个
-    # Tensor 的梯度应该交由 CheckpointFunction.backward 的返回值交回原始 Tensor，
-    # 而不是由他们自己来传递梯度。
+    # 对它来说只是“一个 list 参数”，它看不到 list 里的两个 Tensor，也就不会 detach
+    # 它们。这可能会造成反向传播的错误，因为这两个 Tensor 的梯度应该交由
+    # CheckpointFunction.backward 的返回值交回原始 Tensor，而不是由他们自己来传递梯度。
     # tree_flatten 会把输入变成近似：
     #   hidden, embedding_0, embedding_1
     # 这样 checkpoint 能逐个 detach；tree_unflatten 再在 replay 前把 list 还原。
@@ -117,4 +201,4 @@ def pytree_reentrant_checkpoint(
         replayed_args, replayed_kwargs = tree_unflatten(list(replayed_flat_inputs), input_spec)
         return function(*replayed_args, **replayed_kwargs)
 
-    return checkpoint(run_function, *flat_inputs, use_reentrant=True)
+    return checkpoint(run_function, *flat_inputs, use_reentrant=True, preserve_rng_state=preserve_rng_state)
