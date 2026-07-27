@@ -47,8 +47,10 @@ def apply_gradient_checkpointing(
     Returns:
         nn.Module: A module that runs ``module`` under gradient checkpointing.
     """
-    # Dynamo lowers `checkpoint` to a higher-order op that rejects any explicitly passed
-    # `context_fn`, so a compiled module must not receive one -- not even the default no-op.
+    # A real `context_fn` compiles fine, but forwarding torch's own `noop_context_fn` as the
+    # "no policy" default does not: Dynamo's checkpoint higher-order op rejects it with
+    # `NotImplementedError: ... LazyVariableTracker context_fn`. Omit the kwarg entirely instead,
+    # which is also what leaves the default recompute-everything behaviour to torch.
     checkpoint_kwargs: dict[str, Any] = {"use_reentrant": False, "preserve_rng_state": preserve_rng_state}
     if context_fn is not None:
         checkpoint_kwargs["context_fn"] = context_fn
