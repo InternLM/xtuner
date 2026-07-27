@@ -4,6 +4,8 @@ import re
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayerOutput
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayerOutput
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 
 from .moe import MoELossContextDict, MoEModelOutputs
@@ -157,11 +159,12 @@ class Qwen3VLTextMoE(Qwen3MoE):
 
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
-                hidden_states = decoder_layer(
+                dense_results: DenseDecoderLayerOutput = decoder_layer(
                     hidden_states,
                     position_embeddings=position_embeddings,
                     seq_ctx=seq_ctx,
                 )
+                hidden_states = dense_results["hidden_states"]
             else:
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
                     offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_stream
@@ -172,25 +175,29 @@ class Qwen3VLTextMoE(Qwen3MoE):
                         depth=len(self.layers),
                         custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
                     ):
-                        hidden_states, router_results, router_weights, router_topk_ids = decoder_layer(
+                        layer_results: MoEDecoderLayerOutput = decoder_layer(
                             hidden_states,
                             position_embeddings=position_embeddings,
                             seq_ctx=seq_ctx,
                         )
 
                 else:
-                    hidden_states, router_results, router_weights, router_topk_ids = decoder_layer(
+                    layer_results = decoder_layer(
                         hidden_states,
                         position_embeddings=position_embeddings,
                         seq_ctx=seq_ctx,
                     )
+                hidden_states = layer_results["hidden_states"]
+                router_logits = layer_results["router_logits"]
+                router_weights = layer_results["router_weights"]
+                router_topk_ids = layer_results["router_topk_ids"]
 
                 if keep_router:
-                    output["router_logits"][f"layer{idx}"] = router_results
+                    output["router_logits"][f"layer{idx}"] = router_logits
                     output["router_weights"][f"layer{idx}"] = router_weights
                 hidden_states = self.aux_loss.accumulate(
                     selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
-                    selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
+                    selected_router_logits=router_logits.index_select(0, nonpad_indices).contiguous().float(),
                     selected_experts=router_topk_ids.index_select(0, nonpad_indices).contiguous(),
                     hidden_states=hidden_states,
                     balancing_ctx=balancing_ctx,
