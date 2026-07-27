@@ -2,6 +2,8 @@
 
 TestGlm52OptimizedEngine
     test_sp2_ep4_micro2_compile_offload_train_step: SP2、EP4、micro2、compile 与双 offload 可联合训练。
+TestGlm52ParallelHFCheckpoint
+    test_fsdp2_ep4_mtp_hf_round_trip_preserves_weights: FSDP2、EP4、MTP 权重可经 HF 无损往返。
 TestGlm52PretrainedEngine
     test_ep8_loss_curve_matches_reference: 预训练权重的 EP8 优化轨迹匹配数值基线。
     test_tilewise_fp8_loss_curve_matches_bf16: tilewise FP8 训练轨迹接近 BF16。
@@ -10,6 +12,7 @@ TestGlm52CheckpointEngine
     test_dcp_round_trip_preserves_model_and_optimizer: DCP 往返保留模型与优化器状态。
 """
 
+import json
 import math
 import os
 import shutil
@@ -20,6 +23,7 @@ from unittest import mock
 
 import torch
 import torch.distributed as dist
+from safetensors import safe_open
 from torch.distributed.tensor import DTensor
 from torch.optim.lr_scheduler import LambdaLR
 
@@ -104,7 +108,7 @@ def _tiny_checkpoint_config(dispatcher: str | None, ep_size: int) -> Glm52MoECon
     )
 
 
-def _tiny_sp_mtp_config() -> Glm52MoEConfig:
+def _tiny_ep4_mtp_config() -> Glm52MoEConfig:
     config = _tiny_checkpoint_config(dispatcher="all2all", ep_size=4)
     config.hidden_size = 128
     config.intermediate_size = 128
@@ -189,7 +193,7 @@ class TestGlm52OptimizedEngine(DeterministicDDPTestCase):
     def test_sp2_ep4_micro2_compile_offload_train_step(self):
         # 验证生产优化组合经两次梯度累积后 loss、梯度与优化器状态均有效。
         self.create_pg("cuda")
-        model_cfg = _tiny_sp_mtp_config()
+        model_cfg = _tiny_ep4_mtp_config()
         engine = TrainEngine(
             model_cfg=model_cfg,
             optim_cfg=AdamWConfig(lr=1e-3, foreach=False),
@@ -235,6 +239,82 @@ class TestGlm52OptimizedEngine(DeterministicDDPTestCase):
                 self.assertEqual(seq_ctx.dsa_topk_cache.offloaded, {})
         finally:
             del engine
+            torch.cuda.empty_cache()
+
+    @property
+    def world_size(self) -> int:
+        return 8
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 8, "requires 8 CUDA devices")
+class TestGlm52ParallelHFCheckpoint(DeterministicDDPTestCase):
+    def test_fsdp2_ep4_mtp_hf_round_trip_preserves_weights(self):
+        # 验证 FSDP2、EP4 分片的主干与共享 MTP 权重经公共 HF API 往返后完全一致。
+        self.create_pg("cuda")
+        temp_dir = tempfile.mkdtemp() if dist.get_rank() == 0 else None
+        syncdir = [temp_dir]
+        dist.broadcast_object_list(syncdir, src=0)
+        first_hf_dir = Path(syncdir[0]) / "first"
+        second_hf_dir = Path(syncdir[0]) / "second"
+
+        try:
+            model_cfg = _tiny_ep4_mtp_config()
+            model_cfg.compile_cfg = False
+            engine = TrainEngine(
+                model_cfg=model_cfg,
+                optim_cfg=AdamWConfig(lr=1e-3, foreach=False),
+                fsdp_cfg=FSDPConfig(ep_size=4, cpu_offload=False, torch_compile=False),
+            )
+            engine.init_model_weights()
+            engine.save_hf(str(first_hf_dir))
+            del engine
+            torch.cuda.empty_cache()
+
+            restored_cfg = _tiny_ep4_mtp_config()
+            restored_cfg.compile_cfg = False
+            restored = TrainEngine(
+                model_cfg=restored_cfg,
+                optim_cfg=AdamWConfig(lr=1e-3, foreach=False),
+                fsdp_cfg=FSDPConfig(ep_size=4, cpu_offload=False, torch_compile=False),
+            )
+            restored.from_hf(first_hf_dir, strict=True)
+            restored.save_hf(str(second_hf_dir))
+
+            if dist.get_rank() == 0:
+                with open(first_hf_dir / "model.safetensors.index.json") as f:
+                    first_index = json.load(f)["weight_map"]
+                with open(second_hf_dir / "model.safetensors.index.json") as f:
+                    second_index = json.load(f)["weight_map"]
+
+                mtp_prefix = f"model.layers.{model_cfg.num_hidden_layers}."
+                self.assertTrue(any(key.startswith(mtp_prefix) for key in first_index))
+                self.assertEqual(first_index.keys(), second_index.keys())
+                first_files = {}
+                second_files = {}
+                for key in first_index:
+                    first_filename = first_index[key]
+                    second_filename = second_index[key]
+                    if first_filename not in first_files:
+                        first_files[first_filename] = safe_open(
+                            first_hf_dir / first_filename,
+                            framework="pt",
+                        )
+                    if second_filename not in second_files:
+                        second_files[second_filename] = safe_open(
+                            second_hf_dir / second_filename,
+                            framework="pt",
+                        )
+                    self.assertTrue(
+                        torch.equal(
+                            first_files[first_filename].get_tensor(key),
+                            second_files[second_filename].get_tensor(key),
+                        ),
+                        f"HF round-trip tensor mismatch: {key}",
+                    )
+        finally:
+            dist.barrier()
+            if dist.get_rank() == 0:
+                shutil.rmtree(syncdir[0], ignore_errors=True)
             torch.cuda.empty_cache()
 
     @property
