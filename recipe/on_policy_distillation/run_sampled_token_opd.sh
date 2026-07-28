@@ -5,15 +5,9 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
 
-if (( $# != 0 )); then
-    echo "This script does not accept positional arguments." >&2
-    echo "Set STUDENT_MODEL_PATH, TEACHER_MODEL_PATH, and DATA_PATH before running it." >&2
-    exit 2
-fi
-
-: "${STUDENT_MODEL_PATH:?STUDENT_MODEL_PATH is required}"
-: "${TEACHER_MODEL_PATH:?TEACHER_MODEL_PATH is required}"
-: "${DATA_PATH:?DATA_PATH is required}"
+STUDENT_MODEL_PATH="$1"
+TEACHER_MODEL_PATH="$2"
+DATA_PATH="$3"
 
 STUDENT_CUDA_VISIBLE_DEVICES="0,1,2,3"
 TEACHER_CUDA_VISIBLE_DEVICES="7"
@@ -28,33 +22,7 @@ WORK_DIR="${REPO_ROOT}/work_dirs/dapo_math_opd"
 TEACHER_ENDPOINT="http://${TEACHER_HOST}:${TEACHER_PORT}"
 TEACHER_LOG_FILE="${WORK_DIR}/teacher.log"
 
-if [[ ! -d "${STUDENT_MODEL_PATH}" ]]; then
-    echo "Student model directory does not exist: ${STUDENT_MODEL_PATH}" >&2
-    exit 1
-fi
-if [[ ! -d "${TEACHER_MODEL_PATH}" ]]; then
-    echo "Teacher model directory does not exist: ${TEACHER_MODEL_PATH}" >&2
-    exit 1
-fi
-if [[ ! -f "${DATA_PATH}" ]]; then
-    echo "Training data file does not exist: ${DATA_PATH}" >&2
-    exit 1
-fi
-
-for required_command in python curl ray setsid; do
-    if ! command -v "${required_command}" >/dev/null 2>&1; then
-        echo "Required command is not available: ${required_command}" >&2
-        exit 1
-    fi
-done
-
-python -c "import sglang" >/dev/null
 mkdir -p "${WORK_DIR}"
-
-if curl -sf --max-time 2 "${TEACHER_ENDPOINT}/health_generate" >/dev/null; then
-    echo "A teacher service is already running at ${TEACHER_ENDPOINT}" >&2
-    exit 1
-fi
 
 TEACHER_PID=""
 TRAINING_STARTED=0
