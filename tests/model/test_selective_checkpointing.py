@@ -6,6 +6,7 @@ TestKeptRegions
     test_overlapping_intervals_keep_the_union: 区间重叠时按并集留驻。
     test_marker_outside_session_is_noop: 不在会话内时埋点不做任何事。
 TestUnsupportedRegions
+    test_a_second_model_still_gets_its_own_diagnosis: 诊断去重不跨模型，第二个模型仍会告警。
     test_in_place_op_in_kept_region_is_rejected: 留驻区间内的 in-place 写会明确报错而不是静默改梯度。
     test_dsa_layer_falls_back_to_reentrant: 带 DSA top-k 生命周期的层退回 legacy reentrant。
 TestRegionRecomputeUnderDominoEP
@@ -28,6 +29,7 @@ from xtuner.v1.model.moe.moe import MoE, MoEConfig, SequenceContext
 from xtuner.v1.model.utils import apply_selective_checkpointing, checkpoint_record
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router import NoAuxRouterConfig
+from xtuner.v1.model.utils import selective_checkpointing as engine
 
 
 class _MarkedBlock(nn.Module):
@@ -45,6 +47,10 @@ class _MarkedBlock(nn.Module):
         hidden = torch.tanh(self.second(hidden))
         checkpoint_record("second.end")
         return hidden
+
+
+class _OtherMarkedBlock(_MarkedBlock):
+    """A second layer class, standing in for another model living in the same process."""
 
 
 class _InPlaceBlock(nn.Module):
@@ -135,6 +141,19 @@ class TestUnsupportedRegions:
         out, grads = _run_block(_InPlaceBlock(), ())
         assert torch.count_nonzero(grads[0]) > 0
         assert torch.isfinite(out).all()
+
+    def test_a_second_model_still_gets_its_own_diagnosis(self, monkeypatch):
+        # 诊断做去重是对的（一个模型几十层会喊几十遍），但去重不能跨模型：一个进程里
+        # 同时存在 actor / reference 或 compose 模型的两个塔时，第二个模型的告警被第一个
+        # 静默掉，用户就又回到「配了 SAVE_ATTN 却什么都没发生」的处境。
+        warnings: list[str] = []
+        monkeypatch.setattr(engine.log_rank0, "warning", warnings.append)
+
+        for module in (_MarkedBlock(), _OtherMarkedBlock()):
+            wrapped = apply_selective_checkpointing(module, [("never.reached", "second.start")])
+            wrapped(torch.zeros(3, 4, requires_grad=True)).sum().backward()
+
+        assert len(warnings) == 2, warnings
 
     def test_dsa_layer_falls_back_to_reentrant(self):
         # DSA 的 top-k 生命周期靠 grad 是否开启区分 checkpoint 的两趟，只有 reentrant 满足；
