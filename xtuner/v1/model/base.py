@@ -142,6 +142,10 @@ class XTunerBaseModelConfig(PydanticBaseModel):
             "`dict[str, TorchCompileOption]`: Customize the compile option",
         ),
     ] = None
+    # `activation_offload_cfg` belongs here, next to `recompute_cfg` and sharing its `RecomputeUnit`
+    # vocabulary and per-model interval declarations: offloading applies to the regions SAC keeps
+    # resident, since recomputed regions never land in memory to begin with. Not declared until it is
+    # implemented -- a config field nothing reads is a switch that silently does nothing.
     recompute_cfg: Annotated[
         list[RecomputeUnit] | bool | None,
         Parameter(
@@ -597,7 +601,12 @@ class BaseModel(nn.Module):
         self._async_hf_resources: AsyncHFResources | None = None
 
         self._compile_cfg = self._resolve_compile_cfg(self.config)
-        self._recompute_intervals = self._resolve_recompute_cfg(self.config)
+        # `False` has to reach the nested sub-model configs here, before each sub-model resolves its
+        # own intervals. The intervals themselves resolve lazily on first access: whether a layer can
+        # host a SAC session at all depends on the layers, which subclasses build after this returns.
+        if self.config.recompute_cfg is False:
+            _disable_nested_switch(self.config, "recompute_cfg")
+        self._recompute_intervals: list[MarkerInterval] | None = None
         self._float8_handler: Float8Handler | None = None
 
     def set_hf(self, hf_path: str | Path):
@@ -1052,6 +1061,8 @@ class BaseModel(nn.Module):
         Returns:
             list[MarkerInterval]: Intervals selected by ``config.recompute_cfg``. Empty means plain full recompute.
         """
+        if self._recompute_intervals is None:
+            self._recompute_intervals = self._resolve_recompute_cfg(self.config)
         return self._recompute_intervals
 
     @property
@@ -2640,8 +2651,8 @@ class BaseModel(nn.Module):
     def _resolve_recompute_cfg(self, config: XTunerBaseModelConfig) -> list[MarkerInterval]:
         selected = config.recompute_cfg
 
+        # The `False` case already propagated in `__init__`; nothing is kept resident either way.
         if selected is False:
-            _disable_nested_switch(self.config, "recompute_cfg")
             return []
 
         # `None` means "keep the memory profile of plain full recompute", not "use the model default" as it does
@@ -2653,6 +2664,15 @@ class BaseModel(nn.Module):
             return []
 
         supported = self.default_recompute_cfg
+
+        # `True` asks for whatever the model offers, so an empty vocabulary is not a user error --
+        # but it does mean the request is a no-op, which is worth saying out loud rather than
+        # letting the run look configured when it is not.
+        if selected is True and not supported:
+            log_rank0.warning(
+                f"`recompute_cfg=True` has no effect: {type(self).__name__} declares no recompute units, so every "
+                "region is recomputed."
+            )
         units = list(supported) if selected is True else selected
 
         intervals: list[MarkerInterval] = []
