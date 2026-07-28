@@ -2,7 +2,6 @@
 
 TestCheckpointWrapper
     test_wrapper_is_transparent_to_state_dict_and_attributes: 包裹后参数名/state_dict/属性访问不变。
-    test_legacy_reentrant_preserves_gradients_through_dict_return: legacy reentrant 下 dict 返回值不断梯度。
     test_non_tensor_signature_preserves_gradients: 关键字参数 + dict 返回值下梯度与不重算一致。
 TestDominoEPRecompute
     test_recompute_matches_baseline_under_domino_ep: domino EP 下重算与不重算的 loss/梯度一致。
@@ -19,13 +18,13 @@ from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.moe.moe import MoE, MoEConfig, SequenceContext
-from xtuner.v1.model.utils import apply_gradient_checkpointing, apply_legacy_reentrant_checkpointing
+from xtuner.v1.model.utils import apply_gradient_checkpointing
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router import NoAuxRouterConfig
 
 
 class _KeywordOnlyBlock(nn.Module):
-    """A forward shape the legacy reentrant checkpoint could not support.
+    """A forward shape only the non-reentrant implementation supports.
 
     Tensors arrive nested in a dict and behind a keyword-only argument, and the result is returned
     as a dict rather than a tensor or a tuple of tensors.
@@ -54,28 +53,8 @@ class TestCheckpointWrapper:
         torch.testing.assert_close(wrapped.state_dict()["linear.weight"], plain.state_dict()["linear.weight"])
         assert wrapped.tag == "block"
 
-    def test_legacy_reentrant_preserves_gradients_through_dict_return(self):
-        # reentrant 的 original 那趟在 no_grad 下执行，dict 里的 Tensor 不会被 autograd.Function
-        # 注册为输出，梯度会静默断掉（MTP 返回 TypedDict 时整个 mtp_block 的 grad 都是 None，
-        # 而 loss 仍然有限，所有断言都能过）。出入口都摊平后才不会断。
-        torch.manual_seed(0)
-        plain = _KeywordOnlyBlock()
-        wrapped = apply_legacy_reentrant_checkpointing(_KeywordOnlyBlock())
-        wrapped.load_state_dict(plain.state_dict())
-
-        x = torch.randn(2, 4, requires_grad=True)
-        plain({"x": x}, scale=2.0)["out"].square().sum().backward()
-        baseline_input_grad, x.grad = x.grad.clone(), None
-
-        wrapped({"x": x}, scale=2.0)["out"].square().sum().backward()
-
-        assert x.grad is not None
-        assert wrapped.linear.weight.grad is not None
-        torch.testing.assert_close(x.grad, baseline_input_grad)
-        torch.testing.assert_close(wrapped.linear.weight.grad, plain.linear.weight.grad)
-
     def test_non_tensor_signature_preserves_gradients(self):
-        # 非 tensor 签名下梯度必须与不重算完全一致；legacy reentrant 在这里会直接断梯度。
+        # 非 tensor 签名下梯度必须与不重算完全一致。
         torch.manual_seed(0)
         plain = _KeywordOnlyBlock()
         wrapped = apply_gradient_checkpointing(_KeywordOnlyBlock())
