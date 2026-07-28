@@ -1305,16 +1305,21 @@ class MoE(BaseModel):
         """Marker intervals this architecture can keep resident, keyed by
         semantic unit.
 
-        How much of this survives ``torch.compile`` depends on where each region's markers sit. A marker inside a
-        compiled region is folded away, so only regions delimited in the uncompiled layer body remain addressable:
+        Under ``torch.compile`` a region is only addressable if the ops it encloses run in eager: a marker inside a
+        compiled region is folded away, and ops inside one execute as fused kernels that never reach the per-op
+        checkpoint policy. Both a region's markers *and* its contents therefore have to sit outside compiled code.
 
-        - ``ep_size > 1``: ``SAVE_MOE_DISPATCH`` and the shared-expert half of ``SAVE_MLP`` are delimited in
-          ``MoEDecoderLayer._forward`` / ``_micro_batch_forward`` and stay effective. ``SAVE_ATTN``,
-          ``SAVE_MOE_GATE`` and the dense-layer half of ``SAVE_MLP`` are delimited inside compiled methods and take
-          effect in eager only.
+        - ``ep_size > 1``: only ``SAVE_MOE_DISPATCH`` survives, because the dispatcher calls it wraps are not
+          compiled. ``SAVE_ATTN`` and ``SAVE_MOE_GATE`` are marked inside the compiled ``_pre_moe_forward``.
+          ``SAVE_MLP`` is inert on both of its intervals, for the two different reasons the mechanism allows: its
+          shared-experts markers do fire in eager but enclose the compiled ``_shared_experts_forward``, while its
+          ``mlp`` markers never fire at all, sitting in a ``DenseDecoderLayer`` that stays compiled whole even
+          under EP.
         - ``ep_size == 1``: the whole layer forward is compiled as one region, so every unit is eager-only.
 
         A unit that is inert simply leaves its region recomputed, which is the behaviour of plain full recompute.
+        Measured per unit against the SAC policy: eager keeps ops for all four; ``ep_size=2`` under compile keeps
+        152 ops for ``SAVE_MOE_DISPATCH`` and none for the others.
 
         Returns:
             RecomputeIntervalMap: Supported units mapped to the marker intervals that implement them.
