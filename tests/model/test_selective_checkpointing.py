@@ -5,6 +5,8 @@ TestKeptRegions
     test_unbalanced_interval_is_safe: end marker 不执行时只多留驻，不影响梯度。
     test_overlapping_intervals_keep_the_union: 区间重叠时按并集留驻。
     test_marker_outside_session_is_noop: 不在会话内时埋点不做任何事。
+TestContractLayering
+    test_module_layer_imports_the_contract_without_the_model_layer: 契约模块必须能被 module/ 层单独导入。
 TestUnsupportedRegions
     test_a_second_model_still_gets_its_own_diagnosis: 诊断去重不跨模型，第二个模型仍会告警。
     test_in_place_op_in_kept_region_is_rejected: 留驻区间内的 in-place 写会明确报错而不是静默改梯度。
@@ -14,6 +16,8 @@ TestRegionRecomputeUnderDominoEP
 """
 
 import os
+import subprocess
+import sys
 
 import pytest
 import torch
@@ -28,7 +32,7 @@ from xtuner.v1.model.moe.moe import MoE, MoEConfig, SequenceContext
 from xtuner.v1.model.utils import apply_selective_checkpointing, checkpoint_record
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router import NoAuxRouterConfig
-from xtuner.v1.model.utils import selective_checkpointing as contract
+from xtuner.v1.utils import selective_checkpointing as contract
 
 
 class _MarkedBlock(nn.Module):
@@ -50,22 +54,6 @@ class _MarkedBlock(nn.Module):
 
 class _OtherMarkedBlock(_MarkedBlock):
     """A second layer class, standing in for another model living in the same process."""
-
-
-class _InPlaceBlock(nn.Module):
-    """A region whose body accumulates in place, which selective checkpointing cannot keep."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.linear = nn.Linear(4, 4)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        checkpoint_record("region.start")
-        hidden = self.linear(x)
-        accumulator = torch.zeros_like(hidden)
-        accumulator.add_(hidden)
-        checkpoint_record("region.end")
-        return accumulator
 
 
 class _EmptyRegionBlock(nn.Module):
@@ -161,6 +149,20 @@ class TestKeptRegions:
         module(inputs).sum().backward()
 
         assert inputs.grad is not None
+
+
+class TestContractLayering:
+    def test_module_layer_imports_the_contract_without_the_model_layer(self):
+        # 契约（含 marker session）之所以在 xtuner/v1/utils 而不是挨着 engine，就是因为
+        # `checkpoint_record` 的调用点在 xtuner/v1/module 的 forward 里：一旦契约里出现
+        # 指向 model/ 或 module/ 的 import，这条独立导入就会变成循环导入而失败。
+        # 必须用干净的解释器：同进程里 xtuner.v1.model 早就被导入了，测不出这个性质。
+        result = subprocess.run(
+            [sys.executable, "-c", "import xtuner.v1.module.decoder_layer.moe_decoder_layer"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
 
 
 class TestUnsupportedRegions:
