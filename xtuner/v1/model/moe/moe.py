@@ -1176,6 +1176,7 @@ class MoE(BaseModel):
                 layer = apply_selective_checkpointing(
                     layer,
                     self.recompute_intervals,
+                    owner=self,
                     layer_compiled_as_one_region=self._compiles_whole_decoder_layer(),
                 )
 
