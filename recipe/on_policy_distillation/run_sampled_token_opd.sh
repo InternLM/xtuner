@@ -18,6 +18,27 @@ TEACHER_CHUNKED_PREFILL_SIZE="4096"
 TEACHER_GPU_MEMORY_UTILIZATION="0.6"
 TEACHER_STARTUP_TIMEOUT_S="1200"
 
+USE_SGLANG=${XTUNER_USE_SGLANG:-0}
+USE_LMDEPLOY=${XTUNER_USE_LMDEPLOY:-0}
+USE_VLLM=${XTUNER_USE_VLLM:-0}
+
+if [[ "${USE_SGLANG}" == "1" && "${USE_LMDEPLOY}" == "0" && "${USE_VLLM}" == "0" ]]; then
+    OPD_BACKEND="sglang"
+    TEACHER_HEALTH_PATH="health_generate"
+    TEACHER_MODEL_INFO_PATH="get_model_info"
+elif [[ "${USE_SGLANG}" == "0" && "${USE_LMDEPLOY}" == "1" && "${USE_VLLM}" == "0" ]]; then
+    OPD_BACKEND="lmdeploy"
+    TEACHER_HEALTH_PATH="health"
+    TEACHER_MODEL_INFO_PATH="v1/models"
+else
+    echo "Exactly one of XTUNER_USE_SGLANG and XTUNER_USE_LMDEPLOY must be set to 1; XTUNER_USE_VLLM must be 0." >&2
+    exit 1
+fi
+
+export XTUNER_USE_SGLANG="${USE_SGLANG}"
+export XTUNER_USE_LMDEPLOY="${USE_LMDEPLOY}"
+export XTUNER_USE_VLLM="${USE_VLLM}"
+
 WORK_DIR="${REPO_ROOT}/work_dirs/dapo_math_opd"
 TEACHER_ENDPOINT="http://${TEACHER_HOST}:${TEACHER_PORT}"
 TEACHER_LOG_FILE="${WORK_DIR}/teacher.log"
@@ -63,7 +84,7 @@ wait_for_teacher() {
             tail -n 50 "${TEACHER_LOG_FILE}" >&2 || true
             return 1
         fi
-        if curl -sf --max-time 2 "${TEACHER_ENDPOINT}/health_generate" >/dev/null; then
+        if curl -sf --max-time 2 "${TEACHER_ENDPOINT}/${TEACHER_HEALTH_PATH}" >/dev/null; then
             return 0
         fi
         echo "Waiting for teacher service at ${TEACHER_ENDPOINT}..."
@@ -80,24 +101,24 @@ trap "exit 130" INT
 trap "exit 143" TERM
 
 echo "Starting teacher model: ${TEACHER_MODEL_PATH}"
+echo "Teacher backend: ${OPD_BACKEND}"
 echo "Teacher GPUs: ${TEACHER_CUDA_VISIBLE_DEVICES}"
 echo "Teacher log: ${TEACHER_LOG_FILE}"
 
 setsid env \
     CUDA_VISIBLE_DEVICES="${TEACHER_CUDA_VISIBLE_DEVICES}" \
     PYTHONUNBUFFERED=1 \
-    python -m sglang.launch_server \
-    --model-path "${TEACHER_MODEL_PATH}" \
-    --host "${TEACHER_HOST}" \
-    --port "${TEACHER_PORT}" \
-    --tp "${TEACHER_TP_SIZE}" \
-    --chunked-prefill-size "${TEACHER_CHUNKED_PREFILL_SIZE}" \
-    --mem-fraction-static "${TEACHER_GPU_MEMORY_UTILIZATION}" \
+    TEACHER_HOST="${TEACHER_HOST}" \
+    TEACHER_PORT="${TEACHER_PORT}" \
+    TEACHER_TP_SIZE="${TEACHER_TP_SIZE}" \
+    TEACHER_CHUNKED_PREFILL_SIZE="${TEACHER_CHUNKED_PREFILL_SIZE}" \
+    TEACHER_GPU_MEMORY_UTILIZATION="${TEACHER_GPU_MEMORY_UTILIZATION}" \
+    bash "${SCRIPT_DIR}/start_pg_opd_teacher.sh" "${TEACHER_MODEL_PATH}" \
     >"${TEACHER_LOG_FILE}" 2>&1 &
 TEACHER_PID=$!
 
 wait_for_teacher
-curl -sS --max-time 10 "${TEACHER_ENDPOINT}/get_model_info"
+curl -sS --max-time 10 "${TEACHER_ENDPOINT}/${TEACHER_MODEL_INFO_PATH}"
 echo
 echo "Teacher service is ready at ${TEACHER_ENDPOINT}"
 echo "Starting Pure PG-OPD training with student GPUs: ${STUDENT_CUDA_VISIBLE_DEVICES}"
@@ -110,6 +131,6 @@ TRAINING_STARTED=1
 CUDA_VISIBLE_DEVICES="${STUDENT_CUDA_VISIBLE_DEVICES}" \
     bash -o pipefail examples/v1/scripts/run_rl.sh \
     recipe/on_policy_distillation/rl_dapo_math_opd.py \
-    sglang \
+    "${OPD_BACKEND}" \
     "${STUDENT_MODEL_PATH}" \
     "${DATA_PATH}"
