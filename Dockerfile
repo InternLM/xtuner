@@ -15,7 +15,7 @@ RUN sed -i "s@http://.*.ubuntu.com@${PPA_SOURCE}@g" /etc/apt/sources.list.d/ubun
     apt install --no-install-recommends build-essential sudo -y && \
     apt install --no-install-recommends git curl pkg-config tree unzip tmux \
     openssh-server openssh-client dnsutils iproute2 lsof net-tools zsh rclone \
-    iputils-ping telnet netcat-openbsd htop bubblewrap socat -y && \
+    iputils-ping telnet netcat-openbsd htop bubblewrap socat ffmpeg -y && \
     apt clean && rm -rf /var/lib/apt/lists/*
 
 RUN if [ -d /etc/pip ] && [ -f /etc/pip/constraint.txt ]; then echo > /etc/pip/constraint.txt; fi

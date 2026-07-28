@@ -328,6 +328,8 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
                 args[0]._tensor,
                 args[0]._dtype,
                 args[0]._ori_shape,
+                args[0]._precomputed_scale,
+                args[0]._precomputed_w,
             )
         dtype: Optional[torch.dtype] = None  # type: ignore
         ori_shape: Optional[tuple] = None  # type: ignore
@@ -585,6 +587,8 @@ class WeightWithDynamicTensorWiseFloat8CastTensor(torch.Tensor):
                 args[0]._tensor,
                 args[0]._dtype,
                 args[0]._ori_shape,
+                args[0]._precomputed_scale,
+                args[0]._precomputed_w,
             )
         dtype: Optional[torch.dtype] = None  # type: ignore
         ori_shape: Optional[tuple] = None  # type: ignore

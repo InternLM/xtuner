@@ -172,7 +172,10 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
                     sequence_parallel_mesh=sequence_parallel_mesh,
                     origin_pixel_len=pixel_values.size(0)
                 )
-                inputs_embeds[visual_pos_masks] = inputs_embeds[visual_pos_masks] * 0.0 + visual_features
+                # Match HF `masked_scatter` (expand mask to embed dim). Keep 2D
+                # `visual_pos_masks` for deepstack indexing in the text tower.
+                scatter_mask = visual_pos_masks.unsqueeze(-1).expand_as(inputs_embeds)
+                inputs_embeds = inputs_embeds.masked_scatter(scatter_mask, visual_features)
             except Exception as e:
                 logger.error(f"!!!Warning: {e}, but continue anyway!!!!")
                 inputs_embeds = inputs_embeds + visual_embeds.sum() * 0.0
