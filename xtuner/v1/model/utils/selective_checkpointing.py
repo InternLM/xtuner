@@ -180,6 +180,10 @@ _MARKER_SESSION: contextvars.ContextVar["_MarkerSession | None"] = contextvars.C
 # Ops from these namespaces are never kept, whatever the markers say. See `_checkpoint_policy`.
 _NEVER_KEPT_NAMESPACES = ("c10d", "_c10d_functional")
 
+# Mutating ops that leave tensor *values* alone, so a kept region may contain them. Anything else
+# with a mutable schema is rejected by `_reject_in_place_op_in_kept_region`.
+_VALUE_PRESERVING_MUTATING_OPS = frozenset({torch.ops.aten.record_stream.default})
+
 # Diagnostics fire once per distinct cause, not once per layer or per step.
 _REPORTED_UNREACHED_INTERVALS: set["MarkerInterval"] = set()
 _REPORTED_UNSUPPORTED_LAYERS: set[str] = set()
@@ -283,22 +287,51 @@ def _checkpoint_policy(ctx: Any, op: Any, *args: Any, **kwargs: Any) -> Checkpoi
     if session is None or not session.keeping:
         return CheckpointPolicy.MUST_RECOMPUTE
 
-    # Two classes of op are never kept, whatever the markers say, because keeping them is unsound
-    # rather than merely wasteful. Selective checkpointing hands the recompute pass the very tensors
-    # the forward cached, and skips the ops that produced them:
-    #
-    # - Ops with a mutable schema write into an argument, so the cached tensor is whatever the last
-    #   writer left behind. Under torch.compile inductor's `out=` extern kernels reuse buffers and
-    #   torch catches this as "Tensor cached during selective activation checkpoint has been
-    #   mutated"; in eager the same mistake is silent.
-    # - Keeping a collective elides it from the recompute pass. That is only correct while the op
-    #   that allocated its destination buffer is kept too, and an interval boundary falling between
-    #   the allocation and the collective would leave the recompute reading an uninitialised buffer
-    #   -- silently, and differently on each rank.
-    if op._schema.is_mutable or op.namespace in _NEVER_KEPT_NAMESPACES:
+    # Keeping a collective would elide it from the recompute pass. That is only correct while the op
+    # that allocated its destination buffer is kept too, and an interval boundary falling between
+    # the allocation and the collective would leave the recompute reading an uninitialised buffer --
+    # silently, and differently on each rank.
+    if op.namespace in _NEVER_KEPT_NAMESPACES:
+        return CheckpointPolicy.MUST_RECOMPUTE
+
+    if op._schema.is_mutable:
+        _reject_non_replayable_op_in_kept_region(op)
+        # Keeping a mutating op is unsound from the other side too: it writes into an argument, so
+        # what the recompute pass gets back from the cache is whatever the last writer left behind.
+        # Under torch.compile inductor's `out=` extern kernels reuse buffers and torch catches this
+        # as "Tensor cached during selective activation checkpoint has been mutated".
         return CheckpointPolicy.MUST_RECOMPUTE
 
     return CheckpointPolicy.MUST_SAVE
+
+
+def _reject_non_replayable_op_in_kept_region(op: Any) -> None:
+    # A kept region must survive being replayed on top of its own results. The recompute pass gets
+    # the *forward's* tensors back from the cache, so a read-modify-write op such as `add_` applies
+    # its update a second time to a value that already includes it: gradients then differ from the
+    # recomputed path with a finite loss and no error anywhere. Refuse rather than compute silently
+    # wrong gradients.
+    #
+    # Writing through the `out` argument is the exception, and it is what the policy sees most of
+    # the time: inductor's extern kernels are `out=` variants. Those overwrite the destination with
+    # a value that does not depend on what was there, so replaying them is idempotent. An op that
+    # writes through any other argument is rejected even when it happens to be idempotent
+    # (`copy_`), because the schema cannot tell the two apart.
+    if op in _VALUE_PRESERVING_MUTATING_OPS or _writes_only_through_out(op):
+        return
+    raise RuntimeError(
+        f"Selective checkpointing cannot keep a region containing the in-place op {op}. Move the "
+        f"`checkpoint_record` boundary so that the in-place write falls outside the kept interval, or "
+        f"rewrite it out of place."
+    )
+
+
+def _writes_only_through_out(op: Any) -> bool:
+    return all(
+        argument.name == "out"
+        for argument in op._schema.arguments
+        if argument.alias_info is not None and argument.alias_info.is_write
+    )
 
 
 def _warn_intervals_unsupported(module: nn.Module, intervals: tuple[MarkerInterval, ...], reason: str) -> None:
