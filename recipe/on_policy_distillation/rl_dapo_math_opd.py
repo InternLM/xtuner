@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+from transformers import AutoTokenizer
+
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
@@ -14,24 +16,27 @@ from xtuner.v1.rl.agent_loop_manager import (
     SyncProduceStrategyConfig,
     TaskSpecConfig,
 )
+from xtuner.v1.rl.evaluator import EvaluatorConfig
+from xtuner.v1.rl.judger import DapoMathJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.on_policy_distillation import OPDConfig, OPDTeacherConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig, get_eos_token
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
 
 
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
 data_path = os.environ["DATA_PATH"]
+eval_data_path = os.environ.get("EVAL_DATA_PATH", "")
 NNODE = int(os.environ.get("WORLD_SIZE", "1"))
 
 # basic settings
 experimental_name = "dapo_math_opd"
 total_train_steps = 300
-train_batch_size = 64
+train_batch_size = 16
 prompt_repeat_k = 4
 rollout_tp_size = 1
 rollout_ep_size = 1
@@ -39,6 +44,9 @@ max_prompt_length = 2048
 max_response_length = 16384
 pack_max_length = max_prompt_length + max_response_length
 train_optimizer_steps = 1
+enable_evaluate = bool(eval_data_path)
+evaluate_step = 20
+eval_prompt_repeat_k = 16
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
@@ -56,7 +64,7 @@ rollout_config = RolloutConfig(
     dtype="bfloat16",
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
-    gpu_memory_utilization=0.4,
+    gpu_memory_utilization=0.6,
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=False,
     rollout_max_batch_size_per_instance=2048,
@@ -141,7 +149,55 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
     ),
 )
 
-# 5. pure on-policy distillation
+# 5. evaluation
+eval_agent_loop_manager_cfg = None
+evaluator_config = None
+if enable_evaluate:
+    eos_token_id = get_eos_token(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    eos_token = tokenizer.convert_ids_to_tokens(eos_token_id)
+    eval_judger_config = DapoMathJudgerConfig(
+        judger_name="aime_math",
+        cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+        eos_token=eos_token,
+        enable_overlong_buffer=False,
+    )
+    eval_dataset = DatasetConfig(name="aime", anno_path=eval_data_path, sample_ratio=1.0)
+    eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}]
+    eval_dataloader_cfg = DataloaderConfig(
+        dataset_config_list=eval_dataset_cfg,
+        pack_max_length=pack_max_length,
+        collator="fake_collator",
+        pack_level="none",
+    )
+    eval_sampler_config = SamplerConfig(
+        dataloader_cfg=eval_dataloader_cfg,
+        prompt_repeat_k=eval_prompt_repeat_k,
+    )
+    evaluation_sample_params = SampleParams(
+        max_tokens=max_response_length,
+        top_k=0,
+        top_p=1.0,
+        temperature=1.0,
+        min_tokens=0,
+        skip_special_tokens=False,
+        return_routed_experts=False,
+    )
+    eval_agent_loop_config = SingleTurnAgentLoopConfig(
+        hf_checkpoint=model_path,
+        sample_params=evaluation_sample_params,
+    )
+    eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
+        tasks=TaskSpecConfig(
+            task_name="eval_task",
+            agent_loop_config=eval_agent_loop_config,
+            judger_config=eval_judger_config,
+            sampler_config=eval_sampler_config,
+        ),
+    )
+    evaluator_config = EvaluatorConfig()
+
+# 6. pure on-policy distillation
 opd_config = OPDConfig(
     mode="pg-opd",
     task_adv_weight=0.0,
@@ -157,12 +213,15 @@ trainer = RLColocateTrainerConfig(
     tokenizer_path=model_path,
     replay_buffer_config=SyncReplayBufferConfig(),
     agent_loop_manager_cfg=agent_loop_manager_cfg,
+    eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
+    evaluator_config=evaluator_config,
     load_from=model_path,
     train_batch_size=train_batch_size,
     advantage_estimator_config=GRPOAdvantageConfig(eps=1e-8),
     opd_config=opd_config,
-    enable_evaluate=False,
-    enable_initial_evaluate=False,
+    enable_evaluate=enable_evaluate,
+    enable_initial_evaluate=enable_evaluate,
+    evaluate_step=evaluate_step,
     total_train_steps=total_train_steps,
     work_dir=work_dir,
     seed=1234,

@@ -1424,8 +1424,9 @@ class BaseRLTrainer:
             if not is_valid_for_training(group, self.logger):
                 continue
             for data in group:
-                assert data.reward is not None
-                rewards.append(data.reward["score"])
+                reward = data.reward.get("score") if data.reward is not None else None
+                if reward is not None:
+                    rewards.append(reward)
                 response_ids = self._get_trajectory_response_ids(data)
                 response = data.response
                 if response is None and response_ids:
@@ -1446,7 +1447,7 @@ class BaseRLTrainer:
                         "prompt": data.message,
                         "label": ground_truth,
                         "response": response,
-                        "reward": data.reward["score"],
+                        "reward": reward,
                         "prompt_len": data.num_tokens,
                         "response_len": response_len,
                         "reward_payload": data.reward,
@@ -1471,14 +1472,14 @@ class BaseRLTrainer:
         with open(save_path, "w", encoding="utf-8") as f:
             summary = {
                 "reward_mean": rewards_tensor.mean().item(),
-                "reward_std": rewards_tensor.std().item(),
+                "reward_std": rewards_tensor.std(unbiased=False).item(),
                 "reward_max": rewards_tensor.max().item(),
                 "reward_min": rewards_tensor.min().item(),
                 "response_len_mean": response_lens.mean().item(),
-                "response_len_std": response_lens.std().item(),
+                "response_len_std": response_lens.std(unbiased=False).item(),
                 "response_len_max": response_lens.max().item(),
                 "response_len_min": response_lens.min().item(),
-                "total_len": len(rewards),
+                "total_len": len(trajectory_items),
             }
             json.dump(summary, f, ensure_ascii=False, separators=(",", ":"))
             f.write("\n")
