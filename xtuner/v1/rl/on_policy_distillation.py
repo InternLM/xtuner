@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import time
 from typing import Any, Literal, cast
 
@@ -66,11 +67,12 @@ def validate_opd_sample_params(sample_params: SampleParams) -> None:
 
 
 class TeacherLogprobClient:
-    """Asynchronous SGLang teacher client scoped to one AgentLoop."""
+    """Asynchronous teacher client scoped to one AgentLoop."""
 
     def __init__(self, config: OPDTeacherConfig) -> None:
         self.config = config
         self.name = config.name
+        self.backend = self._resolve_backend_from_env()
         self.url = f"{config.endpoint.rstrip('/')}/generate"
         self._semaphore = asyncio.Semaphore(config.max_concurrency)
 
@@ -84,18 +86,11 @@ class TeacherLogprobClient:
         try:
             prompt_ids = cast(list[int], state.prompt_ids)
             response_ids = cast(list[int], state.response_ids)
-            payload = {
-                "input_ids": prompt_ids + response_ids,
-                "sampling_params": {
-                    "max_new_tokens": 0,
-                    "temperature": 0,
-                    "skip_special_tokens": False,
-                },
-                "return_logprob": True,
-                "logprob_start_len": 0,
-                "top_logprobs_num": 0,
-                "stream": False,
-            }
+            if not prompt_ids or not response_ids:
+                state.status = Status.FAILED
+                state.error_msg = f"Teacher {self.name!r} scoring requires non-empty prompt_ids and response_ids"
+                return state
+            payload = self._construct_payload(prompt_ids, response_ids)
 
             retries = 0
             while True:
@@ -103,7 +98,7 @@ class TeacherLogprobClient:
                     async with self._semaphore:
                         response = await self._client.post(self.url, json=payload)
                         response.raise_for_status()
-                    teacher_tokens, teacher_logprobs = self._parse_response(response, response_ids)
+                    teacher_tokens, teacher_logprobs = self._parse_response(response, prompt_ids, response_ids)
                     state.teacher_tokens = teacher_tokens
                     state.teacher_logprobs = teacher_logprobs
                     return state
@@ -117,17 +112,111 @@ class TeacherLogprobClient:
         finally:
             state.extra_fields["teacher_score_time_s"] = time.perf_counter() - start
 
+    @staticmethod
+    def _resolve_backend_from_env() -> Literal["sglang", "lmdeploy"]:
+        use_sglang = os.environ.get("XTUNER_USE_SGLANG", "0") == "1"
+        use_lmdeploy = os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1"
+        use_vllm = os.environ.get("XTUNER_USE_VLLM", "0") == "1"
+
+        if use_vllm:
+            raise RuntimeError("TeacherLogprobClient supports only SGLang or LMDeploy, not vLLM")
+        if use_sglang == use_lmdeploy:
+            raise RuntimeError("Exactly one of XTUNER_USE_SGLANG and XTUNER_USE_LMDEPLOY must be set to 1")
+        return "sglang" if use_sglang else "lmdeploy"
+
+    def _construct_payload(self, prompt_ids: list[int], response_ids: list[int]) -> dict[str, Any]:
+        if self.backend == "sglang":
+            return self._construct_sglang_payload(prompt_ids, response_ids)
+        if self.backend == "lmdeploy":
+            return self._construct_lmdeploy_payload(prompt_ids, response_ids)
+        raise RuntimeError(f"Unsupported teacher backend: {self.backend}")
+
+    @staticmethod
+    def _construct_sglang_payload(prompt_ids: list[int], response_ids: list[int]) -> dict[str, Any]:
+        return {
+            "input_ids": prompt_ids + response_ids,
+            "sampling_params": {
+                "max_new_tokens": 0,
+                "temperature": 0,
+                "skip_special_tokens": False,
+            },
+            "return_logprob": True,
+            "logprob_start_len": 0,
+            "top_logprobs_num": 0,
+            "stream": False,
+        }
+
+    @staticmethod
+    def _construct_lmdeploy_payload(prompt_ids: list[int], response_ids: list[int]) -> dict[str, Any]:
+        return {
+            "input_ids": prompt_ids + response_ids,
+            "return_logprob": True,
+            "logprob_start_len": 0,
+            "max_tokens": 0,
+            "stream": False,
+        }
+
     def _parse_response(
         self,
         response: httpx.Response,
+        prompt_ids: list[int],
+        response_ids: list[int],
+    ) -> tuple[list[int], list[float]]:
+        if self.backend == "sglang":
+            response_logprobs = self._parse_sglang_response(response, prompt_ids, response_ids)
+        else:
+            response_logprobs = self._parse_lmdeploy_response(response, prompt_ids, response_ids)
+        return self._validate_response_logprobs(response_logprobs, response_ids)
+
+    @staticmethod
+    def _parse_sglang_response(
+        response: httpx.Response,
+        prompt_ids: list[int],
+        response_ids: list[int],
+    ) -> list[Any]:
+        raw_logprobs = TeacherLogprobClient._get_input_token_logprobs(response)
+        expected_length = len(prompt_ids) + len(response_ids)
+        if len(raw_logprobs) != expected_length:
+            raise ValueError(
+                "SGLang teacher logprob length mismatch: "
+                f"expected {expected_length} rows for the full input, got {len(raw_logprobs)}"
+            )
+        return raw_logprobs[-len(response_ids) :]
+
+    @staticmethod
+    def _parse_lmdeploy_response(
+        response: httpx.Response,
+        prompt_ids: list[int],
+        response_ids: list[int],
+    ) -> list[Any]:
+        raw_logprobs = TeacherLogprobClient._get_input_token_logprobs(response)
+        expected_length = len(prompt_ids) + len(response_ids) - 1
+        if len(raw_logprobs) != expected_length:
+            raise ValueError(
+                "LMDeploy teacher logprob length mismatch: "
+                f"expected {expected_length} rows after the boundary token, got {len(raw_logprobs)}"
+            )
+        return raw_logprobs[-len(response_ids) :]
+
+    @staticmethod
+    def _get_input_token_logprobs(response: httpx.Response) -> list[Any]:
+        try:
+            raw_logprobs = response.json()["meta_info"]["input_token_logprobs"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Invalid teacher response") from exc
+        if not isinstance(raw_logprobs, list):
+            raise ValueError("Invalid teacher response")
+        return raw_logprobs
+
+    @staticmethod
+    def _validate_response_logprobs(
+        response_logprobs: list[Any],
         response_ids: list[int],
     ) -> tuple[list[int], list[float]]:
         try:
-            raw_logprobs = response.json()["meta_info"]["input_token_logprobs"]
-            response_logprobs = raw_logprobs[-len(response_ids) :]
             teacher_tokens = [item[1] for item in response_logprobs]
             teacher_logprobs = [float(item[0]) for item in response_logprobs]
-        except (KeyError, TypeError, IndexError) as exc:
+        except (TypeError, IndexError, ValueError) as exc:
             raise ValueError("Invalid teacher response") from exc
 
         if len(teacher_logprobs) != len(response_ids):
