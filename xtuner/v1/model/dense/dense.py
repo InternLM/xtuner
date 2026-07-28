@@ -26,7 +26,7 @@ from xtuner.v1.model.base import (
     TorchCompileOption,
     TransformerConfig,
 )
-from xtuner.v1.model.utils import apply_gradient_checkpointing
+from xtuner.v1.model.utils import RecomputeIntervalMap, RecomputeUnit, apply_gradient_checkpointing
 from xtuner.v1.module import (
     GatedDeltaNetConfig,
     LMHead,
@@ -49,6 +49,11 @@ logger = get_logger()
 DENSE_COMPILE_CFG: dict[str, TorchCompileOption] = {
     "xtuner.v1.module.decoder_layer.dense_decoder_layer.DenseDecoderLayer.forward": TorchCompileOption(fullgraph=True),
     **DEFAULT_FLOAT8_CFG,
+}
+
+DENSE_RECOMPUTE_CFG: RecomputeIntervalMap = {
+    RecomputeUnit.SAVE_ATTN: [("attn.begin", "attn.end")],
+    RecomputeUnit.SAVE_MLP: [("mlp.begin", "mlp.end")],
 }
 
 
@@ -163,6 +168,26 @@ class Dense(BaseModel):
     @override
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
         return DENSE_COMPILE_CFG
+
+    @property
+    @override
+    def default_recompute_cfg(self) -> RecomputeIntervalMap:
+        """Marker intervals this architecture can keep resident, keyed by
+        semantic unit.
+
+        Both units are **eager-only**: ``DenseDecoderLayer.forward`` is compiled as one fullgraph region, so the
+        markers that delimit them are folded away and every region falls back to being recomputed. They are declared
+        because eager training addresses them normally, and because the regions become effective as soon as the layer
+        is compiled at a finer granularity.
+
+        Returns:
+            RecomputeIntervalMap: Supported units mapped to the marker intervals that implement them.
+        """
+        # Linear-attention layers carry in-place convolution state across the forward, so replaying them under a
+        # selective checkpoint is untested. Hybrid models declare no units until it is.
+        if "linear_attention" in self.config.layers_type:
+            return {}
+        return DENSE_RECOMPUTE_CFG
 
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore
