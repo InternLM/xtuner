@@ -51,7 +51,14 @@ class RecomputeUnit(StrEnum):
     """Keep the MoE router: gating projection, top-k selection, and routing weights."""
 
     SAVE_MOE_DISPATCH = "save_moe_dispatch"
-    """Keep the expert dispatch / combine communication region."""
+    """Keep the tensors produced around expert dispatch and combine: the permutation, padding and
+    unpermutation buffers on either side of the all-to-all.
+
+    The collective itself is always recomputed, never kept. Keeping a collective would elide it from
+    the recompute pass, which is only sound if nothing it communicates with is replayed; the safe
+    rule is to replay it. So this unit trades memory for the surrounding tensor work, not for the
+    communication.
+    """
 
     SAVE_MLP = "save_mlp"
     """Keep the dense MLP / shared-expert region."""
