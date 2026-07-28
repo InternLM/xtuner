@@ -4,12 +4,14 @@ from .selective_checkpointing import (
     MarkerInterval,
     RecomputeIntervalMap,
     RecomputeUnit,
+    apply_selective_checkpointing,
     checkpoint_record,
 )
 
 
 __all__ = [
     "apply_gradient_checkpointing",
+    "apply_selective_checkpointing",
     "module_dict_repr",
     "ModelForwardExtraLogInfo",
     "MarkerInterval",

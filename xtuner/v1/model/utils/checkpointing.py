@@ -7,7 +7,7 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
 
-__all__ = ["apply_gradient_checkpointing"]
+__all__ = ["apply_gradient_checkpointing", "CheckpointWrapper"]
 
 
 ContextFn = Callable[[], tuple[AbstractContextManager, AbstractContextManager]]
