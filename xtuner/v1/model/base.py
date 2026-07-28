@@ -142,6 +142,10 @@ class XTunerBaseModelConfig(PydanticBaseModel):
             "`dict[str, TorchCompileOption]`: Customize the compile option",
         ),
     ] = None
+    # `activation_offload_cfg` belongs here, next to `recompute_cfg` and sharing its `RecomputeUnit`
+    # vocabulary and per-model interval declarations: offloading applies to the regions SAC keeps
+    # resident, since recomputed regions never land in memory to begin with. Not declared until it is
+    # implemented -- a config field nothing reads is a switch that silently does nothing.
     recompute_cfg: Annotated[
         list[RecomputeUnit] | bool | None,
         Parameter(
@@ -1033,6 +1037,9 @@ class BaseModel(nn.Module):
         This is the model author's vocabulary: it declares which :class:`RecomputeUnit` s the architecture supports and
         where each one lives, not which of them are worth enabling. A model that has no ``checkpoint_record`` markers,
         or whose markers are all inert in the setup it ships with, declares nothing.
+
+        Like ``default_compile_cfg``, an override must be answerable from ``self.config`` alone: it is read while
+        ``BaseModel.__init__`` resolves the user's selection, which is before the subclass has built its layers.
 
         Returns:
             RecomputeIntervalMap: Supported units mapped to the marker intervals that implement them.
@@ -2640,6 +2647,8 @@ class BaseModel(nn.Module):
     def _resolve_recompute_cfg(self, config: XTunerBaseModelConfig) -> list[MarkerInterval]:
         selected = config.recompute_cfg
 
+        # `False` has to reach the nested sub-model configs, which a compose model builds after this
+        # returns and which resolve their own switch against them.
         if selected is False:
             _disable_nested_switch(self.config, "recompute_cfg")
             return []
@@ -2653,6 +2662,15 @@ class BaseModel(nn.Module):
             return []
 
         supported = self.default_recompute_cfg
+
+        # `True` asks for whatever the model offers, so an empty vocabulary is not a user error --
+        # but it does mean the request is a no-op, which is worth saying out loud rather than
+        # letting the run look configured when it is not.
+        if selected is True and not supported:
+            log_rank0.warning(
+                f"`recompute_cfg=True` has no effect: {type(self).__name__} declares no recompute units, so every "
+                "region is recomputed."
+            )
         units = list(supported) if selected is True else selected
 
         intervals: list[MarkerInterval] = []

@@ -115,6 +115,13 @@ MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
 MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
 MOE_EP_COMPILE_CFG.pop(MOE_DECODER_LAYER_FORWARD)
 
+# Regions are delimited by an explicit `<name>.begin` / `<name>.end` marker pair rather than by ending each region at
+# the marker that starts the next one. Both express the same half-open `[start, end)` interval, but "end = whatever
+# comes next" couples every region to its successor: reordering two regions in a forward, or inserting one between
+# them, would silently redefine what the earlier region keeps. Explicit pairs also survive `_micro_batch_forward`
+# splitting the dispatch/combine chain across four stage loops, where "the next region" differs from the single-batch
+# path. A missing `.end` only leaves the region open to the end of the layer, which costs retained memory and never
+# gradients, since the kept and recomputed paths are both numerically exact.
 MOE_RECOMPUTE_CFG: RecomputeIntervalMap = {
     RecomputeUnit.SAVE_ATTN: [("attn.begin", "attn.end")],
     RecomputeUnit.SAVE_MOE_GATE: [("moe.gate.begin", "moe.gate.end")],
@@ -1316,6 +1323,7 @@ class MoE(BaseModel):
         # selective checkpoint is untested. Hybrid models declare no units until it is.
         if "linear_attention" in self.config.layers_type:
             return {}
+
         return MOE_RECOMPUTE_CFG
 
     @property

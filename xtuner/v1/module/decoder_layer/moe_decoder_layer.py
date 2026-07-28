@@ -417,12 +417,15 @@ class MoEDecoderLayer(nn.Module):
         origin_shape = hidden_states.shape
 
         # reshape hidden_states to (batch_size * seq_len, hidden_size)
+        # Flattened before the marker so that the dispatch region covers the same operations here as
+        # it does in `_micro_batch_forward`, which reshapes outside the region too.
+        flat_hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         # ProberList.before_dispatch(
         #     self.layer_idx, hidden_states, router_results["topk_ids"], router_results["topk_weights"]
         # )
         checkpoint_record("moe.dispatch.begin")
         pre_dispatched = self.dispatcher.dispatch_preprocess(
-            hidden_states=hidden_states.view(-1, hidden_states.shape[-1]),
+            hidden_states=flat_hidden_states,
             topk_ids=router_results["topk_ids"],
         )
         dispatched = self.dispatcher.dispatch(
@@ -476,9 +479,8 @@ class MoEDecoderLayer(nn.Module):
             pre_combined=pre_combined,
             combined=combined,
         )
-        combined_hidden_states = post_combined["hidden_states"]
-        combined_hidden_states = combined_hidden_states.view(*origin_shape)
         checkpoint_record("moe.combine.end")
+        combined_hidden_states = post_combined["hidden_states"].view(*origin_shape)
 
         # debug for aligning with hf implementation.
         # combined_hidden_states = self._hf_expert_forward_for_debug(hidden_states, router_results, origin_shape)
@@ -617,7 +619,10 @@ class MoEDecoderLayer(nn.Module):
         shared_experts_out_list: list[torch.Tensor | None]
 
         # Recorded outside the branch so the region never depends on a configuration-dependent path:
-        # without shared experts it is simply empty rather than left open until the next marker.
+        # without shared experts it is simply empty rather than left open until the next marker. It
+        # also sits outside the loop, unlike the single-batch path's per-call region: this stage runs
+        # every micro-batch back to back with nothing else between them, so one region spanning the
+        # whole stage covers exactly the same operations as one region per micro-batch would.
         checkpoint_record("moe.shared_experts.begin")
         if self.n_shared_experts > 0:
             shared_experts_out_list = []
