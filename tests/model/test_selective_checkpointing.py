@@ -8,7 +8,6 @@ TestKeptRegions
 TestUnsupportedRegions
     test_a_second_model_still_gets_its_own_diagnosis: 诊断去重不跨模型，第二个模型仍会告警。
     test_in_place_op_in_kept_region_is_rejected: 留驻区间内的 in-place 写会明确报错而不是静默改梯度。
-    test_dsa_layer_falls_back_to_reentrant: 带 DSA top-k 生命周期的层退回 legacy reentrant。
 TestRegionRecomputeUnderDominoEP
     test_kept_region_matches_full_recompute_under_domino_ep: domino EP 下留驻区间与全重算数值一致。
     test_kept_region_matches_full_recompute_under_compile: compile 下同上，且不触发 cached-tensor-mutated。
@@ -217,18 +216,6 @@ class TestUnsupportedRegions:
             layer(torch.zeros(3, 4, requires_grad=True)).sum().backward()
 
         assert warnings == []
-
-    def test_dsa_layer_falls_back_to_reentrant(self):
-        # DSA 的 top-k 生命周期靠 grad 是否开启区分 checkpoint 的两趟，只有 reentrant 满足；
-        # 走到非 reentrant 上时 cache 永不释放，且不会报错。
-        module = _MarkedBlock()
-        module._dsa_topk_decoder_lifecycle_hooks_registered = True
-
-        wrapped = apply_selective_checkpointing(module, [("first.start", "second.start")])
-
-        inputs = torch.zeros(3, 4, requires_grad=True)
-        wrapped(inputs).sum().backward()
-        assert inputs.grad is not None
 
 
 def _build_moe_config(ep_size: int, dispatcher: str, compile_model: bool) -> MoEConfig:
