@@ -46,6 +46,8 @@ from xtuner.v1.model.base import (
 )
 from xtuner.v1.model.utils import (
     ModelForwardExtraLogInfo,
+    RecomputeIntervalMap,
+    RecomputeUnit,
     apply_selective_checkpointing,
     module_dict_repr,
 )
@@ -112,6 +114,21 @@ MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
 
 MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
 MOE_EP_COMPILE_CFG.pop(MOE_DECODER_LAYER_FORWARD)
+
+MOE_RECOMPUTE_CFG: RecomputeIntervalMap = {
+    RecomputeUnit.SAVE_ATTN: [("attn.begin", "attn.end")],
+    RecomputeUnit.SAVE_MOE_GATE: [("moe.gate.begin", "moe.gate.end")],
+    RecomputeUnit.SAVE_MOE_DISPATCH: [
+        ("moe.dispatch.begin", "moe.dispatch.end"),
+        ("moe.combine.begin", "moe.combine.end"),
+    ],
+    # The first `first_k_dense_replace` layers of a MoE model are dense layers, whose MLP is a
+    # different region from a MoE layer's shared experts. Both belong to the same user-facing unit.
+    RecomputeUnit.SAVE_MLP: [
+        ("moe.shared_experts.begin", "moe.shared_experts.end"),
+        ("mlp.begin", "mlp.end"),
+    ],
+}
 
 
 class MoEModelOutputs(ModelOutputs):
@@ -1274,6 +1291,32 @@ class MoE(BaseModel):
             return MOE_EP_COMPILE_CFG
         else:
             return MOE_NON_EP_COMPILE_CFG
+
+    @property
+    @override
+    def default_recompute_cfg(self) -> RecomputeIntervalMap:
+        """Marker intervals this architecture can keep resident, keyed by
+        semantic unit.
+
+        How much of this survives ``torch.compile`` depends on where each region's markers sit. A marker inside a
+        compiled region is folded away, so only regions delimited in the uncompiled layer body remain addressable:
+
+        - ``ep_size > 1``: ``SAVE_MOE_DISPATCH`` and the shared-expert half of ``SAVE_MLP`` are delimited in
+          ``MoEDecoderLayer._forward`` / ``_micro_batch_forward`` and stay effective. ``SAVE_ATTN``,
+          ``SAVE_MOE_GATE`` and the dense-layer half of ``SAVE_MLP`` are delimited inside compiled methods and take
+          effect in eager only.
+        - ``ep_size == 1``: the whole layer forward is compiled as one region, so every unit is eager-only.
+
+        A unit that is inert simply leaves its region recomputed, which is the behaviour of plain full recompute.
+
+        Returns:
+            RecomputeIntervalMap: Supported units mapped to the marker intervals that implement them.
+        """
+        # Linear-attention layers carry in-place convolution state across the forward, so replaying them under a
+        # selective checkpoint is untested. Hybrid models declare no units until it is.
+        if "linear_attention" in self.config.layers_type:
+            return {}
+        return MOE_RECOMPUTE_CFG
 
     @property
     def need_update_bias(self) -> bool:

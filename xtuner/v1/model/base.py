@@ -19,7 +19,6 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from cyclopts import Parameter
-from more_itertools import consume
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict, Field, computed_field, model_validator
 from pydantic.fields import FieldInfo
@@ -62,7 +61,7 @@ from xtuner.v1.utils.process import (
     set_async_save_process_qos,
 )
 
-from .utils import MarkerInterval, ModelForwardExtraLogInfo
+from .utils import MarkerInterval, ModelForwardExtraLogInfo, RecomputeIntervalMap, RecomputeUnit
 
 
 logger = get_logger()
@@ -141,6 +140,17 @@ class XTunerBaseModelConfig(PydanticBaseModel):
             "`None` | `True`: Use default compile config defined in model, "
             "`False`: Disable the compile"
             "`dict[str, TorchCompileOption]`: Customize the compile option",
+        ),
+    ] = None
+    recompute_cfg: Annotated[
+        list[RecomputeUnit] | bool | None,
+        Parameter(
+            group="model",
+            help="Which activation regions stay resident instead of being recomputed, inside the layers "
+            "selected by `fsdp_cfg.recompute_ratio`. "
+            "`None` | `False`: Recompute everything, "
+            "`True`: Keep every region the model declares in `default_recompute_cfg`, "
+            "`list[RecomputeUnit]`: Keep exactly the listed regions",
         ),
     ] = None
     hf_key_mapping: Annotated[dict[str, str] | None, "Remapping hf key based on the `to_hf_key_list`"] = None
@@ -538,6 +548,36 @@ def _save_file(
     save_file(tensors, filename, metadata=metadata)
 
 
+def _disable_nested_switch(obj: Any, field_name: str) -> None:
+    """Turn a tri-state feature switch off on every config reachable from
+    ``obj``.
+
+    Sub-model configs carry their own copy of switches such as ``compile_cfg`` and ``recompute_cfg``, and each
+    sub-model resolves its own. Turning a feature off on the outer config therefore only means something if the
+    ``False`` reaches them, which is what this walk does.
+
+    Traversal stops at configs that do not declare ``field_name``: a config that does not take part in the feature
+    cannot hide a participant behind it, and stopping keeps unrelated sub-configs out of the walk.
+
+    Args:
+        obj (Any): Config, container, or leaf value to walk.
+        field_name (str): Name of the switch field to set to ``False``.
+    """
+    if isinstance(obj, PydanticBaseModel):
+        if not hasattr(obj, field_name):
+            return
+        setattr(obj, field_name, False)
+        for nested_field in type(obj).model_fields:
+            _disable_nested_switch(getattr(obj, nested_field), field_name)
+    elif isinstance(obj, Mapping):
+        for value in obj.values():
+            _disable_nested_switch(value, field_name)
+    # str & bytes are Iterables of themselves and would recurse forever.
+    elif isinstance(obj, Iterable) and not isinstance(obj, (str, bytes)):
+        for value in obj:
+            _disable_nested_switch(value, field_name)
+
+
 class BaseModel(nn.Module):
     load_spec_mapping: dict[str, LoadSpec] = {}
     fsdp_mesh: DeviceMesh | None = None
@@ -557,6 +597,7 @@ class BaseModel(nn.Module):
         self._async_hf_resources: AsyncHFResources | None = None
 
         self._compile_cfg = self._resolve_compile_cfg(self.config)
+        self._recompute_intervals = self._resolve_recompute_cfg(self.config)
         self._float8_handler: Float8Handler | None = None
 
     def set_hf(self, hf_path: str | Path):
@@ -985,18 +1026,33 @@ class BaseModel(nn.Module):
         return _compile_cfg
 
     @property
-    def recompute_intervals(self) -> tuple[MarkerInterval, ...]:
-        """Marker intervals kept resident inside every recomputed layer.
+    def default_recompute_cfg(self) -> RecomputeIntervalMap:
+        """Marker intervals this architecture can keep resident, keyed by
+        semantic unit.
 
-        This is the whole surface between the config layer and the checkpointing mechanism: the
-        sharding paths pass whatever this returns to ``apply_selective_checkpointing``. Resolving
-        the user's ``recompute_cfg`` against a model's ``default_recompute_cfg`` belongs in an
-        override here; the default keeps nothing, which recomputes each selected layer whole.
+        This is the model author's vocabulary: it declares which :class:`RecomputeUnit` s the architecture supports and
+        where each one lives, not which of them are worth enabling. A model that has no ``checkpoint_record`` markers,
+        or whose markers are all inert in the setup it ships with, declares nothing.
 
         Returns:
-            tuple[MarkerInterval, ...]: Half-open ``[start, end)`` marker intervals.
+            RecomputeIntervalMap: Supported units mapped to the marker intervals that implement them.
         """
-        return ()
+        return {}
+
+    @property
+    def recompute_intervals(self) -> list[MarkerInterval]:
+        """Marker intervals to keep resident in the layers selected for
+        recompute.
+
+        Unlike ``compile_cfg``, this deliberately does not merge sub-models: ``compile_cfg`` names free functions and
+        methods that are patched process-wide, so every sub-model's entries must reach the single patching step, while
+        intervals are per-layer policy consumed at the sharding site of the sub-model that owns those layers. A compose
+        model's vision tower and language model each resolve their own.
+
+        Returns:
+            list[MarkerInterval]: Intervals selected by ``config.recompute_cfg``. Empty means plain full recompute.
+        """
+        return self._recompute_intervals
 
     @property
     def float8_handler(self):
@@ -2564,14 +2620,14 @@ class BaseModel(nn.Module):
 
         custom_cfg = config.compile_cfg
         if custom_cfg is False:
-            self._disable_compile_cfg(self.config)
+            _disable_nested_switch(self.config, "compile_cfg")
             return {}
 
         # torch.compile is not supported on NPU
         if DEVICE == "npu":
             if custom_cfg is not False:
                 log_rank0.warning("torch.compile is not supported on NPU, disabling torch.compile.")
-            self._disable_compile_cfg(self.config)
+            _disable_nested_switch(self.config, "compile_cfg")
             return {}
 
         if custom_cfg is True or custom_cfg is None:
@@ -2581,17 +2637,35 @@ class BaseModel(nn.Module):
 
         return compile_cfg
 
-    def _disable_compile_cfg(self, obj):
-        if isinstance(obj, PydanticBaseModel) and hasattr(obj, "compile_cfg"):
-            obj.compile_cfg = False
-            consume(self._disable_compile_cfg(getattr(obj, x)) for x in obj.__class__.model_fields)
-        elif isinstance(obj, Mapping):
-            consume(map(self._disable_compile_cfg, obj.values()))
-        # str&bytes are special Iterable, need to exclude it, otherwise it will infinite loop
-        elif isinstance(obj, Iterable) and not isinstance(obj, (str, bytes)):
-            consume(map(self._disable_compile_cfg, obj))
-        else:
-            return
+    def _resolve_recompute_cfg(self, config: XTunerBaseModelConfig) -> list[MarkerInterval]:
+        selected = config.recompute_cfg
+
+        if selected is False:
+            _disable_nested_switch(self.config, "recompute_cfg")
+            return []
+
+        # `None` means "keep the memory profile of plain full recompute", not "use the model default" as it does
+        # for `compile_cfg`. `default_recompute_cfg` is the vocabulary of what an architecture *can* keep resident,
+        # not a recommendation: keeping a region trades memory for speed, and retaining everything can even exceed
+        # the peak of not checkpointing at all, because SAC storage duplicates what autograd already holds. Only the
+        # user knows which side of that trade they want, so an unset config changes nothing.
+        if selected is None:
+            return []
+
+        supported = self.default_recompute_cfg
+        units = list(supported) if selected is True else selected
+
+        intervals: list[MarkerInterval] = []
+        for unit in units:
+            if unit not in supported:
+                supported_desc = ", ".join(sorted(supported)) if supported else "none"
+                raise ValueError(
+                    f"`recompute_cfg` selects {unit!r}, which {type(self).__name__} does not support. "
+                    f"Units supported by this model: {supported_desc}. Note that a compose model declares no units "
+                    "of its own -- set `recompute_cfg` on the sub-model config that owns the layers instead."
+                )
+            intervals.extend(supported[unit])
+        return intervals
 
     def _maybe_enable_compile(self, compile_cfg: dict[str, TorchCompileOption]):
         if compile_cfg:

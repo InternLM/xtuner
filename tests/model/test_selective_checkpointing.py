@@ -29,7 +29,7 @@ from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.moe.moe import MoE, MoEConfig, SequenceContext
-from xtuner.v1.model.utils import apply_selective_checkpointing, checkpoint_record
+from xtuner.v1.model.utils import MarkerInterval, apply_selective_checkpointing, checkpoint_record
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import selective_checkpointing as contract
@@ -265,8 +265,8 @@ class _RegionMoE(MoE):
     _REGION = ("moe.dispatch", "moe.combine.end")
 
     @property
-    def recompute_intervals(self) -> tuple[tuple[str, str], ...]:
-        return (self._REGION,)
+    def recompute_intervals(self) -> list[MarkerInterval]:
+        return [self._REGION]
 
     def fully_shard(self, *args, **kwargs):
         for layer in self.layers.values():
