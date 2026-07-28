@@ -1091,24 +1091,27 @@ class MoE(BaseModel):
         )
         # Shard MTP block if it exists
         if self.mtp_block is not None:
+            assert self.config.mtp_config is not None
+            mtp_config = self.config.mtp_config
             for mtp_idx, mtp_layer in enumerate(self.mtp_block.layers):
-                if (
-                    self._should_recompute(None, mtp_idx=mtp_idx)
-                    or (self.config.mtp_config is not None and self.config.mtp_config.share_weights)
-                    or True
-                ):  # share mtp head must recompute
+                # One shared physical layer serves every logical MTP depth. Always
+                # checkpoint it to avoid retaining activations from all depths.
+                if self._should_recompute(None, mtp_idx=mtp_idx) or mtp_config.share_weights:
                     mtp_layer = checkpoint_wrapper(mtp_layer, checkpoint_impl=CheckpointImpl.REENTRANT)
                 self.mtp_block.layers[mtp_idx] = mtp_layer
 
-                reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1
                 self._fully_shard(
                     mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                     mp_policy=mp_policy,
-                    reshard_after_forward=True,
+                    # Reuse the unsharded shared layer across logical depths. Explicit
+                    # resharding at the end of MTPBlock.forward is currently disabled and
+                    # can be enabled if keeping the shared layer unsharded causes excessive
+                    # peak memory usage.
+                    reshard_after_forward=not mtp_config.share_weights,
                     offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
                     module=mtp_layer,
                 )
-            if self.config.mtp_config is not None and self.config.mtp_config.num_layers > 0:
+            if mtp_config.num_layers > 0:
                 for prev_mtp_layer, next_mtp_layer in zip(
                     list(self.mtp_block.layers)[:-1],
                     list(self.mtp_block.layers)[1:],
@@ -1119,14 +1122,13 @@ class MoE(BaseModel):
             last_decoder_layer = list(self.layers.values())[-1]
             last_decoder_layer.set_modules_to_forward_prefetch([first_mtp_layer])  # type: ignore
 
-            assert self.config.mtp_config is not None
             # Shared-weight MTP reuses one physical FSDP layer at every logical depth. A static
             # forward-prefetch hook on that layer would therefore materialize the LM head after
             # the first depth and keep it resident for all remaining depths. We intentionally
             # leave the first post-MTP LM-head call to unshard on demand for now. A future
             # optimization can explicitly prefetch the LM head in MTPBlock only after its final
             # logical depth finishes.
-            if not self.config.mtp_config.share_weights:
+            if not mtp_config.share_weights:
                 # MTP outputs are projected by the shared LM head before the main LM branch,
                 # so non-shared MTP can safely prefetch it from the last physical MTP layer.
                 self.mtp_block.layers[-1].set_modules_to_forward_prefetch([self.lm_head])  # type: ignore

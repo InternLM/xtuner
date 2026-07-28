@@ -4,6 +4,7 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
+from torch.distributed.fsdp import FSDPModule
 
 from xtuner.v1.data_proto import SequenceContext
 
@@ -112,6 +113,7 @@ class MTPBlock(nn.Module):
                 For ``N`` micro-batches, ``list[list[(hidden, router_logits, router_weights)]]``
                 with outer length ``N`` and inner length ``D``: ``outputs[mb_idx][depth_idx]``.
         """
+        outputs: list[MTPDepthOutput] | list[list[MTPDepthOutput]]
         if len(hidden_states) == 1:
             assert isinstance(seq_ctx, SequenceContext), (
                 "seq_ctx should be a SequenceContext instance in single-microbatch mode"
@@ -119,26 +121,38 @@ class MTPBlock(nn.Module):
             assert isinstance(position_embeddings, tuple) and len(position_embeddings) == 2, (
                 "position_embeddings should be a (cos, sin) tuple in single-microbatch mode"
             )
-            return self._forward(
+            outputs = self._forward(
                 hidden_states=hidden_states[0],
                 embed_tokens_fn=embed_tokens_fn,
                 position_embeddings=position_embeddings,
                 seq_ctx=seq_ctx,
             )
+        else:
+            n = len(hidden_states)
+            assert isinstance(seq_ctx, list) and len(seq_ctx) == n, (
+                "seq_ctx should be a list aligned with hidden_states in multi-microbatch mode"
+            )
+            assert isinstance(position_embeddings, list) and len(position_embeddings) == n, (
+                "position_embeddings should be a list aligned with hidden_states in multi-microbatch mode"
+            )
+            outputs = self._micro_batch_forward(
+                hidden_states_list=list(hidden_states),
+                embed_tokens_fn=embed_tokens_fn,
+                position_embeddings_list=position_embeddings,
+                seq_ctx_list=seq_ctx,
+            )
 
-        n = len(hidden_states)
-        assert isinstance(seq_ctx, list) and len(seq_ctx) == n, (
-            "seq_ctx should be a list aligned with hidden_states in multi-microbatch mode"
-        )
-        assert isinstance(position_embeddings, list) and len(position_embeddings) == n, (
-            "position_embeddings should be a list aligned with hidden_states in multi-microbatch mode"
-        )
-        return self._micro_batch_forward(
-            hidden_states_list=list(hidden_states),
-            embed_tokens_fn=embed_tokens_fn,
-            position_embeddings_list=position_embeddings,
-            seq_ctx_list=seq_ctx,
-        )
+        # Explicit resharding is currently disabled to avoid an extra reshard/unshard
+        # cycle. Consider enabling it if keeping the shared MTP layer unsharded causes
+        # excessive peak memory usage.
+        # self._reshard_shared_layer()
+        return outputs
+
+    def _reshard_shared_layer(self) -> None:
+        if self.mtp_config.share_weights:
+            shared_layer = self.layers[0]
+            if isinstance(shared_layer, FSDPModule):
+                shared_layer.reshard()
 
     def _forward(
         self,
@@ -171,7 +185,6 @@ class MTPBlock(nn.Module):
         mtp_outputs: list[MTPDepthOutput] = []
         current_hidden_states = hidden_states.detach() if self.mtp_config.detach_mtp_inputs else hidden_states
         current_seq_ctx = seq_ctx
-        shared_layer = self.layers[0] if self.mtp_config.share_weights else None
 
         num_steps = self.mtp_config.num_layers
         for step in range(num_steps):
@@ -191,12 +204,6 @@ class MTPBlock(nn.Module):
                 seq_ctx=current_seq_ctx,
             )
             mtp_outputs.append((current_hidden_states, router_logits, router_weights))
-
-
-        # Shared MTP reuses one physical FSDP layer across multiple steps.
-        # Keep it unsharded during inner steps, then reshard once at block end.
-        if shared_layer is not None:
-            shared_layer.reshard()
 
         return mtp_outputs
 
