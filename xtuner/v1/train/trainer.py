@@ -1152,6 +1152,12 @@ class Trainer:
 
         if engine.model.compile_cfg is not None:
             log_rank0.info(f"The `compile_cfg` of model is {json.dumps(engine.model.compile_cfg, indent=4)}")
+        # Only reported when something is actually kept resident: this is the memory knob to look at
+        # first when a run's peak does not match the one it was tuned for.
+        if engine.model.recompute_intervals:
+            log_rank0.info(
+                f"The `recompute_cfg` of model keeps these regions resident: {engine.model.recompute_intervals}"
+            )
         return engine
 
     def build_lr_scheduler(self, lr_cfg: LRConfig, scheduler_step: int) -> torch.optim.lr_scheduler.LRScheduler:
