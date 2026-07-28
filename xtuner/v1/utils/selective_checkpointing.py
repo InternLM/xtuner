@@ -8,6 +8,10 @@ This module holds the vocabulary that the three SAC layers agree on and nothing 
 - Users select :class:`RecomputeUnit` members in the model config; they never see marker strings.
 - The SAC engine turns the selected units into intervals and drives a per-op checkpoint policy.
 
+It lives under ``xtuner.v1.utils`` rather than next to the models because the marker calls sit in
+``xtuner.v1.module`` forwards while the unit vocabulary is consumed by ``xtuner.v1.model`` configs;
+a home inside either package would make the two import each other.
+
 Only the vocabulary lives here. The contextvars session behind :func:`checkpoint_record`, the
 policy function, and the config resolution that turns user selections into intervals are owned by
 the SAC engine and the config layer respectively.
@@ -17,7 +21,7 @@ from typing import TypeAlias
 
 import torch
 
-from xtuner.v1.utils.enum_helper import StrEnum
+from .enum_helper import StrEnum
 
 
 __all__ = [
@@ -58,8 +62,7 @@ MarkerInterval: TypeAlias = tuple[str, str]
 marker names.
 
 Ops executed at or after the ``start`` marker and strictly before the ``end`` marker belong to the
-interval. ``end`` is the name of the marker that begins the *next* region, which is why the
-interval is half-open: regions are delimited by points, not by explicit closing markers.
+interval.
 
 Intervals are resolved by program order at runtime, so an interval may span module boundaries (its
 ``start`` in one module's ``forward`` and its ``end`` in a sibling module's). Unbalanced intervals
@@ -93,8 +96,8 @@ def checkpoint_record(name: str) -> None:
 
     Args:
         name (str): Marker name, unique within a layer's forward. Use a dotted, structural name
-            such as ``"attn.core"`` or ``"moe.dispatch"`` so that ``default_recompute_cfg`` entries
-            read as coordinates into the architecture.
+            such as ``"attn.begin"`` or ``"moe.dispatch.end"`` so that ``default_recompute_cfg``
+            entries read as coordinates into the architecture.
     """
     # The marker session is backed by contextvars, which Dynamo cannot trace: reading a ContextVar
     # inside a `fullgraph=True` region is a hard compile error rather than a graph break, and xtuner
