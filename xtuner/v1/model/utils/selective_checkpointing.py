@@ -9,14 +9,16 @@ The three SAC layers meet here:
 - The sharding paths hand the resolved intervals to :func:`apply_selective_checkpointing`, which
   wraps one layer in a single checkpoint whose per-op policy keeps those intervals resident.
 
-Granularity note, because it decides which units are worth declaring for a given model: markers
-delimit regions only where the marked code runs in eager python. A ``torch.compile``d region
-executes as one unit and its markers are folded away while it is traced, so an interval whose
-endpoints fall inside a compiled region has no effect and that region is recomputed whole.
-Intervals whose endpoints fall *between* compiled regions work in both modes; in eager, all do.
+Granularity note, because it decides which units are worth declaring for a given model: a region is
+addressable only where its **contents** run in eager python, not merely its endpoints. A
+``torch.compile``d region executes as fused kernels whose ops never reach the per-op policy, so an
+interval enclosing one keeps nothing even when both its markers fire -- ``SAVE_MLP`` under EP is the
+case to remember, its markers sitting in the uncompiled layer body while the region encloses the
+compiled ``_shared_experts_forward``. In eager, every region is addressable.
 """
 
 import contextvars
+import weakref
 from collections.abc import Sequence
 from functools import partial
 from typing import Any, TypeAlias
@@ -95,6 +97,7 @@ def apply_selective_checkpointing(
     module: nn.Module,
     intervals: Sequence[MarkerInterval] = (),
     *,
+    owner: nn.Module | None = None,
     preserve_rng_state: bool = True,
     layer_compiled_as_one_region: bool = False,
 ) -> nn.Module:
@@ -114,6 +117,9 @@ def apply_selective_checkpointing(
         module (nn.Module): The layer to checkpoint.
         intervals (Sequence[MarkerInterval]): Half-open ``[start, end)`` marker intervals to keep
             resident, as resolved from the user's ``recompute_cfg``. Defaults to keeping nothing.
+        owner (nn.Module | None): The model these layers belong to. Diagnostics are aggregated over
+            it, so that an interval which keeps nothing in one layer type but works in another is
+            not reported. Defaults to None, which diagnoses each layer on its own.
         preserve_rng_state (bool): Restore the RNG state before recomputing, so dropout and other
             stochastic ops replay identically. Defaults to True.
         layer_compiled_as_one_region (bool): Whether the caller compiles this whole layer as a
@@ -136,7 +142,8 @@ def apply_selective_checkpointing(
     # Not routed through `apply_gradient_checkpointing` because the marker session has to open
     # *inside* the checkpointed region: `use_reentrant=False` re-runs this forward to recompute, and
     # a session opened around the checkpoint call would be long gone by then.
-    checkpointed_call = partial(_run_checkpointed_region, intervals, preserve_rng_state)
+    _declare_selective_regions(owner, intervals)
+    checkpointed_call = partial(_run_checkpointed_region, intervals, preserve_rng_state, owner)
     return CheckpointWrapper(module, checkpointed_call)
 
 
@@ -184,9 +191,9 @@ _NEVER_KEPT_NAMESPACES = ("c10d", "_c10d_functional")
 # with a mutable schema is rejected by `_reject_in_place_op_in_kept_region`.
 _VALUE_PRESERVING_MUTATING_OPS = frozenset({torch.ops.aten.record_stream.default})
 
-# Diagnostics fire once per distinct cause, not once per layer or per step. The cause includes
-# which layers it is about, so a second model in the same process still reports its own.
-_REPORTED_UNREACHED_INTERVALS: set[tuple[type | None, "MarkerInterval"]] = set()
+# Diagnostics accumulate per model and are held weakly, so they neither keep models alive nor let
+# one model's conclusions silence another's.
+_DIAGNOSTICS: "weakref.WeakKeyDictionary[nn.Module, _OwnerDiagnostics]" = weakref.WeakKeyDictionary()
 _REPORTED_UNSUPPORTED_DIAGNOSES: set[tuple[type, tuple["MarkerInterval", ...], str]] = set()
 
 
@@ -194,11 +201,12 @@ class _MarkerSession:
     """Tracks which marker intervals are open at the current point of one pass
     through a checkpointed layer."""
 
-    def __init__(self, intervals: tuple[MarkerInterval, ...], scope: type | None = None) -> None:
+    def __init__(self, intervals: tuple[MarkerInterval, ...], owner: nn.Module | None = None) -> None:
         self._intervals = intervals
-        self._scope = scope
+        self._owner = owner
         self._open: set[MarkerInterval] = set()
         self._recorded: set[str] = set()
+        self._kept: set[MarkerInterval] = set()
 
     @property
     def keeping(self) -> bool:
@@ -215,31 +223,84 @@ class _MarkerSession:
             elif name == end:
                 self._open.discard(interval)
 
-    def report_unreached(self) -> None:
-        # An `end` that never runs is legal -- it only widens the kept region. A `start` that never
-        # runs means the interval kept nothing, and the user sees no memory change with no way to
-        # find out why. Two causes produce this and cannot be told apart from here: a marker name
-        # that this architecture does not have, and a marker that exists but sits inside a compiled
-        # region, where markers are folded away.
-        #
-        # Deduplicated per scope rather than globally: every layer of a model reaches this with the
-        # same diagnosis, but a second model in the same process -- an RL reference model, a compose
-        # model's other tower -- is a diagnosis of its own and must not be silenced by the first.
-        for interval in self._intervals:
-            reported = (self._scope, interval)
-            if interval[0] in self._recorded or reported in _REPORTED_UNREACHED_INTERVALS:
-                continue
-            _REPORTED_UNREACHED_INTERVALS.add(reported)
+    def note_kept(self) -> None:
+        # The only evidence that a region is addressable at all. Markers merely delimit; an interval
+        # whose contents run inside a compiled region has both endpoints fire and still keeps
+        # nothing, because those ops execute as fused kernels and never reach the policy.
+        self._kept |= self._open
+
+    def finish(self) -> None:
+        _report_pass(self._owner, self._intervals, self._recorded, self._kept)
+
+
+class _OwnerDiagnostics:
+    def __init__(self) -> None:
+        self.expected_layers = 0
+        self.completed_layers = 0
+        self.recorded_markers: set[str] = set()
+        self.kept_intervals: set[MarkerInterval] = set()
+        self.declared_intervals: set[MarkerInterval] = set()
+        self.reported: set[MarkerInterval] = set()
+
+
+def _declare_selective_regions(owner: nn.Module | None, intervals: tuple[MarkerInterval, ...]) -> None:
+    # Diagnostics are only trustworthy once every layer has run: a marker missing from one layer
+    # type is normal when the intervals span several -- `mlp.begin` never runs in a MoE layer and
+    # `moe.gate.begin` never runs in a dense one -- and warning per layer fires on models that are
+    # configured correctly. This is how the diagnostics know how many layers to wait for.
+    if owner is None or not intervals:
+        return
+    state = _DIAGNOSTICS.get(owner)
+    if state is None:
+        state = _OwnerDiagnostics()
+        _DIAGNOSTICS[owner] = state
+    state.expected_layers += 1
+
+
+def _report_pass(
+    owner: nn.Module | None,
+    intervals: tuple[MarkerInterval, ...],
+    recorded: set[str],
+    kept: set[MarkerInterval],
+) -> None:
+    state = _DIAGNOSTICS.get(owner) if owner is not None else None
+    if state is None:
+        # No owner declared these regions -- a direct caller, or a test. Diagnose the region alone.
+        state = _OwnerDiagnostics()
+        state.expected_layers = 1
+
+    state.completed_layers += 1
+    state.recorded_markers |= recorded
+    state.kept_intervals |= kept
+    state.declared_intervals |= set(intervals)
+
+    # Wait for a full pass over the owner's layers before concluding anything: only then has every
+    # layer type had its chance to record a marker and keep an op.
+    if state.completed_layers < state.expected_layers:
+        return
+
+    for interval in sorted(state.declared_intervals):
+        if interval in state.kept_intervals or interval in state.reported:
+            continue
+        state.reported.add(interval)
+        if interval[0] not in state.recorded_markers:
             log_rank0.warning(
                 f"Selective checkpointing: marker {interval[0]!r} of interval {interval} never ran, so this "
                 f"interval keeps nothing resident and its region is recomputed. Either the model does not record "
                 f"that marker, or it records it inside a torch.compile'd region, where markers have no effect."
+            )
+        else:
+            log_rank0.warning(
+                f"Selective checkpointing: interval {interval} opened but kept nothing resident, so its region is "
+                f"recomputed. Its contents run inside a torch.compile'd region or consist only of ops that are "
+                f"never kept, such as collectives; markers delimiting a compiled region do not make it addressable."
             )
 
 
 def _run_checkpointed_region(
     intervals: tuple[MarkerInterval, ...],
     preserve_rng_state: bool,
+    owner: nn.Module | None,
     module: nn.Module,
     *args: Any,
     **kwargs: Any,
@@ -248,7 +309,7 @@ def _run_checkpointed_region(
     # checkpoint higher-order op rejects anything else (lambdas, closures, bound methods) with
     # `NotImplementedError: ... LazyVariableTracker context_fn`. Keep it that way.
     return checkpoint(
-        partial(_forward_with_marker_session, module, intervals),
+        partial(_forward_with_marker_session, module, intervals, owner),
         *args,
         use_reentrant=False,
         preserve_rng_state=preserve_rng_state,
@@ -260,6 +321,7 @@ def _run_checkpointed_region(
 def _forward_with_marker_session(
     module: nn.Module,
     intervals: tuple[MarkerInterval, ...],
+    owner: nn.Module | None,
     *args: Any,
     **kwargs: Any,
 ) -> Any:
@@ -272,16 +334,16 @@ def _forward_with_marker_session(
     if torch.compiler.is_compiling():
         return module(*args, **kwargs)
 
-    session = _MarkerSession(intervals, scope=type(module))
+    session = _MarkerSession(intervals, owner)
     token = _MARKER_SESSION.set(session)
     try:
         output = module(*args, **kwargs)
     finally:
         _MARKER_SESSION.reset(token)
-    # Only a pass that ran to the end can say a marker never ran: with `set_checkpoint_early_stop`
-    # on, the recompute pass is cut short by an exception once the last needed tensor is repacked,
-    # and reporting from there would blame markers that simply had not come up yet.
-    session.report_unreached()
+    # Only a pass that ran to the end counts: with `set_checkpoint_early_stop` on, the recompute
+    # pass is cut short by an exception once the last needed tensor is repacked, and folding a
+    # truncated pass into the diagnostics would blame regions that simply had not come up yet.
+    session.finish()
     return output
 
 
@@ -309,6 +371,7 @@ def _checkpoint_policy(ctx: Any, op: Any, *args: Any, **kwargs: Any) -> Checkpoi
         # as "Tensor cached during selective activation checkpoint has been mutated".
         return CheckpointPolicy.MUST_RECOMPUTE
 
+    session.note_kept()
     return CheckpointPolicy.MUST_SAVE
 
 

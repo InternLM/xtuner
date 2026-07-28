@@ -410,6 +410,7 @@ class InternS1VisionModel(BaseModel):
                 layer = apply_selective_checkpointing(
                     layer,
                     self.recompute_intervals,
+                    owner=self,
                     preserve_rng_state=checkpoint_preserve_rng_state,
                     # The layer's own forward is compiled just below, making it one opaque region.
                     layer_compiled_as_one_region=bool(self.compile_cfg),

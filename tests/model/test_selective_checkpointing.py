@@ -29,7 +29,7 @@ from xtuner.v1.model.moe.moe import MoE, MoEConfig, SequenceContext
 from xtuner.v1.model.utils import apply_selective_checkpointing, checkpoint_record
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router import NoAuxRouterConfig
-from xtuner.v1.model.utils import selective_checkpointing as engine
+from xtuner.v1.model.utils import selective_checkpointing as contract
 
 
 class _MarkedBlock(nn.Module):
@@ -51,6 +51,40 @@ class _MarkedBlock(nn.Module):
 
 class _OtherMarkedBlock(_MarkedBlock):
     """A second layer class, standing in for another model living in the same process."""
+
+
+class _InPlaceBlock(nn.Module):
+    """A region whose body accumulates in place, which selective checkpointing cannot keep."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        checkpoint_record("region.start")
+        hidden = self.linear(x)
+        accumulator = torch.zeros_like(hidden)
+        accumulator.add_(hidden)
+        checkpoint_record("region.end")
+        return accumulator
+
+
+class _EmptyRegionBlock(nn.Module):
+    """A layer whose declared region encloses no op the policy can keep.
+
+    Stands in for a region whose contents run inside a compiled kernel: both markers fire, so the
+    interval opens, yet nothing between them ever reaches the per-op policy.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hidden = self.linear(x)
+        checkpoint_record("empty.begin")
+        checkpoint_record("empty.end")
+        return hidden
 
 
 class _InPlaceBlock(nn.Module):
@@ -147,13 +181,42 @@ class TestUnsupportedRegions:
         # 同时存在 actor / reference 或 compose 模型的两个塔时，第二个模型的告警被第一个
         # 静默掉，用户就又回到「配了 SAVE_ATTN 却什么都没发生」的处境。
         warnings: list[str] = []
-        monkeypatch.setattr(engine.log_rank0, "warning", warnings.append)
+        monkeypatch.setattr(contract.log_rank0, "warning", warnings.append)
 
         for module in (_MarkedBlock(), _OtherMarkedBlock()):
             wrapped = apply_selective_checkpointing(module, [("never.reached", "second.start")])
             wrapped(torch.zeros(3, 4, requires_grad=True)).sum().backward()
 
         assert len(warnings) == 2, warnings
+
+    def test_open_interval_that_keeps_nothing_is_reported(self, monkeypatch):
+        # 这是第四次「静默无操作」：markers 都跑了，report_unreached 因此不响；区间里的 op 全在
+        # 编译区域里执行、根本到不了 policy，于是什么都没留驻，用户却收不到任何提示。
+        warnings: list[str] = []
+        monkeypatch.setattr(contract.log_rank0, "warning", warnings.append)
+
+        wrapped = apply_selective_checkpointing(_EmptyRegionBlock(), [("empty.begin", "empty.end")])
+        wrapped(torch.zeros(3, 4, requires_grad=True)).sum().backward()
+
+        assert len(warnings) == 1, warnings
+        assert "kept nothing resident" in warnings[0]
+
+    def test_interval_working_in_another_layer_is_not_reported(self, monkeypatch):
+        # 区间图会同时覆盖 dense 与 MoE 两种层（一个 MoE 模型两者都有），所以某个 marker 在
+        # 其中一种层里不出现是正常的。按层告警会让每个配置正确的模型每步都刷告警。
+        warnings: list[str] = []
+        monkeypatch.setattr(contract.log_rank0, "warning", warnings.append)
+        owner = nn.Module()
+        intervals = [("first.start", "second.start")]
+
+        layers = [
+            apply_selective_checkpointing(_EmptyRegionBlock(), intervals, owner=owner),
+            apply_selective_checkpointing(_MarkedBlock(), intervals, owner=owner),
+        ]
+        for layer in layers:
+            layer(torch.zeros(3, 4, requires_grad=True)).sum().backward()
+
+        assert warnings == []
 
     def test_dsa_layer_falls_back_to_reentrant(self):
         # DSA 的 top-k 生命周期靠 grad 是否开启区分 checkpoint 的两趟，只有 reentrant 满足；
