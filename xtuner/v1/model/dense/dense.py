@@ -51,6 +51,7 @@ DENSE_COMPILE_CFG: dict[str, TorchCompileOption] = {
     **DEFAULT_FLOAT8_CFG,
 }
 
+# Explicit `.begin` / `.end` marker pairs, for the reasons recorded next to `MOE_RECOMPUTE_CFG`.
 DENSE_RECOMPUTE_CFG: RecomputeIntervalMap = {
     RecomputeUnit.SAVE_ATTN: [("attn.begin", "attn.end")],
     RecomputeUnit.SAVE_MLP: [("mlp.begin", "mlp.end")],

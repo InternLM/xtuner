@@ -12,11 +12,12 @@ TestRecomputeCfgResolution
     test_explicit_units_select_only_their_intervals: 显式 list 只解析出对应区间。
     test_string_units_are_accepted: 配置文件里的字符串能解析成 RecomputeUnit。
     test_unsupported_unit_is_rejected: 模型不支持的 unit 报错并列出支持项。
+    test_dsa_layers_declare_no_units: DSA 层走 reentrant，不声明任何 unit。
     test_disable_propagates_into_nested_configs: `False` 递归关闭嵌套子模型配置。
     test_units_round_trip_through_json: enum 序列化成可读字符串并能读回。
 TestMarkerVocabulary
     test_declared_intervals_have_markers: default_recompute_cfg 引用的 marker 都真实埋点。
-    test_micro_batch_path_records_the_same_markers: 单路与 domino 路埋点集合一致。
+    test_micro_batch_path_covers_the_same_operations: 单路与 domino 路每个区间覆盖的算子一致。
 """
 
 import ast
@@ -34,6 +35,7 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.base import BaseModel, XTunerBaseModelConfig
 from xtuner.v1.model.dense.dense import DENSE_RECOMPUTE_CFG
+from xtuner.v1.model.moe import moe
 from xtuner.v1.model.moe.moe import MOE_RECOMPUTE_CFG, MoE, MoEConfig, SequenceContext
 from xtuner.v1.model.utils import (
     RecomputeUnit,
@@ -304,10 +306,24 @@ class TestRecomputeCfgResolution:
         assert _resolve_intervals(recompute_cfg=["save_attn"]) == MOE_RECOMPUTE_CFG[RecomputeUnit.SAVE_ATTN]
 
     def test_unsupported_unit_is_rejected(self):
-        # A hybrid model declares no units, so any selection is a user configuration error rather
-        # than something to silently drop.
+        # A model declaring no units cannot honour any selection, so this is a user configuration
+        # error rather than something to silently drop.
+        model = _ProbeModel(_ProbeConfig(text_config=_NestedProbeConfig(), recompute_cfg=[RecomputeUnit.SAVE_ATTN]))
+
         with pytest.raises(ValueError, match="does not support"):
-            _ProbeModel(_ProbeConfig(text_config=_NestedProbeConfig(), recompute_cfg=[RecomputeUnit.SAVE_ATTN]))
+            model.recompute_intervals
+
+    def test_dsa_layers_declare_no_units(self, monkeypatch):
+        # DSA layers route to the reentrant checkpoint, which takes no `context_fn` and can never
+        # open a SAC session. Declaring units anyway would let a config validate and let the trainer
+        # log regions it keeps resident, while nothing is kept resident at all.
+        monkeypatch.setattr(moe, "uses_dsa_topk_lifecycle", lambda module: True)
+
+        with torch.device("meta"):
+            model = MoE(config=_build_tiny_moe_config(recompute_cfg=True))
+
+        assert model.default_recompute_cfg == {}
+        assert model.recompute_intervals == []
 
     def test_disable_propagates_into_nested_configs(self):
         # A sub-model resolves its own switch, so `False` on the outer config only means something
@@ -346,6 +362,50 @@ def _recorded_markers(func) -> set[str]:
     }
 
 
+def _region_coverage(func) -> dict[str, set[str]]:
+    """Which of the layer's own operations each marker region encloses.
+
+    Regions are keyed by the shared prefix of a ``<name>.begin`` / ``<name>.end`` pair, and an operation is a call on
+    ``self`` -- ``self.experts(...)``, ``self.dispatcher.dispatch(...)``. Calls on tensors are ignored: a region is
+    defined by the sub-modules it covers, not by the reshapes threaded between them.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    # `ast.walk` is breadth-first; the marker state machine needs source order.
+    nodes = sorted(
+        (node for node in ast.walk(tree) if isinstance(node, ast.Call)),
+        key=lambda node: (node.lineno, node.col_offset),
+    )
+
+    coverage: dict[str, set[str]] = {}
+    active: set[str] = set()
+    for node in nodes:
+        name = _called_name(node)
+        if name == "checkpoint_record" and node.args and isinstance(node.args[0], ast.Constant):
+            region, _, edge = node.args[0].value.rpartition(".")
+            if edge == "begin":
+                active.add(region)
+                coverage.setdefault(region, set())
+            elif edge == "end":
+                active.discard(region)
+        elif name is not None and name.startswith("self."):
+            for region in active:
+                coverage[region].add(name.removeprefix("self."))
+    return coverage
+
+
+def _called_name(node: ast.Call) -> str | None:
+    """Dotted name of a call target, e.g. ``self.dispatcher.dispatch``."""
+    parts: list[str] = []
+    target: ast.expr = node.func
+    while isinstance(target, ast.Attribute):
+        parts.append(target.attr)
+        target = target.value
+    if not isinstance(target, ast.Name):
+        return None
+    parts.append(target.id)
+    return ".".join(reversed(parts))
+
+
 class TestMarkerVocabulary:
     @pytest.mark.parametrize(
         "interval_map", [MOE_RECOMPUTE_CFG, DENSE_RECOMPUTE_CFG], ids=["moe", "dense"]
@@ -364,10 +424,11 @@ class TestMarkerVocabulary:
         declared = {name for intervals in interval_map.values() for interval in intervals for name in interval}
         assert declared <= recorded, f"markers referenced but never recorded: {sorted(declared - recorded)}"
 
-    def test_micro_batch_path_records_the_same_markers(self):
+    def test_micro_batch_path_covers_the_same_operations(self):
         # `_micro_batch_forward` re-implements the dispatch/combine chain across four stage loops.
-        # If the two paths drift, domino EP silently keeps a different set of regions resident.
-        single = _recorded_markers(moe_decoder_layer.MoEDecoderLayer._forward)
-        micro_batch = _recorded_markers(moe_decoder_layer.MoEDecoderLayer._micro_batch_forward)
+        # Comparing marker names alone would pass even if the domino path wrapped entirely different
+        # operations, so compare what each region actually encloses.
+        single = _region_coverage(moe_decoder_layer.MoEDecoderLayer._forward)
+        micro_batch = _region_coverage(moe_decoder_layer.MoEDecoderLayer._micro_batch_forward)
 
         assert single == micro_batch
