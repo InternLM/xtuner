@@ -173,6 +173,7 @@ class MTPBlock(nn.Module):
         """
         mtp_outputs: list[MTPDepthOutput] = []
         current_hidden_states = hidden_states.detach() if self.mtp_config.detach_mtp_inputs else hidden_states
+        current_dsa_topk_ids: torch.Tensor | None = None
         current_seq_ctx = seq_ctx
 
         num_steps = self.mtp_config.num_layers
@@ -186,12 +187,20 @@ class MTPBlock(nn.Module):
             if self.mtp_config.detach_mtp_inputs:
                 future_embeddings = future_embeddings.detach()
 
-            current_hidden_states, router_logits, router_weights, router_topk_ids = layer(
-                current_hidden_states,
+            layer_inputs = (
+                (current_hidden_states,)
+                if current_dsa_topk_ids is None
+                else (current_hidden_states, current_dsa_topk_ids)
+            )
+            layer_results = layer(
+                *layer_inputs,
                 future_embeddings=future_embeddings,
                 position_embeddings=position_embeddings,
                 seq_ctx=current_seq_ctx,
             )
+            assert len(layer_results) in (4, 5)
+            current_hidden_states, router_logits, router_weights, router_topk_ids = layer_results[:4]
+            current_dsa_topk_ids = layer_results[4] if len(layer_results) == 5 else None
             mtp_outputs.append((current_hidden_states, router_logits, router_weights, router_topk_ids))
 
         return mtp_outputs
@@ -209,6 +218,7 @@ class MTPBlock(nn.Module):
         # outputs_per_mb[mb_idx][depth_idx] to match the single-microbatch API shape.
         outputs_per_mb: list[list[MTPDepthOutput]] = [[] for _ in range(n)]
         current_hidden_states_list = list(hidden_states_list)
+        current_dsa_topk_ids_list: list[torch.Tensor] | None = None
         current_seq_ctx_list = list(seq_ctx_list)
 
         num_steps = self.mtp_config.num_layers
@@ -218,20 +228,24 @@ class MTPBlock(nn.Module):
             current_seq_ctx_list = [roll_sequence_context(ctx, shifts=-1) for ctx in current_seq_ctx_list]
             future_embeddings_list = [self._embed_future(ctx, embed_tokens_fn) for ctx in current_seq_ctx_list]
 
+            layer_inputs = list(current_hidden_states_list)
+            if current_dsa_topk_ids_list is not None:
+                layer_inputs.extend(current_dsa_topk_ids_list)
             layer_results = layer(
-                *current_hidden_states_list,
+                *layer_inputs,
                 future_embeddings=future_embeddings_list,
                 position_embeddings=position_embeddings_list,
                 seq_ctx=current_seq_ctx_list,
             )
-            assert isinstance(layer_results, tuple) and len(layer_results) == 4 * n, (
-                f"MTPLayer multi-microbatch forward should return a flat tuple of length {4 * n}, "
+            assert isinstance(layer_results, tuple) and len(layer_results) in (4 * n, 5 * n), (
+                f"MTPLayer multi-microbatch forward should return a flat tuple of length {4 * n} or {5 * n}, "
                 f"got {len(layer_results) if isinstance(layer_results, tuple) else type(layer_results)}"
             )
             new_hidden = list(layer_results[:n])
             router_logits = list(layer_results[n : 2 * n])
             router_weights = list(layer_results[2 * n : 3 * n])
-            router_topk_ids = list(layer_results[3 * n :])
+            router_topk_ids = list(layer_results[3 * n : 4 * n])
+            current_dsa_topk_ids_list = list(layer_results[4 * n :]) if len(layer_results) == 5 * n else None
 
             for mb_idx in range(n):
                 outputs_per_mb[mb_idx].append(

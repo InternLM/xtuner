@@ -87,11 +87,20 @@ class TestDenseDecoderLayerMicroBatch:
         )
 
         assert isinstance(outputs, tuple)
-        for output, reference_output in zip(outputs, reference_outputs):
+        n = len(hidden_states)
+        assert len(outputs) == 2 * n
+        output_hidden = outputs[:n]
+        output_ids = outputs[n:]
+        reference_hidden = tuple(result[0] for result in reference_outputs)
+        reference_ids = tuple(result[1] for result in reference_outputs)
+        for output, reference_output in zip(output_hidden, reference_hidden):
             torch.testing.assert_close(output, reference_output)
+        for dsa_topk_ids, reference_dsa_topk_ids in zip(output_ids, reference_ids):
+            torch.testing.assert_close(dsa_topk_ids, reference_dsa_topk_ids)
+            assert dsa_topk_ids.dtype == torch.int32
 
-        sum(output.sum() for output in outputs).backward()
-        sum(output.sum() for output in reference_outputs).backward()
+        sum(output.sum() for output in output_hidden).backward()
+        sum(output.sum() for output in reference_hidden).backward()
 
         for hidden, reference_hidden in zip(hidden_states, reference_hidden_states):
             torch.testing.assert_close(hidden.grad, reference_hidden.grad)

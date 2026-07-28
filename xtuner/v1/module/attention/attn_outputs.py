@@ -8,3 +8,4 @@ class AttnOutputs(TypedDict, total=False):
     raw_output: torch.Tensor
     softmax_lse: torch.Tensor | None
     attn_logits: torch.Tensor | None
+    dsa_topk_ids: torch.Tensor

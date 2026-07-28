@@ -81,20 +81,17 @@ class MTPLayer(nn.Module):
 
     def forward(
         self,
-        *hidden_states: torch.Tensor,
+        *layer_inputs: torch.Tensor,
         future_embeddings: torch.Tensor | list[torch.Tensor],
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
         seq_ctx: SequenceContext | list[SequenceContext],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | tuple[torch.Tensor, ...]:
         """Forward pass through the MTP layer.
 
-        Mirrors :meth:`MoEDecoderLayer.forward`: when a single ``hidden_states`` tensor is
-        provided, the layer runs the regular single-microbatch path and returns a 4-tuple
-        ``(hidden, router_logits, router_weights, router_topk_ids)``. When ``N`` hidden states are provided
-        (intra-layer micro-batching / domino EP), ``future_embeddings``, ``position_embeddings``
-        and ``seq_ctx`` must be lists of length ``N``; the per-microbatch preprocessing
-        (enorm/hnorm/eh_proj) is run independently and a single underlying decoder forward
-        is issued so the inner MoE EP communication can be overlapped across micro-batches.
+        Mirrors :meth:`MoEDecoderLayer.forward`: DSA calls append explicit
+        ``dsa_topk_ids`` to both the flat inputs and results. The enclosing
+        :class:`MTPBlock` consumes that extra category internally and keeps the
+        public per-depth output unchanged.
 
         Args:
             hidden_states (torch.Tensor): One or more hidden state tensors. A single tensor
@@ -107,41 +104,46 @@ class MTPLayer(nn.Module):
             seq_ctx (SequenceContext | list[SequenceContext]): Sequence context per micro-batch.
 
         Returns:
-            tuple: For single-microbatch input, a 4-tuple
-                ``(hidden_states, router_logits, router_weights, router_topk_ids)``.
-                For ``N`` micro-batches, a flat tuple of length ``4 * N`` matching the
-                convention used by :meth:`MoEDecoderLayer._micro_batch_forward`:
-                ``(hidden_0, ..., hidden_{N-1}, router_logits_0, ...,
-                router_weights_{N-1}, router_topk_ids_0, ..., router_topk_ids_{N-1})``.
+            tuple: A flat ``4 * N`` result for non-DSA decoders or ``5 * N``
+                result for DSA decoders, with ``dsa_topk_ids`` as the final
+                category.
         """
-        if len(hidden_states) == 1:
+        if isinstance(seq_ctx, SequenceContext):
+            assert len(layer_inputs) in (1, 2), (
+                "Single-microbatch MTPLayer expects hidden_states and optional dsa_topk_ids."
+            )
             assert isinstance(future_embeddings, torch.Tensor), (
                 "future_embeddings should be a Tensor in single-microbatch mode"
-            )
-            assert isinstance(seq_ctx, SequenceContext), (
-                "seq_ctx should be a SequenceContext instance in single-microbatch mode"
             )
             assert isinstance(position_embeddings, tuple) and len(position_embeddings) == 2, (
                 "position_embeddings should be a (cos, sin) tuple in single-microbatch mode"
             )
             return self._forward(
-                hidden_states=hidden_states[0],
+                hidden_states=layer_inputs[0],
+                dsa_topk_ids=layer_inputs[1] if len(layer_inputs) == 2 else None,
                 future_embeddings=future_embeddings,
                 position_embeddings=position_embeddings,
                 seq_ctx=seq_ctx,
             )
 
+        n = len(seq_ctx)
+        assert len(layer_inputs) in (n, 2 * n), (
+            f"Multi-microbatch MTPLayer expects {n} hidden states and optional {n} dsa_topk_ids."
+        )
         assert isinstance(future_embeddings, list), (
             "future_embeddings should be a list aligned with hidden_states in multi-microbatch mode"
-        )
-        assert isinstance(seq_ctx, list), (
-            "seq_ctx should be a list aligned with hidden_states in multi-microbatch mode"
         )
         assert isinstance(position_embeddings, list), (
             "position_embeddings should be a list aligned with hidden_states in multi-microbatch mode"
         )
+        dsa_topk_ids_list: list[torch.Tensor | None]
+        if len(layer_inputs) == n:
+            dsa_topk_ids_list = [None] * n
+        else:
+            dsa_topk_ids_list = list(layer_inputs[n:])
         return self._micro_batch_forward(
-            hidden_states_list=list(hidden_states),
+            hidden_states_list=list(layer_inputs[:n]),
+            dsa_topk_ids_list=dsa_topk_ids_list,
             future_embeddings_list=future_embeddings,
             position_embeddings_list=position_embeddings,
             seq_ctx_list=seq_ctx,
@@ -150,25 +152,33 @@ class MTPLayer(nn.Module):
     def _forward(
         self,
         hidden_states: torch.Tensor,
+        dsa_topk_ids: torch.Tensor | None,
         future_embeddings: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
         projected = self._preprocess(hidden_states=hidden_states, future_embeddings=future_embeddings)
 
-        hidden_states, router_results, router_weights, router_topk_ids = self.decoder_layer(
-            projected,
+        decoder_inputs = (projected,) if dsa_topk_ids is None else (projected, dsa_topk_ids)
+        layer_results = self.decoder_layer(
+            *decoder_inputs,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
         )
+        assert len(layer_results) in (4, 5)
+        hidden_states, router_results, router_weights, router_topk_ids = layer_results[:4]
 
         hidden_states = self.final_layernorm(hidden_states)
-        return hidden_states, router_results, router_weights, router_topk_ids
+        mtp_results = (hidden_states, router_results, router_weights, router_topk_ids)
+        if len(layer_results) == 4:
+            return mtp_results
+        return (*mtp_results, layer_results[4])
 
     def _micro_batch_forward(
         self,
         *,
         hidden_states_list: list[torch.Tensor],
+        dsa_topk_ids_list: list[torch.Tensor | None],
         future_embeddings_list: list[torch.Tensor],
         position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
         seq_ctx_list: list[SequenceContext],
@@ -185,22 +195,30 @@ class MTPLayer(nn.Module):
             for h, e in zip(hidden_states_list, future_embeddings_list)
         ]
 
+        decoder_inputs = list(projected_list)
+        if any(dsa_topk_ids is not None for dsa_topk_ids in dsa_topk_ids_list):
+            assert all(dsa_topk_ids is not None for dsa_topk_ids in dsa_topk_ids_list)
+            decoder_inputs.extend(dsa_topk_ids for dsa_topk_ids in dsa_topk_ids_list if dsa_topk_ids is not None)
         layer_results = self.decoder_layer(
-            *projected_list,
+            *decoder_inputs,
             position_embeddings=position_embeddings_list,
             seq_ctx=seq_ctx_list,
         )
-        assert isinstance(layer_results, tuple) and len(layer_results) == 4 * n, (
+        assert isinstance(layer_results, tuple) and len(layer_results) in (4 * n, 5 * n), (
             "Multi-microbatch MTP requires the wrapped decoder layer to return a flat "
-            f"(hidden..., router_logits..., router_weights..., router_topk_ids...) tuple of length {4 * n}; "
+            "(hidden..., router_logits..., router_weights..., router_topk_ids..., optional dsa_topk_ids...) "
+            f"tuple of length {4 * n} or {5 * n}; "
             f"got length {len(layer_results) if isinstance(layer_results, tuple) else type(layer_results)}"
         )
 
         hidden_out = [self.final_layernorm(h) for h in layer_results[:n]]
         router_logits = list(layer_results[n : 2 * n])
         router_weights = list(layer_results[2 * n : 3 * n])
-        router_topk_ids = list(layer_results[3 * n :])
-        return tuple(hidden_out + router_logits + router_weights + router_topk_ids)
+        router_topk_ids = list(layer_results[3 * n : 4 * n])
+        mtp_results = hidden_out + router_logits + router_weights + router_topk_ids
+        if len(layer_results) == 4 * n:
+            return tuple(mtp_results)
+        return tuple(mtp_results + list(layer_results[4 * n :]))
 
     def _preprocess(
         self,
