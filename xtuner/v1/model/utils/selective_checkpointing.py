@@ -171,7 +171,7 @@ def checkpoint_record(name: str) -> None:
     #
     # This branch must stay free of side effects for the same reason -- a global mutation or a log
     # call here would break `fullgraph=True`. Markers that turn out to be inert are reported from
-    # `_MarkerSession.report_unreached`, which runs in eager python.
+    # `_report_pass`, which runs in eager python once the owner's layers have all been through.
     if torch.compiler.is_compiling():
         return
 
@@ -405,8 +405,8 @@ def _writes_only_through_out(op: Any) -> bool:
 
 
 def _warn_intervals_unsupported(module: nn.Module, intervals: tuple[MarkerInterval, ...], reason: str) -> None:
-    # Reported here rather than left to `_MarkerSession.report_unreached`, which never speaks for
-    # such a layer: its forward never runs in eager python, so no session ever opens.
+    # Reported here rather than left to `_report_pass`, which never speaks for such a layer: its
+    # forward never runs in eager python, so no session ever opens and no pass ever completes.
     #
     # Deduplicated on the whole diagnosis, not on the layer alone: every layer of a model produces
     # the same one, but a second model in the same process with different intervals -- an RL
