@@ -29,7 +29,7 @@ from xtuner.v1.model.moe.moe import MoE, MoEConfig, SequenceContext
 from xtuner.v1.model.utils import apply_selective_checkpointing, checkpoint_record
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router import NoAuxRouterConfig
-from xtuner.v1.model.utils import selective_checkpointing as contract
+from xtuner.v1.utils import selective_checkpointing as contract
 
 
 class _MarkedBlock(nn.Module):
@@ -51,22 +51,6 @@ class _MarkedBlock(nn.Module):
 
 class _OtherMarkedBlock(_MarkedBlock):
     """A second layer class, standing in for another model living in the same process."""
-
-
-class _InPlaceBlock(nn.Module):
-    """A region whose body accumulates in place, which selective checkpointing cannot keep."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.linear = nn.Linear(4, 4)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        checkpoint_record("region.start")
-        hidden = self.linear(x)
-        accumulator = torch.zeros_like(hidden)
-        accumulator.add_(hidden)
-        checkpoint_record("region.end")
-        return accumulator
 
 
 class _EmptyRegionBlock(nn.Module):
