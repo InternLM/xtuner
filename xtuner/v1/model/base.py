@@ -62,7 +62,7 @@ from xtuner.v1.utils.process import (
     set_async_save_process_qos,
 )
 
-from .utils import ModelForwardExtraLogInfo
+from .utils import MarkerInterval, ModelForwardExtraLogInfo
 
 
 logger = get_logger()
@@ -983,6 +983,20 @@ class BaseModel(nn.Module):
                 _compile_cfg |= sub_custom_cfg
 
         return _compile_cfg
+
+    @property
+    def recompute_intervals(self) -> tuple[MarkerInterval, ...]:
+        """Marker intervals kept resident inside every recomputed layer.
+
+        This is the whole surface between the config layer and the checkpointing mechanism: the
+        sharding paths pass whatever this returns to ``apply_selective_checkpointing``. Resolving
+        the user's ``recompute_cfg`` against a model's ``default_recompute_cfg`` belongs in an
+        override here; the default keeps nothing, which recomputes each selected layer whole.
+
+        Returns:
+            tuple[MarkerInterval, ...]: Half-open ``[start, end)`` marker intervals.
+        """
+        return ()
 
     @property
     def float8_handler(self):

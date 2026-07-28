@@ -8,7 +8,7 @@ from torch.utils._pytree import TreeSpec, tree_flatten, tree_unflatten
 from torch.utils.checkpoint import checkpoint
 
 
-__all__ = ["apply_gradient_checkpointing", "apply_legacy_reentrant_checkpointing"]
+__all__ = ["apply_gradient_checkpointing", "apply_legacy_reentrant_checkpointing", "CheckpointWrapper"]
 
 
 ContextFn = Callable[[], tuple[AbstractContextManager, AbstractContextManager]]
