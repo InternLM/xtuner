@@ -196,17 +196,19 @@ _NEVER_KEPT_NAMESPACES = ("c10d", "_c10d_functional")
 # with a mutable schema is rejected by `_reject_in_place_op_in_kept_region`.
 _VALUE_PRESERVING_MUTATING_OPS = frozenset({torch.ops.aten.record_stream.default})
 
-# Diagnostics fire once per distinct cause, not once per layer or per step.
-_REPORTED_UNREACHED_INTERVALS: set["MarkerInterval"] = set()
-_REPORTED_UNSUPPORTED_LAYERS: set[str] = set()
+# Diagnostics fire once per distinct cause, not once per layer or per step. The cause includes
+# which layers it is about, so a second model in the same process still reports its own.
+_REPORTED_UNREACHED_INTERVALS: set[tuple[type | None, "MarkerInterval"]] = set()
+_REPORTED_UNSUPPORTED_DIAGNOSES: set[tuple[type, tuple["MarkerInterval", ...], str]] = set()
 
 
 class _MarkerSession:
     """Tracks which marker intervals are open at the current point of one pass
     through a checkpointed layer."""
 
-    def __init__(self, intervals: tuple[MarkerInterval, ...]) -> None:
+    def __init__(self, intervals: tuple[MarkerInterval, ...], scope: type | None = None) -> None:
         self._intervals = intervals
+        self._scope = scope
         self._open: set[MarkerInterval] = set()
         self._recorded: set[str] = set()
 
@@ -231,10 +233,15 @@ class _MarkerSession:
         # find out why. Two causes produce this and cannot be told apart from here: a marker name
         # that this architecture does not have, and a marker that exists but sits inside a compiled
         # region, where markers are folded away.
+        #
+        # Deduplicated per scope rather than globally: every layer of a model reaches this with the
+        # same diagnosis, but a second model in the same process -- an RL reference model, a compose
+        # model's other tower -- is a diagnosis of its own and must not be silenced by the first.
         for interval in self._intervals:
-            if interval[0] in self._recorded or interval in _REPORTED_UNREACHED_INTERVALS:
+            reported = (self._scope, interval)
+            if interval[0] in self._recorded or reported in _REPORTED_UNREACHED_INTERVALS:
                 continue
-            _REPORTED_UNREACHED_INTERVALS.add(interval)
+            _REPORTED_UNREACHED_INTERVALS.add(reported)
             log_rank0.warning(
                 f"Selective checkpointing: marker {interval[0]!r} of interval {interval} never ran, so this "
                 f"interval keeps nothing resident and its region is recomputed. Either the model does not record "
@@ -277,7 +284,7 @@ def _forward_with_marker_session(
     if torch.compiler.is_compiling():
         return module(*args, **kwargs)
 
-    session = _MarkerSession(intervals)
+    session = _MarkerSession(intervals, scope=type(module))
     token = _MARKER_SESSION.set(session)
     try:
         output = module(*args, **kwargs)
@@ -349,11 +356,16 @@ def _writes_only_through_out(op: Any) -> bool:
 def _warn_intervals_unsupported(module: nn.Module, intervals: tuple[MarkerInterval, ...], reason: str) -> None:
     # Reported here rather than left to `_MarkerSession.report_unreached`, which never speaks for
     # these layers: neither a compiled-as-one-region layer nor a reentrant one ever opens a session.
-    layer = type(module).__name__
-    if layer in _REPORTED_UNSUPPORTED_LAYERS:
+    #
+    # Deduplicated on the whole diagnosis, not on the layer alone: every layer of a model produces
+    # the same one, but a second model in the same process with different intervals -- an RL
+    # reference model, a compose model's other tower -- has a diagnosis of its own to report.
+    layer = type(module)
+    diagnosis = (layer, intervals, reason)
+    if diagnosis in _REPORTED_UNSUPPORTED_DIAGNOSES:
         return
-    _REPORTED_UNSUPPORTED_LAYERS.add(layer)
+    _REPORTED_UNSUPPORTED_DIAGNOSES.add(diagnosis)
     log_rank0.warning(
-        f"Selective checkpointing: {layer} cannot keep recompute regions resident because {reason}, so the "
-        f"intervals {list(intervals)} have no effect and every selected layer is recomputed whole."
+        f"Selective checkpointing: {layer.__name__} cannot keep recompute regions resident because {reason}, so "
+        f"the intervals {list(intervals)} have no effect and every selected layer is recomputed whole."
     )
