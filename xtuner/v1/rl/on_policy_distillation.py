@@ -4,6 +4,7 @@ import asyncio
 import math
 import os
 import time
+from pathlib import Path
 from typing import Any, Literal, cast
 
 import httpx
@@ -12,6 +13,27 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.loss.base_loss import BaseRLLossContext
+
+
+class OPDTeacherLaunchConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_path: str | Path
+    cuda_visible_devices: str
+    dtype: Literal["auto", "float16", "bfloat16"] = "bfloat16"
+    tensor_parallel_size: int = Field(default=1, gt=0)
+    expert_parallel_size: int = Field(default=1, gt=0)
+    context_length: int | None = Field(default=None, gt=0)
+    max_batch_size: int | None = Field(default=None, gt=0)
+    chunked_prefill_size: int | None = Field(default=4096, gt=0)
+    max_prefill_token_num: int | None = Field(default=4096, gt=0)
+    gpu_memory_utilization: float = Field(default=0.6, gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_parallel_sizes(self) -> OPDTeacherLaunchConfig:
+        if self.tensor_parallel_size > 1 and self.expert_parallel_size > 1:
+            raise ValueError("tensor_parallel_size and expert_parallel_size cannot both be greater than 1")
+        return self
 
 
 class OPDTeacherConfig(BaseModel):
@@ -23,6 +45,7 @@ class OPDTeacherConfig(BaseModel):
     request_timeout_s: float = Field(default=1200.0, gt=0.0)
     max_retry_per_sample: int = Field(default=2, ge=0)
     max_concurrency: int = Field(default=128, gt=0)
+    launch_config: OPDTeacherLaunchConfig | None = None
 
 
 class OPDConfig(BaseModel):

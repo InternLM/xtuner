@@ -10,23 +10,29 @@ from unittest.mock import patch
 import httpx
 import torch
 
+from recipe.on_policy_distillation.build_teacher_server_commands import (
+    build_teacher_server_command,
+)
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.on_policy_distillation import (
     OPDConfig,
     OPDTeacherConfig,
+    OPDTeacherLaunchConfig,
     TeacherLogprobClient,
     apply_opd_kl_to_advantages,
 )
 from xtuner.v1.rl.utils import find_free_ports
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BASELINE_PATH = os.getenv("XTUNER_OPD_BASELINE")
 TEACHER_MODEL_PATH = os.getenv("XTUNER_OPD_TEACHER_MODEL")
 STUDENT_MODEL_PATH = os.getenv("XTUNER_OPD_STUDENT_MODEL")
 TEACHER_STARTUP_TIMEOUT_S = float(os.getenv("XTUNER_OPD_TEACHER_STARTUP_TIMEOUT_S", "1200"))
-TEACHER_START_SCRIPT = REPO_ROOT / "recipe/on_policy_distillation/start_pg_opd_teacher.sh"
-TRAINER_CONFIG_PATH = REPO_ROOT / "recipe/on_policy_distillation/rl_dapo_math_opd.py"
+TRAINER_CONFIG_PATH = (
+    REPO_ROOT / "recipe/on_policy_distillation/config/rl_dapo_math_opd.py"
+)
 
 
 def _wait_for_teacher(process: subprocess.Popen, endpoint: str, backend: str) -> None:
@@ -286,6 +292,7 @@ def _run_trainer_once(
     trainer_environment = {
         "WORK_DIR": str(run_dir / "trainer"),
         "MODEL_PATH": str(student_model_path),
+        "TEACHER_MODEL_PATH": os.getenv("XTUNER_OPD_TEACHER_MODEL", str(student_model_path)),
         "DATA_PATH": os.getenv("XTUNER_OPD_DATA_PATH", str(baseline_path)),
         "WORLD_SIZE": "1",
         "ONLY_CALC_MISMATCH_RATIO": "1",
@@ -487,10 +494,22 @@ class TestTeacherLogprobClient(unittest.IsolatedAsyncioTestCase):
         cls.teacher_endpoint = f"http://127.0.0.1:{port}"
         cls.teacher_backend = TeacherLogprobClient._resolve_backend_from_env()
         teacher_env = os.environ.copy()
-        teacher_env["TEACHER_HOST"] = "127.0.0.1"
-        teacher_env["TEACHER_PORT"] = str(port)
+        teacher_command = build_teacher_server_command(
+            OPDTeacherConfig(
+                name="teacher",
+                endpoint=cls.teacher_endpoint,
+                launch_config=OPDTeacherLaunchConfig(
+                    model_path=str(TEACHER_MODEL_PATH),
+                    cuda_visible_devices=teacher_env.get("CUDA_VISIBLE_DEVICES")
+                    or "7",
+                ),
+            ),
+            cls.teacher_backend,
+        )
+        if not teacher_command:
+            raise ValueError("Teacher must define launch_config for local startup")
         cls.teacher_process = subprocess.Popen(
-            ["bash", str(TEACHER_START_SCRIPT), str(TEACHER_MODEL_PATH)],
+            teacher_command,
             cwd=REPO_ROOT,
             env=teacher_env,
             start_new_session=True,
