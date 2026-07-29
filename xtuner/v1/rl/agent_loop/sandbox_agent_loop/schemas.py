@@ -229,6 +229,7 @@ class SandboxSpec(BaseModel):
     env_vars: dict[str, str] = Field(default_factory=dict)
     resources: dict[str, Any] = Field(default_factory=dict)
     key: str | None = None
+    cluster_name: str | None = None
 
 
 class AgentSpec(BaseModel):

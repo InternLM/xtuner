@@ -939,6 +939,8 @@ class SandboxPool:
                 record.metadata["sandbox_create_attempts"] = attempt
             try:
                 create_kwargs: dict[str, Any] = {}
+                if spec.cluster_name:
+                    create_kwargs["cluster_name"] = spec.cluster_name
                 if spec.key:
                     create_kwargs["key"] = spec.key
                 if spec.env_vars:
