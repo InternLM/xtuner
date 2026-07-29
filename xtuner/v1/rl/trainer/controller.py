@@ -338,9 +338,9 @@ class TrainingController:
             ]
         )
 
-    def update_weights(self):
+    def update_weights(self, need_register: bool = True):
         """Update the weights of the training workers."""
-        handles = [worker.update_weights.remote() for worker in self.workers]
+        handles = [worker.update_weights.remote(need_register=need_register) for worker in self.workers]
         ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
 

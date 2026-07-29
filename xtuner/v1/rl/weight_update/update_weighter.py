@@ -9,7 +9,7 @@ from .data import (
     RolloutWeightUpdateTarget,
     WeightTransportType,
 )
-from .transport import IPCWeightTransport, NCCLWeightTransport, WeightTransport
+from .transport import CheckpointEngineWeightTransport, IPCWeightTransport, NCCLWeightTransport, WeightTransport
 from .weight_iterator import WeightIterator
 
 
@@ -67,7 +67,7 @@ class UpdateWeighter:
         if self._transport is None:
             self._set_transport()
 
-    def update_weights(self):
+    def update_weights(self, need_register: bool = True):
         """Update the model weights."""
 
         assert self.rollout_info is not None, "bind_rollout_weight_update() must be called before update_weights()."
@@ -76,7 +76,7 @@ class UpdateWeighter:
             f"backend={self.rollout_info.backend!r}."
         )
         assert self.weight_iterator is not None, "Weight iterator is not initialized."
-        self._transport.update(self.weight_iterator)
+        self._transport.update(self.weight_iterator, need_register=need_register)
 
     def _set_transport(self) -> None:
         rollout_info = self.rollout_info
@@ -90,6 +90,13 @@ class UpdateWeighter:
             )
         elif rollout_info.transport_type == "nccl":
             self._transport = NCCLWeightTransport(rank=self.rank, logger=self.logger, rollout_info=rollout_info)
+        elif rollout_info.transport_type == "checkpoint_engine":
+            assert rollout_info.rollout_config.enable_checkpoint_engine is True
+            self._transport = CheckpointEngineWeightTransport(
+                rank=self.rank,
+                logger=self.logger,
+                rollout_info=rollout_info,
+            )
         else:
             raise NotImplementedError
 
