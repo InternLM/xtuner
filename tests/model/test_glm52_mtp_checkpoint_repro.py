@@ -1,8 +1,7 @@
 """GLM-5.2 MTP checkpoint 的真实训练回归测试。
 
 TestGlm52CompiledMTPCheckpoint
-    test_shared_mtp_depths_train_with_compile_and_topk_offload: 共享 MTP 深度可在 compile/offload 下训练
-        （GLM-5.2 兼容待做，暂 xfail）。
+    test_shared_mtp_depths_train_with_compile_and_topk_offload: 共享 MTP 深度可在 compile/offload 下训练。
 TestGlm52MicroBatchMTPCheckpoint
     test_nested_micro_batch_inputs_preserve_gradients: EP2 micro2 的嵌套 embedding 梯度可正确反传。
 """
@@ -12,7 +11,6 @@ import os
 import unittest
 from unittest import mock
 
-import pytest
 import torch
 
 from xtuner._testing import DeterministicDDPTestCase
@@ -105,14 +103,6 @@ def _model_item(engine: TrainEngine, start: int) -> ModelItem:
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class TestGlm52CompiledMTPCheckpoint(DeterministicDDPTestCase):
-    @pytest.mark.xfail(
-        reason="Shared MTP depths share one DSA top-k cache whose phase detection still relies on "
-        "`torch.is_grad_enabled()`, which only held for the removed reentrant implementation. Under "
-        "compile the resulting COMPUTE/REUSE divergence trips torch's "
-        "'Recomputed values ... have different metadata' check. Part of the pending GLM-5.2 "
-        "compatibility work; MTP gradients themselves are healthy (19/19 non-zero, matching base).",
-        strict=False,
-    )
     def test_shared_mtp_depths_train_with_compile_and_topk_offload(self):
         # 验证共享 MTP 深度可在 compile/offload 下训练且 loss 有限。
         self.create_pg("cuda")
