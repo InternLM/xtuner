@@ -269,9 +269,12 @@ class Muon(Optimizer):
         use_triton (bool): Whether to use Triton kernel for Newton-Schulz. Ignored if custom function is provided.
         newton_schulz_func (Callable | None): Use a custom Newton-Schulz function for orthogonalization.
             Signature is `func(input: Tensor, epsilon: float, num_experts: int) -> Tensor`.
-        enable_all2all (bool): Whether to allow the all-to-all communication strategy when a full batch
-            (batch size == world size) is available. Set to False to force the all-gather + reduce-scatter
-            (AGRS) path even for full batches. Useful on cluster topologies where all-to-all is unreliable.
+        enable_all2all (bool): Whether to allow the all-to-all communication strategy. Set to False to
+            force the all-gather + reduce-scatter (AGRS) path for all sharded batches. Useful on cluster
+            topologies where all-to-all is unreliable.
+        remainder_strategy (str): Communication strategy for parameter batches smaller than world size.
+            ``"agrs"`` uses all-gather + reduce-scatter without batch padding. ``"pad_all2all"`` restores
+            the original FSDP2 Muon behavior by zero-padding the batch to world size and using all-to-all.
 
     Muon optimizer algorithm by Keller Jordan: https://kellerjordan.github.io/posts/muon/
     FSDP2 Muon uses all-to-all communications: https://www.essential.ai/blog/infra
@@ -291,6 +294,7 @@ class Muon(Optimizer):
         use_triton: bool = False,
         newton_schulz_func: Callable | None = None,
         enable_all2all: bool = True,
+        remainder_strategy: Literal["agrs", "pad_all2all"] = "agrs",
     ):
         # Check hyperparameters
         if lr < 0.0:
@@ -301,6 +305,10 @@ class Muon(Optimizer):
             raise ValueError(f"Invalid betas: {betas}")
         if adjust_lr not in ("spectral_norm", "rms_norm", "none"):
             raise ValueError(f"Invalid adjust_lr value: {adjust_lr}. Must be 'spectral_norm', 'rms_norm', or 'none'.")
+        if remainder_strategy not in ("agrs", "pad_all2all"):
+            raise ValueError(f"Invalid remainder_strategy: {remainder_strategy!r}; expected 'agrs' or 'pad_all2all'.")
+        if not enable_all2all and remainder_strategy == "pad_all2all":
+            raise ValueError("remainder_strategy='pad_all2all' requires enable_all2all=True.")
 
         # Default arguments for each param group
         defaults = dict(
@@ -319,6 +327,7 @@ class Muon(Optimizer):
         )
         super().__init__(params, defaults)
         self._enable_all2all = enable_all2all
+        self._remainder_strategy = remainder_strategy
 
         # Pre-compute lr adjustment ratios for each Muon parameter based on global shape.
         # This must happen at init time because DTensor.shape here is guaranteed to be
@@ -665,9 +674,12 @@ class Muon(Optimizer):
                     lr_ratios = [s["lr_ratio"] for s in states]
                     assert len(set(lr_ratios)) == 1, f"Found different lr_ratios: {set(lr_ratios)}"
 
-                    # Use AGRS when: params can't fill a full all-to-all batch, or all-to-all is disabled.
+                    is_remainder = len(params) < group_world_size
+                    # When all-to-all is disabled, every sharded batch uses AGRS. Otherwise remainder
+                    # batches follow the configured strategy: current AGRS behavior or the original
+                    # zero-padded all-to-all behavior.
                     use_agrs = (
-                        (len(params) < group_world_size or not self._enable_all2all)
+                        (not self._enable_all2all or (is_remainder and self._remainder_strategy == "agrs"))
                         and sharded_tensor_dim is not None
                         and group_process_group is not None
                     )
@@ -695,7 +707,8 @@ class Muon(Optimizer):
                         )
 
                     else:
-                        # Full batch: determine communication strategy
+                        # Non-AGRS path. Remainder batches using ``pad_all2all`` are padded to
+                        # ``group_world_size`` by ``muon_update_batch_async``.
                         if skip_communication:
                             comm_strategy: Literal["agrs", "subgroup_allgather", "all_to_all", "local"] = "local"
                             comm_pg: ProcessGroup | None = None
