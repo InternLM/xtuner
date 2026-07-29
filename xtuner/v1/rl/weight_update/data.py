@@ -98,7 +98,7 @@ class RolloutWeightUpdateInfo:
     # Optional timeout used by checkpoint-engine
     checkpoint_engine_timeout: float | None = None
     # Whether to explicitly synchronize after registering checkpoint-engine tensors.
-    checkpoint_engine_sync_after_register: bool = False
+    checkpoint_engine_sync_after_register: bool = True
 
     @classmethod
     def from_targets(

@@ -115,7 +115,7 @@ class RolloutConfig(BaseModel):
         checkpoint_engine_timeout (float): Timeout in seconds for Checkpoint Engine rollout weight update requests.
             Defaults to 300.0.
         checkpoint_engine_sync_after_register (bool): Whether to explicitly synchronize the accelerator after
-            registering a checkpoint into Checkpoint Engine. Defaults to False.
+            registering a checkpoint into Checkpoint Engine. Defaults to True.
         rollout_max_batch_size_per_instance (int): Maximum batch size for the rollout worker. If not set, it
             will be determined automatically based on `context_length`. Defaults to 512.
         allow_over_concurrency_ratio (float): Deprecated compatibility option. Rollout runtime concurrency is
@@ -250,7 +250,7 @@ class RolloutConfig(BaseModel):
                 "Checkpoint Engine."
             ),
         ),
-    ] = False
+    ] = True
     rollout_max_batch_size_per_instance: Annotated[
         Optional[int],
         Parameter(

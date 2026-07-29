@@ -1010,7 +1010,6 @@ class CheckpointEngineWeightTransport:
         self._ps.register_checkpoint(name, files=[], named_tensors=shard, use_shared_memory_pool=True)
         if self._sync_after_register:
             DEVICE_MODULE.synchronize()
-        dist.barrier()
         self._checkpoint_name = name
 
     def _make_req_func(self, targets: Sequence[RolloutWeightUpdateTarget]):
