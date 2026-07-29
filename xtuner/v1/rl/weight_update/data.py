@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 
 RolloutBackend: TypeAlias = Literal["sglang", "vllm", "pytorch", "turbomind"]  # Rollout inference backend.
-WeightTransportType: TypeAlias = Literal["ipc", "nccl"]  # Supported weight transport types.
+WeightTransportType: TypeAlias = Literal["ipc", "nccl", "checkpoint_engine"]  # Supported weight transport types.
 
 
 def _resolve_rollout_backend(rollout_config: RolloutConfig) -> RolloutBackend:
@@ -40,11 +40,18 @@ def _validate_transport_type(
     assert weight_transport_type is not None, "bind_rollout_weight_update() must set weight_transport_type."
 
     transport_type = weight_transport_type.lower()
-    if transport_type not in ("ipc", "nccl"):
-        raise ValueError(f"Unsupported weight_transport_type: {weight_transport_type!r}. Expected 'ipc' or 'nccl'.")
+    if transport_type not in ("ipc", "nccl", "checkpoint_engine"):
+        raise ValueError(
+            f"Unsupported weight_transport_type: {weight_transport_type!r}. "
+            "Expected 'ipc', 'nccl' or 'checkpoint_engine'."
+        )
     transport_type = cast(WeightTransportType, transport_type)
     if transport_type == "nccl" and backend in ("vllm", "turbomind"):
         raise NotImplementedError(f"NCCL weight transport is not supported for {backend} backend.")
+    if transport_type == "checkpoint_engine" and backend != "sglang":
+        raise NotImplementedError(
+            f"Checkpoint Engine weight transport currently only supports sglang, got backend={backend!r}."
+        )
     return transport_type
 
 
@@ -86,6 +93,10 @@ class RolloutWeightUpdateInfo:
     weight_update_host: str | None = None
     # Optional port used by NCCL external weight update groups.
     weight_update_port: int | None = None
+    # Optional prefix used by checkpoint-engine
+    checkpoint_name_prefix: str | None = None
+    # Optional timeout used by checkpoint-engine
+    checkpoint_engine_timeout: float | None = None
 
     @classmethod
     def from_targets(
@@ -114,6 +125,8 @@ class RolloutWeightUpdateInfo:
             backend=backend,
             weight_update_host=weight_update_host,
             weight_update_port=weight_update_port if weight_update_port is not None else 30000,
+            checkpoint_name_prefix=rollout_config.checkpoint_name_prefix,
+            checkpoint_engine_timeout=rollout_config.checkpoint_engine_timeout,
         )
 
     @property

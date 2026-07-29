@@ -1611,11 +1611,12 @@ class RLColocateTrainer(BaseRLTrainer):
         self.train_controller.offload(target="all")
 
         self.rollout_controller = self._rollout_config.build(self._pg)
+        self._transport_type = "checkpoint_engine" if self._rollout_config.enable_checkpoint_engine else "ipc"
         bind_train_rollout(
             train_controller=self.train_controller,
             rollout_controller=self.rollout_controller,
             rollout_config=self._rollout_config,
-            weight_transport_type="ipc",
+            weight_transport_type=self._transport_type,
         )
 
         replay_buffer = cfg.replay_buffer_config.build()
@@ -1629,14 +1630,28 @@ class RLColocateTrainer(BaseRLTrainer):
             self._sync_weights_from_train_workers()
 
     def _sync_weights_from_train_workers(self) -> None:
-        self.logger.info("Rollout workers skip load weights, update weights from train workers.")
-        ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
-        self.train_controller.onload(target="model")
-        ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
-        self.train_controller.update_weights()
-        self.train_controller.offload(target="model")
-        ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
-        self.logger.info("Rollout workers updated weights from train workers.")
+        if self._transport_type == "checkpoint_engine":
+            self.logger.info("Rollout workers skip load weights, broadcast initial weights via Checkpoint Engine.")
+            ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+            ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+
+            start_time = time.perf_counter()
+            self.train_controller.update_weights(need_register=False)
+            end_time = time.perf_counter()
+            self.logger.info(f"Update weights from Checkpoint Engine took {end_time - start_time:.2f} seconds")
+
+            ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+            self.logger.info("Rollout workers updated weights from Checkpoint Engine.")
+            return
+        else:
+            self.logger.info("Rollout workers skip load weights, update weights from train workers.")
+            ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+            self.train_controller.onload(target="model")
+            ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+            self.train_controller.update_weights()
+            self.train_controller.offload(target="model")
+            ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+            self.logger.info("Rollout workers updated weights from train workers.")
 
     def fit(self):
         try:
@@ -1777,13 +1792,13 @@ class RLColocateTrainer(BaseRLTrainer):
                     train_controller=self.train_controller,
                     rollout_controller=self.rollout_controller,
                     rollout_config=self._rollout_config,
-                    weight_transport_type="ipc",
+                    weight_transport_type=self._transport_type,
                 )
                 ray.get(
                     self.rollout_controller.onload_weights.remote(),
                     timeout=RL_TRAINER_RAY_GET_TIMEOUT,
                 )
-                self.train_controller.update_weights()
+                self.train_controller.update_weights(need_register=True)
                 self.logger.info("Rollout workers update weights successfully in colocate mode")
                 self.train_controller.offload(target="model")
                 suspend_train_nccl = (
