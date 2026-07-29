@@ -387,6 +387,7 @@ class LoadCheckpointConfig(BaseModel):
     load_optimizer_args: bool = True
     load_dataset: bool = True
     load_scheduler: bool = True
+    offload_optimizer_first_step: bool = False
 
 
 class TrainerConfig(BaseModel):
@@ -742,14 +743,12 @@ class Trainer:
             self._checkpoint_interval = None
             self._snapshot_interval = None
 
+        self._offload_optimizer_first_step = False
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._load_checkpoint()
-            # A fresh process has a cold first forward/backward. Keep restored
-            # optimizer states out of that peak and restore them at optimizer.step.
-            optimizer_offloaded = False
-            if self._load_checkpoint_cfg.load_optimizer_states and DEVICE != "cpu":
-                optimizer_offloaded = self._engine.offload_optimizer_until_step()
-            if optimizer_offloaded:
+            self._offload_optimizer_first_step = self._load_checkpoint_cfg.offload_optimizer_first_step
+            if self._offload_optimizer_first_step:
+                self._engine.put_optimizer_to_device("cpu")
                 self.logger.info(
                     "[Checkpoint Resume] Optimizer states are temporarily offloaded "
                     "to CPU until the first optimizer step."
@@ -875,6 +874,9 @@ class Trainer:
                     )
 
                 grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
+                if self._offload_optimizer_first_step:
+                    self._engine.put_optimizer_to_device(DEVICE)
+                    self._offload_optimizer_first_step = False
                 self._engine.step_optimizer(grad_norm)
 
             time_after_train_step = time.time()

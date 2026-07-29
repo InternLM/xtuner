@@ -48,7 +48,7 @@ class FakeEngine:
         self.train_step_calls = 0
         self.grad_norm_calls = 0
         self.optimizer_step_calls = 0
-        self.optimizer_offload_calls = 0
+        self.optimizer_device_calls = []
 
         self.model = model = nn.Linear(10, 10)
         self.optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -90,8 +90,8 @@ class FakeEngine:
         self.grad_norm_calls += 1
         return torch.tensor(1.0)
 
-    def offload_optimizer_until_step(self):
-        self.optimizer_offload_calls += 1
+    def put_optimizer_to_device(self, device):
+        self.optimizer_device_calls.append(str(device))
         return True
 
     load_dcp = Mock()
@@ -961,6 +961,7 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path, capfd):
         load_optimizer_args=True,
         load_dataset=False,
         load_scheduler=False,
+        offload_optimizer_first_step=True,
     )
 
     load_artifacts = {}
@@ -1011,10 +1012,11 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path, capfd):
         if DEVICE == "cuda":
             assert torch.cuda.memory_reserved() < load_artifacts["reserved_memory"]
             assert "[Checkpoint Resume Memory]" in capfd.readouterr().err
-        assert trainer._engine.optimizer_offload_calls == 1
+        assert trainer._engine.optimizer_device_calls == ["cpu"]
         # assert trainer._load_checkpoint_cfg.load_dataset is False
         # assert trainer._load_checkpoint_cfg.load_scheduler is False
         trainer.fit()
+        assert trainer._engine.optimizer_device_calls == ["cpu", str(DEVICE)]
 
     # 4. 2nd create: resume train with auto_resume and load_checkpoint_cfg
     with (

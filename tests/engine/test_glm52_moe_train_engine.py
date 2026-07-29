@@ -474,29 +474,33 @@ class TestGlm52CheckpointEngine(DeterministicDDPTestCase):
                     if not isinstance(value, torch.Tensor):
                         continue
                     local_value = value.to_local() if isinstance(value, DTensor) else value
-                    optimizer_tensors.append(
-                        (state, state_key, local_value.device, local_value.detach().cpu().clone())
-                    )
+                    optimizer_tensors.append((state, state_key, local_value.detach().cpu().clone()))
 
-            self.assertTrue(restored.offload_optimizer_until_step())
-            for state, state_key, original_device, _ in optimizer_tensors:
+            self.assertTrue(restored.put_optimizer_to_device("cpu"))
+            for state, state_key, _ in optimizer_tensors:
                 value = state[state_key]
                 local_value = value.to_local() if isinstance(value, DTensor) else value
-                if original_device.type != "cpu":
-                    self.assertEqual(local_value.device.type, "cpu")
+                self.assertEqual(local_value.device.type, "cpu")
 
             resumed_seq_ctx = SequenceContext.from_input_ids((input_ids[:, :-1],), device=DEVICE)
             resumed_data = {"seq_ctx": resumed_seq_ctx, "shifted_labels": input_ids[:, 1:]}
             resumed_loss_ctx = restored.model.build_loss_ctx_batch([resumed_data], sp_mesh=None)[0]
             restored.train_step([ModelItem(seq_ctx=resumed_seq_ctx, loss_ctx=resumed_loss_ctx)])
             restored_grad_norm = restored.clip_grad_norm()
-            restored.step_optimizer(torch.full_like(restored_grad_norm, float("nan")))
+            self.assertTrue(restored.put_optimizer_to_device(DEVICE))
 
-            for state, state_key, original_device, expected in optimizer_tensors:
+            for state, state_key, expected in optimizer_tensors:
                 value = state[state_key]
                 local_value = value.to_local() if isinstance(value, DTensor) else value
-                self.assertEqual(local_value.device, original_device)
+                self.assertEqual(local_value.device.type, str(DEVICE))
                 self.assertTrue(torch.equal(local_value.cpu(), expected))
+
+            restored.step_optimizer(restored_grad_norm)
+            for state in restored.optimizer.state.values():
+                for value in state.values():
+                    if isinstance(value, torch.Tensor):
+                        local_value = value.to_local() if isinstance(value, DTensor) else value
+                        self.assertTrue(torch.isfinite(local_value).all())
         finally:
             dist.barrier()
             if dist.get_rank() == 0:

@@ -158,7 +158,6 @@ class TrainEngine:
         self.has_freeze_params = self.__has_freeze_params()
         self._async_checkpoint_pg: dist.ProcessGroup | None = None
         self._async_state_dict_cache: dict[str, Any] | None = None
-        self._optimizer_state_restore_plan: list[tuple[dict[str, Any], str, torch.device]] = []
 
     def __has_freeze_params(self) -> bool:
         has_freeze_params = False
@@ -277,14 +276,6 @@ class TrainEngine:
 
     def step_optimizer(self, grad_norm):
         """Step the optimizer to update the model parameters."""
-        if self._optimizer_state_restore_plan:
-            # Resume keeps optimizer states on CPU through the cold first
-            # forward/backward, then restores their original placement here.
-            for state, key, device in self._optimizer_state_restore_plan:
-                state[key] = state[key].to(device, non_blocking=True)
-            DEVICE_MODULE.synchronize()
-            self._optimizer_state_restore_plan = []
-
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
             log_rank0.warning(f"Gradient norm {grad_norm} is invalid, skipping optimizer step.")
             self.optimizer.zero_grad()
@@ -561,23 +552,6 @@ class TrainEngine:
                     if isinstance(val, torch.Tensor):
                         state[key] = val.to(device, non_blocking=True)
         DEVICE_MODULE.synchronize()
-        return True
-
-    def offload_optimizer_until_step(self) -> bool:
-        """Keep GPU optimizer states on CPU until the next optimizer step."""
-        if getattr(self.optim_cfg, "swap_optimizer", False) or not self.optimizer.state:
-            return False
-
-        restore_plan = []
-        for state in self.optimizer.state.values():
-            if isinstance(state, dict):
-                for key, val in state.items():
-                    if isinstance(val, torch.Tensor) and val.device.type != "cpu":
-                        restore_plan.append((state, key, val.device))
-
-        if not restore_plan or not self.put_optimizer_to_device("cpu"):
-            return False
-        self._optimizer_state_restore_plan = restore_plan
         return True
 
     def _maybe_precompute_float8_dynamic_scale_for_fsdp(self):
