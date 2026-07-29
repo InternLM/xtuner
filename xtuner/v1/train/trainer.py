@@ -744,8 +744,19 @@ class Trainer:
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._load_checkpoint()
-            # DCP load materializes temporary model and optimizer state. Release
-            # its cached device memory before the first resumed training step.
+            # A fresh process has a cold first forward/backward. Keep restored
+            # optimizer states out of that peak and restore them at optimizer.step.
+            optimizer_offloaded = False
+            if self._load_checkpoint_cfg.load_optimizer_states and DEVICE != "cpu":
+                optimizer_offloaded = self._engine.offload_optimizer_until_step()
+            if optimizer_offloaded:
+                self.logger.info(
+                    "[Checkpoint Resume] Optimizer states are temporarily offloaded "
+                    "to CPU until the first optimizer step."
+                )
+
+            # Release DCP's temporary state and the allocator cache left by the
+            # optimizer-state transfer before the first resumed training step.
             gc.collect()
             DEVICE_MODULE.empty_cache()
             if DEVICE != "cpu":

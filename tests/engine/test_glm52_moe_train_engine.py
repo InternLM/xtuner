@@ -9,7 +9,7 @@ TestGlm52PretrainedEngine
     test_tilewise_fp8_loss_curve_matches_bf16: tilewise FP8 训练轨迹接近 BF16。
     test_tilewise_fp8_ep4_train_step: tilewise FP8 与 EP4 联合训练产生有限 loss。
 TestGlm52CheckpointEngine
-    test_dcp_round_trip_preserves_model_and_optimizer: DCP 往返保留模型与优化器状态。
+    test_dcp_round_trip_preserves_model_and_optimizer: DCP 往返保留状态，并支持恢复首步暂存优化器状态。
 """
 
 import json
@@ -464,6 +464,39 @@ class TestGlm52CheckpointEngine(DeterministicDDPTestCase):
                         torch.equal(actual, expected),
                         f"optimizer state mismatch: {param_id}.{state_key}",
                     )
+
+            # A resumed process has a cold first forward/backward. Keep the
+            # restored optimizer tensors on CPU through that peak, then verify
+            # the optimizer-step boundary restores every tensor exactly.
+            optimizer_tensors = []
+            for state in restored.optimizer.state.values():
+                for state_key, value in state.items():
+                    if not isinstance(value, torch.Tensor):
+                        continue
+                    local_value = value.to_local() if isinstance(value, DTensor) else value
+                    optimizer_tensors.append(
+                        (state, state_key, local_value.device, local_value.detach().cpu().clone())
+                    )
+
+            self.assertTrue(restored.offload_optimizer_until_step())
+            for state, state_key, original_device, _ in optimizer_tensors:
+                value = state[state_key]
+                local_value = value.to_local() if isinstance(value, DTensor) else value
+                if original_device.type != "cpu":
+                    self.assertEqual(local_value.device.type, "cpu")
+
+            resumed_seq_ctx = SequenceContext.from_input_ids((input_ids[:, :-1],), device=DEVICE)
+            resumed_data = {"seq_ctx": resumed_seq_ctx, "shifted_labels": input_ids[:, 1:]}
+            resumed_loss_ctx = restored.model.build_loss_ctx_batch([resumed_data], sp_mesh=None)[0]
+            restored.train_step([ModelItem(seq_ctx=resumed_seq_ctx, loss_ctx=resumed_loss_ctx)])
+            restored_grad_norm = restored.clip_grad_norm()
+            restored.step_optimizer(torch.full_like(restored_grad_norm, float("nan")))
+
+            for state, state_key, original_device, expected in optimizer_tensors:
+                value = state[state_key]
+                local_value = value.to_local() if isinstance(value, DTensor) else value
+                self.assertEqual(local_value.device, original_device)
+                self.assertTrue(torch.equal(local_value.cpu(), expected))
         finally:
             dist.barrier()
             if dist.get_rank() == 0:
