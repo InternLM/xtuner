@@ -29,16 +29,33 @@ XTUNER_DETERMINISTIC = os.getenv("XTUNER_DETERMINISTIC") == "true"
 
 def set_deterministic():
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-    # Inductor 会在 torch.compile 前读取 dynamic_scale_rblock；确定性模式必须尽早关闭。
-    # torch.use_deterministic_algorithms(True) 只会让 reduction 的初始候选收敛成一个 config；
-    # dynamic rblock 仍可能在 precompile 后追加一个缩小 R*_BLOCK 的 launcher，并由 runtime
-    # benchmark 在多个 launcher 中选择。不同 rank/run 一旦选到不同 reduction 分块，浮点累加
-    # 顺序就会变化，最终可能得到 bitwise 不同的梯度。
+    # Inductor 有两个独立的 reduction 调优入口：dynamic rblock 会在 precompile 后调整
+    # launcher，而 INNER reduction 会在 deterministic 检查前返回 persistent/contiguous
+    # 多个候选，由 runtime benchmark 选出配置。确定性模式必须同时关闭前者并固定后者。
+    # Triton compile subprocess 不会继承 Python monkey patch，因此也要在当前进程串行编译，
+    # 避免不同 rank/run 采用不同的浮点累加顺序。
     os.environ["TORCHINDUCTOR_DYNAMIC_SCALE_RBLOCK"] = "0"
+    os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
     from torch._inductor import config as inductor_config
+    from torch._inductor.runtime import triton_heuristics
 
     inductor_config.dynamic_scale_rblock = False
+    inductor_config.compile_threads = 1
     torch.use_deterministic_algorithms(True, warn_only=True)
+
+    original_reduction_configs = triton_heuristics._reduction_configs
+    if not getattr(original_reduction_configs, "_xtuner_deterministic_patched", False):
+
+        def deterministic_reduction_configs(*args, **kwargs):
+            return original_reduction_configs(*args, **kwargs)[:1]
+
+        setattr(deterministic_reduction_configs, "_xtuner_deterministic_patched", True)
+        setattr(
+            deterministic_reduction_configs,
+            "_xtuner_original_reduction_configs",
+            original_reduction_configs,
+        )
+        triton_heuristics._reduction_configs = deterministic_reduction_configs
 
 
 # https://github.com/python/cpython/issues/82300#issuecomment-2169035092
