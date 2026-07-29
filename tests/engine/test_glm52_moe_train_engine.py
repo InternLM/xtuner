@@ -409,12 +409,23 @@ class TestGlm52CheckpointEngine(DeterministicDDPTestCase):
                 optim_cfg=AdamWConfig(),
                 fsdp_cfg=FSDPConfig(cpu_offload=False, ep_size=2),
             )
+            torch.manual_seed(0)
             engine.init_model_weights()
             with torch.no_grad():
                 for module in engine.model.modules():
                     if isinstance(module, NoAuxRouter):
                         bias = module.e_score_correction_bias
                         bias.copy_(torch.arange(bias.numel(), device=bias.device, dtype=bias.dtype))
+
+            input_ids = torch.arange(2, 12).view(1, -1) % config.vocab_size
+            seq_ctx = SequenceContext.from_input_ids((input_ids[:, :-1],), device=DEVICE)
+            data = {"seq_ctx": seq_ctx, "shifted_labels": input_ids[:, 1:]}
+            loss_ctx = engine.model.build_loss_ctx_batch([data], sp_mesh=None)[0]
+            engine.train_step([ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)])
+            grad_norm = engine.clip_grad_norm()
+            self.assertTrue(math.isfinite(float(grad_norm)))
+            engine.step_optimizer(grad_norm)
+
             engine.save_dcp(weights_dir=weights_dir)
             dist.barrier()
 
@@ -423,6 +434,9 @@ class TestGlm52CheckpointEngine(DeterministicDDPTestCase):
                 optim_cfg=AdamWConfig(),
                 fsdp_cfg=FSDPConfig(cpu_offload=False, ep_size=2),
             )
+            # Frozen parameters are restored from the same base checkpoint in
+            # Trainer; matching initialization models that behavior here.
+            torch.manual_seed(0)
             restored.init_model_weights()
             restored.load_dcp(weights_dir=weights_dir)
 
