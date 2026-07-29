@@ -496,6 +496,11 @@ class MoE(BaseModel):
             seq_ctx.position_ids is not None and seq_ctx.position_ids.shape[-1] == first_position_ids.shape[-1]
             for seq_ctx in seq_ctx_list
         ), "intra-layer micro-batches must have the same local sequence length"
+        # A slot owns both runtime offload state and pinned storage. TrainEngine
+        # finishes backward before the next accumulation group, so only contexts
+        # in this call can be live concurrently and need distinct slots.
+        for offload_slot, seq_ctx in enumerate(seq_ctx_list):
+            seq_ctx.dsa_topk_cache.offload_slot = offload_slot
 
         # Prepare input embeddings for all micro-batches
         if seq_ctx_list[0].input_ids is None:
@@ -624,7 +629,9 @@ class MoE(BaseModel):
                         input_ids=seq_ctx.input_ids.clone() if seq_ctx.input_ids is not None else None,
                         position_ids=seq_ctx.position_ids.clone(),
                         inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
-                        dsa_topk_cache=DSATopKCacheState(),
+                        dsa_topk_cache=DSATopKCacheState(
+                            offload_slot=seq_ctx.dsa_topk_cache.offload_slot,
+                        ),
                     )
                 )
 
@@ -747,6 +754,7 @@ class MoE(BaseModel):
         loss_ctx: MoELossContextDict | None,
         return_router_logits: bool = False,
     ) -> MoEModelOutputs:
+        seq_ctx.dsa_topk_cache.offload_slot = 0
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
 
@@ -854,7 +862,9 @@ class MoE(BaseModel):
                 input_ids=input_ids.clone() if input_ids is not None else None,
                 position_ids=position_ids.clone(),
                 inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
-                dsa_topk_cache=DSATopKCacheState(),
+                dsa_topk_cache=DSATopKCacheState(
+                    offload_slot=seq_ctx.dsa_topk_cache.offload_slot,
+                ),
             )
             # MTP uses its own mask; main mask's non-pad indices do not apply.
             mtp_nonpad_indices = torch.nonzero(mtp_seq_ctx.mask, as_tuple=True)[1]

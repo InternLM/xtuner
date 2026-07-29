@@ -229,6 +229,10 @@ class OffloadManager(metaclass=SingletonMeta):
     def exist(self, key):
         return key in self.items
 
+    def has_runtime_key(self, key):
+        """Return whether an offload key still owns a live runtime entry."""
+        return key in self.items or key in self.may_npu_tensors
+
     def assert_not_exist(self, key):
         if key not in self.items:
             raise RuntimeError(f"Key {key} already exist in items")

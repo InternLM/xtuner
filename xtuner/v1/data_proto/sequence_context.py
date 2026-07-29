@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import itertools
 from typing import cast
 
 import torch
@@ -7,9 +6,6 @@ from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
 from .utils import gather_for_sequence_parallel, pad_to_multiple_of, split_for_sequence_parallel
-
-
-_DSA_TOPK_CONTEXT_IDS = itertools.count()
 
 
 class DSATopKCacheState:
@@ -29,7 +25,7 @@ class DSATopKCacheState:
     offloaded: dict[int, str]  # OffloadManager key for each CPU-resident source.
     released_sources: set[int]  # Sources whose backward replay lifetime has ended.
     checkpoint_active: bool  # Whether checkpoint forward retained this cache for replay.
-    context_id: int  # Process-local identifier used to make offload keys unique.
+    offload_slot: int  # Stable offload slot among concurrently active microbatches.
     mtp_forward_uses_remaining: dict[int, int]  # Original-forward MTP uses left per shared source.
     mtp_replays_remaining: dict[int, int]  # Backward MTP replays left per shared source.
 
@@ -40,7 +36,7 @@ class DSATopKCacheState:
         offloaded: dict[int, str] | None = None,
         released_sources: set[int] | None = None,
         checkpoint_active: bool = False,
-        context_id: int | None = None,
+        offload_slot: int = 0,
         mtp_forward_uses_remaining: dict[int, int] | None = None,
         mtp_replays_remaining: dict[int, int] | None = None,
     ) -> None:
@@ -50,7 +46,7 @@ class DSATopKCacheState:
         self.offloaded = {} if offloaded is None else offloaded
         self.released_sources = set() if released_sources is None else released_sources
         self.checkpoint_active = checkpoint_active
-        self.context_id = next(_DSA_TOPK_CONTEXT_IDS) if context_id is None else context_id
+        self.offload_slot = offload_slot
         self.mtp_forward_uses_remaining = {} if mtp_forward_uses_remaining is None else mtp_forward_uses_remaining
         self.mtp_replays_remaining = {} if mtp_replays_remaining is None else mtp_replays_remaining
 

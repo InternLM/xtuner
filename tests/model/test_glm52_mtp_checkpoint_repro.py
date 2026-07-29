@@ -3,7 +3,7 @@
 TestGlm52CompiledMTPCheckpoint
     test_shared_mtp_depths_train_with_compile_and_topk_offload: 共享 MTP 深度可在 compile/offload 下训练。
 TestGlm52MicroBatchMTPCheckpoint
-    test_nested_micro_batch_inputs_preserve_gradients: EP2 micro2 的嵌套 embedding 梯度可正确反传。
+    test_nested_micro_batch_inputs_preserve_gradients: EP2 micro2 可反传且 pinned buffer 数量有界。
 """
 
 import math
@@ -23,6 +23,7 @@ from xtuner.v1.model.moe.glm52 import Glm52MoEConfig
 from xtuner.v1.module.attention import DSAMLAConfig
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
+from xtuner.v1.utils.activation_offload import OffloadManager
 
 
 def _tiny_mtp_config(ep_size: int, mtp_num_layers: int, compile_model: bool) -> Glm52MoEConfig:
@@ -77,6 +78,7 @@ def _build_engine(
     ep_size: int,
     mtp_num_layers: int,
     compile_model: bool,
+    recompute_ratio: float = 0.0,
 ) -> TrainEngine:
     engine = TrainEngine(
         model_cfg=_tiny_mtp_config(ep_size, mtp_num_layers, compile_model),
@@ -84,7 +86,7 @@ def _build_engine(
         fsdp_cfg=FSDPConfig(
             ep_size=ep_size,
             cpu_offload=False,
-            recompute_ratio=0.0,
+            recompute_ratio=recompute_ratio,
             torch_compile=compile_model,
         ),
         intra_layer_micro_batch=intra_layer_micro_batch,
@@ -104,7 +106,7 @@ def _model_item(engine: TrainEngine, start: int) -> ModelItem:
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class TestGlm52CompiledMTPCheckpoint(DeterministicDDPTestCase):
     def test_shared_mtp_depths_train_with_compile_and_topk_offload(self):
-        # 验证默认 reentrant checkpoint 可训练共享 MTP 深度且 loss 有限。
+        # 验证默认 reentrant checkpoint 可训练共享 MTP 深度，且 pinned buffer 跨 step 复用。
         self.create_pg("cuda")
         engine = _build_engine(
             intra_layer_micro_batch=1,
@@ -112,16 +114,26 @@ class TestGlm52CompiledMTPCheckpoint(DeterministicDDPTestCase):
             mtp_num_layers=2,
             compile_model=True,
         )
+        offload_manager = OffloadManager()
+        offload_manager.clear(clear_pin_memory_cache=True)
         try:
+            cache_sizes = []
             with mock.patch.dict(
                 os.environ,
                 {"XTUNER_ACTIVATION_OFFLOAD": "0", "XTUNER_DSA_TOPK_OFFLOAD": "1"},
             ):
-                step_info = engine.train_step([_model_item(engine, 2)])
+                for step in range(2):
+                    step_info = engine.train_step([_model_item(engine, 2 + step * 12)])
+                    grad_norm = engine.clip_grad_norm()
+                    engine.step_optimizer(grad_norm)
+                    cache_sizes.append(sum(key.startswith("dsa_topk_") for key in offload_manager.pin_memory_cache))
 
             assert math.isfinite(step_info["total_loss"])
             assert math.isfinite(step_info["logs_info"]["reduced_mtp_loss"])
+            assert math.isfinite(float(grad_norm))
+            assert cache_sizes == [1, 1], cache_sizes
         finally:
+            offload_manager.clear(clear_pin_memory_cache=True)
             del engine
             torch.cuda.empty_cache()
 
@@ -133,29 +145,37 @@ class TestGlm52CompiledMTPCheckpoint(DeterministicDDPTestCase):
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires 2 CUDA devices")
 class TestGlm52MicroBatchMTPCheckpoint(DeterministicDDPTestCase):
     def test_nested_micro_batch_inputs_preserve_gradients(self):
-        # 验证 EP2 micro2 的嵌套 future embedding 经 pytree checkpoint 后可完成真实训练步。
+        # 验证 EP2 micro2 的嵌套 embedding 可反传，且两个 slot 的 pinned buffer 跨 step 复用。
         self.create_pg("cuda")
         engine = _build_engine(
             intra_layer_micro_batch=2,
             ep_size=2,
             mtp_num_layers=1,
             compile_model=False,
+            recompute_ratio=1.0,
         )
+        offload_manager = OffloadManager()
+        offload_manager.clear(clear_pin_memory_cache=True)
         try:
+            cache_sizes = []
             with mock.patch.dict(
                 os.environ,
-                {"XTUNER_ACTIVATION_OFFLOAD": "0", "XTUNER_DSA_TOPK_OFFLOAD": "0"},
+                {"XTUNER_ACTIVATION_OFFLOAD": "0", "XTUNER_DSA_TOPK_OFFLOAD": "1"},
             ):
-                step_info = engine.train_step(
-                    [
-                        _model_item(engine, 2),
-                        _model_item(engine, 14),
-                    ]
-                )
+                for step in range(2):
+                    step_info = engine.train_step(
+                        [_model_item(engine, 2 + step * 48 + micro_batch * 12) for micro_batch in range(4)]
+                    )
+                    grad_norm = engine.clip_grad_norm()
+                    engine.step_optimizer(grad_norm)
+                    cache_sizes.append(sum(key.startswith("dsa_topk_") for key in offload_manager.pin_memory_cache))
 
             assert math.isfinite(step_info["total_loss"])
             assert math.isfinite(step_info["logs_info"]["reduced_mtp_loss"])
+            assert math.isfinite(float(grad_norm))
+            assert cache_sizes == [4, 4], cache_sizes
         finally:
+            offload_manager.clear(clear_pin_memory_cache=True)
             del engine
             torch.cuda.empty_cache()
 
