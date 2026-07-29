@@ -65,6 +65,7 @@ class PPOConfig(BaseModel):
     max_truncated_per_group: int | None = None
 
     # Keep the current sampled-token surprisal heuristic for the Actor only.
+    enable_actor_surprisal_scaling: bool = False
     surprisal_upper_bound: float = 0.65
     surprisal_lower_bound: float = 0.4
     tau_upper: float = 0.0

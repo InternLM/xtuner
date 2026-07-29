@@ -1578,6 +1578,9 @@ class BaseRLTrainer:
     ) -> tuple[float, float]:
         ppo_cfg = self._train_worker_cfg.ppo_cfg
         assert ppo_cfg is not None
+        if not ppo_cfg.enable_actor_surprisal_scaling:
+            return 1.0, 1.0
+
         logprob_sum = 0.0
         action_count = 0
         for item, mask in zip(aligned_items, actor_masks):
