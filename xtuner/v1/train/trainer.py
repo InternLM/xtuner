@@ -748,6 +748,14 @@ class Trainer:
             # its cached device memory before the first resumed training step.
             gc.collect()
             DEVICE_MODULE.empty_cache()
+            if DEVICE != "cpu":
+                free_memory, total_memory = DEVICE_MODULE.mem_get_info()  # type: ignore[attr-defined]
+                self.logger.info(
+                    "[Checkpoint Resume Memory] "
+                    f"allocated: {DEVICE_MODULE.memory_allocated() / (1024**3):.2f} GB, "  # type: ignore[attr-defined]
+                    f"reserved: {DEVICE_MODULE.memory_reserved() / (1024**3):.2f} GB, "  # type: ignore[attr-defined]
+                    f"free: {free_memory / (1024**3):.2f} GB, total: {total_memory / (1024**3):.2f} GB"
+                )
 
         self.hooks_config = self._setup_hooks(hooks_config=hooks_config)
 

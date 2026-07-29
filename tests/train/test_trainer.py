@@ -900,7 +900,7 @@ class TestHooksConfig(DeterministicDDPTestCase):
 
 @patch("xtuner.v1.train.trainer.Trainer._prepare_model_input", Mock(return_value=[]))
 @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
-def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
+def test_resume_and_load_checkpoint_cfg(tmp_path: Path, capfd):
     # 0. prepare environment
     os.environ["LOCAL_RANK"] = "0"
     os.environ["RANK"] = "0"
@@ -1005,6 +1005,7 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
         assert load_artifacts["temporary_state"]() is None
         if DEVICE == "cuda":
             assert torch.cuda.memory_reserved() < load_artifacts["reserved_memory"]
+            assert "[Checkpoint Resume Memory]" in capfd.readouterr().err
         # assert trainer._load_checkpoint_cfg.load_dataset is False
         # assert trainer._load_checkpoint_cfg.load_scheduler is False
         trainer.fit()
