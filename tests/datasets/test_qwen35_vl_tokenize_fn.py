@@ -215,6 +215,36 @@ class TestMLLMTokenizeFn(TestCase):
                     self.assertEqual(origin_fps_list, [20])
                     self.assertEqual(timestamps_list, [[0.25, 1.5]])
 
+    def test_qwen35_vl_video_url_cache(self):
+        sample = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "video_url",
+                            "video_url": {
+                                "url": "tennis_frames_2fps/",
+                                "image_wh": [1280, 720],
+                                "origin_video_length": 182,
+                                "origin_fps": 30.0,
+                                "processed_video_length": 13,
+                                "processed_fps": 2,
+                            },
+                        },
+                        {"type": "text", "text": "Describe the video."},
+                    ],
+                },
+                {"role": "assistant", "content": "A tennis match is being played."},
+            ]
+        }
+        self.tokenize_fn.set_state("cache")
+
+        result = self.tokenize_fn(sample)
+
+        self.assertGreater(result["num_tokens"], 0)
+        self.assertGreater(sum(result["num_img_tokens"]), 0)
+
     @parametrize.parametrize("add_vision_id", [(True,), (False,)])
     def test_qwen3_vl_sft_video(self, add_vision_id):
         QWEN35_VL_PATH = os.environ["QWEN3_5_MOE_PATH"]
