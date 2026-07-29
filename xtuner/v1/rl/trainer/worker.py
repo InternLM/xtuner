@@ -1551,10 +1551,19 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
     @ray_method
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         """Save Actor HF weights and, for PPO workers, Critic HF weights."""
+        if self._critic_engine is not None and self._ppo_phase != PPOPhase.ACTOR_READY:
+            raise RuntimeError(f"Cannot save PPO HF checkpoint from phase {self._ppo_phase.value}.")
+
         self._engine.save_hf(hf_dir, save_dtype)
         if self._critic_engine is not None:
             critic_hf_dir = Path(hf_dir) / self._SAVE_CRITIC_HF_DIR
-            self._critic_engine.save_hf(str(critic_hf_dir), save_dtype)
+            self._onload_critic()
+            try:
+                self._critic_engine.save_hf(str(critic_hf_dir), save_dtype)
+            finally:
+                self._offload_critic()
+                self._onload_actor()
+                self._set_ppo_phase(PPOPhase.ACTOR_READY)
 
     @ray_method
     def get_data_replicate_size(self) -> int:
