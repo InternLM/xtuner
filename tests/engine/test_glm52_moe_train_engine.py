@@ -208,7 +208,6 @@ class TestGlm52OptimizedEngine(DeterministicDDPTestCase):
         engine.init_model_weights()
         sp_mesh = init_data_mesh(str(DEVICE), sp_size=2)["sp"]
         data_batches = []
-        seq_ctx_list = []
 
         try:
             for micro_batch_idx in range(4):
@@ -218,7 +217,6 @@ class TestGlm52OptimizedEngine(DeterministicDDPTestCase):
                 data = {"seq_ctx": full_seq_ctx, "shifted_labels": input_ids[:, 1:]}
                 loss_ctx = engine.model.build_loss_ctx_batch([data], sp_mesh=sp_mesh)[0]
                 seq_ctx = full_seq_ctx.split(sp_mesh)
-                seq_ctx_list.append(seq_ctx)
                 data_batches.append(ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx))
 
             with mock.patch.dict(
@@ -234,9 +232,6 @@ class TestGlm52OptimizedEngine(DeterministicDDPTestCase):
             self.assertTrue(math.isfinite(step_info["logs_info"]["reduced_mtp_loss"]))
             self.assertTrue(math.isfinite(float(grad_norm)))
             self.assertTrue(engine.optimizer.state)
-            for seq_ctx in seq_ctx_list:
-                self.assertEqual(seq_ctx.dsa_topk_cache.indices, {})
-                self.assertEqual(seq_ctx.dsa_topk_cache.offloaded, {})
         finally:
             del engine
             torch.cuda.empty_cache()

@@ -1,3 +1,4 @@
+import os
 import re
 from pathlib import Path
 from typing import Literal
@@ -6,19 +7,27 @@ import torch
 from pydantic import Field, computed_field
 from typing_extensions import Self, override
 
-
 try:
     from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as HFGlmMoeDsaConfig
 except ImportError:
     HFGlmMoeDsaConfig = None  # type: ignore[misc, assignment]
+
+from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.loss import BalancingLossContext, ZLossContext
 from xtuner.v1.model.base import DEFAULT_FLOAT8_CFG, TorchCompileOption
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import DSAMLAConfig, DSAMultiLatentAttention
 from xtuner.v1.module.attention.dsa_topk_sharing import (
-    build_dsa_topk_release_plan,
-    configure_dsa_mtp_iteration_lifecycle,
-    configure_dsa_topk_decoder_lifecycle,
     dsa_topk_source_layer,
+    dsa_topk_source_layers,
+)
+from xtuner.v1.module.decoder_layer.dense_decoder_layer import (
+    DenseDecoderLayerMicroBatchOutput,
+    DenseDecoderLayerOutput,
+)
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
+    MoEDecoderLayerMicroBatchOutput,
+    MoEDecoderLayerOutput,
 )
 from xtuner.v1.module.mtp import MTPConfig, MTPLayer
 from xtuner.v1.module.rope import RopeParametersConfig
@@ -27,10 +36,8 @@ from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 from .moe import MoE
 
 
-# GLM DSA attention records cross-layer top-k indices in SequenceContext.
-# That Python-side cache mutation is intentionally kept out of strict fullgraph
-# regions, so decoder/pre-attn/DSA/dense boundaries allow graph breaks while
-# pure tensor MoE expert sub-stages stay fullgraph.
+# Keep the existing graph boundaries while explicit DSA top-k tensor inputs and
+# results are validated. Each boundary can be tightened independently later.
 MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
     "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward": TorchCompileOption(fullgraph=True),
     "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward": TorchCompileOption(fullgraph=False),
@@ -63,62 +70,202 @@ class Glm52MoE(MoE):
         return MOE_NON_EP_COMPILE_CFG
 
     @override
-    def _configure_model_specific_layer_lifecycle(self) -> None:
-        dsa_layers: list[tuple[torch.nn.Module, DSAMultiLatentAttention]] = []
-        mtp_attention: DSAMultiLatentAttention | None = None
+    def _configure_model_specific_layers(self) -> None:
+        dsa_layers: list[DSAMultiLatentAttention] = []
         for decoder_layer in self.layers.values():
             self_attn = decoder_layer.self_attn  # type: ignore[attr-defined]
             assert isinstance(self_attn, DSAMultiLatentAttention), (
                 f"GLM-5.2 requires DSAMultiLatentAttention, got {type(self_attn).__name__}."
             )
-            dsa_layers.append((decoder_layer, self_attn))
+            dsa_layers.append(self_attn)
 
-        num_physical_mtp_layers = 0
         if self.mtp_block is not None and self.config.mtp_config is not None:
             num_physical_mtp_layers = 1 if self.config.mtp_config.share_weights else self.config.mtp_config.num_layers
             for mtp_idx in range(num_physical_mtp_layers):
                 mtp_layer = self.mtp_block.layers[mtp_idx]
                 assert isinstance(mtp_layer, MTPLayer)
-                decoder_layer = mtp_layer.decoder_layer
-                self_attn = decoder_layer.self_attn  # type: ignore[attr-defined]
+                self_attn = mtp_layer.decoder_layer.self_attn  # type: ignore[attr-defined]
                 assert isinstance(self_attn, DSAMultiLatentAttention), (
                     f"GLM-5.2 MTP requires DSAMultiLatentAttention, got {type(self_attn).__name__}."
                 )
-                dsa_layers.append((decoder_layer, self_attn))
-                if mtp_idx == 0:
-                    mtp_attention = self_attn
 
-        sample_attn = dsa_layers[0][1]
-        release_plan = build_dsa_topk_release_plan(
-            num_main_layers=self.config.num_hidden_layers,
-            num_mtp_layers=num_physical_mtp_layers,
+        sample_attn = dsa_layers[0]
+        self._dsa_topk_source_layers = dsa_topk_source_layers(
+            num_layers=self.config.num_hidden_layers,
             indexer_types=sample_attn.indexer_types,
             index_skip_topk_offset=sample_attn.index_skip_topk_offset,
             index_topk_freq=sample_attn.index_topk_freq,
         )
-        for decoder_layer, self_attn in dsa_layers:
-            # DSA top-k sharing spans dense prefix, sparse MoE layers, and the
-            # optional MTP layer. The attention-local default release maps only
-            # see the main-stack indexer_types, so GLM-5.2 injects a model-level
-            # plan with the full physical layer topology.
-            configure_dsa_topk_decoder_lifecycle(
-                decoder_layer=decoder_layer,
-                attention=self_attn,
-                release_plan=release_plan,
+        self._dsa_topk_last_consumers = frozenset(
+            layer_idx
+            for layer_idx, source_layer_idx in enumerate(self._dsa_topk_source_layers)
+            if layer_idx == self.config.num_hidden_layers - 1
+            or self._dsa_topk_source_layers[layer_idx + 1] != source_layer_idx
+        )
+
+    @override
+    def _decoder_stack(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        seq_ctx: SequenceContext,
+        output: dict,
+        keep_router: bool,
+        balancing_ctx: BalancingLossContext | None,
+        z_ctx: ZLossContext | None,
+        nonpad_indices: torch.Tensor,
+        non_pad_token: int,
+        num_tokens_global: torch.Tensor | None,
+        z_world_size: int,
+    ) -> torch.Tensor:
+        """Run GLM layers while carrying DSA top-k IDs as explicit tensors."""
+        activation_offload = int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1
+        dsa_topk_offload = int(os.getenv("XTUNER_DSA_TOPK_OFFLOAD", "0")) == 1
+        dsa_topk_ids: torch.Tensor | None = None
+        offload_block_idx = 0
+
+        for idx, decoder_layer in self.layers.items():
+            layer_idx = int(idx)
+            is_source = self._dsa_topk_source_layers[layer_idx] == layer_idx
+            if is_source:
+                dsa_topk_ids = None
+            else:
+                assert dsa_topk_ids is not None, f"DSA shared layer {layer_idx} requires dsa_topk_ids."
+
+            offload_tensors = (
+                [hidden_states] if activation_offload and layer_idx >= self.config.first_k_dense_replace else []
+            )
+            if dsa_topk_offload and layer_idx in self._dsa_topk_last_consumers and dsa_topk_ids is not None:
+                offload_tensors.append(dsa_topk_ids)
+
+            with self._saved_tensors_offload_ctx(offload_block_idx, offload_tensors):
+                layer_results = decoder_layer(
+                    hidden_states,
+                    position_embeddings=position_embeddings,
+                    seq_ctx=seq_ctx,
+                    dsa_topk_ids=dsa_topk_ids,
+                )
+            if offload_tensors:
+                offload_block_idx += 1
+
+            if layer_idx < self.config.first_k_dense_replace:
+                dense_results: DenseDecoderLayerOutput = layer_results
+                hidden_states = dense_results["hidden_states"]
+                dsa_topk_ids = dense_results.get("dsa_topk_ids")
+            else:
+                moe_results: MoEDecoderLayerOutput = layer_results
+                hidden_states = moe_results["hidden_states"]
+                router_results = moe_results["router_logits"]
+                router_weights = moe_results["router_weights"]
+                router_topk_ids = moe_results["router_topk_ids"]
+                dsa_topk_ids = moe_results.get("dsa_topk_ids")
+                if keep_router:
+                    output["router_logits"][f"layer{idx}"] = self._maybe_offload_router(router_results)
+                    output["router_weights"][f"layer{idx}"] = self._maybe_offload_router(router_weights)
+                hidden_states = self.aux_loss.accumulate(
+                    selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
+                    selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
+                    selected_experts=router_topk_ids.index_select(0, nonpad_indices).contiguous(),
+                    hidden_states=hidden_states,
+                    balancing_ctx=balancing_ctx,
+                    z_ctx=z_ctx,
+                    num_tokens_local=non_pad_token,
+                    num_tokens_global=num_tokens_global,
+                    world_size=z_world_size,
+                )
+
+            assert dsa_topk_ids is not None, f"DSA layer {layer_idx} did not return dsa_topk_ids."
+            if self.config.return_hidden_states:
+                output["hidden_states"].append(hidden_states)
+
+        return hidden_states
+
+    @override
+    def _micro_batch_decoder_stack(
+        self,
+        *,
+        hidden_states_list: list[torch.Tensor],
+        position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
+        seq_ctx_list: list[SequenceContext],
+        router_logits_list: list[dict[str, torch.Tensor]],
+        keep_router: bool,
+        balancing_ctx: list[BalancingLossContext] | BalancingLossContext | None,
+        z_ctx: list[ZLossContext] | ZLossContext | None,
+        nonpad_indices: torch.Tensor,
+        non_pad_token: int,
+        num_tokens_global: torch.Tensor | None,
+        z_world_size: int,
+    ) -> list[torch.Tensor]:
+        """Run GLM layers while carrying explicit IDs per micro-batch."""
+        activation_offload = int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1
+        dsa_topk_offload = int(os.getenv("XTUNER_DSA_TOPK_OFFLOAD", "0")) == 1
+        dsa_topk_ids_list: list[torch.Tensor] | None = None
+        offload_block_idx = 0
+        for idx, decoder_layer in self.layers.items():
+            layer_idx = int(idx)
+            is_source = self._dsa_topk_source_layers[layer_idx] == layer_idx
+            if is_source:
+                dsa_topk_ids_list = None
+            else:
+                assert dsa_topk_ids_list is not None, f"DSA shared layer {layer_idx} requires dsa_topk_ids."
+
+            offload_tensors = (
+                list(hidden_states_list)
+                if activation_offload and layer_idx >= self.config.first_k_dense_replace
+                else []
+            )
+            if dsa_topk_offload and layer_idx in self._dsa_topk_last_consumers and dsa_topk_ids_list is not None:
+                offload_tensors.extend(dsa_topk_ids_list)
+
+            with self._saved_tensors_offload_ctx(offload_block_idx, offload_tensors):
+                layer_results = decoder_layer(
+                    hidden_states_list,
+                    position_embeddings=position_embeddings_list,
+                    seq_ctx=seq_ctx_list,
+                    dsa_topk_ids=dsa_topk_ids_list,
+                )
+            if offload_tensors:
+                offload_block_idx += 1
+
+            if layer_idx < self.config.first_k_dense_replace:
+                dense_results: DenseDecoderLayerMicroBatchOutput = layer_results
+                hidden_states_list = dense_results["hidden_states"]
+                dsa_topk_ids_list = dense_results.get("dsa_topk_ids")
+                assert dsa_topk_ids_list is not None, f"DSA layer {layer_idx} did not return dsa_topk_ids."
+                continue
+
+            moe_results: MoEDecoderLayerMicroBatchOutput = layer_results
+            hidden_states = moe_results["hidden_states"]
+            router_logits = moe_results["router_logits"]
+            router_weights = moe_results["router_weights"]
+            router_topk_ids = moe_results["router_topk_ids"]
+            dsa_topk_ids_list = moe_results.get("dsa_topk_ids")
+            assert dsa_topk_ids_list is not None, f"DSA layer {layer_idx} did not return dsa_topk_ids."
+
+            for micro_batch_idx, hidden_state in enumerate(hidden_states):
+                hidden_states_list[micro_batch_idx] = hidden_state
+                if keep_router:
+                    router_logits_list[micro_batch_idx][f"layer{idx}"] = self._maybe_offload_router(
+                        router_logits[micro_batch_idx]
+                    )
+
+            cat_router_weights = torch.cat(router_weights, dim=0)
+            cat_router_logits = torch.cat(router_logits, dim=0)
+            cat_router_topk_ids = torch.cat(router_topk_ids, dim=0)
+            hidden_states_list[0] = self.aux_loss.accumulate(
+                selected_router_weights=cat_router_weights.index_select(0, nonpad_indices).contiguous().float(),
+                selected_router_logits=cat_router_logits.index_select(0, nonpad_indices).contiguous().float(),
+                selected_experts=cat_router_topk_ids.index_select(0, nonpad_indices).contiguous(),
+                hidden_states=hidden_states_list[0],
+                balancing_ctx=balancing_ctx,
+                z_ctx=z_ctx,
+                num_tokens_local=non_pad_token,
+                num_tokens_global=num_tokens_global,
+                world_size=z_world_size,
             )
 
-        if (
-            self.mtp_block is not None
-            and self.config.mtp_config is not None
-            and self.config.mtp_config.share_weights
-            and self.config.index_share_for_mtp_iteration
-        ):
-            assert mtp_attention is not None
-            configure_dsa_mtp_iteration_lifecycle(
-                mtp_block=self.mtp_block,
-                attention=mtp_attention,
-                num_iterations=self.config.mtp_config.num_layers,
-            )
+        return hidden_states_list
 
     def to_hf_key_list(self, key: str) -> list[str]:
         if self.config.tie_word_embeddings and "lm_head" in key:

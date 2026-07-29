@@ -174,6 +174,7 @@ class MTPBlock(nn.Module):
         """
         mtp_outputs: list[MTPDepthOutput] = []
         current_hidden_states = hidden_states.detach() if self.mtp_config.detach_mtp_inputs else hidden_states
+        current_dsa_topk_ids: torch.Tensor | None = None
         current_seq_ctx = seq_ctx
 
         num_steps = self.mtp_config.num_layers
@@ -192,9 +193,18 @@ class MTPBlock(nn.Module):
                 future_embeddings=future_embeddings,
                 position_embeddings=position_embeddings,
                 seq_ctx=current_seq_ctx,
+                dsa_topk_ids=current_dsa_topk_ids,
             )
             current_hidden_states = layer_results["hidden_states"]
-            mtp_outputs.append(layer_results)
+            current_dsa_topk_ids = layer_results.get("dsa_topk_ids")
+            mtp_outputs.append(
+                {
+                    "hidden_states": current_hidden_states,
+                    "router_logits": layer_results["router_logits"],
+                    "router_weights": layer_results["router_weights"],
+                    "router_topk_ids": layer_results["router_topk_ids"],
+                }
+            )
 
         return mtp_outputs
 
@@ -211,6 +221,7 @@ class MTPBlock(nn.Module):
         # outputs_per_mb[mb_idx][depth_idx] to match the single-microbatch API shape.
         outputs_per_mb: list[list[MTPDepthOutput]] = [[] for _ in range(n)]
         current_hidden_states_list = list(hidden_states_list)
+        current_dsa_topk_ids_list: list[torch.Tensor] | None = None
         current_seq_ctx_list = list(seq_ctx_list)
 
         num_steps = self.mtp_config.num_layers
@@ -225,7 +236,9 @@ class MTPBlock(nn.Module):
                 future_embeddings=future_embeddings_list,
                 position_embeddings=position_embeddings_list,
                 seq_ctx=current_seq_ctx_list,
+                dsa_topk_ids=current_dsa_topk_ids_list,
             )
+            current_dsa_topk_ids_list = layer_results.get("dsa_topk_ids")
 
             for mb_idx in range(n):
                 outputs_per_mb[mb_idx].append(

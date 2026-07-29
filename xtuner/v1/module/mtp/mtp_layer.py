@@ -90,6 +90,7 @@ class MTPLayer(nn.Module):
         future_embeddings: torch.Tensor | list[torch.Tensor],
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
         seq_ctx: SequenceContext | list[SequenceContext],
+        dsa_topk_ids: torch.Tensor | list[torch.Tensor] | None = None,
     ) -> MoEDecoderLayerOutput | MoEDecoderLayerMicroBatchOutput:
         """Forward pass through the MTP layer.
 
@@ -107,10 +108,13 @@ class MTPLayer(nn.Module):
                 Rotary position embeddings ``(cos, sin)``, aligned with ``hidden_states``.
             seq_ctx (SequenceContext | list[SequenceContext]): Sequence context, aligned with
                 ``hidden_states``.
+            dsa_topk_ids (torch.Tensor | list[torch.Tensor] | None): Explicit source-layer DSA
+                top-k IDs, aligned with ``hidden_states``.
 
         Returns:
             MoEDecoderLayerOutput | MoEDecoderLayerMicroBatchOutput: The wrapped decoder layer's
-            outputs with the MTP final layernorm applied to the hidden states.
+            outputs with the MTP final layernorm applied to the hidden states. DSA layers
+            additionally return explicit ``dsa_topk_ids``.
         """
         if not isinstance(hidden_states, list):
             assert isinstance(future_embeddings, torch.Tensor), (
@@ -122,8 +126,10 @@ class MTPLayer(nn.Module):
             assert isinstance(position_embeddings, tuple) and len(position_embeddings) == 2, (
                 "position_embeddings should be a (cos, sin) tuple in single-microbatch mode"
             )
+            assert dsa_topk_ids is None or isinstance(dsa_topk_ids, torch.Tensor)
             return self._forward(
                 hidden_states=hidden_states,
+                dsa_topk_ids=dsa_topk_ids,
                 future_embeddings=future_embeddings,
                 position_embeddings=position_embeddings,
                 seq_ctx=seq_ctx,
@@ -138,8 +144,14 @@ class MTPLayer(nn.Module):
         assert isinstance(position_embeddings, list), (
             "position_embeddings should be a list aligned with hidden_states in multi-microbatch mode"
         )
+        if dsa_topk_ids is None:
+            dsa_topk_ids_list: list[torch.Tensor | None] = [None] * len(hidden_states)
+        else:
+            assert isinstance(dsa_topk_ids, list) and len(dsa_topk_ids) == len(hidden_states)
+            dsa_topk_ids_list = list(dsa_topk_ids)
         return self._micro_batch_forward(
             hidden_states_list=hidden_states,
+            dsa_topk_ids_list=dsa_topk_ids_list,
             future_embeddings_list=future_embeddings,
             position_embeddings_list=position_embeddings,
             seq_ctx_list=seq_ctx,
@@ -148,6 +160,7 @@ class MTPLayer(nn.Module):
     def _forward(
         self,
         hidden_states: torch.Tensor,
+        dsa_topk_ids: torch.Tensor | None,
         future_embeddings: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
@@ -158,26 +171,35 @@ class MTPLayer(nn.Module):
             projected,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
+            dsa_topk_ids=dsa_topk_ids,
         )
-        return {
+        output: MoEDecoderLayerOutput = {
             "hidden_states": self.final_layernorm(layer_results["hidden_states"]),
             "router_logits": layer_results["router_logits"],
             "router_weights": layer_results["router_weights"],
             "router_topk_ids": layer_results["router_topk_ids"],
         }
+        if (output_ids := layer_results.get("dsa_topk_ids")) is not None:
+            output["dsa_topk_ids"] = output_ids
+        return output
 
     def _micro_batch_forward(
         self,
         *,
         hidden_states_list: list[torch.Tensor],
+        dsa_topk_ids_list: list[torch.Tensor | None],
         future_embeddings_list: list[torch.Tensor],
         position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
         seq_ctx_list: list[SequenceContext],
     ) -> MoEDecoderLayerMicroBatchOutput:
         n = len(hidden_states_list)
-        assert len(future_embeddings_list) == n and len(position_embeddings_list) == n and len(seq_ctx_list) == n, (
-            "All per-microbatch inputs must share the same length"
-        )
+        assert (
+            len(dsa_topk_ids_list)
+            == len(future_embeddings_list)
+            == len(position_embeddings_list)
+            == len(seq_ctx_list)
+            == n
+        ), "All per-microbatch inputs must share the same length"
 
         # Run MTP preprocessing eagerly across all micro-batches so the underlying decoder
         # layer can overlap its EP communication in a single fused forward.
@@ -185,18 +207,28 @@ class MTPLayer(nn.Module):
             self._preprocess(hidden_states=h, future_embeddings=e)
             for h, e in zip(hidden_states_list, future_embeddings_list)
         ]
+        decoder_topk_ids: list[torch.Tensor] | None
+        if all(topk_ids is None for topk_ids in dsa_topk_ids_list):
+            decoder_topk_ids = None
+        else:
+            assert all(topk_ids is not None for topk_ids in dsa_topk_ids_list)
+            decoder_topk_ids = [topk_ids for topk_ids in dsa_topk_ids_list if topk_ids is not None]
 
         layer_results: MoEDecoderLayerMicroBatchOutput = self.decoder_layer(
             projected_list,
             position_embeddings=position_embeddings_list,
             seq_ctx=seq_ctx_list,
+            dsa_topk_ids=decoder_topk_ids,
         )
-        return {
+        output: MoEDecoderLayerMicroBatchOutput = {
             "hidden_states": [self.final_layernorm(hidden) for hidden in layer_results["hidden_states"]],
             "router_logits": layer_results["router_logits"],
             "router_weights": layer_results["router_weights"],
             "router_topk_ids": layer_results["router_topk_ids"],
         }
+        if (output_ids := layer_results.get("dsa_topk_ids")) is not None:
+            output["dsa_topk_ids"] = output_ids
+        return output
 
     def _preprocess(
         self,

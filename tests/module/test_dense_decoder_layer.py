@@ -72,13 +72,13 @@ class TestDenseDecoderLayerMicroBatch:
             hidden_states,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
-        )["hidden_states"]
+        )
         reference_outputs = [
             reference_layer(
                 hidden,
                 position_embeddings=position_embedding,
                 seq_ctx=context,
-            )["hidden_states"]
+            )
             for hidden, position_embedding, context in zip(
                 reference_hidden_states,
                 position_embeddings,
@@ -86,12 +86,18 @@ class TestDenseDecoderLayerMicroBatch:
             )
         ]
 
-        assert isinstance(outputs, list)
-        for output, reference_output in zip(outputs, reference_outputs):
+        output_hidden = outputs["hidden_states"]
+        output_ids = outputs["dsa_topk_ids"]
+        reference_hidden = tuple(result["hidden_states"] for result in reference_outputs)
+        reference_ids = tuple(result["dsa_topk_ids"] for result in reference_outputs)
+        for output, reference_output in zip(output_hidden, reference_hidden):
             torch.testing.assert_close(output, reference_output)
+        for dsa_topk_ids, reference_dsa_topk_ids in zip(output_ids, reference_ids):
+            torch.testing.assert_close(dsa_topk_ids, reference_dsa_topk_ids)
+            assert dsa_topk_ids.dtype == torch.int32
 
-        sum(output.sum() for output in outputs).backward()
-        sum(output.sum() for output in reference_outputs).backward()
+        sum(output.sum() for output in output_hidden).backward()
+        sum(output.sum() for output in reference_hidden).backward()
 
         for hidden, reference_hidden in zip(hidden_states, reference_hidden_states):
             torch.testing.assert_close(hidden.grad, reference_hidden.grad)

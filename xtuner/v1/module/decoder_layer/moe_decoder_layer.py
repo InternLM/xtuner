@@ -8,12 +8,14 @@ from torch.autograd.function import Function
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.nn import functional as F
+from typing_extensions import NotRequired
 
 from xtuner.v1.config.generate import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8 import Float8Config
 from xtuner.v1.module import (
     AttnOutputs,
+    DSAMultiLatentAttention,
     GatedDeltaNet,
     GatedDeltaNetConfig,
     GreedyRouterConfig,
@@ -54,6 +56,7 @@ class MoEDecoderLayerOutput(TypedDict):
     router_logits: RouterLogits
     router_weights: RouterWeights
     router_topk_ids: RouterTopKIds
+    dsa_topk_ids: NotRequired[torch.Tensor]
 
 
 class MoEDecoderLayerMicroBatchOutput(TypedDict):
@@ -67,6 +70,7 @@ class MoEDecoderLayerMicroBatchOutput(TypedDict):
     router_logits: list[RouterLogits]
     router_weights: list[RouterWeights]
     router_topk_ids: list[RouterTopKIds]
+    dsa_topk_ids: NotRequired[list[torch.Tensor]]
 
 
 class MoEActFnProtocol(Protocol):
@@ -331,6 +335,7 @@ class MoEDecoderLayer(nn.Module):
         *,
         seq_ctx: SequenceContext | list[SequenceContext],
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
+        dsa_topk_ids: torch.Tensor | list[torch.Tensor] | None = None,
     ) -> MoEDecoderLayerOutput | MoEDecoderLayerMicroBatchOutput:
         """Forward pass of the MoE decoder layer.
 
@@ -349,7 +354,7 @@ class MoEDecoderLayer(nn.Module):
         Returns:
             MoEDecoderLayerOutput | MoEDecoderLayerMicroBatchOutput: Hidden states and router
             results. Scalar fields for a single ``hidden_states`` tensor, per-micro-batch lists for
-            a list of them.
+            a list of them. DSA layers additionally return explicit ``dsa_topk_ids``.
         """
         if not isinstance(hidden_states, list):
             assert isinstance(seq_ctx, SequenceContext), (
@@ -358,24 +363,33 @@ class MoEDecoderLayer(nn.Module):
             assert isinstance(position_embeddings, tuple) and len(position_embeddings) == 2, (
                 "position_embeddings should be a tuple of two tensors (position_ids, position_embeds)"
             )
+            assert dsa_topk_ids is None or isinstance(dsa_topk_ids, torch.Tensor)
             return self._forward(
                 hidden_states=hidden_states,
                 seq_ctx=seq_ctx,
                 position_embeddings=position_embeddings,
-            )
-        else:
-            assert isinstance(seq_ctx, list) and len(seq_ctx) == len(hidden_states), (
-                "seq_ctx should be a list of SequenceContext instances with the same length as hidden_states"
-            )
-            assert isinstance(position_embeddings, list) and len(position_embeddings) == len(hidden_states), (
-                "position_embeddings should be a list of tuples with the same length as hidden_states"
+                dsa_topk_ids=dsa_topk_ids,
             )
 
-            return self._micro_batch_forward(
-                hidden_states_list=hidden_states,
-                seq_ctx_list=seq_ctx,
-                position_embeddings_list=position_embeddings,
-            )
+        n = len(hidden_states)
+        assert isinstance(seq_ctx, list) and len(seq_ctx) == n, (
+            "seq_ctx should be a list of SequenceContext instances with the same length as hidden_states"
+        )
+        assert isinstance(position_embeddings, list) and len(position_embeddings) == n, (
+            "position_embeddings should be a list of tuples with the same length as hidden_states"
+        )
+        if dsa_topk_ids is None:
+            dsa_topk_ids_list: list[torch.Tensor | None] = [None] * n
+        else:
+            assert isinstance(dsa_topk_ids, list) and len(dsa_topk_ids) == n
+            dsa_topk_ids_list = list(dsa_topk_ids)
+
+        return self._micro_batch_forward(
+            hidden_states_list=hidden_states,
+            dsa_topk_ids_list=dsa_topk_ids_list,
+            seq_ctx_list=seq_ctx,
+            position_embeddings_list=position_embeddings,
+        )
 
     def _hf_expert_forward_for_debug(self, hidden_states: torch.Tensor, router_results: RouterResults, origin_shape):
         # xtuner: num_experts * 2 * expert_dim, hidden_size
@@ -420,12 +434,14 @@ class MoEDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         seq_ctx: SequenceContext,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        dsa_topk_ids: torch.Tensor | None,
     ) -> MoEDecoderLayerOutput:
-        residual, hidden_states, router_results = self._pre_moe_forward(
+        residual, hidden_states, router_results, dsa_topk_ids = self._pre_moe_forward(
             hidden_states=hidden_states,
             seq_ctx=seq_ctx,
             position_embeddings=position_embeddings,
             state=ForwardState.TRAINING,
+            dsa_topk_ids=dsa_topk_ids,
         )
 
         origin_shape = hidden_states.shape
@@ -514,16 +530,20 @@ class MoEDecoderLayer(nn.Module):
             residual=residual,
             shared_experts_out=shared_experts_out,
         )
-        return {
+        output: MoEDecoderLayerOutput = {
             "hidden_states": hidden_states,
             "router_logits": router_results["logits"],
             "router_weights": router_results["router_weights"],
             "router_topk_ids": router_results["topk_ids"],
         }
+        if dsa_topk_ids is not None:
+            output["dsa_topk_ids"] = dsa_topk_ids
+        return output
 
     def _micro_batch_forward(
         self,
         hidden_states_list: list[torch.Tensor],
+        dsa_topk_ids_list: list[torch.Tensor | None],
         seq_ctx_list: list[SequenceContext],
         position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
     ) -> MoEDecoderLayerMicroBatchOutput:
@@ -534,6 +554,7 @@ class MoEDecoderLayer(nn.Module):
         intra_layer_micro_batch = len(hidden_states_list)
         residual_list: list[torch.Tensor] = []
         router_results_list: list[RouterResults] = []
+        dsa_topk_ids_out: list[torch.Tensor | None] = []
 
         pre_dispatched_list: list[PreDispatchResult] = []
         dispatched_list: list[DispatchResult] = []
@@ -542,18 +563,21 @@ class MoEDecoderLayer(nn.Module):
         # Attention + gate + pre-dispatch
         for (
             hidden_states,
+            dsa_topk_ids,
             seq_ctx,
             position_embeddings,
         ) in zip(
             hidden_states_list,
+            dsa_topk_ids_list,
             seq_ctx_list,
             position_embeddings_list,
         ):
-            residual, hidden_states, router_results = self._pre_moe_forward(
+            residual, hidden_states, router_results, dsa_topk_ids = self._pre_moe_forward(
                 hidden_states=hidden_states,
                 seq_ctx=seq_ctx,
                 position_embeddings=position_embeddings,
                 state=ForwardState.TRAINING,
+                dsa_topk_ids=dsa_topk_ids,
             )
             pre_moe_forward_out_list.append(hidden_states)
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -565,6 +589,7 @@ class MoEDecoderLayer(nn.Module):
             pre_dispatched_list.append(pre_dispatched)
             residual_list.append(residual)
             router_results_list.append(router_results)
+            dsa_topk_ids_out.append(dsa_topk_ids)
 
         post_dispatched_list: list[PostDispatchResult] = []
         experts_out_list: list[torch.Tensor] = []
@@ -659,12 +684,16 @@ class MoEDecoderLayer(nn.Module):
             )
             hidden_states_out_list.append(hidden_states)
 
-        return {
+        output: MoEDecoderLayerMicroBatchOutput = {
             "hidden_states": hidden_states_out_list,
             "router_logits": [router_results["logits"] for router_results in router_results_list],
             "router_weights": [router_results["router_weights"] for router_results in router_results_list],
             "router_topk_ids": [router_results["topk_ids"] for router_results in router_results_list],
         }
+        if any(dsa_topk_ids is not None for dsa_topk_ids in dsa_topk_ids_out):
+            assert all(dsa_topk_ids is not None for dsa_topk_ids in dsa_topk_ids_out)
+            output["dsa_topk_ids"] = [cast(torch.Tensor, dsa_topk_ids) for dsa_topk_ids in dsa_topk_ids_out]
+        return output
 
     def _pre_moe_forward(
         self,
@@ -673,7 +702,8 @@ class MoEDecoderLayer(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         state: ForwardState,
         past_key_values: list[list[torch.Tensor]] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, RouterResults]:
+        dsa_topk_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, RouterResults, torch.Tensor | None]:
         # NOTE: In order to allow `torch.compile` to compile the ops before and after attention as much as possible,
         # attention, post-layernorm and gate are implemented in one function
         residual = hidden_states
@@ -681,11 +711,21 @@ class MoEDecoderLayer(nn.Module):
 
         # Self Attention
         if state == ForwardState.TRAINING:
-            attn_outputs: AttnOutputs = self.self_attn(
-                hidden_states=hidden_states,
-                position_embeddings=position_embeddings,
-                seq_ctx=seq_ctx,
-            )
+            if dsa_topk_ids is None:
+                attn_outputs: AttnOutputs = self.self_attn(
+                    hidden_states=hidden_states,
+                    position_embeddings=position_embeddings,
+                    seq_ctx=seq_ctx,
+                )
+            else:
+                dsa_attn = cast(DSAMultiLatentAttention, self.self_attn)
+                attn_outputs = dsa_attn(
+                    hidden_states=hidden_states,
+                    position_embeddings=position_embeddings,
+                    seq_ctx=seq_ctx,
+                    dsa_topk_ids=dsa_topk_ids,
+                )
+            dsa_topk_ids = attn_outputs.get("dsa_topk_ids")
             hidden_states = attn_outputs["projected_output"]
         elif state == ForwardState.PREFILLING:
             assert past_key_values is not None, "past_key_values should be provided in pre-filling state"
@@ -719,7 +759,7 @@ class MoEDecoderLayer(nn.Module):
         else:
             rollout_routed_experts = None
         router_results: RouterResults = self.gate(hidden_states, rollout_routed_experts)
-        return residual, hidden_states, router_results
+        return residual, hidden_states, router_results, dsa_topk_ids
 
     def _shared_experts_forward(
         self,

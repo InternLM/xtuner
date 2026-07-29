@@ -9,6 +9,8 @@ TestGlm52CheckpointConversion
 TestGlm52RouterBias
     test_scratch_init_zeroes_main_and_mtp_biases: 从头初始化清零主干与 MTP router bias。
     test_update_bias_handles_main_and_shared_mtp_loads: bias 更新覆盖主干并聚合共享 MTP 深度。
+TestGlm52ExplicitDsaDataflow
+    test_model_forward_backward_with_explicit_dsa_dataflow: 模型通过显式 IDs 完成前反向。
 TestGlm52SequenceParallel
     test_mtp_loss_and_gradients_match_full_sequence: SP2 的 MTP loss 与梯度匹配完整序列。
 """
@@ -271,6 +273,28 @@ class TestGlm52RouterBias:
                 device=device,
             ),
         )
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+class TestGlm52ExplicitDsaDataflow:
+    def test_model_forward_backward_with_explicit_dsa_dataflow(self):
+        # 验证 GLM public forward/backward 经显式 DSA IDs 数据流产生有限 loss 和梯度。
+        config = _tiny_glm52_config()
+        config.mtp_config = None
+        model = config.build().to(device="cuda", dtype=torch.bfloat16)
+        model.init_weights()
+
+        input_ids = torch.tensor([[2, 3, 4, 5]], device="cuda")
+        shifted_labels = torch.tensor([[3, 4, 5, 6]], device="cuda")
+        seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cuda")
+        data = {"seq_ctx": seq_ctx, "shifted_labels": shifted_labels}
+        loss_ctx = model.build_loss_ctx_batch([data], sp_mesh=None)[0]
+
+        output = model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+        output["loss"].backward()
+
+        assert torch.isfinite(output["loss"])
+        assert any(parameter.grad is not None for parameter in model.parameters())
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires 2 CUDA devices")
