@@ -958,10 +958,25 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
         load_scheduler=False,
     )
 
+    load_artifacts = {}
+
+    def load_dcp(**_):
+        class TemporaryState:
+            pass
+
+        temporary_state = TemporaryState()
+        temporary_state.cycle = temporary_state
+        load_artifacts["temporary_state"] = weakref.ref(temporary_state)
+
+        if DEVICE == "cuda":
+            temporary_tensor = torch.empty(16 * 1024 * 1024, dtype=torch.uint8, device=DEVICE)
+            del temporary_tensor
+            load_artifacts["reserved_memory"] = torch.cuda.memory_reserved()
+
     # 2. operate
     with (
         patch.object(Dataloader, "load_state_dict") as mock_data_load_state_dict,
-        patch.object(FakeEngine, "load_dcp") as mock_load_dcp,
+        patch.object(FakeEngine, "load_dcp", side_effect=load_dcp) as mock_load_dcp,
         patch.object(SequentialLR, "load_state_dict") as mock_lr_load_state_dict,
     ):
         trainer = Trainer(
@@ -987,6 +1002,9 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
             load_states=True,
             load_args=True,
         )
+        assert load_artifacts["temporary_state"]() is None
+        if DEVICE == "cuda":
+            assert torch.cuda.memory_reserved() < load_artifacts["reserved_memory"]
         # assert trainer._load_checkpoint_cfg.load_dataset is False
         # assert trainer._load_checkpoint_cfg.load_scheduler is False
         trainer.fit()

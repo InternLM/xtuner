@@ -744,6 +744,10 @@ class Trainer:
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._load_checkpoint()
+            # DCP load materializes temporary model and optimizer state. Release
+            # its cached device memory before the first resumed training step.
+            gc.collect()
+            DEVICE_MODULE.empty_cache()
 
         self.hooks_config = self._setup_hooks(hooks_config=hooks_config)
 
