@@ -15,7 +15,14 @@ except ImportError:
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.model.base import DEFAULT_FLOAT8_CFG, TorchCompileOption
-from xtuner.v1.model.moe.moe import BalancingLossConfig, MoE, MoEConfig, ZLossConfig
+from xtuner.v1.model.moe.moe import (
+    MOE_RECOMPUTE_CFG,
+    BalancingLossConfig,
+    MoE,
+    MoEConfig,
+    ZLossConfig,
+)
+from xtuner.v1.model.utils import KeptCallables, RecomputeTargetMap, SaveUnit
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import (
     DenseDecoderLayerMicroBatchOutput,
     DenseDecoderLayerOutput,
@@ -63,6 +70,14 @@ MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
 MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
 MOE_EP_COMPILE_CFG.pop("xtuner.v1.model.moe.glm52.decoder_layer.GLM52MoEDecoderLayer.forward")
 
+# GLM uses sparse MLA rather than the generic flash-attention op named by
+# ``SaveUnit.ATTN``. Keep the MoE units and expose the narrow no-grad top-k
+# selection callable as the GLM-specific attention saving unit.
+GLM52_RECOMPUTE_CFG: RecomputeTargetMap = {
+    unit: target for unit, target in MOE_RECOMPUTE_CFG.items() if unit is not SaveUnit.ATTN
+}
+GLM52_RECOMPUTE_CFG[SaveUnit.DSA_INDEXER] = KeptCallables("xtuner.v1.model.moe.glm52.dsa_mla.DSAIndexer._select_topk")
+
 
 class Glm52MoE(MoE):
     dense_decoder_layer_cls = GLM52DenseDecoderLayer
@@ -76,6 +91,11 @@ class Glm52MoE(MoE):
         if self.config.ep_size > 1:
             return MOE_EP_COMPILE_CFG
         return MOE_NON_EP_COMPILE_CFG
+
+    @property
+    @override
+    def default_recompute_cfg(self) -> RecomputeTargetMap:
+        return GLM52_RECOMPUTE_CFG
 
     @override
     def _configure_model_specific_layers(self) -> None:

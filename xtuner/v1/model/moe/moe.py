@@ -1370,9 +1370,13 @@ class MoE(BaseModel):
                 if self._should_recompute(None, mtp_idx=mtp_idx) or (
                     self.config.mtp_config is not None and self.config.mtp_config.share_weights
                 ):  # share mtp head must recompute
-                    # Recompute units are declared against the decoder layer, so an MTP layer gets
-                    # the same mechanism with nothing kept: recomputed whole, as before.
-                    mtp_layer = apply_selective_checkpointing(mtp_layer)
+                    # MTP contains the same decoder units as the main stack. In particular, GLM's
+                    # no-grad DSA IDs must be kept here too or shared-depth replay reruns the indexer.
+                    mtp_layer = apply_selective_checkpointing(
+                        mtp_layer,
+                        self.kept_ops,
+                        keeps_any_unit=self.keeps_any_recompute_unit,
+                    )
                 self.mtp_block.layers[mtp_idx] = mtp_layer
 
                 reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1

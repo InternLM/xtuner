@@ -4,6 +4,7 @@ TestGlm52Config
     test_save_hf_matches_transformers_and_engine_contracts: HF round-trip 与推理引擎字段契约一致。
     test_from_hf_preserves_glm_specific_behavior: HF 配置转换保留 DSA、router 与 MTP 语义。
     test_rejects_shared_physical_mtp_indexer: 非法的 physical MTP indexer 计划会被拒绝。
+    test_recompute_cfg_exposes_only_narrow_dsa_indexer_callable: GLM 只声明窄 DSA indexer callable。
 TestGlm52CheckpointConversion
     test_tiny_model_round_trips_through_hf: tiny 主干与 MTP 参数可经公共 HF API 无损往返。
 TestGlm52RouterBias
@@ -32,8 +33,10 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import Glm52MoEConfig, get_model_config, get_model_config_from_hf
 from xtuner.v1.model.moe.glm52 import DSAMLAConfig
+from xtuner.v1.model.utils import KeptCallables
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
+from xtuner.v1.utils import RecomputeConfig, SaveUnit
 from xtuner.v1.utils.test_utils import init_data_mesh
 
 
@@ -183,6 +186,27 @@ class TestGlm52Config:
 
         with pytest.raises(ValueError, match="physical MTP indexer_types"):
             config.build()
+
+    def test_recompute_cfg_exposes_only_narrow_dsa_indexer_callable(self):
+        # GLM 不走通用 flash-attention op；`True` 应改为保留窄 indexer callable，
+        # 而不是声明一个实际不会命中的 ATTN unit。
+        config = _tiny_glm52_config()
+        config.mtp_config = MTPConfig(num_layers=1, share_weights=True)
+        config.recompute_cfg = RecomputeConfig(save=True)
+
+        with torch.device("meta"):
+            model = config.build()
+
+        expected = KeptCallables("xtuner.v1.model.moe.glm52.dsa_mla.DSAIndexer._select_topk")
+        assert model.default_recompute_cfg[SaveUnit.DSA_INDEXER] == expected
+        assert SaveUnit.ATTN not in model.default_recompute_cfg
+        assert model.keeps_any_recompute_unit
+
+        default_config = _tiny_glm52_config()
+        default_config.mtp_config = MTPConfig(num_layers=1, share_weights=True)
+        with torch.device("meta"):
+            default_model = default_config.build()
+        assert not default_model.keeps_any_recompute_unit
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
