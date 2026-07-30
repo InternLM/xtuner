@@ -1,5 +1,19 @@
-from .checkpointing import checkpoint_wrapper, pytree_reentrant_checkpoint
+from .checkpointing import apply_gradient_checkpointing
 from .misc import ModelForwardExtraLogInfo, module_dict_repr
+from .selective_checkpointing import (
+    MarkerInterval,
+    RecomputeIntervalMap,
+    RecomputeUnit,
+    checkpoint_record,
+)
 
 
-__all__ = ["checkpoint_wrapper", "pytree_reentrant_checkpoint", "module_dict_repr", "ModelForwardExtraLogInfo"]
+__all__ = [
+    "apply_gradient_checkpointing",
+    "module_dict_repr",
+    "ModelForwardExtraLogInfo",
+    "MarkerInterval",
+    "RecomputeIntervalMap",
+    "RecomputeUnit",
+    "checkpoint_record",
+]

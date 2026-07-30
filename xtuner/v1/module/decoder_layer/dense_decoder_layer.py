@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, TypedDict
 
 import torch
 import torch.nn as nn
@@ -12,6 +12,27 @@ from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
 
 from ..linear import build_linear
+
+
+class DenseDecoderLayerOutput(TypedDict):
+    """Per-micro-batch outputs of one :class:`DenseDecoderLayer` forward.
+
+    A dense layer only produces hidden states, but it reports them through the same keyed contract
+    as :class:`~xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer` so that the two
+    layer families stay interchangeable to their callers.
+    """
+
+    hidden_states: torch.Tensor
+
+
+class DenseDecoderLayerMicroBatchOutput(TypedDict):
+    """Outputs of one :class:`DenseDecoderLayer` forward over several micro-
+    batches.
+
+    Each field holds one entry per micro-batch, in input order.
+    """
+
+    hidden_states: list[torch.Tensor]
 
 
 class DenseMLP(nn.Module):
@@ -74,36 +95,54 @@ class DenseDecoderLayer(nn.Module):
 
     def forward(
         self,
-        *hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | list[torch.Tensor],
+        *,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
         seq_ctx: SequenceContext | list[SequenceContext],
-    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+    ) -> DenseDecoderLayerOutput | DenseDecoderLayerMicroBatchOutput:
         """Run equal-shaped training micro-batches in one layer invocation.
 
-        Keeping the micro-batch loop inside the decoder layer lets outer FSDP
-        and checkpoint wrappers materialize the layer only once, while each
-        attention call keeps its own ``SequenceContext``.
+        Keeping the micro-batch loop inside the decoder layer lets outer FSDP and checkpointing
+        materialize the layer only once, while each attention call keeps its own
+        ``SequenceContext``.
+
+        Args:
+            hidden_states (torch.Tensor | list[torch.Tensor]): Input hidden states, one tensor per
+                micro-batch.
+            position_embeddings (tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]]):
+                Rotary position embeddings ``(cos, sin)``, aligned with ``hidden_states``.
+            seq_ctx (SequenceContext | list[SequenceContext]): Sequence context, aligned with
+                ``hidden_states``.
+
+        Returns:
+            DenseDecoderLayerOutput | DenseDecoderLayerMicroBatchOutput: Output hidden states. A
+            single tensor for a single ``hidden_states`` tensor, a per-micro-batch list for a list
+            of them.
         """
-        if len(hidden_states) == 1:
+        if not isinstance(hidden_states, list):
             assert isinstance(position_embeddings, tuple) and len(position_embeddings) == 2
             assert isinstance(seq_ctx, SequenceContext)
-            return self._forward(
-                hidden_states=hidden_states[0],
-                position_embeddings=position_embeddings,
-                seq_ctx=seq_ctx,
-            )
+            return {
+                "hidden_states": self._forward(
+                    hidden_states=hidden_states,
+                    position_embeddings=position_embeddings,
+                    seq_ctx=seq_ctx,
+                )
+            }
 
         assert isinstance(position_embeddings, list) and len(position_embeddings) == len(hidden_states)
         assert isinstance(seq_ctx, list) and len(seq_ctx) == len(hidden_states)
         assert all(hidden.shape == hidden_states[0].shape for hidden in hidden_states)
-        return tuple(
-            self._forward(
-                hidden_states=hidden,
-                position_embeddings=position_embedding,
-                seq_ctx=context,
-            )
-            for hidden, position_embedding, context in zip(hidden_states, position_embeddings, seq_ctx)
-        )
+        return {
+            "hidden_states": [
+                self._forward(
+                    hidden_states=hidden,
+                    position_embeddings=position_embedding,
+                    seq_ctx=context,
+                )
+                for hidden, position_embedding, context in zip(hidden_states, position_embeddings, seq_ctx)
+            ]
+        }
 
     def _forward(
         self,

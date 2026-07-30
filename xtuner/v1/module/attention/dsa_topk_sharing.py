@@ -505,8 +505,8 @@ def register_dsa_topk_decoder_lifecycle_hooks(decoder_layer: torch.nn.Module) ->
     # recorded only pending actions and flushed them later. Remove that
     # transient state by keeping the entire residency transition at the decoder
     # boundary: the pre-hook launches H2D and the post-hook directly runs
-    # after_sparse_mla_use. Reentrant checkpoint replay invokes the decoder
-    # module and these hooks again, so main, micro-batch and MTP callers do not
+    # after_sparse_mla_use. Checkpoint recompute re-invokes the decoder module
+    # and these hooks along with it, so main, micro-batch and MTP callers do not
     # need separate lifecycle handling.
     #
     # This deliberately delays eager D2H until the decoder returns, losing its
