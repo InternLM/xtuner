@@ -12,7 +12,8 @@ import ray
 import requests
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
-from xtuner.v1.model.compose.qwen3_vl import Qwen3VLDense4BConfig
+from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
+
 from xtuner.v1.rl.loss import GRPOLossConfig as LossConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import (
@@ -28,7 +29,7 @@ from xtuner.v1.rl.utils import (
     set_cpu_resource_manager,
 )
 
-MODEL_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
+MODEL_PATH = os.environ["QWEN3_5_MOE_PATH"]
 
 
 class TestUpdateWeightColocate(unittest.TestCase):
@@ -56,7 +57,6 @@ class TestUpdateWeightColocate(unittest.TestCase):
 
     def tearDown(self):
         if self.train_controller is not None:
-            self.train_controller.cleanup()
             self.train_controller = None
         if self.rollout_controller is not None:
             ray.get(self.rollout_controller.shutdown.remote(), timeout=60)
@@ -71,7 +71,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
     def init_config(self, *, enable_checkpoint_engine: bool):
         nnodes = int(os.environ.get("WORLD_SIZE", "1"))
         num_workers = int(os.environ.get("COLOCATE_NUM_WORKERS", str(8 * nnodes)))
-        rollout_tp_size = int(os.environ.get("ROLLOUT_TP_SIZE", "2"))
+        rollout_tp_size = int(os.environ.get("ROLLOUT_TP_SIZE", "1"))
 
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator="GPU",
@@ -87,7 +87,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
             tokenizer_path=MODEL_PATH,
             rollout_cross_node_comm=False,
             tensor_parallel_size=rollout_tp_size,
-            expert_parallel_size=1,
+            expert_parallel_size=2,
             gpus_per_node=int(os.environ.get("GPUS_PER_NODE", "8")),
             dtype="bfloat16",
             skip_load_weights=False,
@@ -98,7 +98,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
             gpu_memory_utilization=float(os.environ.get("ROLLOUT_GPU_MEMORY_UTILIZATION", "0.8")),
         )
 
-        model_cfg = Qwen3VLDense4BConfig()
+        model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
         optim_cfg = AdamWConfig(lr=1e-6, foreach=False, weight_decay=0.1)
         fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
         lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
@@ -171,7 +171,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
             results.append(response.json())
         return results
 
-    def _bind_and_update_colocate_weights(self, train_controller, rollout_controller, transport_type: str):
+    def _bind_and_update_colocate_weights(self, train_controller, rollout_controller, transport_type: str, need_register:bool=False):
         targets = ray.get(rollout_controller.get_weight_update_targets.remote())
         train_controller.bind_rollout_weight_update(
             targets=targets,
@@ -181,12 +181,12 @@ class TestUpdateWeightColocate(unittest.TestCase):
         ray.get(rollout_controller.offload.remote(), timeout=300)
         train_controller.onload(target="model")
         ray.get(rollout_controller.onload_weights.remote(), timeout=300)
-        train_controller.update_weights(need_register=False)
+        train_controller.update_weights(need_register=need_register)
         train_controller.offload(target="model")
         ray.get(rollout_controller.onload_kvcache.remote(), timeout=300)
 
     @unittest.skip("skip sglang parameter-only weight check test until the parameter-check-only patch is applied")
-    def test_sglang_colocate_ipc_update_weight_equal_after_reset(self):
+    def test_sglang_colocate_ipc_update_weight(self):
         train_controller, rollout_controller = self._setup_engines(enable_checkpoint_engine=False)
 
         self._check_sglang_weights(rollout_controller, action="snapshot_parameters")
@@ -195,14 +195,22 @@ class TestUpdateWeightColocate(unittest.TestCase):
         self._check_sglang_weights(rollout_controller, action="compare_parameters")
 
     @unittest.skip("skip sglang parameter-only weight check test until the parameter-check-only patch is applied")
-    def test_sglang_colocate_checkpoint_engine_update_weight_equal_after_reset(self):
+    def test_sglang_colocate_checkpoint_engine_update_weight_disk_register(self):
         train_controller, rollout_controller = self._setup_engines(enable_checkpoint_engine=True)
 
         self._check_sglang_weights(rollout_controller, action="snapshot_parameters")
         self._check_sglang_weights(rollout_controller, action="reset_parameters")
-        self._bind_and_update_colocate_weights(train_controller, rollout_controller, "checkpoint_engine")
+        self._bind_and_update_colocate_weights(train_controller, rollout_controller, "checkpoint_engine", False)
         self._check_sglang_weights(rollout_controller, action="compare_parameters")
 
+    @unittest.skip("skip sglang parameter-only weight check test until the parameter-check-only patch is applied")
+    def test_sglang_colocate_checkpoint_engine_update_weight_train_register(self):
+        train_controller, rollout_controller = self._setup_engines(enable_checkpoint_engine=True)
+
+        self._check_sglang_weights(rollout_controller, action="snapshot_parameters")
+        self._check_sglang_weights(rollout_controller, action="reset_parameters")
+        self._bind_and_update_colocate_weights(train_controller, rollout_controller, "checkpoint_engine", True)
+        self._check_sglang_weights(rollout_controller, action="compare_parameters")
 
 if __name__ == "__main__":
     unittest.main()

@@ -328,8 +328,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         return self.update_weighter.bind_rollout_weight_update(*args, **kwargs)
 
     @ray_method
-    def update_weights(self, need_register: bool = True):
-        return self.update_weighter.update_weights(need_register=need_register)
+    def update_weights(self, need_register: bool = True, need_update: bool = True):
+        return self.update_weighter.update_weights(need_register=need_register, need_update=need_update)
 
     def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg

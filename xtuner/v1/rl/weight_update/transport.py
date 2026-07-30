@@ -449,7 +449,8 @@ class IPCWeightTransport(WeightTransport[IPCBackendAdapter]):
         if self.backend == "vllm":
             return VLLMIPCBackendAdapter(rollout_tp=self.rollout_info.tp)
         elif self.backend == "sglang":
-            return SGLangIPCBackendAdapter(rollout_tp=self.rollout_info.tp)
+            tp_size = self.rollout_info.tp if self.rollout_info.tp > 1 else self.rollout_info.ep
+            return SGLangIPCBackendAdapter(rollout_tp=tp_size)
         elif self.backend == "pytorch" or self.backend == "turbomind":
             return LMDeployIPCBackendAdapter(
                 rollout_tp=self.rollout_info.tp,
@@ -946,6 +947,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         """Load and shard tensors for PS-rank via HF weight_map."""
 
         from collections import defaultdict
+
         from safetensors import safe_open
 
         path = Path(checkpoint_path)
@@ -974,6 +976,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
             self._local_checkpoint_keys = set(named_tensors.keys())
         else:
             from safetensors import safe_open
+
             keys = []
             for file in files:
                 with safe_open(file, framework="pt", device="cpu") as f:
@@ -1092,10 +1095,8 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
             if rank != src:
                 return
             update_url = adapter.build_update_url(target.server_url)
-            # end = src + len(target.update_ranks)
             rank_to_socket = dict(enumerate(socket_paths))
             payload = {
-                # "zmq_handles": dict(socket_paths[src:end]),
                 "zmq_handles": dict(rank_to_socket[r] for r in target.update_ranks),
                 "flush_cache": True,
             }
@@ -1110,9 +1111,9 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
 
         return req_func
 
-    def _validate_broadcast_topology(self, targets: Sequence[RolloutWeightUpdateTarget], world_size: int) -> None:
-        """Ensure active ``update_ranks`` cover each train rank exactly
-        once."""
+    def _get_target_update_ranks(self, targets: Sequence[RolloutWeightUpdateTarget], world_size: int) -> list[int]:
+        """Return validated update ranks from active rollout targets."""
+
         covered: set[int] = set()
         for target in targets:
             if not target.update_ranks:
@@ -1125,35 +1126,56 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
                 if r in covered:
                     raise ValueError(f"Duplicate PS rank {r} in active update targets.")
                 covered.add(r)
-        missing = sorted(set(range(world_size)) - covered)
-        if missing:
-            raise ValueError(
-                "CE broadcast requires active target update_ranks to cover all train ranks, "
-                f"but missing ranks={missing}."
-            )
+        return sorted(covered)
 
-    def _broadcast_to_engines(self, checkpoint_name: str) -> None:
+    @staticmethod
+    def _can_broadcast_to_update_ranks(update_ranks: Sequence[int], world_size: int) -> bool:
+        """Whether the pending update ranks satisfy CE broadcast requirements.
+
+        Checkpoint Engine uses full broadcast only when every PS/train rank
+        participates. Partial active ranks must be sent through p2p by passing
+        ``ranks`` to ``ParameterServer.update``.
+        """
+
+        return len(update_ranks) == world_size and list(update_ranks) == list(range(world_size))
+
+    def _update_engines(self, checkpoint_name: str) -> None:
         """``gather_metas`` then ``update`` to push checkpoint to rollout
         engines."""
 
         targets = self.rollout_info.active_update_targets
         if not targets:
             raise RuntimeError("Checkpoint Engine found no active weight-update targets.")
-        self._validate_broadcast_topology(targets, self.ps_world_size)
+        update_ranks = self._get_target_update_ranks(targets, self.ps_world_size)
+        use_broadcast = self._can_broadcast_to_update_ranks(update_ranks, self.ps_world_size)
+        ranks = None if use_broadcast else update_ranks
         req_func = self._make_req_func(targets)
         self.logger.info(
             f"[checkpoint_engine] gather_metas+update name={checkpoint_name} "
-            f"active_targets={len(targets)}/{len(self.rollout_info.weight_update_targets)}"
+            f"active_targets={len(targets)}/{len(self.rollout_info.weight_update_targets)} "
+            f"method={'broadcast' if use_broadcast else 'p2p'} ranks={ranks}"
         )
         self._ps.gather_metas(checkpoint_name)
-        self._ps.update(checkpoint_name, req_func)
+        self._ps.update(checkpoint_name, req_func, ranks=ranks)
 
-    def update(self, weight_iterator: Any, need_register: bool = True, **_: Any) -> None:
-        """Update weights from Checkpoint Engine PS to rollout engines.
+    def update(self, weight_iterator: Any, need_register: bool = True, need_update: bool = True, **_: Any) -> None:
+        """Update rollout engine weights through the checkpoint parameter
+        server.
 
-        If need_register is True, register checkpoint from train engine. Used for update Checkpoint Engine PS. If
-        need_register is False, use the checkpoint name from the previous update. Used for recover rollout engines and
-        skip update .
+        The update consists of two stages: registering a checkpoint from the training
+        engine, and loading that checkpoint into the rollout engines.
+
+        Parameters
+        ----------
+        weight_iterator : Any
+            Iterator that provides the latest training engine weights.
+        need_register : bool, optional
+            Whether to register a new checkpoint from ``weight_iterator``. If False,
+            reuse the checkpoint name from the previous update.
+        need_update : bool, optional
+            Whether to load the registered checkpoint into rollout engines. Set this to
+            False to split registration and rollout update into separate calls, which
+            can reduce peak GPU memory usage under memory pressure.
         """
         if need_register:
             # 1. Register checkpoint from train engine
@@ -1162,19 +1184,8 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
             checkpoint_name = self._checkpoint_name
 
         # 2. Broadcast checkpoint to engines
-        self._broadcast_to_engines(checkpoint_name)
-        # self._ce_noop_adapter.before_update()
-        # try:
-        #     if need_register:
-        #         # 1. Register checkpoint from train engine
-        #         checkpoint_name = self.register_checkpoint_from_train_engine(weight_iterator)
-        #     else:
-        #         checkpoint_name = self._checkpoint_name
-
-        #     # 2. Broadcast checkpoint to engines
-        #     self._broadcast_to_engines(checkpoint_name)
-        # finally:
-        # self._ce_noop_adapter.after_update_all_groups()
+        if need_update:
+            self._update_engines(checkpoint_name)
 
     def send(self, batch: WeightUpdateBatch) -> None:
         raise NotImplementedError("CheckpointEngineWeightTransport uses update() end-to-end; send() is unused.")
