@@ -36,8 +36,7 @@ from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.model.base import ModelItem
-from xtuner.v1.model.moe.glm52 import Glm52MoEConfig
-from xtuner.v1.module.attention import DSAMLAConfig
+from xtuner.v1.model.moe.glm52 import DSAMLAConfig, Glm52MoEConfig
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouter, NoAuxRouterConfig
 from xtuner.v1.utils import pad_to_max_length

@@ -1,6 +1,6 @@
-"""DenseDecoderLayer 多 micro-batch 行为测试。
+"""GLM52DenseDecoderLayer 多 micro-batch 行为测试。
 
-TestDenseDecoderLayerMicroBatch
+TestGLM52DenseDecoderLayerMicroBatch
     test_batched_inputs_match_independent_forwards: 等长 micro-batch 的输出与梯度等价于独立调用。
 """
 
@@ -9,12 +9,12 @@ from copy import deepcopy
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.module.attention import DSAMLAConfig
-from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
+from xtuner.v1.model.moe.glm52 import DSAMLAConfig
+from xtuner.v1.model.moe.glm52.decoder_layer import GLM52DenseDecoderLayer
 
 
-def _build_dense_dsa_layer() -> DenseDecoderLayer:
-    return DenseDecoderLayer(
+def _build_dense_dsa_layer() -> GLM52DenseDecoderLayer:
+    return GLM52DenseDecoderLayer(
         hidden_size=4,
         intermediate_size=8,
         hidden_act="silu",
@@ -55,7 +55,7 @@ def _build_inputs() -> tuple[
     return hidden_states, position_embeddings, seq_ctx
 
 
-class TestDenseDecoderLayerMicroBatch:
+class TestGLM52DenseDecoderLayerMicroBatch:
     def test_batched_inputs_match_independent_forwards(self):
         # 验证一次多输入调用与逐 micro-batch 调用产生相同输出、输入梯度和参数梯度。
         torch.manual_seed(0)
