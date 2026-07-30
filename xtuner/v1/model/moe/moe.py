@@ -226,6 +226,10 @@ class MoE(BaseModel):
 
     config: MoEConfig
     ep_mesh: DeviceMesh | None = None
+    dense_decoder_layer_cls = DenseDecoderLayer
+    moe_decoder_layer_cls = MoEDecoderLayer
+    mtp_layer_cls = MTPLayer
+    mtp_block_cls = MTPBlock
 
     def __init__(self, config: MoEConfig):
         super().__init__(config)
@@ -763,38 +767,30 @@ class MoE(BaseModel):
         z_world_size: int,
     ) -> list[torch.Tensor]:
         """Run the main decoder stack for intra-layer micro-batches."""
-        activation_offload = int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1
-        offload_block_idx = 0
+        previous_layer_results: DenseDecoderLayerMicroBatchOutput | MoEDecoderLayerMicroBatchOutput | None = None
 
         for idx, decoder_layer in self.layers.items():
             layer_idx = int(idx)
+            layer_results = self._call_decoder_layer(
+                decoder_layer=decoder_layer,
+                layer_idx=layer_idx,
+                hidden_states=hidden_states_list,
+                position_embeddings=position_embeddings_list,
+                seq_ctx=seq_ctx_list,
+                previous_layer_results=previous_layer_results,
+            )
+            previous_layer_results = cast(
+                DenseDecoderLayerMicroBatchOutput | MoEDecoderLayerMicroBatchOutput,
+                layer_results,
+            )
             if layer_idx < self.config.first_k_dense_replace:
                 # Keep each micro-batch in its own SequenceContext while issuing
                 # one outer layer call, so FSDP materializes dense weights once.
-                dense_results = cast(
-                    DenseDecoderLayerMicroBatchOutput,
-                    decoder_layer(
-                        hidden_states_list,
-                        position_embeddings=position_embeddings_list,
-                        seq_ctx=seq_ctx_list,
-                    ),
-                )
+                dense_results = cast(DenseDecoderLayerMicroBatchOutput, layer_results)
                 hidden_states_list = dense_results["hidden_states"]
                 continue
 
-            offload_tensors = list(hidden_states_list) if activation_offload else []
-            with self._saved_tensors_offload_ctx(offload_block_idx, offload_tensors):
-                layer_results = cast(
-                    MoEDecoderLayerMicroBatchOutput,
-                    decoder_layer(
-                        hidden_states_list,
-                        position_embeddings=position_embeddings_list,
-                        seq_ctx=seq_ctx_list,
-                    ),
-                )
-            if offload_tensors:
-                offload_block_idx += 1
-
+            layer_results = cast(MoEDecoderLayerMicroBatchOutput, layer_results)
             hidden_states = layer_results["hidden_states"]
             router_logits = layer_results["router_logits"]
             router_weights = layer_results["router_weights"]
@@ -993,35 +989,24 @@ class MoE(BaseModel):
         z_world_size: int,
     ) -> torch.Tensor:
         """Run the main decoder stack for one sequence context."""
-        activation_offload = int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1
-        offload_block_idx = 0
+        previous_layer_results: DenseDecoderLayerOutput | MoEDecoderLayerOutput | None = None
 
         for idx, decoder_layer in self.layers.items():
             layer_idx = int(idx)
+            layer_results = self._call_decoder_layer(
+                decoder_layer=decoder_layer,
+                layer_idx=layer_idx,
+                hidden_states=hidden_states,
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+                previous_layer_results=previous_layer_results,
+            )
+            previous_layer_results = cast(DenseDecoderLayerOutput | MoEDecoderLayerOutput, layer_results)
             if layer_idx < self.config.first_k_dense_replace:
-                dense_results = cast(
-                    DenseDecoderLayerOutput,
-                    decoder_layer(
-                        hidden_states,
-                        position_embeddings=position_embeddings,
-                        seq_ctx=seq_ctx,
-                    ),
-                )
+                dense_results = cast(DenseDecoderLayerOutput, layer_results)
                 hidden_states = dense_results["hidden_states"]
             else:
-                offload_tensors = [hidden_states] if activation_offload else []
-                with self._saved_tensors_offload_ctx(offload_block_idx, offload_tensors):
-                    layer_results = cast(
-                        MoEDecoderLayerOutput,
-                        decoder_layer(
-                            hidden_states,
-                            position_embeddings=position_embeddings,
-                            seq_ctx=seq_ctx,
-                        ),
-                    )
-                if offload_tensors:
-                    offload_block_idx += 1
-
+                layer_results = cast(MoEDecoderLayerOutput, layer_results)
                 hidden_states = layer_results["hidden_states"]
                 router_results = layer_results["router_logits"]
                 router_weights = layer_results["router_weights"]
@@ -1046,6 +1031,55 @@ class MoE(BaseModel):
 
         return hidden_states
 
+    def _call_decoder_layer(
+        self,
+        *,
+        decoder_layer: nn.Module,
+        layer_idx: int,
+        hidden_states: torch.Tensor | list[torch.Tensor],
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
+        seq_ctx: SequenceContext | list[SequenceContext],
+        previous_layer_results: (
+            DenseDecoderLayerOutput
+            | DenseDecoderLayerMicroBatchOutput
+            | MoEDecoderLayerOutput
+            | MoEDecoderLayerMicroBatchOutput
+            | None
+        ),
+    ) -> (
+        DenseDecoderLayerOutput
+        | DenseDecoderLayerMicroBatchOutput
+        | MoEDecoderLayerOutput
+        | MoEDecoderLayerMicroBatchOutput
+    ):
+        """Call one decoder layer and contain its activation-offload window.
+
+        ``previous_layer_results`` is intentionally unused by the generic model; subclasses may
+        consume private cross-layer fields without widening the common decoder API.
+        """
+        if layer_idx < self.config.first_k_dense_replace:
+            return decoder_layer(
+                hidden_states,
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+            )
+
+        offload_tensors = list(hidden_states) if isinstance(hidden_states, list) else [hidden_states]
+        if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) != 1:
+            offload_tensors = []
+        offload_block_idx = sum(
+            self.config.first_k_dense_replace <= int(previous_idx) < layer_idx for previous_idx in self.layers
+        )
+        with self._saved_tensors_offload_ctx(
+            offload_block_idx,
+            offload_tensors,
+        ):
+            return decoder_layer(
+                hidden_states,
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+            )
+
     def build_embeddings(self, config: MoEConfig):
         return nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
 
@@ -1068,7 +1102,7 @@ class MoE(BaseModel):
                 )
 
             if layer_idx < config.first_k_dense_replace:
-                layers[str(layer_idx)] = DenseDecoderLayer(
+                layers[str(layer_idx)] = self.dense_decoder_layer_cls(
                     hidden_size=config.hidden_size,
                     intermediate_size=config.intermediate_size,
                     mlp_bias=config.mlp_bias,
@@ -1083,7 +1117,7 @@ class MoE(BaseModel):
                     layer_idx=layer_idx,
                 )
             else:
-                layers[str(layer_idx)] = MoEDecoderLayer(
+                layers[str(layer_idx)] = self.moe_decoder_layer_cls(
                     hidden_size=config.hidden_size,
                     intermediate_size=config.intermediate_size,
                     moe_intermediate_size=config.moe_intermediate_size,
@@ -1148,7 +1182,7 @@ class MoE(BaseModel):
         num_physical_layer = 1 if mtp_config.share_weights else mtp_config.num_layers
         for i in range(num_physical_layer):
             # Build MoE decoder layer for MTP
-            decoder_layer = MoEDecoderLayer(
+            decoder_layer = self.moe_decoder_layer_cls(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 moe_intermediate_size=config.moe_intermediate_size,
@@ -1177,7 +1211,7 @@ class MoE(BaseModel):
             )
 
             # Wrap decoder layer in MTPLayer
-            mtp_layer = MTPLayer(
+            mtp_layer = self.mtp_layer_cls(
                 hidden_size=config.hidden_size,
                 rms_norm_eps=config.rms_norm_eps,
                 rms_norm_type=config.rms_norm_type,
@@ -1186,7 +1220,7 @@ class MoE(BaseModel):
             )
             mtp_layers.append(mtp_layer)
 
-        return MTPBlock(
+        return self.mtp_block_cls(
             mtp_config=mtp_config,
             mtp_layers=mtp_layers,
         )

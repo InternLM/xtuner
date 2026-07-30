@@ -8,7 +8,8 @@ def dsa_topk_source_layer(
     index_skip_topk_offset: int,
     index_topk_freq: int,
 ) -> int:
-    """Resolve the source layer whose DSA top-k IDs a layer consumes."""
+    """Resolve the GLM-5.2 source layer whose DSA top-k IDs a layer
+    consumes."""
     if indexer_types is not None:
         if layer_idx < len(indexer_types) and indexer_types[layer_idx] == "full":
             return layer_idx

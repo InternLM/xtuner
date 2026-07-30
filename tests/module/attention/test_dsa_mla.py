@@ -26,9 +26,9 @@ import torch.distributed as dist
 
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.model.moe.glm52 import DSAMLAConfig
+from xtuner.v1.model.moe.glm52.decoder_layer import GLM52DenseDecoderLayer
 from xtuner.v1.model.utils import apply_selective_checkpointing
-from xtuner.v1.module.attention import DSAMLAConfig
-from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.ops.sparse_mla import dsa_topk_indices, sparse_mla
 from xtuner.v1.utils.test_utils import init_data_mesh
 
@@ -121,8 +121,8 @@ def _tiny_dsa_config(indexer_types: list[str] | None = None) -> DSAMLAConfig:
     )
 
 
-def _tiny_dsa_decoder(indexer_types: list[str], layer_idx: int) -> DenseDecoderLayer:
-    return DenseDecoderLayer(
+def _tiny_dsa_decoder(indexer_types: list[str], layer_idx: int) -> GLM52DenseDecoderLayer:
+    return GLM52DenseDecoderLayer(
         hidden_size=4,
         intermediate_size=8,
         hidden_act="silu",

@@ -9,6 +9,9 @@ from typing_extensions import overload
 from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
+from xtuner.v1.module.attention.attn_outputs import AttnOutputs
+from xtuner.v1.module.attention.mla import MLAConfig, MultiLatentAttention, mla_apply_rotary_pos_emb
+from xtuner.v1.module.linear import build_linear
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
 from xtuner.v1.ops.sparse_mla import (
@@ -20,10 +23,13 @@ from xtuner.v1.ops.sparse_mla import (
     get_sparse_mla,
 )
 
-from ..linear import build_linear
-from .attn_outputs import AttnOutputs
 from .dsa_topk_sharing import dsa_topk_source_layer
-from .mla import MLAConfig, MultiLatentAttention, mla_apply_rotary_pos_emb
+
+
+class GLM52AttnOutputs(AttnOutputs):
+    """GLM-5.2 attention outputs with explicit cross-layer DSA IDs."""
+
+    dsa_topk_ids: torch.Tensor
 
 
 class LayerNorm(nn.Module):
@@ -262,7 +268,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
         dsa_topk_ids: torch.Tensor | None = None,
-    ) -> AttnOutputs:
+    ) -> GLM52AttnOutputs:
         """Absorbed DSA-MLA forward for packed training (``bsz == 1``).
 
         Shapes use ``S`` for the local sequence length and ``S_g`` for the
@@ -384,6 +390,6 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
         dsa_topk_ids: torch.Tensor | None = None,
-    ) -> AttnOutputs: ...
+    ) -> GLM52AttnOutputs: ...
 
     __call__ = nn.Module.__call__
