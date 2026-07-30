@@ -8,6 +8,7 @@ from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.train import TrainerConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
+from xtuner.v1.utils import RecomputeUnit
 
 
 def _get_bool_env(name: str, default: bool = False) -> bool:
@@ -52,6 +53,8 @@ model_cfg.ep_size = ep_size
 model_cfg.compile_cfg = _get_bool_env("MODEL_COMPILE", False)
 model_cfg.float8_cfg = _get_float8_config()
 model_cfg.lm_loss_cfg = loss_cfg
+if recompute_units := os.environ.get("RECOMPUTE_CFG"):
+    model_cfg.recompute_cfg = [RecomputeUnit(unit.strip()) for unit in recompute_units.split(",")]
 if hasattr(model_cfg.attention, "sparse_mla_backend"):
     model_cfg.attention.sparse_mla_backend = os.environ.get("SPARSE_MLA_BACKEND", "tilelang")
 

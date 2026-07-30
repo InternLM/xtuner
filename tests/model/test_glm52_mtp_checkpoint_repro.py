@@ -1,7 +1,7 @@
 """GLM-5.2 MTP checkpoint 的真实训练回归测试。
 
 TestGlm52CompiledMTPCheckpoint
-    test_shared_mtp_depths_train_with_compile_and_topk_offload: 共享 MTP 深度可在 compile/offload 下训练。
+    test_shared_mtp_depths_train_with_selective_checkpoint_fp8_compile: selective checkpoint 与 FP8/MTP 兼容。
 TestGlm52MicroBatchMTPCheckpoint
     test_nested_micro_batch_inputs_preserve_gradients: EP2 micro2 的嵌套 embedding 梯度可正确反传。
 """
@@ -17,17 +17,19 @@ from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.config import AdamWConfig, FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
+from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.model.moe.glm52 import DSAMLAConfig, Glm52MoEConfig
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
+from xtuner.v1.utils import RecomputeUnit
 
 
 def _tiny_mtp_config(ep_size: int, mtp_num_layers: int, compile_model: bool) -> Glm52MoEConfig:
     return Glm52MoEConfig(
         vocab_size=32,
-        max_position_embeddings=64,
+        max_position_embeddings=128,
         pad_token_id=0,
         eos_token_id=1,
         hf_eos_token_id=[1],
@@ -76,14 +78,32 @@ def _build_engine(
     ep_size: int,
     mtp_num_layers: int,
     compile_model: bool,
+    selective_indexer: bool = False,
+    float8: bool = False,
 ) -> TrainEngine:
+    model_cfg = _tiny_mtp_config(ep_size, mtp_num_layers, compile_model)
+    if selective_indexer:
+        model_cfg.recompute_cfg = [RecomputeUnit.SAVE_DSA_INDEXER]
+    if float8:
+        # Tile-wise FP8 requires every GEMM input dimension to be 128-aligned.
+        model_cfg.attention.q_lora_rank = 128
+        model_cfg.attention.kv_lora_rank = 128
+        model_cfg.attention.head_dim = 64
+        model_cfg.attention.qk_nope_head_dim = 64
+        model_cfg.attention.qk_rope_head_dim = 64
+        model_cfg.attention.v_head_dim = 64
+        model_cfg.attention.index_head_dim = 128
+        model_cfg.float8_cfg = Float8Config(
+            scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+            scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+        )
     engine = TrainEngine(
-        model_cfg=_tiny_mtp_config(ep_size, mtp_num_layers, compile_model),
+        model_cfg=model_cfg,
         optim_cfg=AdamWConfig(lr=1e-3, foreach=False),
         fsdp_cfg=FSDPConfig(
             ep_size=ep_size,
             cpu_offload=False,
-            recompute_ratio=0.0,
+            recompute_ratio=1.0 if selective_indexer else 0.0,
             torch_compile=compile_model,
         ),
         intra_layer_micro_batch=intra_layer_micro_batch,
@@ -92,8 +112,8 @@ def _build_engine(
     return engine
 
 
-def _model_item(engine: TrainEngine, start: int) -> ModelItem:
-    input_ids = torch.arange(start, start + 6).view(1, -1) % engine.model_cfg.vocab_size
+def _model_item(engine: TrainEngine, start: int, num_tokens: int = 5) -> ModelItem:
+    input_ids = torch.arange(start, start + num_tokens + 1).view(1, -1) % engine.model_cfg.vocab_size
     seq_ctx = SequenceContext.from_input_ids((input_ids[:, :-1],), device="cuda")
     data = {"seq_ctx": seq_ctx, "shifted_labels": input_ids[:, 1:]}
     loss_ctx = engine.model.build_loss_ctx_batch([data], sp_mesh=None)[0]
@@ -102,21 +122,24 @@ def _model_item(engine: TrainEngine, start: int) -> ModelItem:
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class TestGlm52CompiledMTPCheckpoint(DeterministicDDPTestCase):
-    def test_shared_mtp_depths_train_with_compile_and_topk_offload(self):
-        # 验证共享 MTP 深度可在 compile/offload 下训练且 loss 有限。
+    def test_shared_mtp_depths_train_with_selective_checkpoint_fp8_compile(self):
+        # 复现真实 SFT 的 main selective checkpoint + MTP checkpoint + FP8/compile
+        # 组合，并验证共享 MTP 深度可完成训练。
         self.create_pg("cuda")
         engine = _build_engine(
             intra_layer_micro_batch=1,
             ep_size=1,
             mtp_num_layers=2,
             compile_model=True,
+            selective_indexer=True,
+            float8=True,
         )
         try:
             with mock.patch.dict(
                 os.environ,
                 {"XTUNER_ACTIVATION_OFFLOAD": "0", "XTUNER_DSA_TOPK_OFFLOAD": "1"},
             ):
-                step_info = engine.train_step([_model_item(engine, 2)])
+                step_info = engine.train_step([_model_item(engine, 2, num_tokens=128)])
 
             assert math.isfinite(step_info["total_loss"])
             assert math.isfinite(step_info["logs_info"]["reduced_mtp_loss"])

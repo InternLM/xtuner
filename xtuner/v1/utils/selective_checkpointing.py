@@ -73,6 +73,10 @@ class RecomputeUnit(StrEnum):
     SAVE_ATTN = "save_attn"
     """Keep the attention core: the flash-attention / SDPA call and its immediate surroundings."""
 
+    SAVE_DSA_INDEXER = "save_dsa_indexer"
+    """Keep the no-grad DSA top-k selection kernel that chooses sparse-
+    attention KV positions."""
+
     SAVE_MOE_GATE = "save_moe_gate"
     """Keep the MoE router: gating projection, top-k selection, and routing weights."""
 

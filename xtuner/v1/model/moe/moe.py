@@ -46,6 +46,7 @@ from xtuner.v1.model.base import (
     TransformerConfig,
 )
 from xtuner.v1.model.utils import (
+    MarkerInterval,
     ModelForwardExtraLogInfo,
     RecomputeIntervalMap,
     RecomputeUnit,
@@ -1352,9 +1353,12 @@ class MoE(BaseModel):
                 if self._should_recompute(None, mtp_idx=mtp_idx) or (
                     self.config.mtp_config is not None and self.config.mtp_config.share_weights
                 ):  # share mtp head must recompute
-                    # Marker intervals are declared against the decoder layer, so an MTP layer
-                    # gets the same mechanism with nothing kept: recomputed whole, as before.
-                    mtp_layer = apply_selective_checkpointing(mtp_layer, ())
+                    mtp_layer = apply_selective_checkpointing(
+                        mtp_layer,
+                        self.mtp_recompute_intervals,
+                        owner=self,
+                        layer_compiled_as_one_region=self._compiles_whole_decoder_layer(),
+                    )
                 self.mtp_block.layers[mtp_idx] = mtp_layer
 
                 reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1
@@ -1429,6 +1433,12 @@ class MoE(BaseModel):
             return {}
 
         return MOE_RECOMPUTE_CFG
+
+    @property
+    def mtp_recompute_intervals(self) -> list[MarkerInterval]:
+        """Selected intervals that are also valid inside this model's MTP
+        decoder."""
+        return []
 
     @property
     def need_update_bias(self) -> bool:

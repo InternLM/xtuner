@@ -22,6 +22,7 @@ from xtuner.v1.ops.sparse_mla import (
     get_dsa_topk_indices,
     get_sparse_mla,
 )
+from xtuner.v1.utils import checkpoint_record
 
 from .dsa_topk_sharing import dsa_topk_source_layer
 
@@ -90,6 +91,29 @@ class DSAIndexer(nn.Module):
         self.k_norm = LayerNorm(index_head_dim, eps=1e-6)
         # weights_proj.weight: [index_n_heads, hidden_size]
         self.weights_proj = build_linear(hidden_size, index_n_heads, bias=False)
+        self.selective_checkpoint_topk = False
+
+    @torch.compiler.disable
+    def _select_topk_outside_checkpoint_replay(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        weights: torch.Tensor,
+        seq_ctx: SequenceContext,
+    ) -> torch.Tensor:
+        # Marker state is eager-only. Keep the graph break around the selection
+        # kernel itself so the index projections and SP gather stay compiled.
+        checkpoint_record("dsa.indexer.begin")
+        topk_ids = self.dsa_topk_indices_func(
+            q,
+            k,
+            weights,
+            seq_ctx,
+            index_head_dim=self.index_head_dim,
+            index_topk=self.index_topk,
+        )
+        checkpoint_record("dsa.indexer.end")
+        return topk_ids
 
     @torch.no_grad()
     def forward(
@@ -155,6 +179,8 @@ class DSAIndexer(nn.Module):
         # k: [bsz, S_g, Di]
         k = gather_for_sequence_parallel(k, dim=1, sp_mesh=seq_ctx.sequence_parallel_mesh)
         # returns topk_indices: [S, 1, K]
+        if self.selective_checkpoint_topk:
+            return self._select_topk_outside_checkpoint_replay(q, k, weights, seq_ctx)
         return self.dsa_topk_indices_func(
             q,
             k,

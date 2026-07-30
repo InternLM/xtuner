@@ -1,7 +1,7 @@
 """GLM-5.2 TrainEngine 的训练、优化组合与 DCP 持久化行为测试。
 
 TestGlm52OptimizedEngine
-    test_sp2_ep4_micro2_compile_offload_train_step: SP2、EP4、micro2、compile 与双 offload 可联合训练。
+    test_sp2_ep4_micro2_compile_offload_train_step: selective checkpoint 与生产优化组合可联合训练。
 TestGlm52PretrainedEngine
     test_ep8_loss_curve_matches_reference: 预训练权重的 EP8 优化轨迹匹配数值基线。
     test_tilewise_fp8_loss_curve_matches_bf16: tilewise FP8 训练轨迹接近 BF16。
@@ -35,7 +35,7 @@ from xtuner.v1.model.base import ModelItem
 from xtuner.v1.model.moe.glm52 import DSAMLAConfig, Glm52MoEConfig
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouter, NoAuxRouterConfig
-from xtuner.v1.utils import pad_to_max_length
+from xtuner.v1.utils import RecomputeUnit, pad_to_max_length
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.utils.test_utils import init_data_mesh
 
@@ -186,9 +186,11 @@ def _run_loss_curve(
 @unittest.skipUnless(torch.cuda.device_count() >= 8, "requires 8 CUDA devices")
 class TestGlm52OptimizedEngine(DeterministicDDPTestCase):
     def test_sp2_ep4_micro2_compile_offload_train_step(self):
-        # 验证生产优化组合经两次梯度累积后 loss、梯度与优化器状态均有效。
+        # 验证 DSA selective checkpoint 与 SP2、EP4、micro2、compile、双 offload
+        # 联合执行后，loss、梯度与优化器状态均有效。
         self.create_pg("cuda")
         model_cfg = _tiny_sp_mtp_config()
+        model_cfg.recompute_cfg = [RecomputeUnit.SAVE_DSA_INDEXER]
         engine = TrainEngine(
             model_cfg=model_cfg,
             optim_cfg=AdamWConfig(lr=1e-3, foreach=False),
