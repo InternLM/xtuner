@@ -665,10 +665,15 @@ class RolloutWorker(SingleAcceleratorWorker):
                 "Content-Type": "application/json; charset=utf-8",
                 "Authorization": f"Bearer {self.config.api_key}",
             }
-            response = requests.get(
-                f"{self.server_url}/{self.endpoints['health_generate']}", headers=headers, timeout=10.0
-            )
-            return response.status_code == 200
+            health_url = f"{self.server_url}/{self.endpoints['health_generate']}"
+            response = requests.get(health_url, headers=headers, timeout=10.0)
+            if response.status_code != 200:
+                self.logger.warning(
+                    f"Health check returned HTTP {response.status_code} for {health_url}: "
+                    f"{response.text[:512]!r}"
+                )
+                return False
+            return True
         except requests.RequestException as e:
             self.logger.error(f"Health check failed for server {self.server_url}: {e}")
             return False

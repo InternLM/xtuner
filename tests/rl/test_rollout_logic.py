@@ -21,7 +21,7 @@ import httpx
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.rollout.controller import RolloutController
 from xtuner.v1.rl.rollout.sglang import SGLangWorker
-from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, RolloutHealthChecker
+from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, RolloutHealthChecker, check_worker_health
 from xtuner.v1.rl.rollout.worker import RolloutWorker
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
@@ -41,6 +41,20 @@ class _FakeWorker:
         self.call_log = []
         self.offload = _FakeRemoteMethod("offload", self.call_log)
         self.shutdown = _FakeRemoteMethod("shutdown", self.call_log)
+
+
+class _FakeAsyncHealthMethod:
+    def __init__(self, result):
+        self.result = result
+        self.call_count = 0
+
+    def remote(self):
+        self.call_count += 1
+
+        async def _result():
+            return self.result
+
+        return _result()
 
 
 class _FakeRolloutRouter:
@@ -122,6 +136,85 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(router.session_ids, [456])
         self.assertEqual(worker.generate.calls, [request_state])
         self.assertEqual(result.status, Status.COMPLETED)
+
+    def _build_health_controller(self, health_results):
+        controller = RolloutController.__new__(RolloutController)
+        controller.logger = MagicMock()
+        controller.health_checker = MagicMock()
+        controller.health_checker.is_paused.return_value = True
+        controller.worker_info_lock = threading.RLock()
+
+        actor = MagicMock()
+        refs = [f"health-{index}" for index in range(len(health_results))]
+        actor.check_health.remote.side_effect = refs
+        info = SimpleNamespace(actor=actor, url="http://worker-0", is_active=True)
+        controller.rank2info = {0: info}
+        result_by_ref = dict(zip(refs, health_results))
+        return controller, actor, info, result_by_ref
+
+    def test_final_health_check_retries_transient_failure(self):
+        controller, actor, info, result_by_ref = self._build_health_controller([False, True])
+        controller._restart_failed_workers = MagicMock()
+
+        with (
+            patch(
+                "xtuner.v1.rl.rollout.controller.ray.get",
+                side_effect=lambda ref, timeout=None: result_by_ref[ref],
+            ),
+            patch("xtuner.v1.rl.rollout.controller.time.sleep") as sleep_mock,
+        ):
+            controller.ensure_workers_healthy_before_training()
+
+        self.assertTrue(info.is_active)
+        self.assertEqual(actor.check_health.remote.call_count, 2)
+        sleep_mock.assert_called_once_with(15.0)
+        controller.health_checker.reset_failure_count.assert_called_once_with(0)
+        controller._restart_failed_workers.assert_not_called()
+
+    def test_final_health_check_recovers_only_after_three_failures(self):
+        controller, actor, info, result_by_ref = self._build_health_controller([False, False, False])
+        controller._restart_failed_workers = MagicMock(return_value=True)
+
+        with (
+            patch(
+                "xtuner.v1.rl.rollout.controller.ray.get",
+                side_effect=lambda ref, timeout=None: result_by_ref[ref],
+            ),
+            patch("xtuner.v1.rl.rollout.controller.time.sleep") as sleep_mock,
+        ):
+            controller.ensure_workers_healthy_before_training()
+
+        self.assertEqual(actor.check_health.remote.call_count, 3)
+        self.assertEqual(sleep_mock.call_count, 2)
+        controller._restart_failed_workers.assert_called_once_with(actor, expected_url="http://worker-0")
+        self.assertTrue(info.is_active)
+
+    def test_final_health_check_starts_round_concurrently_and_isolates_errors(self):
+        controller = RolloutController.__new__(RolloutController)
+        controller.logger = MagicMock()
+        controller.health_checker = MagicMock()
+        events = []
+        workers = {}
+        for rank in range(2):
+            actor = MagicMock()
+            actor.check_health.remote.side_effect = lambda rank=rank: events.append(f"remote-{rank}") or f"ref-{rank}"
+            workers[rank] = (actor, f"http://worker-{rank}", True)
+
+        def ray_get(ref, timeout=None):
+            events.append(f"get-{ref}")
+            if ref == "ref-0":
+                raise RuntimeError("health ref unavailable")
+            return True
+
+        with (
+            patch("xtuner.v1.rl.rollout.controller.FINAL_HEALTH_CHECK_ATTEMPTS", 1),
+            patch("xtuner.v1.rl.rollout.controller.ray.get", side_effect=ray_get),
+        ):
+            health_results = controller._check_workers_health_before_training(workers)
+
+        self.assertEqual(events[:2], ["remote-0", "remote-1"])
+        self.assertEqual(health_results, {0: False, 1: True})
+        controller.health_checker.reset_failure_count.assert_called_once_with(1)
 
 
 class TestSGLangWorker(unittest.TestCase):
@@ -217,6 +310,22 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.assertTrue(worker.receive_abort_request.is_set())
         worker._send_abort_request.assert_awaited_once_with()
+
+    def test_check_health_logs_non_200_response(self):
+        worker = RolloutWorker.__new__(RolloutWorker)
+        worker.server_url = "http://test"
+        worker.endpoints = {"health_generate": "health"}
+        worker.config = SimpleNamespace(api_key="test")
+        worker.logger = MagicMock()
+        response = SimpleNamespace(status_code=503, text='{"status":"unhealthy","message":"stalled"}')
+
+        with patch("xtuner.v1.rl.rollout.worker.requests.get", return_value=response):
+            is_healthy = worker.check_health()
+
+        self.assertFalse(is_healthy)
+        warning = worker.logger.warning.call_args.args[0]
+        self.assertIn("HTTP 503", warning)
+        self.assertIn("stalled", warning)
 
     async def test_safe_post_request_returns_aborted_without_sending_when_abort_flag_is_set(self):
         # safe post 在发送前发现 abort flag 时，应直接返回 REQUEST_ABORTED，不再发 HTTP 请求。
@@ -392,9 +501,84 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
 
 
 class TestRolloutHealthChecker(unittest.TestCase):
-    def _build_checker(self, workers_info):
-        config = SimpleNamespace(health_check_interval_seconds=10, health_check_failure_threshold=1)
+    def _build_checker(self, workers_info, *, failure_threshold=1):
+        config = SimpleNamespace(
+            health_check_interval_seconds=10,
+            health_check_failure_threshold=failure_threshold,
+        )
         return RolloutHealthChecker(config, workers_info)
+
+    def test_check_worker_health_probes_once(self):
+        health_method = _FakeAsyncHealthMethod(False)
+        worker = SimpleNamespace(check_health=health_method)
+
+        is_healthy = asyncio.run(check_worker_health(worker, 0, "http://worker-0", True))
+
+        self.assertFalse(is_healthy)
+        self.assertEqual(health_method.call_count, 1)
+
+    def test_failure_threshold_applies_across_run_once_calls(self):
+        worker = _FakeWorker()
+        workers_info = {0: SimpleNamespace(actor=worker, url="http://worker-0", is_active=True)}
+        checker = self._build_checker(workers_info, failure_threshold=3)
+
+        async def unhealthy_worker(*args, **kwargs):
+            return False
+
+        with (
+            patch("xtuner.v1.rl.rollout.utils.check_worker_health", side_effect=unhealthy_worker) as check_mock,
+            patch("xtuner.v1.rl.rollout.utils.ray.get") as ray_get_mock,
+        ):
+            checker.run_once()
+            checker.run_once()
+            self.assertTrue(workers_info[0].is_active)
+            ray_get_mock.assert_not_called()
+
+            checker.run_once()
+
+        self.assertFalse(workers_info[0].is_active)
+        self.assertEqual(check_mock.await_count, 3)
+        self.assertEqual(ray_get_mock.call_count, 2)
+
+    def test_success_resets_consecutive_failure_count(self):
+        worker = _FakeWorker()
+        workers_info = {0: SimpleNamespace(actor=worker, url="http://worker-0", is_active=True)}
+        checker = self._build_checker(workers_info, failure_threshold=3)
+        results = iter([False, False, True, False])
+
+        async def worker_health(*args, **kwargs):
+            return next(results)
+
+        with (
+            patch("xtuner.v1.rl.rollout.utils.check_worker_health", side_effect=worker_health),
+            patch("xtuner.v1.rl.rollout.utils.ray.get") as ray_get_mock,
+        ):
+            for _ in range(4):
+                checker.run_once()
+
+        self.assertTrue(workers_info[0].is_active)
+        self.assertEqual(checker._consecutive_failures, {0: 1})
+        ray_get_mock.assert_not_called()
+
+    def test_pause_waits_for_in_flight_check(self):
+        checker = self._build_checker({})
+        checker._pause_event = threading.Event()
+        checker._run_once_lock.acquire()
+        pause_finished = threading.Event()
+
+        def pause_checker():
+            checker.pause()
+            pause_finished.set()
+
+        pause_thread = threading.Thread(target=pause_checker)
+        pause_thread.start()
+        try:
+            self.assertFalse(pause_finished.wait(timeout=0.1))
+        finally:
+            checker._run_once_lock.release()
+
+        self.assertTrue(pause_finished.wait(timeout=1.0))
+        pause_thread.join(timeout=1.0)
 
     def test_shutdown_runs_when_offload_fails(self):
         # worker 健康检查失败且 offload 也失败时，health checker 应 shutdown 并标记 inactive。

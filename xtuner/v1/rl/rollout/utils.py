@@ -113,6 +113,9 @@ class RolloutHealthChecker:
         self._worker_infos_lock = worker_infos_lock
         self._check_interval = config.health_check_interval_seconds
         self._check_failure_threshold = config.health_check_failure_threshold
+        self._consecutive_failures: dict[int, int] = {}
+        self._failure_count_lock = threading.Lock()
+        self._run_once_lock = threading.Lock()
         self._stop_event: Optional[threading.Event] = None
         self._pause_event: Optional[threading.Event] = None
         self._thread: Optional[threading.Thread] = None
@@ -121,6 +124,8 @@ class RolloutHealthChecker:
         if self._thread and self._thread.is_alive():
             return
 
+        with self._failure_count_lock:
+            self._consecutive_failures.clear()
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()  # 启动时设置为暂停状态，开始generation后再调用restart方法恢复
@@ -146,6 +151,10 @@ class RolloutHealthChecker:
         if self._pause_event is None:
             return
         self._pause_event.set()
+        # Wait for an in-flight check (including worker cleanup) before the
+        # controller starts switching colocated resources.
+        with self._run_once_lock:
+            pass
         logger.info("RolloutHealthChecker paused.")
 
     def is_paused(self) -> bool:
@@ -158,6 +167,34 @@ class RolloutHealthChecker:
         logger.info("RolloutHealthChecker restarted.")
 
     def run_once(self) -> None:
+        with self._run_once_lock:
+            if self._pause_event is not None and self._pause_event.is_set():
+                return
+            self._run_once_locked()
+
+    def reset_failure_count(self, rank: int) -> None:
+        with self._failure_count_lock:
+            self._consecutive_failures.pop(rank, None)
+
+    def _increment_failure_count(self, rank: int) -> int:
+        with self._failure_count_lock:
+            failure_count = self._consecutive_failures.get(rank, 0) + 1
+            self._consecutive_failures[rank] = failure_count
+            return failure_count
+
+    def _worker_matches_snapshot(self, rank: int, checked_actor: Any, checked_url: str) -> bool:
+        if self._worker_infos_lock is None:
+            info = self._workers_info.get(rank)
+            return bool(
+                info is not None and info.is_active and info.actor == checked_actor and info.url == checked_url
+            )
+        with self._worker_infos_lock:
+            info = self._workers_info.get(rank)
+            return bool(
+                info is not None and info.is_active and info.actor == checked_actor and info.url == checked_url
+            )
+
+    def _run_once_locked(self) -> None:
         logger.debug("RolloutHealthChecker running health checks for all workers.")
         if self._worker_infos_lock is None:
             workers_snapshot = {
@@ -176,7 +213,7 @@ class RolloutHealthChecker:
             return
 
         tasks = [
-            check_worker_health(actor, rank, url, is_active, self._check_failure_threshold)
+            check_worker_health(actor, rank, url, is_active)
             for rank, actor, url, is_active in workers_to_check
         ]
 
@@ -185,22 +222,50 @@ class RolloutHealthChecker:
 
         check_results = asyncio.run(_run_checks())
         inactive_workers = []
-        for (rank, _, _, _), is_healthy in zip(workers_to_check, check_results):
-            if not is_healthy:
-                logger.warning(f"Worker {rank} failed health check. Marking as inactive.")
-                if self._worker_infos_lock is None:
-                    self._workers_info[rank].is_active = False
-                    inactive_worker = self._workers_info[rank].actor
-                else:
-                    with self._worker_infos_lock:
-                        self._workers_info[rank].is_active = False
-                        inactive_worker = self._workers_info[rank].actor
-                if inactive_worker is None:
-                    logger.error(f"[RolloutHealthChecker] Worker {rank} has no actor reference. Skipping shutdown.")
-                    continue
-                inactive_workers.append((rank, inactive_worker))
-            else:
+        for (rank, checked_actor, checked_url, _), is_healthy in zip(workers_to_check, check_results):
+            if is_healthy:
+                self.reset_failure_count(rank)
                 logger.debug(f"[RolloutHealthChecker] Worker {rank} passed health check.")
+                continue
+
+            if not self._worker_matches_snapshot(rank, checked_actor, checked_url):
+                self.reset_failure_count(rank)
+                logger.warning(
+                    f"[RolloutHealthChecker] Ignore stale health result for worker {rank}; "
+                    "the worker state changed while the check was running."
+                )
+                continue
+
+            failure_count = self._increment_failure_count(rank)
+            logger.warning(
+                f"Worker {rank} at {checked_url} failed health check. "
+                f"Consecutive failures: {failure_count}/{self._check_failure_threshold}."
+            )
+            if failure_count < self._check_failure_threshold:
+                continue
+
+            self.reset_failure_count(rank)
+            logger.warning(f"Worker {rank} reached health check failure threshold. Marking as inactive.")
+            inactive_worker = None
+            if self._worker_infos_lock is None:
+                info = self._workers_info.get(rank)
+                if info is not None and info.is_active and info.actor == checked_actor and info.url == checked_url:
+                    info.is_active = False
+                    inactive_worker = info.actor
+            else:
+                with self._worker_infos_lock:
+                    info = self._workers_info.get(rank)
+                    if info is not None and info.is_active and info.actor == checked_actor and info.url == checked_url:
+                        info.is_active = False
+                        inactive_worker = info.actor
+
+            if inactive_worker is None:
+                logger.warning(
+                    f"[RolloutHealthChecker] Ignore stale health result for worker {rank}; "
+                    "the worker state changed while the check was running."
+                )
+                continue
+            inactive_workers.append((rank, inactive_worker))
 
         for rank, inactive_worker in inactive_workers:
             try:
@@ -231,26 +296,15 @@ class RolloutHealthChecker:
                 break
 
 
-async def check_worker_health(
-    worker: "RolloutWorker", rank: int, url: str, is_active: bool, failure_threshold: int = 3
-) -> bool:
+async def check_worker_health(worker: "RolloutWorker", rank: int, url: str, is_active: bool) -> bool:
     if worker is None or not is_active:
         logger.warning("Worker has no actor reference or is marked inactive.")
         return False
-    failing_count = 0
-    while failing_count < failure_threshold:
-        try:
-            health_status = await worker.check_health.remote()  # type: ignore[attr-defined]
-            if health_status:
-                return True
-            failing_count += 1
-            logger.warning(f"Health check failed for worker {rank} at {url}. Failure count: {failing_count}")
-        except Exception as e:
-            failing_count += 1
-            logger.error(
-                f"Exception during health check for worker {rank} at {url}: {e}. Failure count: {failing_count}"
-            )
-    return False
+    try:
+        return bool(await worker.check_health.remote())  # type: ignore[attr-defined]
+    except Exception as e:
+        logger.error(f"Exception during health check for worker {rank} at {url}: {e}")
+        return False
 
 
 async def _resolve_routed_experts(routed_experts: np.ndarray | RayObjectRef) -> np.ndarray:

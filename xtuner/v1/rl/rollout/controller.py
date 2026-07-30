@@ -2,6 +2,7 @@ import asyncio
 import math
 import os
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, TypeAlias, TypedDict
 from uuid import uuid4
@@ -24,6 +25,10 @@ from .worker import (
     RolloutConfig,
     RolloutWorker,
 )
+
+
+FINAL_HEALTH_CHECK_ATTEMPTS = 3
+FINAL_HEALTH_CHECK_RETRY_INTERVAL_SECONDS = 15.0
 
 
 @dataclass
@@ -257,15 +262,9 @@ class RolloutController:
             with self.worker_info_lock:
                 workers = {rank: (info.actor, info.url, info.is_active) for rank, info in self.rank2info.items()}
 
-            for rank, (actor, url, was_active) in workers.items():
-                try:
-                    is_healthy = ray.get(actor.check_health.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
-                except Exception as e:
-                    is_healthy = False
-                    self.logger.warning(f"Final health check raised for rollout worker {rank} at {url}: {e}.")
-
-                if not is_healthy:
-                    self.logger.warning(f"Final health check failed for rollout worker {rank} at {url}.")
+            health_results = self._check_workers_health_before_training(workers)
+            for rank, (_, url, was_active) in workers.items():
+                is_healthy = health_results[rank]
 
                 with self.worker_info_lock:
                     info = self.rank2info[rank]
@@ -292,6 +291,61 @@ class RolloutController:
         finally:
             if not health_checker_was_paused:
                 self.health_checker.resume()
+
+    def _check_workers_health_before_training(
+        self,
+        workers: dict[int, tuple[RolloutWorker, str, bool]],
+    ) -> dict[int, bool]:
+        """Confirm worker health in concurrent rounds before recovery."""
+        health_results = {rank: False for rank in workers}
+        pending = dict(workers)
+
+        for attempt in range(1, FINAL_HEALTH_CHECK_ATTEMPTS + 1):
+            check_refs: dict[int, Any] = {}
+            for rank, (actor, url, _) in pending.items():
+                try:
+                    check_refs[rank] = actor.check_health.remote()  # type: ignore[attr-defined]
+                except Exception as e:
+                    self.logger.warning(
+                        f"Final health check attempt {attempt}/{FINAL_HEALTH_CHECK_ATTEMPTS} could not start "
+                        f"for rollout worker {rank} at {url}: {e}."
+                    )
+
+            failed: dict[int, tuple[RolloutWorker, str, bool]] = {}
+            for rank, worker_info in pending.items():
+                _, url, _ = worker_info
+                is_healthy = False
+                check_ref = check_refs.get(rank)
+                if check_ref is not None:
+                    try:
+                        is_healthy = bool(ray.get(check_ref, timeout=ROLLOUT_RAY_GET_TIMEOUT))
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Final health check attempt {attempt}/{FINAL_HEALTH_CHECK_ATTEMPTS} raised "
+                            f"for rollout worker {rank} at {url}: {e}."
+                        )
+
+                if is_healthy:
+                    health_results[rank] = True
+                    self.health_checker.reset_failure_count(rank)
+                else:
+                    failed[rank] = worker_info
+                    self.logger.warning(
+                        f"Final health check attempt {attempt}/{FINAL_HEALTH_CHECK_ATTEMPTS} failed "
+                        f"for rollout worker {rank} at {url}."
+                    )
+
+            pending = failed
+            if not pending:
+                break
+            if attempt < FINAL_HEALTH_CHECK_ATTEMPTS:
+                self.logger.warning(
+                    f"Retrying final health check for {len(pending)} rollout workers in "
+                    f"{FINAL_HEALTH_CHECK_RETRY_INTERVAL_SECONDS:.0f} seconds."
+                )
+                time.sleep(FINAL_HEALTH_CHECK_RETRY_INTERVAL_SECONDS)
+
+        return health_results
 
     def continue_generation(self):
         self.health_checker.resume()
@@ -332,10 +386,14 @@ class RolloutController:
         self.logger.warning(f"Detected {len(failed_workers)} failed workers. Initiating recovery process.")
         for worker in failed_workers:
             if self._restart_failed_workers(worker.actor, expected_url=worker.url):
+                recovered_rank = None
                 with self.worker_info_lock:
                     rank = self._get_rank_by_actor(worker.actor)
                     if rank is not None:
                         self.rank2info[rank].is_active = True
+                        recovered_rank = rank
+                if recovered_rank is not None:
+                    self.health_checker.reset_failure_count(recovered_rank)
 
     def _restart_failed_workers(self, worker: RolloutWorker, expected_url: str) -> bool:
         try:
