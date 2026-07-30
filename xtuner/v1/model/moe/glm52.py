@@ -6,7 +6,10 @@ import torch
 from pydantic import Field, computed_field
 from typing_extensions import Self, override
 
-from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as HFGlmMoeDsaConfig
+try:
+    from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as HFGlmMoeDsaConfig
+except ImportError:
+    HFGlmMoeDsaConfig = None  # type: ignore[misc, assignment]
 from xtuner.v1.model.base import DEFAULT_FLOAT8_CFG, TorchCompileOption
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import DSAMLAConfig, DSAMultiLatentAttention
