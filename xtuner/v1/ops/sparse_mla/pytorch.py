@@ -68,7 +68,7 @@ def torch_dsa_topk_indices(
     topk = min(index_topk, kv_len)
     topk_scores, topk_indices = index_scores.topk(topk, dim=-1)
     topk_indices = topk_indices.masked_fill(topk_scores == -torch.inf, -1)
-    return topk_indices.squeeze(0).unsqueeze(1)
+    return topk_indices.squeeze(0).unsqueeze(1).to(torch.int32)
 
 
 def _packed_causal_mask(seq_ctx: SequenceContext, query_len: int, kv_len: int, device: torch.device) -> torch.Tensor:
