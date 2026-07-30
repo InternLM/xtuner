@@ -67,7 +67,7 @@ class UpdateWeighter:
         if self._transport is None:
             self._set_transport()
 
-    def update_weights(self, need_register: bool = True):
+    def update_weights(self, need_register: bool = True, need_update: bool = True) -> None:
         """Update the model weights."""
 
         assert self.rollout_info is not None, "bind_rollout_weight_update() must be called before update_weights()."
@@ -76,7 +76,7 @@ class UpdateWeighter:
             f"backend={self.rollout_info.backend!r}."
         )
         assert self.weight_iterator is not None, "Weight iterator is not initialized."
-        self._transport.update(self.weight_iterator, need_register=need_register)
+        self._transport.update(self.weight_iterator, need_register=need_register, need_update=need_update)
 
     def _set_transport(self) -> None:
         rollout_info = self.rollout_info
