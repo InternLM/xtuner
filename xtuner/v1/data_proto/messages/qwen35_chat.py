@@ -56,13 +56,13 @@ def render_content(content, do_vision_count, image_count, video_count, add_visio
             if add_vision_id:
                 result += f"Picture {image_count}: "
             result += "<|vision_start|><|image_pad|><|vision_end|>"
-        elif "video" in item or item.get("type") == "video":
+        elif "video" in item or "video_url" in item or item.get("type") in ("video", "video_url"):
             if do_vision_count:
                 video_count += 1
             if add_vision_id:
                 result += f"Video {video_count}: "
 
-            video_content = item.get("video", {})
+            video_content = item.get("video", item.get("video_url", {}))
             assert isinstance(video_content, dict), f"video_content must be a dict, but got {type(video_content)}"
             timestamps = video_content.get("timestamps", [])
             if len(timestamps) > 0:

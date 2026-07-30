@@ -47,6 +47,10 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
         if isinstance(item, dict) and "dialogs" in item:
             item = item["dialogs"]
 
+        # JsonlDataset removes damaged samples whose cached token count is zero.
+        if not item:
+            return CacheItem(num_tokens=0)
+
         if self.chat_template_name == "qwen3.5-vl":
             messages = Qwen35ChatMessages(messages=item, tools=tools)
         elif self.chat_template_name == "glm5.2":

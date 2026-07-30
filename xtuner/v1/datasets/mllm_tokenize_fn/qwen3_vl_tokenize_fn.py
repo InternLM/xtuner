@@ -217,8 +217,9 @@ def replace_video_timestamps_and_num_frame(
             content = msg["content"]
             if isinstance(content, list):
                 for item in content:
-                    if "video" in item:
-                        video_content = item["video"]
+                    if "video" in item or "video_url" in item:
+                        video_content = item.get("video", item.get("video_url"))
+                        assert isinstance(video_content, dict)
                         if len(timestamps_list) > 0:
                             timestamps = timestamps_list[video_cnt]
                             video_content["timestamps"] = timestamps
