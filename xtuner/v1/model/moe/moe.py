@@ -475,6 +475,14 @@ class MoE(BaseModel):
         moe_info = cast(MoEBatchForwardInfo, base_info)
         return moe_info
 
+    @staticmethod
+    def _prepare_seq_ctx_topk_cache(seq_ctx_list: Sequence[SequenceContext]) -> None:
+        # A slot owns both runtime offload state and pinned storage. TrainEngine
+        # finishes backward before the next accumulation group, so only contexts
+        # in one model call can be live concurrently and need distinct slots.
+        for offload_slot, seq_ctx in enumerate(seq_ctx_list):
+            seq_ctx.dsa_topk_cache.offload_slot = offload_slot
+
     def _micro_batch_forward(
         self,
         seq_ctx_list: list[SequenceContext],
@@ -486,6 +494,7 @@ class MoE(BaseModel):
         This method processes multiple micro-batches in parallel, similar to how MoEDecoderLayer handles micro-batching
         at the layer level.
         """
+        self._prepare_seq_ctx_topk_cache(seq_ctx_list)
         if self.config.return_hidden_states:
             raise NotImplementedError
 
@@ -496,11 +505,6 @@ class MoE(BaseModel):
             seq_ctx.position_ids is not None and seq_ctx.position_ids.shape[-1] == first_position_ids.shape[-1]
             for seq_ctx in seq_ctx_list
         ), "intra-layer micro-batches must have the same local sequence length"
-        # A slot owns both runtime offload state and pinned storage. TrainEngine
-        # finishes backward before the next accumulation group, so only contexts
-        # in this call can be live concurrently and need distinct slots.
-        for offload_slot, seq_ctx in enumerate(seq_ctx_list):
-            seq_ctx.dsa_topk_cache.offload_slot = offload_slot
 
         # Prepare input embeddings for all micro-batches
         if seq_ctx_list[0].input_ids is None:
@@ -754,7 +758,7 @@ class MoE(BaseModel):
         loss_ctx: MoELossContextDict | None,
         return_router_logits: bool = False,
     ) -> MoEModelOutputs:
-        seq_ctx.dsa_topk_cache.offload_slot = 0
+        self._prepare_seq_ctx_topk_cache([seq_ctx])
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
 

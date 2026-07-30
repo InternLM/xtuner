@@ -178,13 +178,12 @@ class ActivationOffloadedTopKResidency(GpuTopKResidency):
             return
 
         key = self._offload_key(seq_ctx, source_layer_idx)
-        manager = OffloadManager()
         # A slot/source pair owns both the runtime entry and its reusable pinned
         # storage. Reusing it while still live would overwrite the earlier D2H
         # result, so fail loudly if the scheduling contract is violated.
-        if manager.has_runtime_key(key):
+        if OffloadManager().has_runtime_key(key):
             raise RuntimeError(f"DSA top-k offload slot is still active: {key}")
-        cpu_buffer = manager.get_or_create_pin_memory(
+        cpu_buffer = OffloadManager().get_or_create_pin_memory(
             key,
             topk_indices.shape,
             topk_indices.dtype,
@@ -194,7 +193,7 @@ class ActivationOffloadedTopKResidency(GpuTopKResidency):
         stream.wait_stream(torch.cuda.current_stream(topk_indices.device))
         swap_tensor.launch_d2h(stream)
         swap_tensor.wait_d2h_finished(stream, True)
-        manager.put(key, swap_tensor)
+        OffloadManager().put(key, swap_tensor)
         cache.offloaded[source_layer_idx] = key
 
     # Pinned CPU buffers and stream-side effects must stay outside Inductor graphs.
