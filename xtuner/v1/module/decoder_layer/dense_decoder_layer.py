@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 import torch.nn as nn
@@ -6,7 +6,14 @@ import torch.nn as nn
 from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
-from xtuner.v1.module import AttnOutputs, GatedDeltaNetConfig, MHAConfig, MLAConfig, RMSNorm
+from xtuner.v1.module import (
+    AttnOutputs,
+    DSAMultiLatentAttention,
+    GatedDeltaNetConfig,
+    MHAConfig,
+    MLAConfig,
+    RMSNorm,
+)
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
@@ -74,7 +81,7 @@ class DenseDecoderLayer(nn.Module):
 
     def forward(
         self,
-        *hidden_states: torch.Tensor,
+        *layer_inputs: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
         seq_ctx: SequenceContext | list[SequenceContext],
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
@@ -82,45 +89,77 @@ class DenseDecoderLayer(nn.Module):
 
         Keeping the micro-batch loop inside the decoder layer lets outer FSDP
         and checkpoint wrappers materialize the layer only once, while each
-        attention call keeps its own ``SequenceContext``.
+        attention call keeps its own ``SequenceContext``. DSA callers append
+        explicit IDs after the hidden-state inputs; DSA results use the flat
+        ``(hidden..., dsa_topk_ids...)`` layout required by reentrant checkpoint.
         """
-        if len(hidden_states) == 1:
+        if isinstance(seq_ctx, SequenceContext):
+            assert len(layer_inputs) in (1, 2), (
+                "Single-microbatch DenseDecoderLayer expects hidden_states and optional dsa_topk_ids."
+            )
             assert isinstance(position_embeddings, tuple) and len(position_embeddings) == 2
-            assert isinstance(seq_ctx, SequenceContext)
             return self._forward(
-                hidden_states=hidden_states[0],
+                hidden_states=layer_inputs[0],
                 position_embeddings=position_embeddings,
                 seq_ctx=seq_ctx,
+                dsa_topk_ids=layer_inputs[1] if len(layer_inputs) == 2 else None,
             )
 
-        assert isinstance(position_embeddings, list) and len(position_embeddings) == len(hidden_states)
-        assert isinstance(seq_ctx, list) and len(seq_ctx) == len(hidden_states)
+        n = len(seq_ctx)
+        assert len(layer_inputs) in (n, 2 * n), (
+            f"Multi-microbatch DenseDecoderLayer expects {n} hidden states and optional {n} dsa_topk_ids."
+        )
+        hidden_states = layer_inputs[:n]
+        dsa_topk_ids: tuple[torch.Tensor | None, ...]
+        if len(layer_inputs) == n:
+            dsa_topk_ids = (None,) * n
+        else:
+            dsa_topk_ids = layer_inputs[n:]
+
+        assert isinstance(position_embeddings, list) and len(position_embeddings) == n
         assert all(hidden.shape == hidden_states[0].shape for hidden in hidden_states)
-        return tuple(
+        layer_results = tuple(
             self._forward(
                 hidden_states=hidden,
                 position_embeddings=position_embedding,
                 seq_ctx=context,
+                dsa_topk_ids=topk_ids,
             )
-            for hidden, position_embedding, context in zip(hidden_states, position_embeddings, seq_ctx)
+            for hidden, topk_ids, position_embedding, context in zip(
+                hidden_states, dsa_topk_ids, position_embeddings, seq_ctx
+            )
         )
+        if isinstance(layer_results[0], tuple):
+            return tuple(result[0] for result in layer_results) + tuple(result[1] for result in layer_results)  # type: ignore[index]
+        return layer_results  # type: ignore[return-value]
 
     def _forward(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
-    ) -> torch.Tensor:
+        dsa_topk_ids: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        attn_outputs: AttnOutputs = self.self_attn(
-            hidden_states=hidden_states,
-            position_embeddings=position_embeddings,
-            seq_ctx=seq_ctx,
-        )
+        if dsa_topk_ids is None:
+            attn_outputs: AttnOutputs = self.self_attn(
+                hidden_states=hidden_states,
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+            )
+        else:
+            dsa_attn = cast(DSAMultiLatentAttention, self.self_attn)
+            attn_outputs = dsa_attn(
+                hidden_states=hidden_states,
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+                dsa_topk_ids=dsa_topk_ids,
+            )
+        dsa_topk_ids = attn_outputs.get("dsa_topk_ids")
         hidden_states = attn_outputs["projected_output"]
         hidden_states = residual + hidden_states
 
@@ -130,7 +169,9 @@ class DenseDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        return hidden_states
+        if dsa_topk_ids is None:
+            return hidden_states
+        return hidden_states, dsa_topk_ids
 
     def prefilling(
         self,
