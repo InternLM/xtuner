@@ -170,7 +170,7 @@ def _tilelang_dsa_topk_indices_from_ranges(
     topk = min(index_topk, k.shape[0])
     topk_scores, topk_indices = logits.topk(topk, dim=-1)
     topk_indices = topk_indices.masked_fill(topk_scores == -torch.inf, -1)
-    return topk_indices.to(torch.int64).unsqueeze(1)
+    return topk_indices.to(torch.int32).unsqueeze(1)
 
 
 @_tilelang_dsa_topk_indices_from_ranges.register_fake
@@ -183,7 +183,7 @@ def _(
     index_topk: int,
 ) -> Tensor:
     topk = min(index_topk, k.shape[0])
-    return torch.empty((q.shape[0], 1, topk), device=q.device, dtype=torch.int64)
+    return torch.empty((q.shape[0], 1, topk), device=q.device, dtype=torch.int32)
 
 
 @functools.cache
