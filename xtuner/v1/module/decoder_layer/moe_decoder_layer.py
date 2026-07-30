@@ -36,7 +36,7 @@ from xtuner.v1.module.dispatcher import (
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
-from xtuner.v1.utils import ForwardState
+from xtuner.v1.utils import ForwardState, checkpoint_record
 
 from ..linear import build_linear
 
@@ -417,11 +417,15 @@ class MoEDecoderLayer(nn.Module):
         origin_shape = hidden_states.shape
 
         # reshape hidden_states to (batch_size * seq_len, hidden_size)
+        # Flattened before the marker so that the dispatch region covers the same operations here as
+        # it does in `_micro_batch_forward`, which reshapes outside the region too.
+        flat_hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         # ProberList.before_dispatch(
         #     self.layer_idx, hidden_states, router_results["topk_ids"], router_results["topk_weights"]
         # )
+        checkpoint_record("moe.dispatch.begin")
         pre_dispatched = self.dispatcher.dispatch_preprocess(
-            hidden_states=hidden_states.view(-1, hidden_states.shape[-1]),
+            hidden_states=flat_hidden_states,
             topk_ids=router_results["topk_ids"],
         )
         dispatched = self.dispatcher.dispatch(
@@ -433,6 +437,7 @@ class MoEDecoderLayer(nn.Module):
             pre_dispatched=pre_dispatched,
             dispatched=dispatched,
         )
+        checkpoint_record("moe.dispatch.end")
         # ProberList.after_dispatch(
         #     self.layer_idx,
         #     post_dispatched["hidden_states"],
@@ -451,6 +456,7 @@ class MoEDecoderLayer(nn.Module):
         #     post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
         #     dispatched["topk_weights"],
         # )
+        checkpoint_record("moe.combine.begin")
         pre_combined = self.dispatcher.combine_preprocess(
             hidden_states=experts_out,
             pre_dispatched=pre_dispatched,
@@ -473,18 +479,22 @@ class MoEDecoderLayer(nn.Module):
             pre_combined=pre_combined,
             combined=combined,
         )
-        combined_hidden_states = post_combined["hidden_states"]
-        combined_hidden_states = combined_hidden_states.view(*origin_shape)
+        checkpoint_record("moe.combine.end")
+        combined_hidden_states = post_combined["hidden_states"].view(*origin_shape)
 
         # debug for aligning with hf implementation.
         # combined_hidden_states = self._hf_expert_forward_for_debug(hidden_states, router_results, origin_shape)
 
         # ProberList.after_combine(self.layer_idx, combined_hidden_states)
 
+        # Recorded outside the branch so the region never depends on a configuration-dependent path:
+        # without shared experts it is simply empty rather than left open until the next marker.
+        checkpoint_record("moe.shared_experts.begin")
         if self.n_shared_experts > 0:
             shared_experts_out = self._shared_experts_forward(hidden_states=hidden_states)
         else:
             shared_experts_out = None
+        checkpoint_record("moe.shared_experts.end")
 
         hidden_states = self._post_moe_forward(
             combined_hidden_states=combined_hidden_states,
@@ -534,11 +544,13 @@ class MoEDecoderLayer(nn.Module):
             )
             pre_moe_forward_out_list.append(hidden_states)
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+            checkpoint_record("moe.dispatch.begin")
             pre_dispatched = self.dispatcher.dispatch_preprocess(
                 hidden_states=hidden_states,
                 topk_ids=router_results["topk_ids"],
                 async_op=True,
             )
+            checkpoint_record("moe.dispatch.end")
             pre_dispatched_list.append(pre_dispatched)
             residual_list.append(residual)
             router_results_list.append(router_results)
@@ -553,6 +565,7 @@ class MoEDecoderLayer(nn.Module):
             router_results_list,
             pre_dispatched_list,
         ):
+            checkpoint_record("moe.dispatch.begin")
             dispatched = self.dispatcher.dispatch(
                 pre_dispatched=pre_dispatched,
                 topk_weights=router_results["topk_weights"],
@@ -564,12 +577,14 @@ class MoEDecoderLayer(nn.Module):
                 dispatched=dispatched,
                 async_op=True,
             )
+            checkpoint_record("moe.dispatch.end")
             experts_out = self.experts(
                 post_dispatched["hidden_states"],
                 post_dispatched["tokens_per_expert"],
                 decoding=False,
             )
 
+            checkpoint_record("moe.combine.begin")
             pre_combined = self.dispatcher.combine_preprocess(
                 hidden_states=experts_out,
                 pre_dispatched=pre_dispatched,
@@ -577,6 +592,7 @@ class MoEDecoderLayer(nn.Module):
                 post_dispatched=post_dispatched,
                 async_op=True,
             )
+            checkpoint_record("moe.combine.end")
 
             post_dispatched_list.append(post_dispatched)
             experts_out_list.append(experts_out)
@@ -589,6 +605,7 @@ class MoEDecoderLayer(nn.Module):
             dispatched_list,
             post_dispatched_list,
         ):
+            checkpoint_record("moe.combine.begin")
             combined = self.dispatcher.combine(
                 pre_combined=pre_combined,
                 pre_dispatched=pre_dispatched,
@@ -596,10 +613,17 @@ class MoEDecoderLayer(nn.Module):
                 post_dispatched=post_dispatched,
                 async_op=True,
             )
+            checkpoint_record("moe.combine.end")
             combined_list.append(combined)
 
         shared_experts_out_list: list[torch.Tensor | None]
 
+        # Recorded outside the branch so the region never depends on a configuration-dependent path:
+        # without shared experts it is simply empty rather than left open until the next marker. It
+        # also sits outside the loop, unlike the single-batch path's per-call region: this stage runs
+        # every micro-batch back to back with nothing else between them, so one region spanning the
+        # whole stage covers exactly the same operations as one region per micro-batch would.
+        checkpoint_record("moe.shared_experts.begin")
         if self.n_shared_experts > 0:
             shared_experts_out_list = []
             for pre_moe_forward_out in pre_moe_forward_out_list:
@@ -609,9 +633,11 @@ class MoEDecoderLayer(nn.Module):
                 shared_experts_out_list.append(shared_experts_out)
         else:
             shared_experts_out_list = [None] * intra_layer_micro_batch
+        checkpoint_record("moe.shared_experts.end")
 
         hidden_states_out_list: list[torch.Tensor] = []
         for i in range(intra_layer_micro_batch):
+            checkpoint_record("moe.combine.begin")
             post_combined = self.dispatcher.combine_postprocess(
                 pre_dispatched=pre_dispatched_list[i],
                 dispatched=dispatched_list[i],
@@ -620,6 +646,7 @@ class MoEDecoderLayer(nn.Module):
                 combined=combined_list[i],
                 async_op=True,
             )
+            checkpoint_record("moe.combine.end")
             hidden_states = self._post_moe_forward(
                 # hidden_states=pre_moe_forward_out_list[i],
                 combined_hidden_states=post_combined["hidden_states"].view(*pre_moe_forward_out_list[i].shape),
@@ -649,6 +676,7 @@ class MoEDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
+        checkpoint_record("attn.begin")
         if state == ForwardState.TRAINING:
             attn_outputs: AttnOutputs = self.self_attn(
                 hidden_states=hidden_states,
@@ -672,6 +700,7 @@ class MoEDecoderLayer(nn.Module):
                 seq_ctx=seq_ctx,
                 past_key_values=past_key_values,
             )
+        checkpoint_record("attn.end")
         hidden_states = residual + hidden_states
 
         # Fully Connected
@@ -687,7 +716,9 @@ class MoEDecoderLayer(nn.Module):
                 rollout_routed_experts = rollout_routed_experts.to(hidden_states.device)
         else:
             rollout_routed_experts = None
+        checkpoint_record("moe.gate.begin")
         router_results: RouterResults = self.gate(hidden_states, rollout_routed_experts)
+        checkpoint_record("moe.gate.end")
         return residual, hidden_states, router_results
 
     def _shared_experts_forward(

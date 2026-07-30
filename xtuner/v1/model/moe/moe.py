@@ -46,6 +46,8 @@ from xtuner.v1.model.base import (
 )
 from xtuner.v1.model.utils import (
     ModelForwardExtraLogInfo,
+    RecomputeIntervalMap,
+    RecomputeUnit,
     apply_selective_checkpointing,
     module_dict_repr,
 )
@@ -112,6 +114,28 @@ MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
 
 MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
 MOE_EP_COMPILE_CFG.pop(MOE_DECODER_LAYER_FORWARD)
+
+# Regions are delimited by an explicit `<name>.begin` / `<name>.end` marker pair rather than by ending each region at
+# the marker that starts the next one. Both express the same half-open `[start, end)` interval, but "end = whatever
+# comes next" couples every region to its successor: reordering two regions in a forward, or inserting one between
+# them, would silently redefine what the earlier region keeps. Explicit pairs also survive `_micro_batch_forward`
+# splitting the dispatch/combine chain across four stage loops, where "the next region" differs from the single-batch
+# path. A missing `.end` only leaves the region open to the end of the layer, which costs retained memory and never
+# gradients, since the kept and recomputed paths are both numerically exact.
+MOE_RECOMPUTE_CFG: RecomputeIntervalMap = {
+    RecomputeUnit.SAVE_ATTN: [("attn.begin", "attn.end")],
+    RecomputeUnit.SAVE_MOE_GATE: [("moe.gate.begin", "moe.gate.end")],
+    RecomputeUnit.SAVE_MOE_DISPATCH: [
+        ("moe.dispatch.begin", "moe.dispatch.end"),
+        ("moe.combine.begin", "moe.combine.end"),
+    ],
+    # The first `first_k_dense_replace` layers of a MoE model are dense layers, whose MLP is a
+    # different region from a MoE layer's shared experts. Both belong to the same user-facing unit.
+    RecomputeUnit.SAVE_MLP: [
+        ("moe.shared_experts.begin", "moe.shared_experts.end"),
+        ("mlp.begin", "mlp.end"),
+    ],
+}
 
 
 class MoEModelOutputs(ModelOutputs):
@@ -1274,6 +1298,38 @@ class MoE(BaseModel):
             return MOE_EP_COMPILE_CFG
         else:
             return MOE_NON_EP_COMPILE_CFG
+
+    @property
+    @override
+    def default_recompute_cfg(self) -> RecomputeIntervalMap:
+        """Marker intervals this architecture can keep resident, keyed by
+        semantic unit.
+
+        Under ``torch.compile`` a region is only addressable if the ops it encloses run in eager: a marker inside a
+        compiled region is folded away, and ops inside one execute as fused kernels that never reach the per-op
+        checkpoint policy. Both a region's markers *and* its contents therefore have to sit outside compiled code.
+
+        - ``ep_size > 1``: only ``SAVE_MOE_DISPATCH`` survives, because the dispatcher calls it wraps are not
+          compiled. ``SAVE_ATTN`` and ``SAVE_MOE_GATE`` are marked inside the compiled ``_pre_moe_forward``.
+          ``SAVE_MLP`` is inert on both of its intervals, for the two different reasons the mechanism allows: its
+          shared-experts markers do fire in eager but enclose the compiled ``_shared_experts_forward``, while its
+          ``mlp`` markers never fire at all, sitting in a ``DenseDecoderLayer`` that stays compiled whole even
+          under EP.
+        - ``ep_size == 1``: the whole layer forward is compiled as one region, so every unit is eager-only.
+
+        A unit that is inert simply leaves its region recomputed, which is the behaviour of plain full recompute.
+        Measured per unit against the SAC policy: eager keeps ops for all four; ``ep_size=2`` under compile keeps
+        152 ops for ``SAVE_MOE_DISPATCH`` and none for the others.
+
+        Returns:
+            RecomputeIntervalMap: Supported units mapped to the marker intervals that implement them.
+        """
+        # Linear-attention layers carry in-place convolution state across the forward, so replaying them under a
+        # selective checkpoint is untested. Hybrid models declare no units until it is.
+        if "linear_attention" in self.config.layers_type:
+            return {}
+
+        return MOE_RECOMPUTE_CFG
 
     @property
     def need_update_bias(self) -> bool:

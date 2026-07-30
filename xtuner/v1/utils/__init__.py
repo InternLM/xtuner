@@ -22,6 +22,7 @@ from .misc import (
 )
 from .pad import pad_to_max_length, pad_to_multiple_of
 from .profile import profile_time, profile_time_and_memory, timer, timer_logger
+from .selective_checkpointing import MarkerInterval, RecomputeIntervalMap, RecomputeUnit, checkpoint_record
 from .state import ForwardState
 from .type_helper import copy_method_signature, copy_signature, ray_method
 from .update_weights_utils import monkey_unpatch_torch_reductions
@@ -68,4 +69,8 @@ __all__ = [
     "trim_memory",
     "group_tensors_by_device_mesh_and_placements",
     "cal_total_norm",
+    "MarkerInterval",
+    "RecomputeIntervalMap",
+    "RecomputeUnit",
+    "checkpoint_record",
 ]
