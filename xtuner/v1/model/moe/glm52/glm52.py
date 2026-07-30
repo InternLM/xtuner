@@ -10,7 +10,13 @@ from typing_extensions import Self, override
 from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as HFGlmMoeDsaConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.model.base import DEFAULT_FLOAT8_CFG, TorchCompileOption
-from xtuner.v1.model.moe.moe import BalancingLossConfig, MoE, MoEConfig, ZLossConfig
+from xtuner.v1.model.moe.moe import (
+    MOE_RECOMPUTE_CFG,
+    BalancingLossConfig,
+    MoE,
+    MoEConfig,
+    ZLossConfig,
+)
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import (
     DenseDecoderLayerMicroBatchOutput,
     DenseDecoderLayerOutput,
@@ -22,6 +28,7 @@ from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
+from xtuner.v1.utils import MarkerInterval, RecomputeIntervalMap, RecomputeUnit
 
 from .decoder_layer import (
     GLM52DenseDecoderLayer,
@@ -58,6 +65,15 @@ MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
 MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
 MOE_EP_COMPILE_CFG.pop("xtuner.v1.model.moe.glm52.decoder_layer.GLM52MoEDecoderLayer.forward")
 
+# GLM's native RMSNorm mutates an intermediate inside the generic attention
+# interval, so retain the other MoE units but replace that interval with the
+# no-grad, mutation-safe DSA top-k selection kernel.
+GLM52_RECOMPUTE_CFG: RecomputeIntervalMap = {
+    unit: intervals for unit, intervals in MOE_RECOMPUTE_CFG.items() if unit is not RecomputeUnit.SAVE_ATTN
+}
+DSA_INDEXER_INTERVAL: MarkerInterval = ("dsa.indexer.begin", "dsa.indexer.end")
+GLM52_RECOMPUTE_CFG[RecomputeUnit.SAVE_DSA_INDEXER] = [DSA_INDEXER_INTERVAL]
+
 
 class Glm52MoE(MoE):
     dense_decoder_layer_cls = GLM52DenseDecoderLayer
@@ -71,6 +87,22 @@ class Glm52MoE(MoE):
         if self.config.ep_size > 1:
             return MOE_EP_COMPILE_CFG
         return MOE_NON_EP_COMPILE_CFG
+
+    @property
+    @override
+    def default_recompute_cfg(self) -> RecomputeIntervalMap:
+        return GLM52_RECOMPUTE_CFG
+
+    @property
+    @override
+    def mtp_recompute_intervals(self) -> list[MarkerInterval]:
+        return [DSA_INDEXER_INTERVAL] if DSA_INDEXER_INTERVAL in self.recompute_intervals else []
+
+    @override
+    def _compiles_whole_decoder_layer(self) -> bool:
+        # GLM keeps decoder forward non-fullgraph so selected eager islands,
+        # including the DSA top-k kernel, remain addressable to SAC.
+        return False
 
     @override
     def _configure_model_specific_layers(self) -> None:
@@ -91,6 +123,12 @@ class Glm52MoE(MoE):
                 assert isinstance(self_attn, DSAMultiLatentAttention), (
                     f"GLM-5.2 MTP requires DSAMultiLatentAttention, got {type(self_attn).__name__}."
                 )
+                dsa_layers.append(self_attn)
+
+        keep_topk = DSA_INDEXER_INTERVAL in self.recompute_intervals
+        for self_attn in dsa_layers:
+            if hasattr(self_attn, "indexer"):
+                self_attn.indexer.selective_checkpoint_topk = keep_topk
 
         sample_attn = dsa_layers[0]
         self._dsa_topk_source_layers = dsa_topk_source_layers(

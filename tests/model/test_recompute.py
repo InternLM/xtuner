@@ -35,6 +35,8 @@ from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.base import BaseModel, XTunerBaseModelConfig, _disable_nested_switch
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLMoE30BA3Config
 from xtuner.v1.model.dense.dense import DENSE_RECOMPUTE_CFG
+from xtuner.v1.model.moe.glm52 import dsa_mla as glm52_dsa_mla
+from xtuner.v1.model.moe.glm52.glm52 import GLM52_RECOMPUTE_CFG
 from xtuner.v1.model.moe.moe import MOE_RECOMPUTE_CFG, MoE, MoEConfig, SequenceContext
 from xtuner.v1.model.utils import (
     RecomputeUnit,
@@ -169,7 +171,9 @@ class TestDominoEPRecompute(DeterministicDDPTestCase):
         config = _build_moe_config(ep_size, dispatcher)
         with torch.device("meta"):
             model = MoE(config=config)._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
-        model.fully_shard(fsdp_config=FSDPConfig(ep_size=ep_size, recompute_ratio=recompute_ratio, torch_compile=False))
+        model.fully_shard(
+            fsdp_config=FSDPConfig(ep_size=ep_size, recompute_ratio=recompute_ratio, torch_compile=False)
+        )
 
         torch.manual_seed(42)
         torch.cuda.manual_seed_all(42)
@@ -385,13 +389,15 @@ def _called_name(node: ast.Call) -> str | None:
 
 class TestMarkerVocabulary:
     @pytest.mark.parametrize(
-        "interval_map", [MOE_RECOMPUTE_CFG, DENSE_RECOMPUTE_CFG], ids=["moe", "dense"]
+        "interval_map",
+        [MOE_RECOMPUTE_CFG, DENSE_RECOMPUTE_CFG, GLM52_RECOMPUTE_CFG],
+        ids=["moe", "dense", "glm52"],
     )
     def test_declared_intervals_have_markers(self, interval_map):
         # A renamed marker would not fail anywhere at runtime: the interval would simply never open
         # and the region would stay recomputed, silently costing the memory the user asked to keep.
         recorded: set[str] = set()
-        for layer_module in (moe_decoder_layer, dense_decoder_layer):
+        for layer_module in (moe_decoder_layer, dense_decoder_layer, glm52_dsa_mla):
             for _, member in inspect.getmembers(layer_module, inspect.isclass):
                 if member.__module__ != layer_module.__name__:
                     continue
