@@ -13,6 +13,7 @@ import requests
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
+from xtuner.v1.module.mtp import MTPConfig
 
 from xtuner.v1.rl.loss import GRPOLossConfig as LossConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
@@ -99,6 +100,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
         )
 
         model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
+        model_cfg.text_config.mtp_config = MTPConfig(num_layers=1)
         optim_cfg = AdamWConfig(lr=1e-6, foreach=False, weight_decay=0.1)
         fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
         lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)

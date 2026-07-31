@@ -1848,6 +1848,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                     "In disaggregated mode, should_continue_fn must be default, "
                     "because it does not allow early stopping in production."
                 )
+        if self._rollout_config.enable_checkpoint_engine:
+            self.logger.warning(
+                "Currently, disaggregated mode is not supported with Checkpoint Engine. Rollout workers use NCCL for weight transport."
+            )
         bind_train_rollout(
             train_controller=self.train_controller,
             rollout_controller=self.rollout_controller,
