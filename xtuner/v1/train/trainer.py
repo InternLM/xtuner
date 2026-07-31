@@ -387,6 +387,7 @@ class LoadCheckpointConfig(BaseModel):
     load_optimizer_args: bool = True
     load_dataset: bool = True
     load_scheduler: bool = True
+    offload_optimizer_first_step: bool = False
 
 
 class TrainerConfig(BaseModel):
@@ -742,8 +743,29 @@ class Trainer:
             self._checkpoint_interval = None
             self._snapshot_interval = None
 
+        self._offload_optimizer_first_step = False
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._load_checkpoint()
+            self._offload_optimizer_first_step = self._load_checkpoint_cfg.offload_optimizer_first_step
+            if self._offload_optimizer_first_step:
+                self._engine.put_optimizer_to_device("cpu")
+                self.logger.info(
+                    "[Checkpoint Resume] Optimizer states are temporarily offloaded "
+                    "to CPU until the first optimizer step."
+                )
+
+            # Release DCP's temporary state and the allocator cache left by the
+            # optimizer-state transfer before the first resumed training step.
+            gc.collect()
+            DEVICE_MODULE.empty_cache()
+            if DEVICE != "cpu":
+                free_memory, total_memory = DEVICE_MODULE.mem_get_info()  # type: ignore[attr-defined]
+                self.logger.info(
+                    "[Checkpoint Resume Memory] "
+                    f"allocated: {DEVICE_MODULE.memory_allocated() / (1024**3):.2f} GB, "  # type: ignore[attr-defined]
+                    f"reserved: {DEVICE_MODULE.memory_reserved() / (1024**3):.2f} GB, "  # type: ignore[attr-defined]
+                    f"free: {free_memory / (1024**3):.2f} GB, total: {total_memory / (1024**3):.2f} GB"
+                )
 
         self.hooks_config = self._setup_hooks(hooks_config=hooks_config)
 
@@ -852,6 +874,9 @@ class Trainer:
                     )
 
                 grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
+                if self._offload_optimizer_first_step:
+                    self._engine.put_optimizer_to_device(DEVICE)
+                    self._offload_optimizer_first_step = False
                 self._engine.step_optimizer(grad_norm)
 
             time_after_train_step = time.time()

@@ -2,14 +2,17 @@
 
 TestGlm52OptimizedEngine
     test_sp2_ep4_micro2_compile_offload_train_step: SP2、EP4、micro2、compile 与双 offload 可联合训练。
+TestGlm52ParallelHFCheckpoint
+    test_fsdp2_ep4_mtp_hf_round_trip_preserves_weights: FSDP2、EP4、MTP 权重可经 HF 无损往返。
 TestGlm52PretrainedEngine
     test_ep8_loss_curve_matches_reference: 预训练权重的 EP8 优化轨迹匹配数值基线。
     test_tilewise_fp8_loss_curve_matches_bf16: tilewise FP8 训练轨迹接近 BF16。
     test_tilewise_fp8_ep4_train_step: tilewise FP8 与 EP4 联合训练产生有限 loss。
 TestGlm52CheckpointEngine
-    test_dcp_round_trip_preserves_model_and_optimizer: DCP 往返保留模型与优化器状态。
+    test_dcp_round_trip_preserves_model_and_optimizer: DCP 往返保留状态，并支持恢复首步暂存优化器状态。
 """
 
+import json
 import math
 import os
 import shutil
@@ -20,6 +23,7 @@ from unittest import mock
 
 import torch
 import torch.distributed as dist
+from safetensors import safe_open
 from torch.distributed.tensor import DTensor
 from torch.optim.lr_scheduler import LambdaLR
 
@@ -104,7 +108,7 @@ def _tiny_checkpoint_config(dispatcher: str | None, ep_size: int) -> Glm52MoECon
     )
 
 
-def _tiny_sp_mtp_config() -> Glm52MoEConfig:
+def _tiny_ep4_mtp_config() -> Glm52MoEConfig:
     config = _tiny_checkpoint_config(dispatcher="all2all", ep_size=4)
     config.hidden_size = 128
     config.intermediate_size = 128
@@ -189,7 +193,7 @@ class TestGlm52OptimizedEngine(DeterministicDDPTestCase):
     def test_sp2_ep4_micro2_compile_offload_train_step(self):
         # 验证生产优化组合经两次梯度累积后 loss、梯度与优化器状态均有效。
         self.create_pg("cuda")
-        model_cfg = _tiny_sp_mtp_config()
+        model_cfg = _tiny_ep4_mtp_config()
         engine = TrainEngine(
             model_cfg=model_cfg,
             optim_cfg=AdamWConfig(lr=1e-3, foreach=False),
@@ -235,6 +239,82 @@ class TestGlm52OptimizedEngine(DeterministicDDPTestCase):
                 self.assertEqual(seq_ctx.dsa_topk_cache.offloaded, {})
         finally:
             del engine
+            torch.cuda.empty_cache()
+
+    @property
+    def world_size(self) -> int:
+        return 8
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 8, "requires 8 CUDA devices")
+class TestGlm52ParallelHFCheckpoint(DeterministicDDPTestCase):
+    def test_fsdp2_ep4_mtp_hf_round_trip_preserves_weights(self):
+        # 验证 FSDP2、EP4 分片的主干与共享 MTP 权重经公共 HF API 往返后完全一致。
+        self.create_pg("cuda")
+        temp_dir = tempfile.mkdtemp() if dist.get_rank() == 0 else None
+        syncdir = [temp_dir]
+        dist.broadcast_object_list(syncdir, src=0)
+        first_hf_dir = Path(syncdir[0]) / "first"
+        second_hf_dir = Path(syncdir[0]) / "second"
+
+        try:
+            model_cfg = _tiny_ep4_mtp_config()
+            model_cfg.compile_cfg = False
+            engine = TrainEngine(
+                model_cfg=model_cfg,
+                optim_cfg=AdamWConfig(lr=1e-3, foreach=False),
+                fsdp_cfg=FSDPConfig(ep_size=4, cpu_offload=False, torch_compile=False),
+            )
+            engine.init_model_weights()
+            engine.save_hf(str(first_hf_dir))
+            del engine
+            torch.cuda.empty_cache()
+
+            restored_cfg = _tiny_ep4_mtp_config()
+            restored_cfg.compile_cfg = False
+            restored = TrainEngine(
+                model_cfg=restored_cfg,
+                optim_cfg=AdamWConfig(lr=1e-3, foreach=False),
+                fsdp_cfg=FSDPConfig(ep_size=4, cpu_offload=False, torch_compile=False),
+            )
+            restored.from_hf(first_hf_dir, strict=True)
+            restored.save_hf(str(second_hf_dir))
+
+            if dist.get_rank() == 0:
+                with open(first_hf_dir / "model.safetensors.index.json") as f:
+                    first_index = json.load(f)["weight_map"]
+                with open(second_hf_dir / "model.safetensors.index.json") as f:
+                    second_index = json.load(f)["weight_map"]
+
+                mtp_prefix = f"model.layers.{model_cfg.num_hidden_layers}."
+                self.assertTrue(any(key.startswith(mtp_prefix) for key in first_index))
+                self.assertEqual(first_index.keys(), second_index.keys())
+                first_files = {}
+                second_files = {}
+                for key in first_index:
+                    first_filename = first_index[key]
+                    second_filename = second_index[key]
+                    if first_filename not in first_files:
+                        first_files[first_filename] = safe_open(
+                            first_hf_dir / first_filename,
+                            framework="pt",
+                        )
+                    if second_filename not in second_files:
+                        second_files[second_filename] = safe_open(
+                            second_hf_dir / second_filename,
+                            framework="pt",
+                        )
+                    self.assertTrue(
+                        torch.equal(
+                            first_files[first_filename].get_tensor(key),
+                            second_files[second_filename].get_tensor(key),
+                        ),
+                        f"HF round-trip tensor mismatch: {key}",
+                    )
+        finally:
+            dist.barrier()
+            if dist.get_rank() == 0:
+                shutil.rmtree(syncdir[0], ignore_errors=True)
             torch.cuda.empty_cache()
 
     @property
@@ -329,12 +409,23 @@ class TestGlm52CheckpointEngine(DeterministicDDPTestCase):
                 optim_cfg=AdamWConfig(),
                 fsdp_cfg=FSDPConfig(cpu_offload=False, ep_size=2),
             )
+            torch.manual_seed(0)
             engine.init_model_weights()
             with torch.no_grad():
                 for module in engine.model.modules():
                     if isinstance(module, NoAuxRouter):
                         bias = module.e_score_correction_bias
                         bias.copy_(torch.arange(bias.numel(), device=bias.device, dtype=bias.dtype))
+
+            input_ids = torch.arange(2, 12).view(1, -1) % config.vocab_size
+            seq_ctx = SequenceContext.from_input_ids((input_ids[:, :-1],), device=DEVICE)
+            data = {"seq_ctx": seq_ctx, "shifted_labels": input_ids[:, 1:]}
+            loss_ctx = engine.model.build_loss_ctx_batch([data], sp_mesh=None)[0]
+            engine.train_step([ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)])
+            grad_norm = engine.clip_grad_norm()
+            self.assertTrue(math.isfinite(float(grad_norm)))
+            engine.step_optimizer(grad_norm)
+
             engine.save_dcp(weights_dir=weights_dir)
             dist.barrier()
 
@@ -343,6 +434,9 @@ class TestGlm52CheckpointEngine(DeterministicDDPTestCase):
                 optim_cfg=AdamWConfig(),
                 fsdp_cfg=FSDPConfig(cpu_offload=False, ep_size=2),
             )
+            # Frozen parameters are restored from the same base checkpoint in
+            # Trainer; matching initialization models that behavior here.
+            torch.manual_seed(0)
             restored.init_model_weights()
             restored.load_dcp(weights_dir=weights_dir)
 
@@ -370,6 +464,43 @@ class TestGlm52CheckpointEngine(DeterministicDDPTestCase):
                         torch.equal(actual, expected),
                         f"optimizer state mismatch: {param_id}.{state_key}",
                     )
+
+            # A resumed process has a cold first forward/backward. Keep the
+            # restored optimizer tensors on CPU through that peak, then verify
+            # the optimizer-step boundary restores every tensor exactly.
+            optimizer_tensors = []
+            for state in restored.optimizer.state.values():
+                for state_key, value in state.items():
+                    if not isinstance(value, torch.Tensor):
+                        continue
+                    local_value = value.to_local() if isinstance(value, DTensor) else value
+                    optimizer_tensors.append((state, state_key, local_value.detach().cpu().clone()))
+
+            self.assertTrue(restored.put_optimizer_to_device("cpu"))
+            for state, state_key, _ in optimizer_tensors:
+                value = state[state_key]
+                local_value = value.to_local() if isinstance(value, DTensor) else value
+                self.assertEqual(local_value.device.type, "cpu")
+
+            resumed_seq_ctx = SequenceContext.from_input_ids((input_ids[:, :-1],), device=DEVICE)
+            resumed_data = {"seq_ctx": resumed_seq_ctx, "shifted_labels": input_ids[:, 1:]}
+            resumed_loss_ctx = restored.model.build_loss_ctx_batch([resumed_data], sp_mesh=None)[0]
+            restored.train_step([ModelItem(seq_ctx=resumed_seq_ctx, loss_ctx=resumed_loss_ctx)])
+            restored_grad_norm = restored.clip_grad_norm()
+            self.assertTrue(restored.put_optimizer_to_device(DEVICE))
+
+            for state, state_key, expected in optimizer_tensors:
+                value = state[state_key]
+                local_value = value.to_local() if isinstance(value, DTensor) else value
+                self.assertEqual(local_value.device.type, str(DEVICE))
+                self.assertTrue(torch.equal(local_value.cpu(), expected))
+
+            restored.step_optimizer(restored_grad_norm)
+            for state in restored.optimizer.state.values():
+                for value in state.values():
+                    if isinstance(value, torch.Tensor):
+                        local_value = value.to_local() if isinstance(value, DTensor) else value
+                        self.assertTrue(torch.isfinite(local_value).all())
         finally:
             dist.barrier()
             if dist.get_rank() == 0:

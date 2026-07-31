@@ -48,6 +48,7 @@ class FakeEngine:
         self.train_step_calls = 0
         self.grad_norm_calls = 0
         self.optimizer_step_calls = 0
+        self.optimizer_device_calls = []
 
         self.model = model = nn.Linear(10, 10)
         self.optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -88,6 +89,10 @@ class FakeEngine:
     def clip_grad_norm(self, do_clip: bool = True, dtype=torch.float32):
         self.grad_norm_calls += 1
         return torch.tensor(1.0)
+
+    def put_optimizer_to_device(self, device):
+        self.optimizer_device_calls.append(str(device))
+        return True
 
     load_dcp = Mock()
 
@@ -900,7 +905,7 @@ class TestHooksConfig(DeterministicDDPTestCase):
 
 @patch("xtuner.v1.train.trainer.Trainer._prepare_model_input", Mock(return_value=[]))
 @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
-def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
+def test_resume_and_load_checkpoint_cfg(tmp_path: Path, capfd):
     # 0. prepare environment
     os.environ["LOCAL_RANK"] = "0"
     os.environ["RANK"] = "0"
@@ -956,12 +961,28 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
         load_optimizer_args=True,
         load_dataset=False,
         load_scheduler=False,
+        offload_optimizer_first_step=True,
     )
+
+    load_artifacts = {}
+
+    def load_dcp(**_):
+        class TemporaryState:
+            pass
+
+        temporary_state = TemporaryState()
+        temporary_state.cycle = temporary_state
+        load_artifacts["temporary_state"] = weakref.ref(temporary_state)
+
+        if DEVICE == "cuda":
+            temporary_tensor = torch.empty(16 * 1024 * 1024, dtype=torch.uint8, device=DEVICE)
+            del temporary_tensor
+            load_artifacts["reserved_memory"] = torch.cuda.memory_reserved()
 
     # 2. operate
     with (
         patch.object(Dataloader, "load_state_dict") as mock_data_load_state_dict,
-        patch.object(FakeEngine, "load_dcp") as mock_load_dcp,
+        patch.object(FakeEngine, "load_dcp", side_effect=load_dcp) as mock_load_dcp,
         patch.object(SequentialLR, "load_state_dict") as mock_lr_load_state_dict,
     ):
         trainer = Trainer(
@@ -987,9 +1008,15 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
             load_states=True,
             load_args=True,
         )
+        assert load_artifacts["temporary_state"]() is None
+        if DEVICE == "cuda":
+            assert torch.cuda.memory_reserved() < load_artifacts["reserved_memory"]
+            assert "[Checkpoint Resume Memory]" in capfd.readouterr().err
+        assert trainer._engine.optimizer_device_calls == ["cpu"]
         # assert trainer._load_checkpoint_cfg.load_dataset is False
         # assert trainer._load_checkpoint_cfg.load_scheduler is False
         trainer.fit()
+        assert trainer._engine.optimizer_device_calls == ["cpu", str(DEVICE)]
 
     # 4. 2nd create: resume train with auto_resume and load_checkpoint_cfg
     with (

@@ -83,6 +83,9 @@ class DSAIndexer(nn.Module):
         self.k_norm = LayerNorm(index_head_dim, eps=1e-6)
         # weights_proj.weight: [index_n_heads, hidden_size]
         self.weights_proj = build_linear(hidden_size, index_n_heads, bias=False)
+        # The indexer only produces integer DSA top-k IDs under no_grad, so its
+        # parameters must not be registered with the training optimizer.
+        self.requires_grad_(False)
 
     @torch.no_grad()
     def forward(

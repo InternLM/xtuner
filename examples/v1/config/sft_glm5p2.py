@@ -1,6 +1,6 @@
 import os
 
-from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
+from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig, MuonConfig
 from xtuner.v1.datasets import OpenaiTokenizeFunctionConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.float8.config import Float8Config, ScalingGranularity
@@ -91,11 +91,18 @@ dataloader_config = DataloaderConfig(
     num_workers=int(os.environ.get("DATALOADER_NUM_WORKERS", "4")),
 )
 
-optim_cfg = AdamWConfig(
-    lr=float(os.environ.get("LR", "1e-6")),
-    foreach=_get_bool_env("ADAMW_FOREACH", False),
-    swap_optimizer=_get_bool_env("SWAP_OPTIMIZER", False),
-)
+lr = float(os.environ.get("LR", "1e-6"))
+optimizer = os.environ.get("OPTIMIZER", "adamw").lower()
+if optimizer == "muon":
+    optim_cfg = MuonConfig(lr=lr)
+elif optimizer == "adamw":
+    optim_cfg = AdamWConfig(
+        lr=lr,
+        foreach=_get_bool_env("ADAMW_FOREACH", False),
+        swap_optimizer=_get_bool_env("SWAP_OPTIMIZER", False),
+    )
+else:
+    raise ValueError(f"Unsupported OPTIMIZER={optimizer!r}. Use adamw or muon.")
 lr_cfg = LRConfig(lr_type=os.environ.get("LR_TYPE", "cosine"), warmup_ratio=float(os.environ.get("WARMUP_RATIO", "0")))
 fsdp_cfg = FSDPConfig(
     cpu_offload=_get_bool_env("CPU_OFFLOAD", False),
