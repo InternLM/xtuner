@@ -19,7 +19,8 @@ class OPDTeacherLaunchConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model_path: str | Path
-    cuda_visible_devices: str
+    num_workers: int = Field(default=1, gt=0)
+    server_port: int = Field(gt=0, le=65535)
     dtype: Literal["auto", "float16", "bfloat16"] = "bfloat16"
     tensor_parallel_size: int = Field(default=1, gt=0)
     expert_parallel_size: int = Field(default=1, gt=0)
@@ -29,18 +30,12 @@ class OPDTeacherLaunchConfig(BaseModel):
     max_prefill_token_num: int | None = Field(default=4096, gt=0)
     gpu_memory_utilization: float = Field(default=0.6, gt=0.0, le=1.0)
 
-    @model_validator(mode="after")
-    def validate_parallel_sizes(self) -> OPDTeacherLaunchConfig:
-        if self.tensor_parallel_size > 1 and self.expert_parallel_size > 1:
-            raise ValueError("tensor_parallel_size and expert_parallel_size cannot both be greater than 1")
-        return self
-
 
 class OPDTeacherConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    endpoint: str
+    endpoint: str | None = None
     api_key: str | None = None
     request_timeout_s: float = Field(default=1200.0, gt=0.0)
     max_retry_per_sample: int = Field(default=2, ge=0)
@@ -66,6 +61,18 @@ class OPDConfig(BaseModel):
         if unknown_teachers:
             raise ValueError(f"data_source_teacher_map references unknown teachers: {sorted(unknown_teachers)}")
         return self
+
+    def resolve_teacher_endpoints(self, endpoint_map: dict[str, str]) -> OPDConfig:
+        teachers = []
+        for teacher in self.teachers:
+            if teacher.launch_config is None:
+                endpoint = teacher.endpoint
+            else:
+                endpoint = endpoint_map[teacher.name]
+            if not endpoint:
+                raise ValueError(f"Teacher {teacher.name!r} needs endpoint")
+            teachers.append(teacher.model_copy(update={"endpoint": endpoint}))
+        return self.model_copy(update={"teachers": teachers})
 
 
 def validate_opd_sample_params(sample_params: SampleParams) -> None:
@@ -96,6 +103,8 @@ class TeacherLogprobClient:
         self.config = config
         self.name = config.name
         self.backend = self._resolve_backend_from_env()
+        if not config.endpoint:
+            raise ValueError(f"Teacher {config.name!r} needs endpoint")
         self.url = f"{config.endpoint.rstrip('/')}/generate"
         self._semaphore = asyncio.Semaphore(config.max_concurrency)
 
@@ -266,18 +275,20 @@ def apply_opd_kl_to_advantages(
     loss_ctx: BaseRLLossContext,
     *,
     config: OPDConfig,
-) -> torch.Tensor:
-    """Apply the OPD reverse-KL penalty and return its valid-token sum."""
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply the OPD reverse-KL penalty and return signed and absolute valid-
+    token sums."""
     loss_kwargs = loss_ctx.loss_kwargs
     old_logprobs = cast(torch.Tensor, loss_kwargs.old_logprobs)
     teacher_logprobs = cast(torch.Tensor, loss_kwargs.teacher_logprobs)
     response_mask = loss_kwargs.shifted_labels != loss_ctx.loss_cfg.ignore_idx
     reverse_kl = old_logprobs - teacher_logprobs
     reverse_kl_sum = (reverse_kl * response_mask).sum().detach()
+    abs_logprob_loss_sum = (reverse_kl.abs() * response_mask).sum().detach()
     loss_kwargs.advantages = torch.where(
         response_mask,
         loss_kwargs.advantages - config.opd_adv_weight * reverse_kl,
         loss_kwargs.advantages,
     )
     loss_kwargs.teacher_logprobs = None
-    return reverse_kl_sum
+    return reverse_kl_sum, abs_logprob_loss_sum

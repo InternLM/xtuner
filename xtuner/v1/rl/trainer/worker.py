@@ -203,6 +203,7 @@ class WorkerTrainLogItem(TypedDict, total=False):
 class WorkerLogItem(TypedDict):
     train_entropy: float
     opd_reverse_kl: NotRequired[float]
+    opd_abs_logprob_loss: NotRequired[float]
     rollout_entropy: NotRequired[float]
     mismatch_metrics: NotRequired[dict[str, float]]
     rollout_is_metrics: NotRequired[dict[str, float]]
@@ -673,12 +674,20 @@ class TrainingWorker(SingleAcceleratorWorker):
         # compute old logprobs
         old_logprobs_list = self.compute_actor_logprobs(seq_ctx_list, shifted_labels_list)
         rank_opd_reverse_kl_sum: torch.Tensor | None = None
+        rank_opd_abs_logprob_loss_sum: torch.Tensor | None = None
         for old_logprobs, loss_ctx in zip(old_logprobs_list, loss_ctx_list):
             loss_ctx.loss_kwargs.old_logprobs = old_logprobs
             if self.config.opd_config is not None:
-                reverse_kl_sum = apply_opd_kl_to_advantages(loss_ctx, config=self.config.opd_config)
+                reverse_kl_sum, abs_logprob_loss_sum = apply_opd_kl_to_advantages(
+                    loss_ctx, config=self.config.opd_config
+                )
                 rank_opd_reverse_kl_sum = (
                     reverse_kl_sum if rank_opd_reverse_kl_sum is None else rank_opd_reverse_kl_sum + reverse_kl_sum
+                )
+                rank_opd_abs_logprob_loss_sum = (
+                    abs_logprob_loss_sum
+                    if rank_opd_abs_logprob_loss_sum is None
+                    else rank_opd_abs_logprob_loss_sum + abs_logprob_loss_sum
                 )
 
         worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
@@ -714,6 +723,17 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
             worker_log_item["opd_reverse_kl"] = avg_opd_reverse_kl.item()
             logger_msg += f", OPD reverse KL: {avg_opd_reverse_kl:.4f}"
+
+        if rank_opd_abs_logprob_loss_sum is not None:
+            global_opd_abs_logprob_loss_sum = rank_opd_abs_logprob_loss_sum
+            dist.all_reduce(global_opd_abs_logprob_loss_sum, op=dist.ReduceOp.SUM)
+            avg_opd_abs_logprob_loss = (
+                global_opd_abs_logprob_loss_sum / global_grad_tokens
+                if global_grad_tokens > 0
+                else global_opd_abs_logprob_loss_sum.new_zeros(())
+            )
+            worker_log_item["opd_abs_logprob_loss"] = avg_opd_abs_logprob_loss.item()
+            logger_msg += f", OPD abs logprob loss: {avg_opd_abs_logprob_loss:.4f}"
 
         # compute rollout importance sampling metrics
         all_rollout_is_metrics = []

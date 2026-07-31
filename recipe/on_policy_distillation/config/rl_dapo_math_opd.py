@@ -213,10 +213,10 @@ opd_config = OPDConfig(
     teachers=[
         OPDTeacherConfig(
             name="teacher",
-            endpoint="http://127.0.0.1:13141",
             launch_config=OPDTeacherLaunchConfig(
                 model_path=teacher_model_path,
-                cuda_visible_devices="7",
+                num_workers=1,
+                server_port=13141,
             ),
         )
     ],
