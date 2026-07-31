@@ -35,6 +35,11 @@ from xtuner.v1.utils import (
 from .data import RolloutWeightUpdateInfo, RolloutWeightUpdateTarget, WeightUpdateBatch
 
 
+try:
+    from checkpoint_engine.ps import ParameterServer
+except ImportError:
+    ParameterServer = None
+
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
@@ -901,7 +906,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         self._checkpoint_name_prefix = self.rollout_info.rollout_config.checkpoint_name_prefix
         self._timeout = self.rollout_info.rollout_config.checkpoint_engine_timeout
         # record the checkpoint name of PS and will use it to register the checkpoint and unregister the previous checkpoint
-        self._checkpoint_name = f"{self._checkpoint_name_prefix}-initial"
+        self._checkpoint_name: str | None = None
 
         assert dist.is_initialized() and self.ps_world_size > 0, (
             "Checkpoint Engine requires an initialized torch.distributed process group and world size > 0."
@@ -909,7 +914,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
 
         self._ps = self.build_parameter_server()
 
-        self.register_checkpoint_from_disk(self._checkpoint_path)
+        self._local_checkpoint_keys = self.split_tensors_for_rank(self._checkpoint_path, self.ps_world_size, self.rank)
 
     def build_parameter_server(self):
         """Build the Checkpoint Engine ParameterServer.
@@ -917,7 +922,8 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         The world size is the same as the train world size. The ParameterServer is built with auto_pg=False, so the
         torch.distributed process group is not destroyed after update.
         """
-        from checkpoint_engine.ps import ParameterServer
+        if ParameterServer is None:
+            raise ImportError("Checkpoint Engine is not available. Please install the Checkpoint Engine package.")
 
         # auto_pg=False keeps the default PG alive.
         ps = ParameterServer(
@@ -928,87 +934,27 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         self.logger.info(f"[checkpoint_engine] ParameterServer ready rank={self.rank} world_size={self.ps_world_size}")
         return ps
 
-    @staticmethod
-    def split_files_for_rank(checkpoint_path: str | Path, rank: int, world_size: int) -> list[str]:
-        """List sorted *.safetensors under checkpoint_path and assign a
-        contiguous shard to PS-rank."""
-
-        path = Path(checkpoint_path)
-        if not path.is_dir():
-            raise FileNotFoundError(f"Checkpoint path is not a directory: {path}")
-        files = sorted(str(p) for p in path.glob("*.safetensors"))
-        if not files:
-            raise FileNotFoundError(f"No .safetensors files found under {path}")
-        per_rank = (len(files) + world_size - 1) // world_size
-        return files[rank * per_rank : (rank + 1) * per_rank]
-
-    @staticmethod
-    def split_tensors_for_rank(checkpoint_path: str | Path, rank: int, world_size: int) -> dict[str, torch.Tensor]:
-        """Load and shard tensors for PS-rank via HF weight_map."""
-
-        from collections import defaultdict
-
-        from safetensors import safe_open
-
-        path = Path(checkpoint_path)
-        index_fn = path / "model.safetensors.index.json"
-        with open(index_fn) as f:
-            weight_map: dict[str, str] = json.load(f)["weight_map"]
-
-        weight_keys = list(weight_map.items())
-        per_rank = (len(weight_keys) + world_size - 1) // world_size
-        my_items = weight_keys[rank * per_rank : (rank + 1) * per_rank]
-        fn_tensors: dict[str, list[str]] = defaultdict(list)
-        for name, file in my_items:
-            fn_tensors[file].append(name)
-
-        named_tensors: dict[str, torch.Tensor] = {}
-        for file, names in fn_tensors.items():
-            with safe_open(str(path / file), framework="pt") as f:
-                for name in names:
-                    named_tensors[name] = f.get_tensor(name)
-        return named_tensors
-
-    def _record_local_tensor_keys(self, files: Sequence[str], named_tensors: dict[str, torch.Tensor]) -> None:
-        """Record which param keys this PS-rank owns."""
-
-        if named_tensors:
-            self._local_checkpoint_keys = set(named_tensors.keys())
-        else:
-            from safetensors import safe_open
-
-            keys = []
-            for file in files:
-                with safe_open(file, framework="pt", device="cpu") as f:
-                    keys.extend(f.keys())
-            self._local_checkpoint_keys = set(keys)
-
-    def register_checkpoint_from_disk(self, checkpoint_path: str | Path) -> str:
+    def split_tensors_for_rank(self, checkpoint_path: str | Path, world_size: int, rank: int) -> set[str]:
         """Register an HF safetensors checkpoint into the local
         ParameterServer."""
 
         path = Path(checkpoint_path)
-        name = self._checkpoint_name
         index_path = path / "model.safetensors.index.json"
 
-        if index_path.exists():
-            shard_tensors = self.split_tensors_for_rank(path, self.rank, self.ps_world_size)
-            files, named_tensors = [], shard_tensors
-        else:
-            files = self.split_files_for_rank(path, self.rank, self.ps_world_size)
-            named_tensors = {}
+        if not index_path.exists():
+            raise FileNotFoundError(f"model.safetensors.index.json file not found: {index_path}")
 
-        # 记录本 PS 负责哪些 key
-        self._record_local_tensor_keys(files, named_tensors)
+        with open(index_path) as f:
+            weight_map: dict[str, str] = json.load(f)["weight_map"]
+        weight_keys = list(key_name for key_name, file_name in weight_map.items())
+        per_rank = (len(weight_keys) + world_size - 1) // world_size
+        local_keys = set(weight_keys[rank * per_rank : (rank + 1) * per_rank])
 
         self.logger.info(
-            f"[checkpoint_engine] register disk checkpoint path={checkpoint_path} name={name} rank={self.rank}"
+            f"[checkpoint_engine] split keys from {index_path} "
+            f"rank={rank} tensors={len(local_keys)}/{len(weight_keys)}"
         )
-        if name in getattr(self._ps, "_memory_pool", {}):
-            self._ps.unregister_checkpoint(name)
-        self._ps.register_checkpoint(name, files=files, named_tensors=named_tensors)
-        dist.barrier()
-        return name
+        return local_keys
 
     def _collect_named_tensors(self, weight_iterator, local_keys=None):
         """Collect all train weights from the iterator onto CPU."""
@@ -1024,7 +970,6 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
                 for key, tensor in sd.items():
                     if local_keys is not None and key not in local_keys:
                         continue
-                    # named[key] = tensor.detach().to("cpu", copy=True)
                     named[key] = tensor
         return named
 
@@ -1038,7 +983,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         my_keys = keys[rank * per_rank : (rank + 1) * per_rank]
         return {k: named_tensors[k] for k in my_keys}
 
-    def register_checkpoint_from_train_engine(self, weight_iterator: Any) -> str:
+    def register_checkpoint_from_train_engine(self, weight_iterator: Any) -> None:
         """Register current train engine weights into Checkpoint Engine PS."""
 
         # 1. Collect named tensors from weight iterator
@@ -1051,9 +996,17 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         else:
             missing = self._local_checkpoint_keys - all_tensors.keys()
             if missing:
-                self.logger.error(f"Missing keys: {missing}")
+                missing_mtp_keys = {key for key in missing if key.startswith("mtp.")}
+                missing_non_mtp_keys = missing - missing_mtp_keys
+                if missing_non_mtp_keys:
+                    self.logger.error(
+                        f"[checkpoint_engine] ParameterServer Rank={self.rank} Missing non-MTP keys: {missing_non_mtp_keys}"
+                    )
+                else:
+                    self.logger.error(
+                        f"[checkpoint_engine] ParameterServer Rank={self.rank} Missing MTP-only keys: {missing_mtp_keys}"
+                    )
             shard = {k: all_tensors[k] for k in self._local_checkpoint_keys if k in all_tensors}
-            # 建议校验：缺 key / 多余 key 打 log 或 raise
 
         # 3. Register checkpoint
         self._update_counter += 1
@@ -1063,13 +1016,11 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
             f"rank={self.rank} tensors={len(shard)}/{len(all_tensors)}"
         )
         # Drop previous train checkpoint to limit pinned host memory.
-
-        self._ps.unregister_checkpoint(self._checkpoint_name)
+        if self._checkpoint_name is not None:
+            self._ps.unregister_checkpoint(self._checkpoint_name)
         self._ps.register_checkpoint(name, files=[], named_tensors=shard, use_shared_memory_pool=True)
         dist.barrier()
         self._checkpoint_name = name
-
-        return name
 
     def _make_req_func(self, targets: Sequence[RolloutWeightUpdateTarget]):
         """Build CE ``req_func``: source rank POSTs IPC update to its SGLang
@@ -1139,7 +1090,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
 
         return len(update_ranks) == world_size and list(update_ranks) == list(range(world_size))
 
-    def _update_engines(self, checkpoint_name: str) -> None:
+    def _update_engines(self) -> None:
         """``gather_metas`` then ``update`` to push checkpoint to rollout
         engines."""
 
@@ -1151,12 +1102,12 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         ranks = None if use_broadcast else update_ranks
         req_func = self._make_req_func(targets)
         self.logger.info(
-            f"[checkpoint_engine] gather_metas+update name={checkpoint_name} "
+            f"[checkpoint_engine] gather_metas+update name={self._checkpoint_name} "
             f"active_targets={len(targets)}/{len(self.rollout_info.weight_update_targets)} "
             f"method={'broadcast' if use_broadcast else 'p2p'} ranks={ranks}"
         )
-        self._ps.gather_metas(checkpoint_name)
-        self._ps.update(checkpoint_name, req_func, ranks=ranks)
+        self._ps.gather_metas(self._checkpoint_name)
+        self._ps.update(self._checkpoint_name, req_func, ranks=ranks)
 
     def update(self, weight_iterator: Any, need_register: bool = True, need_update: bool = True, **_: Any) -> None:
         """Update rollout engine weights through the checkpoint parameter
@@ -1177,15 +1128,19 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
             False to split registration and rollout update into separate calls, which
             can reduce peak GPU memory usage under memory pressure.
         """
+        assert need_register or need_update, (
+            "At least one of need_register or need_update must be True when use checkpoint engine update."
+        )
+        if need_register == False and self._checkpoint_name is None:
+            raise RuntimeError("CheckpointEngineWeightTransport cannot update without a registered checkpoint.")
+
+        # 1. Register checkpoint from train engine
         if need_register:
-            # 1. Register checkpoint from train engine
-            checkpoint_name = self.register_checkpoint_from_train_engine(weight_iterator)
-        else:
-            checkpoint_name = self._checkpoint_name
+            self.register_checkpoint_from_train_engine(weight_iterator)
 
         # 2. Broadcast checkpoint to engines
         if need_update:
-            self._update_engines(checkpoint_name)
+            self._update_engines()
 
     def send(self, batch: WeightUpdateBatch) -> None:
         raise NotImplementedError("CheckpointEngineWeightTransport uses update() end-to-end; send() is unused.")
