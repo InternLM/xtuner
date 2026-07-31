@@ -21,7 +21,6 @@ optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
     cpu_offload=False,
-    ep_size=moe_cfg.ep_size,
 )
 
 dataset_config = [
