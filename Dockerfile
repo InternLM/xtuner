@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.10.0
 # builder
-ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.03-py3
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.11-py3
 
 ## build base env
 FROM ${BASE_IMAGE} AS setup_env
@@ -28,7 +28,8 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     --mount=type=secret,id=NO_PROXY,env=no_proxy \
     if [ -n "${TORCH_VERSION}" ]; then \
         pip install torchvision torch==${TORCH_VERSION} \
-        -i ${PYTORCH_WHEELS_URL}/cu128 \
+        -i ${PYTORCH_WHEELS_URL}/cu130 \
+        --extra-index-url ${PYTORCH_WHEELS_URL}/cu128 \
         --extra-index-url ${PYTORCH_WHEELS_URL}/cu126 \
         --no-cache-dir; \
     fi
@@ -58,17 +59,31 @@ ARG FLASH_ATTN_URL
 # force hopper for now, you change it throught build args
 ARG FLASH_ATTN_CUDA_ARCHS="90"
 ARG FLASH_ATTENTION_DISABLE_SM80="TRUE"
+ARG FLASH_ATTENTION_OFFLINE_BUILD="TRUE"
 
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     git clone $(echo ${FLASH_ATTN_URL} | cut -d '@' -f 1) && \
     cd ${CODESPACE}/flash-attention && \
+    mkdir -p ${CODESPACE}/flash-attention/third_party/nvidia/backend/bin && \
+    ln -snf ${CUDA_HOME:-/usr/local/cuda}/bin/nvcc ${CODESPACE}/flash-attention/third_party/nvidia/backend/bin/nvcc && \
     git checkout $(echo ${FLASH_ATTN_URL} | cut -d '@' -f 2) && \
     git submodule update --init --recursive --force
 
 WORKDIR ${CODESPACE}/flash-attention
 
-RUN cd hopper && FLASH_ATTENTION_FORCE_BUILD=TRUE pip wheel -w ${FLASH_ATTN3_DIR} -v --no-deps .
-RUN FLASH_ATTENTION_FORCE_BUILD=TRUE pip wheel -w ${FLASH_ATTN_DIR} -v --no-deps .
+# CUDA 13 moves CCCL headers into include/cccl, which is missing from default host include paths
+# nvcc 13 falls back to PATH lookup for cicc when invoked from third_party/nvidia/backend
+RUN export PATH="${CUDA_HOME:-/usr/local/cuda}/nvvm/bin:${PATH}" && \
+    CUDA_MAJOR="$(python -c 'import torch; print(torch.version.cuda.split(".", 1)[0])')" && \
+    if [ "${CUDA_MAJOR}" = "13" ]; then \
+        export CPLUS_INCLUDE_PATH="${CUDA_HOME:-/usr/local/cuda}/include/cccl":${CPLUS_INCLUDE_PATH}; \
+    fi && \
+    cd hopper && FLASH_ATTENTION_FORCE_BUILD=TRUE pip wheel --no-build-isolation -w ${FLASH_ATTN3_DIR} -v --no-deps .
+RUN CUDA_MAJOR="$(python -c 'import torch; print(torch.version.cuda.split(".", 1)[0])')" && \
+    if [ "${CUDA_MAJOR}" = "13" ]; then \
+        export CPLUS_INCLUDE_PATH="${CUDA_HOME:-/usr/local/cuda}/include/cccl":${CPLUS_INCLUDE_PATH}; \
+    fi && \
+    FLASH_ATTENTION_FORCE_BUILD=TRUE pip wheel --no-build-isolation -w ${FLASH_ATTN_DIR} -v --no-deps .
 
 # compile adaptive_gemm
 FROM setup_env AS adaptive_gemm
@@ -85,7 +100,7 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 
 WORKDIR ${CODESPACE}/AdaptiveGEMM
 
-RUN pip wheel -w ${ADAPTIVE_GEMM_DIR} -v --no-deps .
+RUN pip wheel --no-build-isolation -w ${ADAPTIVE_GEMM_DIR} -v --no-deps .
 
 # compile grouped_gemm(permute and unpermute)
 FROM setup_env AS grouped_gemm
@@ -102,7 +117,7 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 
 WORKDIR ${CODESPACE}/GroupedGEMM
 
-RUN pip wheel -w ${GROUPED_GEMM_DIR} -v --no-deps .
+RUN pip wheel --no-build-isolation -w ${GROUPED_GEMM_DIR} -v --no-deps .
 
 # compile causal_conv1d
 FROM setup_env AS causal_conv1d
@@ -119,7 +134,7 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 
 WORKDIR ${CODESPACE}/causal-conv1d
 
-RUN CAUSAL_CONV1D_FORCE_BUILD=TRUE pip wheel -w ${CAUSAL_CONV1D_DIR} -v --no-deps --no-build-isolation .
+RUN CAUSAL_CONV1D_FORCE_BUILD=TRUE pip wheel --no-build-isolation -w ${CAUSAL_CONV1D_DIR} -v --no-deps .
 
 # compile nvshmem and deepep
 FROM setup_env AS deep_ep
@@ -156,8 +171,17 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 WORKDIR ${CODESPACE}/DeepEP
 
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
-    (pip show nvidia-nvshmem-cu12 >/dev/null 2>&1 || pip install nvidia-nvshmem-cu12==3.4.5) && \
-    pip wheel -w ${DEEP_EP_DIR} -v --no-deps .
+    CUDA_MAJOR="$(python -c 'import torch; print(torch.version.cuda.split(".", 1)[0])')" && \
+    if [ "${CUDA_MAJOR}" = "13" ]; then \
+        pip show nvidia-nvshmem-cu13 >/dev/null 2>&1 || pip install nvidia-nvshmem-cu13==3.4.5; \
+        export CPLUS_INCLUDE_PATH="${CUDA_HOME:-/usr/local/cuda}/include/cccl":${CPLUS_INCLUDE_PATH}; \
+    elif [ "${CUDA_MAJOR}" = "12" ]; then \
+        pip show nvidia-nvshmem-cu12 >/dev/null 2>&1 || pip install nvidia-nvshmem-cu12==3.4.5; \
+    else \
+        echo "Unsupported CUDA major version: ${CUDA_MAJOR}" >&2; \
+        exit 1; \
+    fi && \
+    pip wheel --no-build-isolation -w ${DEEP_EP_DIR} -v --no-deps .
 
 # compile deep_gemm
 FROM setup_env AS deep_gemm
@@ -174,7 +198,7 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 
 WORKDIR ${CODESPACE}/DeepGEMM
 
-RUN pip wheel -w ${DEEP_GEMM_DIR} -v --no-deps .
+RUN pip wheel --no-build-isolation -w ${DEEP_GEMM_DIR} -v --no-deps .
 
 # integration xtuner
 FROM setup_env AS xtuner_dev
@@ -260,13 +284,15 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 
 # nccl update for torch 2.6.0
 # RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
-RUN if [ "x${TORCH_VERSION}" = "x2.6.0" ]; then \
+RUN if [ "x${TORCH_VERSION}" = "x2.6.0" ] && \
+       pip show nvidia-nccl-cu12 >/dev/null 2>&1; then \
         pip install nvidia-nccl-cu12==2.25.1 --no-cache-dir -i ${DEFAULT_PYPI_URL}; \
     fi
 
 # cudnn update for torch 2.9.1
 # RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
-RUN if [ "x${TORCH_VERSION}" = "x2.9.1" ]; then \
+RUN if [ "x${TORCH_VERSION}" = "x2.9.1" ] && \
+       pip show nvidia-cudnn-cu12 >/dev/null 2>&1; then \
         pip install nvidia-cudnn-cu12==9.15.1.9 --no-cache-dir -i ${DEFAULT_PYPI_URL}; \
     fi
 
