@@ -68,7 +68,7 @@ Having problems running? Check out the [FAQ](faq)
 :caption: dense model fine-tuning example
 :linenos:
 
-torchrun  xtuner/v1/train/cli/sft.py --model-cfg examples/v1/sft_qwen3_tiny.py --chat_template qwen3 --dataset tests/resource/openai_sft.jsonl
+torchrun  xtuner/v1/train/cli/sft.py --model-cfg examples/v1/config/sft_qwen3_tiny.py --chat_template qwen3 --dataset tests/resource/openai_sft.jsonl
 ```
 
 After successful execution, the log is as follows
@@ -91,7 +91,7 @@ After successful execution, the log is as follows
 ```
 ````
 
-The above log shows that only 8G of memory is needed to run. If you want to reduce memory usage further, you can consider modifying the `num_hidden_layers` and `hidden_size` parameters in `examples/v1/sft_qwen3_tiny.py`.
+The above log shows that only 8G of memory is needed to run. If you want to reduce memory usage further, you can consider modifying the `num_hidden_layers` and `hidden_size` parameters in `examples/v1/config/sft_qwen3_tiny.py`.
 
 ### MLLM Multimodal Large Model Fine-tuning
 
@@ -103,7 +103,7 @@ Take Intern-S1 scientific multimodal as an example
 :caption: Intern-S1 tiny model fine-tuning example
 :linenos:
 
-torchrun xtuner/v1/train/cli/sft.py --config examples/v1/sft_intern_s1_tiny_config.py
+torchrun xtuner/v1/train/cli/sft.py --config examples/v1/config/sft_intern_s1_tiny_config.py
 ```
 
 After successful execution, the log is as follows
@@ -267,7 +267,7 @@ WARNING: input_ids length 4171 exceeds model_max_length 4096. truncated!
 ```
 ````
 
-The above log shows that only 10G of memory is needed to run. If you want to reduce memory usage further, you can consider modifying the `llm_cfg` dictionary related parameters in `examples/v1/sft_intern_s1_tiny_config.py`.
+The above log shows that only 10G of memory is needed to run. If you want to reduce memory usage further, you can consider modifying the `llm_cfg` dictionary related parameters in `examples/v1/config/sft_intern_s1_tiny_config.py`.
 
 (faq)=
 ## FAQ
