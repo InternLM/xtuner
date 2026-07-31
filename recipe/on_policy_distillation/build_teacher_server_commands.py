@@ -47,12 +47,14 @@ def build_teacher_launch_server_commands(
           model_info_url, command_arg_count, *command]``.
     """
     config = Config.fromfile(config_path)
-    node_count = int(os.environ["NODE_COUNT"])
-    node_rank = int(os.environ["NODE_RANK"])
-    gpus_per_node = int(os.environ["PROC_PER_NODE"])
+    node_count = int(os.environ.get("NODE_COUNT", "1"))
+    node_rank = int(os.environ.get("NODE_RANK", "0"))
+    gpus_per_node = int(os.environ.get("PROC_PER_NODE", "8"))
     node_addresses = tuple(
         address.strip()
-        for address in os.environ["WORKER_ALL_SOCKET_ADDRS"].split(",")
+        for address in os.environ.get(
+            "WORKER_ALL_SOCKET_ADDRS", "127.0.0.1"
+        ).split(",")
     )
     assert node_count > 0
     assert 0 <= node_rank < node_count

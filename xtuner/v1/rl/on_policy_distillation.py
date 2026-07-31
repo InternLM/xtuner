@@ -122,7 +122,8 @@ class TeacherLogprobClient:
                 state.status = Status.FAILED
                 state.error_msg = f"Teacher {self.name!r} scoring requires non-empty prompt_ids and response_ids"
                 return state
-            payload = self._construct_payload(prompt_ids, response_ids)
+            image_data = state.extra_fields.get("image_data")
+            payload = self._construct_payload(prompt_ids, response_ids, image_data=image_data)
 
             retries = 0
             while True:
@@ -130,7 +131,7 @@ class TeacherLogprobClient:
                     async with self._semaphore:
                         response = await self._client.post(self.url, json=payload)
                         response.raise_for_status()
-                    teacher_tokens, teacher_logprobs = self._parse_response(response, prompt_ids, response_ids)
+                    teacher_tokens, teacher_logprobs = self._parse_response(response, response_ids)
                     state.teacher_tokens = teacher_tokens
                     state.teacher_logprobs = teacher_logprobs
                     return state
@@ -156,12 +157,21 @@ class TeacherLogprobClient:
             raise RuntimeError("Exactly one of XTUNER_USE_SGLANG and XTUNER_USE_LMDEPLOY must be set to 1")
         return "sglang" if use_sglang else "lmdeploy"
 
-    def _construct_payload(self, prompt_ids: list[int], response_ids: list[int]) -> dict[str, Any]:
+    def _construct_payload(
+        self,
+        prompt_ids: list[int],
+        response_ids: list[int],
+        image_data: Any | None = None,
+    ) -> dict[str, Any]:
         if self.backend == "sglang":
-            return self._construct_sglang_payload(prompt_ids, response_ids)
-        if self.backend == "lmdeploy":
-            return self._construct_lmdeploy_payload(prompt_ids, response_ids)
-        raise RuntimeError(f"Unsupported teacher backend: {self.backend}")
+            payload = self._construct_sglang_payload(prompt_ids, response_ids)
+        elif self.backend == "lmdeploy":
+            payload = self._construct_lmdeploy_payload(prompt_ids, response_ids)
+        else:
+            raise RuntimeError(f"Unsupported teacher backend: {self.backend}")
+        if image_data:
+            payload["image_data"] = image_data
+        return payload
 
     @staticmethod
     def _construct_sglang_payload(prompt_ids: list[int], response_ids: list[int]) -> dict[str, Any]:
@@ -191,43 +201,36 @@ class TeacherLogprobClient:
     def _parse_response(
         self,
         response: httpx.Response,
-        prompt_ids: list[int],
         response_ids: list[int],
     ) -> tuple[list[int], list[float]]:
         if self.backend == "sglang":
-            response_logprobs = self._parse_sglang_response(response, prompt_ids, response_ids)
+            response_logprobs = self._parse_sglang_response(response, response_ids)
         else:
-            response_logprobs = self._parse_lmdeploy_response(response, prompt_ids, response_ids)
+            response_logprobs = self._parse_lmdeploy_response(response, response_ids)
         return self._validate_response_logprobs(response_logprobs, response_ids)
 
     @staticmethod
     def _parse_sglang_response(
         response: httpx.Response,
-        prompt_ids: list[int],
         response_ids: list[int],
     ) -> list[Any]:
         raw_logprobs = TeacherLogprobClient._get_input_token_logprobs(response)
-        expected_length = len(prompt_ids) + len(response_ids)
-        if len(raw_logprobs) != expected_length:
-            raise ValueError(
-                "SGLang teacher logprob length mismatch: "
-                f"expected {expected_length} rows for the full input, got {len(raw_logprobs)}"
-            )
+        prompt_tokens = response.json()["meta_info"]["prompt_tokens"]
+        # For N processed input tokens, only tokens 1..N-1 are scorable.
+        # SGLang still returns N rows by prepending (None, input_ids[0]) so
+        # that its rows stay aligned one-to-one with the input tokens.
+        # LMDeploy omits this unscorable first-token row, hence N-1 below.
+        assert len(raw_logprobs) == len(prompt_tokens)
         return raw_logprobs[-len(response_ids) :]
 
     @staticmethod
     def _parse_lmdeploy_response(
         response: httpx.Response,
-        prompt_ids: list[int],
         response_ids: list[int],
     ) -> list[Any]:
         raw_logprobs = TeacherLogprobClient._get_input_token_logprobs(response)
-        expected_length = len(prompt_ids) + len(response_ids) - 1
-        if len(raw_logprobs) != expected_length:
-            raise ValueError(
-                "LMDeploy teacher logprob length mismatch: "
-                f"expected {expected_length} rows after the boundary token, got {len(raw_logprobs)}"
-            )
+        prompt_tokens = response.json()["meta_info"]["prompt_tokens"]
+        assert len(raw_logprobs) == len(prompt_tokens) - 1
         return raw_logprobs[-len(response_ids) :]
 
     @staticmethod
