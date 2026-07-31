@@ -584,6 +584,10 @@ class BaseRLTrainer:
     _debug_train_files: dict[int, Path]
 
     def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
+        if cfg.opd_config is not None:
+            endpoint_map = json.loads(os.environ.get("XTUNER_OPD_TEACHER_ENDPOINTS_JSON", "{}"))
+            cfg.opd_config = cfg.opd_config.resolve_teacher_endpoints(endpoint_map)
+
         check_fa3()
         self._init_work_dir_and_meta(cfg, meta_path)
         self._init_load_source(cfg)
@@ -1017,11 +1021,11 @@ class BaseRLTrainer:
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ):
-        rewards_list = []
         # Per-session rewards for distribution metrics. Agentic sessions may split into several
         # trainable segments that share one reward; counting that reward once per session keeps
         # rewards/* from being weighted by segment count.
         cluster_rewards_list: list[float] = []
+        teacher_rewards: dict[str, list[float]] = {}
         advantages_list = []
         prompt_len_list = []
         response_len_list = []
@@ -1057,35 +1061,43 @@ class BaseRLTrainer:
                 if isinstance(turns, int):
                     tool_turns_list.append(turns)
 
+            # Collect rewards independently from task-advantage computation. Pure OPD may omit
+            # rewards entirely; when rewards are present they remain useful observability signals.
+            cluster_index_by_key: dict[Any, int] = {}
+            cluster_rewards: list[float] = []
+            cluster_representatives: list[RolloutState] = []
+            sample_cluster_indices: list[int] = []
+            for data in group:
+                if data.reward is None or "score" not in data.reward:
+                    assert task_adv_weight == 0, f"Reward is missing or does not contain 'score' key in data: {data}"
+                    continue
+                reward = float(data.reward["score"])
+                # session_id is only set by agentic loops / XTUNER_DETERMINISTIC; plain RL falls back
+                # to rollout_id, which the sampler always assigns. Segments of one session share a key.
+                cluster_key = data.session_id if data.session_id is not None else data.rollout_id
+                cluster_index = cluster_index_by_key.get(cluster_key)
+                if cluster_index is None:
+                    cluster_index = len(cluster_rewards)
+                    cluster_index_by_key[cluster_key] = cluster_index
+                    cluster_rewards.append(reward)
+                    cluster_representatives.append(data)
+                sample_cluster_indices.append(cluster_index)
+
+            cluster_rewards_list.extend(cluster_rewards)
+            if opd_config is not None:
+                for reward, representative in zip(cluster_rewards, cluster_representatives):
+                    data_source = representative.extra_fields.get("origin_data_source")
+                    if not isinstance(data_source, str):
+                        continue
+                    teacher_name = opd_config.data_source_teacher_map.get(data_source)
+                    if teacher_name is not None:
+                        teacher_rewards.setdefault(teacher_name, []).append(reward)
+
             if task_adv_weight == 0:
                 sample_advantages = [0.0] * len(group)
             else:
-                rewards = []
                 # Agentic rollouts may split one model session into multiple trainable segments.
                 # Compute the group advantage once per session, then broadcast it back to each segment.
-                cluster_index_by_key: dict[Any, int] = {}
-                cluster_rewards: list[float] = []
-                cluster_representatives: list[RolloutState] = []
-                sample_cluster_indices: list[int] = []
-                for data in group:
-                    assert data.reward is not None and "score" in data.reward, (
-                        f"Reward is missing or does not contain 'score' key in data: {data}"
-                    )
-                    reward = float(data.reward["score"])
-                    rewards.append(reward)
-                    # session_id is only set by agentic loops / XTUNER_DETERMINISTIC; plain RL falls back
-                    # to rollout_id, which the sampler always assigns. Segments of one session share a key.
-                    cluster_key = data.session_id if data.session_id is not None else data.rollout_id
-                    cluster_index = cluster_index_by_key.get(cluster_key)
-                    if cluster_index is None:
-                        cluster_index = len(cluster_rewards)
-                        cluster_index_by_key[cluster_key] = cluster_index
-                        cluster_rewards.append(reward)
-                        cluster_representatives.append(data)
-                    sample_cluster_indices.append(cluster_index)
-
-                rewards_list.extend(rewards)
-                cluster_rewards_list.extend(cluster_rewards)
                 rewards_tensor = torch.tensor(cluster_rewards, dtype=torch.float32)
                 cluster_advantages = self._advantage_estimator.compute(rewards_tensor, cluster_representatives)
                 sample_advantages = [
@@ -1263,6 +1275,9 @@ class BaseRLTrainer:
             "prompt_len/min": prompt_len_t.min().item(),
             "prompt_len/max": prompt_len_t.max().item(),
         }
+        for teacher_name, rewards in teacher_rewards.items():
+            if rewards:
+                info_dict[f"rewards/{teacher_name}/mean"] = torch.tensor(rewards, dtype=torch.float32).mean().item()
         if tool_turns_list:
             tool_turns_t = torch.tensor(tool_turns_list, dtype=torch.float32)
             info_dict["tool_turns/mean"] = tool_turns_t.mean().item()
@@ -1387,6 +1402,8 @@ class BaseRLTrainer:
             all_scalars.update({"entropy/train": rank0_log_item["train_entropy"]})
             if "opd_reverse_kl" in rank0_log_item:
                 all_scalars["opd_reverse_kl"] = rank0_log_item["opd_reverse_kl"]
+            if "opd_abs_logprob_loss" in rank0_log_item:
+                all_scalars["opd_abs_logprob_loss"] = rank0_log_item["opd_abs_logprob_loss"]
             for worker_idx, log_item in enumerate(train_info["workers_log_item"]):
                 if not self._display_all_workers_log and worker_idx > 0:
                     break

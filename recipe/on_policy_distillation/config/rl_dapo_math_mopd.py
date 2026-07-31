@@ -1,12 +1,11 @@
 import json
 import os
-from pathlib import Path
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig
-from xtuner.v1.model import get_model_config_from_hf
+from xtuner.v1.model import Qwen3VLDense2BConfig
 from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import (
@@ -65,10 +64,10 @@ evaluate_step = 5
 eval_prompt_repeat_k = 1
 checkpoint_interval = 200
 
-# 1. resources: two colocated Student workers, plus one GPU per Teacher.
+# 1. resources: four colocated Student workers, plus one GPU per Teacher.
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
-    num_workers=2 * NNODE,
+    num_workers=4 * NNODE,
     num_cpus_per_worker=12,
     cpu_memory_per_worker=16 * 1024**3,  # 16 GB
 )
@@ -95,7 +94,7 @@ fsdp_cfg = FSDPConfig(
     ep_size=1,
     reduce_dtype="float32",
 )
-model_cfg = get_model_config_from_hf(Path(model_path))
+model_cfg = Qwen3VLDense2BConfig()
 if hasattr(model_cfg, "balancing_loss_cfg"):
     model_cfg.balancing_loss_cfg = None
 if hasattr(model_cfg, "z_loss_cfg"):
@@ -186,6 +185,23 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="train_task",
         agent_loop_config=agent_loop_config,
+        judger_config=ComposedJudgerConfig(
+            branches={
+                "openai/gsm8k": GSM8KJudgerConfig(
+                    judger_name="openai/gsm8k",
+                    cpu_resources=CPUResourcesConfig(
+                        num_workers=1,
+                        num_cpus_per_worker=1,
+                    ),
+                ),
+                "hiyouga/geometry3k": GEO3KJudgerConfig(
+                    cpu_resources=CPUResourcesConfig(
+                        num_workers=1,
+                        num_cpus_per_worker=1,
+                    ),
+                ),
+            }
+        ),
         produce_strategy_config=produce_strategy_config,
         sampler_config=sampler_config,
     ),
@@ -227,10 +243,16 @@ if enable_evaluate:
         branches={
             "openai/gsm8k": GSM8KJudgerConfig(
                 judger_name="openai/gsm8k",
-                cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+                cpu_resources=CPUResourcesConfig(
+                    num_workers=1,
+                    num_cpus_per_worker=1,
+                ),
             ),
             "hiyouga/geometry3k": GEO3KJudgerConfig(
-                cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
+                cpu_resources=CPUResourcesConfig(
+                    num_workers=1,
+                    num_cpus_per_worker=1,
+                ),
             ),
         }
     )
@@ -281,10 +303,10 @@ opd_config = OPDConfig(
     teachers=[
         OPDTeacherConfig(
             name="gsm8k_teacher",
-            endpoint="http://127.0.0.1:13141",
             launch_config=OPDTeacherLaunchConfig(
                 model_path=gsm8k_teacher_model_path,
-                cuda_visible_devices="6",
+                num_workers=1,
+                server_port=13141,
                 tensor_parallel_size=1,
                 expert_parallel_size=1,
                 context_length=max_num_tokens,
@@ -294,10 +316,10 @@ opd_config = OPDConfig(
         ),
         OPDTeacherConfig(
             name="geo3k_teacher",
-            endpoint="http://127.0.0.1:13142",
             launch_config=OPDTeacherLaunchConfig(
                 model_path=geo3k_teacher_model_path,
-                cuda_visible_devices="7",
+                num_workers=1,
+                server_port=13142,
                 tensor_parallel_size=1,
                 expert_parallel_size=1,
                 context_length=max_num_tokens,
