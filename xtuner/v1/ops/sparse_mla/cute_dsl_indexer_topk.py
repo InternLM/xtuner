@@ -5,9 +5,11 @@ import functools
 
 import cutlass
 import cutlass.cute as cute
+import cutlass.torch
 import cutlass.utils as utils
 import cutlass.utils.hopper_helpers as sm90_utils
 import torch
+from cuda.bindings import driver as cuda
 from cutlass import pipeline
 from cutlass.cute.nvgpu import cpasync, warpgroup
 from cutlass.cute.runtime import from_dlpack
@@ -116,6 +118,7 @@ class _CuteDSLIndexerTopK:
         starts: cute.Tensor,
         ends: cute.Tensor,
         output: cute.Tensor,
+        stream: cuda.CUstream,
     ):
         matrix_m = self.QUERY_BLOCK * self.heads
         tile_shape = (matrix_m, self.BLOCK_N, self.index_dim)
@@ -177,6 +180,7 @@ class _CuteDSLIndexerTopK:
         ).launch(
             grid=(cute.ceil_div(q.shape[0], self.QUERY_BLOCK), 1, 1),
             block=(self.THREADS, 1, 1),
+            stream=stream,
         )
 
     @cute.jit
@@ -1313,6 +1317,16 @@ class _CuteDSLIndexerTopK:
                                 candidate_indices[query, candidate_offset] = self.candidate_index_dtype(
                                     key_idx - candidate_id_base
                                 )
+            # The producer barrier above protects partial-score writes from
+            # prior writes. Join again after consumption before a faster warp
+            # can overwrite the shared tile in the next K iteration.
+            if cutlass.const_expr(self.use_warpgroup_score_owners):
+                cute.arch.barrier(
+                    barrier_id=4 + warp_group,
+                    number_of_threads=self.THREADS // 4,
+                )
+            else:
+                cute.arch.sync_threads()
             candidate_tile_offset += self.BLOCK_N
             if cutlass.const_expr(not self.merge_reuses_k):
                 cute.arch.sync_threads()
@@ -1602,7 +1616,7 @@ def _compile_kernel(
 ):
     """Compile one static-shape TVM-FFI entry point and cache it."""
     with torch.cuda.device(device_index):
-        cutlass.cuda.initialize_cuda_context()
+        cutlass.cuda.initialize_cuda_context(device_index)
         q = torch.empty(q_shape, device="cuda", dtype=torch.bfloat16)
         k = torch.empty(k_shape, device="cuda", dtype=torch.bfloat16)
         weights = torch.empty(q_shape[:2], device="cuda", dtype=torch.float32)
@@ -1617,9 +1631,11 @@ def _compile_kernel(
             from_dlpack(tensor, assumed_align=16, enable_tvm_ffi=True)
             for tensor in (q, k, weights, starts, ends, output)
         ]
+        stream = cutlass.torch.current_stream()
         return cute.compile(
             _CuteDSLIndexerTopK(q_shape[1], q_shape[2], topk, k_shape[0]),
             *args,
+            stream,
             options="--enable-tvm-ffi",
         )
 
@@ -1653,7 +1669,7 @@ def indexer_topk_interface(
         topk,
         device_index,
     )
-    kernel(q, k, weights, starts, ends, output)
+    kernel(q, k, weights, starts, ends, output, cutlass.torch.current_stream())
     # The kernel keeps int64 storage because packed specializations reuse each
     # slot as two int32 scratch entries. SparseMLA's public index contract is
     # int32, so narrow only after the final IDs have been written.
