@@ -106,7 +106,7 @@ class GpuTopKResidency:
         seq_ctx.dsa_topk_cache.indices.pop(source_layer_idx, None)
 
     def _offload_key(self, seq_ctx: SequenceContext, source_layer_idx: int) -> str:
-        return f"dsa_topk_{seq_ctx.dsa_topk_cache.context_id}_{source_layer_idx}"
+        return f"dsa_topk_{seq_ctx.dsa_topk_cache.offload_slot}_{source_layer_idx}"
 
 
 class ActivationOffloadedTopKResidency(GpuTopKResidency):
@@ -178,7 +178,16 @@ class ActivationOffloadedTopKResidency(GpuTopKResidency):
             return
 
         key = self._offload_key(seq_ctx, source_layer_idx)
-        cpu_buffer = OffloadManager().get_or_create_pin_memory(key, topk_indices.shape, topk_indices.dtype)
+        # A slot/source pair owns both the runtime entry and its reusable pinned
+        # storage. Reusing it while still live would overwrite the earlier D2H
+        # result, so fail loudly if the scheduling contract is violated.
+        if OffloadManager().has_runtime_key(key):
+            raise RuntimeError(f"DSA top-k offload slot is still active: {key}")
+        cpu_buffer = OffloadManager().get_or_create_pin_memory(
+            key,
+            topk_indices.shape,
+            topk_indices.dtype,
+        )
         swap_tensor = SwapTensor(topk_indices, key, tensor_cpu=cpu_buffer)
         stream = self._stream_for_device(topk_indices.device)
         stream.wait_stream(torch.cuda.current_stream(topk_indices.device))

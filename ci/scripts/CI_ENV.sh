@@ -28,6 +28,7 @@ export ROLLOUT_DAPO_DATA_PATH=${CI_SHARE_DATA}/rl_test_judger_dapo_math_data.jso
 export GEO_ROLLOUT_DATA_PATH=${CI_SHARE_DATA}/rl_test_judge_geo_data.jsonl
 export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
 export XTUNER_DETERMINISTIC=true
+export TORCHINDUCTOR_DYNAMIC_SCALE_RBLOCK=0
 export XTUNER_USE_LMDEPLOY=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPYCACHEPREFIX=/tmp
