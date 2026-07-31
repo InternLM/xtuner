@@ -7,6 +7,7 @@ import torch
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.ops.sparse_mla import dsa_topk_indices, get_dsa_topk_indices
+from xtuner.v1.ops.sparse_mla.cute_dsl_indexer_topk import indexer_topk_interface
 
 
 def _has_cute_dsl_sm90() -> bool:
@@ -19,6 +20,43 @@ pytestmark = pytest.mark.skipif(
     not _has_cute_dsl_sm90(),
     reason="requires nvidia-cutlass-dsl and an SM90 GPU",
 )
+
+
+def test_cute_dsl_indexer_runs_on_current_cuda_stream():
+    torch.manual_seed(29)
+    query_len, kv_len, index_topk = 5, 8192, 1024
+    q = torch.zeros(query_len, 32, 128, device="cuda", dtype=torch.bfloat16)
+    k = torch.zeros(kv_len, 128, device="cuda", dtype=torch.bfloat16)
+    weights = torch.zeros(query_len, 32, device="cuda", dtype=torch.float32)
+    next_q = torch.randn_like(q)
+    next_k = torch.randn_like(k)
+    next_weights = torch.randn_like(weights)
+    starts = torch.zeros(query_len, device="cuda", dtype=torch.int32)
+    ends = torch.full_like(starts, kv_len)
+
+    # Compile before blocking the producer stream so compilation latency cannot
+    # accidentally hide a launch on CUDA's default stream.
+    indexer_topk_interface(q, k, weights, starts, ends, index_topk)
+    torch.cuda.synchronize()
+
+    gate = torch.cuda.Event()
+    blocker = torch.cuda.Stream()
+    producer = torch.cuda.Stream()
+    with torch.cuda.stream(blocker):
+        torch.cuda._sleep(200_000_000)
+        gate.record()
+    producer.wait_event(gate)
+    with torch.cuda.stream(producer):
+        q.copy_(next_q)
+        k.copy_(next_k)
+        weights.copy_(next_weights)
+        actual = indexer_topk_interface(q, k, weights, starts, ends, index_topk)
+    producer.synchronize()
+
+    scores = torch.einsum("qhd,kd->qhk", next_q.float(), next_k.float()).relu_()
+    scores = torch.einsum("qhk,qh->qk", scores, next_weights)
+    expected = scores.topk(index_topk, dim=-1).indices.to(torch.int32)
+    torch.testing.assert_close(actual[:, 0].sort(dim=-1).values, expected.sort(dim=-1).values)
 
 
 @pytest.mark.parametrize("compiled", [False, True])
