@@ -35,7 +35,6 @@ case:
             resource:
                 num_nodes: 1
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: ls
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
                     - ALPACA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
