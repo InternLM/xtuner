@@ -42,22 +42,36 @@ class TestMLLMTokenizeFn(TestCase):
         for j, data in enumerate(all_data):
             if j>=12:
                 break
-            gt_token_ids, gt_labels = qwen35_tokenize_fn_slowspeed(self.tokenizer, data['messages'], tools=data.get('tools'), add_vision_id=True)
             ret = tokenize_fn(data)
             input_ids_xtuner = ret['input_ids']
             labels_xtuner = ret['labels']
-            self.assertEqual(input_ids_xtuner, gt_token_ids)
-            self.assertEqual(labels_xtuner, gt_labels)
-
-            enable_thinking = any("reasoning_content" in msg for msg in data['messages'])
             decode_str = self.tokenizer.decode(input_ids_xtuner, skip_special_tokens=False)
-            hf_text = self.tokenizer.apply_chat_template(data['messages'],   
-                                               tools=data.get('tools'),       
-                                               add_vision_id=True,   
-                                               tokenize=False,
-                                               enable_thinking=enable_thinking,
-                                               add_generation_prompt=False)
-            self.assertEqual(decode_str, hf_text)
+            has_multiple_user_queries = sum(msg["role"] == "user" for msg in data["messages"]) > 1
+
+            if has_multiple_user_queries:
+                # XTuner 内部渲染会保留所有 assistant turn，不再与会丢弃历史 thinking 的 HF 模板对齐。
+                for message in data["messages"]:
+                    if message["role"] == "assistant":
+                        self.assertIn(message["content"].strip(), decode_str)
+                        if message.get("reasoning_content"):
+                            self.assertIn(message["reasoning_content"].strip(), decode_str)
+            else:
+                gt_token_ids, gt_labels = qwen35_tokenize_fn_slowspeed(
+                    self.tokenizer, data["messages"], tools=data.get("tools"), add_vision_id=True
+                )
+                self.assertEqual(input_ids_xtuner, gt_token_ids)
+                self.assertEqual(labels_xtuner, gt_labels)
+
+                enable_thinking = any("reasoning_content" in msg for msg in data["messages"])
+                hf_text = self.tokenizer.apply_chat_template(
+                    data["messages"],
+                    tools=data.get("tools"),
+                    add_vision_id=True,
+                    tokenize=False,
+                    enable_thinking=enable_thinking,
+                    add_generation_prompt=False,
+                )
+                self.assertEqual(decode_str, hf_text)
 
     @parametrize.parametrize("add_vision_id", [(True,), (False,)])
     def test_qwen35_vl_sft_single_image(self, add_vision_id):

@@ -175,16 +175,8 @@ def qwen35_tokenize_fn_fastspeed(
             sys_content = _render(messages[0]["content"], False).strip()
             _append(f"<|im_start|>system\n{sys_content}<|im_end|>\n", False)
 
-    # ── 计算 last_query_index ─────────────────────────────────────────────
-    multi_step_tool = True
-    last_query_index = len(messages) - 1
-    for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
-        if multi_step_tool and msg["role"] == "user":
-            content_str = _render(msg["content"], False).strip()
-            if not (content_str.startswith("<tool_response>") and content_str.endswith("</tool_response>")):
-                multi_step_tool = False
-                last_query_index = i
+    # 强制所有 assistant turn 都走训练分支，保留并训练历史 thinking/content。
+    last_query_index = -1
 
     # ── 主循环 ────────────────────────────────────────────────────────────
     for idx, message in enumerate(messages):
