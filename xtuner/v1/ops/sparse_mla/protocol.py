@@ -7,6 +7,7 @@ from xtuner.v1.data_proto import SequenceContext
 
 
 SparseMLABackend = Literal["torch", "tilelang", "cudnn_dsa"]
+DSAIndexerBackend = Literal["torch", "tilelang", "cute_dsl"]
 
 
 class SparseMLAOutputs(NamedTuple):
@@ -38,7 +39,7 @@ class DSATopKIndicesProtocol(Protocol):
     """Computes GLM-5.2 DSA sparse source indices.
 
     Returns:
-        ``torch.int64`` tensor shaped ``(seq_len, kv_group, topk)``. Invalid
+        ``torch.int32`` tensor shaped ``(seq_len, kv_group, topk)``. Invalid
         slots are padded with ``-1``. For packed inputs, every valid index stays
         inside its sequence and respects causal order.
     """
