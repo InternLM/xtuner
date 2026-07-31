@@ -9,7 +9,7 @@ default_config:
             cpus_per_task: 256
             memory_per_task: 1920
             image: ccr-hw/910c:cann83rc3_pta271_fixzero
-            pip_package: pip install -e . --no-deps; pip install more-itertools triton; pip install flash-linear-attention==0.4.2
+            pip_package: pip install -e . --no-deps; pip install more-itertools; pip install flash-linear-attention==0.4.2
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
     eval:
@@ -38,8 +38,10 @@ case:
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
                     - ALPACA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib/:\${LD_LIBRARY_PATH}
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_ACTIVATION_OFFLOAD=1
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
                     - TORCH_NPU_USE_HCCL=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
