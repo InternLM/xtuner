@@ -1,6 +1,7 @@
 import torch
 import torch.distributed as dist
 from torch import nn
+from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
 
 from xtuner._testing.testcase import DeterministicDDPTestCase
@@ -32,6 +33,44 @@ class ToyModel(BaseModel):
 
     def to_hf_key_list(self, key: str) -> list[str]:
         return [key]
+
+    def fully_shard(self, fsdp_config: FSDPConfig):
+        # Mirror production sharding (see dense.py / moe.py): each leaf module is
+        # its own FSDP group and the root is sharded last, rather than putting all
+        # root-owned params in a single FSDP group. `lm_head` uses
+        # reshard_after_forward=False because LMHead.forward consumes the unsharded
+        # weight via `to_local()`, which must stay materialized for backward.
+        self.fsdp_config = fsdp_config
+        self.fsdp_mesh = self._init_world_mesh()
+        self._world_mesh = self.fsdp_mesh
+
+        for _, module in self.named_modules():
+            for p_name, param in module.named_parameters(recurse=False):
+                if param.requires_grad:
+                    setattr(module, p_name, nn.Parameter(param.to(dtype=torch.float32)))
+
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
+        )
+        for module, reshard in (
+            (self.embed_tokens, fsdp_config.reshard_after_forward),
+            (self.fc1, fsdp_config.reshard_after_forward),
+            (self.lm_head, False),
+        ):
+            self._fully_shard(
+                mesh=self.fsdp_mesh,
+                mp_policy=mp_policy,
+                reshard_after_forward=reshard,
+                offload_policy=None,
+                module=module,
+            )
+        self._fully_shard(
+            mesh=self.fsdp_mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=fsdp_config.reshard_after_forward,
+            offload_policy=None,
+        )
+        return self
 
     def forward(self, seq_ctx: SequenceContext, loss_ctx=None) -> ModelOutputs:
         assert seq_ctx.input_ids is not None
@@ -101,9 +140,14 @@ class TestFSDPModel(DeterministicDDPTestCase):
         assert ref_output.loss is not None
         assert ref_output.logits is not None
         ref_output.loss.backward()
+        # FSDP2 reduces gradients across data-parallel ranks with a mean (AVG), so
+        # the single-process reference must average too. All ranks see the same
+        # batch here, so AVG == the per-rank gradient the sharded optimizer sees.
+        # (The previous SUM only passed by relying on AdamW's approximate
+        # scale-invariance, which drifts ~1e-3 on some torch builds.)
         for param in ref_model.parameters():
             assert param.grad is not None
-            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
 
         fsdp_config = FSDPConfig(
             param_dtype=torch.float32,

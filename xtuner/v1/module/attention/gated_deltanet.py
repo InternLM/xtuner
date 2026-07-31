@@ -15,7 +15,7 @@ from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import get_logger
 
-from ...ops.gated_deltanet import get_causal_conv1d_fn, get_chunk_gated_delta_rule_fn
+from ...ops.gated_deltanet import _hf_impl_enabled, get_causal_conv1d_fn, get_chunk_gated_delta_rule_fn
 from ...ops.gated_deltanet.gen_seq_idx import gen_seq_idx
 from ..linear import build_linear
 from .attn_outputs import AttnOutputs
@@ -338,7 +338,7 @@ class GatedDeltaNet(nn.Module):
             initial_state=None,
             output_final_state=False,
             use_qk_l2norm_in_kernel=True,
-            cu_seqlens=seq_ctx.cu_seq_lens_q,
+            cu_seqlens=self._chunk_cu_seqlens(seq_ctx),
         )
 
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
@@ -440,7 +440,7 @@ class GatedDeltaNet(nn.Module):
             initial_state=None,
             output_final_state=False,
             use_qk_l2norm_in_kernel=True,
-            cu_seqlens=seq_ctx.cu_seq_lens_q,
+            cu_seqlens=self._chunk_cu_seqlens(seq_ctx),
         )
         # reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)
@@ -454,6 +454,20 @@ class GatedDeltaNet(nn.Module):
             "projected_output": output,
         }
         return attn_outputs
+
+    @staticmethod
+    def _chunk_cu_seqlens(seq_ctx: SequenceContext) -> torch.Tensor | None:
+        """cu_seqlens passed to ``chunk_gated_delta_rule``.
+
+        HF's non-packed GDN forward passes ``cu_seqlens=None``. The FLA kernel's
+        ``None`` vs ``[0, seq]`` paths are not bitwise identical in bf16, so under
+        ``XTUNER_HF_IMPL`` mirror HF for a single non-packed sequence. Packed
+        batches (``numel() > 2``) still pass the real cu_seqlens tensor.
+        """
+        cu_seqlens = seq_ctx.cu_seq_lens_q
+        if _hf_impl_enabled() and cu_seqlens is not None and cu_seqlens.numel() == 2:
+            return None
+        return cu_seqlens
 
     @overload  # type: ignore
     def __call__(  # type: ignore

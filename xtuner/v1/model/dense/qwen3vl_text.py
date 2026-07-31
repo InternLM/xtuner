@@ -1,10 +1,11 @@
 import re
+from typing import cast
 
 import torch
 import torch.nn.functional as F
 
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.loss import BaseLossContext
+from xtuner.v1.loss import BaseLossContext, LMHeadLossContext
 from xtuner.v1.model.base import ModelOutputs
 
 from .qwen3 import Qwen3Dense, Qwen3Dense4BConfig, Qwen3Dense8BConfig
@@ -85,7 +86,8 @@ class Qwen3VLTextDense(Qwen3Dense):
             output["logits"] = logits
         else:
             # Training mode
-            loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx["lm"])  # type: ignore[call-overload]
+            lm_loss_ctx = cast(LMHeadLossContext, loss_ctx["lm"])
+            loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)
             output["loss"] = loss
             output["logits"] = logits
             output["extra_info"] = extra_info

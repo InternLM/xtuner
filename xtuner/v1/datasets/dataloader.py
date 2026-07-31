@@ -113,7 +113,9 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
         # With num_workers > 0 the sampler is iterated ahead by DataLoader's prefetch queue,
         # so recording inside sampler.__iter__ would count too many samples. Instead we
         # increment local consumed exactly once per batch that reaches the caller.
-        for batch in super().__iter__():
+        # Call DataLoader.__iter__ explicitly: BaseDataloader.__iter__ is abstract
+        # and mypy rejects super().__iter__() under [safe-super].
+        for batch in torch.utils.data.DataLoader.__iter__(self):
             self._local_samples += len(batch)
             yield batch
 

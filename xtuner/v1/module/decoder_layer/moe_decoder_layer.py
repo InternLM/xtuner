@@ -6,11 +6,13 @@ import torch.nn as nn
 from pydantic import BaseModel, ConfigDict
 from torch.autograd.function import Function
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.nn import functional as distF
 from torch.distributed.tensor import DTensor
 from torch.nn import functional as F
 
 from xtuner.v1.config.generate import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.data_proto.utils import split_for_sequence_parallel
 from xtuner.v1.float8 import Float8Config
 from xtuner.v1.module import (
     AttnOutputs,
@@ -452,7 +454,10 @@ class MoEDecoderLayer(nn.Module):
         # ProberList.after_combine(self.layer_idx, combined_hidden_states)
 
         if self.n_shared_experts > 0:
-            shared_experts_out = self._shared_experts_forward(hidden_states=hidden_states)
+            shared_experts_out = self._shared_experts_forward_for_sequence_parallel(
+                hidden_states=hidden_states,
+                seq_ctx=seq_ctx,
+            )
         else:
             shared_experts_out = None
 
@@ -572,9 +577,10 @@ class MoEDecoderLayer(nn.Module):
 
         if self.n_shared_experts > 0:
             shared_experts_out_list = []
-            for pre_moe_forward_out in pre_moe_forward_out_list:
-                shared_experts_out = self._shared_experts_forward(
+            for pre_moe_forward_out, seq_ctx in zip(pre_moe_forward_out_list, seq_ctx_list):
+                shared_experts_out = self._shared_experts_forward_for_sequence_parallel(
                     hidden_states=pre_moe_forward_out,
+                    seq_ctx=seq_ctx,
                 )
                 shared_experts_out_list.append(shared_experts_out)
         else:
@@ -672,6 +678,25 @@ class MoEDecoderLayer(nn.Module):
             shared_experts_out = torch.sigmoid(self.shared_expert_gate(hidden_states)) * shared_experts_out
 
         return shared_experts_out
+
+    def _shared_experts_forward_for_sequence_parallel(
+        self,
+        hidden_states: torch.Tensor,
+        seq_ctx: SequenceContext,
+    ) -> torch.Tensor:
+        if seq_ctx.sequence_parallel_mesh is None or seq_ctx.sequence_parallel_mesh.size() == 1:
+            return self._shared_experts_forward(hidden_states)
+
+        # Shared experts are dense per-token MLPs. Running bf16 GEMMs with a per-rank
+        # sequence length can choose a different kernel shape from the non-SP path.
+        # Gather first so SP and non-SP use the same M dimension, then shard back.
+        sp_mesh = seq_ctx.sequence_parallel_mesh
+        gathered_hidden_states = torch.cat(
+            distF.all_gather(hidden_states.contiguous(), group=sp_mesh.get_group()),
+            dim=1,
+        )
+        gathered_shared_experts_out = self._shared_experts_forward(gathered_hidden_states)
+        return split_for_sequence_parallel(gathered_shared_experts_out, dim=1, sp_mesh=sp_mesh)
 
     def _post_moe_forward(
         self,

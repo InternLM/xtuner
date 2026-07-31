@@ -34,7 +34,10 @@ class Qwen3VLVisionPatchMerger(nn.Module):
         self.linear_fc2 = nn.Linear(self.hidden_size, config.text_hidden_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.norm(x.view(-1, self.hidden_size) if self.use_postshuffle_norm else x).view(-1, self.hidden_size)
+        # Same fp32-LN / bf16-Linear mismatch as vision blocks.
+        compute_dtype = self.linear_fc1.weight.dtype
+        x = x.view(-1, self.hidden_size) if self.use_postshuffle_norm else x
+        x = self.norm(x.to(dtype=self.norm.weight.dtype)).to(compute_dtype).view(-1, self.hidden_size)
         x = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
         return x
 

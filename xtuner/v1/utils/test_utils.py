@@ -267,3 +267,42 @@ def add_video_root(messages: list[dict], video_root: Path | str):
                 content["path"] = new_image_list
             else:
                 content["path"] = str(content_path)
+
+
+def normalize_hf_qwen3_vl_video_input_ids(input_ids, tokenizer) -> list[int]:
+    """Drop redundant outer vision_start/end from transformers>=5.14 chat
+    templates.
+
+    Qwen3-VL chat templates emit ``<|vision_start|><|video_pad|><|vision_end|>`` per
+    video, while ``Qwen3VLProcessor.replace_video_token`` expands ``video_pad`` into
+    per-frame ``<t seconds><|vision_start|>...<|vision_end|>`` blocks. The composed HF
+    oracle therefore keeps an extra outer ``vision_start`` / ``vision_end`` pair around
+    each video that xtuner (and the intended Qwen3-VL prompt format) do not include.
+    """
+    ids = list(input_ids.tolist() if hasattr(input_ids, "tolist") else input_ids)
+    vision_start_id = tokenizer.convert_tokens_to_ids("<|vision_start|>")
+    vision_end_id = tokenizer.convert_tokens_to_ids("<|vision_end|>")
+    # Token id for ASCII '<' which starts `<0.0 seconds>` style timestamps.
+    lt_id = tokenizer.encode("<", add_special_tokens=False)[0]
+
+    # Outer vision_start sits immediately before each video's first timestamp.
+    i = 0
+    while i < len(ids) - 1:
+        if ids[i] == vision_start_id and ids[i + 1] == lt_id:
+            del ids[i]
+            continue
+        i += 1
+
+    # Outer vision_end appears as a duplicate VE (end of last frame + outer VE),
+    # either before the next video timestamp or at the end of the sequence.
+    i = 0
+    while i < len(ids) - 1:
+        if ids[i] == vision_end_id and ids[i + 1] == vision_end_id:
+            del ids[i + 1]
+            continue
+        i += 1
+
+    # Deleting mid-sequence special tokens (e.g. after ``Video 1: ``) leaves a
+    # BPE split that differs from tokenizing the cleaned string directly
+    # (``' <'`` vs ``' '`` + ``'<'``). Retokenize to match xtuner's layout.
+    return tokenizer.encode(tokenizer.decode(ids), add_special_tokens=False)
