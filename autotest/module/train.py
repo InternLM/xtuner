@@ -41,7 +41,7 @@ class Train:
 
             if train_type == "sft":
                 command = (
-                    f"cd /mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_runner/_work/xtuner-fork; pwd; {pip_package}; source /usr/local/Ascend/ascend-toolkit/set_env.sh; bash test_qwen35.sh config.py"
+                    f"cd /mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_runner/_work/xtuner-fork; pwd; source /usr/local/Ascend/ascend-toolkit/set_env.sh; bash test_qwen35.sh config.py"
                 )
 
                 return command, config
