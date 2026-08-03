@@ -17,7 +17,7 @@ from pydantic import ConfigDict
 import transformers
 from transformers import AutoProcessor, PreTrainedTokenizer
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
-from xtuner.v1.data_proto.messages import ChatMessages, Qwen35ChatMessages
+from xtuner.v1.data_proto.messages import ChatMessages, Qwen35ChatMessages, Qwen36ChatMessages
 from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP, HybridChatTemplate
 from xtuner.v1.utils import get_logger
 
@@ -40,6 +40,10 @@ from .qwenvl_rope2d import get_rope_index_3
 # when multiple datasets share the same processor.
 # Keyed by processor_path to support different model paths.
 _PROCESSOR_CACHE: dict[str, tuple] = {}
+_QWEN_INTERNAL_MESSAGE_CLASSES = {
+    "qwen3.5-vl": Qwen35ChatMessages,
+    "qwen3.6-vl": Qwen36ChatMessages,
+}
 
 logger = get_logger()
 
@@ -409,8 +413,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         )
 
     def calc_num_tokens_pure_text_get_item(self, data_item) -> CacheItem:
-        if self.chat_template_name == "qwen3.5-vl":
-            messages = Qwen35ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
+        if self.chat_template_name in _QWEN_INTERNAL_MESSAGE_CLASSES:
+            messages = _QWEN_INTERNAL_MESSAGE_CLASSES[self.chat_template_name](
+                messages=data_item["messages"], tools=data_item.get("tools")
+            )
         else:
             messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
         tokenized = messages.tokenize(self.tokenizer, self.chat_template, add_vision_id=self.add_vision_id)
@@ -440,8 +446,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
     def pure_text_get_item(self, data_item: dict) -> QwenVL3DataItem:
         is_pretrain = False
-        if self.chat_template_name == "qwen3.5-vl":
-            messages = Qwen35ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
+        if self.chat_template_name in _QWEN_INTERNAL_MESSAGE_CLASSES:
+            messages = _QWEN_INTERNAL_MESSAGE_CLASSES[self.chat_template_name](
+                messages=data_item["messages"], tools=data_item.get("tools")
+            )
             if len(data_item["messages"]) == 1 and data_item["messages"][0]["role"] == "pretrain":
                 is_pretrain = True
         else:
@@ -497,8 +505,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             return {"num_tokens": 0, "num_img_tokens": [0]}  # type: ignore
 
         is_pretrain = False
-        if self.chat_template_name == "qwen3.5-vl":
-            messages = Qwen35ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
+        if self.chat_template_name in _QWEN_INTERNAL_MESSAGE_CLASSES:
+            messages = _QWEN_INTERNAL_MESSAGE_CLASSES[self.chat_template_name](
+                messages=data_item["messages"], tools=data_item.get("tools")
+            )
             if len(data_item["messages"]) == 1 and data_item["messages"][0]["role"] == "pretrain":
                 is_pretrain = True
             tokenized = messages.tokenize(self.tokenizer, self.chat_template, add_vision_id=self.add_vision_id)
@@ -554,8 +564,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         grid_thw_merged = [merged_thw.prod().item() // self.merge_length for merged_thw in grid_thw]  # type: ignore
 
         is_pretrain = False
-        if self.chat_template_name == "qwen3.5-vl":
-            messages = Qwen35ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
+        if self.chat_template_name in _QWEN_INTERNAL_MESSAGE_CLASSES:
+            messages = _QWEN_INTERNAL_MESSAGE_CLASSES[self.chat_template_name](
+                messages=data_item["messages"], tools=data_item.get("tools")
+            )
             if len(data_item["messages"]) == 1 and data_item["messages"][0]["role"] == "pretrain":
                 is_pretrain = True
             tokenized = messages.tokenize(self.tokenizer, self.chat_template, add_vision_id=self.add_vision_id)
@@ -793,9 +805,11 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             total_sum_media_grid_thw += sum_media_grid_thw
 
         is_pretrain = False
-        if self.chat_template_name == "qwen3.5-vl":
+        if self.chat_template_name in _QWEN_INTERNAL_MESSAGE_CLASSES:
             replace_video_timestamps_and_num_frame(data_item["messages"], num_image_token_list, timestamps_list)
-            messages = Qwen35ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
+            messages = _QWEN_INTERNAL_MESSAGE_CLASSES[self.chat_template_name](
+                messages=data_item["messages"], tools=data_item.get("tools")
+            )
             if len(data_item["messages"]) == 1 and data_item["messages"][0]["role"] == "pretrain":
                 is_pretrain = True
             tokenized = messages.tokenize(self.tokenizer, self.chat_template, add_vision_id=self.add_vision_id)
@@ -930,9 +944,11 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             total_sum_media_grid_thw += sum_media_grid_thw
 
         is_pretrain = False
-        if self.chat_template_name == "qwen3.5-vl":
+        if self.chat_template_name in _QWEN_INTERNAL_MESSAGE_CLASSES:
             replace_video_timestamps_and_num_frame(data_item["messages"], num_image_tokens_list, timestamps_list)
-            messages = Qwen35ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
+            messages = _QWEN_INTERNAL_MESSAGE_CLASSES[self.chat_template_name](
+                messages=data_item["messages"], tools=data_item.get("tools")
+            )
             if len(data_item["messages"]) == 1 and data_item["messages"][0]["role"] == "pretrain":
                 is_pretrain = True
             tokenized = messages.tokenize(self.tokenizer, self.chat_template, add_vision_id=self.add_vision_id)
@@ -1020,7 +1036,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     add_vision_id: bool = True
 
     trim_memory_interval: int = 1
-    chat_template: Literal["qwen3-vl", "qwen3-vl-rl", "qwen3.5-vl"] = "qwen3-vl"
+    chat_template: Literal["qwen3-vl", "qwen3-vl-rl", "qwen3.5-vl", "qwen3.6-vl"] = "qwen3-vl"
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
