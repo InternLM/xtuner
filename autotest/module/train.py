@@ -41,35 +41,9 @@ class Train:
 
             if train_type == "sft":
                 command = (
-                    f"cd {current_dir}; pwd; {pip_package}; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
-                    + cudnn_patch
-                    + f"torchrun --nproc-per-node {nproc_per_node} --master_addr=${{MASTER_ADDR}} --master_port=${{MASTER_PORT}} --nnodes=${{WORLD_SIZE}} --node_rank=${{RANK}} "
-                    + f"xtuner/v1/train/cli/{train_type}.py"
+                    f"cd /mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_runner/_work/xtuner-fork; pwd; {pip_package}; source /usr/local/Ascend/ascend-toolkit/set_env.sh; bash test_qwen35.sh config.py"
                 )
-                if config_path:
-                    output_path = model_config = config.get("parameters", {}).get("output_path", ".")
-                    if output_path == ".":
-                        command += f" --config {config_path}; mkdir -p {work_dir}; mv {output_path}/.xtuner {work_dir}; mv {output_path}/202* {work_dir}"
-                    else:
-                        command += f" --config {config_path}"
-                else:
-                    if model_config:
-                        command += f" --model-cfg {model_config}"
-                    if chat_template:
-                        command += f" --chat_template {chat_template}"
-                    if dataset_path:
-                        command += f" --dataset {dataset_path}"
-                    command += f" --work_dir {work_dir}"
 
-                return command, config
-            elif train_type == "rl":
-                infer_type = config.get("parameters", {}).get("infer_backend", "lmdeploy")
-                accelerator = config.get("parameters", {}).get("accelerator", "GPU")
-                command = (
-                    f"cd {current_dir}; pwd; {pip_package}; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
-                    + cudnn_patch
-                    + f"bash -x autotest/utils/ci_run_rl.sh {accelerator} {infer_type} {config_path} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
-                )
                 return command, config
         else:
             return "", config
