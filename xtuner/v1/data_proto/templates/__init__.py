@@ -14,6 +14,12 @@ CHAT_TEMPLATE_MAP = {
         image_context_token="<|image_pad|>",
         video_context_token="<|video_pad|>",
     ),
+    "qwen3.6-vl": HybridChatTemplate(
+        image_start_token="<|vision_start|>",
+        image_end_token="<|vision_end|>",
+        image_context_token="<|image_pad|>",
+        video_context_token="<|video_pad|>",
+    ),
     "intern-s1": HybridChatTemplate(
         system="<|im_start|>system\n{system}<|im_end|>\n",
         user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
