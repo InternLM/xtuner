@@ -10,8 +10,8 @@ from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
+    AsyncProduceStrategyConfig,
     SamplerConfig,
-    SyncProduceStrategyConfig,
     TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
@@ -22,9 +22,9 @@ from xtuner.v1.rl.on_policy_distillation import (
     OPDTeacherConfig,
     OPDTeacherLaunchConfig,
 )
-from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
+from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.trainer import WorkerConfig
+from xtuner.v1.rl.trainer import RolloutImportanceSampling, WorkerConfig
 from xtuner.v1.rl.utils import (
     AcceleratorResourcesConfig,
     CPUResourcesConfig,
@@ -78,11 +78,9 @@ def mopd_compute_metric(samples):
 # Training shape aligned with verl PR #6051:
 # examples/on_policy_distillation_trainer/run_qwen3_mopd_gsm8k_geo3k.sh.
 # Teacher roles and model families follow the GSM8K/Geo3K experiment.
-experimental_name = "dapo_math_mopd"
+experimental_name = "dapo_math_mopd_async"
 total_epochs = 15
-total_train_steps_env = os.environ.get("TOTAL_TRAIN_STEPS")
-total_train_steps = int(total_train_steps_env) if total_train_steps_env is not None else None
-train_batch_size = 256
+train_batch_size = 128
 prompt_repeat_k = 1
 rollout_tp_size = 1
 rollout_ep_size = 1
@@ -96,7 +94,7 @@ evaluate_step = 5
 eval_prompt_repeat_k = 1
 checkpoint_interval = 200
 
-# 1. resources: four colocated Student workers, plus one GPU per Teacher replica.
+# 1. resources: four colocated Student workers, plus one GPU per Teacher.
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
     num_workers=4 * NNODE,
@@ -147,6 +145,13 @@ loss_cfg = GRPOLossConfig(
     kl_loss_type="low_var_kl",
     mode="chunk",
     chunk_size=512,
+    rollout_is=RolloutImportanceSampling(
+        rollout_is_level="token",
+        rollout_is_mode="both",
+        rollout_is_threshold=(5, 0.5),
+        rollout_is_mask_threshold=(5, 0.5),
+        rollout_is_veto_threshold=(20, 0),
+    ),
 )
 train_worker_cfg = WorkerConfig(
     model_cfg=model_cfg,
@@ -212,7 +217,11 @@ agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=training_sample_params,
 )
-produce_strategy_config = SyncProduceStrategyConfig()
+produce_strategy_config = AsyncProduceStrategyConfig(
+    over_sample_threshold=1.0,
+    enable_partial_rollout=True,
+    max_staleness=2,
+)
 agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="train_task",
@@ -335,7 +344,6 @@ opd_config = OPDConfig(
     teachers=[
         OPDTeacherConfig(
             name="gsm8k_teacher",
-            num_replicas=2,
             launch_config=OPDTeacherLaunchConfig(
                 model_path=gsm8k_teacher_model_path,
                 num_workers=1,
@@ -349,7 +357,6 @@ opd_config = OPDConfig(
         ),
         OPDTeacherConfig(
             name="geo3k_teacher",
-            num_replicas=2,
             launch_config=OPDTeacherLaunchConfig(
                 model_path=geo3k_teacher_model_path,
                 num_workers=1,
@@ -373,7 +380,7 @@ trainer = RLColocateTrainerConfig(
     train_worker_cfg=train_worker_cfg,  # TODO: uniform naming of cfg and config
     rollout_config=rollout_config,
     tokenizer_path=model_path,
-    replay_buffer_config=SyncReplayBufferConfig(),
+    replay_buffer_config=AsyncReplayBufferConfig(),
     agent_loop_manager_cfg=agent_loop_manager_cfg,
     eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
     evaluator_config=evaluator_config,
@@ -384,7 +391,6 @@ trainer = RLColocateTrainerConfig(
     enable_evaluate=enable_evaluate,
     enable_initial_evaluate=enable_evaluate,
     evaluate_step=evaluate_step,
-    total_train_steps=total_train_steps,
     total_epochs=total_epochs,
     work_dir=work_dir,
     seed=1234,

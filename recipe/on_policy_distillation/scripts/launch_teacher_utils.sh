@@ -154,6 +154,11 @@ _start_teacher_servers() {
     local -a teacher_fields=()
     local -a teacher_command=()
 
+    # Local non-rjob launches default to a single node. Preserve topology
+    # values supplied by distributed launchers.
+    export NODE_COUNT="${NODE_COUNT:-1}"
+    export NODE_RANK="${NODE_RANK:-0}"
+
     TEACHER_NAMES=()
     TEACHER_ENDPOINTS=()
     TEACHER_HEALTH_URLS=()
@@ -165,8 +170,8 @@ _start_teacher_servers() {
     mkdir -p "${work_dir}"
 
     # Command builder output:
-    # count, endpoint map JSON, Student worker count, current-node Student
-    # worker count, then repeated name, target node rank, local devices,
+    # replica count, endpoint map JSON, Student worker count, current-node
+    # Student worker count, then repeated display name, target node rank, local devices,
     # endpoint, health URL, model-info URL,
     # command-argument count, and command argv.
     unset XTUNER_OPD_TEACHER_ENDPOINTS_JSON
