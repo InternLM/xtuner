@@ -33,16 +33,8 @@ class Train:
             )
             config["work_dir"] = work_dir
 
-            # this patch is for torch 2.9.1 Conv3d memory issue fix
-            cudnn_patch = (
-                "TORCH_VERSION=$(python -c 'import torch;print(torch.__version__.split(chr(43))[0])'); "
-                "if [[ $TORCH_VERSION == 2.9.1 ]]; then pip install nvidia-cudnn-cu12==9.15.1.9; fi; "
-            )
-
             if train_type == "sft":
-                command = (
-                    f"cd /mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_runner/_work/xtuner-fork; pwd; source /usr/local/Ascend/ascend-toolkit/set_env.sh; bash test_qwen35.sh config.py"
-                )
+                command = "cd /mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_runner/_work/xtuner-fork; pwd; source /usr/local/Ascend/ascend-toolkit/set_env.sh; sleep inf; bash test_qwen35.sh config.py"
 
                 return command, config
         else:
