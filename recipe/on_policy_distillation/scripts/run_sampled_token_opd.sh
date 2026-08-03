@@ -55,7 +55,7 @@ trap cleanup EXIT
 trap "exit 130" INT
 trap "exit 143" TERM
 
-start_single_teacher_server "${OPD_CONFIG_FILE}" "${OPD_BACKEND}" "${WORK_DIR}"
+start_teacher_servers "${OPD_CONFIG_FILE}" "${OPD_BACKEND}" "${WORK_DIR}"
 wait_for_teacher_servers "${TEACHER_STARTUP_TIMEOUT_S}"
 curl -sS --max-time 10 "${TEACHER_MODEL_INFO_URLS[0]}"
 echo

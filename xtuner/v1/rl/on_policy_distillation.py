@@ -35,7 +35,8 @@ class OPDTeacherConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    endpoint: str | None = None
+    num_replicas: int = Field(default=1, gt=0)
+    endpoints: list[str] = Field(default_factory=list)
     api_key: str | None = None
     request_timeout_s: float = Field(default=1200.0, gt=0.0)
     max_retry_per_sample: int = Field(default=2, ge=0)
@@ -62,16 +63,16 @@ class OPDConfig(BaseModel):
             raise ValueError(f"data_source_teacher_map references unknown teachers: {sorted(unknown_teachers)}")
         return self
 
-    def resolve_teacher_endpoints(self, endpoint_map: dict[str, str]) -> OPDConfig:
-        teachers = []
-        for teacher in self.teachers:
-            if teacher.launch_config is None:
-                endpoint = teacher.endpoint
-            else:
-                endpoint = endpoint_map[teacher.name]
-            if not endpoint:
-                raise ValueError(f"Teacher {teacher.name!r} needs endpoint")
-            teachers.append(teacher.model_copy(update={"endpoint": endpoint}))
+    def resolve_teacher_endpoints(
+        self,
+        endpoint_map: dict[str, list[str]],
+    ) -> OPDConfig:
+        teachers = [
+            teacher
+            if teacher.launch_config is None
+            else teacher.model_copy(update={"endpoints": endpoint_map[teacher.name]})
+            for teacher in self.teachers
+        ]
         return self.model_copy(update={"teachers": teachers})
 
 
@@ -103,10 +104,9 @@ class TeacherLogprobClient:
         self.config = config
         self.name = config.name
         self.backend = self._resolve_backend_from_env()
-        if not config.endpoint:
-            raise ValueError(f"Teacher {config.name!r} needs endpoint")
-        self.url = f"{config.endpoint.rstrip('/')}/generate"
-        self._semaphore = asyncio.Semaphore(config.max_concurrency)
+        self.urls = [f"{endpoint.rstrip('/')}/generate" for endpoint in config.endpoints]
+        self._semaphores = [asyncio.Semaphore(config.max_concurrency) for _ in self.urls]
+        self._next_replica_idx = 0
 
         headers = {"Content-Type": "application/json"}
         if config.api_key is not None:
@@ -125,23 +125,29 @@ class TeacherLogprobClient:
             image_data = state.extra_fields.get("image_data")
             payload = self._construct_payload(prompt_ids, response_ids, image_data=image_data)
 
-            retries = 0
-            while True:
+            start_replica_idx = self._next_replica_idx
+            self._next_replica_idx = (start_replica_idx + 1) % len(self.urls)
+            for attempt_idx in range(self.config.max_retry_per_sample + 1):
+                replica_idx = (start_replica_idx + attempt_idx) % len(self.urls)
+                url = self.urls[replica_idx]
                 try:
-                    async with self._semaphore:
-                        response = await self._client.post(self.url, json=payload)
+                    async with self._semaphores[replica_idx]:
+                        response = await self._client.post(url, json=payload)
                         response.raise_for_status()
                     teacher_tokens, teacher_logprobs = self._parse_response(response, response_ids)
                     state.teacher_tokens = teacher_tokens
                     state.teacher_logprobs = teacher_logprobs
                     return state
                 except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as exc:
-                    if retries >= self.config.max_retry_per_sample:
+                    if attempt_idx >= self.config.max_retry_per_sample:
                         state.status = Status.FAILED
-                        state.error_msg = f"Teacher {self.name!r} scoring failed after {retries + 1} attempts: {exc}"
+                        state.error_msg = (
+                            f"Teacher {self.name!r} scoring failed after {attempt_idx + 1} attempts; "
+                            f"replica={replica_idx}; endpoint={url}; last_error={exc}"
+                        )
                         return state
-                    retries += 1
                     await asyncio.sleep(0.1)
+            raise RuntimeError("Teacher scoring retry loop exited unexpectedly")
         finally:
             state.extra_fields["teacher_score_time_s"] = time.perf_counter() - start
 
@@ -215,12 +221,16 @@ class TeacherLogprobClient:
         response_ids: list[int],
     ) -> list[Any]:
         raw_logprobs = TeacherLogprobClient._get_input_token_logprobs(response)
-        prompt_tokens = response.json()["meta_info"]["prompt_tokens"]
+        prompt_token_count = response.json()["meta_info"]["prompt_tokens"]
         # For N processed input tokens, only tokens 1..N-1 are scorable.
         # SGLang still returns N rows by prepending (None, input_ids[0]) so
         # that its rows stay aligned one-to-one with the input tokens.
         # LMDeploy omits this unscorable first-token row, hence N-1 below.
-        assert len(raw_logprobs) == len(prompt_tokens)
+        if len(raw_logprobs) != prompt_token_count:
+            raise ValueError(
+                "SGLang teacher logprob length mismatch: "
+                f"expected {prompt_token_count} rows for the full input, got {len(raw_logprobs)}"
+            )
         return raw_logprobs[-len(response_ids) :]
 
     @staticmethod
@@ -229,8 +239,12 @@ class TeacherLogprobClient:
         response_ids: list[int],
     ) -> list[Any]:
         raw_logprobs = TeacherLogprobClient._get_input_token_logprobs(response)
-        prompt_tokens = response.json()["meta_info"]["prompt_tokens"]
-        assert len(raw_logprobs) == len(prompt_tokens) - 1
+        prompt_token_count = response.json()["meta_info"]["prompt_tokens"]
+        if len(raw_logprobs) != prompt_token_count - 1:
+            raise ValueError(
+                "LMDeploy teacher logprob length mismatch: "
+                f"expected {prompt_token_count - 1} rows after the boundary token, got {len(raw_logprobs)}"
+            )
         return raw_logprobs[-len(response_ids) :]
 
     @staticmethod

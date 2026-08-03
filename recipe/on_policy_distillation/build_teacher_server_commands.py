@@ -1,16 +1,17 @@
 """Build executable Teacher server commands from an OPD config.
 
-The NUL-delimited output starts with the Teacher count, resolved endpoint
-mapping, total Student worker count, and current-node Student worker count. Each
-Teacher record contains its placement, endpoint, health URLs, and executable
-command arguments. An externally managed Teacher has a target node rank of
-``-1`` and a command-argument count of zero.
+The NUL-delimited output starts with the Teacher replica count, resolved
+endpoint mapping, total Student worker count, and current-node Student worker
+count. Each replica record contains its placement, endpoint, health URLs, and
+executable command arguments. An externally managed Teacher replica has a
+target node rank of ``-1`` and a command-argument count of zero.
 """
 
 import argparse
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
@@ -23,11 +24,24 @@ from xtuner.v1.rl.on_policy_distillation import OPDTeacherConfig  # noqa: E402
 from xtuner.v1.utils.config import Config  # noqa: E402
 
 
+@dataclass(frozen=True)
+class TeacherReplicaRequest:
+    teacher: OPDTeacherConfig
+    replica_index: int
+
+    @property
+    def key(self) -> tuple[str, int]:
+        return self.teacher.name, self.replica_index
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.teacher.name}[{self.replica_index}]"
+
 
 def build_teacher_launch_server_commands(
     config_path: str,
     backend: Literal["sglang", "lmdeploy"],
-) -> tuple[dict[str, str], int, int, list[list[str]]]:
+) -> tuple[dict[str, list[str]], int, int, list[list[str]]]:
     """Build executable Teacher server command records.
 
     Args:
@@ -38,13 +52,14 @@ def build_teacher_launch_server_commands(
     Returns:
         A four-item tuple containing:
 
-        - ``endpoint_map``: Teacher name to advertised endpoint.
+        - ``endpoint_map``: Logical Teacher name to advertised replica
+          endpoints.
         - ``student_num_workers``: Total number of Student GPUs in the cluster.
         - ``student_local_num_workers``: Number of Student GPUs on the current
           node.
-        - ``records``: One flattened string record per Teacher. Each record is
-          ``[name, target_node_rank, local_devices, endpoint, health_url,
-          model_info_url, command_arg_count, *command]``.
+        - ``records``: One flattened string record per Teacher replica. Each
+          record is ``[display_name, target_node_rank, local_devices, endpoint,
+          health_url, model_info_url, command_arg_count, *command]``.
     """
     config = Config.fromfile(config_path)
     node_count = int(os.environ.get("NODE_COUNT", "1"))
@@ -62,9 +77,11 @@ def build_teacher_launch_server_commands(
     assert len(node_addresses) == node_count
     assert all(node_addresses)
 
+    teachers = config.opd_config.teachers
+    replica_requests = _expand_teacher_replicas(teachers)
     health_path, model_info_path = _get_teacher_server_paths(backend)
     teacher_placements, student_local_num_workers = _allocate_teacher_devices(
-        config.opd_config.teachers,
+        replica_requests,
         node_count=node_count,
         node_rank=node_rank,
         gpus_per_node=gpus_per_node,
@@ -74,42 +91,40 @@ def build_teacher_launch_server_commands(
         for _, local_devices in teacher_placements.values()
     )
     student_num_workers = node_count * gpus_per_node - teacher_num_workers
-    endpoint_map: dict[str, str] = {}
+    endpoint_map: dict[str, list[str]] = {teacher.name: [] for teacher in teachers}
     records: list[list[str]] = []
     used_node_ports: set[tuple[int, int]] = set()
 
-    for teacher in config.opd_config.teachers:
+    for replica in replica_requests:
+        teacher = replica.teacher
         launch_config = teacher.launch_config
         if launch_config is None:
-            if teacher.endpoint is None:
-                raise ValueError(f"Externally managed Teacher {teacher.name!r} must define endpoint")
             target_node_rank = -1
             local_cuda_visible_devices = ""
-            endpoint = teacher.endpoint.rstrip("/")
+            endpoint = teacher.endpoints[replica.replica_index].rstrip("/")
             command: list[str] = []
         else:
-            target_node_rank, local_devices = teacher_placements[teacher.name]
-            node_port = (target_node_rank, launch_config.server_port)
-            if node_port in used_node_ports:
-                raise ValueError(
-                    f"Teacher {teacher.name!r} reuses port {launch_config.server_port} on node "
-                    f"{target_node_rank}"
-                )
-            used_node_ports.add(node_port)
+            target_node_rank, local_devices = teacher_placements[replica.key]
+            server_port = _allocate_teacher_server_port(
+                launch_config.server_port,
+                target_node_rank=target_node_rank,
+                used_node_ports=used_node_ports,
+                replica_name=replica.display_name,
+            )
 
             local_cuda_visible_devices = ",".join(str(device) for device in local_devices)
-            endpoint = (
-                f"http://{node_addresses[target_node_rank]}:{launch_config.server_port}"
-            )
+            endpoint = f"http://{node_addresses[target_node_rank]}:{server_port}"
             if backend == "sglang":
-                command = _build_sglang_command(teacher)
+                command = _build_sglang_command(teacher, server_port=server_port)
             elif backend == "lmdeploy":
-                command = _build_lmdeploy_command(teacher)
+                command = _build_lmdeploy_command(teacher, server_port=server_port)
+            else:
+                raise ValueError(f"Unsupported Teacher backend: {backend}")
 
-        endpoint_map[teacher.name] = endpoint
+        endpoint_map[teacher.name].append(endpoint)
         records.append(
             [
-                teacher.name,
+                replica.display_name,
                 str(target_node_rank),
                 local_cuda_visible_devices,
                 endpoint,
@@ -122,23 +137,36 @@ def build_teacher_launch_server_commands(
     return endpoint_map, student_num_workers, student_local_num_workers, records
 
 
-def _allocate_teacher_devices(
+def _expand_teacher_replicas(
     teachers: list[OPDTeacherConfig],
+) -> list[TeacherReplicaRequest]:
+    return [
+        TeacherReplicaRequest(
+            teacher=teacher,
+            replica_index=replica_index,
+        )
+        for teacher in teachers
+        for replica_index in range(teacher.num_replicas)
+    ]
+
+
+def _allocate_teacher_devices(
+    replica_requests: list[TeacherReplicaRequest],
     *,
     node_count: int,
     node_rank: int,
     gpus_per_node: int,
-) -> tuple[dict[str, tuple[int, list[int]]], int]:
+) -> tuple[dict[tuple[str, int], tuple[int, list[int]]], int]:
     """Allocate high-rank GPUs to local Teachers and leave the rest to Student.
 
-    Teachers are processed by descending ``num_workers``. Requests with the
-    same size keep their original config order. Each Teacher is placed wholly
-    on the highest-rank node that has enough free GPUs, using that node's
-    highest free local device ordinals. Teachers without ``launch_config`` are
-    externally managed and do not consume cluster GPUs.
+    Teacher replicas are processed by descending ``num_workers``. Requests
+    with the same size keep their expanded config order. Each replica is placed
+    wholly on the highest-rank node that has enough free GPUs, using that
+    node's highest free local device ordinals. Replicas without
+    ``launch_config`` are externally managed and do not consume cluster GPUs.
 
     Args:
-        teachers: Teacher configs in their original config order.
+        replica_requests: Teacher replicas in expanded config order.
         node_count: Number of homogeneous nodes in the cluster.
         node_rank: Rank of the current node.
         gpus_per_node: Number of local GPUs available on every node.
@@ -146,7 +174,7 @@ def _allocate_teacher_devices(
     Returns:
         A pair of ``(placements, student_local_num_workers)``:
 
-        - ``placements`` maps each local Teacher name to
+        - ``placements`` maps each local ``(Teacher name, replica index)`` to
           ``(target_node_rank, local_device_ordinals)``.
         - ``student_local_num_workers`` is the number of remaining GPUs assigned
           to Student on the current node.
@@ -158,18 +186,18 @@ def _allocate_teacher_devices(
             node_count = 4
             node_rank = 3
             gpus_per_node = 8
-            teacher_num_workers = {
-                "teacher1": 4,
-                "teacher2": 2,
-            }
+            replica_requests = [
+                ("teacher1", 0, 4),
+                ("teacher2", 0, 2),
+            ]
 
         the returned values are:
 
         .. code-block:: python
 
             placements = {
-                "teacher1": (3, [4, 5, 6, 7]),
-                "teacher2": (3, [2, 3]),
+                ("teacher1", 0): (3, [4, 5, 6, 7]),
+                ("teacher2", 0): (3, [2, 3]),
             }
             student_local_num_workers = 2
 
@@ -180,18 +208,18 @@ def _allocate_teacher_devices(
     free_devices_by_node = [
         list(range(gpus_per_node)) for _ in range(node_count)
     ]
-    local_teacher_requests: list[tuple[OPDTeacherConfig, int]] = []
-    for teacher in teachers:
-        launch_config = teacher.launch_config
+    local_teacher_requests: list[tuple[TeacherReplicaRequest, int]] = []
+    for replica in replica_requests:
+        launch_config = replica.teacher.launch_config
         if launch_config is not None:
-            local_teacher_requests.append((teacher, launch_config.num_workers))
+            local_teacher_requests.append((replica, launch_config.num_workers))
     local_teacher_requests.sort(key=lambda request: request[1], reverse=True)
 
-    placements: dict[str, tuple[int, list[int]]] = {}
-    for teacher, num_workers in local_teacher_requests:
+    placements: dict[tuple[str, int], tuple[int, list[int]]] = {}
+    for replica, num_workers in local_teacher_requests:
         if num_workers > gpus_per_node:
             raise ValueError(
-                f"Teacher {teacher.name!r} requests {num_workers} workers, "
+                f"Teacher replica {replica.display_name!r} requests {num_workers} workers, "
                 f"but each node has only {gpus_per_node} GPUs"
             )
 
@@ -208,7 +236,7 @@ def _allocate_teacher_devices(
                 len(local_devices) for local_devices in free_devices_by_node
             )
             raise ValueError(
-                f"Teacher {teacher.name!r} requests {num_workers} workers, "
+                f"Teacher replica {replica.display_name!r} requests {num_workers} workers, "
                 "but no single node has enough remaining GPUs; "
                 f"{remaining_devices} GPUs remain across the cluster"
             )
@@ -216,12 +244,31 @@ def _allocate_teacher_devices(
         free_devices = free_devices_by_node[target_node_rank]
         local_devices = free_devices[-num_workers:]
         del free_devices[-num_workers:]
-        placements[teacher.name] = (target_node_rank, local_devices)
+        placements[replica.key] = (target_node_rank, local_devices)
 
     if not any(free_devices_by_node):
         raise ValueError("Teacher allocation leaves no GPUs for Student workers")
     student_local_num_workers = len(free_devices_by_node[node_rank])
     return placements, student_local_num_workers
+
+
+def _allocate_teacher_server_port(
+    base_port: int,
+    *,
+    target_node_rank: int,
+    used_node_ports: set[tuple[int, int]],
+    replica_name: str,
+) -> int:
+    server_port = base_port
+    while (target_node_rank, server_port) in used_node_ports:
+        server_port += 1
+        if server_port > 65535:
+            raise ValueError(
+                f"Teacher replica {replica_name!r} cannot allocate a free port "
+                f"on node {target_node_rank} starting from {base_port}"
+            )
+    used_node_ports.add((target_node_rank, server_port))
+    return server_port
 
 
 def _get_teacher_server_paths(
@@ -232,8 +279,13 @@ def _get_teacher_server_paths(
     return "health", "v1/models"
 
 
-def _build_sglang_command(teacher: OPDTeacherConfig) -> list[str]:
+def _build_sglang_command(
+    teacher: OPDTeacherConfig,
+    *,
+    server_port: int,
+) -> list[str]:
     config = teacher.launch_config
+    assert config is not None
     tensor_parallel_size = config.tensor_parallel_size
     if config.expert_parallel_size > 1:
         tensor_parallel_size = config.expert_parallel_size
@@ -247,7 +299,7 @@ def _build_sglang_command(teacher: OPDTeacherConfig) -> list[str]:
         "--host",
         "0.0.0.0",
         "--port",
-        str(config.server_port),
+        str(server_port),
         "--dtype",
         config.dtype,
         "--tp",
@@ -266,9 +318,18 @@ def _build_sglang_command(teacher: OPDTeacherConfig) -> list[str]:
     return command
 
 
-def _build_lmdeploy_command(teacher: OPDTeacherConfig) -> list[str]:
+def _build_lmdeploy_command(
+    teacher: OPDTeacherConfig,
+    *,
+    server_port: int,
+) -> list[str]:
     config = teacher.launch_config
-    data_parallel_size = config.expert_parallel_size if config.expert_parallel_size > 1 else 1
+    assert config is not None
+    data_parallel_size = (
+        config.expert_parallel_size
+        if config.expert_parallel_size > 1
+        else 1
+    )
     command = [
         sys.executable,
         "-m",
@@ -285,7 +346,7 @@ def _build_lmdeploy_command(teacher: OPDTeacherConfig) -> list[str]:
         "--server-name",
         "0.0.0.0",
         "--server-port",
-        str(config.server_port),
+        str(server_port),
         "--dtype",
         config.dtype,
         "--tp",
@@ -307,12 +368,17 @@ def _build_lmdeploy_command(teacher: OPDTeacherConfig) -> list[str]:
 
 
 def _write_teacher_records(
-    endpoint_map: dict[str, str],
+    endpoint_map: dict[str, list[str]],
     student_num_workers: int,
     student_local_num_workers: int,
     records: list[list[str]],
 ) -> None:
-    endpoint_map_json = json.dumps(endpoint_map, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    endpoint_map_json = json.dumps(
+        endpoint_map,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
     fields = [
         str(len(records)),
         endpoint_map_json,
