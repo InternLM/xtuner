@@ -177,8 +177,10 @@ class BaseProduceContext:
             rewards_count = 0
             for item in group:
                 # TODO: 在 agent 存在一拆多的情况下，这个 raw reward 统计会不准，但是考虑到在这区分有点 hard code，应该暂时不处理
-                rewards_sum += float(item.reward["score"])  # type: ignore[index]
-                rewards_count += 1
+                reward = item.reward.get("score") if item.reward is not None else None
+                if reward is not None:
+                    rewards_sum += float(reward)
+                    rewards_count += 1
             self.progress.add_raw_rewards(self.task_name, rewards_sum, rewards_count)
 
         if initial_status in (Status.FAILED, Status.FILTERED):
