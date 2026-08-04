@@ -3,6 +3,11 @@ name: publish-docker-inner
 on:
   workflow_dispatch:
     inputs:
+      repo_ref:
+        required: false
+        description: 'Set branch or tag or commit id. Default is "main"'
+        type: string
+        default: 'main'
       image_tag:
         required: true
         description: 'Set docker image tag. Default is "latest", you can also set "auto" to generate a formated tag, or input a manual tag'
@@ -39,7 +44,9 @@ jobs:
       SCHEDULE_TAG: 'pt29_latest'
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.repo_ref || 'main' }}
       - name: Parse tag
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == 'schedule' ]]; then
