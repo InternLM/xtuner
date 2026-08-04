@@ -13,6 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.loss.base_loss import BaseRLLossContext
+from xtuner.v1.utils import get_logger
+
+
+logger = get_logger()
 
 
 class OPDTeacherLaunchConfig(BaseModel):
@@ -26,6 +30,7 @@ class OPDTeacherLaunchConfig(BaseModel):
     expert_parallel_size: int = Field(default=1, gt=0)
     context_length: int | None = Field(default=None, gt=0)
     max_batch_size: int | None = Field(default=None, gt=0)
+    log_level: Literal["critical", "error", "warning", "info", "debug"] | None = None
     chunked_prefill_size: int | None = Field(default=4096, gt=0)
     max_prefill_token_num: int | None = Field(default=4096, gt=0)
     gpu_memory_utilization: float = Field(default=0.6, gt=0.0, le=1.0)
@@ -163,9 +168,10 @@ class TeacherLogprobClient:
                     if attempt_idx >= self.config.max_retry_per_sample:
                         state.status = Status.FAILED
                         state.error_msg = (
-                            f"Teacher {self.name!r} scoring failed after {attempt_idx + 1} attempts; "
+                            f"Teacher {self.name!r} logprobs calculation failed after {attempt_idx + 1} attempts; "
                             f"replica={replica_idx}; endpoint={url}; last_error={exc}"
                         )
+                        logger.warning(state.error_msg)
                         return state
                     await asyncio.sleep(0.1)
             raise RuntimeError("Teacher scoring retry loop exited unexpectedly")

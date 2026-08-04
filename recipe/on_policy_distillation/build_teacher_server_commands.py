@@ -309,6 +309,8 @@ def _build_sglang_command(
         "--mem-fraction-static",
         str(config.gpu_memory_utilization),
     ]
+    if config.log_level is not None:
+        command.extend(["--log-level", config.log_level])
     if config.context_length is not None:
         command.extend(["--context-length", str(config.context_length)])
     if config.max_batch_size is not None:
@@ -358,6 +360,8 @@ def _build_lmdeploy_command(
         "--cache-max-entry-count",
         str(config.gpu_memory_utilization),
     ]
+    if config.log_level is not None:
+        command.extend(["--log-level", config.log_level.upper()])
     if config.context_length is not None:
         command.extend(["--session-len", str(config.context_length)])
     if config.max_batch_size is not None:
