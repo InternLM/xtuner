@@ -213,6 +213,7 @@ opd_config = OPDConfig(
     teachers=[
         OPDTeacherConfig(
             name="teacher",
+            enable_prefix_caching=True,
             launch_config=OPDTeacherLaunchConfig(
                 model_path=teacher_model_path,
                 num_workers=1,

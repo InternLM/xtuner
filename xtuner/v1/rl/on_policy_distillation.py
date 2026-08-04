@@ -41,6 +41,7 @@ class OPDTeacherConfig(BaseModel):
     request_timeout_s: float = Field(default=1200.0, gt=0.0)
     max_retry_per_sample: int = Field(default=2, ge=0)
     max_concurrency: int = Field(default=128, gt=0)
+    enable_prefix_caching: bool = False
     launch_config: OPDTeacherLaunchConfig | None = None
 
 
@@ -123,7 +124,22 @@ class TeacherLogprobClient:
                 state.error_msg = f"Teacher {self.name!r} scoring requires non-empty prompt_ids and response_ids"
                 return state
             image_data = state.extra_fields.get("image_data")
-            payload = self._construct_payload(prompt_ids, response_ids, image_data=image_data)
+            expanded_prompt_len = None
+            # Recompute the final prompt token so the first response token's
+            # logprob remains available while the earlier prompt can be reused.
+            logprob_start_len = 0
+            if self.config.enable_prefix_caching:
+                if not image_data:
+                    logprob_start_len = len(prompt_ids) - 1
+                else:
+                    expanded_prompt_len = len(state.extra_fields["train_prompt_ids"])
+                    logprob_start_len = expanded_prompt_len - 1
+            payload = self._construct_payload(
+                prompt_ids,
+                response_ids,
+                logprob_start_len=logprob_start_len,
+                image_data=image_data,
+            )
 
             start_replica_idx = self._next_replica_idx
             self._next_replica_idx = (start_replica_idx + 1) % len(self.urls)
@@ -134,7 +150,12 @@ class TeacherLogprobClient:
                     async with self._semaphores[replica_idx]:
                         response = await self._client.post(url, json=payload)
                         response.raise_for_status()
-                    teacher_tokens, teacher_logprobs = self._parse_response(response, response_ids)
+                    teacher_tokens, teacher_logprobs = self._parse_response(
+                        response,
+                        response_ids,
+                        logprob_start_len=logprob_start_len,
+                        expanded_prompt_len=expanded_prompt_len,
+                    )
                     state.teacher_tokens = teacher_tokens
                     state.teacher_logprobs = teacher_logprobs
                     return state
@@ -167,12 +188,22 @@ class TeacherLogprobClient:
         self,
         prompt_ids: list[int],
         response_ids: list[int],
+        *,
+        logprob_start_len: int,
         image_data: Any | None = None,
     ) -> dict[str, Any]:
         if self.backend == "sglang":
-            payload = self._construct_sglang_payload(prompt_ids, response_ids)
+            payload = self._construct_sglang_payload(
+                prompt_ids,
+                response_ids,
+                logprob_start_len=logprob_start_len,
+            )
         elif self.backend == "lmdeploy":
-            payload = self._construct_lmdeploy_payload(prompt_ids, response_ids)
+            payload = self._construct_lmdeploy_payload(
+                prompt_ids,
+                response_ids,
+                logprob_start_len=logprob_start_len,
+            )
         else:
             raise RuntimeError(f"Unsupported teacher backend: {self.backend}")
         if image_data:
@@ -180,7 +211,12 @@ class TeacherLogprobClient:
         return payload
 
     @staticmethod
-    def _construct_sglang_payload(prompt_ids: list[int], response_ids: list[int]) -> dict[str, Any]:
+    def _construct_sglang_payload(
+        prompt_ids: list[int],
+        response_ids: list[int],
+        *,
+        logprob_start_len: int,
+    ) -> dict[str, Any]:
         return {
             "input_ids": prompt_ids + response_ids,
             "sampling_params": {
@@ -189,17 +225,22 @@ class TeacherLogprobClient:
                 "skip_special_tokens": False,
             },
             "return_logprob": True,
-            "logprob_start_len": 0,
+            "logprob_start_len": logprob_start_len,
             "top_logprobs_num": 0,
             "stream": False,
         }
 
     @staticmethod
-    def _construct_lmdeploy_payload(prompt_ids: list[int], response_ids: list[int]) -> dict[str, Any]:
+    def _construct_lmdeploy_payload(
+        prompt_ids: list[int],
+        response_ids: list[int],
+        *,
+        logprob_start_len: int,
+    ) -> dict[str, Any]:
         return {
             "input_ids": prompt_ids + response_ids,
             "return_logprob": True,
-            "logprob_start_len": 0,
+            "logprob_start_len": logprob_start_len,
             "max_tokens": 0,
             "stream": False,
         }
@@ -208,28 +249,53 @@ class TeacherLogprobClient:
         self,
         response: httpx.Response,
         response_ids: list[int],
+        *,
+        logprob_start_len: int,
+        expanded_prompt_len: int | None = None,
     ) -> tuple[list[int], list[float]]:
         if self.backend == "sglang":
-            response_logprobs = self._parse_sglang_response(response, response_ids)
+            response_logprobs = self._parse_sglang_response(
+                response,
+                response_ids,
+                logprob_start_len=logprob_start_len,
+                expanded_prompt_len=expanded_prompt_len,
+            )
         else:
-            response_logprobs = self._parse_lmdeploy_response(response, response_ids)
+            response_logprobs = self._parse_lmdeploy_response(
+                response,
+                response_ids,
+                logprob_start_len=logprob_start_len,
+                expanded_prompt_len=expanded_prompt_len,
+            )
         return self._validate_response_logprobs(response_logprobs, response_ids)
 
     @staticmethod
     def _parse_sglang_response(
         response: httpx.Response,
         response_ids: list[int],
+        *,
+        logprob_start_len: int,
+        expanded_prompt_len: int | None = None,
     ) -> list[Any]:
         raw_logprobs = TeacherLogprobClient._get_input_token_logprobs(response)
         prompt_token_count = response.json()["meta_info"]["prompt_tokens"]
-        # For N processed input tokens, only tokens 1..N-1 are scorable.
-        # SGLang still returns N rows by prepending (None, input_ids[0]) so
-        # that its rows stay aligned one-to-one with the input tokens.
-        # LMDeploy omits this unscorable first-token row, hence N-1 below.
-        if len(raw_logprobs) != prompt_token_count:
+        if expanded_prompt_len is not None:
+            expected_prompt_token_count = expanded_prompt_len + len(response_ids)
+            if prompt_token_count != expected_prompt_token_count:
+                raise ValueError(
+                    "SGLang expanded prompt length mismatch: "
+                    f"expected {expected_prompt_token_count} total input tokens "
+                    f"({expanded_prompt_len} prompt + {len(response_ids)} response), "
+                    f"got {prompt_token_count}"
+                )
+        # SGLang includes an unscorable placeholder at the requested boundary,
+        # so N processed tokens with boundary S produce N-S rows.
+        expected_rows = prompt_token_count - logprob_start_len
+        if len(raw_logprobs) != expected_rows:
             raise ValueError(
                 "SGLang teacher logprob length mismatch: "
-                f"expected {prompt_token_count} rows for the full input, got {len(raw_logprobs)}"
+                f"expected {expected_rows} rows for logprob_start_len={logprob_start_len}, "
+                f"got {len(raw_logprobs)}"
             )
         return raw_logprobs[-len(response_ids) :]
 
@@ -237,13 +303,29 @@ class TeacherLogprobClient:
     def _parse_lmdeploy_response(
         response: httpx.Response,
         response_ids: list[int],
+        *,
+        logprob_start_len: int,
+        expanded_prompt_len: int | None = None,
     ) -> list[Any]:
         raw_logprobs = TeacherLogprobClient._get_input_token_logprobs(response)
         prompt_token_count = response.json()["meta_info"]["prompt_tokens"]
-        if len(raw_logprobs) != prompt_token_count - 1:
+        if expanded_prompt_len is not None:
+            expected_prompt_token_count = expanded_prompt_len + len(response_ids)
+            if prompt_token_count != expected_prompt_token_count:
+                raise ValueError(
+                    "LMDeploy expanded prompt length mismatch: "
+                    f"expected {expected_prompt_token_count} total input tokens "
+                    f"({expanded_prompt_len} prompt + {len(response_ids)} response), "
+                    f"got {prompt_token_count}"
+                )
+        # LMDeploy omits the unscorable boundary row, hence one fewer row than
+        # SGLang for the same processed input and logprob boundary.
+        expected_rows = prompt_token_count - logprob_start_len - 1
+        if len(raw_logprobs) != expected_rows:
             raise ValueError(
                 "LMDeploy teacher logprob length mismatch: "
-                f"expected {prompt_token_count - 1} rows after the boundary token, got {len(raw_logprobs)}"
+                f"expected {expected_rows} rows for logprob_start_len={logprob_start_len}, "
+                f"got {len(raw_logprobs)}"
             )
         return raw_logprobs[-len(response_ids) :]
 

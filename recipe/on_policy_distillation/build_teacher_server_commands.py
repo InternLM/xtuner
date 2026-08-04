@@ -364,6 +364,8 @@ def _build_lmdeploy_command(
         command.extend(["--max-batch-size", str(config.max_batch_size)])
     if config.max_prefill_token_num is not None:
         command.extend(["--max-prefill-token-num", str(config.max_prefill_token_num)])
+    if teacher.enable_prefix_caching:
+        command.append("--enable-prefix-caching")
     return command
 
 
