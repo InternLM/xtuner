@@ -11,7 +11,7 @@ export DEEP_GEMM_URL=https://github.com/deepseek-ai/DeepGEMM@c9f8b34dcdacc20aa74
 export CAUSAL_CONV1D_URL=https://github.com/Dao-AILab/causal-conv1d@da6dbaa9fd5a919967f14d3fd031da1288ad5025 # v1.6.0
 export FLA_URL="${FLA_URL-https://github.com/HAOCHENYE/flash-linear-attention@tmp-tensor-cache}"
 
-export TORCH_VERSION=${TORCH_VERSION:-"2.9.1"}
+export TORCH_VERSION=${TORCH_VERSION:-"2.12.1"}
 export LMDEPLOY_VERSION="0.14.0"
 # export LMDEPLOY_URL=https://github.com/InternLM/lmdeploy@efe3b88607756a7ad9411b89627b5ac6ebaa540e
 export PPA_SOURCE="https://mirrors.aliyun.com"

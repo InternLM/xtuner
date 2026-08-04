@@ -10,9 +10,9 @@ on:
         default: auto
       torch_version:
         required: true
-        description: 'Set docker torch version. Default is "2.9.1"'
+        description: 'Set docker torch version. Default is "2.12.1"'
         type: string
-        default: '2.9.1'
+        default: '2.12.1'
       image_repo_short:
         required: true
         description: 'Set target repository for pushing the docker image. Default is "xtuner"'
@@ -35,8 +35,8 @@ jobs:
     env:
       IMAGE_NAME: ailab-llmrazor/${{ inputs.image_repo_short || 'xtuner' }}
       IMAGE_TAG: ${{ inputs.image_tag || 'auto' }}
-      TORCH_VERSION: ${{ inputs.torch_version || '2.9.1' }}
-      SCHEDULE_TAG: 'pt29_latest'
+      TORCH_VERSION: ${{ inputs.torch_version || '2.12.1' }}
+      SCHEDULE_TAG: 'pt212_latest'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
