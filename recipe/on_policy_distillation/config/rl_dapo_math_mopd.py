@@ -83,6 +83,9 @@ total_epochs = 15
 total_train_steps_env = os.environ.get("TOTAL_TRAIN_STEPS")
 total_train_steps = int(total_train_steps_env) if total_train_steps_env is not None else None
 train_batch_size = 256
+teacher_num_replicas = int(os.environ.get("MOPD_TEACHER_NUM_REPLICAS", "2"))
+teacher_replica_num_workers = int(os.environ.get("MOPD_TEACHER_REPLICA_NUM_WORKERS", "1"))
+enable_prefix_caching = os.environ.get("MOPD_ENABLE_PREFIX_CACHING", "0") == "1"
 prompt_repeat_k = 1
 rollout_tp_size = 1
 rollout_ep_size = 1
@@ -335,12 +338,13 @@ opd_config = OPDConfig(
     teachers=[
         OPDTeacherConfig(
             name="gsm8k_teacher",
-            num_replicas=2,
+            num_replicas=teacher_num_replicas,
+            enable_prefix_caching=enable_prefix_caching,
             launch_config=OPDTeacherLaunchConfig(
                 model_path=gsm8k_teacher_model_path,
-                num_workers=1,
+                num_workers=teacher_replica_num_workers,
                 server_port=13141,
-                tensor_parallel_size=1,
+                tensor_parallel_size=teacher_replica_num_workers,
                 expert_parallel_size=1,
                 context_length=max_num_tokens,
                 max_batch_size=max_num_tokens,
@@ -349,12 +353,13 @@ opd_config = OPDConfig(
         ),
         OPDTeacherConfig(
             name="geo3k_teacher",
-            num_replicas=2,
+            num_replicas=teacher_num_replicas,
+            enable_prefix_caching=enable_prefix_caching,
             launch_config=OPDTeacherLaunchConfig(
                 model_path=geo3k_teacher_model_path,
-                num_workers=1,
+                num_workers=teacher_replica_num_workers,
                 server_port=13142,
-                tensor_parallel_size=1,
+                tensor_parallel_size=teacher_replica_num_workers,
                 expert_parallel_size=1,
                 context_length=max_num_tokens,
                 max_batch_size=max_num_tokens,
