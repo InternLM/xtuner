@@ -81,6 +81,7 @@ rollout_config = RolloutConfig(
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=True,
     rollout_max_batch_size_per_instance=512,
+    extra_rollout_config={"lmdeploy_trust_remote_code": True},
 )
 
 # sampling params
