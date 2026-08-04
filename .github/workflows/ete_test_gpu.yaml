@@ -18,7 +18,10 @@ on:
         default: 'main'
       run_case:
         required: false
-        description: 'Run a specific test case, e.g., "qwen3-rl-lmdeploy", as defined in autotest/config.yaml.'
+        description: >-
+          Case name(s) from autotest/config.yaml. Use "all" for every case,
+          one name (e.g. "qwen3-rl-lmdeploy"), or comma-separated names
+          (e.g. "qwen3-5-rl-vl-lmdeploy-grpo,interns2-preview-rl-vl-lmdeploy-grpo").
         type: string
         default: 'all'
   schedule:
@@ -63,11 +66,24 @@ jobs:
           conda activate clusterx 
           conda env list
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
-          CASE_NAME="${{ github.event.inputs.run_case || 'all' }}"
-          if [ "$CASE_NAME" = "all" ]; then
+          CASE_INPUT="${{ github.event.inputs.run_case || 'all' }}"
+          if [ "$CASE_INPUT" = "all" ]; then
             pytest autotest/test_all.py -m all -n 1 -s -vv --run_id ${{ github.run_id }}
           else
-            pytest autotest/test_all.py::test_all[$CASE_NAME] -m all -n 1 -s -vv --run_id ${{ github.run_id }}
+            # Support one or more cases: "case_a" or "case_a,case_b, case_c"
+            PYTEST_NODES=()
+            IFS=',' read -ra RAW_CASES <<< "$CASE_INPUT"
+            for raw in "${RAW_CASES[@]}"; do
+              case_name="$(echo "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+              [ -z "$case_name" ] && continue
+              PYTEST_NODES+=("autotest/test_all.py::test_all[${case_name}]")
+            done
+            if [ "${#PYTEST_NODES[@]}" -eq 0 ]; then
+              echo "No valid case names parsed from run_case='${CASE_INPUT}'"
+              exit 1
+            fi
+            echo "Running cases: ${PYTEST_NODES[*]}"
+            pytest "${PYTEST_NODES[@]}" -m all -n 1 -s -vv --run_id ${{ github.run_id }}
           fi
 
       - name: Check report files

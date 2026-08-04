@@ -1026,6 +1026,217 @@ case:
                        operator: <
             timeout: 7200
 
+    # InternS2-Preview: Qwen3.5-VL-MoE-35B-A3B architecture; MODEL_PATH may need adjust on share.
+    interns2-preview-rl-vl-lmdeploy-grpo:
+        -
+            type: rl
+            parameters:
+                config: autotest/config/rl_interns2_preview_vl_grpo.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/qa-llmcicd/cicd-autotest/eval_resource/model/internlm/inters2-preview
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: interns2-preview-rl-vl-lmdeploy-grpo/tracker.jsonl
+                check_metrics:
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.0005
+                       method: absolute
+                       operator: <=
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 0.15
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 9000
+
+    interns2-preview-rl-vl-lmdeploy-dapo:
+        -
+            type: rl
+            parameters:
+                config: autotest/config/rl_interns2_preview_vl_dapo.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/qa-llmcicd/cicd-autotest/eval_resource/model/internlm/inters2-preview
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: interns2-preview-rl-vl-lmdeploy-dapo/tracker.jsonl
+                check_metrics:
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.0005
+                       method: absolute
+                       operator: <=
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 0.15
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 9000
+
+    interns2-preview-rl-vl-lmdeploy-resume:
+        -
+            type: rl
+            phase: first
+            parameters:
+                config: autotest/config/rl_interns2_preview_vl_dapo_ep2_resume.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/qa-llmcicd/cicd-autotest/eval_resource/model/internlm/inters2-preview
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_GC_ENABLE=1
+            assert_info:
+                base_metric: interns2-preview-rl-vl-lmdeploy-resume/tracker.jsonl
+                check_metrics:
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.0005
+                       method: absolute
+                       operator: <=
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 0.15
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 9600
+
+        -
+            type: rl
+            phase: resume
+            pre_action:
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output interns2-preview-rl-vl-lmdeploy-resume rl'
+            parameters:
+                config: autotest/config/rl_interns2_preview_vl_dapo_ep2_resume.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/qa-llmcicd/cicd-autotest/eval_resource/model/internlm/inters2-preview
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_GC_ENABLE=1
+            assert_info:
+                base_metric: interns2-preview-rl-vl-lmdeploy-resume/tracker-resume.jsonl
+                check_metrics:
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.0005
+                       method: absolute
+                       operator: <=
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 0.15
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 9600
+
+    interns2-preview-rl-lmdeploy-dapo:
+        -
+            type: rl
+            parameters:
+                config: autotest/config/rl_interns2_preview_dapo.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/qa-llmcicd/cicd-autotest/eval_resource/model/internlm/inters2-preview
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: interns2-preview-rl-lmdeploy-dapo/tracker.jsonl
+                check_metrics:
+                    -
+                       metric:  eval/accuracy
+                       threshold: 0.1
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.0005
+                       method: absolute
+                       operator: <=
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 20
+                       method: absolute
+                       operator: <
+            timeout: 7200
+
     qwen3-rl-sglang:
         -
             type: rl
