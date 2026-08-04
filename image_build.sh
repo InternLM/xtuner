@@ -40,6 +40,7 @@ docker build . \
   --build-arg DEEP_GEMM_URL=$DEEP_GEMM_URL \
   --build-arg XTUNER_URL=$XTUNER_URL \
   --build-arg XTUNER_COMMIT=$XTUNER_COMMIT \
+  --build-arg LMDEPLOY_VERSION=$LMDEPLOY_VERSION \
   --build-arg LMDEPLOY_URL=$LMDEPLOY_URL \
   --progress=plain \
   --label "BASE_IMAGE=$BASE_IMAGE" \
