@@ -40,8 +40,7 @@ docker build . \
   --build-arg DEEP_GEMM_URL=$DEEP_GEMM_URL \
   --build-arg XTUNER_URL=$XTUNER_URL \
   --build-arg XTUNER_COMMIT=$XTUNER_COMMIT \
-  --build-arg LMDEPLOY_VERSION=$LMDEPLOY_VERSION \
-  # --build-arg LMDEPLOY_URL=$LMDEPLOY_URL \
+  --build-arg LMDEPLOY_URL=$LMDEPLOY_URL \
   --progress=plain \
   --label "BASE_IMAGE=$BASE_IMAGE" \
   --label "XTUNER_URL=${XTUNER_URL/@/\/tree\/}" \
@@ -53,5 +52,4 @@ docker build . \
   --label "FLA_URL=${FLA_URL/@/\/tree\/}" \
   --label "DEEP_EP_URL=${DEEP_EP_URL/@/\/tree\/}" \
   --label "DEEP_GEMM_URL=${DEEP_GEMM_URL/@/\/tree\/}" \
-  --label "LMDEPLOY_VERSION=$LMDEPLOY_VERSION"
-  # --label "LMDEPLOY_URL=${LMDEPLOY_URL/@/\/tree\/}" 
+  --label "LMDEPLOY_VERSION=${LMDEPLOY_VERSION/@/\/tree\/}"
