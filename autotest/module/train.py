@@ -66,7 +66,7 @@ class Train:
                 infer_type = config.get("parameters", {}).get("infer_backend", "lmdeploy")
                 accelerator = config.get("parameters", {}).get("accelerator", "GPU")
                 command = (
-                    f"cd {current_dir}; pwd; {pip_package}; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
+                    f"cd {current_dir}; pwd; {pip_package}; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; sleep inf;"
                     + cudnn_patch
                     + f"bash -x autotest/utils/ci_run_rl.sh {accelerator} {infer_type} {config_path} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
                 )
