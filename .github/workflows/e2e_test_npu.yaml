@@ -41,6 +41,7 @@ jobs:
           ref: ${{github.event.inputs.repo_ref || 'main'}}
       - name: run-test
         run: |
+          source /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/miniconda3/bin/activate
           source activate npuci
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
           CASE_NAME="${{ github.event.inputs.run_case || 'all' }}"
