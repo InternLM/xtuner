@@ -12,6 +12,7 @@ TestGlm52SequenceParallel
     test_mtp_loss_and_gradients_match_full_sequence: SP2 的 MTP loss 与梯度匹配完整序列。
 """
 
+import json
 import os
 import tempfile
 import unittest
@@ -81,6 +82,38 @@ def _tiny_glm52_config() -> Glm52MoEConfig:
 
 
 class TestGlm52Config:
+    def test_save_hf_preserves_glm_compatibility_fields(self):
+        # 验证公共 HF 保存 API 保留旧推理引擎依赖的字段，并只导出当前 RoPE 类型需要的参数。
+        config = _tiny_glm52_config()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config.save_hf(tmpdir)
+            with open(Path(tmpdir) / "config.json") as f:
+                saved_config = json.load(f)
+
+        assert {
+            key: saved_config[key]
+            for key in (
+                "ep_size",
+                "index_topk_pattern",
+                "moe_layer_freq",
+                "pretraining_tp",
+                "rope_interleave",
+                "topk_method",
+            )
+        } == {
+            "ep_size": 1,
+            "index_topk_pattern": None,
+            "moe_layer_freq": 1,
+            "pretraining_tp": 1,
+            "rope_interleave": True,
+            "topk_method": "noaux_tc",
+        }
+        assert saved_config["rope_parameters"] == {
+            "rope_theta": config.rope_parameters_cfg.rope_theta,
+            "rope_type": "default",
+        }
+
     def test_from_hf_preserves_glm_specific_behavior(self):
         # 验证公共 HF 配置转换保留 GLM-5.2 的 DSA、router、MTP 及回写语义。
         hf_config = HFGlmMoeDsaConfig.from_pretrained(GLM5_2_TINY_MOE_PATH)
