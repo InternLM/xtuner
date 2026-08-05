@@ -247,7 +247,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cic/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:rl_s1_vllm
-                pip_package: ls
+                pip_package: pip install -e . --no-deps; pip install more-itertools triton
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/gsm8k/train-mini.jsonl
