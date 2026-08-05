@@ -54,3 +54,7 @@ docker build . \
   --label "DEEP_EP_URL=${DEEP_EP_URL/@/\/tree\/}" \
   --label "DEEP_GEMM_URL=${DEEP_GEMM_URL/@/\/tree\/}" \
   --label "LMDEPLOY_VERSION=${LMDEPLOY_VERSION/@/\/tree\/}"
+
+echo "===== pip list in ${image_name}:${image_tag} ====="
+docker run --rm --entrypoint pip "${image_name}:${image_tag}" list
+
