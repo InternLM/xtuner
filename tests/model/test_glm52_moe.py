@@ -1,6 +1,7 @@
 """GLM-5.2 配置、HF 转换、路由、checkpoint 与并行数值行为测试。
 
 TestGlm52Config
+    test_save_hf_matches_transformers_and_engine_contracts: HF round-trip 与推理引擎字段契约一致。
     test_from_hf_preserves_glm_specific_behavior: HF 配置转换保留 DSA、router 与 MTP 语义。
     test_rejects_shared_physical_mtp_indexer: 非法的 physical MTP indexer 计划会被拒绝。
 TestGlm52CheckpointConversion
@@ -12,7 +13,6 @@ TestGlm52SequenceParallel
     test_mtp_loss_and_gradients_match_full_sequence: SP2 的 MTP loss 与梯度匹配完整序列。
 """
 
-import json
 import os
 import tempfile
 import unittest
@@ -23,8 +23,9 @@ import pytest
 import torch
 import torch.distributed as dist
 
+import transformers
 from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as HFGlmMoeDsaConfig
-from xtuner._testing import DeterministicDDPTestCase
+from xtuner._testing import DeterministicDDPTestCase, HFConfigFieldDependency, check_hf_config_save
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import Glm52MoEConfig, get_model_config, get_model_config_from_hf
@@ -82,37 +83,54 @@ def _tiny_glm52_config() -> Glm52MoEConfig:
 
 
 class TestGlm52Config:
-    def test_save_hf_preserves_glm_compatibility_fields(self):
-        # 验证公共 HF 保存 API 保留旧推理引擎依赖的字段，并只导出当前 RoPE 类型需要的参数。
-        config = _tiny_glm52_config()
+    def test_save_hf_matches_transformers_and_engine_contracts(self):
+        # 走公共 from_hf/save_hf 路径，并将当前 Transformers 的强制归一化与 XTuner 丢字段区分开。
+        config = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
+        report = check_hf_config_save(
+            config,
+            GLM5_2_TINY_MOE_PATH,
+            engine_dependencies=(
+                HFConfigFieldDependency(
+                    engine="vllm",
+                    version="0.26.0",
+                    path="/topk_method",
+                    expected="noaux_tc",
+                    reason=(
+                        "vLLM only registers gate.e_score_correction_bias for noaux_tc; "
+                        "otherwise loading the GLM checkpoint raises KeyError."
+                    ),
+                    source=(
+                        "https://github.com/vllm-project/vllm/blob/v0.26.0/"
+                        "vllm/model_executor/models/deepseek_v2.py#L314-L319"
+                    ),
+                ),
+                HFConfigFieldDependency(
+                    engine="sglang",
+                    version="0.5.16",
+                    path="/topk_method",
+                    expected="noaux_tc",
+                    reason="SGLang uses this field to register and route with the correction-bias parameter.",
+                    source=(
+                        "https://github.com/sgl-project/sglang/blob/v0.5.16/"
+                        "python/sglang/srt/models/deepseek_v2.py#L454-L475"
+                    ),
+                ),
+                HFConfigFieldDependency(
+                    engine="sglang",
+                    version="0.5.16",
+                    path="/moe_layer_freq",
+                    expected=1,
+                    reason="SGLang directly reads this field when deciding whether a decoder layer is sparse.",
+                    source=(
+                        "https://github.com/sgl-project/sglang/blob/v0.5.16/"
+                        "python/sglang/srt/models/deepseek_v2.py#L2190-L2196"
+                    ),
+                ),
+            ),
+        )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config.save_hf(tmpdir)
-            with open(Path(tmpdir) / "config.json") as f:
-                saved_config = json.load(f)
-
-        assert {
-            key: saved_config[key]
-            for key in (
-                "ep_size",
-                "index_topk_pattern",
-                "moe_layer_freq",
-                "pretraining_tp",
-                "rope_interleave",
-                "topk_method",
-            )
-        } == {
-            "ep_size": 1,
-            "index_topk_pattern": None,
-            "moe_layer_freq": 1,
-            "pretraining_tp": 1,
-            "rope_interleave": True,
-            "topk_method": "noaux_tc",
-        }
-        assert saved_config["rope_parameters"] == {
-            "rope_theta": config.rope_parameters_cfg.rope_theta,
-            "rope_type": "default",
-        }
+        assert report.transformers_version == transformers.__version__
+        assert report.checked_engine_versions == ("vllm==0.26.0", "sglang==0.5.16")
 
     def test_from_hf_preserves_glm_specific_behavior(self):
         # 验证公共 HF 配置转换保留 GLM-5.2 的 DSA、router、MTP 及回写语义。
