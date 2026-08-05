@@ -331,6 +331,10 @@ class TrainingWorker(SingleAcceleratorWorker):
     def weight_update(self, **kwargs):
         return self.update_weighter.weight_update(**kwargs)
 
+    @ray_method
+    def has_registered_weight_checkpoint(self) -> bool:
+        return self.update_weighter.has_registered_weight_checkpoint()
+
     def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
         self._sft_dataloader: Dataloader | None = None

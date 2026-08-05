@@ -70,6 +70,28 @@ class RolloutController:
         """Return rollout endpoints that can receive weight update requests."""
         return self.registry.weight_update_targets()
 
+    def get_pending_weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
+        """Return recovered rollout endpoints waiting for weights."""
+        return tuple(
+            target
+            for target in self.registry.weight_update_targets()
+            if target.lifecycle_state == "pending_weights"
+        )
+
+    def inject_backend_crash_for_test(self, *, rank: int = 0) -> None:
+        """Crash one active rollout backend for the immediate-recovery test."""
+        worker = self.registry.active_entrypoint_by_rank(rank)
+        if worker is None:
+            raise RuntimeError(f"No active rollout request entrypoint found for test fault injection: rank={rank}.")
+
+        accepted = ray.get(
+            worker.actor.inject_backend_crash_for_test.remote(),  # type: ignore[attr-defined]
+            timeout=ROLLOUT_RAY_GET_TIMEOUT,
+        )
+        if not accepted:
+            raise RuntimeError(f"Rollout worker rejected test fault injection: rank={rank}, url={worker.url}.")
+        self.logger.warning(f"[ImmediateRecoveryExperiment] backend_crash_injected rank={rank} url={worker.url}")
+
     def register_active_workers_to_proxy(self) -> None:
         if self.proxy_manager is None:
             return
@@ -120,6 +142,11 @@ class RolloutController:
                 f"Rollout request timed out after {self.config.rollout_timeout * self.timeout_multiplier} seconds."
             )
             return rollout_state
+        except Exception as e:
+            self.logger.exception(f"RolloutController.generate failed: session_id={session_id}")
+            rollout_state.status = Status.FAILED
+            rollout_state.error_msg = f"Rollout request failed: {type(e).__name__}: {str(e)[:1024]}"
+            return rollout_state
 
     def set_enable_partial_rollout(self, enable: bool) -> None:
         """Propagate enable_partial_rollout flag to all active workers."""
@@ -159,7 +186,20 @@ class RolloutController:
 
     async def restart_inactive_workers(self):
         """Restart inactive groups before a sync-step weight update."""
-        await asyncio.to_thread(self.health_manager.restart_inactive_workers)
+        groups = await asyncio.to_thread(self.health_manager.restart_inactive_workers)
+        return tuple(group.ranks for group in groups)
+
+    def mark_pending_weight_update_groups_active(self, group_ranks: tuple[tuple[int, ...], ...]) -> None:
+        groups_by_ranks = {group.ranks: group for group in self.registry.pending_weights_worker_groups()}
+        groups = tuple(groups_by_ranks[ranks] for ranks in group_ranks if ranks in groups_by_ranks)
+        recovered_groups = self.registry.mark_pending_weights_groups_active(groups)
+        self.health_manager.notify_worker_group_recovered(recovered_groups)
+
+    def mark_pending_weight_update_groups_inactive(self, group_ranks: tuple[tuple[int, ...], ...]) -> None:
+        groups_by_ranks = {group.ranks: group for group in self.registry.pending_weights_worker_groups()}
+        groups = tuple(groups_by_ranks[ranks] for ranks in group_ranks if ranks in groups_by_ranks)
+        inactive_groups = self.registry.mark_groups_inactive(groups)
+        self.health_manager.notify_worker_group_inactive(inactive_groups)
 
     def continue_generation(self):
         self._broadcast_to_active_workers("continue_generation")
@@ -175,8 +215,14 @@ class RolloutController:
     def onload_weights(self):
         self._broadcast_to_active_workers("onload_weights")
 
+    def onload_pending_weight_update_workers(self):
+        self._broadcast_to_pending_weight_update_workers("onload_weights")
+
     def onload_kvcache(self):
         self._broadcast_to_active_workers("onload_kvcache")
+
+    def onload_kvcache_pending_weight_update_workers(self):
+        self._broadcast_to_pending_weight_update_workers("onload_kvcache")
 
     def shutdown(self):
         """Shut down all rollout workers tracked by the controller."""
@@ -189,6 +235,12 @@ class RolloutController:
 
     def _broadcast_to_active_workers(self, method_name: str, **kwargs):
         workers = self.registry.active_workers()
+        futures = [getattr(worker.actor, method_name).remote(**kwargs) for worker in workers]
+        return ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
+
+    def _broadcast_to_pending_weight_update_workers(self, method_name: str, **kwargs):
+        groups = self.registry.pending_weights_worker_groups()
+        workers = [worker for group in groups for worker in group.workers]
         futures = [getattr(worker.actor, method_name).remote(**kwargs) for worker in workers]
         return ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
 

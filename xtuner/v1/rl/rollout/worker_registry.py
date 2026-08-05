@@ -32,6 +32,8 @@ class WorkerLifecycleState(str, Enum):
     INACTIVE = "inactive"
     # Temporarily owned by recovery shutdown/init/check_health.
     RECOVERING = "recovering"
+    # Server is healthy after recovery, but waiting for trainer-side weights..
+    PENDING_WEIGHTS = "pending_weights"
 
 
 @dataclass(frozen=True)
@@ -171,6 +173,19 @@ class RolloutWorkerRegistry:
             ]
             return tuple(sorted(inactive_groups, key=lambda group: group.ranks))
 
+    def pending_weights_worker_groups(self) -> tuple[WorkerGroup, ...]:
+        """Return lifecycle groups waiting for a rollout weight update."""
+        with self._lock:
+            worker_groups = self._build_worker_groups()
+            pending_groups = [
+                group
+                for group in worker_groups.values()
+                if any(
+                    worker.lifecycle_state is WorkerLifecycleState.PENDING_WEIGHTS for worker in group.workers
+                )
+            ]
+            return tuple(sorted(pending_groups, key=lambda group: group.ranks))
+
     def claim_inactive_groups_for_recovery(self) -> tuple[WorkerGroup, ...]:
         """Claim inactive worker groups by moving them to RECOVERING state."""
         with self._lock:
@@ -235,6 +250,54 @@ class RolloutWorkerRegistry:
                     "is not registered."
                 )
             return recorded_group
+
+    def set_group_pending_weights(self, group: WorkerGroup) -> WorkerGroup:
+        """Mark recovered server groups as pending for weights update."""
+        with self._lock:
+            for rank in group.ranks:
+                worker = self._workers.get(rank)
+                if worker is not None:
+                    self._workers[rank] = replace(
+                        worker, lifecycle_state=WorkerLifecycleState.PENDING_WEIGHTS
+                    )
+            worker_groups = self._build_worker_groups()
+            recorded_group = worker_groups.get(group.ranks)
+            if recorded_group is None:
+                raise RuntimeError(
+                    f"Failed to mark rollout worker group pending weights because group_ranks={group.ranks} "
+                    "is not registered."
+                )
+            return recorded_group
+
+    def mark_pending_weights_groups_active(self, groups: Iterable[WorkerGroup]) -> tuple[WorkerGroup, ...]:
+        """Promote pending weights groups after their rollout weights are updated."""
+        with self._lock:
+            for group in groups:
+                for rank in group.ranks:
+                    worker = self._workers.get(rank)
+                    if worker is not None and worker.lifecycle_state is WorkerLifecycleState.PENDING_WEIGHTS:
+                        self._workers[rank] = replace(worker, lifecycle_state=WorkerLifecycleState.ACTIVE)
+            worker_groups = self._build_worker_groups()
+            return tuple(
+                worker_groups[group.ranks]
+                for group in groups
+                if group.ranks in worker_groups
+            )
+
+    def mark_groups_inactive(self, groups: Iterable[WorkerGroup]) -> tuple[WorkerGroup, ...]:
+        """Move recovered groups back to inactive after failed post-restart work."""
+        with self._lock:
+            for group in groups:
+                for rank in group.ranks:
+                    worker = self._workers.get(rank)
+                    if worker is not None:
+                        self._workers[rank] = replace(worker, lifecycle_state=WorkerLifecycleState.INACTIVE)
+            worker_groups = self._build_worker_groups()
+            return tuple(
+                worker_groups[group.ranks]
+                for group in groups
+                if group.ranks in worker_groups
+            )
 
     def weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
         """Return weight-update targets resolved with current runtime state."""

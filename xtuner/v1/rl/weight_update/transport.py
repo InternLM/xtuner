@@ -73,6 +73,10 @@ class WeightTransport(ABC, Generic[AdapterT]):
 
         self.rollout_url = self.rollout_info.rollout_url
 
+    def reset_rollout_info(self, rollout_info: RolloutWeightUpdateInfo):
+        self.rollout_info = rollout_info
+        self.rollout_url = rollout_info.rollout_url
+
     @staticmethod
     def post_json(url: str, endpoint: str, payload: dict, *, api_key=None) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -899,7 +903,9 @@ class CheckpointEngineWeightTransport:
         self._checkpoint_name: str | None = None
 
         self._ps = self.build_parameter_server()
+        self._p2p_available = self._check_checkpoint_engine_p2p_available()
         # record the local checkpoint keys per PS-rank
+
         self._local_checkpoint_keys = self.split_tensors_for_rank(self._checkpoint_path, self.ps_world_size, self.rank)
 
     def build_parameter_server(self):
@@ -919,6 +925,20 @@ class CheckpointEngineWeightTransport:
         )
         self.logger.info(f"[checkpoint_engine] ParameterServer ready rank={self.rank} world_size={self.ps_world_size}")
         return ps
+
+    def _check_checkpoint_engine_p2p_available(self) -> bool:
+        try:
+            from mooncake.engine import TransferEngine  # noqa: F401
+        except ImportError as e:
+            self.logger.warning(
+                "Checkpoint Engine P2P weight update is unavailable because "
+                "mooncake TransferEngine is not installed or cannot be imported. "
+                "Full Checkpoint Engine broadcast weight update may still work, "
+                "but partial rollout worker recovery requires P2P. "
+                f"import_error={e!r}"
+            )
+            return False
+        return True
 
     def split_tensors_for_rank(self, checkpoint_path: str | Path, world_size: int, rank: int) -> set[str]:
         """Split an HF keys for each ParameterServer."""
@@ -1075,21 +1095,39 @@ class CheckpointEngineWeightTransport:
 
         return len(update_ranks) == world_size and list(update_ranks) == list(range(world_size))
 
-    def _update_engines(self) -> None:
+    def _update_engines(self, update_pending_only: bool = False) -> None:
         """``gather_metas`` then ``update`` to push checkpoint to rollout
         engines."""
 
-        targets = self.rollout_info.active_update_targets
+        if update_pending_only:
+            targets = self.rollout_info.pending_update_targets
+        else:
+            targets = self.rollout_info.active_update_targets
+
+        self.logger.info(
+            f"[Checkpoint engine debug] rank={self.rank} update_pending_only={update_pending_only} "
+            f"all_targets={self.rollout_info.weight_update_targets} selected_targets={targets}"
+        )
+
         if not targets:
             raise RuntimeError("Checkpoint Engine found no active weight-update targets.")
         update_ranks = self._get_target_update_ranks(targets, self.ps_world_size)
         use_broadcast = self._can_broadcast_to_update_ranks(update_ranks, self.ps_world_size)
         ranks = None if use_broadcast else update_ranks
+
+        if not use_broadcast and not self._p2p_available:
+            self.logger.warning(
+                "Checkpoint Engine partial weight update requires P2P, but mooncake "
+                "TransferEngine is unavailable. update_ranks=%s world_size=%s. "
+                "Install mooncake TransferEngine or fall back to full broadcast update.",
+                update_ranks,
+                self.ps_world_size,
+            )
         req_func = self._make_req_func(targets)
         self.logger.info(
             f"[checkpoint_engine] gather_metas+update name={self._checkpoint_name} "
             f"active_targets={len(targets)}/{len(self.rollout_info.weight_update_targets)} "
-            f"method={'broadcast' if use_broadcast else 'p2p'} ranks={ranks}"
+            f"method={'broadcast' if use_broadcast else 'p2p'} update_ranks={update_ranks} ranks={ranks}"
         )
         self._ps.gather_metas(self._checkpoint_name)
         self._ps.update(self._checkpoint_name, req_func, ranks=ranks)
@@ -1112,10 +1150,15 @@ class CheckpointEngineWeightTransport:
             Whether to load the registered checkpoint into rollout engines. Set this to
             False to split registration and rollout update into separate calls, which
             can reduce peak GPU memory usage under memory pressure.
+        update_pending_only : bool, optional
+            Whether to update only rollout targets that are pending weight updates. If True, skip rollout targets
+            that have already received the latest checkpoint.
         """
 
         need_register = kwargs.pop("need_register", True)
         need_update = kwargs.pop("need_update", True)
+        update_pending_only = kwargs.pop("update_pending_only", True)
+        
         assert need_register or need_update, (
             "At least one of need_register or need_update must be True when use checkpoint engine update."
         )
@@ -1128,7 +1171,11 @@ class CheckpointEngineWeightTransport:
 
         # 2. Broadcast checkpoint to engines
         if need_update:
-            self._update_engines()
+            self._update_engines(update_pending_only=update_pending_only)
+
+
+    def has_registered_checkpoint(self) -> bool:
+        return self._checkpoint_name is not None
 
     def reset_rollout_info(self, rollout_info: RolloutWeightUpdateInfo):
         self.rollout_info = rollout_info

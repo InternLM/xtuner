@@ -55,7 +55,6 @@ class WeightUpdater:
                 self.logger.info("Rollout metadata changed, reset weight transport.")
                 self._reset_transport()
             self._transport_signature = new_transport_signature
-
         self.weight_iterator = WeightIterator(
             config=self.config,
             engine=self._engine,
@@ -75,6 +74,14 @@ class WeightUpdater:
         )
         assert self.weight_iterator is not None, "Weight iterator is not initialized."
         self._transport.update(self.weight_iterator, **kwargs)
+    def has_registered_weight_checkpoint(self) -> bool:
+        transport = self._transport
+        if transport is None:
+            return False
+        has_registered = getattr(transport, "has_registered_checkpoint", None)
+        if has_registered is None:
+            return False
+        return bool(has_registered())
 
     def _set_transport(self) -> None:
         rollout_info = self.rollout_info

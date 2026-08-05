@@ -57,6 +57,10 @@ class RolloutProxyManager(RolloutWorkerLifecycleListener):
             if worker.is_request_entrypoint:
                 self._delete_session_url(worker.session_url)
 
+    def on_worker_group_pending_weights(self, group: "WorkerGroup") -> None:
+        """Pending workers are healthy but not ready for routed traffic yet."""
+        del group
+
     def on_worker_group_recovered(self, group: "WorkerGroup") -> None:
         """Register recovered request entrypoints to routed API proxy."""
         for worker in group.workers:

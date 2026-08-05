@@ -73,6 +73,10 @@ class RolloutWeightUpdateTarget:
         return self.lifecycle_state == "active"
 
     @property
+    def is_pending(self) -> bool:
+        return self.lifecycle_state == "pending_weights"
+
+    @property
     def engine_size(self) -> int:
         return len(self.update_ranks)
 
@@ -175,7 +179,11 @@ class RolloutWeightUpdateInfo:
 
     @property
     def active_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
-        return tuple(target for target in self.weight_update_targets if target.is_active)
+        return tuple(target for target in self.weight_update_targets if target.is_active or target.is_pending)
+
+    @property
+    def pending_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
+        return tuple(target for target in self.weight_update_targets if target.is_pending)
 
     @property
     def nccl_engine_infos(self) -> tuple[tuple[int, str, int], ...]:
