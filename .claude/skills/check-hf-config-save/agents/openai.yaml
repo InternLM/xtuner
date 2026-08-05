@@ -1,4 +1,4 @@
 interface:
   display_name: "Check HF Config Save"
-  short_description: "Validate exported HF configs across runtimes"
-  default_prompt: "Use $check-hf-config-save to validate the exported Hugging Face config across Transformers and inference engines."
+  short_description: "Implement and validate exported HF configs"
+  default_prompt: "Use $check-hf-config-save to implement any missing official Hugging Face config export and validate it across Transformers and inference engines."
