@@ -68,7 +68,7 @@ class Train:
                 command = (
                     f"cd {current_dir}; pwd; {pip_package}; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + cudnn_patch
-                    + f"bash -x autotest/utils/ci_run_rl.sh {accelerator} {infer_type} {config_path} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
+                    + f"sleep inf; bash -x autotest/utils/ci_run_rl.sh {accelerator} {infer_type} {config_path} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
                 )
                 return command, config
         else:
