@@ -17,6 +17,9 @@ TestRegionRecomputeUnderDominoEP
     test_kept_unit_matches_full_recompute_under_compile: compile 下同上，且不触发 cached-tensor-mutated。
 """
 
+import subprocess
+import sys
+
 import pytest
 import torch
 from torch import nn
@@ -147,6 +150,19 @@ class TestKeptCallables:
         module(inputs).sum().backward()
 
         assert inputs.grad is not None
+
+
+class TestContractLayering:
+    def test_module_layer_imports_the_contract_without_the_model_layer(self):
+        # 契约之所以在 xtuner/v1/utils 而不是挨着 engine，是因为它命名的 callable 在
+        # xtuner/v1/module 里：一旦契约里出现指向 model/ 的 import，这条独立导入就会变成
+        # 循环导入而失败。必须用干净的解释器：同进程里 xtuner.v1.model 早就被导入了。
+        result = subprocess.run(
+            [sys.executable, "-c", "import xtuner.v1.module.decoder_layer.moe_decoder_layer"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
 
 
 class TestUnsupportedUnits:
