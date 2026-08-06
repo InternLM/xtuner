@@ -30,6 +30,7 @@ logger = get_logger()
 def build_dispatcher(
     dispatcher: Literal["deepep", "all2all", "agrs"] | None,
     n_routed_experts: int,
+    hidden_size: int,
     ep_group: dist.ProcessGroup | None = None,
     training_dtype: Literal["bf16", "fp8"] = "bf16",
     generate_dtype: Literal["bf16", "fp8"] = "bf16",
@@ -55,6 +56,7 @@ def build_dispatcher(
         # TODO: remove type ignore here
         return DeepEPDispatcher(
             n_routed_experts=n_routed_experts,
+            hidden_size=hidden_size,
             process_group=ep_group,
             training_dtype=training_dtype,
             generate_dtype=generate_dtype,
