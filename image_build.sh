@@ -12,8 +12,8 @@ export CAUSAL_CONV1D_URL=https://github.com/Dao-AILab/causal-conv1d@da6dbaa9fd5a
 export FLA_URL="${FLA_URL-https://github.com/HAOCHENYE/flash-linear-attention@tmp-tensor-cache}"
 
 export TORCH_VERSION=${TORCH_VERSION:-"2.9.1"}
-export LMDEPLOY_VERSION="0.15.0"
-# export LMDEPLOY_URL=https://github.com/InternLM/lmdeploy@efe3b88607756a7ad9411b89627b5ac6ebaa540e
+export LMDEPLOY_URL="${LMDEPLOY_URL:-https://github.com/RunningLeon/lmdeploy@c14f389e9b2346f9835954ed90aefc0a0aac7ad4}"
+# export LMDEPLOY_VERSION="0.15.0"
 export PPA_SOURCE="https://mirrors.aliyun.com"
 export DEFAULT_PYPI_URL=${DEFAULT_PYPI_URL:-"https://mirrors.aliyun.com/pypi/simple"}
 # mirror https://download.pytorch.org/whl
@@ -40,8 +40,7 @@ docker build . \
   --build-arg DEEP_GEMM_URL=$DEEP_GEMM_URL \
   --build-arg XTUNER_URL=$XTUNER_URL \
   --build-arg XTUNER_COMMIT=$XTUNER_COMMIT \
-  --build-arg LMDEPLOY_VERSION=$LMDEPLOY_VERSION \
-  --build-arg LMDEPLOY_URL=$LMDEPLOY_URL \
+  --build-arg LMDEPLOY_URL="$LMDEPLOY_URL" \
   --progress=plain \
   --label "BASE_IMAGE=$BASE_IMAGE" \
   --label "XTUNER_URL=${XTUNER_URL/@/\/tree\/}" \
@@ -53,7 +52,7 @@ docker build . \
   --label "FLA_URL=${FLA_URL/@/\/tree\/}" \
   --label "DEEP_EP_URL=${DEEP_EP_URL/@/\/tree\/}" \
   --label "DEEP_GEMM_URL=${DEEP_GEMM_URL/@/\/tree\/}" \
-  --label "LMDEPLOY_VERSION=${LMDEPLOY_VERSION/@/\/tree\/}"
+  --label "LMDEPLOY_URL=${LMDEPLOY_URL/@/\/tree\/}"
 
 echo "===== pip list in ${image_name}:${image_tag} ====="
 docker run --rm --entrypoint pip "${image_name}:${image_tag}" list
