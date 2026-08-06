@@ -4,6 +4,7 @@ import asyncio
 import math
 import os
 import time
+from hashlib import blake2b
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -103,6 +104,28 @@ def validate_opd_sample_params(sample_params: SampleParams) -> None:
         raise ValueError("PG-OPD requires return_logprob=True and return_token_ids=True")
 
 
+class TeacherReplicaRouter:
+    """Resolve a physical teacher replica for one scoring request."""
+
+    def __init__(self, num_replicas: int) -> None:
+        if num_replicas <= 0:
+            raise ValueError(f"num_replicas must be positive, got {num_replicas}")
+        self._num_replicas = num_replicas
+
+    def resolve_replica_idx(
+        self,
+        *,
+        teacher_name: str,
+        data_source: str,
+        group_id: int | None,
+    ) -> int:
+        if self._num_replicas == 1:
+            return 0
+        routing_key = f"{teacher_name}\0{data_source}\0{group_id}".encode()
+        digest = blake2b(routing_key, digest_size=8).digest()
+        return int.from_bytes(digest, byteorder="big") % self._num_replicas
+
+
 class TeacherLogprobClient:
     """Asynchronous teacher client scoped to one AgentLoop."""
 
@@ -112,7 +135,7 @@ class TeacherLogprobClient:
         self.backend = self._resolve_backend_from_env()
         self.urls = [f"{endpoint.rstrip('/')}/generate" for endpoint in config.endpoints]
         self._semaphores = [asyncio.Semaphore(config.max_concurrency) for _ in self.urls]
-        self._next_replica_idx = 0
+        self._replica_router = TeacherReplicaRouter(len(self.urls))
 
         headers = {"Content-Type": "application/json"}
         if config.api_key is not None:
@@ -127,6 +150,17 @@ class TeacherLogprobClient:
             if not prompt_ids or not response_ids:
                 state.status = Status.FAILED
                 state.error_msg = f"Teacher {self.name!r} scoring requires non-empty prompt_ids and response_ids"
+                return state
+            try:
+                routed_replica_idx = self._replica_router.resolve_replica_idx(
+                    teacher_name=self.name,
+                    data_source=str(state.extra_fields.get("origin_data_source", "")),
+                    group_id=state.group_id,
+                )
+            except ValueError as exc:
+                state.status = Status.FAILED
+                state.error_msg = f"Teacher {self.name!r} replica routing failed: {exc}"
+                logger.warning(state.error_msg)
                 return state
             image_data = state.extra_fields.get("image_data")
             expanded_prompt_len = None
@@ -146,10 +180,8 @@ class TeacherLogprobClient:
                 image_data=image_data,
             )
 
-            start_replica_idx = self._next_replica_idx
-            self._next_replica_idx = (start_replica_idx + 1) % len(self.urls)
             for attempt_idx in range(self.config.max_retry_per_sample + 1):
-                replica_idx = (start_replica_idx + attempt_idx) % len(self.urls)
+                replica_idx = (routed_replica_idx + attempt_idx) % len(self.urls)
                 url = self.urls[replica_idx]
                 try:
                     async with self._semaphores[replica_idx]:
@@ -169,6 +201,7 @@ class TeacherLogprobClient:
                         state.status = Status.FAILED
                         state.error_msg = (
                             f"Teacher {self.name!r} logprobs calculation failed after {attempt_idx + 1} attempts; "
+                            f"group_id={state.group_id}; routed_replica={routed_replica_idx}; "
                             f"replica={replica_idx}; endpoint={url}; last_error={exc}"
                         )
                         logger.warning(state.error_msg)
