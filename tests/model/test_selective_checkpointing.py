@@ -6,6 +6,8 @@ TestKeptOps
 TestKeptCallables
     test_kept_callable_reproduces_full_recompute: 按 callable 留驻与全重算逐位相同。
     test_unit_marker_outside_a_region_is_noop: 未被包装时不产生任何可观察行为。
+TestContractLayering
+    test_module_layer_imports_the_contract_without_the_model_layer: 契约模块必须能被 module/ 层单独导入。
 TestUnsupportedUnits
     test_in_place_op_in_kept_unit_is_recomputed_not_refused: 只动自己缓冲区的 in-place 写不该被拒。
     test_mutating_a_kept_tensor_is_caught_by_torch: 写到被留驻张量上时由 torch 精确拦下。
@@ -19,6 +21,8 @@ TestRegionRecomputeUnderDominoEP
     test_kept_unit_matches_full_recompute_under_compile: compile 下同上，且不触发 cached-tensor-mutated。
 """
 
+import subprocess
+import sys
 from collections import Counter
 
 import pytest
@@ -184,6 +188,19 @@ class TestKeptCallables:
         module(inputs).sum().backward()
 
         assert inputs.grad is not None
+
+
+class TestContractLayering:
+    def test_module_layer_imports_the_contract_without_the_model_layer(self):
+        # 契约之所以在 xtuner/v1/utils 而不是挨着 engine，是因为它命名的 callable 在
+        # xtuner/v1/module 里：一旦契约里出现指向 model/ 的 import，这条独立导入就会变成
+        # 循环导入而失败。必须用干净的解释器：同进程里 xtuner.v1.model 早就被导入了。
+        result = subprocess.run(
+            [sys.executable, "-c", "import xtuner.v1.module.decoder_layer.moe_decoder_layer"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
 
 
 class TestUnsupportedUnits:
