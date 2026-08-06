@@ -13,6 +13,7 @@ from xtuner.v1.ops.comm.deepep_op import (
     combine_forward,
     dispatch_backward,
     dispatch_forward,
+    get_low_latency_buffer,
 )
 from xtuner.v1.utils import copy_method_signature, get_device, get_logger
 
@@ -257,6 +258,7 @@ class DeepEPDispatcher(
         self,
         *,
         n_routed_experts: int,
+        hidden_size: int,
         process_group: torch.distributed.ProcessGroup,
         training_dtype: Literal["fp8", "bf16"] = "bf16",
         generate_dtype: Literal["fp8", "bf16"] = "bf16",
@@ -273,6 +275,13 @@ class DeepEPDispatcher(
             "Process group must be provided for `DeepEPDispatcher`. "
             "If you are training a MoE model, it means that `expert parallel` is not enabled in the config."
         )
+        # Built here rather than on first dispatch. The buffer is a process-wide singleton whose
+        # constructor all-gathers device ids and IPC handles, and `all_gather_object` swaps a
+        # tensor's storage with `aten.set_`. Left lazy, that lands inside whichever forward happens
+        # to run first -- which under selective checkpointing is a checkpointed one, where the write
+        # hits a tensor the policy kept and torch rejects the step with "Tensor cached during
+        # selective activation checkpoint has been mutated".
+        get_low_latency_buffer(self._process_group, hidden=hidden_size, num_experts=n_routed_experts)
 
     @override
     def dispatch_preprocess(

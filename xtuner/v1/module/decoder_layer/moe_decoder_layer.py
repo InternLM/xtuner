@@ -306,6 +306,7 @@ class MoEDecoderLayer(nn.Module):
         self.dispatcher = build_dispatcher(
             dispatcher=dispatcher,
             n_routed_experts=n_routed_experts,
+            hidden_size=hidden_size,
             ep_group=process_group,
             training_dtype="fp8" if float8_cfg is not None else "bf16",
             generate_dtype=generate_config.dtype if generate_config is not None else "bf16",
