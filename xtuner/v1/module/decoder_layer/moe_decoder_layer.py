@@ -35,6 +35,7 @@ from xtuner.v1.module.dispatcher import (
 )
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.rope import RopeScalingConfig
+from xtuner.v1.module.ultraep.runtime import UltraEPLayerRuntime, UltraEPManagerProvider
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
 
@@ -233,6 +234,7 @@ class MoEDecoderLayer(nn.Module):
         ep_mesh: DeviceMesh | None = None,
         expert_tp_mesh: DeviceMesh | None = None,
         ep_tp_mesh: DeviceMesh | None = None,
+        ultraep_manager_provider: UltraEPManagerProvider | None = None,
     ):
         super().__init__()
         self.ep_mesh = ep_mesh
@@ -241,6 +243,7 @@ class MoEDecoderLayer(nn.Module):
         self.n_routed_experts = n_routed_experts
         self.n_shared_experts = n_shared_experts
         self.hidden_factor = hidden_factor
+        self._ultraep: UltraEPLayerRuntime | None = None
 
         self.self_attn: MultiHeadAttention | MultiLatentAttention | GatedDeltaNet = attention_config.build(
             hidden_size=hidden_size,
@@ -293,13 +296,23 @@ class MoEDecoderLayer(nn.Module):
             moe_act_fn_cfg=moe_act_fn_cfg,
             ep_tp_mesh=ep_tp_mesh,
         )
+        if ultraep_manager_provider is not None:
+            if ep_mesh is None:
+                raise ValueError("UltraEP requires an EP device mesh")
+            self._ultraep = UltraEPLayerRuntime(
+                layer_id=layer_idx,
+                manager_provider=ultraep_manager_provider,
+                fused_w1w3=self.experts.fused_w1w3,
+                fused_w2=self.experts.fused_w2,
+            )
         # TODO: (yehaochen) Maybe should be replaced by build_dispatcher
         process_group = ep_mesh.get_group() if ep_mesh is not None else None
         tp_group = expert_tp_mesh.get_group() if expert_tp_mesh is not None else None
         ep_tp_group = ep_tp_mesh._flatten().get_group() if ep_tp_mesh is not None else None
+        num_dispatch_experts = self._ultraep.num_dispatch_experts if self._ultraep is not None else n_routed_experts
         self.dispatcher = build_dispatcher(
             dispatcher=dispatcher,
-            n_routed_experts=n_routed_experts,
+            n_routed_experts=num_dispatch_experts,
             ep_group=process_group,
             tp_group=tp_group,
             ep_tp_group=ep_tp_group,
@@ -395,6 +408,11 @@ class MoEDecoderLayer(nn.Module):
         seq_ctx: SequenceContext,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
     ) -> tuple[HiddenStates, RouterLogits, RouterWeights, RouterTopKIds]:
+        ultraep = self._ultraep
+        virtual_layer_id: int | None = None
+        if ultraep is not None:
+            hidden_states, virtual_layer_id = ultraep.begin_microbatch(hidden_states)
+
         residual, hidden_states, router_results = self._pre_moe_forward(
             hidden_states=hidden_states,
             seq_ctx=seq_ctx,
@@ -408,9 +426,19 @@ class MoEDecoderLayer(nn.Module):
         # ProberList.before_dispatch(
         #     self.layer_idx, hidden_states, router_results["topk_ids"], router_results["topk_weights"]
         # )
+        dispatch_hidden_states = hidden_states
+        dispatch_topk_ids = router_results["topk_ids"]
+        if ultraep is not None:
+            assert virtual_layer_id is not None
+            ultraep.update_placement(dispatch_topk_ids, virtual_layer_id)
+            weight_sync_event = ultraep.sync_weights(virtual_layer_id, async_finish=True)
+            dispatch_topk_ids = ultraep.reroute(dispatch_topk_ids, virtual_layer_id)
+            weight_sync_event.current_stream_wait()
+            dispatch_hidden_states = ultraep.mark_dispatch_input(hidden_states, virtual_layer_id)
+
         pre_dispatched = self.dispatcher.dispatch_preprocess(
-            hidden_states=hidden_states.view(-1, hidden_states.shape[-1]),
-            topk_ids=router_results["topk_ids"],
+            hidden_states=dispatch_hidden_states.view(-1, dispatch_hidden_states.shape[-1]),
+            topk_ids=dispatch_topk_ids,
             topk_weights=router_results["topk_weights"],
         )
         dispatched = self.dispatcher.dispatch(
@@ -498,6 +526,11 @@ class MoEDecoderLayer(nn.Module):
             "All hidden states should have the same shape"
         )
         intra_layer_micro_batch = len(hidden_states_list)
+        if self._ultraep is not None:
+            raise RuntimeError(
+                "Xtuner UltraEP currently supports intra_layer_micro_batch == 1 only; "
+                "per-microbatch replica weight/grad slots are not implemented yet"
+            )
         residual_list: list[torch.Tensor] = []
         router_results_list: list[RouterResults] = []
 

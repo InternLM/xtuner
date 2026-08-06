@@ -64,6 +64,8 @@ from xtuner.v1.module import (
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer, MoEGate
 from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
+from xtuner.v1.module.ultraep import UltraEPConfig
+from xtuner.v1.module.ultraep.runtime import UltraEPManagerProvider
 from xtuner.v1.utils import (
     get_device,
     get_logger,
@@ -166,6 +168,9 @@ class MoEConfig(TransformerConfig):
     # Compose models call `self.embed_tokens` multiple times per step, so default to
     # keeping it unsharded after forward to avoid repeated all-gathers.
     embed_reshard_after_forward: bool = True
+    # ``None`` keeps the baseline route byte-for-byte independent of UltraEP.
+    # When configured, replicas remain runtime-owned rather than model state.
+    ultraep_cfg: UltraEPConfig | None = None
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
@@ -176,6 +181,25 @@ class MoEConfig(TransformerConfig):
 def use_moe_ep_compile_cfg(config: MoEConfig) -> bool:
     # 中文注释：ExpertTP 也会跨 rank 进入 dispatcher 通信段，compile 边界应和 EP 路径一致。
     return config.ep_size > 1 or config.expert_tp_size > 1
+
+
+def _validate_ultraep_model_config(config: MoEConfig, *, ep_size: int, expert_tp_size: int) -> None:
+    if config.ultraep_cfg is None:
+        return
+    if expert_tp_size != 1:
+        raise ValueError("Xtuner UltraEP requires expert_tp_size == 1")
+    if ep_size <= 1:
+        raise ValueError("UltraEP requires ep_size > 1")
+    if config.n_routed_experts % ep_size != 0:
+        raise ValueError("UltraEP requires n_routed_experts to be divisible by ep_size")
+    if config.dispatcher != "deepep":
+        raise ValueError("Xtuner UltraEP currently supports dispatcher='deepep' only")
+    if config.float8_cfg is not None:
+        raise ValueError("Xtuner UltraEP currently supports BF16 grouped experts only")
+    if config.moe_bias:
+        raise ValueError("Xtuner UltraEP does not currently support expert bias")
+    if config.mtp_config is not None:
+        raise ValueError("Xtuner UltraEP does not currently support MTP expert layers")
 
 
 class MoE(BaseModel):
@@ -190,6 +214,7 @@ class MoE(BaseModel):
     ep_mesh: DeviceMesh | None = None
     expert_tp_mesh: DeviceMesh | None = None
     ep_tp_mesh: DeviceMesh | None = None
+    ultraep_manager_provider: UltraEPManagerProvider | None = None
 
     def __init__(self, config: MoEConfig):
         # Concrete MoE configs override build(), so validate dispatcher support
@@ -205,6 +230,7 @@ class MoE(BaseModel):
         super().__init__(config)
         ep_size = config.ep_size if config.ep_size is not None else 1
         expert_tp_size = config.expert_tp_size if config.expert_tp_size > 1 else 1
+        _validate_ultraep_model_config(config, ep_size=ep_size, expert_tp_size=expert_tp_size)
         if ep_size > 1 or expert_tp_size > 1:
             world_size = dist.get_world_size()
             fsdp_size = world_size // (ep_size * expert_tp_size)
@@ -238,6 +264,15 @@ class MoE(BaseModel):
             self.ep_mesh = None
             self.expert_tp_mesh = None
             self.ep_tp_mesh = None
+
+        if config.ultraep_cfg is not None:
+            assert self.ep_mesh is not None
+            self.ultraep_manager_provider = UltraEPManagerProvider.from_xtuner_config(
+                group=self.ep_mesh.get_group(),
+                config=config,
+            )
+        else:
+            self.ultraep_manager_provider = None
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, type=config.rms_norm_type)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
@@ -1040,6 +1075,7 @@ class MoE(BaseModel):
                     ep_mesh=self.ep_mesh,
                     expert_tp_mesh=self.expert_tp_mesh,
                     ep_tp_mesh=self.ep_tp_mesh,
+                    ultraep_manager_provider=self.ultraep_manager_provider,
                 )
                 if self.config.freeze_routers:
                     layers[str(layer_idx)].gate.requires_grad_(False)
@@ -1148,6 +1184,11 @@ class MoE(BaseModel):
         if fsdp_config.hsdp_sharding_size is not None and self.config.expert_tp_size > 1:
             raise NotImplementedError("HSDP with ExpertTP is not supported")
 
+        if self.config.ultraep_cfg is not None and fsdp_config.recompute_ratio > 0:
+            raise ValueError(
+                "Xtuner UltraEP does not support FSDP activation recompute yet; "
+                "set fsdp_config.recompute_ratio=0 or disable ultraep"
+            )
         self.fsdp_config = fsdp_config
         assert self.fsdp_config.ep_size == self.config.ep_size
         self.mp_policy = MixedPrecisionPolicy(

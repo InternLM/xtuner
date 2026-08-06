@@ -243,6 +243,205 @@ def m_grouped_gemm_bNmajor_kernel(
         tl.store(c_ptrs, c, mask=mask)
 
 
+@triton.autotune(configs=get_cuda_autotune_config(), key=["N", "K"])
+@triton.jit
+def m_grouped_gemm_dual_bKmajor_kernel(
+    A,
+    B_master,
+    B_replica,
+    C,
+    pad_starts,
+    pad_ends,
+    group_starts,
+    group_ends,
+    m_indices_pad,
+    M_pad_ptr,
+    M,
+    B_MASTER_ROWS,
+    B_REPLICA_ROWS,
+    NUM_MASTER_GROUPS: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    dtype_a: tl.constexpr,
+    dtype_b: tl.constexpr,
+    dtype_c: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """B-K-major GMM over two disjoint expert-weight allocations."""
+    dtypeA = tl.bfloat16 if dtype_a == 0 else tl.float16
+    dtypeB = tl.bfloat16 if dtype_b == 0 else tl.float16
+    dtypeC = tl.bfloat16 if dtype_c == 0 else tl.float16
+    BLOCKS = tl.num_programs(axis=0)
+    start_pid = tl.program_id(axis=0)
+    M_pad = tl.load(M_pad_ptr)
+    num_pid_m = tl.cdiv(M_pad, BLOCK_M)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    num_tiles = num_pid_m * num_pid_n
+
+    a_ptr = A.to(tl.pointer_type(dtypeA))
+    master_ptr = B_master.to(tl.pointer_type(dtypeB))
+    replica_ptr = B_replica.to(tl.pointer_type(dtypeB))
+    c_ptr = C.to(tl.pointer_type(dtypeC))
+
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr,
+        shape=[M, K],
+        strides=[K, 1],
+        block_shape=[BLOCK_M, BLOCK_K],
+    )
+    master_desc = tl.make_tensor_descriptor(
+        master_ptr,
+        shape=[B_MASTER_ROWS, K],
+        strides=[K, 1],
+        block_shape=[BLOCK_N, BLOCK_K],
+    )
+    replica_desc = tl.make_tensor_descriptor(
+        replica_ptr,
+        shape=[B_REPLICA_ROWS, K],
+        strides=[K, 1],
+        block_shape=[BLOCK_N, BLOCK_K],
+    )
+
+    for tile_id in tl.range(start_pid, num_tiles, BLOCKS):
+        pid_m, pid_n = grouped_launch(tile_id, M_pad, N, BLOCK_M, BLOCK_N, GROUP_M)
+
+        group = tl.load(m_indices_pad + pid_m).to(tl.int32)
+        pad_off = tl.load(pad_starts + group).to(tl.int32)
+        group_start = (tl.load(group_starts + group) + (pid_m * BLOCK_M - pad_off)).to(tl.int32)
+        group_end = tl.load(group_ends + group).to(tl.int32)
+
+        offs_bn = (pid_n * BLOCK_N).to(tl.int32)
+        accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+        # ``group`` is uniform for the whole program tile. Branch once around
+        # the K loop, then use the matching TMA descriptor without materializing
+        # a concatenated physical-expert tensor.
+        if group < NUM_MASTER_GROUPS:
+            offs_k = 0
+            for _ in tl.range(0, tl.cdiv(K, BLOCK_K)):
+                a = a_desc.load([group_start, offs_k])
+                b = master_desc.load([group * N + offs_bn, offs_k])
+                accumulator = tl.dot(a, b.T, acc=accumulator, input_precision="tf32x3")
+                offs_k += BLOCK_K
+        else:
+            replica_group = group - NUM_MASTER_GROUPS
+            offs_k = 0
+            for _ in tl.range(0, tl.cdiv(K, BLOCK_K)):
+                a = a_desc.load([group_start, offs_k])
+                b = replica_desc.load([replica_group * N + offs_bn, offs_k])
+                accumulator = tl.dot(a, b.T, acc=accumulator, input_precision="tf32x3")
+                offs_k += BLOCK_K
+
+        offs_m_range = group_start + tl.arange(0, BLOCK_M)
+        offs_n_range = (pid_n * BLOCK_N).to(tl.int32) + tl.arange(0, BLOCK_N)
+        mask = (offs_m_range[:, None] < group_end) & (offs_n_range[None, :] < N)
+        c_ptrs = c_ptr + offs_m_range[:, None].to(tl.int64) * N + offs_n_range[None, :].to(tl.int64)
+        tl.store(c_ptrs, accumulator.to(dtypeC), mask=mask)
+
+
+@triton.autotune(configs=get_cuda_autotune_config(), key=["N", "K"])
+@triton.jit
+def m_grouped_gemm_dual_bNmajor_kernel(
+    A,
+    B_master,
+    B_replica,
+    C,
+    pad_starts,
+    pad_ends,
+    group_starts,
+    group_ends,
+    m_indices_pad,
+    M_pad_ptr,
+    M,
+    B_MASTER_ROWS,
+    B_REPLICA_ROWS,
+    NUM_MASTER_GROUPS: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    dtype_a: tl.constexpr,
+    dtype_b: tl.constexpr,
+    dtype_c: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """B-N-major GMM over two disjoint expert-weight allocations."""
+    dtypeA = tl.bfloat16 if dtype_a == 0 else tl.float16
+    dtypeB = tl.bfloat16 if dtype_b == 0 else tl.float16
+    dtypeC = tl.bfloat16 if dtype_c == 0 else tl.float16
+    BLOCKS = tl.num_programs(axis=0)
+    start_pid = tl.program_id(axis=0)
+    M_pad = tl.load(M_pad_ptr)
+    num_pid_m = tl.cdiv(M_pad, BLOCK_M)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    num_tiles = num_pid_m * num_pid_n
+
+    a_ptr = A.to(tl.pointer_type(dtypeA))
+    master_ptr = B_master.to(tl.pointer_type(dtypeB))
+    replica_ptr = B_replica.to(tl.pointer_type(dtypeB))
+    c_ptr = C.to(tl.pointer_type(dtypeC))
+
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr,
+        shape=[M, K],
+        strides=[K, 1],
+        block_shape=[BLOCK_M, BLOCK_K],
+    )
+    master_desc = tl.make_tensor_descriptor(
+        master_ptr,
+        shape=[B_MASTER_ROWS, N],
+        strides=[N, 1],
+        block_shape=[BLOCK_K, BLOCK_N],
+    )
+    replica_desc = tl.make_tensor_descriptor(
+        replica_ptr,
+        shape=[B_REPLICA_ROWS, N],
+        strides=[N, 1],
+        block_shape=[BLOCK_K, BLOCK_N],
+    )
+
+    for tile_id in tl.range(start_pid, num_tiles, BLOCKS):
+        pid_m, pid_n = grouped_launch(tile_id, M_pad, N, BLOCK_M, BLOCK_N, GROUP_M)
+
+        group = tl.load(m_indices_pad + pid_m).to(tl.int32)
+        pad_off = tl.load(pad_starts + group).to(tl.int32)
+        group_start = (tl.load(group_starts + group) + (pid_m * BLOCK_M - pad_off)).to(tl.int32)
+        group_end = tl.load(group_ends + group).to(tl.int32)
+
+        offs_bn = (pid_n * BLOCK_N).to(tl.int32)
+        accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+        if group < NUM_MASTER_GROUPS:
+            offs_k = 0
+            offs_bk = (group * K).to(tl.int32)
+            for _ in tl.range(0, tl.cdiv(K, BLOCK_K)):
+                a = a_desc.load([group_start, offs_k])
+                b = master_desc.load([offs_bk, offs_bn])
+                accumulator = tl.dot(a, b, acc=accumulator, input_precision="tf32x3")
+                offs_k += BLOCK_K
+                offs_bk += BLOCK_K
+        else:
+            replica_group = group - NUM_MASTER_GROUPS
+            offs_k = 0
+            offs_bk = (replica_group * K).to(tl.int32)
+            for _ in tl.range(0, tl.cdiv(K, BLOCK_K)):
+                a = a_desc.load([group_start, offs_k])
+                b = replica_desc.load([offs_bk, offs_bn])
+                accumulator = tl.dot(a, b, acc=accumulator, input_precision="tf32x3")
+                offs_k += BLOCK_K
+                offs_bk += BLOCK_K
+
+        offs_m_range = group_start + tl.arange(0, BLOCK_M)
+        offs_n_range = (pid_n * BLOCK_N).to(tl.int32) + tl.arange(0, BLOCK_N)
+        mask = (offs_m_range[:, None] < group_end) & (offs_n_range[None, :] < N)
+        c_ptrs = c_ptr + offs_m_range[:, None].to(tl.int64) * N + offs_n_range[None, :].to(tl.int64)
+        tl.store(c_ptrs, accumulator.to(dtypeC), mask=mask)
+
+
 @triton.jit
 def repeat_interleave_kernel(
     group_ptr,
@@ -361,6 +560,116 @@ def _(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False)
         num_groups, BK, N = B.shape
     C = A.new_empty(M, N)
     return C
+
+
+@torch.library.custom_op("moe::m_grouped_gemm_dual_weight", mutates_args=())
+def m_grouped_gemm_dual_weight(
+    A: Tensor,
+    B_master: Tensor,
+    B_replica: Tensor,
+    size_per_group: torch.Tensor,
+    trans_b: bool = False,
+) -> Tensor:
+    """Grouped GEMM whose expert weights live in two contiguous allocations.
+
+    Logical groups are ordered as ``[master experts, replica experts]``. The
+    persistent Triton kernel selects the appropriate TMA descriptor per group,
+    so all physical experts are still computed in one launch.
+    """
+    assert A.dim() == 2
+    assert B_master.dim() == 3
+    assert B_replica.dim() == 3
+    assert A.stride(-1) == 1, "Please make sure A is K-major"
+    assert B_master.is_contiguous(), "Master expert weights must be contiguous"
+    assert B_replica.is_contiguous(), "Replica expert weights must be contiguous"
+    assert B_master.dtype == B_replica.dtype
+    assert B_master.device == B_replica.device == A.device
+
+    M, K = A.shape
+    if trans_b:
+        num_master, N, BK = B_master.shape
+        num_replica, replica_N, replica_BK = B_replica.shape
+    else:
+        num_master, BK, N = B_master.shape
+        num_replica, replica_BK, replica_N = B_replica.shape
+
+    assert num_master > 0 and num_replica > 0
+    assert BK == K and replica_BK == K, "K of A should be equal to K of both B tensors"
+    assert replica_N == N, "Master and replica expert output dimensions must match"
+    num_groups = num_master + num_replica
+    assert size_per_group.numel() == num_groups
+    C = A.new_empty(M, N)
+
+    BLOCK_M = 128
+    m_per_group_padding = triton.cdiv(size_per_group, BLOCK_M) * BLOCK_M
+    M_pad = m_per_group_padding.sum()
+    repeats = (m_per_group_padding // BLOCK_M).to(torch.int32)
+    m_indices_pad = torch.empty(M // BLOCK_M + num_groups, device=size_per_group.device, dtype=torch.int64)
+    repeat_interleave(
+        torch.arange(num_groups, device=size_per_group.device, dtype=torch.int32),
+        repeats,
+        repeats.cumsum(0),
+        m_indices_pad,
+    )
+
+    pad_start = m_per_group_padding.cumsum(0) - m_per_group_padding
+    pad_end = m_per_group_padding.cumsum(0)
+    group_end = size_per_group.cumsum(0)
+    group_start = group_end - size_per_group
+    NUM_SMS = torch.cuda.get_device_properties(A.device).multi_processor_count - SM_MARGIN
+
+    dtype_mapping = {torch.bfloat16: 0, torch.float16: 1}
+    dtype_a = dtype_mapping.get(A.dtype, -1)
+    dtype_b = dtype_mapping.get(B_master.dtype, -1)
+    dtype_c = dtype_mapping.get(C.dtype, -1)
+    assert dtype_a >= 0 and dtype_b >= 0 and dtype_c >= 0, "Only BF16 and FP16 are supported"
+
+    def grid(META):
+        return (NUM_SMS,)
+
+    def alloc_fn(size: int, alignment: int, stream: Optional[int]):
+        return torch.empty(size, device=A.device, dtype=torch.int8)
+
+    triton.set_allocator(alloc_fn)
+    kernel = m_grouped_gemm_dual_bKmajor_kernel if trans_b else m_grouped_gemm_dual_bNmajor_kernel
+    master_rows = num_master * (N if trans_b else K)
+    replica_rows = num_replica * (N if trans_b else K)
+    kernel[grid](
+        A,
+        B_master,
+        B_replica,
+        C,
+        pad_start,
+        pad_end,
+        group_start,
+        group_end,
+        m_indices_pad,
+        M_pad,
+        M,
+        master_rows,
+        replica_rows,
+        num_master,
+        N,
+        K,
+        dtype_a,
+        dtype_b,
+        dtype_c,
+        BLOCK_M=BLOCK_M,
+    )
+    return C
+
+
+@m_grouped_gemm_dual_weight.register_fake
+def _(
+    A: Tensor,
+    B_master: Tensor,
+    B_replica: Tensor,
+    size_per_group: torch.Tensor,
+    trans_b: bool = False,
+) -> Tensor:
+    M, _ = A.shape
+    N = B_master.shape[1] if trans_b else B_master.shape[2]
+    return A.new_empty(M, N)
 
 
 if __name__ == "__main__":
