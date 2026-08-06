@@ -26,7 +26,7 @@ from xtuner.v1.model.base import (
     TorchCompileOption,
     TransformerConfig,
 )
-from xtuner.v1.model.utils import apply_gradient_checkpointing
+from xtuner.v1.model.utils import apply_selective_checkpointing
 from xtuner.v1.module import (
     GatedDeltaNetConfig,
     LMHead,
@@ -235,7 +235,12 @@ class Dense(BaseModel):
             layer = self.layers[str(int(layer_idx))]
             layer_idx = int(layer_idx)
             if layer_idx < num_recompute_layers:
-                layer = apply_gradient_checkpointing(layer, preserve_rng_state=checkpoint_preserve_rng_state)
+                layer = apply_selective_checkpointing(
+                    layer,
+                    self.kept_ops,
+                    keeps_any_unit=self.keeps_any_recompute_unit,
+                    preserve_rng_state=checkpoint_preserve_rng_state,
+                )
 
                 # Linear-attention (GatedDeltaNet) layers write ``seq_ctx.seq_idx`` inside the
                 # checkpoint region; compiling the checkpointed layer with ``fullgraph=True`` turns

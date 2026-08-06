@@ -24,7 +24,7 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from torch.distributed.device_mesh import init_device_mesh
 import torch.distributed as dist
 from xtuner.v1.utils.compile import maybe_compile
-from xtuner.v1.model.utils.checkpointing import apply_gradient_checkpointing
+from xtuner.v1.model.utils import apply_selective_checkpointing
 from xtuner.v1.module import AttnOutputs
 from torch.distributed.device_mesh import DeviceMesh
 from tqdm import tqdm
@@ -338,7 +338,12 @@ class Qwen3VLVisionModel(BaseModel):
             layer = self.blocks[layer_idx]
 
             if layer_idx < num_recompute_layers:
-                layer = apply_gradient_checkpointing(layer, preserve_rng_state=checkpoint_preserve_rng_state)
+                layer = apply_selective_checkpointing(
+                    layer,
+                    self.kept_ops,
+                    keeps_any_unit=self.keeps_any_recompute_unit,
+                    preserve_rng_state=checkpoint_preserve_rng_state,
+                )
                 if self.compile_cfg:
                     layer.forward = torch.compile(layer.forward, fullgraph=True)
 
