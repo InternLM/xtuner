@@ -2,6 +2,7 @@
 
 TestCheckpointWrapper
     test_wrapper_is_transparent_to_state_dict_and_attributes: 包裹后参数名/state_dict/属性访问不变。
+    test_legacy_reentrant_preserves_gradients_through_dict_return: legacy reentrant 下 dict 返回值不断梯度。
     test_non_tensor_signature_preserves_gradients: 关键字参数 + dict 返回值下梯度与不重算一致。
     test_checkpointing_keeps_the_module_itself: 换类而非套壳，isinstance/属性/容器协议原生可用。
     test_module_without_a_protocol_does_not_gain_one: 被包裹模块没有的协议不会凭空出现。
@@ -26,7 +27,7 @@ TestCheckpointWrapper
 import torch
 from torch import nn
 
-from xtuner.v1.model.utils import apply_gradient_checkpointing
+from xtuner.v1.model.utils import apply_gradient_checkpointing, apply_legacy_reentrant_checkpointing
 
 
 class _KeywordOnlyBlock(nn.Module):
@@ -83,6 +84,26 @@ class TestCheckpointWrapper:
         )
         assert torch.equal(wrapped.state_dict()["linear.weight"], plain.state_dict()["linear.weight"])
         assert wrapped.tag == "block"
+
+    def test_legacy_reentrant_preserves_gradients_through_dict_return(self):
+        # reentrant 的 original 那趟在 no_grad 下执行，dict 里的 Tensor 不会被 autograd.Function
+        # 注册为输出，梯度会静默断掉（MTP 返回 TypedDict 时整个 mtp_block 的 grad 都是 None，
+        # 而 loss 仍然有限，所有断言都能过）。出入口都摊平后才不会断。
+        torch.manual_seed(0)
+        plain = _KeywordOnlyBlock()
+        wrapped = apply_legacy_reentrant_checkpointing(_KeywordOnlyBlock())
+        wrapped.load_state_dict(plain.state_dict())
+
+        x = torch.randn(2, 4, requires_grad=True)
+        plain({"x": x}, scale=2.0)["out"].square().sum().backward()
+        baseline_input_grad, x.grad = x.grad.clone(), None
+
+        wrapped({"x": x}, scale=2.0)["out"].square().sum().backward()
+
+        assert x.grad is not None
+        assert wrapped.linear.weight.grad is not None
+        assert torch.equal(x.grad, baseline_input_grad)
+        assert torch.equal(wrapped.linear.weight.grad, plain.linear.weight.grad)
 
     def test_non_tensor_signature_preserves_gradients(self):
         # 非 tensor 签名下梯度必须与不重算完全一致。

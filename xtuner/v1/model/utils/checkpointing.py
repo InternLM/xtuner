@@ -3,9 +3,8 @@
 from contextlib import AbstractContextManager
 from typing import Any, Callable
 
-import torch
 import torch.nn as nn
-from torch.utils._pytree import tree_flatten, tree_unflatten
+from torch.utils._pytree import TreeSpec, tree_flatten, tree_unflatten
 from torch.utils.checkpoint import checkpoint
 
 
@@ -184,21 +183,34 @@ def _pytree_reentrant_checkpoint(
     preserve_rng_state: bool = True,
     **kwargs: Any,
 ) -> Any:
-    """让嵌套 Tensor 也成为 reentrant checkpoint 的 autograd 输入。"""
-    # 原生 CheckpointFunction 只看得到顶层位置参数。例如：
-    #   future_embeddings=[embedding_0, embedding_1]
-    # 对它来说只是“一个 list 参数”，它看不到 list 里的两个 Tensor，也就不会 detach
-    # 它们。这可能会造成反向传播的错误，因为这两个 Tensor 的梯度应该交由
-    # CheckpointFunction.backward 的返回值交回原始 Tensor，而不是由他们自己来传递梯度。
-    # tree_flatten 会把输入变成近似：
+    """让嵌套 Tensor 在 reentrant checkpoint 的出入口都成为 autograd 的一等公民。"""
+    # 原生 CheckpointFunction 只看得到顶层位置参数与 tensor 返回值，嵌套容器两头都会出问题。
+    #
+    # 入参侧：future_embeddings=[embedding_0, embedding_1] 对它来说只是“一个 list 参数”，
+    # 它看不到 list 里的两个 Tensor，也就不会 detach 它们。这可能会造成反向传播的错误，因为
+    # 这两个 Tensor 的梯度应该交由 CheckpointFunction.backward 的返回值交回原始 Tensor，
+    # 而不是由他们自己来传递梯度。tree_flatten 把输入摊平成
     #   hidden, embedding_0, embedding_1
-    # 这样 checkpoint 能逐个 detach；tree_unflatten 再在 replay 前把 list 还原。
+    # 后 checkpoint 才能逐个 detach；tree_unflatten 再在 replay 前把 list 还原。
+    #
+    # 返回值侧：original 那趟在 no_grad 下执行，dict / TypedDict 里的 Tensor 因此不会被
+    # autograd.Function 注册为输出，回来时既没有 grad_fn 也不 require_grad——梯度会在此处
+    # 静默断掉（MTP 返回 TypedDict 时整个 mtp_block 的 grad 都是 None）。所以出口同样要摊平：
+    # 交给 checkpoint 的是纯 Tensor 元组，拿回来后再按 spec 还原成原本的结构。
     flat_inputs, input_spec = tree_flatten((args, kwargs))
+    output_spec: TreeSpec | None = None
 
-    def run_function(*replayed_flat_inputs: Any) -> torch.Tensor | tuple[torch.Tensor, ...]:
+    def run_function(*replayed_flat_inputs: Any) -> tuple[Any, ...]:
         # 这里只还原参数结构，不会把 detached Tensor 重新连接到旧 graph；梯度由
         # CheckpointFunction.backward 的返回值交回原始 Tensor。
+        nonlocal output_spec
         replayed_args, replayed_kwargs = tree_unflatten(list(replayed_flat_inputs), input_spec)
-        return function(*replayed_args, **replayed_kwargs)
+        flat_outputs, output_spec = tree_flatten(function(*replayed_args, **replayed_kwargs))
+        return tuple(flat_outputs)
 
-    return checkpoint(run_function, *flat_inputs, use_reentrant=True, preserve_rng_state=preserve_rng_state)
+    flat_outputs = checkpoint(run_function, *flat_inputs, use_reentrant=True, preserve_rng_state=preserve_rng_state)
+    # original 与 replay 写入的 spec 相同，取任意一趟的结果即可。
+    assert output_spec is not None, "XTuner Internal Error: reentrant checkpoint did not run the function"
+    if not isinstance(flat_outputs, tuple):
+        flat_outputs = (flat_outputs,)
+    return tree_unflatten(list(flat_outputs), output_spec)

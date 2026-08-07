@@ -60,6 +60,7 @@ from xtuner.v1.module import (
     NoAuxRouterConfig,
     RMSNorm,
 )
+from xtuner.v1.module.attention.dsa_topk_sharing import uses_dsa_topk_lifecycle
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import (
     DenseDecoderLayer,
     DenseDecoderLayerMicroBatchOutput,
@@ -1183,7 +1184,16 @@ class MoE(BaseModel):
                 layer_idx=layer_idx,
                 mtp_idx=None,
             ):
-                layer = apply_gradient_checkpointing(layer)
+                # DSA cross-layer top-k sharing recognizes a checkpoint's original pass by grad
+                # being disabled, which only the reentrant implementation provides. Under the
+                # non-reentrant one both passes run with grad enabled, so the cache is never
+                # marked active and the shared top-k is never released. Keep those layers on the
+                # legacy path until the cache tracks the original/replay phase explicitly, which
+                # is also what lets `apply_legacy_reentrant_checkpointing` go away entirely.
+                if uses_dsa_topk_lifecycle(layer):
+                    layer = apply_legacy_reentrant_checkpointing(layer)
+                else:
+                    layer = apply_gradient_checkpointing(layer)
 
             self.layers[str(layer_idx)] = layer
             if layer_idx >= len(self.layers) - 1 and self.mtp_block is None:

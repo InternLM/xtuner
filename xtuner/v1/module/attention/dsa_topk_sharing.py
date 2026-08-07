@@ -501,6 +501,25 @@ def _dsa_mtp_iteration_lifecycle_pre_hook(
         )
 
 
+def uses_dsa_topk_lifecycle(decoder_layer: torch.nn.Module) -> bool:
+    """Report whether a decoder layer participates in DSA cross-layer top-k
+    sharing.
+
+    The lifecycle distinguishes a checkpoint's original pass from its recompute pass by whether
+    grad is enabled (see ``_is_checkpoint_original_forward``), which only holds for the reentrant
+    checkpoint implementation. Callers that choose a checkpointing strategy use this to keep such
+    layers on the reentrant path; the distinction disappears once the cache tracks the
+    original/replay phase explicitly.
+
+    Args:
+        decoder_layer (torch.nn.Module): The decoder layer to inspect.
+
+    Returns:
+        bool: True if the DSA top-k lifecycle hooks are registered on the layer.
+    """
+    return getattr(decoder_layer, "_dsa_topk_decoder_lifecycle_hooks_registered", False)
+
+
 def register_dsa_topk_decoder_lifecycle_hooks(decoder_layer: torch.nn.Module) -> None:
     if getattr(decoder_layer, "_dsa_topk_decoder_lifecycle_hooks_registered", False):
         return
