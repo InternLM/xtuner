@@ -34,7 +34,7 @@ class Train:
             config["work_dir"] = work_dir
 
             # Print runtime image package list before training for version diagnosis.
-            image_version_check = 'echo "===== runtime pip list ====="; pip list; '
+            image_version_check = "echo '===== runtime pip list ====='; pip list; "
 
             # this patch is for torch 2.9.1 Conv3d memory issue fix
             cudnn_patch = (
