@@ -321,29 +321,20 @@ class TrainingController:
         *,
         targets,
         rollout_config,
-        weight_transport_type,
-        weight_update_host=None,
-        weight_update_port=None,
     ):
         ray.get(
             [
                 worker.bind_rollout_weight_update.remote(
                     targets=targets,
                     rollout_config=rollout_config,
-                    weight_transport_type=weight_transport_type,
-                    weight_update_host=weight_update_host,
-                    weight_update_port=weight_update_port,
                 )
                 for worker in self.workers
             ]
         )
 
-    def update_weights(self, need_register: bool = True, need_update: bool = True):
+    def update_weights(self, **kwargs):
         """Update the weights from the training workers."""
-        handles = [
-            worker.update_weights.remote(need_register=need_register, need_update=need_update)
-            for worker in self.workers
-        ]
+        handles = [worker.update_weights.remote(**kwargs) for worker in self.workers]
         ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
 

@@ -172,6 +172,7 @@ class TestRolloutTopologyAPI(unittest.TestCase):
             expert_parallel_size=ep,
             num_gpus_per_engine=num_gpus_per_engine,
             gpus_per_node=gpus_per_node,
+            weight_transport_type="ipc",
             extra_rollout_config={"lmdeploy_backend": "pytorch"},
         )
 
@@ -202,7 +203,6 @@ class TestRolloutTopologyAPI(unittest.TestCase):
             rollout_config=config,
             weight_update_targets=targets,
             train_rank=train_rank,
-            weight_transport_type="ipc",
         )
 
     def test_rollout_topology_resolves_engine_dist_init_addr_when_created(self):

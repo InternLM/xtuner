@@ -85,6 +85,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
             expert_parallel_size=1,
             gpus_per_node=int(os.environ.get("GPUS_PER_NODE", "8")),
             dtype="bfloat16",
+            weight_transport_type="nccl",
             skip_load_weights=True,
             context_length=256,
             worker_log_dir=self.worker_log_dir,
@@ -159,7 +160,6 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         train_controller.bind_rollout_weight_update(
             targets=targets,
             rollout_config=self.rollout_cfg,
-            weight_transport_type="nccl",
         )
         train_controller.update_weights()
 
@@ -198,7 +198,6 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
             train_controller.bind_rollout_weight_update(
                 targets=targets,
                 rollout_config=self.rollout_cfg,
-                weight_transport_type="nccl",
             )
             train_controller.update_weights()
 
@@ -237,7 +236,6 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         train_controller.bind_rollout_weight_update(
             targets=targets,
             rollout_config=self.rollout_cfg,
-            weight_transport_type="nccl",
         )
         train_controller.update_weights()
 

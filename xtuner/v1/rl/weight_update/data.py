@@ -105,16 +105,16 @@ class RolloutWeightUpdateInfo:
         rollout_config: RolloutConfig,
         weight_update_targets: tuple[RolloutWeightUpdateTarget, ...],
         train_rank: int,
-        weight_transport_type: WeightTransportType | str,
-        weight_update_host: str | None = None,
-        weight_update_port: int | None = None,
     ) -> RolloutWeightUpdateInfo:
         backend = _resolve_rollout_backend(rollout_config)
         tp = rollout_config.tensor_parallel_size
         ep = rollout_config.expert_parallel_size
         assert tp == 1 or ep == 1, "Either tensor parallel size or engine parallel size must be 1."
+        transport_type = rollout_config.weight_transport_type
+        if transport_type is None:
+            raise ValueError("rollout_config.weight_transport_type should be set in RL training")
         transport_type = _validate_transport_type(
-            weight_transport_type=weight_transport_type,
+            weight_transport_type=transport_type,
             backend=backend,
         )
         return cls(
@@ -123,8 +123,10 @@ class RolloutWeightUpdateInfo:
             train_rank=train_rank,
             transport_type=transport_type,
             backend=backend,
-            weight_update_host=weight_update_host,
-            weight_update_port=weight_update_port if weight_update_port is not None else 30000,
+            weight_update_host=rollout_config.weight_update_host,
+            weight_update_port=rollout_config.weight_update_port
+            if rollout_config.weight_update_port is not None
+            else 30000,
             checkpoint_name_prefix=rollout_config.checkpoint_name_prefix,
             checkpoint_engine_timeout=rollout_config.checkpoint_engine_timeout,
         )

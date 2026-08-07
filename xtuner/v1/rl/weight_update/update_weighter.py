@@ -7,7 +7,6 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from .data import (
     RolloutWeightUpdateInfo,
     RolloutWeightUpdateTarget,
-    WeightTransportType,
 )
 from .transport import CheckpointEngineWeightTransport, IPCWeightTransport, NCCLWeightTransport, WeightTransport
 from .weight_iterator import WeightIterator
@@ -34,9 +33,6 @@ class UpdateWeighter:
         *,
         targets: tuple[RolloutWeightUpdateTarget, ...],
         rollout_config: RolloutConfig,
-        weight_transport_type: WeightTransportType,
-        weight_update_host: str | None = None,
-        weight_update_port: int | None = None,
     ):
         """Bind this train worker to rollout weight-update targets."""
 
@@ -44,19 +40,21 @@ class UpdateWeighter:
             rollout_config=rollout_config,
             weight_update_targets=targets,
             train_rank=self.rank,
-            weight_transport_type=weight_transport_type,
-            weight_update_host=weight_update_host,
-            weight_update_port=weight_update_port,
         )
 
-        new_transport_signature = self.rollout_info.transport_signature
-        # Weight transports may cache resources derived from rollout metadata.
-        # Since rollout workers can fail and recover with new URL/status/mesh metadata,
-        # reset the cached transport whenever that metadata changes.
-        if self._transport_signature is not None and new_transport_signature != self._transport_signature:
-            self.logger.info("Rollout metadata changed, reset weight transport.")
-            self._reset_transport()
-        self._transport_signature = new_transport_signature
+        if self.rollout_info.transport_type == "checkpoint_engine" and self._transport is not None:
+            # When using Checkpoint Engine, the ParameterServer must not be reinitialized
+            # when rollout info changes. And only update rollout_info.
+            self._transport.reset_rollout_info(self.rollout_info)
+        else:
+            new_transport_signature = self.rollout_info.transport_signature
+            # Weight transports may cache resources derived from rollout metadata.
+            # Since rollout workers can fail and recover with new URL/status/mesh metadata,
+            # reset the cached transport whenever that metadata changes.
+            if self._transport_signature is not None and new_transport_signature != self._transport_signature:
+                self.logger.info("Rollout metadata changed, reset weight transport.")
+                self._reset_transport()
+            self._transport_signature = new_transport_signature
 
         self.weight_iterator = WeightIterator(
             config=self.config,
@@ -67,7 +65,7 @@ class UpdateWeighter:
         if self._transport is None:
             self._set_transport()
 
-    def update_weights(self, need_register: bool = True, need_update: bool = True) -> None:
+    def update_weights(self, **kwargs: Any) -> None:
         """Update the model weights."""
 
         assert self.rollout_info is not None, "bind_rollout_weight_update() must be called before update_weights()."
@@ -76,7 +74,7 @@ class UpdateWeighter:
             f"backend={self.rollout_info.backend!r}."
         )
         assert self.weight_iterator is not None, "Weight iterator is not initialized."
-        self._transport.update(self.weight_iterator, need_register=need_register, need_update=need_update)
+        self._transport.update(self.weight_iterator, **kwargs)
 
     def _set_transport(self) -> None:
         rollout_info = self.rollout_info
@@ -91,7 +89,6 @@ class UpdateWeighter:
         elif rollout_info.transport_type == "nccl":
             self._transport = NCCLWeightTransport(rank=self.rank, logger=self.logger, rollout_info=rollout_info)
         elif rollout_info.transport_type == "checkpoint_engine":
-            assert rollout_info.rollout_config.enable_checkpoint_engine is True
             self._transport = CheckpointEngineWeightTransport(
                 rank=self.rank,
                 logger=self.logger,

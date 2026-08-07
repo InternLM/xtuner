@@ -73,6 +73,10 @@ class WeightTransport(ABC, Generic[AdapterT]):
 
         self.rollout_url = self.rollout_info.rollout_url
 
+    def reset_rollout_info(self, rollout_info: RolloutWeightUpdateInfo):
+        self.rollout_info = rollout_info
+        self.rollout_url = rollout_info.rollout_url
+
     @staticmethod
     def post_json(url: str, endpoint: str, payload: dict, *, api_key=None) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -946,7 +950,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
 
         with open(index_path) as f:
             weight_map: dict[str, str] = json.load(f)["weight_map"]
-        weight_keys = list(key_name for key_name, file_name in weight_map.items())
+        weight_keys = [key_name for key_name, file_name in weight_map.items()]
         per_rank = (len(weight_keys) + world_size - 1) // world_size
         local_keys = set(weight_keys[rank * per_rank : (rank + 1) * per_rank])
 
@@ -1131,7 +1135,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         assert need_register or need_update, (
             "At least one of need_register or need_update must be True when use checkpoint engine update."
         )
-        if need_register == False and self._checkpoint_name is None:
+        if not need_register and self._checkpoint_name is None:
             raise RuntimeError("CheckpointEngineWeightTransport cannot update without a registered checkpoint.")
 
         # 1. Register checkpoint from train engine

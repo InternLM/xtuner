@@ -69,7 +69,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
             self.temp_dir.cleanup()
             self.temp_dir = None
 
-    def init_config(self, *, enable_checkpoint_engine: bool):
+    def init_config(self, *, weight_transport_type: str):
         nnodes = int(os.environ.get("WORLD_SIZE", "1"))
         num_workers = int(os.environ.get("COLOCATE_NUM_WORKERS", str(8 * nnodes)))
         rollout_tp_size = int(os.environ.get("ROLLOUT_TP_SIZE", "1"))
@@ -92,7 +92,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
             gpus_per_node=int(os.environ.get("GPUS_PER_NODE", "8")),
             dtype="bfloat16",
             skip_load_weights=False,
-            enable_checkpoint_engine=enable_checkpoint_engine,
+            weight_transport_type=weight_transport_type,
             checkpoint_name_prefix=f"test-update-weight-colocate-{id(self)}",
             context_length=int(os.environ.get("ROLLOUT_CONTEXT_LENGTH", "10240")),
             worker_log_dir=self.worker_log_dir,
@@ -131,11 +131,11 @@ class TestUpdateWeightColocate(unittest.TestCase):
             pack_max_length=int(os.environ.get("PACK_MAX_LENGTH", str(10 * 1024))),
         )
 
-    def _setup_engines(self, *, enable_checkpoint_engine: bool):
+    def _setup_engines(self, *, weight_transport_type: str):
         ray.init(num_cpus=128, ignore_reinit_error=True)
         self.temp_dir = tempfile.TemporaryDirectory()
         self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
-        self.init_config(enable_checkpoint_engine=enable_checkpoint_engine)
+        self.init_config(weight_transport_type=weight_transport_type)
         self.pg = AutoAcceleratorWorkers.build_placement_group(
             self.resources_cfg,
             name=f"test_update_weight_colocate_{id(self)}",
@@ -173,12 +173,11 @@ class TestUpdateWeightColocate(unittest.TestCase):
             results.append(response.json())
         return results
 
-    def _bind_and_update_colocate_weights(self, train_controller, rollout_controller, transport_type: str, need_register:bool=False):
+    def _bind_and_update_colocate_weights(self, train_controller, rollout_controller,need_register:bool=False):
         targets = ray.get(rollout_controller.get_weight_update_targets.remote())
         train_controller.bind_rollout_weight_update(
             targets=targets,
             rollout_config=self.rollout_cfg,
-            weight_transport_type=transport_type,
         )
         ray.get(rollout_controller.offload.remote(), timeout=300)
         train_controller.onload(target="model")
@@ -189,7 +188,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
 
     @unittest.skip("skip sglang parameter-only weight check test until the parameter-check-only patch is applied")
     def test_sglang_colocate_ipc_update_weight(self):
-        train_controller, rollout_controller = self._setup_engines(enable_checkpoint_engine=False)
+        train_controller, rollout_controller = self._setup_engines(weight_transport_type='ipc')
 
         self._check_sglang_weights(rollout_controller, action="snapshot_parameters")
         self._check_sglang_weights(rollout_controller, action="reset_parameters")
@@ -198,7 +197,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
 
     @unittest.skip("skip sglang parameter-only weight check test until the parameter-check-only patch is applied")
     def test_sglang_colocate_checkpoint_engine_update_weight_disk_register(self):
-        train_controller, rollout_controller = self._setup_engines(enable_checkpoint_engine=True)
+        train_controller, rollout_controller = self._setup_engines(weight_transport_type="checkpoint_engine")
 
         self._check_sglang_weights(rollout_controller, action="snapshot_parameters")
         self._check_sglang_weights(rollout_controller, action="reset_parameters")
@@ -207,7 +206,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
 
     @unittest.skip("skip sglang parameter-only weight check test until the parameter-check-only patch is applied")
     def test_sglang_colocate_checkpoint_engine_update_weight_train_register(self):
-        train_controller, rollout_controller = self._setup_engines(enable_checkpoint_engine=True)
+        train_controller, rollout_controller = self._setup_engines(weight_transport_type="checkpoint_engine")
 
         self._check_sglang_weights(rollout_controller, action="snapshot_parameters")
         self._check_sglang_weights(rollout_controller, action="reset_parameters")

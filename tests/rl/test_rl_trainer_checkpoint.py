@@ -133,17 +133,11 @@ class _FakeTrainController:
         *,
         targets,
         rollout_config,
-        weight_transport_type,
-        weight_update_host=None,
-        weight_update_port=None,
     ):
         self.rollout_info = {
             "targets": targets,
             "rollout_config": rollout_config,
         }
-        self.weight_transport_type = weight_transport_type
-        self.weight_update_host = weight_update_host
-        self.weight_update_port = weight_update_port
 
     def onload(self, target="all"):
         return f"onload:{target}"
