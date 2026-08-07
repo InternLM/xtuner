@@ -34,7 +34,7 @@ from torch.distributed.fsdp import (
     fully_shard,
 )
 from xtuner.v1.ops.attn_imp import attn_impl_mapping, AttnOpOutputs
-from xtuner.v1.model.utils.checkpointing import apply_gradient_checkpointing
+from xtuner.v1.model.utils import apply_selective_checkpointing
 from xtuner.v1.module import RMSNorm
 from xtuner.v1.ops.others import Dropout
 from xtuner.v1.ops.act_fn import get_act_fn
@@ -407,7 +407,12 @@ class InternS1VisionModel(BaseModel):
             layer = self.encoder.layer[layer_idx]
 
             if layer_idx < num_recompute_layers:
-                layer = apply_gradient_checkpointing(layer, preserve_rng_state=checkpoint_preserve_rng_state)
+                layer = apply_selective_checkpointing(
+                    layer,
+                    self.kept_ops,
+                    keeps_any_unit=self.keeps_any_recompute_unit,
+                    preserve_rng_state=checkpoint_preserve_rng_state,
+                )
                 if self.config.drop_path_rate == 0.0 and self.compile_cfg:
                     layer.forward = torch.compile(layer.forward, fullgraph=True)
 
