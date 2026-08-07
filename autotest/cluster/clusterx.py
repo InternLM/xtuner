@@ -10,11 +10,6 @@ from clusterx.launcher.base import JobSchema, JobStatus
 
 JOB_LOOKUP_RETRY_INTERVAL_S = 5
 JOB_LOOKUP_RETRY_TIMES = 6
-JOB_SUBMIT_RETRY_TIMES = 3
-JOB_SUBMIT_RETRY_INTERVAL_S = 5
-# brainpp often creates the job then fails get_info with "Cannot find <full-job-id>".
-CANNOT_FIND_JOB_RE = re.compile(r"Cannot find\s+(\S+)", re.IGNORECASE)
-TERMINAL_JOB_STATUSES = (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.STOPPED)
 
 
 class ClusterTaskExecutor:
@@ -32,6 +27,7 @@ class ClusterTaskExecutor:
         command = task_config.get("command", "")
         timeout = task_config.get("timeout", 600)
         envs = resource.get("envs", [])
+        job_schema = None
 
         if not command:
             return False, "Command is empty or resource is None. Not implemented! Please check!"
@@ -47,20 +43,34 @@ class ClusterTaskExecutor:
         run_command = "; ".join(all_command)
         job_name = "-".join([task_config["type"], task_config["case_name"], task_config["run_id"]])
 
-        params = self.params_cls(
-            job_name=job_name,
-            cmd=run_command,
-            gpus_per_task=resource.get("gpus_per_task", 8),
-            cpus_per_task=resource.get("cpus_per_task", 32),
-            memory_per_task=resource.get("memory_per_task", 512),
-            priority=resource.get("priority", 9),
-            priority_preemptible=resource.get("preemptible", False),
-            num_nodes=resource.get("num_nodes", 1),
-            image=resource.get("image", None),
-            no_env=resource.get("no_env", True),
-            image_pull_policy=resource.get("image_pull_policy", "Always"),
-        )
-        job_schema = self._submit_or_recover(params, job_name, task_config)
+        try:
+            params = self.params_cls(
+                job_name=job_name,
+                cmd=run_command,
+                gpus_per_task=resource.get("gpus_per_task", 8),
+                cpus_per_task=resource.get("cpus_per_task", 32),
+                memory_per_task=resource.get("memory_per_task", 512),
+                priority=resource.get("priority", 9),
+                priority_preemptible=resource.get("preemptible", False),
+                num_nodes=resource.get("num_nodes", 1),
+                image=resource.get("image", None),
+                no_env=resource.get("no_env", True),
+                image_pull_policy=resource.get("image_pull_policy", "Always"),
+            )
+
+            job_schema = self.cluster.run(params)
+        except Exception as e:
+            traceback.print_exc()
+            job_schema = self._lookup_job_schema(job_name)
+            if job_schema is None:
+                raise RuntimeError(
+                    f"clusterx job {job_name} start fail and lookup found no matching job, "
+                    f"task config is {task_config}, exception is: {e}"
+                )
+            print(
+                f"clusterx job {job_name} submit error recovered via lookup: "
+                f"job_id={job_schema.job_id}, status={job_schema.status}, original exception: {e}"
+            )
 
         poll_start_time = time.time()
         run_start_time = None
@@ -95,73 +105,11 @@ class ClusterTaskExecutor:
                 )
             time.sleep(10)
 
-    def _submit_or_recover(self, params, job_name: str, task_config: Dict[str, Any]) -> JobSchema:
-        last_error: Exception | None = None
-        for attempt in range(1, JOB_SUBMIT_RETRY_TIMES + 1):
-            try:
-                return self.cluster.run(params)
-            except Exception as e:
-                last_error = e
-                traceback.print_exc()
-                print(f"clusterx job {job_name} submit attempt {attempt}/{JOB_SUBMIT_RETRY_TIMES} failed: {e}")
-
-                exact_job_id = self._extract_cannot_find_job_id(e, job_name)
-                recovered = self._recover_job_schema(job_name, e)
-                if recovered is not None:
-                    print(
-                        f"clusterx job {job_name} submit error recovered: "
-                        f"job_id={recovered.job_id}, status={recovered.status}, "
-                        f"original exception: {e}"
-                    )
-                    return recovered
-
-                # Job was likely created already; resubmitting would launch a duplicate.
-                if exact_job_id is not None:
-                    raise RuntimeError(
-                        f"clusterx job {job_name} was created as {exact_job_id} but could not be "
-                        f"resolved after lookup retries; task config is {task_config}, "
-                        f"exception is: {e}"
-                    ) from e
-
-                if attempt < JOB_SUBMIT_RETRY_TIMES:
-                    print(f"Retry submit in {JOB_SUBMIT_RETRY_INTERVAL_S}s")
-                    time.sleep(JOB_SUBMIT_RETRY_INTERVAL_S)
-
-        raise RuntimeError(
-            f"clusterx job {job_name} start fail after {JOB_SUBMIT_RETRY_TIMES} submit attempts "
-            f"and recovery; task config is {task_config}, exception is: {last_error}"
-        )
-
-    def _recover_job_schema(self, job_name: str, error: Exception) -> JobSchema | None:
-        # Prefer the exact id embedded in brainpp "Cannot find <job_id>" errors.
-        exact_job_id = self._extract_cannot_find_job_id(error, job_name)
-        if exact_job_id:
-            print(f"Trying exact job id recovery for {exact_job_id}")
-            job_schema = self._lookup_job_schema(exact_job_id, allow_terminal=True)
-            if job_schema is not None:
-                return job_schema
-
-        return self._lookup_job_schema(job_name, allow_terminal=False)
-
-    @staticmethod
-    def _extract_cannot_find_job_id(error: Exception, job_name: str) -> str | None:
-        match = CANNOT_FIND_JOB_RE.search(str(error))
-        if not match:
-            return None
-        candidate = match.group(1).rstrip(".,;")
-        if candidate == job_name or candidate.startswith(f"{job_name}-"):
-            return candidate
-        return None
-
     @staticmethod
     def _job_name_matches(candidate: str | None, job_name: str) -> bool:
         if not candidate:
             return False
         return candidate == job_name or candidate.startswith(f"{job_name}-")
-
-    @staticmethod
-    def _is_terminal(job_schema: JobSchema) -> bool:
-        return job_schema.status in TERMINAL_JOB_STATUSES
 
     def _pick_latest_job(self, jobs: list[JobSchema]) -> JobSchema:
         return max(jobs, key=lambda job: job.job_id or job.job_name or "")
@@ -204,16 +152,10 @@ class ClusterTaskExecutor:
 
         return None
 
-    def _lookup_job_schema(self, job_name: str, allow_terminal: bool = False) -> JobSchema | None:
+    def _lookup_job_schema(self, job_name: str) -> JobSchema | None:
         for attempt in range(1, JOB_LOOKUP_RETRY_TIMES + 1):
             job_schema = self._lookup_job_schema_once(job_name)
             if job_schema is not None:
-                if not allow_terminal and self._is_terminal(job_schema):
-                    print(
-                        f"Ignore terminal lookup match for {job_name}: "
-                        f"job_id={job_schema.job_id}, status={job_schema.status}"
-                    )
-                    return None
                 return job_schema
             if attempt < JOB_LOOKUP_RETRY_TIMES:
                 print(
