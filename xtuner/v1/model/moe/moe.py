@@ -47,7 +47,6 @@ from xtuner.v1.model.base import (
 from xtuner.v1.model.utils import (
     ModelForwardExtraLogInfo,
     apply_gradient_checkpointing,
-    apply_legacy_reentrant_checkpointing,
     module_dict_repr,
 )
 from xtuner.v1.module import (
@@ -60,7 +59,6 @@ from xtuner.v1.module import (
     NoAuxRouterConfig,
     RMSNorm,
 )
-from xtuner.v1.module.attention.dsa_topk_sharing import uses_dsa_topk_lifecycle
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import (
     DenseDecoderLayer,
     DenseDecoderLayerMicroBatchOutput,
@@ -1184,16 +1182,7 @@ class MoE(BaseModel):
                 layer_idx=layer_idx,
                 mtp_idx=None,
             ):
-                # DSA cross-layer top-k sharing recognizes a checkpoint's original pass by grad
-                # being disabled, which only the reentrant implementation provides. Under the
-                # non-reentrant one both passes run with grad enabled, so the cache is never
-                # marked active and the shared top-k is never released. Keep those layers on the
-                # legacy path until the cache tracks the original/replay phase explicitly, which
-                # is also what lets `apply_legacy_reentrant_checkpointing` go away entirely.
-                if uses_dsa_topk_lifecycle(layer):
-                    layer = apply_legacy_reentrant_checkpointing(layer)
-                else:
-                    layer = apply_gradient_checkpointing(layer)
+                layer = apply_gradient_checkpointing(layer)
 
             self.layers[str(layer_idx)] = layer
             if layer_idx >= len(self.layers) - 1 and self.mtp_block is None:
@@ -1245,30 +1234,7 @@ class MoE(BaseModel):
                 if self._should_recompute(None, mtp_idx=mtp_idx) or (
                     self.config.mtp_config is not None and self.config.mtp_config.share_weights
                 ):  # share mtp head must recompute
-                    # MTP 默认使用 reentrant 的原因：
-                    #   Case 1：最小触发条件是 compile, topk offload, MTP share weights and depth > 1.
-                    #   多个 logical depth 共用 top-k cache。reentrant 的 original
-                    #   关闭 grad、replay 开启 grad，DSA 能据此正确更新 cache 计数。
-                    #   original 不建立内部图，所以 replay 可以安全复用离散 top-k。
-                    #   non-reentrant 的两次执行都开启 grad，却仍沿用该复用策略，
-                    #   因而出现 original=COMPUTE、replay=REUSE，无法重建相同清单。
-                    #
-                    #   indexer 本身始终 no_grad。不开 compile 时，多执行/少执行一次
-                    #   indexer 不会改变 eager autograd 的保存清单；开启 compile 后，
-                    #   COMPUTE/REUSE 经过不同 graph break 和 compiled block，才可能让
-                    #   checkpoint 保存槽位错位并报 different metadata。例如 original
-                    #   保存 [A, B, C]、replay 保存 [A, X, C] 时，槽位 1 的 metadata
-                    #   不同。后续若显式记录 ORIGINAL/REPLAY phase，可再让
-                    #   non-reentrant 正确推进 cache 状态。
-                    #
-                    #   `apply_legacy_reentrant_checkpointing` 内部的 pytree 展开也是 reentrant
-                    #   专属的补丁：EP > 1、intra-layer micro-batch > 1 时 micro2 传入
-                    #   [embedding_0, embedding_1]，展开后 checkpoint 才能在 replay 前逐个
-                    #   detach，并在 backward 中把梯度交回原始 embedding graph。
-                    if self.fsdp_config.mtp_checkpoint_use_reentrant:
-                        mtp_layer = apply_legacy_reentrant_checkpointing(mtp_layer)
-                    else:
-                        mtp_layer = apply_gradient_checkpointing(mtp_layer)
+                    mtp_layer = apply_gradient_checkpointing(mtp_layer)
                 self.mtp_block.layers[mtp_idx] = mtp_layer
 
                 reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1
