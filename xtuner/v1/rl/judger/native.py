@@ -229,11 +229,11 @@ class RemoteJudger(Judger):
 
     ``RemoteJudger`` keeps the same ``Judger`` interface as local judgers, so
     callers still pass ``RolloutState`` to ``judge``. This proxy runs the same
-    ``preprocess`` implementation as the actor-side judger on the driver, then
-    sends only the lightweight payload to ``JudgerActor``. ``JudgerActor`` lives
-    in the Ray worker process and owns the real local judger instance that
-    executes ``judge_payload``. Batch support is determined by that actor-side
-    judger.
+    ``preprocess`` and ``postprocess`` implementations as the actor-side judger
+    on the driver, and sends only the lightweight payload to ``JudgerActor``.
+    ``JudgerActor`` lives in the Ray worker process and owns the real local
+    judger instance that executes ``judge_payload``. Batch support is determined
+    by that actor-side judger.
     """
 
     def __init__(self, actor: RayJudgerProxy, judger_name: str, preprocess_judger: Judger | None = None):
@@ -244,17 +244,28 @@ class RemoteJudger(Judger):
     # Preprocess must run on the driver before the Ray call. Otherwise the full
     # RolloutState would be serialized to the actor, and remote branches with
     # custom preprocess logic would lose the payload fields they require.
+    # Postprocess also runs on the driver because it writes the output back to
+    # the original RolloutState retained by the caller.
     def preprocess(self, rollout_state: RolloutState) -> JudgerPayload:
         if self.preprocess_judger is None:
             return super().preprocess(rollout_state)
         return self.preprocess_judger.preprocess(rollout_state)
+
+    def postprocess(self, rollout_state: RolloutState, output: JudgerOutput) -> RolloutState:
+        if self.preprocess_judger is None:
+            return super().postprocess(rollout_state, output)
+        return self.preprocess_judger.postprocess(rollout_state, output)
 
     async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
         return await self.actor.judge_payload.remote(payload)
 
 
 class JudgerPool(Judger):
-    """Round-robin dispatch across replicas of the same judger type."""
+    """Round-robin dispatch across replicas of the same judger type.
+
+    Replicas are homogeneous and therefore share the same payload contract. Preprocessing and postprocessing are
+    delegated to a representative replica, while payload execution is dispatched round-robin across all replicas.
+    """
 
     def __init__(self, replicas: list[Judger], judger_name: str):
         super().__init__(judger_name=judger_name)
@@ -264,6 +275,12 @@ class JudgerPool(Judger):
         self._rr_index = 0
         self._lock = asyncio.Lock()
         self._worker_loads = dict.fromkeys(range(len(replicas)), 0)
+
+    def preprocess(self, rollout_state: RolloutState) -> JudgerPayload:
+        return self.replicas[0].preprocess(rollout_state)
+
+    def postprocess(self, rollout_state: RolloutState, output: JudgerOutput) -> RolloutState:
+        return self.replicas[0].postprocess(rollout_state, output)
 
     async def _pick_replica(self) -> tuple[int, Judger]:
         async with self._lock:
