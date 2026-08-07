@@ -25,6 +25,7 @@ import torch
 from torch import nn
 
 from xtuner.v1.model.utils import (
+    KeptOps,
     RecomputeUnit,
     apply_selective_checkpointing,
     in_recompute_unit,
@@ -179,3 +180,16 @@ class TestUnsupportedUnits:
 
     def test_in_place_op_outside_kept_unit_is_fine(self):
         _run(_InPlaceOutsideBlock(), keeps_any_unit=True)
+
+
+class TestDeclarations:
+    def test_kept_ops_and_callables_are_distinct_targets(self):
+        # 两种解析方式的代价完全不同（一个零编译代价，一个要退出编译集合），所以类型必须能区分。
+        from xtuner.v1.model.moe.moe import MOE_RECOMPUTE_CFG
+
+        assert isinstance(MOE_RECOMPUTE_CFG[RecomputeUnit.SAVE_ATTN], KeptOps)
+        assert set(MOE_RECOMPUTE_CFG) == {
+            RecomputeUnit.SAVE_ATTN,
+            RecomputeUnit.SAVE_MOE_GATE,
+            RecomputeUnit.SAVE_MOE_DISPATCH,
+        }
