@@ -24,6 +24,14 @@ on:
           (e.g. "qwen3-5-rl-vl-lmdeploy-grpo,interns2-preview-rl-vl-lmdeploy-grpo").
         type: string
         default: 'all'
+      parallel:
+        required: false
+        description: >-
+          pytest-xdist worker count (-n). Cases from config.yaml run in parallel.
+          Use a number (e.g. 4), or "all" for one worker per selected case.
+          Resume phases within one case stay sequential.
+        type: string
+        default: '4'
   schedule:
     - cron:  '00 16 * * 0-5'
 env:
@@ -67,24 +75,42 @@ jobs:
           conda env list
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
           CASE_INPUT="${{ github.event.inputs.run_case || 'all' }}"
+          PARALLEL_INPUT="${{ github.event.inputs.parallel || '4' }}"
+          PYTEST_NODES=()
           if [ "$CASE_INPUT" = "all" ]; then
-            pytest autotest/test_all.py -m all -n 1 -s -vv --run_id ${{ github.run_id }}
+            mapfile -t CASE_NAMES < <(python -c 'import yaml; cfg=yaml.safe_load(open("autotest/config.yaml",encoding="utf-8")); print("\n".join(cfg["case"]))')
+            for case_name in "${CASE_NAMES[@]}"; do
+              [ -z "$case_name" ] && continue
+              PYTEST_NODES+=("autotest/test_all.py::test_all[${case_name}]")
+            done
           else
             # Support one or more cases: "case_a" or "case_a,case_b, case_c"
-            PYTEST_NODES=()
             IFS=',' read -ra RAW_CASES <<< "$CASE_INPUT"
             for raw in "${RAW_CASES[@]}"; do
               case_name="$(echo "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
               [ -z "$case_name" ] && continue
               PYTEST_NODES+=("autotest/test_all.py::test_all[${case_name}]")
             done
-            if [ "${#PYTEST_NODES[@]}" -eq 0 ]; then
-              echo "No valid case names parsed from run_case='${CASE_INPUT}'"
-              exit 1
-            fi
-            echo "Running cases: ${PYTEST_NODES[*]}"
-            pytest "${PYTEST_NODES[@]}" -m all -n 1 -s -vv --run_id ${{ github.run_id }}
           fi
+          if [ "${#PYTEST_NODES[@]}" -eq 0 ]; then
+            echo "No valid case names parsed from run_case='${CASE_INPUT}'"
+            exit 1
+          fi
+          CASE_COUNT="${#PYTEST_NODES[@]}"
+          if [ "$PARALLEL_INPUT" = "all" ]; then
+            PARALLEL="$CASE_COUNT"
+          elif [[ "$PARALLEL_INPUT" =~ ^[1-9][0-9]*$ ]]; then
+            PARALLEL="$PARALLEL_INPUT"
+          else
+            echo "Invalid parallel='${PARALLEL_INPUT}', fallback to 4"
+            PARALLEL=4
+          fi
+          if [ "$PARALLEL" -gt "$CASE_COUNT" ]; then
+            PARALLEL="$CASE_COUNT"
+          fi
+          echo "Running ${CASE_COUNT} case(s) with pytest-xdist -n ${PARALLEL}"
+          echo "Cases: ${PYTEST_NODES[*]}"
+          pytest "${PYTEST_NODES[@]}" -m all -n "${PARALLEL}" -s -vv --run_id ${{ github.run_id }}
 
       - name: Check report files
         if: always()

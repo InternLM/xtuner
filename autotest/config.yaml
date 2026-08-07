@@ -10,7 +10,7 @@ default_config:
             memory_per_task: 512
             # image: ailab-llmrazor/xtuner:pt29_20260805_940a869
             image: ailab-llmrazor/xtuner:pt29_20260806_32f627c
-            pip_package: pip install more-itertools
+            pip_package: pip install more-itertools pytest-xdist
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
     eval:
