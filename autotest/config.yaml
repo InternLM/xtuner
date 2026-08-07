@@ -1038,9 +1038,11 @@ case:
             resource:
                 memory_per_task: 1200
                 envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
+                    - MODEL_PATH=/mnt/shared-storage-user/puyudelivery/user/puyudilivery/ckpts/xtuner_saved_model/interns2_preview_sft/sft_interns2_pre_base05_20260424a_lr2e5_256gpu/20260424143245/hf-4073
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
                     - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_USE_FA3=1
+                    - PERMUTE_COMPUTE_DTYPE=fp32
                     - XTUNER_DETERMINISTIC=true
             assert_info:
                 base_metric: interns2-preview-rl-vl-lmdeploy-grpo/tracker.jsonl
@@ -1066,7 +1068,7 @@ case:
                        method: relative
                        operator: <
                        aggregate: 80
-            timeout: 9000
+            timeout: 18000
 
     interns2-preview-rl-vl-lmdeploy-dapo:
         -
@@ -1078,9 +1080,11 @@ case:
             resource:
                 memory_per_task: 1200
                 envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
+                    - MODEL_PATH=/mnt/shared-storage-user/puyudelivery/user/puyudilivery/ckpts/xtuner_saved_model/interns2_preview_sft/sft_interns2_pre_base05_20260424a_lr2e5_256gpu/20260424143245/hf-4073
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
                     - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_USE_FA3=1
+                    - PERMUTE_COMPUTE_DTYPE=fp32
                     - XTUNER_DETERMINISTIC=true
             assert_info:
                 base_metric: interns2-preview-rl-vl-lmdeploy-dapo/tracker.jsonl
@@ -1106,7 +1110,7 @@ case:
                        method: relative
                        operator: <
                        aggregate: 80
-            timeout: 9000
+            timeout: 18000
 
     interns2-preview-rl-vl-lmdeploy-resume:
         -
@@ -1119,9 +1123,11 @@ case:
             resource:
                 memory_per_task: 1200
                 envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
+                    - MODEL_PATH=/mnt/shared-storage-user/puyudelivery/user/puyudilivery/ckpts/xtuner_saved_model/interns2_preview_sft/sft_interns2_pre_base05_20260424a_lr2e5_256gpu/20260424143245/hf-4073
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
                     - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_USE_FA3=1
+                    - PERMUTE_COMPUTE_DTYPE=fp32
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
             assert_info:
@@ -1148,7 +1154,7 @@ case:
                        method: relative
                        operator: <
                        aggregate: 80
-            timeout: 9600
+            timeout: 19200
 
         -
             type: rl
@@ -1162,7 +1168,7 @@ case:
             resource:
                 memory_per_task: 1200
                 envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
+                    - MODEL_PATH=/mnt/shared-storage-user/puyudelivery/user/puyudilivery/ckpts/xtuner_saved_model/interns2_preview_sft/sft_interns2_pre_base05_20260424a_lr2e5_256gpu/20260424143245/hf-4073
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
@@ -1191,7 +1197,7 @@ case:
                        method: relative
                        operator: <
                        aggregate: 80
-            timeout: 9600
+            timeout: 19200
 
     interns2-preview-rl-lmdeploy-dapo:
         -
@@ -1203,10 +1209,12 @@ case:
             resource:
                 memory_per_task: 1200
                 envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
+                    - MODEL_PATH=/mnt/shared-storage-user/puyudelivery/user/puyudilivery/ckpts/xtuner_saved_model/interns2_preview_sft/sft_interns2_pre_base05_20260424a_lr2e5_256gpu/20260424143245/hf-4073
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
                     - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_USE_FA3=1
+                    - PERMUTE_COMPUTE_DTYPE=fp32
                     - XTUNER_DETERMINISTIC=true
             assert_info:
                 base_metric: interns2-preview-rl-lmdeploy-dapo/tracker.jsonl
@@ -1236,7 +1244,7 @@ case:
                        threshold: 20
                        method: absolute
                        operator: <
-            timeout: 7200
+            timeout: 14400
 
     qwen3-rl-sglang:
         -
