@@ -1038,7 +1038,7 @@ case:
             resource:
                 memory_per_task: 1200
                 envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/puyudelivery/user/puyudilivery/ckpts/xtuner_saved_model/interns2_preview_sft/sft_interns2_pre_base05_20260424a_lr2e5_256gpu/20260424143245/hf-4073
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_USE_FA3=1
@@ -1080,7 +1080,7 @@ case:
             resource:
                 memory_per_task: 1200
                 envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/puyudelivery/user/puyudilivery/ckpts/xtuner_saved_model/interns2_preview_sft/sft_interns2_pre_base05_20260424a_lr2e5_256gpu/20260424143245/hf-4073
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_USE_FA3=1
@@ -1123,7 +1123,7 @@ case:
             resource:
                 memory_per_task: 1200
                 envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/puyudelivery/user/puyudilivery/ckpts/xtuner_saved_model/interns2_preview_sft/sft_interns2_pre_base05_20260424a_lr2e5_256gpu/20260424143245/hf-4073
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_USE_FA3=1
@@ -1168,7 +1168,7 @@ case:
             resource:
                 memory_per_task: 1200
                 envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/puyudelivery/user/puyudilivery/ckpts/xtuner_saved_model/interns2_preview_sft/sft_interns2_pre_base05_20260424a_lr2e5_256gpu/20260424143245/hf-4073
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
@@ -1209,7 +1209,7 @@ case:
             resource:
                 memory_per_task: 1200
                 envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/puyudelivery/user/puyudilivery/ckpts/xtuner_saved_model/interns2_preview_sft/sft_interns2_pre_base05_20260424a_lr2e5_256gpu/20260424143245/hf-4073
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
                     - XTUNER_USE_LMDEPLOY=1
