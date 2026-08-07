@@ -1,30 +1,33 @@
-"""InternS2-Preview VL RL autotest config.
+"""InternS2-Preview VL RL autotest config (GRPO).
 
-InternS2-Preview is architecturally aligned with Qwen3.5-VL-MoE-35B-A3B, so this reuses Qwen3_5_VLMoE35BA3Config /
-RLQwen3VLTokenizeFnConfig (chat_template=qwen3.5-vl).
+Aligned with delivery InternS2 VL async RL reference:
+rollout TP1/EP4, AsyncProduceStrategy, AsyncReplayBuffer, MTP4.
+Reuses Qwen3_5_VLMoE35BA3Config / RLQwen3VLTokenizeFnConfig (chat_template=qwen3.5-vl).
 """
 
 import json
 import os
 
+import ray
 from transformers import AutoTokenizer
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
+from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
+    AsyncProduceStrategyConfig,
     SamplerConfig,
-    SyncProduceStrategyConfig,
     TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger import DapoMathJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
-from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
+from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import RolloutImportanceSampling, WorkerConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, get_eos_token
@@ -52,8 +55,8 @@ experimental_name = "interns2_preview_vl_rl"
 total_epochs = 15
 global_batch_size = 128
 prompt_repeat_k = 8
-rollout_tp_size = 2
-rollout_ep_size = 1
+rollout_tp_size = 1
+rollout_ep_size = 4
 max_prompt_length = 2048
 max_response_length = 8192
 pack_max_length = 32768
@@ -77,6 +80,7 @@ rollout_config = RolloutConfig(
     dtype="bfloat16",
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
+    skip_load_weights=True,
     gpu_memory_utilization=0.8,
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=True,
@@ -95,6 +99,7 @@ training_sample_params = SampleParams(
     top_p=1.0,
     temperature=1.0,
     min_tokens=0,
+    return_routed_experts=True,
 )
 evaluation_sample_params = SampleParams(
     max_tokens=max_response_length,
@@ -102,6 +107,7 @@ evaluation_sample_params = SampleParams(
     top_p=1.0,
     temperature=0.0,
     min_tokens=0,
+    return_routed_experts=False,
 )
 
 # 3. datasets
@@ -185,6 +191,19 @@ judger_config = DapoMathJudgerConfig(
 
 # 5. train worker
 model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
+model_cfg.float8_cfg = None
+model_cfg.text_config.ep_size = 1
+model_cfg.text_config.z_loss_cfg = None
+model_cfg.text_config.balancing_loss_cfg = None
+model_cfg.text_config.freeze_routers = True
+model_cfg.text_config.mtp_config = MTPConfig(
+    num_layers=4,
+    loss_scaling_factor=1.0,
+    detach_mtp_lm_head_weight=True,
+    detach_mtp_inputs=True,
+    share_weights=True,
+)
+model_cfg.text_config.vocab_size = 251392
 optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(
@@ -218,9 +237,37 @@ train_worker_cfg = WorkerConfig(
     loss_cfg=loss_cfg,
     lr_cfg=lr_cfg,
     fsdp_cfg=fsdp_cfg,
-    sp_size=1,
     optimizer_steps=train_optimizer_steps,
     pack_max_length=pack_max_length,
+)
+
+
+def group_sample_filter_func(group_samples):
+    # filter all correct or all wrong sample
+    valid_samples = []
+    for s in group_samples:
+        if s.response_ids is not None:
+            valid_samples.append(s)
+        else:
+            if s.routed_experts is not None:
+                routed_experts = s.routed_experts
+                if isinstance(routed_experts, ray.ObjectRef):
+                    ray.internal.free([s.routed_experts], local_only=False)
+
+    # filter all same reward sample
+    rewards = [(d.reward or {}).get("score", 0.0) for d in valid_samples]
+    if len(set(rewards)) == 1:
+        print(f"filter all same reward sample: {rewards}")
+        return False
+    else:
+        return True
+
+
+produce_strategy_config = AsyncProduceStrategyConfig(
+    over_sample_threshold=1,
+    enable_partial_rollout=1,
+    is_valid_sample_fn=group_sample_filter_func,
+    max_staleness=1000000,
 )
 
 # 6. agent loop managers
@@ -233,7 +280,7 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
         task_name="train_task",
         agent_loop_config=agent_loop_config,
         judger_config=judger_config,
-        produce_strategy_config=SyncProduceStrategyConfig(),
+        produce_strategy_config=produce_strategy_config,
         sampler_config=SamplerConfig(dataloader_cfg=dataloader_cfg, prompt_repeat_k=prompt_repeat_k),
     ),
 )
@@ -262,7 +309,7 @@ trainer = RLColocateTrainerConfig(
     train_worker_cfg=train_worker_cfg,
     rollout_config=rollout_config,
     tokenizer_path=model_path,
-    replay_buffer_config=SyncReplayBufferConfig(),
+    replay_buffer_config=AsyncReplayBufferConfig(),
     agent_loop_manager_cfg=agent_loop_manager_cfg,
     eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
     evaluator_config=EvaluatorConfig(compute_metric_func=None),
