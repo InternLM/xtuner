@@ -6,6 +6,7 @@ from .data import (
     WeightUpdateBatch,
 )
 from .transport import (
+    CheckpointEngineWeightTransport,
     IPCBackendAdapter,
     IPCWeightTransport,
     LMDeployIPCBackendAdapter,
@@ -21,6 +22,7 @@ from .weight_iterator import WeightIterator
 
 
 __all__ = [
+    "CheckpointEngineWeightTransport",
     "IPCBackendAdapter",
     "IPCWeightTransport",
     "LMDeployIPCBackendAdapter",

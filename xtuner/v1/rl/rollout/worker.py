@@ -108,6 +108,11 @@ class RolloutConfig(BaseModel):
             group. Defaults to None.
         weight_update_port (Optional[int]): Port used by train rank 0 to initialize the external NCCL weight update
             group. Defaults to 30000.
+        enable_checkpoint_engine (bool): Whether to use Checkpoint Engine to synchronize training weights to rollout workers. When enabled, train workers create in-process ParameterServer instances and broadcast weights through Checkpoint Engine. Defaults to False.
+        checkpoint_name_prefix (str): Prefix used for Checkpoint Engine checkpoint names registered in the
+            ParameterServer. Defaults to "xtuner-rl".
+        checkpoint_engine_timeout (float): Timeout in seconds for Checkpoint Engine rollout weight update requests.
+            Defaults to 300.0.
         rollout_max_batch_size_per_instance (int): Maximum batch size for the rollout worker. If not set, it
             will be determined automatically based on `context_length`. Defaults to 512.
         allow_over_concurrency_ratio (float): Deprecated compatibility option. Rollout runtime concurrency is
@@ -207,6 +212,28 @@ class RolloutConfig(BaseModel):
             ),
         ),
     ] = 30000
+    # checkpoint engine config
+    enable_checkpoint_engine: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Whether to use Checkpoint Engine to synchronize training weights to rollout workers.",
+        ),
+    ] = False
+    checkpoint_name_prefix: Annotated[
+        str,
+        Parameter(
+            group=infer_group,
+            help="Prefix used for Checkpoint Engine checkpoint names.",
+        ),
+    ] = "xtuner-rl"
+    checkpoint_engine_timeout: Annotated[
+        float,
+        Parameter(
+            group=infer_group,
+            help="Timeout in seconds for Checkpoint Engine rollout weight update requests.",
+        ),
+    ] = 300.0
     rollout_max_batch_size_per_instance: Annotated[
         Optional[int],
         Parameter(

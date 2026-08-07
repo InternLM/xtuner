@@ -8,7 +8,8 @@ from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Callable, Protocol, cast
+from pathlib import Path
+from typing import Any, Callable, Generic, Protocol, Sequence, TypeVar, cast
 
 import requests
 import torch
@@ -31,8 +32,13 @@ from xtuner.v1.utils import (
     monkey_unpatch_torch_reductions,
 )
 
-from .data import RolloutWeightUpdateInfo, WeightUpdateBatch
+from .data import RolloutWeightUpdateInfo, RolloutWeightUpdateTarget, WeightUpdateBatch
 
+
+try:
+    from checkpoint_engine.ps import ParameterServer
+except ImportError:
+    ParameterServer = None
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
@@ -52,7 +58,10 @@ class WeightTransportAdapter(Protocol):
     def after_update_all_groups(self) -> None: ...
 
 
-class WeightTransport(ABC):
+AdapterT = TypeVar("AdapterT", bound=WeightTransportAdapter)
+
+
+class WeightTransport(ABC, Generic[AdapterT]):
     def __init__(self, *, rollout_info: RolloutWeightUpdateInfo, logger: Any, rank: int):
         self.rollout_info = rollout_info
         self.logger = logger
@@ -60,7 +69,7 @@ class WeightTransport(ABC):
         self.backend = self.rollout_info.backend
         self.rollout_ep = self.rollout_info.ep
         self.rollout_tp = self.rollout_info.tp
-        self._adapter: WeightTransportAdapter | None = None
+        self._adapter: AdapterT | None = None
 
         self.rollout_url = self.rollout_info.rollout_url
 
@@ -75,7 +84,7 @@ class WeightTransport(ABC):
         response.raise_for_status()
         return response.json()
 
-    def update(self, weight_iterator: Any) -> None:
+    def update(self, weight_iterator: Any, **_: Any) -> None:
         assert self._adapter is not None
         self._adapter.before_update()
         DEVICE_MODULE.empty_cache()
@@ -417,7 +426,7 @@ class SGLangIPCBackendAdapter(IPCBackendAdapter):
             dist.barrier(group=cpu_group)
 
 
-class IPCWeightTransport(WeightTransport):
+class IPCWeightTransport(WeightTransport[IPCBackendAdapter]):
     _adapter: IPCBackendAdapter
 
     def __init__(
@@ -445,7 +454,8 @@ class IPCWeightTransport(WeightTransport):
         if self.backend == "vllm":
             return VLLMIPCBackendAdapter(rollout_tp=self.rollout_info.tp)
         elif self.backend == "sglang":
-            return SGLangIPCBackendAdapter(rollout_tp=self.rollout_info.tp)
+            tp_size = self.rollout_info.tp if self.rollout_info.tp > 1 else self.rollout_info.ep
+            return SGLangIPCBackendAdapter(rollout_tp=tp_size)
         elif self.backend == "pytorch" or self.backend == "turbomind":
             return LMDeployIPCBackendAdapter(
                 rollout_tp=self.rollout_info.tp,
@@ -606,7 +616,7 @@ class LMDeployNCCLBackendAdapter(NCCLBackendAdapter):
         return WeightUpdateRequest(endpoint="update_weights_from_distributed", body=payload)
 
 
-class NCCLWeightTransport(WeightTransport):
+class NCCLWeightTransport(WeightTransport[NCCLBackendAdapter]):
     _adapter: NCCLBackendAdapter
 
     def __init__(self, *, rank: int, logger: Any, rollout_info: RolloutWeightUpdateInfo):
@@ -838,3 +848,306 @@ class NCCLWeightTransport(WeightTransport):
         self.group_name = None
         self.engine_urls = []
         self.external_group_world_size = None
+
+
+class CheckpointEngineBackendAdapter:
+    """Build SGLang IPC weight-update URLs for Checkpoint Engine req_func."""
+
+    def __init__(self, *, rank: int):
+        self.rank = rank
+
+    def build_update_url(self, server_url: str) -> str:
+        raise NotImplementedError
+
+    def before_update(self) -> None:
+        return
+
+    def after_update_all_groups(self) -> None:
+        return
+
+
+class SGlangCheckpointEngineAdapter(CheckpointEngineBackendAdapter):
+    """Build SGLang IPC weight-update URLs for Checkpoint Engine req_func."""
+
+    def __init__(self, *, rank: int):
+        self.rank = rank
+
+    def build_update_url(self, server_url: str) -> str:
+        return f"{server_url.rstrip('/')}/update_weights_from_ipc"
+
+
+class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAdapter]):
+    """In-process Checkpoint Engine transport via ParameterServer.
+
+    Each train rank owns a PS and collectively register / gather_metas / update.
+    """
+
+    _adapter: CheckpointEngineBackendAdapter
+
+    def __init__(
+        self,
+        *,
+        rank: int,
+        logger: Any,
+        rollout_info: RolloutWeightUpdateInfo,
+    ):
+        """Build PS and optionally register the initial disk checkpoint from
+        disk."""
+
+        super().__init__(rank=rank, logger=logger, rollout_info=rollout_info)
+
+        self.ps_world_size = int(os.environ.get("WORLD_SIZE", dist.get_world_size()))
+        self._adapter = SGlangCheckpointEngineAdapter(rank=rank)
+        # record the local checkpoint keys per PS-rank
+        self._local_checkpoint_keys: set[Any] | None = None
+        # record the update counter of PS
+        self._update_counter = 0
+        self._checkpoint_path = self.rollout_info.rollout_config.model_path
+        self._checkpoint_name_prefix = self.rollout_info.rollout_config.checkpoint_name_prefix
+        self._timeout = self.rollout_info.rollout_config.checkpoint_engine_timeout
+        # record the checkpoint name of PS and will use it to register the checkpoint and unregister the previous checkpoint
+        self._checkpoint_name: str | None = None
+
+        assert dist.is_initialized() and self.ps_world_size > 0, (
+            "Checkpoint Engine requires an initialized torch.distributed process group and world size > 0."
+        )
+
+        self._ps = self.build_parameter_server()
+
+        self._local_checkpoint_keys = self.split_tensors_for_rank(self._checkpoint_path, self.ps_world_size, self.rank)
+
+    def build_parameter_server(self):
+        """Build the Checkpoint Engine ParameterServer.
+
+        The world size is the same as the train world size. The ParameterServer is built with auto_pg=False, so the
+        torch.distributed process group is not destroyed after update.
+        """
+        if ParameterServer is None:
+            raise ImportError("Checkpoint Engine is not available. Please install the Checkpoint Engine package.")
+
+        # auto_pg=False keeps the default PG alive.
+        ps = ParameterServer(
+            auto_pg=False,
+            rank=self.rank,
+            world_size=self.ps_world_size,
+        )
+        self.logger.info(f"[checkpoint_engine] ParameterServer ready rank={self.rank} world_size={self.ps_world_size}")
+        return ps
+
+    def split_tensors_for_rank(self, checkpoint_path: str | Path, world_size: int, rank: int) -> set[str]:
+        """Register an HF safetensors checkpoint into the local
+        ParameterServer."""
+
+        path = Path(checkpoint_path)
+        index_path = path / "model.safetensors.index.json"
+
+        if not index_path.exists():
+            raise FileNotFoundError(f"model.safetensors.index.json file not found: {index_path}")
+
+        with open(index_path) as f:
+            weight_map: dict[str, str] = json.load(f)["weight_map"]
+        weight_keys = list(key_name for key_name, file_name in weight_map.items())
+        per_rank = (len(weight_keys) + world_size - 1) // world_size
+        local_keys = set(weight_keys[rank * per_rank : (rank + 1) * per_rank])
+
+        self.logger.info(
+            f"[checkpoint_engine] split keys from {index_path} "
+            f"rank={rank} tensors={len(local_keys)}/{len(weight_keys)}"
+        )
+        return local_keys
+
+    def _collect_named_tensors(self, weight_iterator, local_keys=None):
+        """Collect all train weights from the iterator onto CPU."""
+        named = {}
+        for batches in weight_iterator.iter_batch_groups():
+            for batch in batches:
+                sd = batch.state_dict
+                if not sd:
+                    continue
+                # batch 级快路径：完全无交集可跳过
+                if local_keys is not None and sd.keys().isdisjoint(local_keys):
+                    continue
+                for key, tensor in sd.items():
+                    if local_keys is not None and key not in local_keys:
+                        continue
+                    named[key] = tensor
+        return named
+
+    def _shard_named_tensors(
+        self, named_tensors: dict[str, torch.Tensor], rank: int, world_size: int
+    ) -> dict[str, torch.Tensor]:
+        """Shard named tensors by sorted keys when disk keys are
+        unavailable."""
+        keys = sorted(named_tensors.keys())
+        per_rank = (len(keys) + world_size - 1) // world_size
+        my_keys = keys[rank * per_rank : (rank + 1) * per_rank]
+        return {k: named_tensors[k] for k in my_keys}
+
+    def register_checkpoint_from_train_engine(self, weight_iterator: Any) -> None:
+        """Register current train engine weights into Checkpoint Engine PS."""
+
+        # 1. Collect named tensors from weight iterator
+        all_tensors = self._collect_named_tensors(weight_iterator, local_keys=self._local_checkpoint_keys)
+
+        # 2. Shard named tensors for the current rank
+        if self._local_checkpoint_keys is None:
+            # 未做 disk init 时的兜底
+            shard = self._shard_named_tensors(all_tensors, self.rank, self.ps_world_size)
+        else:
+            missing = self._local_checkpoint_keys - all_tensors.keys()
+            if missing:
+                missing_mtp_keys = {key for key in missing if key.startswith("mtp.")}
+                missing_non_mtp_keys = missing - missing_mtp_keys
+                if missing_non_mtp_keys:
+                    self.logger.error(
+                        f"[checkpoint_engine] ParameterServer Rank={self.rank} Missing non-MTP keys: {missing_non_mtp_keys}"
+                    )
+                else:
+                    self.logger.error(
+                        f"[checkpoint_engine] ParameterServer Rank={self.rank} Missing MTP-only keys: {missing_mtp_keys}"
+                    )
+            shard = {k: all_tensors[k] for k in self._local_checkpoint_keys if k in all_tensors}
+
+        # 3. Register checkpoint
+        self._update_counter += 1
+        name = f"{self._checkpoint_name_prefix}-train-{self._update_counter}"
+        self.logger.info(
+            f"[checkpoint_engine] register train checkpoint name={name} "
+            f"rank={self.rank} tensors={len(shard)}/{len(all_tensors)}"
+        )
+        # Drop previous train checkpoint to limit pinned host memory.
+        if self._checkpoint_name is not None:
+            self._ps.unregister_checkpoint(self._checkpoint_name)
+        self._ps.register_checkpoint(name, files=[], named_tensors=shard, use_shared_memory_pool=True)
+        dist.barrier()
+        self._checkpoint_name = name
+
+    def _make_req_func(self, targets: Sequence[RolloutWeightUpdateTarget]):
+        """Build CE ``req_func``: source rank POSTs IPC update to its SGLang
+        target."""
+        rank = self.rank
+
+        # Map each train rank to its SGLang engine target and group src rank.
+        rank_to_target: dict[int, RolloutWeightUpdateTarget] = {}
+        for target in targets:
+            for r in target.update_ranks:
+                if r in rank_to_target:
+                    raise ValueError(f"Duplicate update rank {r} across active CE targets.")
+                rank_to_target[r] = target
+        adapter = self._adapter
+        if adapter is None:
+            raise RuntimeError("Weight transport adapter is not initialized.")
+
+        def req_func(socket_paths: list[tuple[str, str]]) -> None:
+            target = rank_to_target.get(rank)
+            if target is None:
+                return
+            src = min(target.update_ranks)
+            if rank != src:
+                return
+            update_url = adapter.build_update_url(target.server_url)
+            rank_to_socket = dict(enumerate(socket_paths))
+            payload = {
+                "zmq_handles": dict(rank_to_socket[r] for r in target.update_ranks),
+                "flush_cache": True,
+            }
+            headers = {"Content-Type": "application/json"}
+            api_key = self.rollout_info.api_key
+            if api_key is not None:
+                token = api_key[0] if isinstance(api_key, list) else api_key
+                headers["Authorization"] = f"Bearer {token}"
+            response = requests.post(update_url, headers=headers, json=payload, timeout=self._timeout)
+            response.raise_for_status()
+            self.logger.info(f"[checkpoint_engine] rank{rank} updated {update_url}")
+
+        return req_func
+
+    def _get_target_update_ranks(self, targets: Sequence[RolloutWeightUpdateTarget], world_size: int) -> list[int]:
+        """Return validated update ranks from active rollout targets."""
+
+        covered: set[int] = set()
+        for target in targets:
+            if not target.update_ranks:
+                raise ValueError(f"Empty update_ranks for target {target.server_url!r}")
+            for r in target.update_ranks:
+                if r < 0 or r >= world_size:
+                    raise ValueError(
+                        f"PS/train rank {r} from target {target.server_url!r} out of range for world_size={world_size}."
+                    )
+                if r in covered:
+                    raise ValueError(f"Duplicate PS rank {r} in active update targets.")
+                covered.add(r)
+        return sorted(covered)
+
+    @staticmethod
+    def _can_broadcast_to_update_ranks(update_ranks: Sequence[int], world_size: int) -> bool:
+        """Whether the pending update ranks satisfy CE broadcast requirements.
+
+        Checkpoint Engine uses full broadcast only when every PS/train rank
+        participates. Partial active ranks must be sent through p2p by passing
+        ``ranks`` to ``ParameterServer.update``.
+        """
+
+        return len(update_ranks) == world_size and list(update_ranks) == list(range(world_size))
+
+    def _update_engines(self) -> None:
+        """``gather_metas`` then ``update`` to push checkpoint to rollout
+        engines."""
+
+        targets = self.rollout_info.active_update_targets
+        if not targets:
+            raise RuntimeError("Checkpoint Engine found no active weight-update targets.")
+        update_ranks = self._get_target_update_ranks(targets, self.ps_world_size)
+        use_broadcast = self._can_broadcast_to_update_ranks(update_ranks, self.ps_world_size)
+        ranks = None if use_broadcast else update_ranks
+        req_func = self._make_req_func(targets)
+        self.logger.info(
+            f"[checkpoint_engine] gather_metas+update name={self._checkpoint_name} "
+            f"active_targets={len(targets)}/{len(self.rollout_info.weight_update_targets)} "
+            f"method={'broadcast' if use_broadcast else 'p2p'} ranks={ranks}"
+        )
+        self._ps.gather_metas(self._checkpoint_name)
+        self._ps.update(self._checkpoint_name, req_func, ranks=ranks)
+
+    def update(self, weight_iterator: Any, need_register: bool = True, need_update: bool = True, **_: Any) -> None:
+        """Update rollout engine weights through the checkpoint parameter
+        server.
+
+        The update consists of two stages: registering a checkpoint from the training
+        engine, and loading that checkpoint into the rollout engines.
+
+        Parameters
+        ----------
+        weight_iterator : Any
+            Iterator that provides the latest training engine weights.
+        need_register : bool, optional
+            Whether to register a new checkpoint from ``weight_iterator``. If False,
+            reuse the checkpoint name from the previous update.
+        need_update : bool, optional
+            Whether to load the registered checkpoint into rollout engines. Set this to
+            False to split registration and rollout update into separate calls, which
+            can reduce peak GPU memory usage under memory pressure.
+        """
+        assert need_register or need_update, (
+            "At least one of need_register or need_update must be True when use checkpoint engine update."
+        )
+        if need_register == False and self._checkpoint_name is None:
+            raise RuntimeError("CheckpointEngineWeightTransport cannot update without a registered checkpoint.")
+
+        # 1. Register checkpoint from train engine
+        if need_register:
+            self.register_checkpoint_from_train_engine(weight_iterator)
+
+        # 2. Broadcast checkpoint to engines
+        if need_update:
+            self._update_engines()
+
+    def send(self, batch: WeightUpdateBatch) -> None:
+        raise NotImplementedError("CheckpointEngineWeightTransport uses update() end-to-end; send() is unused.")
+
+    def teardown(self) -> None:
+        if self._ps is None:
+            return
+        if self._checkpoint_name:
+            self._ps.unregister_checkpoint(self._checkpoint_name, force=True)
+        self._ps = None
