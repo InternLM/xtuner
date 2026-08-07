@@ -412,6 +412,7 @@ class InternS1VisionModel(BaseModel):
                     self.kept_ops,
                     keeps_any_unit=self.keeps_any_recompute_unit,
                     preserve_rng_state=checkpoint_preserve_rng_state,
+                    # The layer's own forward is compiled just below, making it one opaque region.
                 )
                 if self.config.drop_path_rate == 0.0 and self.compile_cfg:
                     layer.forward = torch.compile(layer.forward, fullgraph=True)

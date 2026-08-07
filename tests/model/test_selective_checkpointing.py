@@ -17,11 +17,15 @@ TestRegionRecomputeUnderDominoEP
     test_kept_unit_matches_full_recompute_under_compile: compile 下同上，且不触发 cached-tensor-mutated。
 """
 
+import subprocess
+import sys
+
 import pytest
 import torch
 from torch import nn
 
 from xtuner.v1.model.utils import (
+    KeptOps,
     RecomputeUnit,
     apply_selective_checkpointing,
     in_recompute_unit,
@@ -149,6 +153,19 @@ class TestKeptCallables:
         assert inputs.grad is not None
 
 
+class TestContractLayering:
+    def test_module_layer_imports_the_contract_without_the_model_layer(self):
+        # 契约之所以在 xtuner/v1/utils 而不是挨着 engine，是因为它命名的 callable 在
+        # xtuner/v1/module 里：一旦契约里出现指向 model/ 的 import，这条独立导入就会变成
+        # 循环导入而失败。必须用干净的解释器：同进程里 xtuner.v1.model 早就被导入了。
+        result = subprocess.run(
+            [sys.executable, "-c", "import xtuner.v1.module.decoder_layer.moe_decoder_layer"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+
 class TestUnsupportedUnits:
     def test_in_place_op_in_kept_unit_is_recomputed_not_refused(self):
         # in-place op 本身不危险，危险的是它写到了被 unit 留驻的张量上——那由 torch 的
@@ -163,3 +180,16 @@ class TestUnsupportedUnits:
 
     def test_in_place_op_outside_kept_unit_is_fine(self):
         _run(_InPlaceOutsideBlock(), keeps_any_unit=True)
+
+
+class TestDeclarations:
+    def test_kept_ops_and_callables_are_distinct_targets(self):
+        # 两种解析方式的代价完全不同（一个零编译代价，一个要退出编译集合），所以类型必须能区分。
+        from xtuner.v1.model.moe.moe import MOE_RECOMPUTE_CFG
+
+        assert isinstance(MOE_RECOMPUTE_CFG[RecomputeUnit.SAVE_ATTN], KeptOps)
+        assert set(MOE_RECOMPUTE_CFG) == {
+            RecomputeUnit.SAVE_ATTN,
+            RecomputeUnit.SAVE_MOE_GATE,
+            RecomputeUnit.SAVE_MOE_DISPATCH,
+        }

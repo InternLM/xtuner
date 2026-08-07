@@ -139,11 +139,21 @@ class MoEGate(nn.Module):
         if self.gate_bias:
             self.bias = nn.Parameter(torch.zeros(self.n_routed_experts))
 
-    def forward(
-        self, hidden_states: torch.Tensor, rollout_routed_experts: torch.Tensor | None = None
-    ) -> RouterResults:
+    def project(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Compute the routing logits.
+
+        Split from :meth:`forward` so that the projection can be addressed on its own: it holds all the activation
+        memory the router has -- the logits are ``tokens x n_routed_experts`` while everything the router itself
+        produces is top-k sized -- and unlike the router it contains no in-place write, which selective checkpointing
+        cannot keep.
+
+        Args:
+            hidden_states (torch.Tensor): Layer input, of any leading shape.
+
+        Returns:
+            torch.Tensor: Routing logits, flattened to ``(tokens, n_routed_experts)``.
+        """
         _, _, h = hidden_states.shape
-        ### compute gating score
         hidden_states = hidden_states.view(-1, h)
 
         if isinstance(self.weight, DTensor):
@@ -156,11 +166,14 @@ class MoEGate(nn.Module):
             bias = self.bias.to_local() if isinstance(self.bias, DTensor) else self.bias
 
         if self.router_compute_dtype == "native":
-            logits = F.linear(hidden_states, weight, bias)
-        else:
-            bias = bias.float() if bias is not None else None
-            logits = F.linear(hidden_states.float(), weight.float(), bias)
-        return self.router(logits, rollout_routed_experts)
+            return F.linear(hidden_states, weight, bias)
+        bias = bias.float() if bias is not None else None
+        return F.linear(hidden_states.float(), weight.float(), bias)
+
+    def forward(
+        self, hidden_states: torch.Tensor, rollout_routed_experts: torch.Tensor | None = None
+    ) -> RouterResults:
+        return self.router(self.project(hidden_states), rollout_routed_experts)
 
         # Debug for aligning with hf implementation.
         # logits = F.linear(hidden_states, weight, bias)
@@ -306,6 +319,7 @@ class MoEDecoderLayer(nn.Module):
         self.dispatcher = build_dispatcher(
             dispatcher=dispatcher,
             n_routed_experts=n_routed_experts,
+            hidden_size=hidden_size,
             ep_group=process_group,
             training_dtype="fp8" if float8_cfg is not None else "bf16",
             generate_dtype=generate_config.dtype if generate_config is not None else "bf16",
@@ -417,11 +431,14 @@ class MoEDecoderLayer(nn.Module):
         origin_shape = hidden_states.shape
 
         # reshape hidden_states to (batch_size * seq_len, hidden_size)
+        # Flattened before the marker so that the dispatch region covers the same operations here as
+        # it does in `_micro_batch_forward`, which reshapes outside the region too.
+        flat_hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         # ProberList.before_dispatch(
         #     self.layer_idx, hidden_states, router_results["topk_ids"], router_results["topk_weights"]
         # )
         pre_dispatched = self.dispatcher.dispatch_preprocess(
-            hidden_states=hidden_states.view(-1, hidden_states.shape[-1]),
+            hidden_states=flat_hidden_states,
             topk_ids=router_results["topk_ids"],
         )
         dispatched = self.dispatcher.dispatch(
@@ -473,14 +490,15 @@ class MoEDecoderLayer(nn.Module):
             pre_combined=pre_combined,
             combined=combined,
         )
-        combined_hidden_states = post_combined["hidden_states"]
-        combined_hidden_states = combined_hidden_states.view(*origin_shape)
+        combined_hidden_states = post_combined["hidden_states"].view(*origin_shape)
 
         # debug for aligning with hf implementation.
         # combined_hidden_states = self._hf_expert_forward_for_debug(hidden_states, router_results, origin_shape)
 
         # ProberList.after_combine(self.layer_idx, combined_hidden_states)
 
+        # Recorded outside the branch so the region never depends on a configuration-dependent path:
+        # without shared experts it is simply empty rather than left open until the next marker.
         if self.n_shared_experts > 0:
             shared_experts_out = self._shared_experts_forward(hidden_states=hidden_states)
         else:
@@ -600,6 +618,11 @@ class MoEDecoderLayer(nn.Module):
 
         shared_experts_out_list: list[torch.Tensor | None]
 
+        # Recorded outside the branch so the region never depends on a configuration-dependent path:
+        # without shared experts it is simply empty rather than left open until the next marker. It
+        # also sits outside the loop, unlike the single-batch path's per-call region: this stage runs
+        # every micro-batch back to back with nothing else between them, so one region spanning the
+        # whole stage covers exactly the same operations as one region per micro-batch would.
         if self.n_shared_experts > 0:
             shared_experts_out_list = []
             for pre_moe_forward_out in pre_moe_forward_out_list:
