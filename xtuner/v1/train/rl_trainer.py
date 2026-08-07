@@ -33,6 +33,7 @@ from xtuner.v1.rl.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
 from xtuner.v1.rl.evaluator import EvaluatorConfig
+from xtuner.v1.rl.on_policy_distillation import OPDConfig
 from xtuner.v1.rl.replay_buffer import (
     AsyncReplayBufferConfig,
     SyncReplayBufferConfig,
@@ -342,6 +343,7 @@ class BaseRLTrainerConfig(BaseModel):
     total_epochs: int | None = None
     train_batch_size: int
     advantage_estimator_config: BaseAdvantageConfig = Field(default_factory=GRPOAdvantageConfig)
+    opd_config: OPDConfig | None = None
     sync_weights_interval: int = 1
 
     enable_evaluate: bool = True
@@ -582,6 +584,10 @@ class BaseRLTrainer:
     _debug_train_files: dict[int, Path]
 
     def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
+        if cfg.opd_config is not None:
+            endpoint_map = json.loads(os.environ.get("XTUNER_OPD_TEACHER_ENDPOINTS_JSON", "{}"))
+            cfg.opd_config = cfg.opd_config.resolve_teacher_endpoints(endpoint_map)
+
         check_fa3()
         self._init_work_dir_and_meta(cfg, meta_path)
         self._init_load_source(cfg)
@@ -594,6 +600,7 @@ class BaseRLTrainer:
         self._init_rollout_config(cfg, log_dir)
         self._ensure_rollout_proxy_config(cfg)
         self._init_runtime_flags(cfg)
+        self._opd_config = cfg.opd_config
         self._advantage_estimator = cfg.advantage_estimator_config.build()
         self._cpu_resource_manager: CPUResourceManager | None = None
         self._num_workers = 1.0
@@ -675,6 +682,7 @@ class BaseRLTrainer:
             cfg.train_worker_cfg.free_rollout_routed_experts_in_worker = False
         cfg.train_worker_cfg.load_from = cfg.load_from
         cfg.train_worker_cfg.log_dir = log_dir
+        cfg.train_worker_cfg.opd_config = cfg.opd_config
         self._train_worker_cfg = cfg.train_worker_cfg
 
     def _init_rollout_config(self, cfg: BaseRLTrainerConfig, log_dir: Path) -> None:
@@ -708,6 +716,7 @@ class BaseRLTrainer:
             replay_buffer=replay_buffer,
             logger=self.logger,
             sync_weights_interval=cfg.sync_weights_interval,
+            opd_config=self._opd_config,
         )
         self.agent_loop_manager = cast(AgentLoopManager | DisaggAgentLoopManager, agent_loop_manager)
 
@@ -722,6 +731,7 @@ class BaseRLTrainer:
                     replay_buffer=replay_buffer,
                     logger=self.logger,
                     sync_weights_interval=cfg.sync_weights_interval,
+                    opd_config=None,
                 ),
             )
 
@@ -1015,16 +1025,17 @@ class BaseRLTrainer:
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ):
-        rewards_list = []
         # Per-session rewards for distribution metrics. Agentic sessions may split into several
         # trainable segments that share one reward; counting that reward once per session keeps
-        # rewards/* from being weighted by segment count. rewards_list stays per-segment for counts.
+        # rewards/* from being weighted by segment count.
         cluster_rewards_list: list[float] = []
+        teacher_rewards: dict[str, list[float]] = {}
         advantages_list = []
         prompt_len_list = []
         response_len_list = []
         tool_turns_list: list[int] = []
         training_tokens = 0
+        training_samples = 0
 
         data_batches = []
 
@@ -1032,7 +1043,11 @@ class BaseRLTrainer:
             if not is_valid_for_training(group, self.logger):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
+            training_samples += len(group)
 
+            # When opd_config is not None, PG-OPD currently supports only single-turn rollouts.
+            opd_config = self._opd_config
+            task_adv_weight = opd_config.task_adv_weight if opd_config is not None else 1.0
             prompt_ids = None
             if any(data.input_ids is None for data in group):
                 is_vlm_model = "train_prompt_ids" in group[0].extra_fields
@@ -1044,19 +1059,23 @@ class BaseRLTrainer:
                 assert prompt_ids is not None and len(prompt_ids) > 0, (
                     f"Prompt ids cannot be None or empty in data: {group[0]}"
                 )
-            rewards = []
-            # Agentic rollouts may split one model session into multiple trainable segments.
-            # Compute the group advantage once per session, then broadcast it back to each segment.
+            for data in group:
+                # 有可能有重复，但是没有其他更好办法
+                turns = data.extra_fields.get("agent_tool_turns")
+                if isinstance(turns, int):
+                    tool_turns_list.append(turns)
+
+            # Collect rewards independently from task-advantage computation. Pure OPD may omit
+            # rewards entirely; when rewards are present they remain useful observability signals.
             cluster_index_by_key: dict[Any, int] = {}
             cluster_rewards: list[float] = []
             cluster_representatives: list[RolloutState] = []
             sample_cluster_indices: list[int] = []
             for data in group:
-                assert data.reward is not None and "score" in data.reward, (
-                    f"Reward is missing or does not contain 'score' key in data: {data}"
-                )
+                if data.reward is None or "score" not in data.reward:
+                    assert task_adv_weight == 0, f"Reward is missing or does not contain 'score' key in data: {data}"
+                    continue
                 reward = float(data.reward["score"])
-                rewards.append(reward)
                 # session_id is only set by agentic loops / XTUNER_DETERMINISTIC; plain RL falls back
                 # to rollout_id, which the sampler always assigns. Segments of one session share a key.
                 cluster_key = data.session_id if data.session_id is not None else data.rollout_id
@@ -1067,16 +1086,28 @@ class BaseRLTrainer:
                     cluster_rewards.append(reward)
                     cluster_representatives.append(data)
                 sample_cluster_indices.append(cluster_index)
-                # 有可能有重复，但是没有其他更好办法
-                turns = data.extra_fields.get("agent_tool_turns")
-                if isinstance(turns, int):
-                    tool_turns_list.append(turns)
 
-            rewards_list.extend(rewards)
             cluster_rewards_list.extend(cluster_rewards)
-            rewards_tensor = torch.tensor(cluster_rewards, dtype=torch.float32)
-            cluster_advantages = self._advantage_estimator.compute(rewards_tensor, cluster_representatives)
-            sample_advantages = [cluster_advantages[cluster_index].item() for cluster_index in sample_cluster_indices]
+            if opd_config is not None:
+                for reward, representative in zip(cluster_rewards, cluster_representatives):
+                    data_source = representative.extra_fields.get("origin_data_source")
+                    if not isinstance(data_source, str):
+                        continue
+                    teacher_name = opd_config.data_source_teacher_map.get(data_source)
+                    if teacher_name is not None:
+                        teacher_rewards.setdefault(teacher_name, []).append(reward)
+
+            if task_adv_weight == 0:
+                sample_advantages = [0.0] * len(group)
+            else:
+                # Agentic rollouts may split one model session into multiple trainable segments.
+                # Compute the group advantage once per session, then broadcast it back to each segment.
+                rewards_tensor = torch.tensor(cluster_rewards, dtype=torch.float32)
+                cluster_advantages = self._advantage_estimator.compute(rewards_tensor, cluster_representatives)
+                sample_advantages = [
+                    cluster_advantages[cluster_index].item() for cluster_index in sample_cluster_indices
+                ]
+                sample_advantages = [task_adv_weight * sample_advantage for sample_advantage in sample_advantages]
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
@@ -1181,12 +1212,9 @@ class BaseRLTrainer:
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_labels
                 shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
-                # 根据 response_mask 计算新的 advantages
-                advatnages_val = sample_advantages[i]
-                actual_advantages = [advatnages_val] * len(prompt_ids) + [
-                    0.0 if mask == 0 else advatnages_val for mask in response_mask
-                ]
-                advantages_list.extend(actual_advantages[:-1])
+                base_advantage = sample_advantages[i]
+                actual_advantages = [0.0 if label == -100 else base_advantage for label in shifted_labels]
+                advantages_list.extend(actual_advantages)
 
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 training_tokens += len(input_ids)
@@ -1211,6 +1239,12 @@ class BaseRLTrainer:
                     "advantage": actual_advantages,
                     "rollout_logprobs": rollout_logprobs,
                 }
+                if opd_config is not None:
+                    response_teacher_logprobs = cast(list[float], group[i].teacher_logprobs)
+                    data_dict["teacher_logprobs"] = torch.tensor(
+                        [0.0] * (len(prompt_ids) - 1) + response_teacher_logprobs,
+                        dtype=torch.float32,
+                    ).unsqueeze(0)
 
                 seq_ctx.rollout_routed_experts = group[i].routed_experts  # n,layer*expert
 
@@ -1218,8 +1252,8 @@ class BaseRLTrainer:
         if not XTUNER_DETERMINISTIC:
             random.shuffle(data_batches)
 
-        # rewards/* report the per-session reward distribution; batch_size/training_samples below
-        # still use rewards_list (per-segment) so counts reflect the actual training samples.
+        # rewards/* report the per-session reward distribution; batch_size/training_samples
+        # count the valid rollout segments included in training.
         rewards_t = torch.tensor(cluster_rewards_list).float() if cluster_rewards_list else torch.tensor([0.0]).float()
         advantages_t = torch.tensor(advantages_list).float() if advantages_list else torch.tensor([0.0]).float()
         prompt_len_t = torch.tensor(prompt_len_list).float() if prompt_len_list else torch.tensor([0.0]).float()
@@ -1227,8 +1261,8 @@ class BaseRLTrainer:
 
         raw_rewards_mean = raw_rewards_sum / raw_rewards_count if raw_rewards_count > 0 else rewards_t.mean().item()
         info_dict = {
-            "batch_size": len(rewards_list),
-            "training_samples": len(rewards_list),
+            "batch_size": training_samples,
+            "training_samples": training_samples,
             "training_tokens": training_tokens,
             "rewards/mean": rewards_t.mean().item(),
             "rewards/min": rewards_t.min().item(),
@@ -1245,6 +1279,9 @@ class BaseRLTrainer:
             "prompt_len/min": prompt_len_t.min().item(),
             "prompt_len/max": prompt_len_t.max().item(),
         }
+        for teacher_name, rewards in teacher_rewards.items():
+            if rewards:
+                info_dict[f"rewards/{teacher_name}/mean"] = torch.tensor(rewards, dtype=torch.float32).mean().item()
         if tool_turns_list:
             tool_turns_t = torch.tensor(tool_turns_list, dtype=torch.float32)
             info_dict["tool_turns/mean"] = tool_turns_t.mean().item()
@@ -1367,6 +1404,10 @@ class BaseRLTrainer:
             all_scalars.update({f"{k}": v for k, v in rank0_mismatch_metrics.items()})
             all_scalars.update({"entropy/rollout": rank0_rollout_entropy})
             all_scalars.update({"entropy/train": rank0_log_item["train_entropy"]})
+            if "opd_reverse_kl" in rank0_log_item:
+                all_scalars["opd_reverse_kl"] = rank0_log_item["opd_reverse_kl"]
+            if "opd_abs_logprob_loss" in rank0_log_item:
+                all_scalars["opd_abs_logprob_loss"] = rank0_log_item["opd_abs_logprob_loss"]
             for worker_idx, log_item in enumerate(train_info["workers_log_item"]):
                 if not self._display_all_workers_log and worker_idx > 0:
                     break
@@ -1404,8 +1445,9 @@ class BaseRLTrainer:
             if not is_valid_for_training(group, self.logger):
                 continue
             for data in group:
-                assert data.reward is not None
-                rewards.append(data.reward["score"])
+                reward = data.reward.get("score") if data.reward is not None else None
+                if reward is not None:
+                    rewards.append(reward)
                 response_ids = self._get_trajectory_response_ids(data)
                 response = data.response
                 if response is None and response_ids:
@@ -1426,7 +1468,7 @@ class BaseRLTrainer:
                         "prompt": data.message,
                         "label": ground_truth,
                         "response": response,
-                        "reward": data.reward["score"],
+                        "reward": reward,
                         "prompt_len": data.num_tokens,
                         "response_len": response_len,
                         "reward_payload": data.reward,
@@ -1451,14 +1493,14 @@ class BaseRLTrainer:
         with open(save_path, "w", encoding="utf-8") as f:
             summary = {
                 "reward_mean": rewards_tensor.mean().item(),
-                "reward_std": rewards_tensor.std().item(),
+                "reward_std": rewards_tensor.std(unbiased=False).item(),
                 "reward_max": rewards_tensor.max().item(),
                 "reward_min": rewards_tensor.min().item(),
                 "response_len_mean": response_lens.mean().item(),
-                "response_len_std": response_lens.std().item(),
+                "response_len_std": response_lens.std(unbiased=False).item(),
                 "response_len_max": response_lens.max().item(),
                 "response_len_min": response_lens.min().item(),
-                "total_len": len(rewards),
+                "total_len": len(trajectory_items),
             }
             json.dump(summary, f, ensure_ascii=False, separators=(",", ":"))
             f.write("\n")

@@ -7,9 +7,6 @@
 - VLM 样本使用 train_prompt_ids，并保留 multimodal 训练字段。
 - 无效 rollout group 会被跳过。
 - 缺失 reward、logprob/mask 长度不一致、pack_max_length 过小时 fail fast。
-
-注意：当前训练 contract 中 data_dict["advantage"] 比 shifted_labels 多 1 个元素；
-metric 统计使用 actual_advantages[:-1]，测试会显式固定这个行为。
 """
 
 import unittest
@@ -36,6 +33,7 @@ class TestPrepareTrainData(unittest.TestCase):
     def _build_trainer(self, advantages: list[float]):
         trainer = BaseRLTrainer.__new__(BaseRLTrainer)
         trainer._advantage_estimator = _FakeAdvantageEstimator(advantages)
+        trainer._opd_config = None
         trainer.tokenizer = MagicMock(return_value={"input_ids": torch.tensor([[999]])})
         trainer.logger = MagicMock()
         return trainer
@@ -102,8 +100,8 @@ class TestPrepareTrainData(unittest.TestCase):
             batch["rollout_logprobs"],
             torch.tensor([[0.0, 0.0, 0.1, 0.2, 0.3]], dtype=torch.float32),
         )
-        self.assertEqual(batch["advantage"], [1.5, 1.5, 1.5, 1.5, 0.0, 1.5])
-        self.assertEqual(len(batch["advantage"]), batch["shifted_labels"].numel() + 1)
+        self.assertEqual(batch["advantage"], [0.0, 0.0, 1.5, 0.0, 1.5])
+        self.assertEqual(len(batch["advantage"]), batch["shifted_labels"].numel())
         self.assertIs(batch["seq_ctx"].rollout_routed_experts, routed_experts)
         self.assertEqual(info["training_samples"], 1)
         self.assertEqual(info["training_tokens"], 5)
@@ -120,8 +118,8 @@ class TestPrepareTrainData(unittest.TestCase):
         data_batches, info = self._prepare(trainer, [[first, second]])
 
         self.assertEqual(len(data_batches), 2)
-        self.assertEqual(data_batches[0]["advantage"], [1.5, 1.5, 1.5, 1.5, 1.5])
-        self.assertEqual(data_batches[1]["advantage"], [-2.0, -2.0, -2.0, -2.0, -2.0])
+        self.assertEqual(data_batches[0]["advantage"], [0.0, 0.0, 1.5, 1.5])
+        self.assertEqual(data_batches[1]["advantage"], [0.0, 0.0, -2.0, -2.0])
         self.assertEqual(info["batch_size"], 2)
         self.assertEqual(info["rewards/min"], -1.0)
         self.assertEqual(info["rewards/max"], 3.0)
