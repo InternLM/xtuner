@@ -892,7 +892,10 @@ class BaseRLTrainer:
         self.logger.info("Release all sessions and free associated resources")
         ray.get(store.release_all.remote())
         keys = ray.get(store.list_sessions.remote())
-        assert len(keys) == 0, f"Store Keys not released: {keys}"
+        # NOTE: previously asserted ``len(keys) == 0`` here, but a leftover session key should not crash the whole
+        # fit() at teardown. Warn instead so the leak stays visible without aborting the run.
+        if keys:
+            self.logger.warning(f"Trace store keys not released after release_all: {keys}")
 
     def _train_one_batch(
         self,
