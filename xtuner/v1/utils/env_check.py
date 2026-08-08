@@ -2,7 +2,6 @@ import os
 import subprocess
 from typing import Any, Callable, List
 
-
 def check_torch_accelerator_available():
     """Check if PyTorch is installed and the torch accelerator is available.
 
@@ -16,20 +15,23 @@ def check_torch_accelerator_available():
     except Exception:
         return False
 
-
 def check_triton_available():
     """Check if Triton is installed.
 
     Returns:
         bool: True if Triton is installed, False otherwise.
     """
+    import os
+
+    if os.environ.get("XTUNER_USE_TRITON", "1") == "0":
+        return False
+
     try:
         import triton  # noqa: F401
 
         return True
     except ImportError:
         return False
-
 
 def get_env_not_available_func(env_name_list: List[str]) -> Callable:
     """Get a function that raises an error indicating the environment is not
@@ -43,7 +45,6 @@ def get_env_not_available_func(env_name_list: List[str]) -> Callable:
         raise RuntimeError(f"{' or '.join(env_name_list)} in environment is not available.")
 
     return env_not_available_func
-
 
 def get_rollout_engine_version() -> dict:
     if os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1":
