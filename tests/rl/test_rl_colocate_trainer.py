@@ -123,6 +123,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer._enable_evaluate = False
         trainer._enable_initial_evaluate = False
         trainer._evaluate_step = 1
+        trainer._hf_export_executor = None
         trainer._cpu_resource_manager = None
         trainer._train_worker_cfg = SimpleNamespace(pack_max_length=16)
         trainer._meta = SimpleNamespace(

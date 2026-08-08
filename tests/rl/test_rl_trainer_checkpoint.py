@@ -101,7 +101,7 @@ class _FakeRolloutController:
         self.continue_generation = _RemoteMethod(async_result=True)
         self.offload = _RemoteMethod(return_value="rollout_offloaded")
         self.check_and_shutdown_inactive_workers = _RemoteMethod(return_value="rollout_inactive_workers_shutdown")
-        self.restart_inactive_workers = _RemoteMethod(return_value="rollout_restarted")
+        self.restart_inactive_workers = _RemoteMethod(return_value=_AwaitableValue(None))
         self.onload_weights = _RemoteMethod(return_value="weights_loaded")
         self.onload_kvcache = _RemoteMethod(return_value="kvcache_loaded")
         self.get_weight_update_targets = _RemoteMethod(return_value=())

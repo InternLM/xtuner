@@ -1253,13 +1253,10 @@ class TestRolloutHealthManager(unittest.TestCase):
         manager._check_interval = 0.01
         manager._pause_event = threading.Event()
 
-        class _FakeStopEvent:
+        class _FakeWakeupEvent:
             def __init__(self):
                 self.wait_calls = []
                 self._paused_once = False
-
-            def is_set(self):
-                return False
 
             def wait(self, timeout=None):
                 self.wait_calls.append(timeout)
@@ -1270,11 +1267,14 @@ class TestRolloutHealthManager(unittest.TestCase):
                     manager._pause_event.clear()
                 return False
 
-        stop_event = _FakeStopEvent()
-        manager._stop_event = stop_event
+            def clear(self):
+                return None
+
+        wakeup_event = _FakeWakeupEvent()
+        manager._health_loop_wakeup_event = wakeup_event
 
         self.assertTrue(manager._wait_until_next_check())
-        self.assertEqual(stop_event.wait_calls, [manager._check_interval, 0.5, manager._check_interval])
+        self.assertEqual(wakeup_event.wait_calls, [manager._check_interval, 0.5])
 
     def test_shutdown_barrier_keeps_failed_shutdown_group_inactive(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
@@ -1349,7 +1349,8 @@ class TestRolloutHealthManager(unittest.TestCase):
         )
         manager, registry = self._build_manager({0: worker_info})
 
-        def stop_after_restart(groups):
+        def stop_after_restart(groups, *, ready_recovery_hf):
+            self.assertIsNone(ready_recovery_hf)
             manager._stop_event.set()
             return {group.ranks: False for group in groups}
 
@@ -1395,12 +1396,10 @@ class TestRolloutHealthManager(unittest.TestCase):
             session_url="http://session-0",
         )
         actor = SimpleNamespace(
-            set_skip_load_weights=_FakeAsyncRemoteMethod(None),
             init=_FakeAsyncRemoteMethod(init_result),
             reinit=_FakeAsyncRemoteMethod(init_result),
             check_health=_FakeAsyncRemoteMethod(True),
             offload=_FakeAsyncRemoteMethod(None),
-            restore_skip_load_weights=_FakeAsyncRemoteMethod(None),
         )
         worker_info = WorkerSnapshot(
             rank=0,
@@ -1419,16 +1418,22 @@ class TestRolloutHealthManager(unittest.TestCase):
         with (
             patch.object(manager, "_shutdown_worker_group", return_value=True),
             patch("xtuner.v1.rl.rollout.health_manager.ray.get", side_effect=fake_ray_get),
+            patch("xtuner.v1.rl.rollout.health_manager.logger.info") as log_info,
         ):
-            result = manager._restart_worker_group(group)
+            result = manager._restart_worker_group(group, ready_recovery_hf=None)
 
         self.assertTrue(result)
-        self.assertEqual(actor.set_skip_load_weights.calls, [(True,)])
-        self.assertEqual(actor.reinit.calls, [()])
+        self.assertEqual(actor.reinit.calls, [((), {"skip_load_weights": True})])
         self.assertEqual(actor.init.calls, [])
         self.assertEqual(actor.check_health.calls, [()])
         self.assertEqual(actor.offload.calls, [()])
-        self.assertEqual(actor.restore_skip_load_weights.calls, [()])
+        self.assertTrue(
+            any(
+                "without ready recovery HF" in call.args[0]
+                and "recovery will complete through the next weight update" in call.args[0]
+                for call in log_info.call_args_list
+            )
+        )
 
     def test_recovered_listener_runs_outside_lifecycle_operation_lock(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
