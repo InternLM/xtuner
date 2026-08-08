@@ -276,6 +276,14 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             indexer_backend=self.sparse_mla_backend,
         )
 
+    def get_muon_split_sizes(self) -> dict[nn.Parameter, tuple[int, ...]]:
+        """Return the logical row blocks used by GLM MuonSplit."""
+        return {
+            self.q_b_proj.weight: (self.qk_nope_head_dim, self.qk_rope_head_dim) * self.num_attention_heads,
+            self.kv_a_proj_with_mqa.weight: (self.kv_lora_rank, self.qk_rope_head_dim),
+            self.kv_b_proj.weight: (self.qk_nope_head_dim, self.v_head_dim) * self.num_attention_heads,
+        }
+
     def forward(
         self,
         hidden_states: torch.Tensor,

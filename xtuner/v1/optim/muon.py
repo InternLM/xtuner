@@ -24,6 +24,7 @@
 
 import math
 from collections import defaultdict
+from functools import partial
 from itertools import chain, product
 from typing import Callable, Generator, Iterator, Literal, Sequence, cast, overload
 
@@ -43,7 +44,11 @@ def maybe_to_local(tensor: list[Tensor]) -> list[Tensor]:
     return [t.to_local() if isinstance(t, DTensor) else t for t in tensor]
 
 
-def create_param_batches(params: Sequence[Tensor], batch_size: int) -> Generator[list[Tensor], None, None]:
+def create_param_batches(
+    params: Sequence[Tensor],
+    batch_size: int,
+    extra_group_key: Callable[[Tensor], object] | None = None,
+) -> Generator[list[Tensor], None, None]:
     """Batch parameters into groups of size `batch_size`.
 
     Tensors in each batch will have identical shape, sharding, and dtype.
@@ -52,13 +57,26 @@ def create_param_batches(params: Sequence[Tensor], batch_size: int) -> Generator
     groups = defaultdict(list)
     for p in params:
         sharding = p.placements if isinstance(p, DTensor) else None
-        groups[(p.shape, sharding, p.dtype)].append(p)
+        extra_key = extra_group_key(p) if extra_group_key is not None else None
+        groups[(p.shape, sharding, p.dtype, extra_key)].append(p)
 
     # Create batches from grouped parameters
     for group in groups.values():
         for i in range(0, len(group), batch_size):
             batch = group[i : i + batch_size]
             yield batch
+
+
+def _get_muon_lr_ratio(
+    fan_out: int,
+    fan_in: int,
+    adjust_lr: Literal["rms_norm", "spectral_norm", "none"],
+) -> float:
+    if adjust_lr == "none":
+        return 1.0
+    if adjust_lr == "spectral_norm":
+        return math.sqrt(fan_out / fan_in)
+    return 0.2 * math.sqrt(max(fan_out, fan_in))
 
 
 def pad_batch(batch: list[Tensor], batch_size: int) -> list[Tensor]:
@@ -275,6 +293,8 @@ class Muon(Optimizer):
         remainder_strategy (str): Communication strategy for parameter batches smaller than world size.
             ``"agrs"`` uses all-gather + reduce-scatter without batch padding. ``"pad_all2all"`` restores
             the original FSDP2 Muon behavior by zero-padding the batch to world size and using all-to-all.
+        muon_split_sizes (dict[Tensor, tuple[int, ...]] | None): Logical row blocks that Muon should
+            orthogonalize and scale independently. Used by GLM MuonSplit attention projections.
 
     Muon optimizer algorithm by Keller Jordan: https://kellerjordan.github.io/posts/muon/
     FSDP2 Muon uses all-to-all communications: https://www.essential.ai/blog/infra
@@ -295,6 +315,7 @@ class Muon(Optimizer):
         newton_schulz_func: Callable | None = None,
         enable_all2all: bool = True,
         remainder_strategy: Literal["agrs", "pad_all2all"] = "agrs",
+        muon_split_sizes: dict[Tensor, tuple[int, ...]] | None = None,
     ):
         # Check hyperparameters
         if lr < 0.0:
@@ -328,6 +349,7 @@ class Muon(Optimizer):
         super().__init__(params, defaults)
         self._enable_all2all = enable_all2all
         self._remainder_strategy = remainder_strategy
+        self._muon_split_sizes = muon_split_sizes or {}
 
         # Pre-compute lr adjustment ratios for each Muon parameter based on global shape.
         # This must happen at init time because DTensor.shape here is guaranteed to be
@@ -340,16 +362,18 @@ class Muon(Optimizer):
             ne = group.get("num_experts", 1)
             for p in group["params"]:
                 state = self.state[p]
-                if adj == "none":
+                split_sizes = self._muon_split_sizes.get(p)
+                if split_sizes is not None:
+                    if p.ndim != 2 or ne != 1:
+                        raise ValueError("MuonSplit only supports regular 2D Muon parameters.")
+                    if not split_sizes or any(size <= 0 for size in split_sizes):
+                        raise ValueError(f"Invalid MuonSplit sizes: {split_sizes}")
+                    if sum(split_sizes) > p.shape[-2]:
+                        raise ValueError(f"MuonSplit sizes {split_sizes} exceed parameter shape {tuple(p.shape)}")
+                    # Each logical block applies its own ratio inside the orthogonalization callback.
                     state["lr_ratio"] = 1.0
-                elif adj == "spectral_norm":
-                    fan_out = p.shape[-2] // ne
-                    fan_in = p.shape[-1]
-                    state["lr_ratio"] = math.sqrt(fan_out / fan_in)
-                elif adj == "rms_norm":
-                    A = p.shape[-2] // ne
-                    B = p.shape[-1]
-                    state["lr_ratio"] = 0.2 * math.sqrt(max(A, B))
+                else:
+                    state["lr_ratio"] = _get_muon_lr_ratio(p.shape[-2] // ne, p.shape[-1], adj)
 
         # Newton-Schulz configuration
         if newton_schulz_func is not None:
@@ -664,15 +688,30 @@ class Muon(Optimizer):
                 group_world_size = group_process_group.size() if group_process_group is not None else 1
 
                 # Create batches within this mesh group
-                for params in create_param_batches(mesh_params, batch_size=group_world_size):
+                for params in create_param_batches(
+                    mesh_params,
+                    batch_size=group_world_size,
+                    extra_group_key=self._muon_split_sizes.get,
+                ):
                     gradients: list[Tensor] = [g for p in params if (g := p.grad) is not None]
                     assert len(gradients) == len(params), "Some gradients became None after filtering"
 
                     states = [self._get_or_initialize_state(p, algo_name) for p in params]
 
                     momentums = [s["momentum"] for s in states]
-                    lr_ratios = [s["lr_ratio"] for s in states]
+                    lr_ratios = [1.0 if p in self._muon_split_sizes else s["lr_ratio"] for p, s in zip(params, states)]
                     assert len(set(lr_ratios)) == 1, f"Found different lr_ratios: {set(lr_ratios)}"
+
+                    split_sizes = self._muon_split_sizes.get(params[0])
+                    assert all(self._muon_split_sizes.get(p) == split_sizes for p in params)
+                    newton_schulz_func = self._newton_schulz_func
+                    if split_sizes is not None:
+                        newton_schulz_func = partial(
+                            _muonsplit_newton_schulz,
+                            newton_schulz_func=self._newton_schulz_func,
+                            split_sizes=split_sizes,
+                            adjust_lr=group["adjust_lr"],
+                        )
 
                     is_remainder = len(params) < group_world_size
                     # When all-to-all is disabled, every sharded batch uses AGRS. Otherwise remainder
@@ -698,7 +737,7 @@ class Muon(Optimizer):
                                 epsilon=epsilon,
                                 nesterov=nesterov,
                                 flatten=flatten,
-                                newton_schulz_func=self._newton_schulz_func,
+                                newton_schulz_func=newton_schulz_func,
                                 comm_strategy="agrs",
                                 shard_dim=sharded_tensor_dim,
                                 process_group=group_process_group,
@@ -735,7 +774,7 @@ class Muon(Optimizer):
                                 epsilon=epsilon,
                                 nesterov=nesterov,
                                 flatten=flatten,
-                                newton_schulz_func=self._newton_schulz_func,
+                                newton_schulz_func=newton_schulz_func,
                                 comm_strategy=comm_strategy,
                                 shard_dim=sharded_tensor_dim,
                                 process_group=comm_pg,
@@ -1423,6 +1462,45 @@ def muon_update_newton_schulz(
         X = X.flatten(end_dim=-3)
 
     return newton_schulz_func(X, epsilon=epsilon, num_experts=num_experts).reshape(original_shape)
+
+
+def _muonsplit_newton_schulz(
+    X: Tensor,
+    epsilon: float | Tensor,
+    num_experts: int,
+    *,
+    newton_schulz_func: Callable,
+    split_sizes: tuple[int, ...],
+    adjust_lr: Literal["rms_norm", "spectral_norm", "none"],
+) -> Tensor:
+    """Orthogonalize and scale unequal logical row blocks independently."""
+    if X.ndim != 2 or num_experts != 1:
+        raise ValueError(f"MuonSplit expects one 2D matrix, got shape={tuple(X.shape)}, num_experts={num_experts}")
+
+    logical_rows = sum(split_sizes)
+    if logical_rows > X.size(-2):
+        raise ValueError(f"MuonSplit sizes {split_sizes} exceed input shape {tuple(X.shape)}")
+
+    chunks = X.narrow(-2, 0, logical_rows).split(split_sizes, dim=-2)
+    chunks_by_size: dict[int, list[tuple[int, Tensor]]] = defaultdict(list)
+    for index, (size, chunk) in enumerate(zip(split_sizes, chunks)):
+        chunks_by_size[size].append((index, chunk))
+
+    results: dict[int, Tensor] = {}
+    for size, indexed_chunks in chunks_by_size.items():
+        batch = torch.cat([chunk for _, chunk in indexed_chunks], dim=-2)
+        batch = newton_schulz_func(batch, epsilon=epsilon, num_experts=len(indexed_chunks))
+        lr_ratio = _get_muon_lr_ratio(size, X.size(-1), adjust_lr)
+        if lr_ratio != 1.0:
+            batch.mul_(lr_ratio)
+        for (index, _), result in zip(indexed_chunks, batch.split(size, dim=-2)):
+            results[index] = result
+
+    output = torch.cat([results[index] for index in range(len(split_sizes))], dim=-2)
+    if logical_rows < X.size(-2):
+        padding = torch.zeros_like(X.narrow(-2, logical_rows, X.size(-2) - logical_rows))
+        output = torch.cat([output, padding], dim=-2)
+    return output
 
 
 def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7, num_experts: int = 1):
