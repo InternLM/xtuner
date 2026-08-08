@@ -39,6 +39,7 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BaseLossContext, CELossConfig, LogProbConfig
 from xtuner.v1.loss.ce_loss import CELossContext, LMHeadLossContext
 from xtuner.v1.loss.mtp_loss import MTPLossConfig, MTPLossContext
+from xtuner.v1.model.adapter.lora import LoraConfig
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
@@ -140,6 +141,7 @@ class WorkerConfig(BaseModel):
     loss_cfg: BaseRLLossConfig
     lr_cfg: LRConfig
     fsdp_cfg: FSDPConfig
+    adapter_cfg: LoraConfig | None = None
     load_from: str | Path  # TODO: 把 actor 和 ref 配置分离
     optimizer_steps: int = 1
     sp_size: int = 1
@@ -370,6 +372,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             optim_cfg=worker_cfg.optim_cfg,
             fsdp_cfg=worker_cfg.fsdp_cfg,
             model_cfg=worker_cfg.model_cfg,
+            adapter_cfg=worker_cfg.adapter_cfg,
         )
         if worker_cfg.load_from is not None:
             engine.from_hf(worker_cfg.load_from)
