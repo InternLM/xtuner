@@ -30,6 +30,7 @@ def _build_dense_dsa_layer() -> DenseDecoderLayer:
             index_head_dim=4,
             index_n_heads=2,
             indexer_types=["full"],
+            indexer_backend="torch",
             sparse_mla_backend="torch",
         ),
     )

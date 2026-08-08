@@ -1,9 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import importlib.util
+
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
 
-from .protocol import DSATopKIndicesProtocol, SparseMLABackend, SparseMLAOutputs, SparseMLAProtocol
+from .protocol import DSAIndexerBackend, DSATopKIndicesProtocol, SparseMLABackend, SparseMLAOutputs, SparseMLAProtocol
 from .pytorch import torch_dsa_topk_indices, torch_sparse_mla
 
 
@@ -32,13 +34,18 @@ def sparse_mla(
     return get_sparse_mla(backend)(q, kv, indices, scaling=scaling, value_dim=value_dim)
 
 
-def get_dsa_topk_indices(backend: SparseMLABackend) -> DSATopKIndicesProtocol:
+def get_dsa_topk_indices(backend: DSAIndexerBackend) -> DSATopKIndicesProtocol:
     if backend == "torch":
         return torch_dsa_topk_indices
-    if backend in ("tilelang", "cudnn_dsa"):
+    if backend == "tilelang":
         from .tilelang import tilelang_dsa_topk_indices
 
         return tilelang_dsa_topk_indices
+    if backend == "cute_dsl":
+        ensure_cute_dsl_runtime_available()
+        from .cute_dsl_indexer_topk import cute_dsl_dsa_topk_indices
+
+        return cute_dsl_dsa_topk_indices
     raise ValueError(f"Unsupported DSA indexer backend: {backend}")
 
 
@@ -50,7 +57,7 @@ def dsa_topk_indices(
     *,
     index_head_dim: int,
     index_topk: int,
-    backend: SparseMLABackend = "torch",
+    backend: DSAIndexerBackend = "torch",
 ) -> torch.Tensor:
     return get_dsa_topk_indices(backend)(
         q,
@@ -74,6 +81,14 @@ def ensure_cudnn_dsa_runtime_available() -> None:
     return _impl()
 
 
+def ensure_cute_dsl_runtime_available() -> None:
+    if importlib.util.find_spec("cutlass") is None:
+        raise RuntimeError("CuTe DSL DSA indexer requires nvidia-cutlass-dsl; install XTuner with the 'cute' extra.")
+    from .cute_dsl_indexer_topk import ensure_cute_dsl_runtime_available as _impl
+
+    return _impl()
+
+
 def sparse_mla_fwd_interface(*args, **kwargs):
     from .tilelang_sparse_mla_fwd import sparse_mla_fwd_interface as _impl
 
@@ -93,12 +108,14 @@ def indexer_fwd_interface(*args, **kwargs):
 
 
 __all__ = [
+    "DSAIndexerBackend",
     "DSATopKIndicesProtocol",
     "SparseMLABackend",
     "SparseMLAOutputs",
     "SparseMLAProtocol",
     "dsa_topk_indices",
     "ensure_cudnn_dsa_runtime_available",
+    "ensure_cute_dsl_runtime_available",
     "ensure_tilelang_runtime_available",
     "get_dsa_topk_indices",
     "get_sparse_mla",

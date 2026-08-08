@@ -11,9 +11,12 @@ from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
 from xtuner.v1.ops.sparse_mla import (
+    DSAIndexerBackend,
     DSATopKIndicesProtocol,
+    SparseMLABackend,
     SparseMLAProtocol,
     ensure_cudnn_dsa_runtime_available,
+    ensure_cute_dsl_runtime_available,
     ensure_tilelang_runtime_available,
     get_dsa_topk_indices,
     get_sparse_mla,
@@ -67,7 +70,7 @@ class DSAIndexer(nn.Module):
         index_head_dim: int,
         index_n_heads: int,
         index_topk: int,
-        indexer_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch",
+        indexer_backend: DSAIndexerBackend = "tilelang",
     ):
         super().__init__()
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -175,7 +178,8 @@ class DSAMLAConfig(MLAConfig):
     index_skip_topk_offset: int = 0
     indexer_rope_interleave: bool = True
     indexer_types: list[str] | None = None
-    sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch"
+    indexer_backend: DSAIndexerBackend = "tilelang"
+    sparse_mla_backend: SparseMLABackend = "torch"
 
     def build(
         self,
@@ -186,8 +190,10 @@ class DSAMLAConfig(MLAConfig):
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
     ) -> "DSAMultiLatentAttention":
-        if self.sparse_mla_backend in ("tilelang", "cudnn_dsa"):
+        if self.indexer_backend == "tilelang" or self.sparse_mla_backend in ("tilelang", "cudnn_dsa"):
             ensure_tilelang_runtime_available()
+        if self.indexer_backend == "cute_dsl":
+            ensure_cute_dsl_runtime_available()
         if self.sparse_mla_backend == "cudnn_dsa":
             ensure_cudnn_dsa_runtime_available()
 
@@ -213,7 +219,8 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         index_skip_topk_offset: int = 0,
         indexer_rope_interleave: bool = True,
         indexer_types: list[str] | None = None,
-        sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch",
+        indexer_backend: DSAIndexerBackend = "tilelang",
+        sparse_mla_backend: SparseMLABackend = "torch",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -239,6 +246,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         self.index_skip_topk_offset = index_skip_topk_offset
         self.indexer_rope_interleave = indexer_rope_interleave
         self.indexer_types = indexer_types
+        self.indexer_backend = indexer_backend
         self.sparse_mla_backend = sparse_mla_backend
         self.sparse_mla_func: SparseMLAProtocol = get_sparse_mla(sparse_mla_backend)
         if indexer_types is None:
@@ -273,7 +281,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             index_head_dim=self.index_head_dim,
             index_n_heads=self.index_n_heads,
             index_topk=self.index_topk,
-            indexer_backend=self.sparse_mla_backend,
+            indexer_backend=self.indexer_backend,
         )
 
     def forward(
