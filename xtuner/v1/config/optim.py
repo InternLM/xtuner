@@ -83,6 +83,12 @@ class MuonConfig(OptimConfig):
         trainable_parameters_names = model.trainable_parameters()
         trainable_names = {name for name, _ in trainable_parameters_names}
 
+        muon_split_sizes = {}
+        for module in model.modules():
+            get_muon_split_sizes = getattr(module, "get_muon_split_sizes", None)
+            if callable(get_muon_split_sizes):
+                muon_split_sizes.update(get_muon_split_sizes())
+
         untrainable_names = []
         num_total = 0
         num_total_requires_grad = 0
@@ -201,6 +207,7 @@ class MuonConfig(OptimConfig):
             use_triton=False,
             epsilon=self.eps,
             enable_all2all=self.enable_all2all,
+            muon_split_sizes=muon_split_sizes,
         )
 
         return optimizer

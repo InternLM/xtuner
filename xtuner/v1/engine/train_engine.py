@@ -257,11 +257,28 @@ class TrainEngine:
     def clip_grad_norm(self, do_clip: bool = True, dtype=torch.float32):
         ProberList.before_clip_grad_norm(self.model)
         self.model.scale_and_reduce_grad()
+
         params = self.model.trainable_parameters()
         grads = [p.grad for _, p in params if p.grad is not None]
         grad_norm, grouped_grads = cal_grad_norm(grads, dtype=dtype)
+
         if do_clip:
-            clip_coef = self.optim_cfg.max_grad_norm / (grad_norm + 1e-6)
+            if any(group.get("algorithm") == "muon" for group in self.optimizer.param_groups):
+                clip_params = (
+                    p
+                    for group in self.optimizer.param_groups
+                    if group.get("algorithm") != "muon"
+                    for p in group["params"]
+                )
+                clip_grads = [p.grad for p in clip_params if p.grad is not None]
+                if clip_grads:
+                    clip_grad_norm, grouped_grads = cal_grad_norm(clip_grads, dtype=dtype)
+                else:
+                    clip_grad_norm = torch.zeros((), device=DEVICE, dtype=dtype)
+                    grouped_grads = {}
+            else:
+                clip_grad_norm = grad_norm
+            clip_coef = self.optim_cfg.max_grad_norm / (clip_grad_norm + 1e-6)
             clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
             for grads in grouped_grads.values():
                 device = grads[0].device
