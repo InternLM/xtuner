@@ -5,12 +5,13 @@ import parametrize
 import torch
 from torch.testing._internal.common_distributed import DistributedTestBase
 import torch.distributed as dist
-from transformers import  AutoTokenizer
+# Import concrete symbols only. Third-party parametrize scans global module
+# dictionaries, which can mutate while Transformers resolves lazy imports.
+from transformers import AutoTokenizer
 import tempfile
 from pathlib import Path
 from safetensors import safe_open
 from unittest import skipIf
-import transformers
 from packaging import version
 
 from xtuner.v1.data_proto import SequenceContext
