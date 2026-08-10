@@ -4,7 +4,7 @@ import shutil
 import time
 from pathlib import Path
 
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 import torch
 import torch.distributed as dist
 from xtuner._testing import DeterministicDDPTestCase
@@ -29,9 +29,10 @@ QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 DEVICE = get_device()
 
 
+@instantiate_parametrized_tests
 class TestMoEEngineFloat8(DeterministicDDPTestCase):
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,ep_size,hsdp_sharding_size,sim_tol,rtol",
         [
             ("cuda", 1, int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8")), 0.01, 0.01),
@@ -116,7 +117,7 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         except:
             pass
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,ep_size,hsdp_sharding_size",
         [
             ("cuda", 1, int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8"))),  # todo: test ep8 and hsdp, OOM in 8 gpus
@@ -195,7 +196,7 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         except:
             pass
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,ep_size,hsdp_sharding_size",
         [
             ("cuda", 1, int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8"))),  # todo: test ep8 and hsdp, OOM in 8 gpus
@@ -295,7 +296,7 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         except:
             pass
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,ep_size",
         [
             ("cuda", 1),
@@ -399,9 +400,10 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         return False
 
 
+@instantiate_parametrized_tests
 class TestMoEEngineFloat8Case2(DeterministicDDPTestCase):
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,ep_size,hsdp_sharding_size",
         [
             ("cuda", 1, int(os.getenv("XTUNER_TEST_WORLD_SIZE", "6"))),  # todo: test ep8 and hsdp, OOM in 8 gpus

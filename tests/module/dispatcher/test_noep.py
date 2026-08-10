@@ -2,13 +2,14 @@ from unittest import TestCase
 
 import torch
 from xtuner.v1.module.dispatcher.base import NaiveDispatcher
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 
 
 def mock_experts(hidden_states: torch.Tensor, tokens_per_exprts: torch.Tensor):
     return hidden_states
 
 
+@instantiate_parametrized_tests
 class TestNoEPDispatcher(TestCase):
     def setUp(self):
         n_routed_experts = 4
@@ -16,7 +17,7 @@ class TestNoEPDispatcher(TestCase):
             n_routed_experts=n_routed_experts,
         )
 
-    @parametrize.parametrize("dtype,device", [(torch.bfloat16, "cuda")])
+    @parametrize("dtype,device", [(torch.bfloat16, "cuda")])
     def test_dispatch_and_combine(self, dtype, device):
         # seq len 16, hidden size 4
         # [0, 1, 2, 3]

@@ -1,7 +1,7 @@
 from unittest import TestCase
 import random
 import os
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 
 from torch.testing._internal.common_distributed import DistributedTestBase
 import torch
@@ -13,9 +13,10 @@ from xtuner.v1.rl.utils import gather_logprobs
 from xtuner.v1.utils.test_utils import init_data_mesh
 
 
+@instantiate_parametrized_tests
 class TestGRPOLoss(DistributedTestBase):
     
-    @parametrize.parametrize(
+    @parametrize(
         "grad_acc, sp_size, kl_loss_coef, loss_mode, chunk_size, atol, rtol",
         [
             (1, 1, 0, "eager", None, 1e-4, 1e-4),

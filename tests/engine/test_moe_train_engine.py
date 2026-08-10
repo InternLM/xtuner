@@ -4,7 +4,7 @@ import tempfile
 import shutil
 import time
 from torch.distributed.device_mesh import init_device_mesh
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
@@ -33,8 +33,9 @@ QWEN3_MOE_FOPE_PATH = os.environ["QWEN3_MOE_FOPE_PATH"]
 DEVICE = get_device()
 
 
+@instantiate_parametrized_tests
 class TestMoEEngine(DeterministicDDPTestCase):
-    @parametrize.parametrize(
+    @parametrize(
         "device,ep_size,sp_size",
         [
             ("cuda", 1, 1),
@@ -115,7 +116,7 @@ class TestMoEEngine(DeterministicDDPTestCase):
         except:
             pass
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,ep_size,sp_size",
         [
             ("cuda", 1, 1),
@@ -212,7 +213,7 @@ class TestMoEEngine(DeterministicDDPTestCase):
         except:
             pass
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,ep_size,hsdp_sharding_size",
         [
             ("cuda", 1, 8),  # todo: test ep8 and hsdp, OOM in 8 gpus
@@ -281,7 +282,7 @@ class TestMoEEngine(DeterministicDDPTestCase):
         except:
             pass
     
-    @parametrize.parametrize(
+    @parametrize(
         "device,dispatcher,ep_size,load_from_type",
         [
             ("cuda", None, 1, "qwen3"),
@@ -363,10 +364,10 @@ class TestMoEEngine(DeterministicDDPTestCase):
         except:
             pass
     
-    @parametrize.parametrize(
+    @parametrize(
         "device",
         [
-            ("cuda",),
+            "cuda",
         ],
     )
     def test_load_optimizer_with_new_lr(self, device):

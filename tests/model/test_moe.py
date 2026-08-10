@@ -9,11 +9,12 @@ from xtuner.v1.loss.ce_loss import CELossContext, CELossConfig
 
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.utils.compile import maybe_compile
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 
 
+@instantiate_parametrized_tests
 class TestMoE:
-    @parametrize.parametrize("dtype,device", [(torch.bfloat16, "cuda")])
+    @parametrize("dtype,device", [(torch.bfloat16, "cuda")])
     def test_moe_config(self, dtype, device):
         router_config = NoAuxRouterConfig(
             scoring_func="sigmoid",
@@ -70,8 +71,9 @@ class TestMoE:
         model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
 
 
+@instantiate_parametrized_tests
 class TestDistributedMoE(DeterministicDDPTestCase):
-    @parametrize.parametrize(
+    @parametrize(
         "dtype,device,dispatcher,n_shared_experts,first_k_dense_replace",
         [
             # (torch.bfloat16, "cuda", "deepep", 1, 2),

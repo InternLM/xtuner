@@ -8,7 +8,7 @@ from torch.testing._internal.common_distributed import DistributedTestBase
 from xtuner.v1.module.dispatcher.deepep import DeepEPDispatcher
 from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.module.dispatcher.base import NaiveDispatcher, GenericDispatcher
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 
 
 import os
@@ -18,8 +18,9 @@ def mock_experts(hidden_states: torch.Tensor, tokens_per_exprts: torch.Tensor):
     return hidden_states
 
 
+@instantiate_parametrized_tests
 class TestMoETorchAll2AllDispatcher(DistributedTestBase):
-    @parametrize.parametrize(
+    @parametrize(
         "dtype,device,async_op",
         [
             (torch.bfloat16, "cuda", False),

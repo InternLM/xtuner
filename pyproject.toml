@@ -89,7 +89,6 @@ all = [
   "fastapi",
   "uvicorn",
   "liger-kernel",
-  "parametrize",
   "mathruler",
   "pylatexenc",
   "flash-linear-attention==0.4.2"

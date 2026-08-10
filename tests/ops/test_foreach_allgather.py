@@ -4,13 +4,14 @@ import torch
 import torch.distributed as dist
 import os
 
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 import time
 
 
+@instantiate_parametrized_tests
 class TestMoETorchAll2AllDispatcher(DistributedTestBase):
-    @parametrize.parametrize("device", [("cuda",)])
+    @parametrize("device", ["cuda"])
     def test_foreach_all_gather_acc(self, device):
         self.create_pg(device)
 
@@ -35,7 +36,7 @@ class TestMoETorchAll2AllDispatcher(DistributedTestBase):
             for x, y in zip(a, b):
                 self.assertTrue(torch.equal(x, y))
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,shape",
         [
             ("cuda", (1,)),

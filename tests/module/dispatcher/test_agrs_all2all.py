@@ -3,7 +3,7 @@ import torch
 from torch.testing._internal.common_distributed import DistributedTestBase
 from xtuner.v1.module.dispatcher.base import NaiveDispatcher, DispacherInterface
 from xtuner.v1.module.dispatcher.torch_all2all import TorchAll2AllDispatcher
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 from xtuner.v1.module.dispatcher.agrs import MoEAGRSDispatcher
 from xtuner.v1.module.router.greedy import GreedyGroupedRouter
 
@@ -18,8 +18,9 @@ def mock_experts(hidden_states: torch.Tensor, tokens_per_exprts: torch.Tensor):
     return hidden_states
 
 
+@instantiate_parametrized_tests
 class TestNoETorchAll2AllDispatcher(DistributedTestBase):
-    @parametrize.parametrize("dtype,device", [(torch.bfloat16, "cuda")])
+    @parametrize("dtype,device", [(torch.bfloat16, "cuda")])
     # @unittest.skipIf(True, "none")
     def test_dispatch_and_combine(self, dtype, device):
         self.create_pg(device)

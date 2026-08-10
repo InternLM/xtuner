@@ -1,6 +1,6 @@
 import os
 from packaging import version
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 import torch
 from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase, patch_hf_rope
 from transformers import AutoTokenizer, AutoModelForImageTextToText
@@ -24,6 +24,7 @@ QWEN3_VL_DENSE_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
 VIDEO_ROOT = os.environ["VIDEO_ROOT"]
 
 
+@instantiate_parametrized_tests
 class TestQwen3VL(DeterministicDDPTestCase):
 
     # 在没有 sp 情况下，可以实现和 hf loss 完全一致
@@ -155,7 +156,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,sp_size,tol",
         [
             ("cuda", 1, 1e-2),
@@ -187,7 +188,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         self._test_all(hf_model, qwen3vl_model, 'video', device, sp_size, tol)
 
     # TODO: sp+ compile
-    @parametrize.parametrize(
+    @parametrize(
         "device,sp_size,compile,tol",
         [
             ("cuda", 1, False, 1e-2),
@@ -225,7 +226,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         self._test_all(hf_model, qwen3vl_model, 'image', device, sp_size, tol)
         self._test_all(hf_model, qwen3vl_model, 'video', device, sp_size, tol)
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,tp_size",
         [
             ("cuda", 1),

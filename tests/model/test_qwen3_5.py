@@ -1,6 +1,6 @@
 import os
 import unittest
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 import torch
 from packaging.version import Version
 from transformers import __version__ as transformers_version
@@ -30,11 +30,18 @@ VIDEO_ROOT = os.environ["VIDEO_ROOT"]
     Version(transformers_version) < Version("5.2.0"),
     f"transformers >= 5.2.0 is required, but got {transformers_version}"
 )
+@instantiate_parametrized_tests
 class TestQwen3_5_VL(DeterministicDDPTestCase):
     def _patch_xtuner_fast_pos_embed_interpolate(self) -> None:
         from xtuner.v1.model.compose.qwen3_vl.modeling_vision import Qwen3VLVisionModel
         from transformers.models.qwen3_5_moe import Qwen3_5MoeVisionModel
-        Qwen3VLVisionModel.fast_pos_embed_interpolate = Qwen3_5MoeVisionModel.fast_pos_embed_interpolate
+
+        # Transformers returns interpolation weights in fp32, while XTuner's vision forward expects
+        # positional embeddings to keep the model dtype before entering LayerNorm.
+        def _interp(self, grid_thw):
+            return Qwen3_5MoeVisionModel.fast_pos_embed_interpolate(self, grid_thw).to(self.pos_embed.weight.dtype)
+
+        Qwen3VLVisionModel.fast_pos_embed_interpolate = _interp
 
     def _forward(self, model, type, device, sp_size):
         QWEN3_VL_MOE_PATH = os.environ["QWEN3_5_MOE_PATH"]
@@ -168,7 +175,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
             loss = output["loss"]
             return loss
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,sp_size,tol",
         [
             ("cuda", 1, 2e-2),
@@ -244,7 +251,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         self.assertTrue(torch.allclose(loss_xtuner_image_fsdp, loss_xtuner_image, atol=tol, rtol=tol))
         self.assertTrue(torch.allclose(loss_xtuner_video_fsdp, loss_xtuner_video, atol=tol, rtol=tol))
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,sp_size,tol",
         [
             ("cuda", 1, 1e-2),
@@ -305,7 +312,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
             )
 
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,sp_size",
         [
             ("cuda", 1),

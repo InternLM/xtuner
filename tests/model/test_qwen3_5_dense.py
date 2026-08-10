@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 import torch
 import torch.distributed as dist
 from packaging.version import Version
@@ -27,8 +27,9 @@ QWEN3_5_DENSE_4B_PATH = os.environ["QWEN3_5_DENSE_4B_PATH"]
     Version(transformers_version) < Version("5.9.0"),
     f"transformers >= 5.9.0 is required, but got {transformers_version}",
 )
+@instantiate_parametrized_tests
 class TestQwen3_5_VLDense(DeterministicDDPTestCase):
-    @parametrize.parametrize("device,layer_idx", [("cuda", 3), ("cuda", 0)])
+    @parametrize("device,layer_idx", [("cuda", 3), ("cuda", 0)])
     def test_decoder_layer_bitwise_parity(self, device, layer_idx):
         # One decoder layer (full=3 / linear=0) -> final norm -> lm_head -> CE loss -> backward.
         # Under XTUNER_HF_IMPL (eager) the layer output, the loss, and the input gradient dL/dx must all
@@ -112,7 +113,7 @@ class TestQwen3_5_VLDense(DeterministicDDPTestCase):
         self.assertEqual(grad_diff, 0.0, f"layer {layer_idx} [{layer_type}] dL/dx not bitwise: max diff {grad_diff}")
         dist.barrier()
 
-    @parametrize.parametrize("device", [("cuda",)])
+    @parametrize("device", ["cuda"])
     def test_vision_tower_bitwise_parity(self, device):
         # Vision tower (patch_embed + blocks + merger) bitwise vs HF, eager on both sides. Loads ONLY the
         # vision tower on each side (standalone; weights are the checkpoint's `model.visual.*`), not the
@@ -185,7 +186,7 @@ class TestQwen3_5_VLDense(DeterministicDDPTestCase):
         self.assertEqual(grad_diff, 0.0, f"vision tower dL/d(pixel_values) not bitwise: max diff {grad_diff}")
         dist.barrier()
 
-    @parametrize.parametrize("device", [("cuda",)])
+    @parametrize("device", ["cuda"])
     def test_vl_forward_parity(self, device):
         # Whole-model (compose VLM) forward + backward parity vs HF on an image prompt — the VLM is the
         # real model, so this is the end-to-end integration check across vision + projector + text.
@@ -269,7 +270,7 @@ class TestQwen3_5_VLDense(DeterministicDDPTestCase):
         self.assertEqual(grad_diff, 0.0, f"VL dL/d(pixel_values) not bitwise: max diff {grad_diff}")
         dist.barrier()
 
-    @parametrize.parametrize("device", [("cuda",)])
+    @parametrize("device", ["cuda"])
     def test_model_forward_bitwise_reduced_layers(self, device):
         # Whole-model bitwise parity that runs the real `compose.forward` / `Dense.forward` orchestration
         # — embed_tokens, rotary_emb call site, the layer loop, `_prepare_llm_inputs` image-embed
@@ -369,7 +370,7 @@ class TestQwen3_5_VLDense(DeterministicDDPTestCase):
         self.assertEqual(grad_diff, 0.0, f"reduced-layer VL dL/d(pixel_values) not bitwise: max diff {grad_diff}")
         dist.barrier()
 
-    @parametrize.parametrize("device", [("cuda",)])
+    @parametrize("device", ["cuda"])
     def test_save_hf_round_trip(self, device):
         # MTP is deferred for the dense port, so the 15 ``mtp.*`` checkpoint keys are
         # neither loaded nor re-saved. The round-trip is therefore asserted over the

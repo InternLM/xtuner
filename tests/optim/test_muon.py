@@ -14,7 +14,7 @@ import copy
 import math
 from typing import Callable, overload
 
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -366,12 +366,13 @@ class TestMuonSingleGPU(DeterministicDDPTestCase):
 # ─── Test: end-to-end FSDP ───────────────────────────────────────────────────
 
 
+@instantiate_parametrized_tests
 class TestMuonFSDP(DeterministicDDPTestCase):
     @property
     def world_size(self) -> int:
         return 4
 
-    @parametrize.parametrize("enable_all2all", [True, False])
+    @parametrize("enable_all2all", [True, False])
     def test_muon_fsdp_matches_reference(self, enable_all2all: bool):
         """One Muon step on a fully-sharded model must match the single-process
         reference for every parameter, across all param categories.

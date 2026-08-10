@@ -7,7 +7,7 @@ import time
 import random
 
 import tracemalloc
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -42,6 +42,7 @@ def _get_pss_mb() -> float:
     return proc.memory_full_info().pss / 1024 / 1024
 
 
+@instantiate_parametrized_tests
 class TestJsonlDatasetDist(DistributedTestBase):
     def create_pg(self, device):
         ret = super().create_pg(device)
@@ -56,7 +57,7 @@ class TestJsonlDatasetDist(DistributedTestBase):
         # 默认按八卡跑；本地可用环境变量临时改小做快速验证
         return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8"))
 
-    @parametrize.parametrize("enable_mmap_shared", [(False,), (True,)])
+    @parametrize("enable_mmap_shared", [False, True])
     def test_jsonl_dataset_smoke_test(self, enable_mmap_shared: bool):
         alpaca_path = os.path.join(os.environ["ALPACA_PATH"], "202404121913-shard-1-of-3.jsonl")
         tokenizer_path = os.environ["QWEN3_MOE_PATH"]

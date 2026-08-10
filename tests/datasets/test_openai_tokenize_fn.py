@@ -1,5 +1,5 @@
 import os
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 from unittest import TestCase
 from transformers import AutoTokenizer
 
@@ -8,9 +8,10 @@ from xtuner.v1.datasets import OpenaiTokenizeFunctionConfig
 QWEN3_PATH = os.environ["QWEN3_VL_DENSE_PATH"]  # We need instruct model
 
 
+@instantiate_parametrized_tests
 class TestOpenaiTokenizeFunction(TestCase):
 
-    @parametrize.parametrize(
+    @parametrize(
         "template_type, tokenizer_path",
         [
             ("qwen3", QWEN3_PATH),

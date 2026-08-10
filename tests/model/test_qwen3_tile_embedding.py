@@ -1,7 +1,8 @@
 import os
 import json
 
-import parametrize
+# Unlike the third-party decorator, PyTorch parameterization does not inspect globals and trigger lazy imports.
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 import torch
 from torch.testing._internal.common_distributed import DistributedTestBase
 import torch.distributed as dist
@@ -30,9 +31,10 @@ QWEN3_VL_DENSE_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
 DEVICE = get_device()
 
 
+@instantiate_parametrized_tests
 class TestQwen3Dense4B(DistributedTestBase):
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,tp_size",
         [
             ("cuda", 1),
@@ -100,7 +102,7 @@ class TestQwen3Dense4B(DistributedTestBase):
             pass
 
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,tp_size",
         [
             ("cuda", 1),
@@ -174,7 +176,7 @@ class TestQwen3Dense4B(DistributedTestBase):
         except:
             pass
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,tp_size",
         [
             ("cuda", 1),

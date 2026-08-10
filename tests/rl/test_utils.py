@@ -6,7 +6,7 @@ import ray
 
 
 from xtuner.v1.rl.utils.ray_utils import find_master_addr_and_port, get_accelerator_ids, get_ray_accelerator
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 
 
 class TestFindMasterAddrAndPort(unittest.TestCase):
@@ -64,6 +64,7 @@ class TestFindMasterAddrAndPort(unittest.TestCase):
             test_socket.close()
 
 
+@instantiate_parametrized_tests
 class TestGetAcceleratorIds(unittest.TestCase):
     """测试 get_accelerator_ids 函数"""
 
@@ -81,7 +82,7 @@ class TestGetAcceleratorIds(unittest.TestCase):
         if ray.is_initialized():
             ray.shutdown()
 
-    @parametrize.parametrize("num_accelerators", [1, 2, 4])
+    @parametrize("num_accelerators", [1, 2, 4])
     def test_get_accelerator_ids(self, num_accelerators: int):
         """测试获取 GPU ID 列表"""
 

@@ -4,13 +4,14 @@ from xtuner.v1.datasets import Qwen3VLTokenizeFnConfig, PretrainTokenizeFunction
 from transformers import AutoTokenizer, AutoProcessor
 import json
 import torch
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 from xtuner.v1.utils.test_utils import add_video_root
 
 QWEN3_VL_PATH = os.environ["QWEN3_VL_MOE_PATH"]
 VIDEO_ROOT = os.environ["VIDEO_ROOT"]
 
 
+@instantiate_parametrized_tests
 class TestMLLMTokenizeFn(TestCase):
     def setUp(self):
         self.tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_PATH)
@@ -90,7 +91,7 @@ class TestMLLMTokenizeFn(TestCase):
         input_ids = tokenize_fn(messages)['input_ids']
         self.assertEqual(input_ids, input_ids_ref)
 
-    @parametrize.parametrize("add_vision_id", [(True,), (False,)])
+    @parametrize("add_vision_id", [True, False])
     def test_qwen3_vl_sft_single_image(self, add_vision_id):
         tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH,
                                               add_vision_id=add_vision_id).build(self.tokenizer)
@@ -131,7 +132,7 @@ class TestMLLMTokenizeFn(TestCase):
                 self.assertTrue(torch.allclose(pixel_values_xtuner, pixel_values_hf))
                 self.assertTrue(torch.allclose(image_grid_thw_xtuner, image_grid_thw_hf))
 
-    @parametrize.parametrize("add_vision_id", [(True,), (False,)])
+    @parametrize("add_vision_id", [True, False])
     def test_qwen3_vl_sft_multi_image(self, add_vision_id):
         tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH,
                                               add_vision_id=add_vision_id).build(self.tokenizer)
@@ -279,7 +280,7 @@ class TestMLLMTokenizeFn(TestCase):
                     self.assertEqual(origin_fps_list, [20])
                     self.assertEqual(timestamps_list, [[0.25, 1.5]])
 
-    @parametrize.parametrize("add_vision_id", [(True,), (False,)])
+    @parametrize("add_vision_id", [True, False])
     def test_qwen3_vl_sft_video(self, add_vision_id):
         tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH, rand_video_max_frames=14,
                                               add_vision_id=add_vision_id).build(
@@ -368,7 +369,7 @@ class TestMLLMTokenizeFn(TestCase):
                 input_ids_hf = self.tokenizer(content)['input_ids']
                 self.assertEqual(input_ids_xtuner, input_ids_hf)
 
-    @parametrize.parametrize("add_vision_id", [(True,), (False,)])
+    @parametrize("add_vision_id", [True, False])
     def test_qwen3_vl_pretrain_image(self, add_vision_id):
         tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH,
                                               add_vision_id=add_vision_id).build(self.tokenizer)

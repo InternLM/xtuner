@@ -1,7 +1,7 @@
 from datetime import datetime
 import os
 import json
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 from unittest import TestCase
 from transformers import AutoTokenizer
 import torch
@@ -19,6 +19,7 @@ QWEN3_VL_DENSE_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
 GPT_OSS_MINI_PATH = os.environ["GPT_OSS_MINI_PATH"]
 DEEPSEEK_V3_PATH = os.environ["DEEPSEEK_V3_PATH"]
 
+@instantiate_parametrized_tests
 class TestChatTemplate(TestCase):
 
     def setUp(self):
@@ -36,7 +37,7 @@ class TestChatTemplate(TestCase):
         }
 
 
-    @parametrize.parametrize(
+    @parametrize(
         "template_type, tokenizer",
         [   
             ("qwen3", QWEN3_PATH),
@@ -68,7 +69,7 @@ class TestChatTemplate(TestCase):
 
         self.assertTrue((input_ids == input_ids_ref))
 
-    @parametrize.parametrize(
+    @parametrize(
         "template_type, tokenizer",
         [
             ("qwen3-vl", QWEN3_VL_DENSE_PATH),
@@ -149,7 +150,7 @@ class TestChatTemplate(TestCase):
         input_ids = _messages.tokenize(tokenizer, chat_template)['input_ids']
         self.assertTrue((input_ids == input_ids_ref))
 
-    @parametrize.parametrize(
+    @parametrize(
         "template_type, tokenizer",
         [   
             ("gpt-oss", GPT_OSS_MINI_PATH),
@@ -198,7 +199,7 @@ class TestChatTemplate(TestCase):
             input_ids = _messages.tokenize(tokenizer, chat_template)['input_ids']
             self.assertTrue((input_ids == input_ids_ref))
 
-    @parametrize.parametrize(
+    @parametrize(
         "template_type, thinking, tokenizer",
         [   
             ("deepseek-v3", False, DEEPSEEK_V3_PATH),

@@ -10,10 +10,11 @@ import os
 import torch.distributed as dist
 from xtuner.v1.data_proto.utils import pad_to_multiple_of, split_for_sequence_parallel
 from xtuner.v1.utils.test_utils import init_data_mesh
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 from functools import wraps
 
 
+@instantiate_parametrized_tests
 class TestCELoss(TestCase):
     def setUp(self) -> None:
         self.device = 'cuda'  # liger loss must be tested on GPU
@@ -24,7 +25,7 @@ class TestCELoss(TestCase):
         self.lm_head2 = nn.Linear(self.input_dim, self.vocab_size, bias=False).to(device=self.device, dtype=self.dtype)
         self.lm_head2.weight.data = self.lm_head1.weight.data.clone()
 
-    @parametrize.parametrize(
+    @parametrize(
         "loss_mode, grad_accumulation_steps, chunk_size, atol, rtol",
         [
             ("eager", 1, -1, 1e-4, 5e-2),
@@ -111,7 +112,7 @@ class TestCELoss(TestCase):
         self.lm_head2.weight.grad.zero_()
         self.lm_head1.weight.grad.zero_()
 
-    @parametrize.parametrize(
+    @parametrize(
         "loss_reduction, loss_mode, grad_accumulation_steps, chunk_size, atol, rtol",
         [
             ('square', "eager", 1, -1, 1e-4, 5e-2),
@@ -245,6 +246,7 @@ def prepare(fn):
     return wrapper
 
 
+@instantiate_parametrized_tests
 class TestCELossWithSP(DistributedTestBase):
 
     def create_pg(self, device):
@@ -252,7 +254,7 @@ class TestCELossWithSP(DistributedTestBase):
         os.environ["LOCAL_RANK"] = str(dist.get_rank())
         return ret
 
-    @parametrize.parametrize(
+    @parametrize(
         "loss_mode, sp_size, grad_accumulation_steps, chunk_size, atol, rtol",
         [
             ("eager", 1, 1, -1, 1e-4, 5e-2),
@@ -325,7 +327,7 @@ class TestCELossWithSP(DistributedTestBase):
         loss2 = out[0]
         assert_verbose_allclose(loss1, loss2, atol=atol, rtol=rtol)
 
-    @parametrize.parametrize(
+    @parametrize(
         "loss_reduction, loss_mode, sp_size, grad_accumulation_steps, chunk_size, atol, rtol",
         [
             ('square', "eager", 1, 1, -1, 1e-4, 5e-2),

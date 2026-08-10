@@ -3,7 +3,7 @@ import random
 import os
 from pydantic import BaseModel, ConfigDict, model_validator
 from typing import TYPE_CHECKING, Literal, Union, Any
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 
 from torch.testing._internal.common_distributed import DistributedTestBase
 import torch
@@ -27,9 +27,10 @@ def policy_loss(logprobs, old_logprobs, advantages, loss_weights, cliprange_low,
     return loss
 
 
+@instantiate_parametrized_tests
 class TestOrealLoss(DistributedTestBase):
 
-    @parametrize.parametrize(
+    @parametrize(
         "grad_acc, sp_size, kl_loss_coef, loss_mode, chunk_size, atol, rtol",
         [
             (1, 1, 0, "eager", None, 1e-3, 1e-3),

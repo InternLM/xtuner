@@ -7,7 +7,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -466,6 +466,7 @@ class TestTrainerSaveHF(DistributedTestBase):
         return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "2"))
 
 
+@instantiate_parametrized_tests
 class TestTrainerConfig(DeterministicDDPTestCase):
     def prepare(self):
         self.create_pg(DEVICE)
@@ -533,7 +534,7 @@ class TestTrainerConfig(DeterministicDDPTestCase):
         trainer_cfg.model_dump()
         pickle.dumps(trainer_cfg)
 
-    @parametrize.parametrize(
+    @parametrize(
         "pack_to_max_length,compile_cfg,torch_compile,success",
         [
             # compile_cfg could be Any if pack_to_max_length is True
@@ -566,7 +567,7 @@ class TestTrainerConfig(DeterministicDDPTestCase):
             trainer = Trainer.from_config(trainer_cfg)
             self.cleanup_trainer(trainer)
 
-    @parametrize.parametrize(
+    @parametrize(
         "model_ep_size,fsdp_ep_size,target_ep_size",
         [
             (1, 8, 8),

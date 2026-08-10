@@ -1,7 +1,7 @@
 import os
 import json
 
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 import torch
 from torch.testing._internal.common_distributed import DistributedTestBase
 import torch.distributed as dist
@@ -22,8 +22,9 @@ from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase
 QWEN3_PATH = os.environ["QWEN3_PATH"]
 
 
+@instantiate_parametrized_tests
 class TestQwen3Dense(DeterministicDDPTestCase):
-    @parametrize.parametrize(
+    @parametrize(
         "device,tp_size,compile,tol,loss_class",
         [
             ("cuda", 1, False, 1e-2, "cross_entropy"),
@@ -80,7 +81,7 @@ class TestQwen3Dense(DeterministicDDPTestCase):
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,tp_size",
         [
             ("cuda", 1),
@@ -136,7 +137,7 @@ class TestQwen3Dense(DeterministicDDPTestCase):
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=1e-2, rtol=1e-2))
 
-    @parametrize.parametrize(
+    @parametrize(
         "use_sliding_window, max_window_layers, sliding_window",
         [
             (False, 6, 1024),
@@ -211,7 +212,7 @@ class TestQwen3Dense(DeterministicDDPTestCase):
                 )
             assert "loss" in output
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,tp_size",
         [
             ("cuda", 1),

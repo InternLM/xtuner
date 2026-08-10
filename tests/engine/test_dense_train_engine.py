@@ -2,7 +2,7 @@ import os
 import tempfile
 import shutil
 import time
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 import torch
 import torch.distributed as dist
 from xtuner._testing import DeterministicDDPTestCase
@@ -25,6 +25,7 @@ QWEN3_PATH = os.environ["QWEN3_PATH"]
 DEVICE = get_device()
 
 
+@instantiate_parametrized_tests
 class TestDenseEngine(DeterministicDDPTestCase):
     def _run_dense_engine_train_case(self, device, tp_size, sp_size, swap_optimizer: bool = False):
         pg = self.create_pg(device)
@@ -98,7 +99,7 @@ class TestDenseEngine(DeterministicDDPTestCase):
         except:
             pass
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,tp_size,sp_size",
         [
             ("cuda", 1, 1),
@@ -108,7 +109,7 @@ class TestDenseEngine(DeterministicDDPTestCase):
     def test_dense_engine_train(self, device, tp_size, sp_size):
         self._run_dense_engine_train_case(device, tp_size, sp_size, swap_optimizer=False)
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,tp_size,sp_size",
         [
             ("cuda", 1, 1),
@@ -118,7 +119,7 @@ class TestDenseEngine(DeterministicDDPTestCase):
     def test_dense_engine_train_swap_optimizer(self, device, tp_size, sp_size):
         self._run_dense_engine_train_case(device, tp_size, sp_size, swap_optimizer=True)
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,tp_size,hsdp_sharding_size",
         [
             ("cuda", 1, 8),  # todo: test ep8 and hsdp, OOM in 8 gpus

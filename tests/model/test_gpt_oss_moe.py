@@ -4,7 +4,7 @@ import torch.distributed as dist
 from safetensors import safe_open
 import json
 
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 import torch
 from xtuner._testing import DeterministicDDPTestCase, patch_hf_rms_norm
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
@@ -29,8 +29,9 @@ def prepare(fn):
     return wrapper
 
 
+@instantiate_parametrized_tests
 class TestGptOss(DeterministicDDPTestCase):
-    @parametrize.parametrize(
+    @parametrize(
         "device,dispatcher,ep_size,compile,tol,loss_class",
         [
             # TODO(chenchiyu): The tolerance is relatively high, need to investigate the reason.
@@ -93,7 +94,7 @@ class TestGptOss(DeterministicDDPTestCase):
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,dispatcher,ep_size",
         [
             ("cuda", "all2all", 4),
@@ -158,7 +159,7 @@ class TestGptOss(DeterministicDDPTestCase):
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=5e-2, rtol=5e-2))
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,dispatcher,ep_size",
         [
             ("cuda", None, 1),

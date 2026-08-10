@@ -2,7 +2,7 @@ import os
 import unittest
 from packaging.version import Version
 
-import parametrize
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 import torch
 from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, __version__ as transformers_version
@@ -31,8 +31,9 @@ INTERNS1_DENSE_PATH = os.environ["INTERNS1_DENSE_PATH"]
     "intern-s1 model is break for transformers 5.x, "
     f"skip until model is updated. Current transformers version: {transformers_version}"
 )
+@instantiate_parametrized_tests
 class TestInternS1(DeterministicDDPTestCase):
-    @parametrize.parametrize(
+    @parametrize(
         "device,tol",
         [
             ("cuda", 1e-2),
@@ -99,7 +100,7 @@ class TestInternS1(DeterministicDDPTestCase):
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,sp_size,tol",
         [
             ("cuda", 1, 1e-2),
@@ -207,7 +208,7 @@ class TestInternS1(DeterministicDDPTestCase):
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,tol",
         [
             ("cuda", 1e-2),
@@ -277,7 +278,7 @@ class TestInternS1(DeterministicDDPTestCase):
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,sp_size, compile, tol",
         [
             ("cuda", 1, False, 1e-2),
@@ -391,7 +392,7 @@ class TestInternS1(DeterministicDDPTestCase):
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
-    @parametrize.parametrize(
+    @parametrize(
         "device,tp_size",
         [
             ("cuda", 1),
