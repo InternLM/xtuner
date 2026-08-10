@@ -23,6 +23,7 @@ from xtuner.v1.module.attention.dsa_topk_sharing import (
 from xtuner.v1.module.mtp import MTPConfig, MTPLayer
 from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
+from xtuner.v1.utils.load_spec import HFLoadPlan
 
 from .moe import MoE
 
@@ -161,36 +162,17 @@ class Glm52MoE(MoE):
         self,
         safetensors: list[torch.Tensor],
         local_tensor: torch.Tensor,
-        param_name: str,
-        start: int | None,
-        end: int | None,
-        dim: int | None,
-    ):
-        if len(safetensors) > 1:
-            assert dim is not None, "Internal Error dim must not be None when len(safetensors) > 1"
-            loaded_tensor = torch.cat(safetensors, dim=dim)
-        else:
-            loaded_tensor = safetensors[0]
+        load_plan: HFLoadPlan,
+    ) -> None:
+        loaded_tensor = self._cat_safetensors(safetensors, load_plan)
 
         if (
-            "fused_w1w3.weight" in param_name or "fused_w2.weight" in param_name
+            "fused_w1w3.weight" in load_plan.name or "fused_w2.weight" in load_plan.name
         ) and loaded_tensor.ndim == local_tensor.ndim + 1:
             loaded_tensor = loaded_tensor.flatten(0, 1)
 
-        if start is not None and end is not None:
-            start = min(start, loaded_tensor.shape[self.FSDP_SHARD_DIM])
-            end = min(end, loaded_tensor.shape[self.FSDP_SHARD_DIM])
-            loaded_tensor_slice = loaded_tensor.index_select(
-                dim=self.FSDP_SHARD_DIM, index=torch.arange(start, end, dtype=torch.int64, device=loaded_tensor.device)
-            )
-            non_pad_len = end - start
-            local_tensor[:non_pad_len].copy_(loaded_tensor_slice)
-
-            if non_pad_len < local_tensor.shape[self.FSDP_SHARD_DIM]:
-                assert self.config.float8_cfg is not None
-                local_tensor[non_pad_len:].zero_()
-        else:
-            local_tensor.copy_(loaded_tensor)
+        loaded_tensor = self._apply_load_slices(loaded_tensor, load_plan)
+        self._copy_loaded_tensor_to_local(loaded_tensor, local_tensor)
 
     def param_to_safetensor(
         self,
