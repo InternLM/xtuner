@@ -32,6 +32,7 @@ from xtuner.v1.model.base import (
     ModelOutputs,
     XTunerBaseModelConfig,
 )
+from xtuner.v1.patch import InterleavedShardLoadPlanner, InterleavedShardSavePlanner
 from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
 
@@ -44,82 +45,6 @@ logger = get_logger()
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
-
-def _drop_interleaved_for_dcp(state_dict: dict) -> list[str]:
-    """Drop top-level InterleavedShard DTensor entries from ``state_dict`` so they bypass DCP.
-
-    DCP's default planner can't describe ``(Shard, InterleavedShard)`` placements (the
-    ``_StridedShard`` ``split_factor`` does not satisfy DCP's
-    ``split_factor == aggregate_mesh_size`` invariant). Materializing the full tensor on
-    every rank to feed DCP a replicated plain Tensor blew CPU memory (~30 GB × 4 states ×
-    N layers → SIGKILL).
-
-    These params are already covered by the HF safetensors checkpoint that ``save_hf``
-    writes alongside the DCP snapshot, so resume can reload them via ``from_hf`` after
-    ``dcp.load`` handles the rest. This helper mutates ``state_dict`` in place and returns
-    the list of fqns it removed so the caller can log / re-load them.
-
-    Only top-level keys are considered. Nested optimizer-state dicts use a different code
-    path (see callers).
-
-    Args:
-        state_dict (dict): Mutated in-place — InterleavedShard top-level entries removed.
-
-    Returns:
-        list[str]: The fqns that were dropped.
-    """
-    from torch.distributed.tensor import DTensor as _DTensor
-
-    from xtuner.v1.utils.interleaved_shard import has_interleaved_placement
-
-    dropped: list[str] = []
-    for key in list(state_dict.keys()):
-        value = state_dict[key]
-        if isinstance(value, _DTensor) and has_interleaved_placement(value):
-            del state_dict[key]
-            dropped.append(key)
-    return dropped
-
-
-def _drop_interleaved_from_optim_state(optim_state: dict, dropped_param_keys: set[str]) -> None:
-    """Drop optimizer state entries that correspond to dropped model params.
-
-    Optimizer state is a nested dict ``{"state": {fqn: {"exp_avg": ..., "exp_avg_sq": ...}},
-    "param_groups": [...]}``. We delete the per-param entries that match
-    ``dropped_param_keys`` and prune those fqns out of every ``param_groups[i]["params"]``
-    list so DCP's planner sees a consistent state. ``param_groups`` may also reference fqns
-    that map to InterleavedShard DTensors at the leaf level — those nested DTensors are
-    still removed via per-state-entry scanning below for safety.
-
-    Args:
-        optim_state (dict): Optimizer state from ``get_optimizer_state_dict``; mutated.
-        dropped_param_keys (set[str]): Param fqns whose state should be dropped.
-    """
-    from torch.distributed.tensor import DTensor as _DTensor
-
-    from xtuner.v1.utils.interleaved_shard import has_interleaved_placement
-
-    state = optim_state.get("state")
-    if isinstance(state, dict):
-        for k in list(state.keys()):
-            if k in dropped_param_keys:
-                del state[k]
-                continue
-            # Defensive: if any nested leaf is itself an InterleavedShard DTensor (not
-            # currently expected because optimizer state mirrors the param placement which
-            # we already dropped), drop the whole entry rather than feed DCP a bad spec.
-            v = state[k]
-            if isinstance(v, dict) and any(
-                isinstance(leaf, _DTensor) and has_interleaved_placement(leaf) for leaf in v.values()
-            ):
-                del state[k]
-                dropped_param_keys.add(k)
-
-    param_groups = optim_state.get("param_groups")
-    if isinstance(param_groups, list):
-        for group in param_groups:
-            if isinstance(group, dict) and isinstance(group.get("params"), list):
-                group["params"] = [p for p in group["params"] if p not in dropped_param_keys]
 
 threading_lock = threading.Lock()
 
@@ -386,33 +311,24 @@ class TrainEngine:
         _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params)
         with profile_time_and_memory(f"[DCP Checkpoint to {model_dir}]"):
             model_state = get_model_state_dict(self.model, options=_options)
-            # InterleavedShard placements (per-expert column-parallel for fused_w1w3) carry a
-            # ``_StridedShard(split_factor=N)`` that violates DCP's
-            # ``split_factor == aggregate_mesh_size`` invariant. Materializing the global
-            # tensor on every rank to feed DCP a replicated plain Tensor blew CPU memory
-            # at scale (each rank reconstructing 30B-class weights × 4 optimizer states →
-            # SIGKILL). These params are already in the HF safetensors checkpoint written
-            # by ``save_hf`` — drop them here and rely on ``from_hf`` to refill on resume.
-            dropped = _drop_interleaved_for_dcp(model_state)
-            if dropped and dist.get_rank() == 0:
-                logger.warning(
-                    "DCP save skipping %d InterleavedShard params; reload via from_hf on resume: %s",
-                    len(dropped),
-                    sorted(dropped),
-                )
+            # InterleavedShard (tpep) DTensors — per-expert column-parallel fused MoE weights —
+            # are stored per-run by ``InterleavedShardSavePlanner``; the default planner would
+            # silently mis-map them (a single contiguous chunk that ignores the interleaving).
             dcp.save(
                 model_state,
                 checkpoint_id=model_dir,
+                planner=InterleavedShardSavePlanner(),
             )
 
         with profile_time_and_memory(f"[DCP Checkpoint to {optimizer_dir}]"):
             if optimizer_dir is not None:
                 shard_optimizer_state_dict = get_optimizer_state_dict(self.model, self.optimizer, options=_options)
-                # Drop optimizer state for the dropped params so DCP doesn't try to plan them.
-                _drop_interleaved_from_optim_state(shard_optimizer_state_dict, set(dropped))
+                # Optimizer state mirrors the param placement, so its InterleavedShard leaves need
+                # the same per-run planner.
                 dcp.save(
                     shard_optimizer_state_dict,
                     checkpoint_id=optimizer_dir,
+                    planner=InterleavedShardSavePlanner(),
                 )
 
     def load_dcp(
@@ -436,25 +352,13 @@ class TrainEngine:
             _set_options = StateDictOptions(cpu_offload=True, strict=True)
         with profile_time_and_memory(f"[Load DCP Model from {model_dir}]"):
             shard_model_state_dict = get_model_state_dict(self.model, options=_load_options)
-            # Mirror the save-side drop: skip InterleavedShard params from DCP load. The
-            # caller is expected to reload them from the HF safetensors checkpoint (which
-            # ``save_hf`` writes alongside the DCP snapshot) via ``from_hf`` after
-            # ``load_dcp`` returns. We force ``strict=False`` on set_model_state_dict so
-            # the missing keys aren't treated as a load error.
-            dropped = _drop_interleaved_for_dcp(shard_model_state_dict)
+            # InterleavedShard (tpep) DTensors are read per-run by ``InterleavedShardLoadPlanner``,
+            # resharding from the global-coordinate checkpoint into this rank's interleaved runs.
             dcp.load(
                 state_dict=shard_model_state_dict,
                 checkpoint_id=model_dir,
+                planner=InterleavedShardLoadPlanner(),
             )
-            if dropped:
-                # Override strictness — model has these params but DCP didn't load them.
-                _set_options = StateDictOptions(cpu_offload=True, strict=False)
-                if dist.get_rank() == 0:
-                    logger.warning(
-                        "DCP load skipped %d InterleavedShard params; call from_hf to refill: %s",
-                        len(dropped),
-                        sorted(dropped),
-                    )
             set_model_state_dict(self.model, shard_model_state_dict, options=_set_options)
 
         if optimizer_dir is not None:
@@ -462,13 +366,10 @@ class TrainEngine:
                 shard_optimizer_state_dict = get_optimizer_state_dict(
                     self.model, self.optimizer, options=_load_options
                 )
-                # Save side stripped optimizer state for InterleavedShard params; the saved
-                # checkpoint has no entries for those fqns, so strip them here too before
-                # ``dcp.load`` to keep the planner consistent.
-                _drop_interleaved_from_optim_state(shard_optimizer_state_dict, set(dropped))
                 dcp.load(
                     state_dict=shard_optimizer_state_dict,
                     checkpoint_id=optimizer_dir,
+                    planner=InterleavedShardLoadPlanner(),
                 )
                 if not load_states:
                     logger.info("Not loading optimizer states")

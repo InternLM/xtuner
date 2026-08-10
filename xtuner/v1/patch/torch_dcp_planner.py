@@ -117,10 +117,12 @@ def patch_dcp_save_with_cache_storage():
         storage_writer = kwargs.get("storage_writer", None)
 
         if storage_writer is None and planner is None:
-            from xtuner.v1.patch.xtuner_cache_planner import XtunerCacheSavePlanner
+            from xtuner.v1.patch.dcp_interleaved_planner import InterleavedShardSavePlanner
             from xtuner.v1.patch.xtuner_storage import XtunerCacheWriter
 
-            planner = XtunerCacheSavePlanner(enable_plan_caching=True, cache_key_prefix=checkpoint_id.stem)
+            # Use the interleaved-aware planner so InterleavedShard (tpep) DTensors are saved as
+            # per-run chunks even on the torch 2.7.x incremental-save path.
+            planner = InterleavedShardSavePlanner(enable_plan_caching=True, cache_key_prefix=checkpoint_id.stem)
             storage_writer = XtunerCacheWriter(
                 checkpoint_id, enable_write_result_caching=True, cache_key_prefix=checkpoint_id.stem
             )

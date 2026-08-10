@@ -1,4 +1,5 @@
 from . import torch_shape_env_simplify_pt28
+from .dcp_interleaved_planner import InterleavedShardLoadPlanner, InterleavedShardSavePlanner
 from .torch_dcp_planner import patch_dcp_save_state_dict, patch_dcp_save_with_cache_storage, patch_default_save_plan
 
 
@@ -7,4 +8,6 @@ __all__ = [
     "torch_shape_env_simplify_pt28",
     "patch_dcp_save_state_dict",
     "patch_dcp_save_with_cache_storage",
+    "InterleavedShardSavePlanner",
+    "InterleavedShardLoadPlanner",
 ]
