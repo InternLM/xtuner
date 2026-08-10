@@ -1,3 +1,4 @@
+import pytest
 import torch
 from xtuner.v1.model.moe.moe import MoEConfig, MoE, SequenceContext
 from xtuner.v1.module.router import NoAuxRouterConfig
@@ -12,9 +13,10 @@ from xtuner.v1.utils.compile import maybe_compile
 from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize
 
 
-@instantiate_parametrized_tests
 class TestMoE:
-    @parametrize("dtype,device", [(torch.bfloat16, "cuda")])
+    # PyTorch's parametrize utility is unittest-specific. This is intentionally a
+    # plain pytest class, so pytest must own parameter injection for this method.
+    @pytest.mark.parametrize("dtype,device", [(torch.bfloat16, "cuda")])
     def test_moe_config(self, dtype, device):
         router_config = NoAuxRouterConfig(
             scoring_func="sigmoid",

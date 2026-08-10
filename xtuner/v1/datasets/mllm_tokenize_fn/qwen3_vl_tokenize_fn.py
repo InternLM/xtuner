@@ -198,6 +198,11 @@ def replace_video_token(
                                         video_placeholder += f"<{curr_time:.1f} seconds>{image_tokens}"
                                 else:
                                     video_placeholder += f"{image_tokens}"
+                            # Current Transformers processors replace only the inner video token and
+                            # preserve the chat template's outer vision boundaries around the video.
+                            video_placeholder = (
+                                f"{chat_template.image_start_token}{video_placeholder}{chat_template.image_end_token}"
+                            )
                             text = text.replace(IMAGE_TOKEN_ALIAS, video_placeholder, 1)
                             current_image_idx += len(num_image_token_list[i])
                         c.text = text
