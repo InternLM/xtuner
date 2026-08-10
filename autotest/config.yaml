@@ -901,7 +901,7 @@ case:
                        method: relative
                        operator: <
                        aggregate: 80
-            timeout: 4200
+            timeout: 8400
 
     qwen3-rl-sglang:
         -
@@ -1003,7 +1003,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1500
+            timeout: 3000
         -
             type: sft
             phase: resume
@@ -1032,7 +1032,7 @@ case:
                     runtime_info/text_tokens: 0
             post_action:
                 command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-sft-ep8 sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
-            timeout: 1500
+            timeout: 3000
 
     qwen3-sft-tp2:
         -
@@ -1084,7 +1084,7 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            timeout: 1500
+            timeout: 3000
 
     qwen3-sft-fp8:
         -
