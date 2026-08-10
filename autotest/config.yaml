@@ -735,7 +735,6 @@ case:
                 config: autotest/config/qwen3_5_ep2_mtp4_vl.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
-                cpus_per_task: 80
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
