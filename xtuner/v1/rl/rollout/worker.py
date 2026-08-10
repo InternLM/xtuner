@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 
 infer_group = Group("inference", help="Inference worker configuration.")
 ROLLOUT_CONCURRENCY_GROUP_GENERATE = "generate"
+ROLLOUT_CONCURRENCY_GROUP_CONTROL = "control"
 
 
 @dataclass(frozen=True)
@@ -500,6 +501,7 @@ class RolloutConfig(BaseModel):
             ray.remote(
                 concurrency_groups={
                     ROLLOUT_CONCURRENCY_GROUP_GENERATE: ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY,
+                    ROLLOUT_CONCURRENCY_GROUP_CONTROL: 1,
                 },
             )(RolloutController)
             .options(**actor_options)

@@ -18,6 +18,7 @@ from .proxy_manager import RolloutProxyManager
 from .rollout_topology import RolloutTopology
 from .utils import SessionRouter
 from .worker import (
+    ROLLOUT_CONCURRENCY_GROUP_CONTROL,
     ROLLOUT_CONCURRENCY_GROUP_GENERATE,
     RolloutConfig,
     get_rollout_worker_base_cls,
@@ -131,6 +132,7 @@ class RolloutController:
             ]
         )
 
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_CONTROL)
     def pause_generation(self):
         self.health_manager.pause()
         active_workers = self.registry.active_workers()

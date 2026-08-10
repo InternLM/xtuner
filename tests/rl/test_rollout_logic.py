@@ -21,6 +21,7 @@ import httpx
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.agent_loop import AgentLoopConfig
+from xtuner.v1.rl.rollout.constants import ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
 from xtuner.v1.rl.rollout.controller import RolloutController
 from xtuner.v1.rl.rollout.health_manager import RolloutHealthManager
 from xtuner.v1.rl.rollout.lmdeploy import LMDeployWorker
@@ -33,7 +34,13 @@ from xtuner.v1.rl.rollout.worker_registry import (
 )
 from xtuner.v1.rl.rollout.sglang import SGLangWorker
 from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, SessionRouter
-from xtuner.v1.rl.rollout.worker import RolloutWorker, RolloutWorkerInitResult
+from xtuner.v1.rl.rollout.worker import (
+    ROLLOUT_CONCURRENCY_GROUP_CONTROL,
+    ROLLOUT_CONCURRENCY_GROUP_GENERATE,
+    RolloutConfig,
+    RolloutWorker,
+    RolloutWorkerInitResult,
+)
 from xtuner.v1.rl.utils.misc import delete_from_routedapiproxy
 from xtuner.v1.rl.weight_update.data import RolloutWeightUpdateInfo
 from xtuner.v1.train.rl_trainer import BaseRLTrainer, _agent_loop_manager_requires_rollout_proxy
@@ -316,6 +323,31 @@ class TestRolloutTopologyAPI(unittest.TestCase):
 
 
 class TestRolloutController(unittest.IsolatedAsyncioTestCase):
+    def test_pause_generation_uses_dedicated_control_concurrency_group(self):
+        self.assertEqual(
+            getattr(RolloutController.pause_generation, "__ray_concurrency_group__", None),
+            ROLLOUT_CONCURRENCY_GROUP_CONTROL,
+        )
+
+    def test_rollout_config_build_registers_control_concurrency_group(self):
+        remote_actor_cls = MagicMock()
+        remote_actor_cls.options.return_value.remote.return_value = "rollout-controller"
+
+        with (
+            patch("xtuner.v1.rl.rollout.worker.register_cpu_resources"),
+            patch("xtuner.v1.rl.trace.get_trace_env_vars", return_value={}),
+            patch("ray.remote", return_value=lambda _: remote_actor_cls) as ray_remote,
+        ):
+            result = RolloutConfig.build(MagicMock(), placement_group=object())
+
+        self.assertEqual(result, "rollout-controller")
+        ray_remote.assert_called_once_with(
+            concurrency_groups={
+                ROLLOUT_CONCURRENCY_GROUP_GENERATE: ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY,
+                ROLLOUT_CONCURRENCY_GROUP_CONTROL: 1,
+            },
+        )
+
     def _state(self, uid: int, session_id: int) -> RolloutState:
         return RolloutState(
             rollout_id=uid,
