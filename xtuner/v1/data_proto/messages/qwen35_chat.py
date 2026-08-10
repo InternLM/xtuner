@@ -65,6 +65,9 @@ def render_content(content, do_vision_count, image_count, video_count, add_visio
             video_content = item.get("video", item.get("video_url", {}))
             assert isinstance(video_content, dict), f"video_content must be a dict, but got {type(video_content)}"
             timestamps = video_content.get("timestamps", [])
+            # Match Transformers' processor replacement: per-frame placeholders stay
+            # nested inside the video boundary emitted by the chat template.
+            result += "<|vision_start|>"
             if len(timestamps) > 0:
                 video_placeholder = ""
                 for timestamp in timestamps:
@@ -76,6 +79,7 @@ def render_content(content, do_vision_count, image_count, video_count, add_visio
                 num_frames = video_content["num_frames"]
                 for _ in range(len(num_frames)):
                     result += "<|vision_start|><|video_pad|><|vision_end|>"
+            result += "<|vision_end|>"
             conversation_timestamp = video_content.get("conversation_timestamps", [])
             if len(conversation_timestamp) > 0:
                 start_time = conversation_timestamp[0]
