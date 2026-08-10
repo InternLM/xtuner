@@ -83,8 +83,8 @@ class RolloutController:
             return
         self.proxy_manager.validate_registered_session_urls()
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     @trace_rollout_endpoint("rollout.controller.generate")
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         if XTUNER_DETERMINISTIC:
             sample_params = rollout_state.sample_params.model_copy(deep=True)
