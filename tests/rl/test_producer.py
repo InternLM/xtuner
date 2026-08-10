@@ -252,6 +252,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # 场景 B: ReplayBuffer 有多个候选状态，按列表顺序优先拿
         aborted_item = make_rollout_state(999, status=Status.ABORTED)
         expired_item = make_rollout_state(1000, status=Status.EXPIRED)
+        self.replay_buffer.bind_tail_batch_trigger_sizes({task_name: 1})
         await self.replay_buffer.put([aborted_item], task_name)
         await self.replay_buffer.put([expired_item], task_name)
 
@@ -588,6 +589,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
     async def test_async_produce_strategy_tail_batch_is_static_and_no_oversample(self):
         # 验证 tail-batch 模式固定从 expired/aborted pool 补必要缺口，并禁用额外超发。
         task_name = "test_tail_static"
+        self.replay_buffer.bind_tail_batch_trigger_sizes({task_name: 1})
         for sample_id in (900, 901):
             await self.replay_buffer.put([make_rollout_state(sample_id, status=Status.EXPIRED)], task_name)
 

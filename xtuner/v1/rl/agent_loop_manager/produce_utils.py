@@ -201,7 +201,7 @@ class BaseProduceContext:
                 discard_rollout_state(item)
             return False
 
-        # ABORTED / EXPIRED 保持可重试状态；COMPLETED 也可能在 put 时因 staleness 转成 EXPIRED。
+        # ABORTED 保持可重试；ReplayBuffer 根据 task 绑定的 tail batch 配置处理 EXPIRED。
         await self.replay_buffer.put(
             group,
             self.task_name,

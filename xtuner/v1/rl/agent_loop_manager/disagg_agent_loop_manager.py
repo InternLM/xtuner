@@ -101,6 +101,12 @@ class DisaggAgentLoopManagerConfig(BaseModel):
                 )
             )
 
+        replay_buffer.bind_tail_batch_trigger_sizes(
+            {
+                task_cfg.task_name: getattr(task_cfg.produce_strategy_config, "tail_batch_trigger_size", 0)
+                for task_cfg in tasks
+            }
+        )
         return DisaggAgentLoopManager(
             task_runners=task_runners,
             replay_buffer=replay_buffer,
