@@ -97,11 +97,13 @@ class ClusterTaskExecutor:
                     except Exception as e:
                         print(f"Get log failed: {e}")
                 return False, "Task failed or stopped"
-            elapsed_time = time.time() - poll_start_time
-            if elapsed_time >= timeout:
+            # Only enforce execution timeout after the job has started running.
+            # Queuing / waiting time is not limited by config timeout.
+            if run_start_time is not None and time.time() - run_start_time >= timeout:
                 self.stop_task(job_schema.job_id)
                 raise Exception(
-                    f"Pool timeout: jobname {job_name}, {timeout} seconds, task {job_schema.job_id} status is {status}"
+                    f"Execution timeout: jobname {job_name}, {timeout} seconds, "
+                    f"task {job_schema.job_id} status is {status}"
                 )
             time.sleep(10)
 
