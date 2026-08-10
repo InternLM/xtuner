@@ -728,6 +728,33 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500
 
+    qwen3-5-sft-ep2-mtp4-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_5_ep2_mtp4_vl.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                cpus_per_task: 80
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
+            assert_info:
+                base_metric: qwen3-5-sft-ep2-mtp4-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1500
+
     qwen3-rl-lmdeploy:
         -
             type: rl
