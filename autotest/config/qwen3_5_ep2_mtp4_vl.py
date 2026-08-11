@@ -87,7 +87,7 @@ trainer = TrainerConfig(
     tokenizer_path=MODEL_PATH,
     resume_cfg=ResumeConfig(auto_resume=True),
     global_batch_size=16,
-    total_epoch=1,
+    total_step=20,
     sp_size=4,
     work_dir=WORK_DIR,
     seed=0,
