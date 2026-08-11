@@ -24,8 +24,8 @@ QWEN3_5_DENSE_4B_PATH = os.environ["QWEN3_5_DENSE_4B_PATH"]
 
 
 @unittest.skipIf(
-    Version(transformers_version) < Version("5.9.0"),
-    f"transformers >= 5.9.0 is required, but got {transformers_version}",
+    Version(transformers_version) < Version("5.14.0"),
+    f"transformers >= 5.14.0 is required, but got {transformers_version}",
 )
 class TestQwen3_5_VLDense(DeterministicDDPTestCase):
     @parametrize.parametrize("device,layer_idx", [("cuda", 3), ("cuda", 0)])
@@ -99,7 +99,7 @@ class TestQwen3_5_VLDense(DeterministicDDPTestCase):
             loss_hf.backward()
 
             x_xt = base.clone().requires_grad_(True)
-            o_xt = xt_layer(x_xt, (cos, sin), seq_ctx)
+            o_xt = xt_layer(x_xt, position_embeddings=(cos, sin), seq_ctx=seq_ctx)
             loss_xt = F.cross_entropy(F.linear(model.norm(o_xt), model.lm_head.weight).reshape(-1, cfg.vocab_size), labels)
             loss_xt.backward()
 
@@ -441,15 +441,19 @@ class TestQwen3_5_VLDense(DeterministicDDPTestCase):
         dist.barrier()
 
     def _patch_fast_pos_embed_interpolate(self) -> None:
-        # HF's fast_pos_embed_interpolate returns fp32; the reused XTuner vision forward adds
-        # pos_embeds without a cast, so cast the result back to the pos_embed dtype here to
-        # avoid an fp32/bf16 LayerNorm mismatch.
-        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5VisionModel
+        from transformers.vision_utils import get_vision_bilinear_indices_and_weights
 
         from xtuner.v1.model.compose.qwen3_vl.modeling_vision import Qwen3VLVisionModel
 
+        # Follow the current Transformers vision path: accumulate interpolation in fp32,
+        # then return to the model dtype before XTuner's first LayerNorm.
         def _interp(self, grid_thw):
-            return Qwen3_5VisionModel.fast_pos_embed_interpolate(self, grid_thw).to(self.pos_embed.weight.dtype)
+            indices, weights = get_vision_bilinear_indices_and_weights(
+                grid_thw,
+                num_grid_per_side=self.num_grid_per_side,
+                spatial_merge_size=self.config.spatial_merge_size,
+            )
+            return (self.pos_embed(indices) * weights[:, :, None]).sum(0).to(self.pos_embed.weight.dtype)
 
         Qwen3VLVisionModel.fast_pos_embed_interpolate = _interp
 
