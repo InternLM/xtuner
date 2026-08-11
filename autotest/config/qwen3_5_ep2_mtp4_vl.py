@@ -71,7 +71,7 @@ dataloader_config = DataloaderConfig(
     group_by_length=True,
     collator="qwen3_vl_sft_collator",
     pack_extra_buffer_size=20,
-    num_workers=4,
+    num_workers=2,
 )
 
 loss_cfg = CELossConfig(mode="chunk", chunk_size=1024, loss_reduction="square")
