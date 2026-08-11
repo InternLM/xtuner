@@ -18,10 +18,17 @@ handling, `RolloutState.extra_fields`, object references, or memory ownership ar
 RoutedExperts impact: <specific impact or "not affected">
 ```
 
+Also include Ray concurrency impact when the PR touches Ray actor methods, actor construction,
+method decorators or wrappers, concurrency-group definitions, or rollout control paths:
+
+```text
+Ray concurrency impact: <effective groups and possible starvation impact, or "not affected">
+```
+
 Do not leave these impacts implicit in the finding text. If a finding is about rollout status,
-pause/abort/timeout behavior, response handling, producer aggregation, or routed-experts ownership,
-repeat the relevant impact line inside that finding so the downstream effect is visible at the point
-of review.
+pause/abort/timeout behavior, response handling, producer aggregation, routed-experts ownership, or
+Ray actor concurrency, repeat the relevant impact line inside that finding so the downstream effect
+is visible at the point of review.
 
 ## ProduceBatchResult Checklist
 
@@ -57,6 +64,54 @@ Common impacts to call out explicitly:
   especially `group_gen_pause_time_s`.
 - Reward or filter-path changes can change `raw_rewards_sum`, `raw_rewards_count`,
   `produced_samples`, and `produced_tokens`.
+
+## Ray Actor Concurrency Checklist
+
+Review whether high-volume rollout calls can starve pause, abort, health-check, restart, or shutdown
+RPCs.
+
+Check this area when the PR changes any of these paths:
+
+- Ray actor methods decorated with `@ray.method(...)` or `@ray_method(...)`.
+- Decorators or wrappers stacked on Ray actor methods, especially wrappers using `functools.wraps`
+  or exposing `__wrapped__`.
+- Actor construction through `ray.remote(...)`, including `concurrency_groups` and
+  `max_concurrency`.
+- Generate, pause, continue, abort, health-check, restart, or shutdown methods.
+
+When a Ray method is combined with another decorator, keep the Ray method decorator closest to the
+function definition:
+
+```python
+@trace_rollout_endpoint("rollout.worker.generate")
+@ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
+async def generate(...):
+    ...
+```
+
+Do not use the reverse order:
+
+```python
+@ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
+@trace_rollout_endpoint("rollout.worker.generate")
+async def generate(...):
+    ...
+```
+
+The current Ray actor-class processing unwraps decorated methods before reading Ray method metadata.
+If `@ray.method(...)` is outside a wrapper, metadata such as `__ray_concurrency_group__` can remain
+on the discarded wrapper, causing the method to fall back to the default concurrency group.
+
+Review the effective dispatch behavior, not only the visible decorator order:
+
+- After following `__wrapped__`, the callable inspected by Ray must retain the expected Ray method
+  metadata.
+- Every named method concurrency group must be declared by the corresponding `ray.remote(...)`
+  actor construction.
+- High-volume `generate` methods must not accidentally fall back to the default group.
+- Pause, abort, and other control RPCs must remain schedulable while generation is saturated.
+- Slow health or lifecycle methods must not occupy every slot needed by critical control RPCs.
+- Blocking work inside async actor methods must not block the actor event loop or concurrency lane.
 
 ## RoutedExperts Checklist
 
