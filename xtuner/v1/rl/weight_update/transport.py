@@ -947,7 +947,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
 
         if not index_path.exists():
             raise FileNotFoundError(f"model.safetensors.index.json file not found: {index_path}")
-
+        # TODO: split tensor according to tenser size of header metadata in .safetensors
         with open(index_path) as f:
             weight_map: dict[str, str] = json.load(f)["weight_map"]
         weight_keys = [key_name for key_name, file_name in weight_map.items()]
@@ -970,11 +970,17 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
                     continue
                 # batch 级快路径：完全无交集可跳过
                 if local_keys is not None and sd.keys().isdisjoint(local_keys):
+                    del sd, batch
                     continue
                 for key, tensor in sd.items():
                     if local_keys is not None and key not in local_keys:
                         continue
-                    named[key] = tensor
+                    # 占显存更少，但速度慢
+                    named[key] = tensor.detach().to("cpu", non_blocking=True)
+                    # 占显存多，速度快
+                    # named[key] = tensor
+                del sd, batch
+            DEVICE_MODULE.empty_cache()
         return named
 
     def _shard_named_tensors(
@@ -989,6 +995,10 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
 
     def register_checkpoint_from_train_engine(self, weight_iterator: Any) -> None:
         """Register current train engine weights into Checkpoint Engine PS."""
+
+        # 0. Drop previous train checkpoint to limit pinned host memory.
+        if self._checkpoint_name is not None:
+            self._ps.unregister_checkpoint(self._checkpoint_name)
 
         # 1. Collect named tensors from weight iterator
         all_tensors = self._collect_named_tensors(weight_iterator, local_keys=self._local_checkpoint_keys)
@@ -1019,10 +1029,9 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
             f"[checkpoint_engine] register train checkpoint name={name} "
             f"rank={self.rank} tensors={len(shard)}/{len(all_tensors)}"
         )
-        # Drop previous train checkpoint to limit pinned host memory.
-        if self._checkpoint_name is not None:
-            self._ps.unregister_checkpoint(self._checkpoint_name)
         self._ps.register_checkpoint(name, files=[], named_tensors=shard, use_shared_memory_pool=True)
+        del all_tensors, shard
+        DEVICE_MODULE.empty_cache()
         dist.barrier()
         self._checkpoint_name = name
 

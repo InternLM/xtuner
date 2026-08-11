@@ -1838,7 +1838,7 @@ class RLColocateTrainer(BaseRLTrainer):
                         self.rollout_controller.onload_weights.remote(),
                         timeout=RL_TRAINER_RAY_GET_TIMEOUT,
                     )
-                    self.train_controller.update_weights(need_register=True)
+                    self.train_controller.update_weights()
                     self.train_controller.offload(target="model")
                 self.logger.info("Rollout workers update weights successfully in colocate mode")
                 suspend_train_nccl = (
