@@ -265,6 +265,7 @@ case:
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
                 base_metric: qwen3-5-vl-lmdeploy-grpo/tracker.jsonl
                 check_metrics:
@@ -305,6 +306,7 @@ case:
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
                 base_metric: qwen3-5-vl-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
@@ -347,6 +349,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
                 base_metric: qwen3-5-vl-lmdeploy-resume/tracker.jsonl
                 check_metrics:
@@ -390,6 +393,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
                 base_metric: qwen3-5-vl-lmdeploy-resume/tracker-resume.jsonl
                 check_metrics:
@@ -431,6 +435,7 @@ case:
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
                 base_metric: qwen3-5-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
