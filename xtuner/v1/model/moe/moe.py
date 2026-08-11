@@ -49,7 +49,7 @@ from xtuner.v1.model.utils import (
     KeptOps,
     ModelForwardExtraLogInfo,
     RecomputeTargetMap,
-    RecomputeUnit,
+    SaveUnit,
     apply_selective_checkpointing,
     module_dict_repr,
 )
@@ -138,7 +138,7 @@ MOE_RECOMPUTE_CFG: RecomputeTargetMap = {
     # The attention kernel identifies itself, so this unit needs nothing taken out of the compiled
     # set: a custom op is never fused, so it reaches the checkpoint policy compiled or not. Both
     # flash-attention spellings are listed because only one is registered in a given build.
-    RecomputeUnit.SAVE_ATTN: KeptOps(
+    SaveUnit.ATTN: KeptOps(
         "flash_attn::_flash_attn_varlen_forward_v3",
         "flash_attn::_flash_attn_varlen_forward_v2",
     ),
@@ -147,15 +147,13 @@ MOE_RECOMPUTE_CFG: RecomputeTargetMap = {
     # projection holds all the activation memory the router has (the logits are
     # `tokens x n_routed_experts` while the router's own tensors are top-k sized), and unlike the
     # router it contains no in-place write, which the policy refuses to keep.
-    RecomputeUnit.SAVE_MOE_GATE: KeptCallables(f"{_MOE_GATE}.project"),
+    SaveUnit.MOE_GATE: KeptCallables(f"{_MOE_GATE}.project"),
     # The dispatcher stages are already the finest callables there are, and none of them is
     # compiled, so this unit costs no compilation either. Its stages call into the backend library,
     # so ops the library performs on its own buffers -- deep_ep swaps storage with `aten.set_` --
     # fall inside the unit and are reported once; they are recomputed rather than kept, and torch
     # catches the case where such a write lands on a tensor the unit did keep.
-    RecomputeUnit.SAVE_MOE_DISPATCH: KeptCallables(
-        *(f"{cls}.{stage}" for cls in _DISPATCHERS for stage in _DISPATCH_STAGES)
-    ),
+    SaveUnit.MOE_DISPATCH: KeptCallables(*(f"{cls}.{stage}" for cls in _DISPATCHERS for stage in _DISPATCH_STAGES)),
 }
 
 
@@ -1558,7 +1556,7 @@ class MoE(BaseModel):
             mtp_layers = 1 if self.config.mtp_config.share_weights else self.config.mtp_config.num_layers
         else:
             mtp_layers = 0
-        recompute_ratio = self.fsdp_config.recompute_ratio if self.fsdp_config is not None else 0.0
+        recompute_ratio = self.config.recompute_cfg.ratio
 
         total_layers = num_layers + mtp_layers
         num_recompute_layers = int(total_layers * recompute_ratio)

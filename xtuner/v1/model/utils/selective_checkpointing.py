@@ -23,7 +23,7 @@ import torch.nn as nn
 from torch.utils.checkpoint import CheckpointPolicy, create_selective_checkpoint_contexts
 
 from xtuner.v1.utils import log_rank0
-from xtuner.v1.utils.selective_checkpointing import RecomputeUnit, active_recompute_unit, recompute_unit
+from xtuner.v1.utils.selective_checkpointing import SaveUnit, active_recompute_unit, recompute_unit
 
 from .checkpointing import apply_gradient_checkpointing
 
@@ -73,7 +73,7 @@ def apply_selective_checkpointing(
     )
 
 
-def in_recompute_unit(unit: RecomputeUnit, func: Any) -> Any:
+def in_recompute_unit(unit: SaveUnit, func: Any) -> Any:
     """Wrap ``func`` so everything it dispatches belongs to ``unit``.
 
     Installed by the model layer on each callable a
@@ -81,7 +81,7 @@ def in_recompute_unit(unit: RecomputeUnit, func: Any) -> Any:
     the exclusion from compilation that makes the marker readable at all.
 
     Args:
-        unit (RecomputeUnit): The unit this callable implements.
+        unit (SaveUnit): The unit this callable implements.
         func (Any): The callable to wrap.
 
     Returns:

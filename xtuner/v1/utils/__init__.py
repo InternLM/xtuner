@@ -25,9 +25,10 @@ from .profile import profile_time, profile_time_and_memory, timer, timer_logger
 from .selective_checkpointing import (
     KeptCallables,
     KeptOps,
+    RecomputeConfig,
     RecomputeTarget,
     RecomputeTargetMap,
-    RecomputeUnit,
+    SaveUnit,
 )
 from .state import ForwardState
 from .type_helper import copy_method_signature, copy_signature, ray_method
@@ -79,5 +80,6 @@ __all__ = [
     "KeptOps",
     "RecomputeTarget",
     "RecomputeTargetMap",
-    "RecomputeUnit",
+    "RecomputeConfig",
+    "SaveUnit",
 ]

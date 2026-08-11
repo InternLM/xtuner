@@ -1,8 +1,9 @@
 from xtuner.v1.utils.selective_checkpointing import (
     KeptCallables,
     KeptOps,
+    RecomputeConfig,
     RecomputeTargetMap,
-    RecomputeUnit,
+    SaveUnit,
 )
 
 from .checkpointing import apply_gradient_checkpointing
@@ -18,7 +19,8 @@ __all__ = [
     "KeptCallables",
     "KeptOps",
     "RecomputeTargetMap",
-    "RecomputeUnit",
+    "RecomputeConfig",
+    "SaveUnit",
     "in_recompute_unit",
     "resolve_kept_ops",
 ]

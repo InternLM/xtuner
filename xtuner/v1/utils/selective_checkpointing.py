@@ -2,7 +2,7 @@
 
 This module holds the vocabulary that the SAC layers agree on and nothing else:
 
-- Users select :class:`RecomputeUnit` members in the model config.
+- Users select :class:`SaveUnit` members in the model config.
 - Model authors declare a :data:`RecomputeTargetMap` saying what each unit they support resolves to
   for their architecture.
 - The SAC engine turns the selection into a per-op checkpoint policy.
@@ -35,11 +35,17 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TypeAlias
 
+from cyclopts import Parameter
+from pydantic import BaseModel as PydanticBaseModel
+from pydantic import ConfigDict
+from typing_extensions import Annotated
+
 from .enum_helper import StrEnum
 
 
 __all__ = [
-    "RecomputeUnit",
+    "SaveUnit",
+    "RecomputeConfig",
     "KeptOps",
     "KeptCallables",
     "RecomputeTarget",
@@ -49,19 +55,22 @@ __all__ = [
 ]
 
 
-class RecomputeUnit(StrEnum):
-    """Semantic units of activation that may be kept resident instead of
-    recomputed.
+class SaveUnit(StrEnum):
+    """Semantic units of activation that are *saved* -- kept resident instead
+    of recomputed.
 
-    Each member names a *class of sub-structure* whose activations are worth keeping in memory because recomputing it
-    is expensive relative to what it costs to store. A unit selected by the user means "do not recompute this part";
-    everything not selected is recomputed. What a unit resolves to is architecture-specific and is declared per model,
-    so the same unit can cover different code in different models.
+    Naming is deliberate: selecting a member means "save this", not "recompute this". Everything not
+    selected is recomputed, which is the default and costs no memory.
+
+    Each member names a *class of sub-structure* whose activations are worth keeping because
+    recomputing it is expensive relative to what it costs to store. What a unit resolves to is
+    architecture-specific and is declared per model, so the same unit can cover different code in
+    different models.
 
     Members are strings so pydantic round-trips them to readable names in serialized configs.
     """
 
-    SAVE_ATTN = "save_attn"
+    ATTN = "attn"
     """Keep the attention kernel's output -- the flash-attention call itself,
     not the projections around it.
 
@@ -70,10 +79,10 @@ class RecomputeUnit(StrEnum):
     is always visible to the checkpoint policy, compiled or not.
     """
 
-    SAVE_MOE_GATE = "save_moe_gate"
+    MOE_GATE = "moe_gate"
     """Keep the MoE router: gating projection, top-k selection, and routing weights."""
 
-    SAVE_MOE_DISPATCH = "save_moe_dispatch"
+    MOE_DISPATCH = "moe_dispatch"
     """Keep the tensors produced around expert dispatch and combine: the permutation, padding and
     unpermutation buffers on either side of the all-to-all.
 
@@ -123,31 +132,63 @@ class KeptCallables:
 
 
 RecomputeTarget: TypeAlias = KeptOps | KeptCallables
-"""What a single :class:`RecomputeUnit` resolves to for one architecture."""
+"""What a single :class:`SaveUnit` resolves to for one architecture."""
 
-RecomputeTargetMap: TypeAlias = dict[RecomputeUnit, RecomputeTarget]
-"""Per-model declaration of what each supported :class:`RecomputeUnit` resolves
-to.
+
+class RecomputeConfig(PydanticBaseModel):
+    """All recompute settings in one place: which layers, and what stays saved
+    inside them.
+
+    ``ratio`` and ``vision_ratio`` decide *which layers* are recomputed at all; ``save`` decides
+    *what inside a recomputed layer* is kept resident anyway. They used to live in two different
+    configs -- the ratios on ``FSDPConfig``, the unit selection on the model config -- which made
+    the pair hard to reason about, since neither means much without the other.
+
+    Args:
+        ratio (float): Fraction of decoder layers to recompute, counted from the end. Defaults to
+            1.0, i.e. recompute every layer.
+        vision_ratio (float): The same, for a compose model's vision tower. Defaults to 1.0.
+        save (list[SaveUnit] | bool | None): What stays resident inside the recomputed layers.
+            ``None`` and ``False`` save nothing, ``True`` saves every unit the model declares, and a
+            list saves exactly those. Defaults to None.
+
+            ``None`` deliberately does not mean "model default", unlike ``compile_cfg``: saving a
+            unit trades memory for speed, so an unset config must not silently change an existing
+            run's peak memory.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ratio: Annotated[float, Parameter(help="Fraction of decoder layers to recompute, from the end")] = 1.0
+    vision_ratio: Annotated[float, Parameter(help="The same, for a compose model's vision tower")] = 1.0
+    save: Annotated[
+        list[SaveUnit] | bool | None,
+        Parameter(help="What stays resident inside recomputed layers: None/False none, True all declared, or a list"),
+    ] = None
+
+
+RecomputeTargetMap: TypeAlias = dict[SaveUnit, RecomputeTarget]
+"""Per-model declaration of what each supported :class:`SaveUnit` resolves to.
 
 Models expose this as a ``default_recompute_cfg`` property, mirroring ``default_compile_cfg``. A unit absent from the
 mapping is not supported by that architecture.
 """
 
 
-def active_recompute_unit() -> RecomputeUnit | None:
+def active_recompute_unit() -> SaveUnit | None:
     """Return the unit whose callable is currently executing, if any.
 
     Meaningful only while a checkpoint policy is running, which is the only caller. Units resolved by
     :class:`KeptOps` never set this -- they are recognised from the op itself.
 
     Returns:
-        RecomputeUnit | None: The innermost open unit, or None outside one.
+        SaveUnit | None: The innermost open unit, or None outside one.
     """
     return _ACTIVE_UNIT.get()
 
 
 @contextmanager
-def recompute_unit(unit: RecomputeUnit) -> Iterator[None]:
+def recompute_unit(unit: SaveUnit) -> Iterator[None]:
     """Mark the enclosed call as belonging to ``unit``.
 
     Entered by the wrapper the engine installs on a :class:`KeptCallables` target, never by model
@@ -155,7 +196,7 @@ def recompute_unit(unit: RecomputeUnit) -> Iterator[None]:
     taken out of the compiled set; inside compiled code it would neither be set nor read.
 
     Args:
-        unit (RecomputeUnit): The unit the enclosed call belongs to.
+        unit (SaveUnit): The unit the enclosed call belongs to.
     """
     token = _ACTIVE_UNIT.set(unit)
     try:
@@ -164,4 +205,4 @@ def recompute_unit(unit: RecomputeUnit) -> Iterator[None]:
         _ACTIVE_UNIT.reset(token)
 
 
-_ACTIVE_UNIT: ContextVar[RecomputeUnit | None] = ContextVar("xtuner_recompute_unit", default=None)
+_ACTIVE_UNIT: ContextVar[SaveUnit | None] = ContextVar("xtuner_recompute_unit", default=None)

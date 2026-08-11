@@ -26,7 +26,7 @@ from xtuner.v1.model.base import (
     TorchCompileOption,
     TransformerConfig,
 )
-from xtuner.v1.model.utils import KeptOps, RecomputeTargetMap, RecomputeUnit, apply_selective_checkpointing
+from xtuner.v1.model.utils import KeptOps, RecomputeTargetMap, SaveUnit, apply_selective_checkpointing
 from xtuner.v1.module import (
     GatedDeltaNetConfig,
     LMHead,
@@ -54,7 +54,7 @@ DENSE_COMPILE_CFG: dict[str, TorchCompileOption] = {
 DENSE_RECOMPUTE_CFG: RecomputeTargetMap = {
     # A dense stack has no router and no expert dispatch, so attention is the only unit it can keep
     # -- and it keeps it by op identity, which costs no compilation.
-    RecomputeUnit.SAVE_ATTN: KeptOps(
+    SaveUnit.ATTN: KeptOps(
         "flash_attn::_flash_attn_varlen_forward_v3",
         "flash_attn::_flash_attn_varlen_forward_v2",
     ),
@@ -254,7 +254,7 @@ class Dense(BaseModel):
             lm_head_mp_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
         else:
             lm_head_mp_policy = mp_policy
-        num_recompute_layers = int(self.config.num_hidden_layers * self.fsdp_config.recompute_ratio)
+        num_recompute_layers = int(self.config.num_hidden_layers * self.config.recompute_cfg.ratio)
 
         generator = torch.Generator()
         generator.manual_seed(dist.get_rank())

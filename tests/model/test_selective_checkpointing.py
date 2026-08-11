@@ -32,7 +32,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 from xtuner.v1.model.utils import (
     KeptOps,
-    RecomputeUnit,
+    SaveUnit,
     apply_selective_checkpointing,
     in_recompute_unit,
     resolve_kept_ops,
@@ -57,7 +57,7 @@ class _UnitBlock(_Block):
 
     def __init__(self) -> None:
         super().__init__()
-        self.second_stage = in_recompute_unit(RecomputeUnit.SAVE_ATTN, self._second_stage)
+        self.second_stage = in_recompute_unit(SaveUnit.ATTN, self._second_stage)
 
     def _second_stage(self, hidden: torch.Tensor) -> torch.Tensor:
         return torch.tanh(self.second(hidden))
@@ -72,7 +72,7 @@ class _InPlaceUnitBlock(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.linear = nn.Linear(4, 4)
-        self.unit = in_recompute_unit(RecomputeUnit.SAVE_ATTN, self._unit)
+        self.unit = in_recompute_unit(SaveUnit.ATTN, self._unit)
 
     def _unit(self, x: torch.Tensor) -> torch.Tensor:
         hidden = self.linear(x)
@@ -90,7 +90,7 @@ class _MutatesKeptTensorBlock(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.linear = nn.Linear(4, 4)
-        self.unit = in_recompute_unit(RecomputeUnit.SAVE_ATTN, self._unit)
+        self.unit = in_recompute_unit(SaveUnit.ATTN, self._unit)
 
     def _unit(self, x: torch.Tensor) -> torch.Tensor:
         kept = torch.tanh(self.linear(x))
@@ -225,11 +225,11 @@ class TestDeclarations:
         # 两种解析方式的代价完全不同（一个零编译代价，一个要退出编译集合），所以类型必须能区分。
         from xtuner.v1.model.moe.moe import MOE_RECOMPUTE_CFG
 
-        assert isinstance(MOE_RECOMPUTE_CFG[RecomputeUnit.SAVE_ATTN], KeptOps)
+        assert isinstance(MOE_RECOMPUTE_CFG[SaveUnit.ATTN], KeptOps)
         assert set(MOE_RECOMPUTE_CFG) == {
-            RecomputeUnit.SAVE_ATTN,
-            RecomputeUnit.SAVE_MOE_GATE,
-            RecomputeUnit.SAVE_MOE_DISPATCH,
+            SaveUnit.ATTN,
+            SaveUnit.MOE_GATE,
+            SaveUnit.MOE_DISPATCH,
         }
 
 

@@ -10,11 +10,15 @@ TestRecomputeCfgResolution
     test_unset_cfg_keeps_full_recompute: `None` 不改变显存行为，解析为不留驻。
     test_true_selects_every_supported_unit: `True` 选中模型声明的全部 unit。
     test_explicit_units_select_only_themselves: 显式 list 只选中对应 unit。
-    test_string_units_are_accepted: 配置文件里的字符串能解析成 RecomputeUnit。
+    test_string_units_are_accepted: 配置文件里的字符串能解析成 SaveUnit。
     test_unsupported_unit_is_rejected: 模型不支持的 unit 在构造时报错并列出支持项。
     test_disable_propagates_into_nested_configs: `False` 递归关闭嵌套子模型配置。
     test_disable_reaches_every_sub_model_of_a_real_compose_config: 真实 compose 配置的三个子配置都被关闭。
     test_units_round_trip_through_json: enum 序列化成可读字符串并能读回。
+TestRecomputeRatioMigration
+    test_old_field_still_takes_effect: 旧的 fsdp_cfg.recompute_ratio 仍然生效。
+    test_unset_old_field_leaves_the_new_one_alone: 没设旧字段时不覆盖新位置的值。
+    test_setting_both_is_an_error: 两处都设时报错而不是静默择一。
 TestDeclaredTargets
     test_declared_targets_resolve: 声明表里的 op 名与 callable 名都能解析到真实对象。
     test_no_unit_names_the_method_that_holds_most_compilation: 没有 unit 点名承载最多编译的那个方法。
@@ -34,6 +38,7 @@ import torch
 from torch import nn
 from torch.autograd.graph import saved_tensors_hooks
 
+from xtuner.v1.config import FSDPConfig
 from xtuner.v1.model.base import BaseModel, TorchCompileOption, XTunerBaseModelConfig, _disable_nested_switch
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLMoE30BA3Config
 from xtuner.v1.model.dense.dense import DENSE_RECOMPUTE_CFG
@@ -41,7 +46,8 @@ from xtuner.v1.model.moe.moe import MOE_RECOMPUTE_CFG, MoE, MoEConfig
 from xtuner.v1.model.utils import (
     KeptCallables,
     KeptOps,
-    RecomputeUnit,
+    RecomputeConfig,
+    SaveUnit,
     apply_gradient_checkpointing,
     resolve_kept_ops,
 )
@@ -244,34 +250,34 @@ class TestRecomputeCfgResolution:
     def test_unset_cfg_keeps_full_recompute(self):
         # `None` must not change the memory profile of an existing training run: unlike `compile_cfg`,
         # it resolves to "retain nothing" rather than to the model's declared units.
-        assert _resolve_units(recompute_cfg=None) == set()
+        assert _resolve_units(recompute_cfg=RecomputeConfig(save=None)) == set()
 
     def test_true_selects_every_supported_unit(self):
-        assert _resolve_units(recompute_cfg=True) == set(MOE_RECOMPUTE_CFG)
+        assert _resolve_units(recompute_cfg=RecomputeConfig(save=True)) == set(MOE_RECOMPUTE_CFG)
 
     def test_explicit_units_select_only_themselves(self):
-        assert _resolve_units(recompute_cfg=[RecomputeUnit.SAVE_MOE_GATE]) == {RecomputeUnit.SAVE_MOE_GATE}
+        assert _resolve_units(recompute_cfg=RecomputeConfig(save=[SaveUnit.MOE_GATE])) == {SaveUnit.MOE_GATE}
 
     def test_string_units_are_accepted(self):
         # Configs arrive as JSON/py files where units are written as plain strings.
-        assert _resolve_units(recompute_cfg=["save_attn"]) == {RecomputeUnit.SAVE_ATTN}
+        assert _resolve_units(recompute_cfg=RecomputeConfig(save=["attn"])) == {SaveUnit.ATTN}
 
     def test_unsupported_unit_is_rejected(self):
         # A model declaring no units cannot honour any selection, so this is a user configuration
         # error rather than something to silently drop. It surfaces at construction, before the run
         # spends anything on materializing and sharding weights.
         with pytest.raises(ValueError, match="does not support"):
-            _ProbeModel(_ProbeConfig(text_config=_NestedProbeConfig(), recompute_cfg=[RecomputeUnit.SAVE_ATTN]))
+            _ProbeModel(_ProbeConfig(text_config=_NestedProbeConfig(), recompute_cfg=RecomputeConfig(save=[SaveUnit.ATTN])))
 
     def test_disable_propagates_into_nested_configs(self):
         # A sub-model resolves its own switch, so `False` on the outer config only means something
         # if it reaches the nested ones. `compile_cfg` must stay untouched: the walk is per switch.
-        config = _ProbeConfig(text_config=_NestedProbeConfig(), recompute_cfg=False)
+        config = _ProbeConfig(text_config=_NestedProbeConfig(), recompute_cfg=RecomputeConfig(save=False))
 
         model = _ProbeModel(config)
 
         assert model._selected_recompute_units == set()
-        assert config.text_config.recompute_cfg is False
+        assert config.text_config.recompute_cfg.save is False
         assert config.text_config.compile_cfg is None
 
     def test_disable_reaches_every_sub_model_of_a_real_compose_config(self):
@@ -279,23 +285,23 @@ class TestRecomputeCfgResolution:
         # further-derived MoE config. Exercised on the config walk rather than through the model,
         # because constructing a 30B compose model is the expensive part and contributes nothing:
         # what can regress here is which nested configs the walk reaches.
-        config = Qwen3VLMoE30BA3Config(recompute_cfg=False)
+        config = Qwen3VLMoE30BA3Config(recompute_cfg=RecomputeConfig(save=False))
 
-        _disable_nested_switch(config, "recompute_cfg")
+        _disable_nested_switch(config, "recompute_cfg", subfield="save")
 
         for sub_config in (config.vision_config, config.projector_config, config.text_config):
-            assert sub_config.recompute_cfg is False
+            assert sub_config.recompute_cfg.save is False
 
     def test_units_round_trip_through_json(self):
         # Trainer resume reads the config back, and serialized runs are read by humans, so units
         # must survive as their readable names.
-        config = _build_tiny_moe_config(recompute_cfg=[RecomputeUnit.SAVE_ATTN, RecomputeUnit.SAVE_MOE_GATE])
+        config = _build_tiny_moe_config(recompute_cfg=RecomputeConfig(save=[SaveUnit.ATTN, SaveUnit.MOE_GATE]))
 
         dumped = config.model_dump(mode="json")["recompute_cfg"]
-        assert dumped == ["save_attn", "save_moe_gate"]
+        assert dumped["save"] == ["attn", "moe_gate"]
 
-        restored = _build_tiny_moe_config(recompute_cfg=dumped)
-        assert restored.recompute_cfg == [RecomputeUnit.SAVE_ATTN, RecomputeUnit.SAVE_MOE_GATE]
+        restored = _build_tiny_moe_config(recompute_cfg=RecomputeConfig(**dumped))
+        assert restored.recompute_cfg.save == [SaveUnit.ATTN, SaveUnit.MOE_GATE]
 
 
 class TestDeclaredTargets:
@@ -343,28 +349,55 @@ class TestUnitCostIsProportionate:
             return MoE(config=config).compile_cfg
 
     def test_an_op_identity_unit_costs_no_compilation(self):
-        assert self._compile_cfg(recompute_cfg=[RecomputeUnit.SAVE_ATTN]) == self._compile_cfg()
+        assert self._compile_cfg(recompute_cfg=RecomputeConfig(save=[SaveUnit.ATTN])) == self._compile_cfg()
 
     def test_a_callable_unit_keeps_its_callers_compiled(self):
-        unit = RecomputeUnit.SAVE_MOE_GATE
+        unit = SaveUnit.MOE_GATE
         # Relaxed, not removed: the caller still compiles, it just splits at the excluded callee.
         # Being absent from `compile_cfg` is not enough to be outside the compiled set, because
         # Dynamo inlines a callee into whichever compiled caller reaches it.
         baseline = self._compile_cfg()
-        relaxed = self._compile_cfg(recompute_cfg=[unit])
+        relaxed = self._compile_cfg(recompute_cfg=RecomputeConfig(save=[unit]))
 
         assert set(relaxed) == set(baseline), "a unit must not remove a caller from the compiled set"
         assert not any(option.get("fullgraph") for option in relaxed.values())
 
     def test_no_unit_withdraws_the_method_that_holds_most_compilation(self):
         for unit in MOE_RECOMPUTE_CFG:
-            assert _PRE_MOE_FORWARD in self._compile_cfg(recompute_cfg=[unit]), f"{unit} withdrew {_PRE_MOE_FORWARD}"
+            assert _PRE_MOE_FORWARD in self._compile_cfg(recompute_cfg=RecomputeConfig(save=[unit])), f"{unit} withdrew {_PRE_MOE_FORWARD}"
 
     def test_attention_is_kept_by_op_identity(self):
         # The attention kernel is a custom op, so it reaches the policy from inside a compiled
         # region -- which is why this unit costs nothing.
-        config = _build_tiny_moe_config(recompute_cfg=[RecomputeUnit.SAVE_ATTN])
+        config = _build_tiny_moe_config(recompute_cfg=RecomputeConfig(save=[SaveUnit.ATTN]))
         with torch.device("meta"):
             model = MoE(config=config)
         assert model.kept_ops
         assert model.keeps_any_recompute_unit
+
+
+class TestRecomputeRatioMigration:
+    """`fsdp_cfg.recompute_ratio` 已迁到 `recompute_cfg.ratio`，旧字段留作过渡。"""
+
+    def _model(self, fsdp_kwargs, **config_kwargs):
+        model = _ProbeModel(_ProbeConfig(text_config=_NestedProbeConfig(), **config_kwargs))
+        model._migrate_recompute_ratio(FSDPConfig(**fsdp_kwargs))
+        return model
+
+    def test_old_field_still_takes_effect(self):
+        # 过渡期内旧配置不能突然失效，值要被搬到新位置。
+        model = self._model({"recompute_ratio": 0.25})
+
+        assert model.config.recompute_cfg.ratio == 0.25
+
+    def test_unset_old_field_leaves_the_new_one_alone(self):
+        # 旧字段的哨兵是 None 而不是 1.0，否则「没设过」会被当成「显式设成 1.0」，
+        # 把用户在新位置写的值覆盖掉。
+        model = self._model({}, recompute_cfg=RecomputeConfig(ratio=0.5))
+
+        assert model.config.recompute_cfg.ratio == 0.5
+
+    def test_setting_both_is_an_error(self):
+        # 同一个设置有两个写法时，静默挑一个是最糟的处理。
+        with pytest.raises(ValueError, match="both set"):
+            self._model({"recompute_ratio": 0.25}, recompute_cfg=RecomputeConfig(ratio=0.5))

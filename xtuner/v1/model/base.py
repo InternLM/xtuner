@@ -65,8 +65,9 @@ from .utils import (
     KeptCallables,
     KeptOps,
     ModelForwardExtraLogInfo,
+    RecomputeConfig,
     RecomputeTargetMap,
-    RecomputeUnit,
+    SaveUnit,
     in_recompute_unit,
     resolve_kept_ops,
 )
@@ -150,21 +151,14 @@ class XTunerBaseModelConfig(PydanticBaseModel):
             "`dict[str, TorchCompileOption]`: Customize the compile option",
         ),
     ] = None
-    # `activation_offload_cfg` belongs here, next to `recompute_cfg` and sharing its `RecomputeUnit`
+    # `activation_offload_cfg` belongs here, next to `recompute_cfg` and sharing its `SaveUnit`
     # vocabulary and per-model interval declarations: offloading applies to the regions SAC keeps
     # resident, since recomputed regions never land in memory to begin with. Not declared until it is
     # implemented -- a config field nothing reads is a switch that silently does nothing.
     recompute_cfg: Annotated[
-        list[RecomputeUnit] | bool | None,
-        Parameter(
-            group="model",
-            help="Which activation regions stay resident instead of being recomputed, inside the layers "
-            "selected by `fsdp_cfg.recompute_ratio`. "
-            "`None` | `False`: Recompute everything, "
-            "`True`: Keep every region the model declares in `default_recompute_cfg`, "
-            "`list[RecomputeUnit]`: Keep exactly the listed regions",
-        ),
-    ] = None
+        RecomputeConfig,
+        Parameter(group="model", help="Which layers are recomputed, and what stays saved inside them"),
+    ] = RecomputeConfig()
     hf_key_mapping: Annotated[dict[str, str] | None, "Remapping hf key based on the `to_hf_key_list`"] = None
     dcp_ignore_frozen_params: bool = True
     lm_loss_cfg: BaseLossConfig = CELossConfig()
@@ -560,7 +554,7 @@ def _save_file(
     save_file(tensors, filename, metadata=metadata)
 
 
-def _disable_nested_switch(obj: Any, field_name: str) -> None:
+def _disable_nested_switch(obj: Any, field_name: str, *, subfield: str | None = None) -> None:
     """Turn a tri-state feature switch off on every config reachable from
     ``obj``.
 
@@ -573,21 +567,27 @@ def _disable_nested_switch(obj: Any, field_name: str) -> None:
 
     Args:
         obj (Any): Config, container, or leaf value to walk.
-        field_name (str): Name of the switch field to set to ``False``.
+        field_name (str): Name of the field holding the switch.
+        subfield (str | None): When the switch is one field *inside* ``field_name`` -- as
+            ``recompute_cfg.save`` is inside ``RecomputeConfig`` -- the name of that inner field.
+            Defaults to None, i.e. ``field_name`` is itself the switch.
     """
     if isinstance(obj, PydanticBaseModel):
         if not hasattr(obj, field_name):
             return
-        setattr(obj, field_name, False)
+        if subfield is None:
+            setattr(obj, field_name, False)
+        else:
+            setattr(getattr(obj, field_name), subfield, False)
         for nested_field in type(obj).model_fields:
-            _disable_nested_switch(getattr(obj, nested_field), field_name)
+            _disable_nested_switch(getattr(obj, nested_field), field_name, subfield=subfield)
     elif isinstance(obj, Mapping):
         for value in obj.values():
-            _disable_nested_switch(value, field_name)
+            _disable_nested_switch(value, field_name, subfield=subfield)
     # str & bytes are Iterables of themselves and would recurse forever.
     elif isinstance(obj, Iterable) and not isinstance(obj, (str, bytes)):
         for value in obj:
-            _disable_nested_switch(value, field_name)
+            _disable_nested_switch(value, field_name, subfield=subfield)
 
 
 class BaseModel(nn.Module):
@@ -610,7 +610,7 @@ class BaseModel(nn.Module):
 
         # Recompute resolves first: selecting a unit withdraws the callables enclosing its region
         # from the compiled set, so the compile config depends on the answer.
-        self._selected_recompute_units: set[RecomputeUnit] = set()
+        self._selected_recompute_units: set[SaveUnit] = set()
         self._kept_ops, self._kept_callables = self._resolve_recompute_cfg(self.config)
         self._compile_cfg = self._resolve_compile_cfg(self.config)
         self._float8_handler: Float8Handler | None = None
@@ -648,6 +648,7 @@ class BaseModel(nn.Module):
     ) -> Self:
         """Fully shard the model parameters."""
         self.fsdp_config = fsdp_config
+        self._migrate_recompute_ratio(fsdp_config)
         self.fsdp_mesh = self._init_world_mesh()
         self._world_mesh = self.fsdp_mesh
 
@@ -1044,7 +1045,7 @@ class BaseModel(nn.Module):
     def default_recompute_cfg(self) -> RecomputeTargetMap:
         """What each recompute unit this architecture supports resolves to.
 
-        This is the model author's vocabulary: it declares which :class:`RecomputeUnit` s the architecture supports and
+        This is the model author's vocabulary: it declares which :class:`SaveUnit` s the architecture supports and
         what each one is made of, not which of them are worth enabling. An architecture that supports none declares
         nothing.
 
@@ -2658,13 +2659,44 @@ class BaseModel(nn.Module):
 
         return self._without_compiled_selected_regions(compile_cfg)
 
+    def _migrate_recompute_ratio(self, fsdp_config: FSDPConfig) -> None:
+        # Compatibility shim for the two ratios that used to live on `FSDPConfig`. Remove together
+        # with those fields once downstream configs have moved to `recompute_cfg`.
+        moves = (
+            ("recompute_ratio", "ratio", "recompute_cfg.ratio"),
+            ("vision_recompute_ratio", "vision_ratio", "recompute_cfg.vision_ratio"),
+        )
+        for old_name, new_name, new_path in moves:
+            old_value = getattr(fsdp_config, old_name, None)
+            if old_value is None:
+                continue
+            if new_name in self.config.recompute_cfg.model_fields_set:
+                raise ValueError(
+                    f"`fsdp_cfg.{old_name}` and `model_cfg.{new_path}` are both set. They are the same setting; "
+                    f"keep only `model_cfg.{new_path}`."
+                )
+            log_rank0.warning(
+                f"`fsdp_cfg.{old_name}` is deprecated and will be removed; use `model_cfg.{new_path}` instead."
+            )
+            setattr(self.config.recompute_cfg, new_name, old_value)
+
     def _resolve_recompute_cfg(self, config: XTunerBaseModelConfig) -> tuple[frozenset, set[str]]:
-        selected = config.recompute_cfg
+        """Turn the user's ``recompute_cfg.save`` selection into what the
+        policy needs.
+
+        Args:
+            config (XTunerBaseModelConfig): The model config carrying the selection.
+
+        Returns:
+            tuple[frozenset, set[str]]: The op overloads to keep by identity, and the qualified
+            names of the callables to keep by marker.
+        """
+        selected = config.recompute_cfg.save
 
         # `False` has to reach the nested sub-model configs, which a compose model builds after this
         # returns and which resolve their own switch against them.
         if selected is False:
-            _disable_nested_switch(self.config, "recompute_cfg")
+            _disable_nested_switch(self.config, "recompute_cfg", subfield="save")
             return frozenset(), set()
 
         # `None` means "keep the memory profile of plain full recompute", not "use the model default" as it does
@@ -2682,7 +2714,7 @@ class BaseModel(nn.Module):
         # letting the run look configured when it is not.
         if selected is True and not supported:
             log_rank0.warning(
-                f"`recompute_cfg=True` has no effect: {type(self).__name__} declares no recompute units, so every "
+                f"`recompute_cfg.save=True` has no effect: {type(self).__name__} declares no recompute units, so every "
                 "region is recomputed."
             )
         units = list(supported) if selected is True else selected
@@ -2693,9 +2725,9 @@ class BaseModel(nn.Module):
             if unit not in supported:
                 supported_desc = ", ".join(sorted(supported)) if supported else "none"
                 raise ValueError(
-                    f"`recompute_cfg` selects {unit!r}, which {type(self).__name__} does not support. "
+                    f"`recompute_cfg.save` selects {unit!r}, which {type(self).__name__} does not support. "
                     f"Units supported by this model: {supported_desc}. Note that a compose model declares no units "
-                    "of its own -- set `recompute_cfg` on the sub-model config that owns the layers instead."
+                    "of its own -- set `recompute_cfg.save` on the sub-model config that owns the layers instead."
                 )
             target = supported[unit]
             if isinstance(target, KeptOps):
@@ -2755,12 +2787,12 @@ class BaseModel(nn.Module):
             for name in sorted(target.names):
                 self._recompute_unit_overwrite(unit, name)
 
-    def _recompute_unit_overwrite(self, unit: RecomputeUnit, func_name: str) -> None:
+    def _recompute_unit_overwrite(self, unit: SaveUnit, func_name: str) -> None:
         """Install the unit wrapper on one callable, and keep it out of the
         compiled set.
 
         Args:
-            unit (RecomputeUnit): The unit this callable implements.
+            unit (SaveUnit): The unit this callable implements.
             func_name (str): Qualified name of the callable, as written in ``compile_cfg``.
         """
         function = cast(FunctionType | MaybeCompile, pydoc.locate(func_name))

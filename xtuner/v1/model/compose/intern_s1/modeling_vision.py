@@ -396,7 +396,7 @@ class InternS1VisionModel(BaseModel):
             for param in self.parameters():
                 param.requires_grad = False
 
-        recompute_ratio = fsdp_config.vision_recompute_ratio
+        recompute_ratio = self.config.recompute_cfg.vision_ratio
         num_recompute_layers = int(len(self.encoder.layer) * recompute_ratio)
 
         generator = torch.Generator()

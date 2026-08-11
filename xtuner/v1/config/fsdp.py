@@ -15,8 +15,15 @@ class FSDPConfig(BaseModel):
     tp_size: Annotated[int, Parameter(help="Tensor parallel size")] = 1
     ep_size: Annotated[int, Parameter(help="Expert parallel size")] = 1
     reshard_after_forward: Annotated[bool, Parameter(help="Reshard model parameters after forward pass")] = True
-    recompute_ratio: Annotated[float, Parameter(help="Gradient checkpointing ratio for memory optimization")] = 1.0
-    vision_recompute_ratio: Annotated[float, Parameter(help="Recompute ratio for vision modules")] = 1.0
+    # Deprecated: moved to `model_cfg.recompute_cfg.ratio` / `.vision_ratio`, so that "which layers
+    # are recomputed" and "what stays saved inside them" live together -- neither means much without
+    # the other. `None` marks "not set by the user", which is what lets the migration tell a real
+    # request from a default. Remove both fields, and `BaseModel._migrate_recompute_ratio`, once
+    # downstream configs have moved.
+    recompute_ratio: Annotated[float | None, Parameter(help="Deprecated, use `model_cfg.recompute_cfg.ratio`")] = None
+    vision_recompute_ratio: Annotated[
+        float | None, Parameter(help="Deprecated, use `model_cfg.recompute_cfg.vision_ratio`")
+    ] = None
     checkpoint_preserve_rng_state: Annotated[bool, Parameter(help="Preserve RNG state during checkpointing")] = True
     # Training-time FSDP CPU offload is version-sensitive for XTuner model configs
     # that keep selected fp32 trainable parameters outside FSDP via

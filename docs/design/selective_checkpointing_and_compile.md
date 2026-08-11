@@ -48,7 +48,7 @@ Two mechanics of the withdrawal are easy to get wrong:
   (`Skip inlining torch.compiler.disable()d function`), not a split. The surviving entries are
   therefore relaxed to `fullgraph=False`.
 
-Measured, 8k, `save_attn`, when it was still resolved by withdrawing the callable that encloses it:
+Measured, 8k, `attn`, when it was still resolved by withdrawing the callable that encloses it:
 
 | | tgs | peak | compiled graphs / captured calls | kept |
 |---|---|---|---|---|
@@ -71,22 +71,22 @@ one run per setting is not enough to say anything about throughput here:
 | unit | tgs (3 runs) | mean | peak allocated | peak reserved |
 |---|---|---|---|---|
 | none | 10206.0 / 9990.6 / 10205.9 | 10134.2 | 84.4-85.3 GB | 108.5-109.3 GB |
-| `save_attn` | 10165.6 / 10204.6 / 10071.2 | 10147.2 | 90.4-91.2 GB | 114.4-115.3 GB |
-| `save_moe_gate` | 10095.2 / 10179.5 / 10144.4 | 10139.7 | 93.7-94.5 GB | 117.7-118.7 GB |
-| `save_moe_dispatch` | OOM | — | — | — |
+| `attn` | 10165.6 / 10204.6 / 10071.2 | 10147.2 | 90.4-91.2 GB | 114.4-115.3 GB |
+| `moe_gate` | 10095.2 / 10179.5 / 10144.4 | 10139.7 | 93.7-94.5 GB | 117.7-118.7 GB |
+| `moe_dispatch` | OOM | — | — | — |
 
 **Throughput is unchanged.** The three means are within 0.1% of each other, while the baseline's own
 three runs span 2.1%. Any single-run comparison of these units reads as ±2% in whichever direction
 the run-to-run variance happened to fall, and means nothing.
 
-**Memory is the reproducible effect**: `save_attn` costs +6.0 GB allocated, `save_moe_gate` +9.2 GB,
+**Memory is the reproducible effect**: `attn` costs +6.0 GB allocated, `moe_gate` +9.2 GB,
 each within ±0.4 GB across runs.
 
 So a unit here buys nothing on this model and costs memory. That is not a statement about the
 mechanism -- it is a statement about which activations an MoE layer's recompute is actually spent
 on, and the census below says why.
 
-`save_moe_dispatch` is not usable at this shape at all. It keeps the permutation and padding buffers
+`moe_dispatch` is not usable at this shape at all. It keeps the permutation and padding buffers
 on both sides of the all-to-all, the widest tensors in the layer, and domino already runs at 109 GB
 reserved of 140 GB. It OOMs during the first step -- and also OOMs without domino, and at
 `pack_max_length=4096`, where it peaks at 111.9 GB against the baseline's 85.9 GB. It is verified
@@ -96,7 +96,7 @@ numerically for one step (see below) and declared for smaller models, not as a d
 
 Checkpointing changes only the backward pass, so **step-1 loss must be bit-identical** whatever is
 kept. It is, across every setting and both shapes -- `2.46262765` at 8k, `2.38410378` at 4k,
-including the `save_moe_dispatch` run that OOMs immediately afterwards.
+including the `moe_dispatch` run that OOMs immediately afterwards.
 
 Gradients need a noise floor to interpret, which is why the baseline was run twice under identical
 settings:
@@ -105,8 +105,8 @@ settings:
 |---|---|---|---|
 | baseline | 2.46262765 | 24.39401245 | — |
 | baseline, second run | 2.46262765 | 24.39329147 | 3.0e-5 |
-| `save_attn` | 2.46262765 | 24.39325905 | 3.1e-5 |
-| `save_moe_gate` | 2.46262765 | 24.39400864 | 1.6e-8 |
+| `attn` | 2.46262765 | 24.39325905 | 3.1e-5 |
+| `moe_gate` | 2.46262765 | 24.39400864 | 1.6e-8 |
 
 Every unit sits at or below the floor two identical runs produce. The floor itself comes from
 reduction ordering in the grouped GEMM and the all-to-all, and exists with no unit selected.
@@ -177,7 +177,7 @@ Instead of withdrawing the callable, let the marker execute during tracing and a
 break Dynamo takes at it. The marker becomes live and the policy sees the unit — but only for ops
 that reach the dispatcher, so it keeps 752 tensors where withdrawing the callable keeps 42112.
 
-Measured, 8k, `save_attn`: 8578.4 tgs, 86.03 GB, 11 graphs / 90 captured, 5 breaks. Cheaper than
+Measured, 8k, `attn`: 8578.4 tgs, 86.03 GB, 11 graphs / 90 captured, 5 breaks. Cheaper than
 withdrawing the callable and more expensive than op identity, with a third semantics again. Not
 adopted because "keep this unit" should not silently mean "keep the handful of ops in it that
 inductor happened not to fuse".
