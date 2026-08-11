@@ -44,6 +44,7 @@ case:
                     - XTUNER_USE_FA3=1
                     - PERMUTE_COMPUTE_DTYPE=fp32
                     - XTUNER_DETERMINISTIC=true
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
                 base_metric: s2-preview-vl-lmdeploy-grpo/tracker.jsonl
                 check_metrics:
@@ -86,6 +87,7 @@ case:
                     - XTUNER_USE_FA3=1
                     - PERMUTE_COMPUTE_DTYPE=fp32
                     - XTUNER_DETERMINISTIC=true
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
                 base_metric: s2-preview-vl-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
@@ -130,6 +132,7 @@ case:
                     - PERMUTE_COMPUTE_DTYPE=fp32
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
                 base_metric: s2-preview-vl-lmdeploy-resume/tracker.jsonl
                 check_metrics:
@@ -173,6 +176,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
                 base_metric: s2-preview-vl-lmdeploy-resume/tracker-resume.jsonl
                 check_metrics:
@@ -216,6 +220,7 @@ case:
                     - XTUNER_USE_FA3=1
                     - PERMUTE_COMPUTE_DTYPE=fp32
                     - XTUNER_DETERMINISTIC=true
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
                 base_metric: s2-preview-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
