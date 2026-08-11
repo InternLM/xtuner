@@ -34,7 +34,15 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
     def _patch_xtuner_fast_pos_embed_interpolate(self) -> None:
         from xtuner.v1.model.compose.qwen3_vl.modeling_vision import Qwen3VLVisionModel
         from transformers.models.qwen3_5_moe import Qwen3_5MoeVisionModel
-        Qwen3VLVisionModel.fast_pos_embed_interpolate = Qwen3_5MoeVisionModel.fast_pos_embed_interpolate
+
+        hf_fast_pos_embed_interpolate = Qwen3_5MoeVisionModel.fast_pos_embed_interpolate
+
+        def _fast_pos_embed_interpolate(self, grid_thw):
+            # Transformers 5.14 accumulates interpolation in fp32 and casts in its
+            # forward; XTuner's older forward expects this helper to keep the model dtype.
+            return hf_fast_pos_embed_interpolate(self, grid_thw).to(self.pos_embed.weight.dtype)
+
+        Qwen3VLVisionModel.fast_pos_embed_interpolate = _fast_pos_embed_interpolate
 
     def _forward(self, model, type, device, sp_size):
         QWEN3_VL_MOE_PATH = os.environ["QWEN3_5_MOE_PATH"]
