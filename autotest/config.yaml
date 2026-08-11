@@ -28,7 +28,7 @@ default_config:
 
 case: 
     # InternS2-Preview: Qwen3.5-VL-MoE-35B-A3B architecture; MODEL_PATH may need adjust on share.
-    interns2-preview-rl-vl-lmdeploy-grpo:
+    s2-preview-vl-lmdeploy-grpo:
         -
             type: rl
             parameters:
@@ -45,7 +45,7 @@ case:
                     - PERMUTE_COMPUTE_DTYPE=fp32
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: interns2-preview-rl-vl-lmdeploy-grpo/tracker.jsonl
+                base_metric: s2-preview-vl-lmdeploy-grpo/tracker.jsonl
                 check_metrics:
                     -
                        metric: response/rewards/mean
@@ -70,7 +70,7 @@ case:
                        aggregate: 80
             timeout: 18000
 
-    interns2-preview-rl-vl-lmdeploy-dapo:
+    s2-preview-vl-lmdeploy-dapo:
         -
             type: rl
             parameters:
@@ -87,7 +87,7 @@ case:
                     - PERMUTE_COMPUTE_DTYPE=fp32
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: interns2-preview-rl-vl-lmdeploy-dapo/tracker.jsonl
+                base_metric: s2-preview-vl-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
                     -
                        metric: response/rewards/mean
@@ -112,7 +112,7 @@ case:
                        aggregate: 80
             timeout: 18000
 
-    interns2-preview-rl-vl-lmdeploy-resume:
+    s2-preview-vl-lmdeploy-resume:
         -
             type: rl
             phase: first
@@ -131,7 +131,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
             assert_info:
-                base_metric: interns2-preview-rl-vl-lmdeploy-resume/tracker.jsonl
+                base_metric: s2-preview-vl-lmdeploy-resume/tracker.jsonl
                 check_metrics:
                     -
                        metric: response/rewards/mean
@@ -160,7 +160,7 @@ case:
             type: rl
             phase: resume
             pre_action:
-                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output interns2-preview-rl-vl-lmdeploy-resume rl'
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output s2-preview-vl-lmdeploy-resume rl'
             parameters:
                 config: autotest/config/rl_interns2_preview_vl_dapo_ep2_resume.py
                 infer_backend: lmdeploy
@@ -174,7 +174,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
             assert_info:
-                base_metric: interns2-preview-rl-vl-lmdeploy-resume/tracker-resume.jsonl
+                base_metric: s2-preview-vl-lmdeploy-resume/tracker-resume.jsonl
                 check_metrics:
                     -
                        metric: response/rewards/mean
@@ -199,7 +199,7 @@ case:
                        aggregate: 80
             timeout: 19200
 
-    interns2-preview-rl-lmdeploy-dapo:
+    s2-preview-lmdeploy-dapo:
         -
             type: rl
             parameters:
@@ -217,7 +217,7 @@ case:
                     - PERMUTE_COMPUTE_DTYPE=fp32
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: interns2-preview-rl-lmdeploy-dapo/tracker.jsonl
+                base_metric: s2-preview-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
                     -
                        metric:  eval/accuracy
@@ -246,7 +246,7 @@ case:
                        operator: <
             timeout: 14400
 
-    qwen3-5-rl-vl-lmdeploy-grpo:
+    qwen3-5-vl-lmdeploy-grpo:
         -
             type: rl
             parameters:
@@ -261,7 +261,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-rl-vl-lmdeploy-grpo/tracker.jsonl
+                base_metric: qwen3-5-vl-lmdeploy-grpo/tracker.jsonl
                 check_metrics:
                     -
                        metric: response/rewards/mean
@@ -286,7 +286,7 @@ case:
                        aggregate: 80
             timeout: 9000
 
-    qwen3-5-rl-vl-lmdeploy-dapo:
+    qwen3-5-vl-lmdeploy-dapo:
         -
             type: rl
             parameters:
@@ -301,7 +301,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-rl-vl-lmdeploy-dapo/tracker.jsonl
+                base_metric: qwen3-5-vl-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
                     -
                        metric: response/rewards/mean
@@ -326,7 +326,7 @@ case:
                        aggregate: 80
             timeout: 9000
 
-    qwen3-5-rl-vl-lmdeploy-resume:
+    qwen3-5-vl-lmdeploy-resume:
         -
             type: rl
             phase: first
@@ -343,7 +343,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
             assert_info:
-                base_metric: qwen3-5-rl-vl-lmdeploy-resume/tracker.jsonl
+                base_metric: qwen3-5-vl-lmdeploy-resume/tracker.jsonl
                 check_metrics:
                     -
                        metric: response/rewards/mean
@@ -372,7 +372,7 @@ case:
             type: rl
             phase: resume
             pre_action:
-                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-rl-vl-lmdeploy-resume rl'
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-vl-lmdeploy-resume rl'
             parameters:
                 config: autotest/config/rl_qwen3p5_vl_35B_dapo_ep2_resume.py
                 infer_backend: lmdeploy
@@ -386,7 +386,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
             assert_info:
-                base_metric: qwen3-5-rl-vl-lmdeploy-resume/tracker-resume.jsonl
+                base_metric: qwen3-5-vl-lmdeploy-resume/tracker-resume.jsonl
                 check_metrics:
                     -
                        metric: response/rewards/mean
@@ -411,7 +411,7 @@ case:
                        aggregate: 80
             timeout: 9600
 
-    qwen3-5-rl-lmdeploy-dapo:
+    qwen3-5-lmdeploy-dapo:
         -
             type: rl
             parameters:
@@ -427,7 +427,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-rl-lmdeploy-dapo/tracker.jsonl
+                base_metric: qwen3-5-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy
@@ -456,7 +456,7 @@ case:
                        operator: <
             timeout: 7200
 
-    qwen3-5-sft-vl-moe:
+    qwen3-5-vl-moe:
         -
             type: sft
             parameters:
@@ -471,7 +471,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
-                base_metric: qwen3-5-sft-vl-moe/tracker.jsonl
+                base_metric: qwen3-5-vl-moe/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/local_loss: 0.000001
@@ -483,7 +483,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500
 
-    qwen3-5-sft-fp8:
+    qwen3-5-fp8:
         -
             type: sft
             parameters:
@@ -499,7 +499,7 @@ case:
                     - XTUNER_ACTIVATION_OFFLOAD=1
                     - XTUNER_USE_FA3=1
             assert_info:
-                base_metric: qwen3-5-sft-fp8/tracker.jsonl
+                base_metric: qwen3-5-fp8/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.1
                     loss/local_loss: 0.000001
@@ -511,7 +511,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500
 
-    qwen3-5-sft-recompute:
+    qwen3-5-recompute:
         -
             type: sft
             parameters:
@@ -525,7 +525,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-sft-recompute/tracker.jsonl
+                base_metric: qwen3-5-recompute/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.02
                     loss/local_loss: 0.000001
@@ -537,7 +537,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500
 
-    qwen3-5-sft-tp2:
+    qwen3-5-tp2:
         -
             type: sft
             parameters:
@@ -549,7 +549,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-sft-tp2/tracker.jsonl
+                base_metric: qwen3-5-tp2/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.05
                     loss/local_loss: 0.000001
@@ -561,7 +561,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500
 
-    qwen3-5-sft-sp4-resume:
+    qwen3-5-sp4-resume:
         -
             type: sft
             phase: first
@@ -575,7 +575,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
             assert_info:
-                base_metric: qwen3-5-sft-sp4-resume/tracker.jsonl
+                base_metric: qwen3-5-sp4-resume/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.09
                     loss/local_loss: 0.000001
@@ -591,7 +591,7 @@ case:
             type: sft
             phase: resume
             pre_action:
-                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sft-sp4-resume sft'
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sp4-resume sft'
             parameters:
                 config: autotest/config/qwen3_5_moe_30BA3_sp4.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
@@ -603,7 +603,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
             assert_info:
-                base_metric: qwen3-5-sft-sp4-resume/tracker-resume.jsonl
+                base_metric: qwen3-5-sp4-resume/tracker-resume.jsonl
                 check_metrics:
                     grad_norm: 0.02
                     loss/local_loss: 0.000001
@@ -614,10 +614,10 @@ case:
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
             post_action:
-                command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sft-sp4-resume sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
+                command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sp4-resume sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
             timeout: 1500
 
-    qwen3-5-sft-8nums-vs-16nums:
+    qwen3-5-8nums-vs-16nums:
         -
             type: sft
             parameters:
@@ -630,7 +630,7 @@ case:
                     - CACHE_DIR=/mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/.cache_qwen3_5
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-sft-8nums-vs-16nums/tracker.jsonl
+                base_metric: qwen3-5-8nums-vs-16nums/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.02
                     loss/maxvio: 0.05
@@ -640,7 +640,7 @@ case:
                     lr: 0
             timeout: 1500
 
-    qwen3-5-sft-fp8-vl:
+    qwen3-5-fp8-vl:
         -
             type: sft
             parameters:
@@ -657,7 +657,7 @@ case:
                     - XTUNER_USE_FA3=1
                     - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
-                base_metric: qwen3-5-sft-fp8-vl/tracker.jsonl
+                base_metric: qwen3-5-fp8-vl/tracker.jsonl
                 check_metrics:
                     # FP8+VL+MoE: early steps / occasional spikes; p80 only for this case.
                     grad_norm:
@@ -678,7 +678,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500
 
-    qwen3-5-sft-tp2-vl:
+    qwen3-5-tp2-vl:
         -
             type: sft
             parameters:
@@ -693,7 +693,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
-                base_metric: qwen3-5-sft-tp2-vl/tracker.jsonl
+                base_metric: qwen3-5-tp2-vl/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/local_loss: 0.000001
@@ -705,7 +705,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500
 
-    qwen3-5-sft-sp4-resume-vl:
+    qwen3-5-sp4-resume-vl:
         -
             type: sft
             phase: first
@@ -721,7 +721,7 @@ case:
                     - XTUNER_GC_ENABLE=1
                     - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
-                base_metric: qwen3-5-sft-sp4-resume-vl/tracker.jsonl
+                base_metric: qwen3-5-sp4-resume-vl/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/local_loss: 0.000001
@@ -737,7 +737,7 @@ case:
             type: sft
             phase: resume
             pre_action:
-                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sft-sp4-resume-vl sft'
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sp4-resume-vl sft'
             parameters:
                 config: autotest/config/qwen3_5_moe_30BA3_sp4_vl.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
@@ -751,7 +751,7 @@ case:
                     - XTUNER_GC_ENABLE=1
                     - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
-                base_metric: qwen3-5-sft-sp4-resume-vl/tracker-resume.jsonl
+                base_metric: qwen3-5-sp4-resume-vl/tracker-resume.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/local_loss: 0.000001
@@ -762,10 +762,10 @@ case:
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
             post_action:
-                command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sft-sp4-resume-vl sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
+                command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sp4-resume-vl sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
             timeout: 1500
 
-    qwen3-5-sft-mtp:
+    qwen3-5-mtp:
         -
             type: sft
             parameters:
@@ -777,7 +777,7 @@ case:
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-sft-mtp/tracker.jsonl
+                base_metric: qwen3-5-mtp/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.05
                     loss/local_loss: 0.000001
@@ -789,7 +789,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500
 
-    qwen3-5-sft-mtp-vl:
+    qwen3-5-mtp-vl:
         -
             type: sft
             parameters:
@@ -803,7 +803,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
-                base_metric: qwen3-5-sft-mtp-vl/tracker.jsonl
+                base_metric: qwen3-5-mtp-vl/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/local_loss: 0.000001
@@ -815,7 +815,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500
 
-    qwen3-rl-lmdeploy:
+    qwen3-lmdeploy:
         -
             type: rl
             parameters:
@@ -829,7 +829,7 @@ case:
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-rl-lmdeploy/tracker.jsonl
+                base_metric: qwen3-lmdeploy/tracker.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy
@@ -858,7 +858,7 @@ case:
                        operator: <
             timeout: 2460
 
-    qwen3-rl-vl-lmdeploy:
+    qwen3-vl-lmdeploy:
         -
             type: rl
             parameters:
@@ -873,7 +873,7 @@ case:
                     - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-rl-vl-lmdeploy/tracker.jsonl
+                base_metric: qwen3-vl-lmdeploy/tracker.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy
@@ -903,7 +903,7 @@ case:
                        aggregate: 80
             timeout: 8400
 
-    qwen3-rl-sglang:
+    qwen3-sglang:
         -
             type: rl
             parameters:
@@ -923,7 +923,7 @@ case:
                     - XTUNER_USE_SGLANG=1
                     - XTUNER_USE_FA3=0
             assert_info:
-                base_metric: qwen3-rl-sglang/tracker.jsonl
+                base_metric: qwen3-sglang/tracker.jsonl
                 check_metrics:
                     - 
                        metric:  eval/accuracy
@@ -952,7 +952,7 @@ case:
                        operator: <
             timeout: 4500
 
-    qwen3-sft:
+    qwen3:
         -
             type: sft
             parameters:
@@ -964,7 +964,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft/tracker.jsonl
+                base_metric: qwen3/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -977,7 +977,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500
 
-    qwen3-sft-ep8:
+    qwen3-ep8:
         -
             type: sft
             phase: first
@@ -992,7 +992,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft-ep8/tracker.jsonl
+                base_metric: qwen3-ep8/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -1008,7 +1008,7 @@ case:
             type: sft
             phase: resume
             pre_action:
-                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-sft-ep8 sft'
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-ep8 sft'
             parameters:
                 config: autotest/config/qwen3_moe_30BA3_ep8_resume.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
@@ -1020,7 +1020,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft-ep8/tracker-resume.jsonl
+                base_metric: qwen3-ep8/tracker-resume.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -1031,10 +1031,10 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/text_tokens: 0
             post_action:
-                command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-sft-ep8 sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
+                command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-ep8 sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
             timeout: 3000
 
-    qwen3-sft-tp2:
+    qwen3-tp2:
         -
             type: sft
             parameters:
@@ -1046,7 +1046,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft-tp2/tracker.jsonl
+                base_metric: qwen3-tp2/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -1059,7 +1059,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500
 
-    qwen3-sft-recompute:
+    qwen3-recompute:
         -
             type: sft
             parameters:
@@ -1073,7 +1073,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft-recompute/tracker.jsonl
+                base_metric: qwen3-recompute/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -1086,7 +1086,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 3000
 
-    qwen3-sft-fp8:
+    qwen3-fp8:
         -
             type: sft
             parameters:
@@ -1102,7 +1102,7 @@ case:
                     - XTUNER_ACTIVATION_OFFLOAD=1
                     - XTUNER_USE_FA3=1
             assert_info:
-                base_metric: qwen3-sft-fp8/tracker.jsonl
+                base_metric: qwen3-fp8/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.1
                     loss/maxvio: 0.000001
@@ -1115,7 +1115,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500 
 
-    qwen3-sft-16nums:
+    qwen3-16nums:
         -
             type: sft
             parameters:
@@ -1129,7 +1129,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft/tracker.jsonl
+                base_metric: qwen3/tracker.jsonl
                 check_metrics:
                     grad_norm: 1
                     loss/maxvio: 0.05
@@ -1139,7 +1139,7 @@ case:
                     lr: 0
             timeout: 1500
 
-    qwen3-sft-celoss:
+    qwen3-celoss:
         -
             type: sft
             parameters:
@@ -1153,7 +1153,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft-celoss/tracker.jsonl
+                base_metric: qwen3-celoss/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -1241,7 +1241,7 @@ case:
     #                runtime_info/text_tokens: 0
     #        timeout: 1080
 
-    qwen3-sft-cache:
+    qwen3-cache:
         -
             type: sft
             parameters:
@@ -1255,7 +1255,7 @@ case:
                     - CACHE_DIR=/mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/.cache
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-sft-cache/tracker.jsonl
+                base_metric: qwen3-cache/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001
@@ -1268,7 +1268,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500
 
-    qwen3-sft-vl-dense:
+    qwen3-vl-dense:
         -
             type: sft
             parameters:
@@ -1282,7 +1282,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
             assert_info:
-                base_metric: qwen3-sft-vl-dense/tracker.jsonl
+                base_metric: qwen3-vl-dense/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/maxvio: 0.000001

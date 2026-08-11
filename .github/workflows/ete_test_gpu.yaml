@@ -21,7 +21,7 @@ on:
         description: >-
           Case name(s) from autotest/config.yaml. Use "all" for every case,
           one name (e.g. "qwen3-rl-lmdeploy"), or comma-separated names
-          (e.g. "qwen3-5-rl-vl-lmdeploy-grpo,interns2-preview-rl-vl-lmdeploy-grpo").
+          (e.g. "qwen3-5-vl-lmdeploy-grpo,s2-preview-vl-lmdeploy-grpo").
         type: string
         default: 'all'
       parallel:

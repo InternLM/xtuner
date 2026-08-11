@@ -1,3 +1,4 @@
+import hashlib
 import re
 import time
 import traceback
@@ -10,6 +11,41 @@ from clusterx.launcher.base import JobSchema, JobStatus
 
 JOB_LOOKUP_RETRY_INTERVAL_S = 5
 JOB_LOOKUP_RETRY_TIMES = 6
+# rjob appends a suffix such as "-7b6a1" (6 chars); keep the final name <= 50.
+MAX_RJOB_FINAL_NAME_LEN = 50
+RJOB_GENERATED_SUFFIX_LEN = 6
+MAX_RJOB_SUBMITTED_NAME_LEN = MAX_RJOB_FINAL_NAME_LEN - RJOB_GENERATED_SUFFIX_LEN
+
+
+def build_rjob_name(
+    task_type: str,
+    case_name: str,
+    run_id: str,
+    max_len: int = MAX_RJOB_SUBMITTED_NAME_LEN,
+) -> str:
+    """Build a submitted rjob name while reserving room for its generated suffix.
+
+    Format: ``{type}-{case}-{run_id}``. When too long, truncate ``case`` and append a
+    short hash so different long case names do not collide after truncation. By
+    default, this returns at most 44 chars; rjob then appends its 6-char suffix.
+    """
+    task_type = str(task_type)
+    case_name = str(case_name)
+    run_id = str(run_id)
+    prefix = f"{task_type}-"
+    suffix = f"-{run_id}"
+    budget = max_len - len(prefix) - len(suffix)
+    if budget <= 0:
+        digest = hashlib.md5(f"{task_type}:{case_name}:{run_id}".encode()).hexdigest()
+        return digest[:max_len]
+    if len(case_name) <= budget:
+        return f"{prefix}{case_name}{suffix}"
+
+    digest = hashlib.md5(case_name.encode()).hexdigest()[:6]
+    keep = budget - len(digest) - 1  # casehead-digest
+    if keep < 1:
+        return f"{prefix}{digest}{suffix}"[:max_len]
+    return f"{prefix}{case_name[:keep]}-{digest}{suffix}"
 
 
 class ClusterTaskExecutor:
@@ -41,7 +77,8 @@ class ClusterTaskExecutor:
 
         all_command.append(command)
         run_command = "; ".join(all_command)
-        job_name = "-".join([task_config["type"], task_config["case_name"], task_config["run_id"]])
+        job_name = build_rjob_name(task_config["type"], task_config["case_name"], task_config["run_id"])
+        print(f"rjob name ({len(job_name)} chars): {job_name}")
 
         try:
             params = self.params_cls(
