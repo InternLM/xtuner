@@ -8,9 +8,8 @@ default_config:
             gpus_per_task: 8
             cpus_per_task: 120
             memory_per_task: 512
-            # image: ailab-llmrazor/xtuner:pt29_20260805_940a869
-            image: ailab-llmrazor/xtuner:pt29_20260806_32f627c
-            pip_package: pip install more-itertools pytest-xdist
+            image: ailab-llmrazor/xtuner:pt29_latest
+            pip_package: pip install -e .[all]; pip install more-itertools pytest-xdist
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
     eval:
