@@ -19,12 +19,15 @@ TestCheckpointWrapper
     test_a_callable_unit_keeps_its_callers_compiled: KeptCallables 只退出自身，调用者仍编译。
     test_no_unit_withdraws_the_method_that_holds_most_compilation: 没有 unit 撤出编译占比最大的方法。
     test_attention_is_kept_by_op_identity: attention 走 op identity 而非撤出 callable。
+    test_input_tensors_reach_the_ambient_saved_tensor_hooks: 嵌套/关键字传入的输入也能进外层 hook。
 """
 
 
 
+import pytest
 import torch
 from torch import nn
+from torch.autograd.graph import saved_tensors_hooks
 
 from xtuner.v1.model.utils import apply_gradient_checkpointing
 
@@ -68,6 +71,21 @@ class _ContainerBlock(nn.Module):
         for layer in self.layers:
             x = layer(x)
         return x
+
+
+class _FlexibleBlock(nn.Module):
+    """接受任意摆放的输入：位置的容器、字典、关键字参数，用来覆盖各种嵌套形状。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        # 输入 4 维、输出 6 维：输出与输入形状不同，断言才不会把输出误当成输入。
+        self.linear = nn.Linear(4, 6)
+
+    def forward(self, inputs, *, scale: float, extra: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+        tensors = list(inputs.values()) if isinstance(inputs, dict) else list(inputs)
+        if extra is not None:
+            tensors.append(extra)
+        return {"out": sum(self.linear(t) * scale for t in tensors)}
 
 
 class TestCheckpointWrapper:
@@ -120,3 +138,32 @@ class TestCheckpointWrapper:
 
         assert bool(checkpointed) is True
         assert not hasattr(type(checkpointed), "__len__")
+
+    @pytest.mark.parametrize(
+        "make_call",
+        [
+            pytest.param(lambda block, x: block([x], scale=2.0), id="nested-in-list"),
+            pytest.param(lambda block, x: block({"x": x}, scale=2.0), id="nested-in-dict"),
+            pytest.param(lambda block, x: block([], scale=2.0, extra=x), id="passed-by-keyword"),
+        ],
+    )
+    def test_input_tensors_reach_the_ambient_saved_tensor_hooks(self, make_call):
+        # 激活 offload 是靠外层 saved_tensors_hooks 拿到层输入的，而 checkpoint 只把**顶层**
+        # tensor 参数包成 SavedVariable（构造它才会触发 hook）。所以嵌套在容器里、或走关键字
+        # 传进来的 tensor 会一个 hook 都不经过——offload 静默空转，梯度却完全正确，没有任何
+        # 现象能暴露它。这里直接断言 hook 收得到。
+        packed: list[int] = []
+
+        class _Record(saved_tensors_hooks):
+            # 按 data_ptr 认张量，不按 shape：区域的输出很容易和输入同形，
+            # 按 shape 断言会把输出当成输入，测试变成恒绿。
+            def __init__(self) -> None:
+                super().__init__(lambda t: (packed.append(t.data_ptr()), t)[1], lambda t: t)
+
+        wrapped = apply_gradient_checkpointing(_FlexibleBlock())
+        x = torch.randn(2, 4, requires_grad=True)
+
+        with _Record():
+            make_call(wrapped, x)["out"].square().sum().backward()
+
+        assert x.data_ptr() in packed
