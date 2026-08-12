@@ -33,6 +33,9 @@ class Train:
             )
             config["work_dir"] = work_dir
 
+            # Print runtime image package list before training for version diagnosis.
+            image_version_check = "echo '===== runtime pip list ====='; pip list; "
+
             # this patch is for torch 2.9.1 Conv3d memory issue fix
             cudnn_patch = (
                 "TORCH_VERSION=$(python -c 'import torch;print(torch.__version__.split(chr(43))[0])'); "
@@ -41,7 +44,8 @@ class Train:
 
             if train_type == "sft":
                 command = (
-                    f"cd {current_dir}; pwd; {pip_package}; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
+                    f"cd {current_dir}; pwd; {pip_package}; {image_version_check}"
+                    f"export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + cudnn_patch
                     + f"torchrun --nproc-per-node {nproc_per_node} --master_addr=${{MASTER_ADDR}} --master_port=${{MASTER_PORT}} --nnodes=${{WORLD_SIZE}} --node_rank=${{RANK}} "
                     + f"xtuner/v1/train/cli/{train_type}.py"
@@ -66,7 +70,8 @@ class Train:
                 infer_type = config.get("parameters", {}).get("infer_backend", "lmdeploy")
                 accelerator = config.get("parameters", {}).get("accelerator", "GPU")
                 command = (
-                    f"cd {current_dir}; pwd; {pip_package}; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
+                    f"cd {current_dir}; pwd; {pip_package}; {image_version_check}"
+                    f"export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + cudnn_patch
                     + f"bash -x autotest/utils/ci_run_rl.sh {accelerator} {infer_type} {config_path} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
                 )

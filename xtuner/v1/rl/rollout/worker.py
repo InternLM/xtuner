@@ -706,6 +706,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 host=self.host,
                 port=self.session_server_port,
                 request_timeout=self.config.session_server_timeout,
+                enable_return_routed_experts=self.enable_return_routed_experts,
             )
         )
         self.session_server_url = ray.get(
@@ -783,8 +784,8 @@ class RolloutWorker(SingleAcceleratorWorker):
     async def _decode_routed_experts(self, routed_experts: Any) -> Any:
         return routed_experts
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     @trace_rollout_endpoint("rollout.worker.generate")
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         request_max_tokens = rollout_state.sample_params.max_tokens
         try:

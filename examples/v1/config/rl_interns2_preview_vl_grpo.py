@@ -1,28 +1,71 @@
+"""Intern-S2-Preview VL RL (GRPO) example.
+
+Validated ETE settings: rollout TP1/EP4, AsyncProduce + AsyncReplay, MTP4,
+skip_load_weights, freeze routers/vision/projector, vocab_size=251392.
+
+Required env:
+  WORK_DIR, MODEL_PATH, DATA_PATH
+Optional:
+  EVAL_DATA_PATH, EVAL_MEDIA_ROOT
+
+Recommended env:
+  export LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
+    # Intern-S2 / Qwen3.5 use GatedDeltaNet (Mamba/SSM). By default LMDeploy stores the
+    # recurrent state in the activation dtype (bf16/fp16). Setting this to 1 forces
+    # FP32 recurrent state for better numerical stability (roughly 2x recurrent-state
+    # memory). Keep this enabled for RL to reduce mismatch/kl drift.
+  export XTUNER_USE_LMDEPLOY=1
+  export XTUNER_USE_FA3=1
+  export PERMUTE_COMPUTE_DTYPE=fp32
+
+DATA_PATH is a JSON meta mapping dataset name -> annotation / media_root, e.g.::
+
+  {
+    "geo3k": {
+      "annotation": "/path/to/train.jsonl",
+      "media_root": "/path/to/media",
+      "sample_ratio": 1.0
+    }
+  }
+
+Launch::
+
+  bash examples/v1/scripts/run_rl.sh \\
+    examples/v1/config/rl_interns2_preview_vl_grpo.py \\
+    lmdeploy $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
+"""
+
 import json
 import os
 
+import ray
 from transformers import AutoTokenizer
+
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
+from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
+    AsyncProduceStrategyConfig,
     SamplerConfig,
-    SyncProduceStrategyConfig,
     TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger import DapoMathJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
-from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
+from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import RolloutImportanceSampling, WorkerConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, get_eos_token
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
+
+# Strongly recommended before launch (see module docstring):
+#   export LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
 
 
 def _as_list(value):
@@ -39,15 +82,15 @@ debug_rollout_dir = os.environ.get("DEBUG_ROLLOUT_DIR", "")
 debug_train = os.environ.get("DEBUG_TRAIN", False)
 debug_rollout = os.environ.get("DEBUG_ROLLOUT", False)
 
-enable_evaluate = eval_data_path is not None and eval_data_path != ""
+enable_evaluate = bool(eval_data_path)
 
-# basic settings
-experimental_name = "grpo_mix_data"
+# basic settings (validated by ETE)
+experimental_name = "interns2_preview_vl_grpo"
 total_epochs = 15
 global_batch_size = 128
 prompt_repeat_k = 8
 rollout_tp_size = 1
-rollout_ep_size = 2
+rollout_ep_size = 4
 max_prompt_length = 2048
 max_response_length = 8192
 pack_max_length = 32768
@@ -71,23 +114,25 @@ rollout_config = RolloutConfig(
     dtype="bfloat16",
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
+    skip_load_weights=True,
     gpu_memory_utilization=0.8,
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=True,
     rollout_max_batch_size_per_instance=512,
     extra_rollout_config=dict(
+        lmdeploy_trust_remote_code=True,
         lmdeploy_log_level="INFO",
         lmdeploy_uvicorn_log_level="INFO",
     ),
 )
 
-# sampling params
 training_sample_params = SampleParams(
     max_tokens=max_response_length,
     top_k=0,
     top_p=1.0,
     temperature=1.0,
     min_tokens=0,
+    return_routed_experts=True,
 )
 evaluation_sample_params = SampleParams(
     max_tokens=max_response_length,
@@ -95,6 +140,7 @@ evaluation_sample_params = SampleParams(
     top_p=1.0,
     temperature=0.0,
     min_tokens=0,
+    return_routed_experts=False,
 )
 
 # 3. datasets
@@ -103,8 +149,7 @@ with open(meta_data_path, encoding="utf-8") as f:
 
 train_dataset_cfg = []
 for name, data in ds_collections.items():
-    annotations = _as_list(data["annotation"])
-    for annotation in annotations:
+    for annotation in _as_list(data["annotation"]):
         train_dataset_cfg.append(
             {
                 "dataset": DatasetConfig(
@@ -161,7 +206,6 @@ dataloader_cfg = DataloaderConfig(
     pack_max_length=pack_max_length,
 )
 
-
 # 4. judger
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 eos_token_id = get_eos_token(model_path)
@@ -177,11 +221,25 @@ judger_config = DapoMathJudgerConfig(
 )
 
 # 5. train worker
+# Intern-S2-Preview reuses the Qwen3.5-VL-MoE-35B-A3B architecture config.
 model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
+model_cfg.float8_cfg = None
+model_cfg.text_config.ep_size = 1
+model_cfg.text_config.z_loss_cfg = None
+model_cfg.text_config.balancing_loss_cfg = None
+model_cfg.text_config.freeze_routers = True
+model_cfg.text_config.mtp_config = MTPConfig(
+    num_layers=4,
+    loss_scaling_factor=1.0,
+    detach_mtp_lm_head_weight=True,
+    detach_mtp_inputs=True,
+    share_weights=True,
+)
+model_cfg.text_config.vocab_size = 251392
 optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(
-        cliprange_high=0.28,
+        cliprange_high=0.2,
         cliprange_low=0.2,
         loss_type="vanilla",
         clip_ratio_c=10.0,
@@ -189,7 +247,7 @@ loss_cfg = GRPOLossConfig(
         log_prob_diff_max=20.0,
     ),
     ignore_idx=-100,
-    use_kl_loss=False,
+    use_kl_loss=True,
     kl_loss_coef=0.0,
     kl_loss_type="low_var_kl",
     mode="chunk",
@@ -211,43 +269,61 @@ train_worker_cfg = WorkerConfig(
     loss_cfg=loss_cfg,
     lr_cfg=lr_cfg,
     fsdp_cfg=fsdp_cfg,
-    sp_size=1,
     optimizer_steps=train_optimizer_steps,
     pack_max_length=pack_max_length,
 )
 
-# 6. agent loop managers
-agent_loop_config = SingleTurnAgentLoopConfig(
-    hf_checkpoint=model_path,
-    sample_params=training_sample_params,
+
+def group_sample_filter_func(group_samples):
+    valid_samples = []
+    for s in group_samples:
+        if s.response_ids is not None:
+            valid_samples.append(s)
+        elif s.routed_experts is not None and isinstance(s.routed_experts, ray.ObjectRef):
+            ray.internal.free([s.routed_experts], local_only=False)
+
+    rewards = [(d.reward or {}).get("score", 0.0) for d in valid_samples]
+    if len(set(rewards)) == 1:
+        print(f"filter all same reward sample: {rewards}")
+        return False
+    return True
+
+
+produce_strategy_config = AsyncProduceStrategyConfig(
+    over_sample_threshold=1,
+    enable_partial_rollout=1,
+    is_valid_sample_fn=group_sample_filter_func,
+    max_staleness=1000000,
 )
+
+# 6. agent loop managers
 agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="train_task",
-        agent_loop_config=agent_loop_config,
+        agent_loop_config=SingleTurnAgentLoopConfig(
+            hf_checkpoint=model_path,
+            sample_params=training_sample_params,
+        ),
         judger_config=judger_config,
-        produce_strategy_config=SyncProduceStrategyConfig(),
+        produce_strategy_config=produce_strategy_config,
         sampler_config=SamplerConfig(dataloader_cfg=dataloader_cfg, prompt_repeat_k=prompt_repeat_k),
     ),
 )
 
 if enable_evaluate:
-    eval_agent_loop_config = SingleTurnAgentLoopConfig(
-        hf_checkpoint=model_path,
-        sample_params=evaluation_sample_params,
-    )
     eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
         tasks=TaskSpecConfig(
             task_name="eval_task",
-            agent_loop_config=eval_agent_loop_config,
+            agent_loop_config=SingleTurnAgentLoopConfig(
+                hf_checkpoint=model_path,
+                sample_params=evaluation_sample_params,
+            ),
             judger_config=judger_config,
             sampler_config=SamplerConfig(dataloader_cfg=eval_dataloader_cfg, prompt_repeat_k=1),
         ),
     )
-    enable_evaluate = True
 else:
     eval_agent_loop_manager_cfg = None
-    enable_evaluate = False
 
 # 7. trainer
 trainer = RLColocateTrainerConfig(
@@ -255,7 +331,7 @@ trainer = RLColocateTrainerConfig(
     train_worker_cfg=train_worker_cfg,
     rollout_config=rollout_config,
     tokenizer_path=model_path,
-    replay_buffer_config=SyncReplayBufferConfig(),
+    replay_buffer_config=AsyncReplayBufferConfig(),
     agent_loop_manager_cfg=agent_loop_manager_cfg,
     eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
     evaluator_config=EvaluatorConfig(compute_metric_func=None),
@@ -268,9 +344,6 @@ trainer = RLColocateTrainerConfig(
     evaluate_step=1,
     work_dir=work_dir,
     hf_interval=hf_interval,
-    checkpoint_interval=5,
-    checkpoint_maxkeep=3,
-    auto_resume=True,
     debug_rollout_dir=debug_rollout_dir,
     debug_train=debug_train,
     debug_rollout=debug_rollout,

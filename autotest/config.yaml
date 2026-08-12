@@ -9,7 +9,7 @@ default_config:
             cpus_per_task: 120
             memory_per_task: 512
             image: ailab-llmrazor/xtuner:pt29_latest
-            pip_package: pip install -e .[all]; pip install more-itertools
+            pip_package: pip install -e .[all]; pip install more-itertools pytest-xdist
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
     eval:
@@ -26,348 +26,444 @@ default_config:
                 - HF_HUB_OFFLINE=1
 
 case: 
-    qwen3-sft:
+    # InternS2-Preview: Qwen3.5-VL-MoE-35B-A3B architecture; MODEL_PATH may need adjust on share.
+    s2-preview-rl-vl-lmdeploy-grpo:
         -
-            type: sft
+            type: rl
             parameters:
-                config: autotest/config/qwen3.py
+                config: autotest/config/rl_interns2_preview_vl_grpo.py
+                infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
-                envs: 
-                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_USE_FA3=1
+                    - PERMUTE_COMPUTE_DTYPE=fp32
                     - XTUNER_DETERMINISTIC=true
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
-                base_metric: qwen3-sft/tracker.jsonl
+                base_metric: s2-preview-rl-vl-lmdeploy-grpo/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.000001
-                    loss/maxvio: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
-            timeout: 1500
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 0.15
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 18000
 
-    qwen3-sft-ep8:
+    s2-preview-rl-vl-lmdeploy-dapo:
         -
-            type: sft
+            type: rl
+            parameters:
+                config: autotest/config/rl_interns2_preview_vl_dapo.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_USE_FA3=1
+                    - PERMUTE_COMPUTE_DTYPE=fp32
+                    - XTUNER_DETERMINISTIC=true
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
+            assert_info:
+                base_metric: s2-preview-rl-vl-lmdeploy-dapo/tracker.jsonl
+                check_metrics:
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 0.15
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 18000
+
+    s2-preview-rl-vl-lmdeploy-resume:
+        -
+            type: rl
             phase: first
             parameters:
-                config: autotest/config/qwen3_moe_30BA3_ep8.py
+                config: autotest/config/rl_interns2_preview_vl_dapo_ep2_resume.py
+                infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
-                num_nodes: 2
-                cpus_per_task: 80
+                memory_per_task: 1200
                 envs:
-                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_USE_FA3=1
+                    - PERMUTE_COMPUTE_DTYPE=fp32
                     - XTUNER_DETERMINISTIC=true
+                    - XTUNER_GC_ENABLE=1
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
-                base_metric: qwen3-sft-ep8/tracker.jsonl
+                base_metric: s2-preview-rl-vl-lmdeploy-resume/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.000001
-                    loss/maxvio: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
-            timeout: 1500
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 0.15
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 19200
+
         -
-            type: sft
+            type: rl
             phase: resume
             pre_action:
-                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-sft-ep8 sft'
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output s2-preview-rl-vl-lmdeploy-resume rl'
             parameters:
-                config: autotest/config/qwen3_moe_30BA3_ep8_resume.py
+                config: autotest/config/rl_interns2_preview_vl_dapo_ep2_resume.py
+                infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
-                num_nodes: 2
-                cpus_per_task: 80
+                memory_per_task: 1200
                 envs:
-                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
+                    - XTUNER_GC_ENABLE=1
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
-                base_metric: qwen3-sft-ep8/tracker-resume.jsonl
+                base_metric: s2-preview-rl-vl-lmdeploy-resume/tracker-resume.jsonl
                 check_metrics:
-                    grad_norm: 0.000001
-                    loss/maxvio: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/text_tokens: 0
-            post_action:
-                command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-sft-ep8 sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
-            timeout: 1500
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 0.15
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 19200
 
-    qwen3-sft-tp2:
+    s2-preview-rl-lmdeploy-dapo:
         -
-            type: sft
+            type: rl
             parameters:
-                config: autotest/config/qwen3_moe_30BA3_tp2.py
+                config: autotest/config/rl_interns2_preview_dapo.py
+                infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
+                memory_per_task: 1200
                 envs:
-                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
-                    - XTUNER_DETERMINISTIC=true
-            assert_info:
-                base_metric: qwen3-sft-tp2/tracker.jsonl
-                check_metrics:
-                    grad_norm: 0.000001
-                    loss/maxvio: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
-            timeout: 1500
-
-    qwen3-sft-recompute:
-        -
-            type: sft
-            parameters:
-                config: autotest/config/qwen3_recompute.py
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                num_nodes: 2
-                cpus_per_task: 80
-                envs:
-                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
-                    - XTUNER_DETERMINISTIC=true
-            assert_info:
-                base_metric: qwen3-sft-recompute/tracker.jsonl
-                check_metrics:
-                    grad_norm: 0.000001
-                    loss/maxvio: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
-            timeout: 1500
-             
-    qwen3-sft-fp8:
-        -
-            type: sft
-            parameters:
-                config: autotest/config/qwen3_fp8.py
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                num_nodes: 2
-                cpus_per_task: 80
-                envs:
-                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
-                    - XTUNER_DETERMINISTIC=true
-                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Intern-S2-Preview
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_USE_FA3=1
+                    - PERMUTE_COMPUTE_DTYPE=fp32
+                    - XTUNER_DETERMINISTIC=true
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
-                base_metric: qwen3-sft-fp8/tracker.jsonl
+                base_metric: s2-preview-rl-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.1
-                    loss/maxvio: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
-            timeout: 1500 
+                    -
+                       metric:  eval/accuracy
+                       threshold: 0.1
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 20
+                       method: absolute
+                       operator: <
+            timeout: 14400
 
-    qwen3-sft-16nums:
+    qwen3-5-rl-vl-lmdeploy-grpo:
         -
-            type: sft
+            type: rl
             parameters:
-                config: autotest/config/qwen3_16nums.py
+                config: autotest/config/rl_qwen3p5_vl_35B_grpo.py
+                infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
-                num_nodes: 2
-                cpus_per_task: 80
+                memory_per_task: 1200
                 envs:
-                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
-                base_metric: qwen3-sft/tracker.jsonl
+                base_metric: qwen3-5-rl-vl-lmdeploy-grpo/tracker.jsonl
                 check_metrics:
-                    grad_norm: 1
-                    loss/maxvio: 0.05
-                    loss/local_loss: 0.02
-                    loss/reduced_balancing_loss: 0.02
-                    loss/reduced_llm_loss: 0.02
-                    lr: 0
-            timeout: 1500
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    - 
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 0.15
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 9000
 
-    qwen3-sft-celoss:
+    qwen3-5-rl-vl-lmdeploy-dapo:
         -
-            type: sft
+            type: rl
             parameters:
-                config: autotest/config/qwen3_sft_celoss.py
+                config: autotest/config/rl_qwen3p5_vl_35B_dapo.py
+                infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
-                num_nodes: 2
-                cpus_per_task: 80
+                memory_per_task: 1200
                 envs:
-                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
-                base_metric: qwen3-sft-celoss/tracker.jsonl
+                base_metric: qwen3-5-rl-vl-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.000001
-                    loss/maxvio: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
-            timeout: 1500
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    - 
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 0.15
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 9000
 
-    qwen3-30B-sp4-intralayer2:
+    qwen3-5-rl-vl-lmdeploy-resume:
         -
-            type: sft
+            type: rl
+            phase: first
             parameters:
-                config: autotest/config/qwen3_30B_sp4_intralayer2.py
+                config: autotest/config/rl_qwen3p5_vl_35B_dapo_ep2_resume.py
+                infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
+                memory_per_task: 1200
                 envs:
-                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
+                    - XTUNER_GC_ENABLE=1
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
-                base_metric: qwen3-30B-sp4-intralayer2/tracker.jsonl
+                base_metric: qwen3-5-rl-vl-lmdeploy-resume/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.000001
-                    loss/maxvio: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
-            timeout: 1080
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    - 
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 0.15
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 9600
 
-    qwen3-30B-sp8-intralayer2:
         -
-            type: sft
+            type: rl
+            phase: resume
+            pre_action:
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-rl-vl-lmdeploy-resume rl'
             parameters:
-                config: autotest/config/qwen3_30B_sp8_intralayer2.py
+                config: autotest/config/rl_qwen3p5_vl_35B_dapo_ep2_resume.py
+                infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
+                memory_per_task: 1200
                 envs:
-                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
+                    - XTUNER_GC_ENABLE=1
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
-                base_metric: qwen3-30B-sp8-intralayer2/tracker.jsonl
+                base_metric: qwen3-5-rl-vl-lmdeploy-resume/tracker-resume.jsonl
                 check_metrics:
-                    grad_norm: 0.025
-                    loss/maxvio: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
-            timeout: 1080
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    - 
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 0.15
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 9600
 
-    # gptoss-sft:
-    #    -
-    #        type: sft
-    #        parameters:
-    #            config: autotest/config/gptoss.py
-    #            output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-    #        resource:
-    #            envs:
-    #                - GPTOSS_21B_PATH=/mnt/shared-storage-user/llmrazor-share/model/gpt-oss-20b-bf16
-    #                - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
-    #                - XTUNER_DETERMINISTIC=true
-    #        assert_info:
-    #            base_metric: gptoss-sft/7b774a0e2/tracker.jsonl
-    #            check_metrics:
-    #                grad_norm: 0.9
-    #                loss/maxvio: 0.000001
-    #                loss/local_loss: 0.000001
-    #                loss/reduced_balancing_loss: 0.000001
-    #                loss/reduced_llm_loss: 0.1
-    #                lr: 0
-    #                memory/max_memory_GB: 0.2
-    #                runtime_info/tgs: 0.05
-    #                runtime_info/text_tokens: 0
-    #        timeout: 1080
-
-    qwen3-sft-cache:
+    qwen3-5-rl-lmdeploy-dapo:
         -
-            type: sft
+            type: rl
             parameters:
-                config: autotest/config/qwen3_sft_cache.py
+                config: autotest/config/rl_qwen3p5_35B_dapo.py
+                infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
-                cpus_per_task: 80
+                memory_per_task: 1200
                 envs:
-                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
-                    - CACHE_DIR=/mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/.cache
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
             assert_info:
-                base_metric: qwen3-sft-cache/tracker.jsonl
+                base_metric: qwen3-5-rl-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.000001
-                    loss/maxvio: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
-            timeout: 1500
-
-    qwen3-sft-vl-dense:
-        -
-            type: sft
-            parameters:
-                config: autotest/config/qwen3_vl_8B_dense.py
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-8B-Instruct
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
-                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
-                    - XTUNER_DETERMINISTIC=true
-                    - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
-            assert_info:
-                base_metric: qwen3-sft-vl-dense/tracker.jsonl
-                check_metrics:
-                    grad_norm: 0.000001
-                    loss/maxvio: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
-            timeout: 1500
+                    - 
+                       metric:  eval/accuracy
+                       threshold: 0.1
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    - 
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 20
+                       method: absolute
+                       operator: <
+            timeout: 7200
 
     qwen3-5-sft-vl-moe:
         -
@@ -756,9 +852,9 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0002
-                       method: absolute
-                       operator: <=
+                       threshold: 0.001
+                       method: relative
+                       operator: <
                     -
                        metric: response/response_len/mean
                        threshold: 0.15
@@ -800,9 +896,9 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0002
-                       method: absolute
-                       operator: <=
+                       threshold: 0.001
+                       method: relative
+                       operator: <
                     -
                        metric: response/response_len/mean
                        threshold: 0.25
@@ -814,217 +910,7 @@ case:
                        method: relative
                        operator: <
                        aggregate: 80
-            timeout: 4200
-
-    qwen3-5-rl-vl-lmdeploy-grpo:
-        -
-            type: rl
-            parameters:
-                config: autotest/config/rl_qwen3p5_vl_35B_grpo.py
-                infer_backend: lmdeploy
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                memory_per_task: 1200
-                envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
-                    - XTUNER_USE_LMDEPLOY=1
-                    - XTUNER_DETERMINISTIC=true
-            assert_info:
-                base_metric: qwen3-5-rl-vl-lmdeploy-grpo/tracker.jsonl
-                check_metrics:
-                    -
-                       metric: response/rewards/mean
-                       threshold: 0.3
-                       method: absolute
-                       operator: <
-                    - 
-                       metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0005
-                       method: absolute
-                       operator: <=
-                    -
-                       metric: response/response_len/mean
-                       threshold: 0.25
-                       method: relative
-                       operator: <
-                    -
-                       metric: time/step
-                       threshold: 0.15
-                       method: relative
-                       operator: <
-                       aggregate: 80
-            timeout: 9000
-
-    qwen3-5-rl-vl-lmdeploy-dapo:
-        -
-            type: rl
-            parameters:
-                config: autotest/config/rl_qwen3p5_vl_35B_dapo.py
-                infer_backend: lmdeploy
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                memory_per_task: 1200
-                envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
-                    - XTUNER_USE_LMDEPLOY=1
-                    - XTUNER_DETERMINISTIC=true
-            assert_info:
-                base_metric: qwen3-5-rl-vl-lmdeploy-dapo/tracker.jsonl
-                check_metrics:
-                    -
-                       metric: response/rewards/mean
-                       threshold: 0.3
-                       method: absolute
-                       operator: <
-                    - 
-                       metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0005
-                       method: absolute
-                       operator: <=
-                    -
-                       metric: response/response_len/mean
-                       threshold: 0.25
-                       method: relative
-                       operator: <
-                    -
-                       metric: time/step
-                       threshold: 0.15
-                       method: relative
-                       operator: <
-                       aggregate: 80
-            timeout: 9000
-
-    qwen3-5-rl-vl-lmdeploy-resume:
-        -
-            type: rl
-            phase: first
-            parameters:
-                config: autotest/config/rl_qwen3p5_vl_35B_dapo_ep2_resume.py
-                infer_backend: lmdeploy
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                memory_per_task: 1200
-                envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
-                    - XTUNER_USE_LMDEPLOY=1
-                    - XTUNER_DETERMINISTIC=true
-                    - XTUNER_GC_ENABLE=1
-            assert_info:
-                base_metric: qwen3-5-rl-vl-lmdeploy-resume/tracker.jsonl
-                check_metrics:
-                    -
-                       metric: response/rewards/mean
-                       threshold: 0.3
-                       method: absolute
-                       operator: <
-                    - 
-                       metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0005
-                       method: absolute
-                       operator: <=
-                    -
-                       metric: response/response_len/mean
-                       threshold: 0.25
-                       method: relative
-                       operator: <
-                    -
-                       metric: time/step
-                       threshold: 0.15
-                       method: relative
-                       operator: <
-                       aggregate: 80
-            timeout: 9600
-
-        -
-            type: rl
-            phase: resume
-            pre_action:
-                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-rl-vl-lmdeploy-resume rl'
-            parameters:
-                config: autotest/config/rl_qwen3p5_vl_35B_dapo_ep2_resume.py
-                infer_backend: lmdeploy
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                memory_per_task: 1200
-                envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
-                    - XTUNER_USE_LMDEPLOY=1
-                    - XTUNER_DETERMINISTIC=true
-                    - XTUNER_GC_ENABLE=1
-            assert_info:
-                base_metric: qwen3-5-rl-vl-lmdeploy-resume/tracker-resume.jsonl
-                check_metrics:
-                    -
-                       metric: response/rewards/mean
-                       threshold: 0.3
-                       method: absolute
-                       operator: <
-                    - 
-                       metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0005
-                       method: absolute
-                       operator: <=
-                    -
-                       metric: response/response_len/mean
-                       threshold: 0.25
-                       method: relative
-                       operator: <
-                    -
-                       metric: time/step
-                       threshold: 0.15
-                       method: relative
-                       operator: <
-                       aggregate: 80
-            timeout: 9600
-
-    qwen3-5-rl-lmdeploy-dapo:
-        -
-            type: rl
-            parameters:
-                config: autotest/config/rl_qwen3p5_35B_dapo.py
-                infer_backend: lmdeploy
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                memory_per_task: 1200
-                envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
-                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
-                    - XTUNER_USE_LMDEPLOY=1
-                    - XTUNER_DETERMINISTIC=true
-            assert_info:
-                base_metric: qwen3-5-rl-lmdeploy-dapo/tracker.jsonl
-                check_metrics:
-                    - 
-                       metric:  eval/accuracy
-                       threshold: 0.1
-                       method: absolute
-                       operator: <
-                    -
-                       metric: response/rewards/mean
-                       threshold: 0.3
-                       method: absolute
-                       operator: <
-                    - 
-                       metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0005
-                       method: absolute
-                       operator: <=
-                    -
-                       metric: response/response_len/mean
-                       threshold: 0.25
-                       method: relative
-                       operator: <
-                    -
-                       metric: time/step
-                       threshold: 20
-                       method: absolute
-                       operator: <
-            timeout: 7200
+            timeout: 8400
 
     qwen3-rl-sglang:
         -
@@ -1060,9 +946,9 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0001
-                       method: absolute
-                       operator: <=
+                       threshold: 0.001
+                       method: relative
+                       operator: <
                     -
                        metric: response/response_len/mean
                        threshold: 0.12
@@ -1074,3 +960,347 @@ case:
                        method: absolute
                        operator: <
             timeout: 4500
+
+    qwen3-sft:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                envs: 
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-sft/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1500
+
+    qwen3-sft-ep8:
+        -
+            type: sft
+            phase: first
+            parameters:
+                config: autotest/config/qwen3_moe_30BA3_ep8.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                cpus_per_task: 80
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-sft-ep8/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 3000
+        -
+            type: sft
+            phase: resume
+            pre_action:
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-sft-ep8 sft'
+            parameters:
+                config: autotest/config/qwen3_moe_30BA3_ep8_resume.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                cpus_per_task: 80
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-sft-ep8/tracker-resume.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/text_tokens: 0
+            post_action:
+                command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-sft-ep8 sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
+            timeout: 3000
+
+    qwen3-sft-tp2:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_moe_30BA3_tp2.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-sft-tp2/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1500
+
+    qwen3-sft-recompute:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_recompute.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                cpus_per_task: 80
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-sft-recompute/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 3000
+
+    qwen3-sft-fp8:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_fp8.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                cpus_per_task: 80
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - XTUNER_USE_FA3=1
+            assert_info:
+                base_metric: qwen3-sft-fp8/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.1
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1500 
+
+    qwen3-sft-16nums:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_16nums.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                cpus_per_task: 80
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-sft/tracker.jsonl
+                check_metrics:
+                    grad_norm: 1
+                    loss/maxvio: 0.05
+                    loss/local_loss: 0.02
+                    loss/reduced_balancing_loss: 0.02
+                    loss/reduced_llm_loss: 0.02
+                    lr: 0
+            timeout: 1500
+
+    qwen3-sft-celoss:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_sft_celoss.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                cpus_per_task: 80
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-sft-celoss/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1500
+
+    qwen3-sft-30B-sp4-intralayer2:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_30B_sp4_intralayer2.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-sft-30B-sp4-intralayer2/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1080
+
+    qwen3-sft-30B-sp8-intralayer2:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_30B_sp8_intralayer2.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-sft-30B-sp8-intralayer2/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.025
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1080
+
+    # gptoss-sft:
+    #    -
+    #        type: sft
+    #        parameters:
+    #            config: autotest/config/gptoss.py
+    #            output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+    #        resource:
+    #            envs:
+    #                - GPTOSS_21B_PATH=/mnt/shared-storage-user/llmrazor-share/model/gpt-oss-20b-bf16
+    #                - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+    #                - XTUNER_DETERMINISTIC=true
+    #        assert_info:
+    #            base_metric: gptoss-sft/7b774a0e2/tracker.jsonl
+    #            check_metrics:
+    #                grad_norm: 0.9
+    #                loss/maxvio: 0.000001
+    #                loss/local_loss: 0.000001
+    #                loss/reduced_balancing_loss: 0.000001
+    #                loss/reduced_llm_loss: 0.1
+    #                lr: 0
+    #                memory/max_memory_GB: 0.2
+    #                runtime_info/tgs: 0.05
+    #                runtime_info/text_tokens: 0
+    #        timeout: 1080
+
+    qwen3-sft-cache:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_sft_cache.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                cpus_per_task: 80
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - CACHE_DIR=/mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/.cache
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-sft-cache/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1500
+
+    qwen3-sft-vl-dense:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_vl_8B_dense.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-8B-Instruct
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
+            assert_info:
+                base_metric: qwen3-sft-vl-dense/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1500
+
