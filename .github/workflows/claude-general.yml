@@ -104,7 +104,10 @@ jobs:
 
             5. 无论是设计接口还是核心实现, 如有改进意见, 在相关位置以伪代码说明.
 
-            6. top-level summary 要体现上述所有review内容, 并且详略得当: 简单的修改, 行文精简; 复杂的修改, 行文按需扩展.
+            6. top-level summary 要体现上述所有 review 内容，并按照 summary, Main Flowchart before this PR,
+               Main Flowchart after this PR, 核心原理实现与单测, 抽象与信息隐藏评估, 公开 Interface 的线性业务流程评估,
+               单测建议, 其他 issues 顺序组织。根据实际情况可以增删章节，并且详略得当: 简单的修改, 行文精简;
+               复杂的修改, 行文按需扩展.
 
             ---
 
