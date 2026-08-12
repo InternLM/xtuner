@@ -32,6 +32,14 @@ on:
           Resume phases within one case stay sequential.
         type: string
         default: '4'
+      CI_E2E_DEBUG:
+        required: false
+        description: >-
+          If true, start "sleep inf &" after install and before training so the
+          cluster job stays alive for interactive debug (including after OOM).
+          Default false.
+        type: boolean
+        default: false
   schedule:
     - cron:  '00 16 * * 0-5'
 env:
@@ -69,6 +77,7 @@ jobs:
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
           CI_REPORTS_RAW_URL_BASE: ${{ env.CI_REPORTS_RAW_URL_BASE }}
+          CI_E2E_DEBUG: ${{ github.event.inputs.CI_E2E_DEBUG || 'false' }}
         run: |
           source /mnt/shared-storage-user/opencompass-shared/qa-llm-cicd/miniconda3/bin/activate
           conda activate clusterx 
