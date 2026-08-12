@@ -784,8 +784,8 @@ class RolloutWorker(SingleAcceleratorWorker):
     async def _decode_routed_experts(self, routed_experts: Any) -> Any:
         return routed_experts
 
-    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     @trace_rollout_endpoint("rollout.worker.generate")
+    @ray.method(concurrency_group=ROLLOUT_CONCURRENCY_GROUP_GENERATE)
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         request_max_tokens = rollout_state.sample_params.max_tokens
         try:

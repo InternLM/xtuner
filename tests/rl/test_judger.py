@@ -140,12 +140,19 @@ class TestComposedJudgerUnit(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "does not support batch_judge"):
             asyncio.run(judger.batch_judge([self._make_rollout_state("correctness")]))
 
-    def test_remote_judger_uses_driver_side_preprocess_judger(self):
+    def test_remote_judger_preserves_driver_side_judger_contract(self):
         from xtuner.v1.rl.judger import Judger, RemoteJudger
 
-        class CustomPreprocessJudger(Judger):
+        class CustomJudger(Judger):
             def preprocess(self, rollout_state):
                 return {"custom_value": rollout_state.extra_fields["custom_value"]}
+
+            def postprocess(self, rollout_state, output):
+                rollout_state.reward = {
+                    "score": output["raw_score"],
+                    "postprocessed": True,
+                }
+                return rollout_state
 
         class RemoteMethod:
             def __init__(self):
@@ -153,7 +160,7 @@ class TestComposedJudgerUnit(unittest.TestCase):
 
             async def remote(self, payload):
                 self.payload = payload
-                return {"score": payload["custom_value"]}
+                return {"raw_score": payload["custom_value"]}
 
         class FakeActor:
             def __init__(self):
@@ -162,8 +169,8 @@ class TestComposedJudgerUnit(unittest.TestCase):
         actor = FakeActor()
         judger = RemoteJudger(
             actor=actor,
-            judger_name="remote_custom_preprocess",
-            preprocess_judger=CustomPreprocessJudger(),
+            judger_name="remote_custom_contract",
+            preprocess_judger=CustomJudger(),
         )
         rollout_state = self._make_rollout_state("correctness")
         rollout_state.extra_fields["custom_value"] = 7
@@ -171,7 +178,84 @@ class TestComposedJudgerUnit(unittest.TestCase):
         judged_state = asyncio.run(judger.judge(rollout_state))
 
         self.assertEqual(actor.judge_payload.payload, {"custom_value": 7})
-        self.assertEqual(judged_state.reward, {"score": 7})
+        self.assertEqual(judged_state.reward, {"score": 7, "postprocessed": True})
+
+    def test_composed_judger_pool_preserves_branch_contract_and_routing(self):
+        from xtuner.v1.rl.judger import ComposedJudger, Judger, JudgerPool, RemoteJudger
+
+        class CustomJudger(Judger):
+            def preprocess(self, rollout_state):
+                return {
+                    "response": rollout_state.response,
+                    "reward_model": rollout_state.reward_model,
+                    "finish_reason": rollout_state.finish_reason,
+                    "extra_fields": rollout_state.extra_fields,
+                }
+
+            def postprocess(self, rollout_state, output):
+                rollout_state.reward = {
+                    "score": output["raw_score"],
+                    "postprocessed": True,
+                }
+                return rollout_state
+
+        class RemoteMethod:
+            def __init__(self):
+                self.payload = None
+
+            async def remote(self, payload):
+                self.payload = payload
+                return {"raw_score": payload["extra_fields"]["expected_score"]}
+
+        class FakeActor:
+            def __init__(self):
+                self.judge_payload = RemoteMethod()
+
+        branch_judger = CustomJudger()
+        actors = [FakeActor(), FakeActor()]
+        replicas = [
+            RemoteJudger(
+                actor=actor,
+                judger_name="remote_custom_contract",
+                preprocess_judger=branch_judger,
+            )
+            for actor in actors
+        ]
+        judger = ComposedJudger(
+            branches={
+                "biology": JudgerPool(
+                    replicas=replicas,
+                    judger_name="biology",
+                )
+            }
+        )
+        rollout_states = [self._make_rollout_state("biology"), self._make_rollout_state("biology")]
+        for expected_score, rollout_state in enumerate(rollout_states, start=1):
+            rollout_state.finish_reason = "stop"
+            rollout_state.extra_fields = {
+                "expected_score": expected_score,
+                "task_name": "MCC",
+            }
+
+        async def judge_all():
+            return [await judger.judge(state) for state in rollout_states]
+
+        judged_states = asyncio.run(judge_all())
+
+        for expected_score, (actor, state) in enumerate(zip(actors, judged_states), start=1):
+            self.assertEqual(
+                actor.judge_payload.payload,
+                {
+                    "response": state.response,
+                    "reward_model": state.reward_model,
+                    "finish_reason": "stop",
+                    "extra_fields": {
+                        "expected_score": expected_score,
+                        "task_name": "MCC",
+                    },
+                },
+            )
+            self.assertEqual(state.reward, {"score": expected_score, "postprocessed": True})
 
     def test_composed_judger_config(self):
         def merge_fn(original, judged):

@@ -2,7 +2,6 @@ import json
 import os
 
 from transformers import AutoTokenizer
-
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
@@ -10,7 +9,12 @@ from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
 from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
-from xtuner.v1.rl.agent_loop_manager import AgentLoopManagerConfig, SamplerConfig, SyncProduceStrategyConfig, TaskSpecConfig
+from xtuner.v1.rl.agent_loop_manager import (
+    AgentLoopManagerConfig,
+    SamplerConfig,
+    SyncProduceStrategyConfig,
+    TaskSpecConfig,
+)
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger import DapoMathJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
@@ -71,6 +75,10 @@ rollout_config = RolloutConfig(
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=True,
     rollout_max_batch_size_per_instance=512,
+    extra_rollout_config=dict(
+        lmdeploy_log_level="INFO",
+        lmdeploy_uvicorn_log_level="INFO",
+    ),
 )
 
 # sampling params
@@ -90,7 +98,7 @@ evaluation_sample_params = SampleParams(
 )
 
 # 3. datasets
-with open(meta_data_path, "r", encoding="utf-8") as f:
+with open(meta_data_path, encoding="utf-8") as f:
     ds_collections = json.load(f)
 
 train_dataset_cfg = []
@@ -236,10 +244,10 @@ if enable_evaluate:
             sampler_config=SamplerConfig(dataloader_cfg=eval_dataloader_cfg, prompt_repeat_k=1),
         ),
     )
-    enable_evaluate=True
+    enable_evaluate = True
 else:
     eval_agent_loop_manager_cfg = None
-    enable_evaluate=False
+    enable_evaluate = False
 
 # 7. trainer
 trainer = RLColocateTrainerConfig(
