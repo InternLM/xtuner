@@ -12,6 +12,8 @@ jobs:
   claude-review:
     if: contains(github.event.comment.body, '@claude review')
     runs-on: ubuntu-latest
+    env:
+      CLAUDE_REVIEW_MAX_TURNS: 45
     permissions:
       contents: write
       pull-requests: write
@@ -59,6 +61,12 @@ jobs:
 
             For large PRs, prioritize changed critical paths and their tests. Once sufficient evidence has been collected,
             stop further exploration and publish the inline comments and top-level summary.
+
+            You have at most `${{ env.CLAUDE_REVIEW_MAX_TURNS }}` agentic turns. This is a hard external limit, and no
+            remaining-turn countdown will be injected. Track the budget yourself: stop starting new exploration or
+            subagents well before the limit, and reserve at least the final 10 turns for completing evidence-backed
+            inline comments and the top-level summary. If full coverage is impossible, publish the prioritized findings
+            you can support instead of exhausting the turn budget without review output.
 
             You can use multiple subagents to parallelize tasks. Each subagent should be told the PR title and description
             and must follow the same tool constraints.
@@ -207,7 +215,7 @@ jobs:
             https://github.com/${{ github.repository }}/blob/<HEAD_SHA>/README.md#L10-L15
             ```
           claude_args: |
-              --max-turns 60
+              --max-turns ${{ env.CLAUDE_REVIEW_MAX_TURNS }}
               --model opus
               --allowedTools "
                 Read,Grep,Glob,
