@@ -450,32 +450,13 @@ class ReplayBuffer:
         self._policy = policy
         self._storage = storage_backend
         self._lock = asyncio.Lock()
-        self._tail_batch_trigger_size_by_task: dict[str, int] = {}
 
-    def bind_tail_batch_trigger_sizes(self, sizes_by_task: dict[str, int]) -> None:
-        """Bind each task's immutable tail-batch setting before buffer use.
+    def _cleanup_expired_group(self, group: list[RolloutState], *, retryable: bool) -> None:
+        """Release stale state according to whether the group can be
+        retried."""
 
-        The producer owns the exact scheduling threshold. ReplayBuffer only uses whether the value is positive to
-        decide if EXPIRED groups may be rerolled and therefore must retain their prompt and multimodal inputs.
-        """
-
-        for task_name, tail_batch_trigger_size in sizes_by_task.items():
-            existing_size = self._tail_batch_trigger_size_by_task.get(task_name)
-            if existing_size is not None and existing_size != tail_batch_trigger_size:
-                raise ValueError(
-                    f"Conflicting tail_batch_trigger_size values for task {task_name!r}: "
-                    f"existing={existing_size}, new={tail_batch_trigger_size}."
-                )
-        self._tail_batch_trigger_size_by_task.update(sizes_by_task)
-
-    def _cleanup_expired_group(self, task_name: str, group: list[RolloutState]) -> bool:
-        """Release stale data and return whether the group remains
-        retryable."""
-
-        tail_batch_trigger_size = self._tail_batch_trigger_size_by_task[task_name]
-        retain_for_tail_batch = tail_batch_trigger_size > 0
         for item in group:
-            if retain_for_tail_batch:
+            if retryable:
                 # Tail batch may reroll this sample. Keep prompt and multimodal
                 # training inputs, but release the stale response and routed experts.
                 reset_rollout_response(item)
@@ -484,7 +465,6 @@ class ReplayBuffer:
                 # state before dropping the group's final strong references.
                 discard_rollout_state(item)
             item.status = Status.EXPIRED
-        return retain_for_tail_batch
 
     async def put(
         self,
@@ -494,6 +474,7 @@ class ReplayBuffer:
         model_step: int | None = None,
         current_train_step: int | None = None,
         stale_threshold: int | None = None,
+        expired_groups_retryable: bool = True,
     ) -> None:
         if not items:
             return
@@ -508,8 +489,8 @@ class ReplayBuffer:
         status = get_group_status(items)
         staleness = max(item.seq_staleness for item in items)
         if status == Status.EXPIRED:
-            if not self._cleanup_expired_group(task_name, items):
-                # NOTE: the expired samples will not be put in replay buffer when tail_batch_trigger_size <= 0.
+            self._cleanup_expired_group(items, retryable=expired_groups_retryable)
+            if not expired_groups_retryable:
                 return
         storage_item = StorageItem(
             item=items,
@@ -538,6 +519,7 @@ class ReplayBuffer:
         self,
         *,
         task_stale_thresholds: dict[str, int],
+        expired_groups_retryable_by_task: dict[str, bool] | None = None,
         current_train_step: int,
         statuses: list[Status] | None = None,
     ) -> dict[str, int]:
@@ -548,6 +530,7 @@ class ReplayBuffer:
         if statuses is None:
             statuses = [Status.COMPLETED, Status.ABORTED]
         expired_counts: dict[str, int] = {}
+        retryable_by_task = expired_groups_retryable_by_task or {}
         async with self._lock:
             updated_records: list[StorageItem] = []
             deleted_uids: list[int] = []
@@ -565,12 +548,11 @@ class ReplayBuffer:
                     staleness = max((getattr(item, "seq_staleness", 0) for item in record.item), default=0)
                     should_expire = any(getattr(item, "seq_staleness", 0) >= stale_threshold for item in record.item)
                     if should_expire:
-                        # A tail-enabled task keeps enough state for rerollout;
-                        # otherwise EXPIRED is terminal and is removed from storage.
-                        retain_for_tail_batch = self._cleanup_expired_group(task_name, record.item)
+                        retryable = retryable_by_task.get(task_name, True)
+                        self._cleanup_expired_group(record.item, retryable=retryable)
                         status = Status.EXPIRED
                         expired_count += 1
-                        if not retain_for_tail_batch:
+                        if not retryable:
                             deleted_uids.append(record.uid)
                             continue
                     else:

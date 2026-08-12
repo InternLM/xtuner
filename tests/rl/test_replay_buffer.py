@@ -184,7 +184,6 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:
             with self.subTest(replay_buffer_config=config_name):
                 replay_buffer = replay_buffer_config_cls().build()
-                replay_buffer.bind_tail_batch_trigger_sizes({"task": 0})
                 stale = make_rollout_state(
                     1,
                     prompt_ids=[101, 102],
@@ -204,6 +203,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                     "task",
                     current_train_step=5,
                     stale_threshold=3,
+                    expired_groups_retryable=False,
                 )
 
                 assert stale.status == Status.EXPIRED
@@ -215,12 +215,11 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 assert len(replay_buffer) == 0
                 assert await replay_buffer.get(1, "task", Status.EXPIRED) == []
 
-    async def test_common_put_keeps_rerollout_inputs_before_tail_batch_is_ready(self):
-        # tail batch 尚未攒够时也要保留 EXPIRED，只清理旧输出和 routed experts，保留 pixel_values。
+    async def test_common_put_defaults_to_retryable_expired_group(self):
+        # standalone ReplayBuffer 不传 retryability 时保留原有语义：EXPIRED 可 rerollout。
         for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:
             with self.subTest(replay_buffer_config=config_name):
                 replay_buffer = replay_buffer_config_cls().build()
-                replay_buffer.bind_tail_batch_trigger_sizes({"task": 2})
                 pixel_values = np.ones((2, 3), dtype=np.float32)
                 stale = make_rollout_state(
                     1,
@@ -268,7 +267,6 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:
             with self.subTest(replay_buffer_config=config_name):
                 replay_buffer = replay_buffer_config_cls().build()
-                replay_buffer.bind_tail_batch_trigger_sizes({"terminal_task": 0, "retryable_task": 2})
                 terminal_stale = make_rollout_state(
                     1,
                     response_model_steps=[1],
@@ -285,6 +283,10 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
 
                 expired_counts = await replay_buffer.refresh_staleness(
                     task_stale_thresholds={"terminal_task": 2, "retryable_task": 2},
+                    expired_groups_retryable_by_task={
+                        "terminal_task": False,
+                        "retryable_task": True,
+                    },
                     current_train_step=4,
                 )
 
@@ -306,7 +308,6 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:
             with self.subTest(replay_buffer_config=config_name):
                 replay_buffer = replay_buffer_config_cls().build()
-                replay_buffer.bind_tail_batch_trigger_sizes({"task": 1})
                 await replay_buffer.put([make_rollout_state(1, response_model_steps=[1])], "task")
                 await replay_buffer.put(
                     [make_rollout_state(2, status=Status.ABORTED, response_model_steps=[1])], "task"
@@ -325,7 +326,6 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 assert {state.rollout_id for group in expired for state in group} == {1, 2}
 
                 filtered_buffer = replay_buffer_config_cls().build()
-                filtered_buffer.bind_tail_batch_trigger_sizes({"task": 1})
                 await filtered_buffer.put([make_rollout_state(3, response_model_steps=[1])], "task")
                 await filtered_buffer.put(
                     [make_rollout_state(4, status=Status.ABORTED, response_model_steps=[1])], "task"

@@ -125,6 +125,7 @@ class BaseProduceContext:
     progress: "ProduceProgress | DisaggProduceProgress"
     is_valid_sample_fn: IsValidSampleFn = default_is_valid_sample_fn
     stale_threshold: int | None = None
+    expired_groups_retryable: bool = True
 
     @property
     def consumer_step(self) -> int:
@@ -201,13 +202,14 @@ class BaseProduceContext:
                 discard_rollout_state(item)
             return False
 
-        # ABORTED 保持可重试；ReplayBuffer 根据 task 绑定的 tail batch 配置处理 EXPIRED。
+        # ABORTED 保持可重试；EXPIRED 由 task 的 retryability 决定保留或丢弃。
         await self.replay_buffer.put(
             group,
             self.task_name,
             model_step=self.model_step,
             current_train_step=self.consumer_step,
             stale_threshold=self.stale_threshold,
+            expired_groups_retryable=self.expired_groups_retryable,
         )
         self.progress.add_produced(self.task_name, samples=len(group), tokens=produced_tokens)
         final_status = get_group_status(group)
@@ -282,6 +284,10 @@ class _TaskRunner:
     @property
     def stale_threshold(self) -> int | None:
         return getattr(self.produce_strategy, "stale_threshold", None)
+
+    @property
+    def expired_groups_retryable(self) -> bool:
+        return getattr(self.produce_strategy, "tail_batch_trigger_size", 0) > 0
 
 
 class _TaskSamplerView:
@@ -424,12 +430,15 @@ async def refresh_for_all_tasks(
     statuses: list[Status],
 ) -> None:
     task_stale_thresholds: dict[str, int] = {}
+    expired_groups_retryable_by_task: dict[str, bool] = {}
     for task in task_runners:
         # 没有 stale_threshold 的同步策略按 1 处理。
         task_stale_thresholds[task.task_name] = task.stale_threshold if task.stale_threshold is not None else 1
+        expired_groups_retryable_by_task[task.task_name] = task.expired_groups_retryable
 
     expired_counts = await replay_buffer.refresh_staleness(
         task_stale_thresholds=task_stale_thresholds,
+        expired_groups_retryable_by_task=expired_groups_retryable_by_task,
         current_train_step=train_step,
         statuses=statuses,
     )

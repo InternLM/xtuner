@@ -159,12 +159,6 @@ class AgentLoopManagerConfig(BaseModel):
                 )
             )
 
-        replay_buffer.bind_tail_batch_trigger_sizes(
-            {
-                task_cfg.task_name: getattr(task_cfg.produce_strategy_config, "tail_batch_trigger_size", 0)
-                for task_cfg in tasks
-            }
-        )
         return AgentLoopManager(
             task_runners=task_runners,
             replay_buffer=replay_buffer,
@@ -258,6 +252,7 @@ class AgentLoopManager:
                         progress=local_progress,
                         is_valid_sample_fn=task.is_valid_sample_fn,
                         stale_threshold=task.stale_threshold,
+                        expired_groups_retryable=task.expired_groups_retryable,
                     )
                 )
             )
@@ -282,6 +277,7 @@ class AgentLoopManager:
                     progress=local_progress,
                     is_valid_sample_fn=task.is_valid_sample_fn,
                     stale_threshold=task.stale_threshold,
+                    expired_groups_retryable=task.expired_groups_retryable,
                 )
             )
         result = await take_train_batch(
