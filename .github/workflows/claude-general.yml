@@ -192,7 +192,7 @@ jobs:
             ```
           claude_args: |
               --max-turns 30
-              --model claude-opus-4-6
+              --model opus
               --allowedTools "
                 Read,Write,Edit,MultiEdit,LS,Grep,Glob,
                 Bash(cat:*),Bash(test:*),Bash(printf:*),Bash(jq:*),Bash(head:*),Bash(git:*),Bash(gh:*),
@@ -315,7 +315,7 @@ jobs:
 
           claude_args: |
               --max-turns 30
-              --model claude-opus-4-6
+              --model opus
               --allowedTools "
                 Read,Write,Edit,MultiEdit,LS,Grep,Glob,
                 Bash(cat:*),Bash(test:*),Bash(printf:*),Bash(jq:*),Bash(head:*),Bash(git:*),Bash(gh:*),
