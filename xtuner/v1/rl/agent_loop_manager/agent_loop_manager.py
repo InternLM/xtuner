@@ -252,6 +252,7 @@ class AgentLoopManager:
                         progress=local_progress,
                         is_valid_sample_fn=task.is_valid_sample_fn,
                         stale_threshold=task.stale_threshold,
+                        expired_groups_retryable=task.expired_groups_retryable,
                     )
                 )
             )
@@ -276,6 +277,7 @@ class AgentLoopManager:
                     progress=local_progress,
                     is_valid_sample_fn=task.is_valid_sample_fn,
                     stale_threshold=task.stale_threshold,
+                    expired_groups_retryable=task.expired_groups_retryable,
                 )
             )
         result = await take_train_batch(

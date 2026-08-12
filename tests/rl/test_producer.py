@@ -145,6 +145,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             progress=progress,
             is_valid_sample_fn=strategy.is_valid_sample_fn,
             stale_threshold=getattr(strategy, "stale_threshold", None),
+            expired_groups_retryable=getattr(strategy, "tail_batch_trigger_size", 0) > 0,
         )
 
     def _build_disagg_progress(
@@ -195,6 +196,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             progress=progress,
             is_valid_sample_fn=strategy.is_valid_sample_fn,
             stale_threshold=getattr(strategy, "stale_threshold", None),
+            expired_groups_retryable=getattr(strategy, "tail_batch_trigger_size", 0) > 0,
         )
 
     async def test_contexts_keep_colocate_and_disagg_control_surface_separate(self):
@@ -253,7 +255,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         aborted_item = make_rollout_state(999, status=Status.ABORTED)
         expired_item = make_rollout_state(1000, status=Status.EXPIRED)
         await self.replay_buffer.put([aborted_item], task_name)
-        await self.replay_buffer.put([expired_item], task_name)
+        await self.replay_buffer.put([expired_item], task_name, expired_groups_retryable=True)
 
         data = await sampler.sample(task_name, group_status=[Status.EXPIRED, Status.ABORTED])
         self.assertEqual(data[0].group_id, 1000)
@@ -589,7 +591,11 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # 验证 tail-batch 模式固定从 expired/aborted pool 补必要缺口，并禁用额外超发。
         task_name = "test_tail_static"
         for sample_id in (900, 901):
-            await self.replay_buffer.put([make_rollout_state(sample_id, status=Status.EXPIRED)], task_name)
+            await self.replay_buffer.put(
+                [make_rollout_state(sample_id, status=Status.EXPIRED)],
+                task_name,
+                expired_groups_retryable=True,
+            )
 
         sampler = self._build_sampler()
         original_sample = sampler.sample
