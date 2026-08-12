@@ -54,8 +54,9 @@ case:
                        operator: <
                     -
                        metric:  mismatch/mismatch_k3_kl
+                       # Per-step bound on the metric itself (not vs baseline).
                        threshold: 0.001
-                       method: absolute
+                       method: value
                        operator: <
                     -
                        metric: response/response_len/mean
@@ -97,8 +98,9 @@ case:
                        operator: <
                     -
                        metric:  mismatch/mismatch_k3_kl
+                       # Per-step bound on the metric itself (not vs baseline).
                        threshold: 0.001
-                       method: absolute
+                       method: value
                        operator: <
                     -
                        metric: response/response_len/mean
@@ -142,8 +144,9 @@ case:
                        operator: <
                     -
                        metric:  mismatch/mismatch_k3_kl
+                       # Per-step bound on the metric itself (not vs baseline).
                        threshold: 0.001
-                       method: absolute
+                       method: value
                        operator: <
                     -
                        metric: response/response_len/mean
@@ -186,8 +189,9 @@ case:
                        operator: <
                     -
                        metric:  mismatch/mismatch_k3_kl
+                       # Per-step bound on the metric itself (not vs baseline).
                        threshold: 0.001
-                       method: absolute
+                       method: value
                        operator: <
                     -
                        metric: response/response_len/mean
@@ -235,8 +239,9 @@ case:
                        operator: <
                     -
                        metric:  mismatch/mismatch_k3_kl
+                       # Per-step bound on the metric itself (not vs baseline).
                        threshold: 0.001
-                       method: absolute
+                       method: value
                        operator: <
                     -
                        metric: response/response_len/mean
@@ -275,9 +280,9 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       # VL RL KL run-to-run abs noise ~1.3e-3; 1e-3 was too tight.
-                       threshold: 0.002
-                       method: absolute
+                       # Per-step bound on the metric itself (not vs baseline).
+                       threshold: 0.001
+                       method: value
                        operator: <
                     -
                        metric: response/response_len/mean
@@ -317,9 +322,9 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       # Same VL RL KL noise band as grpo (~1.3e-3).
-                       threshold: 0.002
-                       method: absolute
+                       # Per-step bound on the metric itself (not vs baseline).
+                       threshold: 0.001
+                       method: value
                        operator: <
                     -
                        metric: response/response_len/mean
@@ -361,8 +366,9 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.002
-                       method: absolute
+                       # Per-step bound on the metric itself (not vs baseline).
+                       threshold: 0.001
+                       method: value
                        operator: <
                     -
                        metric: response/response_len/mean
@@ -405,8 +411,9 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.002
-                       method: absolute
+                       # Per-step bound on the metric itself (not vs baseline).
+                       threshold: 0.001
+                       method: value
                        operator: <
                     -
                        metric: response/response_len/mean
@@ -452,8 +459,9 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
+                       # Per-step bound on the metric itself (not vs baseline).
                        threshold: 0.001
-                       method: absolute
+                       method: value
                        operator: <
                     -
                        metric: response/response_len/mean
@@ -854,9 +862,9 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       # Tiny abs KL drift (~2.5e-4) becomes relative false alarms when baseline KL is small.
-                       threshold: 0.0005
-                       method: absolute
+                       # Per-step bound on the metric itself (not vs baseline).
+                       threshold: 0.001
+                       method: value
                        operator: <
                     -
                        metric: response/response_len/mean
@@ -900,8 +908,9 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
+                       # Per-step bound on the metric itself (not vs baseline).
                        threshold: 0.001
-                       method: relative
+                       method: value
                        operator: <
                     -
                        metric: response/response_len/mean
@@ -950,8 +959,9 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
+                       # Per-step bound on the metric itself (not vs baseline).
                        threshold: 0.001
-                       method: relative
+                       method: value
                        operator: <
                     -
                        metric: response/response_len/mean

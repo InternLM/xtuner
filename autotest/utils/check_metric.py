@@ -92,7 +92,16 @@ def _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SF
 
 
 def _step_errors(base_vals: list[float], cur_vals: list[float], method: str) -> list[float]:
+    """Compute per-step quantities compared against ``threshold``.
+
+    - ``absolute`` / ``relative``: drift vs baseline
+    - ``value``: current metric itself (baseline ignored); used for bounds like
+      ``mismatch_k3_kl < 0.001`` on every step
+    """
     errors: list[float] = []
+    if method == "value":
+        return list(cur_vals)
+
     for base_val, cur_val in zip(base_vals, cur_vals):
         if method == "absolute":
             errors.append(abs(cur_val - base_val))
@@ -371,31 +380,37 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
                 max_error_idx = idx
 
             if operator == "<":
-                if not (error < threshold):
+                passed = error < threshold
+            elif operator == "<=":
+                passed = error <= threshold
+            else:
+                raise ValueError(f"Unknown operator: {operator}")
+
+            if not passed:
+                if method == "value":
+                    fail_metric[metric] = (
+                        f"{metric} value {cur_val:.6f} does not satisfy {operator} {threshold} at step {idx}"
+                    )
+                else:
                     fail_metric[metric] = (
                         f"{metric} error {error:.6f} not less than threshold {threshold} "
                         f"(method: {method}, operator: {operator}) at step {idx}, "
                         f"baseline: {base_val:.6f}, current: {cur_val:.6f}"
                     )
-                    check_flag = False
-                    break
-            elif operator == "<=":
-                if not (error <= threshold):
-                    fail_metric[metric] = (
-                        f"{metric} error {error:.6f} not less than or equal to threshold {threshold} "
-                        f"(method: {method}, operator: {operator}) at step {idx}, "
-                        f"baseline: {base_val:.6f}, current: {cur_val:.6f}"
-                    )
-                    check_flag = False
-                    break
-            else:
-                raise ValueError(f"Unknown operator: {operator}")
+                check_flag = False
+                break
 
         if check_flag:
-            logger.info(
-                f"✓ {metric} check passed, max error is {max_error:.6f} at step {max_error_idx} "
-                f"(method: {method}, operator: {operator})"
-            )
+            if method == "value":
+                logger.info(
+                    f"✓ {metric} check passed, max value is {max_error:.6f} at step {max_error_idx} "
+                    f"(operator: {operator}, threshold: {threshold})"
+                )
+            else:
+                logger.info(
+                    f"✓ {metric} check passed, max error is {max_error:.6f} at step {max_error_idx} "
+                    f"(method: {method}, operator: {operator})"
+                )
 
     result = not bool(fail_metric)
     if result:
