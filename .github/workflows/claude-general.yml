@@ -167,13 +167,15 @@ jobs:
 
             ### Review Output
 
-            1. For every issue, rate how significant it is. Make sure you are confident in your diagnosis.
+            1. Write all review comments posted to GitHub, including inline comments and the top-level summary, in Chinese. Technical terms may remain in English.
 
-            2. Use `gh pr view <PR NUMBER> --comments` to avoid reporting the same issue twice.
+            2. For every issue, rate how significant it is. Make sure you are confident in your diagnosis.
 
-            3. Provide detailed feedback as PR comments: use `mcp__github_inline_comment__create_inline_comment` to create inline comments for specific code issues, and use `gh pr comment ${{ github.event.pull_request.number || github.event.issue.number }} --body "..."` for the top-level summary.
+            3. Use `gh pr view <PR NUMBER> --comments` to avoid reporting the same issue twice.
 
-            4. Prefix all your GitHub comments with "Claude: ".
+            4. Provide detailed feedback as PR comments: use `mcp__github_inline_comment__create_inline_comment` to create inline comments for specific code issues, and use `gh pr comment ${{ github.event.pull_request.number || github.event.issue.number }} --body "..."` for the top-level summary.
+
+            5. Prefix all your GitHub comments with "Claude: ".
 
             ### Code Linking Format
 
