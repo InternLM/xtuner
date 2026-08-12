@@ -21,8 +21,6 @@ contract from another model in the family.
 
 1. Record the official HF repo or local directory, immutable revision, tokenizer
    class, Transformers version, and whether `trust_remote_code=True` is required.
-   Follow the repository's requested Python environment; otherwise use
-   `conda activate pt29_glm1`.
 2. Inspect the actual artifacts used by inference:
    `tokenizer_config.json`, `chat_template.jinja` or `chat_template`,
    `special_tokens_map.json`, `generation_config.json`, and `config.json`.
