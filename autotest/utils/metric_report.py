@@ -1,5 +1,6 @@
 """Generate ete metric comparison plots and GitHub Actions job summaries."""
 
+import fcntl
 import os
 from collections import deque
 from pathlib import Path
@@ -129,22 +130,27 @@ def append_case_to_step_summary(case_name: str, base_jsonl: str, cur_jsonl: str,
     image_url = report_image_url(case_name, report_suffix)
     phase_label = "resume" if report_suffix == "_resume" else None
     title = f"{case_name} ({phase_label})" if phase_label else case_name
+    # xdist workers may append concurrently; lock the summary file.
     with open(summary_file, "a", encoding="utf-8") as f:
-        f.write(f"## {title} 指标比较图\n")
-        f.write('<div align="center">\n')
-        f.write(f'<img src="{image_url}"\n')
-        f.write('  style="max-width: 90%; border: 1px solid #ddd; border-radius: 8px;">\n')
-        f.write("</div>\n")
-        f.write(f"[在 reports 分支查看大图]({image_url})\n\n")
-        f.write('<div align="center">\n')
-        f.write(
-            f'<details>\n<summary><strong style="text-align: left;">'
-            f"📊 用例 {case_name} tracker 预览（基线 / 当前，完整数据见集群 baseline 路径）</strong></summary>\n\n"
-        )
-        f.write(format_jsonl_preview(base_jsonl, "Baseline"))
-        f.write(format_jsonl_preview(cur_jsonl, "Current"))
-        f.write("</details>\n")
-        f.write("</div>\n\n")
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.write(f"## {title} 指标比较图\n")
+            f.write('<div align="center">\n')
+            f.write(f'<img src="{image_url}"\n')
+            f.write('  style="max-width: 90%; border: 1px solid #ddd; border-radius: 8px;">\n')
+            f.write("</div>\n")
+            f.write(f"[在 reports 分支查看大图]({image_url})\n\n")
+            f.write('<div align="center">\n')
+            f.write(
+                f'<details>\n<summary><strong style="text-align: left;">'
+                f"📊 用例 {case_name} tracker 预览（基线 / 当前，完整数据见集群 baseline 路径）</strong></summary>\n\n"
+            )
+            f.write(format_jsonl_preview(base_jsonl, "Baseline"))
+            f.write(format_jsonl_preview(cur_jsonl, "Current"))
+            f.write("</details>\n")
+            f.write("</div>\n\n")
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def publish_comparison_report(
