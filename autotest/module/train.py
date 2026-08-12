@@ -44,7 +44,7 @@ class Train:
 
             if train_type == "sft":
                 command = (
-                    f"cd {current_dir}; pwd; {pip_package}; {image_version_check}; sleep inf;"
+                    f"cd {current_dir}; pwd; {pip_package}; {image_version_check} sleep inf;"
                     f"export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + cudnn_patch
                     + f"torchrun --nproc-per-node {nproc_per_node} --master_addr=${{MASTER_ADDR}} --master_port=${{MASTER_PORT}} --nnodes=${{WORLD_SIZE}} --node_rank=${{RANK}} "
