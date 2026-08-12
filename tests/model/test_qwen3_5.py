@@ -259,7 +259,8 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
             "text": 1.5416,
             "image": 3.6920,
             # "video": 8.2165, # pt28+tf4.57.0
-            "video": 8.8627, # pt29+tf5.2.0
+            # "video": 8.8627, # pt29+tf5.2.0
+            "video": 8.7589
         }
 
         QWEN3_VL_MOE_PATH = os.environ["QWEN3_5_MOE_PATH"]
