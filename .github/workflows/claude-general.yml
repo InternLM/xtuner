@@ -47,31 +47,135 @@ jobs:
 
             You can use multiple subagents to parallelize tasks. Each subagent should be told the PR title and description.
 
-            ## PR Review Guide
+            ## Review Instructions
 
             You are in repository without that patch applied. **Do not apply it.**
             Assume the patch will be built and tested by other GitHub Actions workflows.
 
-            ### Focus Areas
+            ### Additional Checks
 
-            - Code quality, style, and best practices
-            - Potential bugs, issues, incorrect logic
             - Security implications
             - `.claude/CLAUDE.md` compliance
 
-            ### Review Process
+            ### Project-Specific Review Requirements
+
+            请 review 这次修改的代码, 要求如下:
+
+            #### 设计接口 review
+
+            1. 对这次代码涉及到的主要流程和关键抽象(类):
+               - 按照修改前的状态画一个增强的Flowchart, 每个关键类的关键接口一个 subgraph, 图中要有相关的类和接口全称
+               - 按照修改后的状态再画一个Flowchart, 有修改的部分做突出(使用 mermaid version 8.8.0 支持的突出语法), 并做文字简要说明
+
+            2. 根据下文“附录 A：架构审查规则”的标准，检查此次类、接口等改动是否合理，是否做到了良好抽象和信息隐藏。
+
+            3. 根据下文“附录 B：线性业务流程”的标准，检查此次关键抽象的公开接口实现是否把高层方法写成线性业务流程。
+
+            #### 核心实现 review
+
+            4. 指出本次修改中的核心实现及其对应单测, 并解释其中的原理.
+
+            #### 其他
+
+            5. 无论是设计接口还是核心实现, 如有改进意见, 在相关位置以伪代码说明.
+
+            6. 详略得当: 简单的修改, 行文精简; 复杂的修改, 行文按需扩展.
+
+            ---
+
+            #### 附录 A：架构审查规则
+
+            ##### 目标
+
+            寻找架构摩擦，判断此次修改是否把浅层 Module 加深：调用者通过较小的 Interface 获得更多行为，规则和修改集中在一处，从而提高可测试性和可维护性。
+
+            ##### 术语
+
+            | 术语 | 定义 |
+            |---|---|
+            | **Module** | 任何同时具有 Interface 和 Implementation 的单元，可以是函数、类、包或功能切片 |
+            | **Interface** | 调用者正确使用 Module 必须知道的一切，包括类型、不变量、错误模式、调用顺序、配置和性能特征 |
+            | **Implementation** | Module 内部的实现代码 |
+            | **Depth** | Interface 的杠杆率；行为多而 Interface 小的是 Deep Module，Interface 几乎和 Implementation 一样复杂的是 Shallow Module |
+            | **Seam** | 无需在原位置修改代码即可替换行为的位置，Interface 位于此处 |
+            | **Adapter** | 在某个 Seam 上满足 Interface 的具体实现 |
+            | **Leverage** | 调用者从 Depth 获得的收益：学习较少 Interface 即可获得更多行为 |
+            | **Locality** | 维护者从 Depth 获得的收益：规则、修改、缺陷和验证集中在一处 |
+
+            架构意见统一使用这些术语，避免用含义不清的“组件”“服务”“API”或“边界”代替。
+
+            ##### 核心原则
+
+            1. **Depth 属于 Interface，而不是 Implementation**：内部可以由多个小函数组成，但调用者不应被迫了解内部接缝和组合细节。
+            2. **Deletion test**：设想删除一个 Module。如果复杂性也消失，它可能只是转发层；如果复杂性重新散落到多个调用者，它就在提供信息隐藏和 Locality。
+            3. **Interface 是测试面**：调用者和测试应跨过同一个 Seam。若测试必须穿透 Interface 才能验证行为，通常说明 Module 形状或测试方式有问题。
+            4. **一个 Adapter 是假设，两个 Adapter 才形成真实 Seam**：没有真实变化需求时，不要为“未来可能替换”增加 Interface、工厂和转发层。
+            5. **信息隐藏优先**：策略、状态转换、不变量、资源管理和外部依赖细节应留在 Implementation 内，调用者只承担必要知识。
+
+            ##### 审查方法
+
+            1. 如果项目存在领域词汇或架构决策，先了解与本次修改相关的部分；不要重复建议已经被明确否决的方案。如果不存在，则从代码和调用关系中判断，不阻塞审查。
+            2. 阅读变更 Module 的完整实现、直接调用者和测试，不只阅读 diff。
+            3. 检查以下架构摩擦：
+               - 理解一个概念是否需要在很多小 Module 间跳转。
+               - Interface 是否几乎暴露了全部 Implementation。
+               - 为了测试而抽出的纯函数，是否丢失了真实调用顺序和组合路径的 Locality。
+               - 紧耦合 Module 是否通过 Seam 泄漏内部类型、配置或错误。
+               - 同一规则是否散落在多个调用者中。
+               - 公开行为是否难以通过当前 Interface 测试。
+            4. 对可疑的 Shallow Module 使用 Deletion test，判断它应该内联还是与相关职责合并为更 Deep 的 Module。
+            5. 判断此次改动是否提高了 Leverage 和 Locality，而不是只增加层级、helper 或抽象名词。
+
+            ##### 依赖与测试
+
+            | 依赖类型 | Seam 与测试策略 |
+            |---|---|
+            | 进程内计算或内存状态 | 直接放入 Deep Module，通过公开 Interface 测试，无需 Adapter |
+            | 有本地测试替身的依赖 | Seam 留在 Implementation 内，测试使用真实本地替身 |
+            | 自有远程服务 | 在 Seam 定义端口；生产使用网络 Adapter，测试使用内存 Adapter |
+            | 不可控的第三方服务 | 注入最小端口，测试使用 mock/test Adapter |
+
+            重构后应测试 Deep Module 的公开行为。项目内部 Module 尽量不 mock；只替换项目外部依赖。测试应在内部重构后仍然成立。
+
+            ##### 改进意见格式
+
+            只有发现真实摩擦时才提出改进。每条意见应包含：
+
+            - **Files**：涉及的文件和 Module。
+            - **Problem**：当前设计造成的具体摩擦和证据。
+            - **Solution**：职责、Interface 或 Seam 应如何调整。
+            - **Benefits**：对 Locality、Leverage 和测试的改善。
+
+            如果建议与既有架构决策冲突，应明确指出冲突以及为什么真实摩擦值得重新讨论。
+
+            #### 附录 B：线性业务流程
+
+            建议把高层方法写成线性业务流程。
+
+            高层方法应由同一抽象层级的步骤组成，读起来像一段清晰叙述：高层先表达业务意图和执行顺序，具体机制放到后续更低层级的方法中。
+
+            ```python
+            def run(self, request):
+                plan = self._build_plan(request)
+                runtime = self._prepare_runtime(plan)
+                result = self._execute(plan, runtime)
+                self._persist(result)
+                return result
+            ```
+
+            这里不能机械理解成“每一步都抽一个函数”。结合 Deletion test，只有能隐藏真实规则、提高 Locality，或把不同抽象层级的细节移出主流程的私有方法才值得保留；纯转发的一行 wrapper 应该内联。
+
+            ### Review Output
 
             1. For every issue, rate how significant it is. Make sure you are confident in your diagnosis.
 
-            2. Provide detailed feedback as PR comments, using inline comments for specific issues.
+            2. Use `gh pr view <PR NUMBER> --comments` to avoid reporting the same issue twice.
 
-            3. Use `gh pr comment ${{ github.event.pull_request.number || github.event.issue.number }} --body "..."` for top-level summary. Keep it short.
+            3. Use `mcp__github_inline_comment__create_inline_comment` for detailed feedback on specific code issues.
 
-            4. Use `mcp__github_inline_comment__create_inline_comment` to highlight specific code issues.
+            4. Use `gh pr comment ${{ github.event.pull_request.number || github.event.issue.number }} --body "..."` for the top-level summary.
 
             5. Prefix all your GitHub comments with "Claude: ".
-
-            6. Use `gh pr view <PR NUMBER> --comments` output to make sure you don't comment about the same issue twice.
 
             ### Code Linking Format
 
