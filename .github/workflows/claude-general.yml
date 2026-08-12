@@ -100,11 +100,22 @@ jobs:
 
             4. 指出本次修改中的核心实现及其对应单测, 并解释其中的原理.
 
+            #### 单测建议
+
+            5. 当前向 upstream/main 提 PR，如涉及到很多单测新增和改动，需要检查这些单测，并给出重构和精简建议：
+               去掉 Bad Tests，去掉过于简单测试，去掉冗余测试，只保留必要的单测。
+               - 原则: 测试的时候写 Good Tests。Good Tests 测试模块的 public API 和行为，他们测试真实的代码路径，
+                 项目内的模块尽量不做 mock，项目外的依赖才 mock。Bad Tests 则测试内部实现细节。
+               - 格式要求: 将文件中不同类别的 testcase 整理在不同的 TestClass 中，TestClass 的 docstring
+                 说明当前测试的类别。在文件 docstring 里按两个层级（一级 TestClass，二级 test_func）来说明
+                 当前文件做了哪些行为测试。
+               - 注释: 在每个测试用例开头加一行中文的注释说明测试哪种行为。
+
             #### 其他
 
-            5. 无论是设计接口还是核心实现, 如有改进意见, 在相关位置以伪代码说明.
+            6. 无论是设计接口还是核心实现, 如有改进意见, 在相关位置以伪代码说明.
 
-            6. top-level summary 要体现上述所有 review 内容，并按照 summary, Main Flowchart before this PR,
+            7. top-level summary 要体现上述所有 review 内容，并按照 summary, Main Flowchart before this PR,
                Main Flowchart after this PR, 核心原理实现与单测, 抽象与信息隐藏评估, 公开 Interface 的线性业务流程评估,
                单测建议, 其他 issues 顺序组织。根据实际情况可以增删章节，并且详略得当: 简单的修改, 行文精简;
                复杂的修改, 行文按需扩展.
