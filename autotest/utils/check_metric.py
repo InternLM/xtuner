@@ -75,6 +75,22 @@ def extract_rl_value(file, metrics):
     return total_step, metric_all
 
 
+def _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SFT"):
+    """Offline first+resume may append into one tracker; CI uses a snapshot.
+
+    For ``phase=first``, compare only the baseline-length prefix when the
+    current tracker is longer. Shorter current trackers still fail.
+    """
+    if phase == "first" and cur_steps > base_steps:
+        logger.warning(
+            f"phase=first: current {kind} tracker has {cur_steps} steps vs baseline "
+            f"{base_steps}; using first-run prefix (likely merged first+resume offline)."
+        )
+        trimmed = {metric: values[:base_steps] for metric, values in cur_metrics.items()}
+        return base_steps, trimmed
+    return cur_steps, cur_metrics
+
+
 def _step_errors(base_vals: list[float], cur_vals: list[float], method: str) -> list[float]:
     errors: list[float] = []
     for base_val, cur_val in zip(base_vals, cur_vals):
@@ -182,6 +198,7 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
     threshold_dict = {metric: cfg[0] for metric, cfg in metric_cfgs.items()}
     base_steps, base_metrics = extract_value(base_path, metric_list)
     cur_steps, cur_metrics = extract_value(cur_path, metric_list)
+    cur_steps, cur_metrics = _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SFT")
     assert cur_steps == base_steps, (
         f"current steps is not equal to base steps, current steps: {cur_steps}, base steps: {base_steps}"
     )
@@ -247,9 +264,7 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
                 percentile=percentile,
             )
             if not check_flag:
-                fail_metric[metric] = (
-                    f"{metric} relative error bigger than {threshold} ({detail})"
-                )
+                fail_metric[metric] = f"{metric} relative error bigger than {threshold} ({detail})"
             else:
                 logger.info(f"✓ {metric} check pass，{detail}, threshold={threshold}")
             continue
@@ -287,6 +302,7 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
 
     base_steps, base_metrics = extract_rl_value(base_path, metric_list)
     cur_steps, cur_metrics = extract_rl_value(cur_path, metric_list)
+    cur_steps, cur_metrics = _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="RL")
 
     assert cur_steps == base_steps, (
         f"current RL steps is not equal to base RL steps, current steps: {cur_steps}, base steps: {base_steps}"

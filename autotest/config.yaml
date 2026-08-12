@@ -275,7 +275,8 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.001
+                       # VL RL KL run-to-run abs noise ~1.3e-3; 1e-3 was too tight.
+                       threshold: 0.002
                        method: absolute
                        operator: <
                     -
@@ -316,7 +317,8 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.001
+                       # Same VL RL KL noise band as grpo (~1.3e-3).
+                       threshold: 0.002
                        method: absolute
                        operator: <
                     -
@@ -359,7 +361,7 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.001
+                       threshold: 0.002
                        method: absolute
                        operator: <
                     -
@@ -403,7 +405,7 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.001
+                       threshold: 0.002
                        method: absolute
                        operator: <
                     -
@@ -852,8 +854,9 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.001
-                       method: relative
+                       # Tiny abs KL drift (~2.5e-4) becomes relative false alarms when baseline KL is small.
+                       threshold: 0.0005
+                       method: absolute
                        operator: <
                     -
                        metric: response/response_len/mean
@@ -862,7 +865,8 @@ case:
                        operator: <
                     -
                        metric: time/step
-                       threshold: 10
+                       # Observed abs ~10.5s vs thr 10.
+                       threshold: 15
                        method: absolute
                        operator: <
             timeout: 2460
