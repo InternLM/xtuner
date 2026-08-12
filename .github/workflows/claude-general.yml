@@ -45,7 +45,23 @@ jobs:
             - `gh pr view <PR NUMBER> --comments`
             - `gh pr diff <PR NUMBER> --patch`
 
-            You can use multiple subagents to parallelize tasks. Each subagent should be told the PR title and description.
+            Use only the following tools and command forms:
+
+            - Use `Read`, `Grep`, and `Glob` to inspect repository files.
+            - Use `gh pr view`, `gh pr diff`, and `gh pr comment` for PR operations.
+            - Use `git diff`, `git show`, and `git grep` for repository inspection.
+            - Use `head`, `tail`, `grep`, and `wc` only to filter read-only output.
+            - Use `mcp__github_inline_comment__create_inline_comment` for inline comments.
+
+            Do not use other Bash commands, including `python`, `python3`, `sed`, `awk`, `mkdir`, or `find`.
+            Do not create temporary files or redirect command output to files.
+            After a permission denial, do not retry the same operation; use an allowed alternative.
+
+            For large PRs, prioritize changed critical paths and their tests. Once sufficient evidence has been collected,
+            stop further exploration and publish the inline comments and top-level summary.
+
+            You can use multiple subagents to parallelize tasks. Each subagent should be told the PR title and description
+            and must follow the same tool constraints.
 
             ## Review Instructions
 
@@ -191,11 +207,13 @@ jobs:
             https://github.com/${{ github.repository }}/blob/<HEAD_SHA>/README.md#L10-L15
             ```
           claude_args: |
-              --max-turns 30
+              --max-turns 60
               --model opus
               --allowedTools "
-                Read,Write,Edit,MultiEdit,LS,Grep,Glob,
-                Bash(cat:*),Bash(test:*),Bash(printf:*),Bash(jq:*),Bash(head:*),Bash(git:*),Bash(gh:*),
+                Read,Grep,Glob,
+                Bash(head:*),Bash(tail:*),Bash(grep:*),Bash(wc:*),
+                Bash(git diff:*),Bash(git show:*),Bash(git grep:*),
+                Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),
                 mcp__github_inline_comment__create_inline_comment,
                 "
           settings: |
