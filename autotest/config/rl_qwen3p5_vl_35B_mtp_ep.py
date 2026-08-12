@@ -54,7 +54,7 @@ enable_evaluate = eval_meta_data_path is not None and eval_meta_data_path != ""
 
 # basic settings
 experimental_name = "rl_qwen3p5_vl_35B_mtp_ep"
-total_epochs = 15
+total_epochs = 5
 global_batch_size = 128
 prompt_repeat_k = 8
 rollout_tp_size = 1
@@ -64,7 +64,7 @@ max_prompt_length = 2048
 max_response_length = 8192
 pack_max_length = 32768
 train_optimizer_steps = 8
-hf_interval = 15
+hf_interval = 30
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
@@ -87,7 +87,7 @@ rollout_config = RolloutConfig(
     gpu_memory_utilization=0.6,
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=True,
-    rollout_max_batch_size_per_instance=512,
+    rollout_max_batch_size_per_instance=128,
     extra_rollout_config=dict(
         lmdeploy_log_level="INFO",
         lmdeploy_uvicorn_log_level="INFO",

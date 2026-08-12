@@ -14,8 +14,8 @@ MODEL_PATH = os.environ["MODEL_PATH"]
 DATA_PATH = os.environ["DATA_PATH"]
 WORK_DIR = os.environ["WORK_DIR"]
 
-sample_max_length = 128 * 1024
-pack_max_length = 128 * 1024
+sample_max_length = 16 * 1024
+pack_max_length = 64 * 1024
 ep_size = 2
 
 moe_cfg = Qwen3_5_VLMoE35BA3Config(only_llm_forward=False, compile_cfg=True)
@@ -71,7 +71,7 @@ dataloader_config = DataloaderConfig(
     group_by_length=True,
     collator="qwen3_vl_sft_collator",
     pack_extra_buffer_size=20,
-    num_workers=2,
+    num_workers=1,
 )
 
 loss_cfg = CELossConfig(mode="chunk", chunk_size=1024, loss_reduction="square")
