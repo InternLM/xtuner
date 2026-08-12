@@ -13,8 +13,10 @@ jobs:
     if: contains(github.event.comment.body, '@claude review')
     runs-on: ubuntu-latest
     env:
-      CLAUDE_REVIEW_ANALYSIS_MAX_TURNS: 35
-      CLAUDE_REVIEW_PUBLISH_MAX_TURNS: 10
+      # Keep the complete review within the original 45-turn budget.
+      CLAUDE_REVIEW_ANALYSIS_MAX_TURNS: 34
+      CLAUDE_REVIEW_SUMMARY_MAX_TURNS: 1
+      CLAUDE_REVIEW_INLINE_MAX_TURNS: 10
       # allowed_non_write_users otherwise enables the action's additional bubblewrap isolation.
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
       CLAUDE_REVIEW_PR_REF: refs/remotes/origin/claude-review-pr
@@ -85,7 +87,7 @@ jobs:
             You have at most `${{ env.CLAUDE_REVIEW_ANALYSIS_MAX_TURNS }}` agentic turns in this phase. This is a hard
             external limit, and no remaining-turn countdown will be injected. Do not use subagents. If full coverage is
             impossible, retain the prioritized evidence already established; the same session will be resumed by a
-            separate publication phase.
+            summary phase and then an inline-comment publication phase.
 
             ## Review Instructions
 
@@ -227,7 +229,9 @@ jobs:
 
             3. Use `gh pr view <PR NUMBER> --comments` to avoid reporting the same issue twice.
 
-            4. In the subsequent publication phase, provide detailed feedback as PR comments: use `mcp__github_inline_comment__create_inline_comment` to create inline comments for specific code issues, and use `gh pr comment ${{ github.event.pull_request.number || github.event.issue.number }} --body "..."` for the top-level summary. Do not call either tool during this analysis phase.
+            4. In the subsequent publication phases, return the top-level summary as the model response for the workflow
+               to post, and use `mcp__github_inline_comment__create_inline_comment` for specific code issues. Do not post
+               comments during this analysis phase.
 
             5. Prefix all your GitHub comments with "Claude: ".
 
@@ -248,7 +252,7 @@ jobs:
               --max-turns ${{ env.CLAUDE_REVIEW_ANALYSIS_MAX_TURNS }}
               --model opus
               --tools "Read,Grep,Glob,Bash,WebSearch,WebFetch"
-              --disallowedTools "Agent"
+              --disallowedTools "Agent,mcp__github_inline_comment__create_inline_comment"
               --allowedTools "
                 Read,Grep,Glob,WebSearch,WebFetch,
                 Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(grep:*),Bash(rg:*),
@@ -259,9 +263,8 @@ jobs:
                 Bash(git diff:*),Bash(git show:*),Bash(git grep:*),Bash(git log:*),Bash(git status:*),
                 Bash(git rev-parse:*),Bash(git rev-list:*),Bash(git merge-base:*),Bash(git ls-tree:*),
                 Bash(git ls-files:*),Bash(git cat-file:*),Bash(git blame:*),Bash(git fetch origin:*),
-                Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh pr comment:*),
+                Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),
                 Bash(gh run view:*),Bash(gh run list:*),
-                mcp__github_inline_comment__create_inline_comment,
                 "
           settings: |
             {
@@ -303,8 +306,8 @@ jobs:
           fi
           echo "session_id=$session_id" >> "$GITHUB_OUTPUT"
 
-      - name: Publish Claude Code Review
-        id: claude-review-publish
+      - name: Compose Claude review summary
+        id: claude-review-summary
         if: steps.claude-review-session.outcome == 'success'
         uses: anthropics/claude-code-action@v1
         env:
@@ -314,36 +317,83 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           show_full_output: true
           prompt: |
-            # PR Review Publication Phase
+            # PR Review Summary Phase
 
             Resume the preceding analysis of `${{ github.repository }}` PR
-            `${{ github.event.pull_request.number || github.event.issue.number }}` and publish its supported results.
+            `${{ github.event.pull_request.number || github.event.issue.number }}` and compose its top-level summary.
 
             The analysis phase is over. Do not inspect more code, run tests, perform web research, or use `Agent` or
             subagents. Use only evidence already present in this session. Omit uncertain findings instead of starting
             new exploration.
 
-            You have at most `${{ env.CLAUDE_REVIEW_PUBLISH_MAX_TURNS }}` new agentic turns. Immediately:
-
-            1. Use `gh pr view <PR NUMBER> --comments` once to avoid duplicate findings and resolve the head SHA if needed.
-            2. Post the required top-level summary with `gh pr comment`. This guarantees a review result even if later
-               inline-comment publication is interrupted.
-            3. Use `mcp__github_inline_comment__create_inline_comment` for specific, high-confidence code issues. Prioritize
-               the most significant findings and leave enough turns to complete all tool calls.
+            You have exactly one new agentic turn. Do not call any tool. Respond immediately with only the complete,
+            publish-ready top-level summary; the workflow will read this response from the action execution output and
+            post it to GitHub without passing the Markdown through Bash command parsing.
 
             Follow all project-specific requirements, output structure, code-linking format, and review-output rules from
-            the analysis-phase prompt. Write every GitHub comment in Chinese, retain English technical terms where useful,
-            and prefix every comment with `Claude: `. If no specific issue is sufficiently supported, still publish the
-            top-level summary and state that explicitly. Do not merely describe the comments in your response: call the
-            tools and publish them.
+            the analysis-phase prompt. Write the summary in Chinese, retain English technical terms where useful, and
+            start it with `Claude: `. If no specific issue is sufficiently supported, state that explicitly. Do not wrap
+            the summary in an outer code fence and do not add meta-commentary before or after it.
           claude_args: |
               --resume ${{ steps.claude-review-session.outputs.session_id }}
-              --max-turns ${{ env.CLAUDE_REVIEW_PUBLISH_MAX_TURNS }}
+              --max-turns ${{ env.CLAUDE_REVIEW_SUMMARY_MAX_TURNS }}
+              --model opus
+              --disallowedTools "*"
+          allowed_non_write_users: "*"
+          track_progress: false
+
+      - name: Post Claude review summary
+        env:
+          EXECUTION_FILE: ${{ steps.claude-review-summary.outputs.execution_file }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          summary_file="${RUNNER_TEMP}/claude-review-summary.md"
+          # Keep long, multiline Markdown out of Claude's Bash permission parser.
+          jq -er '[.[] | select(.type == "result" and (.result | type == "string") and (.result | length > 0)) | .result][-1]' \
+            "$EXECUTION_FILE" > "$summary_file"
+          grep -q '^Claude: ' "$summary_file"
+          gh pr comment "$PR_NUMBER" --body-file "$summary_file"
+
+      - name: Publish Claude inline comments
+        id: claude-review-inline
+        # The required top-level result is already posted; inline comments are best-effort enrichment.
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: 1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          show_full_output: true
+          prompt: |
+            # PR Review Inline-Comment Phase
+
+            Resume the preceding review of `${{ github.repository }}` PR
+            `${{ github.event.pull_request.number || github.event.issue.number }}`. The workflow has already posted the
+            top-level summary. Do not post or edit another top-level summary.
+
+            The analysis phase is over. Do not inspect more code, run tests, perform web research, or use `Agent` or
+            subagents. Use only evidence already present in this session and omit uncertain findings.
+
+            You have at most `${{ env.CLAUDE_REVIEW_INLINE_MAX_TURNS }}` new agentic turns:
+
+            1. Use `gh pr view <PR NUMBER> --comments` at most once to avoid duplicate findings.
+            2. Use `mcp__github_inline_comment__create_inline_comment` for at most eight specific, high-confidence code
+               issues. Publish the most significant findings first.
+            3. Finish immediately after publishing the selected inline comments. Do not call `gh pr comment`.
+
+            Follow all project-specific requirements, code-linking format, and review-output rules from the analysis-phase
+            prompt. Write every inline comment in Chinese, retain English technical terms where useful, and prefix every
+            comment with `Claude: `. If no specific issue is sufficiently supported, finish without posting one.
+          claude_args: |
+              --resume ${{ steps.claude-review-summary.outputs.session_id }}
+              --max-turns ${{ env.CLAUDE_REVIEW_INLINE_MAX_TURNS }}
               --model opus
               --tools "Bash"
               --disallowedTools "Agent"
               --allowedTools "
-                Bash(gh pr view:*),Bash(gh pr comment:*),
+                Bash(gh pr view:*),
                 mcp__github_inline_comment__create_inline_comment,
                 "
           settings: |
