@@ -451,50 +451,53 @@ class ReplayBuffer:
         """Refresh one group's staleness, expire it when needed, and clean it
         up."""
         storage_status = get_group_status(group)
-        if current_train_step is None or storage_status not in (Status.COMPLETED, Status.ABORTED):
+        if current_train_step is None or storage_status not in (Status.COMPLETED, Status.ABORTED, Status.EXPIRED):
             return storage_status
+        # NOTE: input_ids/labels 表示 agentic 训练分支，当前暂不支持 agentic token-expired lifecycle。
+        is_agentic_group = any(item.input_ids is not None or item.labels is not None for item in group)
+        # NOTE: An EXPIRED group may still contain COMPLETED states whose responses were preserved.
+        # Refresh the group again so those states can also expire while waiting for rerollout.
+        expired_mask = [item.status == Status.EXPIRED for item in group]
 
         # 1. update seq-level staleness
         refresh_seq_staleness(group, current_train_step)
-        if stale_threshold is not None:
-            for item in group:
-                if item.seq_staleness >= stale_threshold:
-                    item.status = Status.EXPIRED
-                    storage_status = Status.EXPIRED
 
-        # 2. update token-level staleness
-        if storage_status != Status.EXPIRED and token_stale_threshold is not None:
-            # NOTE: input_ids/labels 表示 agentic 训练分支，当前暂不支持 agentic token-expired lifecycle。
-            if any(item.input_ids is not None or item.labels is not None for item in group):
-                return storage_status
+        for index, item in enumerate(group):
+            if expired_mask[index]:
+                continue
+            if stale_threshold is not None and item.seq_staleness >= stale_threshold:
+                expired_mask[index] = True
+                continue
+            if is_agentic_group or token_stale_threshold is None:
+                continue
+            if not item.response_ids or (item.response_mask is not None and not any(item.response_mask)):
+                continue
 
-            for item in group:
-                if not item.response_ids or (item.response_mask is not None and not any(item.response_mask)):
-                    continue
+            # 2. update token-level staleness
+            effective_mask = calculate_effective_response_mask(
+                item,
+                current_train_step=current_train_step,
+                token_stale_threshold=token_stale_threshold,
+            )
+            if not any(effective_mask):
+                expired_mask[index] = True
 
-                effective_mask = calculate_effective_response_mask(
-                    item,
-                    current_train_step=current_train_step,
-                    token_stale_threshold=token_stale_threshold,
-                )
-                if not any(mask_value != 0 for mask_value in effective_mask):
-                    item.status = Status.EXPIRED
-                    storage_status = Status.EXPIRED
-
-        if storage_status != Status.EXPIRED:
+        # 3. return storage_status when no expired sample in group
+        if not any(expired_mask):
             return storage_status
 
-        # 3. 如果存在过期的样本，清理过期样本
+        # 4. cleanup sample or cleanup response for expired sample
         if expired_groups_retryable:
-            for item in group:
-                if item.status == Status.EXPIRED:
+            for item, expired in zip(group, expired_mask):
+                if expired:
+                    item.status = Status.EXPIRED
                     reset_rollout_response(item)
         else:
             for item in group:
                 discard_rollout_state(item)
                 item.status = Status.EXPIRED
 
-        return storage_status
+        return Status.EXPIRED
 
     async def put(
         self,
@@ -554,9 +557,10 @@ class ReplayBuffer:
         current_train_step: int,
         statuses: list[Status] | None = None,
     ) -> dict[str, int]:
-        # 刷新可复用样本的 staleness；completed / aborted 都可能来自旧权重，需要按 train_step 淘汰。
+        # 刷新可复用样本的 staleness；EXPIRED group 中保留的 COMPLETED state
+        # 在等待 rerollout 期间也可能继续变旧。
         if statuses is None:
-            statuses = [Status.COMPLETED, Status.ABORTED]
+            statuses = [Status.COMPLETED, Status.ABORTED, Status.EXPIRED]
         expired_counts: dict[str, int] = {}
         retryable_by_task = expired_groups_retryable_by_task or {}
         token_stale_thresholds = task_token_stale_thresholds or {}

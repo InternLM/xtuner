@@ -336,7 +336,7 @@ class DisaggAgentLoopManager:
             logger=self.logger,
             manager_name=self.name,
             train_step=train_step,
-            statuses=[Status.COMPLETED, Status.ABORTED],
+            statuses=[Status.COMPLETED, Status.ABORTED, Status.EXPIRED],
         )
         task_batch_sizes = allocate_task_batch_sizes(self.task_runners, batch_size, train_step)
         current_model_step = train_step - 1
@@ -389,7 +389,7 @@ class DisaggAgentLoopManager:
                         logger=self.logger,
                         manager_name=self.name,
                         train_step=train_step + 1,
-                        statuses=[Status.COMPLETED, Status.ABORTED],
+                        statuses=[Status.COMPLETED, Status.ABORTED, Status.EXPIRED],
                     )
                     return result
             await asyncio.sleep(self._STATUS_POLL_INTERVAL_S)
