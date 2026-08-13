@@ -45,7 +45,7 @@ class _FakeProduceStrategy:
         self,
         cleanup_pause_time_s: float = 0.0,
         stale_threshold: int = 1,
-        tail_batch_trigger_size: int = 0,
+        tail_batch_trigger_size: int = -1,
         token_stale_threshold: int | None = None,
     ):
         self.cleanup_pause_time_s = cleanup_pause_time_s
@@ -289,7 +289,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         # 共卡 produce_batch 按 task 权重分配 batch，并按 task 名稳定返回训练数据和 leftover 统计。
         strategy_a = _FakeProduceStrategy(tail_batch_trigger_size=2)
         strategy_b = _FakeProduceStrategy()
-        strategy_c = _FakeProduceStrategy()
+        strategy_c = _FakeProduceStrategy(tail_batch_trigger_size=0)
         replay_buffer = _FakeReplayBuffer(
             rollout_states_by_task={
                 "task_a": [["a-0"], ["a-1"]],
@@ -348,7 +348,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertIn("task_c", result.task_results)
         self.assertEqual(
             replay_buffer.expired_groups_retryable_calls,
-            [{"task_b": False, "task_a": True, "task_c": False}],
+            [{"task_b": False, "task_a": True, "task_c": True}],
         )
         self.assertEqual(strategy_a.called_expired_groups_retryable, [True])
         self.assertEqual(strategy_a.cleanup_expired_groups_retryable, [True])

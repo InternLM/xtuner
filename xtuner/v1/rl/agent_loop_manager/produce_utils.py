@@ -287,7 +287,7 @@ class _TaskRunner:
 
     @property
     def expired_groups_retryable(self) -> bool:
-        return getattr(self.produce_strategy, "tail_batch_trigger_size", 0) > 0
+        return getattr(self.produce_strategy, "tail_batch_trigger_size", -1) >= 0
 
     @property
     def token_stale_threshold(self) -> int | None:

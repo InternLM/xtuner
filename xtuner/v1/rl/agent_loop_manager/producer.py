@@ -210,8 +210,10 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
             extra periods. Unlike ``max_staleness``, this does not expire or
             re-roll a group; it only shrinks ``response_mask``. Defaults to
             None.
-        tail_batch_trigger_size (int): Minimum pending tail size that can
-            trigger a final batch. Defaults to 0.
+        tail_batch_trigger_size (int): Expired-group rerollout policy. ``-1``
+            disables rerollout, ``0`` rerolls out immediately without entering
+            tail-batch mode, and ``N > 0`` waits until the expired pool contains
+            at least ``N`` groups before entering tail-batch mode.
 
     **Examples:**
 
@@ -228,7 +230,7 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
     enable_partial_rollout: bool = False
     max_staleness: int = Field(default=0, ge=0)
     max_token_staleness: int | None = Field(default=None, ge=0)
-    tail_batch_trigger_size: int = 0
+    tail_batch_trigger_size: int = Field(default=-1, ge=-1)
 
     def build(
         self,
@@ -382,8 +384,11 @@ class AsyncProduceStrategy(ProduceStrategy):
             return
 
         expired_count = await ctx.expired_count()
-        sample_from_expired = self.tail_batch_trigger_size > 0 and expired_count >= self.tail_batch_trigger_size
-        if sample_from_expired:
+        sample_expired = (
+            self.tail_batch_trigger_size >= 0 and expired_count > 0 and expired_count >= self.tail_batch_trigger_size
+        )
+        tail_batch_triggered = self.tail_batch_trigger_size > 0 and expired_count >= self.tail_batch_trigger_size
+        if tail_batch_triggered:
             logger.info(
                 f"Tail batch trigger condition met: {expired_count} expired samples "
                 f"(threshold: {self.tail_batch_trigger_size}). Enabling tail batch mode."
@@ -391,7 +396,7 @@ class AsyncProduceStrategy(ProduceStrategy):
 
         # normal 使用固定超发预算；tail-batch 只补必要缺口。
         batch_target = ctx.batch_target
-        oversample_budget = 0 if sample_from_expired else math.ceil(self.over_sample_threshold * ctx.task_batch_size)
+        oversample_budget = 0 if tail_batch_triggered else math.ceil(self.over_sample_threshold * ctx.task_batch_size)
         scheduled_target = batch_target + oversample_budget
         logger.info(
             f"Starting produce_batch for task {ctx.task_name} with batch_target={batch_target}, "
@@ -399,7 +404,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         )
 
         async def spawn_one() -> asyncio.Task:
-            rollout_state = await ctx.sample_group(from_expired_pool=sample_from_expired)
+            rollout_state = await ctx.sample_group(from_expired_pool=sample_expired)
             return create_task(
                 ctx.generate_group(
                     rollout_state,

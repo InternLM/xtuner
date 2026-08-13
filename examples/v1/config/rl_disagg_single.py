@@ -80,7 +80,7 @@ train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", str(32 * train_optimiz
 sync_weights_interval = int(os.environ.get("SYNC_WEIGHTS_INTERVAL", "1"))
 over_sample_threshold = float(os.environ.get("OVER_SAMPLE_THRESHOLD", "0.0"))
 partial_rollout = os.environ.get("PARTIAL_ROLLOUT", "0") == "1"
-tail_batch_trigger_size = int(os.environ.get("TAIL_BATCH_TRIGGER_SIZE", "0"))
+tail_batch_trigger_size = int(os.environ.get("TAIL_BATCH_TRIGGER_SIZE", "-1"))
 max_staleness = int(os.environ.get("MAX_STALENESS", "0"))
 prompt_repeat_k = int(os.environ.get("PROMPT_REPEAT_K", "4"))
 rollout_tp_size = int(os.environ.get("ROLLOUT_TP_SIZE", "1"))

@@ -146,7 +146,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             is_valid_sample_fn=strategy.is_valid_sample_fn,
             stale_threshold=getattr(strategy, "stale_threshold", None),
             token_stale_threshold=getattr(strategy, "token_stale_threshold", None),
-            expired_groups_retryable=getattr(strategy, "tail_batch_trigger_size", 0) > 0,
+            expired_groups_retryable=getattr(strategy, "tail_batch_trigger_size", -1) >= 0,
         )
 
     def _build_disagg_progress(
@@ -198,7 +198,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             is_valid_sample_fn=strategy.is_valid_sample_fn,
             stale_threshold=getattr(strategy, "stale_threshold", None),
             token_stale_threshold=getattr(strategy, "token_stale_threshold", None),
-            expired_groups_retryable=getattr(strategy, "tail_batch_trigger_size", 0) > 0,
+            expired_groups_retryable=getattr(strategy, "tail_batch_trigger_size", -1) >= 0,
         )
 
     async def test_contexts_keep_colocate_and_disagg_control_surface_separate(self):
@@ -676,6 +676,45 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         completed = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
         self.assertEqual(sorted(group[0].group_id for group in completed), [900, 901])
         self.assertTrue(all(group[0].seq_staleness == 0 for group in completed))
+
+    async def test_async_produce_strategy_immediate_rerollout_keeps_oversampling(self):
+        # trigger size 为 0 只立即启用 expired 采样，不进入禁用超发的 tail-batch 模式。
+        task_name = "test_immediate_rerollout"
+        for sample_id in (900, 901):
+            await self.replay_buffer.put(
+                [make_rollout_state(sample_id, status=Status.EXPIRED)],
+                task_name,
+                expired_groups_retryable=True,
+            )
+
+        sampler = self._build_sampler()
+        original_sample = sampler.sample
+        sampled_statuses: list[list[Status] | None] = []
+
+        async def instrumented_sample(task_name, group_status=None):
+            sampled_statuses.append(group_status)
+            return await original_sample(task_name=task_name, group_status=group_status)
+
+        sampler.sample = instrumented_sample
+        strategy = AsyncProduceStrategyConfig(
+            over_sample_threshold=1.0,
+            tail_batch_trigger_size=0,
+        ).build()
+        ctx = self._build_context(
+            strategy,
+            task_name,
+            self._build_agent_loop(),
+            sampler,
+            batch_size=1,
+            progress=self._build_progress(task_name, target=1),
+        )
+
+        await strategy.produce_batch(ctx)
+
+        self.assertEqual(
+            sampled_statuses,
+            [[Status.EXPIRED, Status.ABORTED], [Status.EXPIRED, Status.ABORTED]],
+        )
 
     async def test_async_produce_strategy_fails_fast_on_invalid_progress(self):
         # 验证 progress 缺少当前 task key 时 fail fast，避免静默用 0 掩盖调度状态损坏。
