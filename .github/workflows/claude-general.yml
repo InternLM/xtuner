@@ -19,6 +19,7 @@ jobs:
       CLAUDE_REVIEW_INLINE_MAX_TURNS: 10
       # allowed_non_write_users otherwise enables the action's additional bubblewrap isolation.
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
+      CLAUDE_REVIEW_DIFF_PATH: .claude-review/pr.diff
       CLAUDE_REVIEW_PR_REF: refs/remotes/origin/claude-review-pr
     permissions:
       contents: write
@@ -32,10 +33,15 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Fetch pull request head
+      - name: Prepare pull request review inputs
         env:
+          GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
-        run: git fetch --no-tags --depth=1 origin "+refs/pull/${PR_NUMBER}/head:${CLAUDE_REVIEW_PR_REF}"
+        run: |
+          git fetch --no-tags --depth=1 origin "+refs/pull/${PR_NUMBER}/head:${CLAUDE_REVIEW_PR_REF}"
+          mkdir -p .claude-review
+          # Keep the authoritative net diff and its output redirection outside the Claude permission boundary.
+          gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --color=never > "$CLAUDE_REVIEW_DIFF_PATH"
 
       - name: Analyze Claude Code Review
         id: claude-review-analysis
@@ -56,13 +62,19 @@ jobs:
 
             ## Accessing PR Content
 
-            The workflow has already fetched the PR head as `${{ env.CLAUDE_REVIEW_PR_REF }}`. Inspect it without
-            applying the patch:
-            - `git diff --stat HEAD ${{ env.CLAUDE_REVIEW_PR_REF }}`
-            - `git diff --name-only HEAD ${{ env.CLAUDE_REVIEW_PR_REF }}`
-            - `git diff HEAD ${{ env.CLAUDE_REVIEW_PR_REF }} -- <path>`
-            - `git show ${{ env.CLAUDE_REVIEW_PR_REF }}:<path>`
-            - `gh pr view <PR NUMBER> --comments`
+            The workflow has saved GitHub's authoritative net PR diff to
+            `${{ env.CLAUDE_REVIEW_DIFF_PATH }}` and fetched the PR head as `${{ env.CLAUDE_REVIEW_PR_REF }}`.
+
+            - Use `Grep` on `${{ env.CLAUDE_REVIEW_DIFF_PATH }}` to locate changed files and relevant hunks, then use
+              `Read` with offsets and limits to inspect only the needed parts of the diff.
+            - Use `gh pr view <PR NUMBER> --comments` to inspect existing discussion.
+            - Use `git show ${{ env.CLAUDE_REVIEW_PR_REF }}:<path>` for surrounding content at the PR head.
+
+            Review only changes present in the prepared diff. Do not run `gh pr diff` yourself: on large PRs its output
+            can exceed the tool output limit, and attempts to save it through redirection or temporary files cause
+            permission denials and waste review turns. The workflow has already run it once outside the Claude permission
+            boundary. An `issue_comment` checkout leaves `HEAD` at the default branch tip, so do not diff the local PR
+            ref directly against `HEAD`.
 
             Use any available review and research tools that help establish evidence:
 
@@ -76,9 +88,10 @@ jobs:
               already available locally; do not fetch it again.
 
             Do not execute code or scripts from the PR, push commits, or perform other GitHub mutations. Prefer direct
-            tools and pipelines. Do not create temporary files or use output redirection, `$TMPDIR`, shell loops,
-            command substitution, or chains of independent commands; inspect only the needed path or line range directly.
-            After a permission denial, do not retry the same operation; use an allowed alternative.
+            tools and pipelines. If temporary output is necessary, write it to a `.claude-review-tmp-*` file or directory
+            created directly in the current repository directory, and inspect it in a separate tool call. Never use
+            `$TMPDIR` or `/tmp`, and never commit temporary output. Do not use shell loops, command substitution, or chains
+            of independent commands. After a permission denial, do not retry the same operation; use an allowed alternative.
 
             This is the analysis phase only. Do not post inline comments or a top-level summary. For large PRs, prioritize
             changed critical paths and their tests. Once sufficient evidence has been collected, stop further exploration
@@ -254,7 +267,7 @@ jobs:
               --tools "Read,Grep,Glob,Bash,WebSearch,WebFetch"
               --disallowedTools "Agent,mcp__github_inline_comment__create_inline_comment"
               --allowedTools "
-                Read,Grep,Glob,WebSearch,WebFetch,
+                Read,Edit(./.claude-review-tmp-*),Edit(./.claude-review-tmp-*/**),Grep,Glob,WebSearch,WebFetch,
                 Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(grep:*),Bash(rg:*),
                 Bash(sed:*),Bash(awk:*),Bash(wc:*),Bash(diff:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),
                 Bash(jq:*),Bash(find:*),Bash(ls:*),Bash(stat:*),Bash(file:*),Bash(test:*),
@@ -263,7 +276,7 @@ jobs:
                 Bash(git diff:*),Bash(git show:*),Bash(git grep:*),Bash(git log:*),Bash(git status:*),
                 Bash(git rev-parse:*),Bash(git rev-list:*),Bash(git merge-base:*),Bash(git ls-tree:*),
                 Bash(git ls-files:*),Bash(git cat-file:*),Bash(git blame:*),Bash(git fetch origin:*),
-                Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),
+                Bash(gh pr view:*),Bash(gh pr checks:*),
                 Bash(gh run view:*),Bash(gh run list:*),
                 "
           settings: |
