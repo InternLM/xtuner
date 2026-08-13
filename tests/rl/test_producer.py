@@ -145,6 +145,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             progress=progress,
             is_valid_sample_fn=strategy.is_valid_sample_fn,
             stale_threshold=getattr(strategy, "stale_threshold", None),
+            token_stale_threshold=getattr(strategy, "token_stale_threshold", None),
             expired_groups_retryable=getattr(strategy, "tail_batch_trigger_size", 0) > 0,
         )
 
@@ -196,6 +197,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             progress=progress,
             is_valid_sample_fn=strategy.is_valid_sample_fn,
             stale_threshold=getattr(strategy, "stale_threshold", None),
+            token_stale_threshold=getattr(strategy, "token_stale_threshold", None),
             expired_groups_retryable=getattr(strategy, "tail_batch_trigger_size", 0) > 0,
         )
 
@@ -241,6 +243,53 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(disagg_ctx.should_abort())
         update_event.set()
         self.assertTrue(disagg_ctx.should_abort())
+
+    async def test_disagg_put_uses_consumer_step_for_token_expiry(self):
+        # 非共卡 put-time check 必须读取 live consumer step，而不是 producer future step。
+        task_name = "test_disagg_token_expiry"
+        strategy = DisaggAsyncProduceStrategyConfig(
+            max_staleness=3,
+            max_token_staleness=0,
+            tail_batch_trigger_size=1,
+        ).build(sync_weights_interval=1)
+        progress = self._build_disagg_progress(
+            task_name,
+            target=1,
+            train_step=5,
+            producer_future_step=9,
+            target_upto_future_step=9,
+        )
+        ctx = self._build_disagg_context(
+            strategy,
+            task_name,
+            self._build_agent_loop(),
+            self._build_sampler(),
+            batch_size=1,
+            train_step=9,
+            model_step=3,
+            progress=progress,
+        )
+        state = RolloutState(
+            rollout_id=1,
+            group_id=1,
+            message=[{"role": "user", "content": "prompt"}],
+            prompt_ids=[1],
+            tokens=[1, 11],
+            response="old response",
+            response_ids=[11],
+            response_mask=[1],
+            response_model_steps=[3],
+            logprobs=[0.1],
+            finish_reason="stop",
+            reward={"score": 1.0},
+            status=Status.COMPLETED,
+        )
+
+        self.assertFalse(await ctx.put_generated_group([state]))
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 0)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.EXPIRED), 1)
+        self.assertEqual(state.status, Status.EXPIRED)
+        self.assertEqual(state.response_ids, [])
 
     async def test_sampler_with_replay_buffer(self):
         # 验证 sampler 优先复用 replay buffer 中可重试的 rollout group，耗尽后回退 dataloader。

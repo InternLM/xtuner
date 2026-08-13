@@ -124,6 +124,7 @@ class BaseProduceContext:
     is_valid_sample_fn: IsValidSampleFn = default_is_valid_sample_fn
     stale_threshold: int | None = None
     expired_groups_retryable: bool = True
+    token_stale_threshold: int | None = None
 
     @property
     def consumer_step(self) -> int:
@@ -169,7 +170,7 @@ class BaseProduceContext:
         return result
 
     async def put_generated_group(self, group: list[RolloutState]) -> bool:
-        produced_tokens = sum(len(item.response_ids) for item in group if item.response_ids is not None)
+        produced_tokens = sum(len(item.response_ids or []) - len(item.response_model_steps or []) for item in group)
         initial_status = get_group_status(group)
         discard_status: Status | None = None
 
@@ -207,6 +208,7 @@ class BaseProduceContext:
             model_step=self.model_step,
             current_train_step=self.consumer_step,
             stale_threshold=self.stale_threshold,
+            token_stale_threshold=self.token_stale_threshold,
             expired_groups_retryable=self.expired_groups_retryable,
         )
         self.progress.add_produced(self.task_name, samples=len(group), tokens=produced_tokens)
@@ -432,14 +434,18 @@ async def refresh_for_all_tasks(
     statuses: list[Status],
 ) -> None:
     task_stale_thresholds: dict[str, int] = {}
+    task_token_stale_thresholds: dict[str, int] = {}
     expired_groups_retryable_by_task: dict[str, bool] = {}
     for task in task_runners:
         # 没有 stale_threshold 的同步策略按 1 处理。
         task_stale_thresholds[task.task_name] = task.stale_threshold if task.stale_threshold is not None else 1
+        if task.token_stale_threshold is not None:
+            task_token_stale_thresholds[task.task_name] = task.token_stale_threshold
         expired_groups_retryable_by_task[task.task_name] = task.expired_groups_retryable
 
     expired_counts = await replay_buffer.refresh_staleness(
         task_stale_thresholds=task_stale_thresholds,
+        task_token_stale_thresholds=task_token_stale_thresholds,
         expired_groups_retryable_by_task=expired_groups_retryable_by_task,
         current_train_step=train_step,
         statuses=statuses,

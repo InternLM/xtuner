@@ -252,6 +252,7 @@ class AgentLoopManager:
                         progress=local_progress,
                         is_valid_sample_fn=task.is_valid_sample_fn,
                         stale_threshold=task.stale_threshold,
+                        token_stale_threshold=task.token_stale_threshold,
                         expired_groups_retryable=task.expired_groups_retryable,
                     )
                 )
@@ -277,6 +278,7 @@ class AgentLoopManager:
                     progress=local_progress,
                     is_valid_sample_fn=task.is_valid_sample_fn,
                     stale_threshold=task.stale_threshold,
+                    token_stale_threshold=task.token_stale_threshold,
                     expired_groups_retryable=task.expired_groups_retryable,
                 )
             )

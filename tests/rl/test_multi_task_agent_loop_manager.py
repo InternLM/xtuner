@@ -128,6 +128,7 @@ class _FakeReplayBuffer:
         self._leftover_counts = leftover_counts
         self.refresh_staleness_calls: list[tuple[str, int, int, tuple[Status, ...]]] = []
         self.expired_groups_retryable_calls: list[dict[str, bool]] = []
+        self.task_token_stale_threshold_calls: list[dict[str, int]] = []
 
     async def get(self, batch_size: int, task_name: str, group_status: Status):
         assert group_status == Status.COMPLETED
@@ -143,11 +144,13 @@ class _FakeReplayBuffer:
         self,
         *,
         task_stale_thresholds: dict[str, int],
+        task_token_stale_thresholds: dict[str, int] | None = None,
         expired_groups_retryable_by_task: dict[str, bool] | None = None,
         current_train_step: int,
         statuses: list[Status] | None = None,
     ):
         self.expired_groups_retryable_calls.append(dict(expired_groups_retryable_by_task or {}))
+        self.task_token_stale_threshold_calls.append(dict(task_token_stale_thresholds or {}))
         expired_counts = {}
         for task_name, stale_threshold in task_stale_thresholds.items():
             self.refresh_staleness_calls.append(
@@ -225,6 +228,10 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             status=Status.COMPLETED,
         )
         strategy = _FakeProduceStrategy(token_stale_threshold=4)
+        replay_buffer = _FakeReplayBuffer(
+            rollout_states_by_task={"task": [[state]]},
+            leftover_counts={},
+        )
         manager = AgentLoopManager(
             task_runners=[
                 _TaskRunner(
@@ -236,16 +243,14 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                     order=0,
                 )
             ],
-            replay_buffer=_FakeReplayBuffer(
-                rollout_states_by_task={"task": [[state]]},
-                leftover_counts={},
-            ),
+            replay_buffer=replay_buffer,
             rollout_controller=_fake_rollout_controller(),
         )
 
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
 
         self.assertEqual(result.rollout_states[0][0].response_mask, [0, 1])
+        self.assertEqual(replay_buffer.task_token_stale_threshold_calls, [{"task": 4}])
 
     async def test_take_train_batch_skips_agentic_token_staleness_mask(self):
         state = RolloutState(

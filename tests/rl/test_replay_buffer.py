@@ -47,6 +47,7 @@ def make_rollout_state(
     response: str | None = None,
     response_ids: list[int] | None = None,
     response_model_steps: list[int] | None = None,
+    response_mask: list[int] | None = None,
     logprobs: list[float] | None = None,
     reward: dict | None = None,
     error_msg: str | None = None,
@@ -54,6 +55,8 @@ def make_rollout_state(
     routed_experts=None,
     mm_info: dict | None = None,
     extra_fields: dict | None = None,
+    input_ids: list[int] | None = None,
+    labels: list[int] | None = None,
 ) -> RolloutState:
     prompt_ids = list(prompt_ids) if prompt_ids is not None else [uid, uid + 1000]
     response_ids = list(response_ids) if response_ids is not None else [uid + 10]
@@ -67,7 +70,7 @@ def make_rollout_state(
         response=response if response is not None else f"response {uid}",
         response_ids=response_ids,
         response_model_steps=list(response_model_steps) if response_model_steps is not None else None,
-        response_mask=[1 for _ in response_ids],
+        response_mask=list(response_mask) if response_mask is not None else [1 for _ in response_ids],
         logprobs=logprobs,
         routed_experts=routed_experts,
         finish_reason="stop" if status == Status.COMPLETED else None,
@@ -77,6 +80,8 @@ def make_rollout_state(
         status=status,
         mm_info=mm_info,
         extra_fields=dict(extra_fields or {}),
+        input_ids=input_ids,
+        labels=labels,
     )
 
 
@@ -259,10 +264,153 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 assert reusable.error_msg is None
                 assert reusable.routed_experts is None
                 assert reusable.finish_reason is None
-                assert reusable.response_mask == []
+                assert reusable.response_mask is None
                 assert reusable.mm_info is not None
                 assert reusable.mm_info["pixel_values"] is pixel_values
                 assert reusable.extra_fields == {"train_prompt_ids": [101, 102]}
+
+    async def test_common_put_token_expiry_preserves_fresh_group_members(self):
+        # token expiry 只清理真正全 token 过期的 state，外层 group 仍进入 EXPIRED pool。
+        for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:
+            with self.subTest(replay_buffer_config=config_name):
+                replay_buffer = replay_buffer_config_cls().build()
+                expired = make_rollout_state(
+                    1,
+                    response="expired response",
+                    response_ids=[11, 12],
+                    response_model_steps=[0, 0],
+                    reward={"score": 0.1},
+                )
+                fresh = make_rollout_state(
+                    2,
+                    response="fresh response",
+                    response_ids=[21, 22],
+                    response_model_steps=[4, 4],
+                    reward={"score": 0.9},
+                )
+
+                await replay_buffer.put(
+                    [expired, fresh],
+                    "task",
+                    current_train_step=5,
+                    stale_threshold=10,
+                    token_stale_threshold=4,
+                    expired_groups_retryable=True,
+                )
+
+                self.assertEqual(await replay_buffer.count("task", Status.COMPLETED), 0)
+                self.assertEqual(await replay_buffer.count("task", Status.EXPIRED), 1)
+                group = (await replay_buffer.get(1, "task", Status.EXPIRED))[0]
+                self.assertEqual([item.status for item in group], [Status.EXPIRED, Status.COMPLETED])
+                self.assertEqual(group[0].response, "")
+                self.assertEqual(group[0].response_ids, [])
+                self.assertIsNone(group[0].reward)
+                self.assertEqual(group[1].response, "fresh response")
+                self.assertEqual(group[1].response_ids, [21, 22])
+                self.assertEqual(group[1].response_model_steps, [4, 4])
+                self.assertEqual(group[1].reward, {"score": 0.9})
+
+    async def test_common_put_skips_token_expiry_for_agentic_group(self):
+        for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:
+            with self.subTest(replay_buffer_config=config_name):
+                replay_buffer = replay_buffer_config_cls().build()
+                state = make_rollout_state(
+                    1,
+                    response="agentic response",
+                    response_model_steps=[0],
+                    input_ids=[1, 2],
+                    labels=[-100, 2],
+                )
+
+                await replay_buffer.put(
+                    [state],
+                    "task",
+                    current_train_step=5,
+                    stale_threshold=10,
+                    token_stale_threshold=4,
+                    expired_groups_retryable=True,
+                )
+
+                self.assertEqual(await replay_buffer.count("task", Status.COMPLETED), 1)
+                self.assertEqual(await replay_buffer.count("task", Status.EXPIRED), 0)
+                self.assertEqual(state.status, Status.COMPLETED)
+                self.assertEqual(state.response, "agentic response")
+
+    async def test_common_put_seq_expiry_preserves_fresh_group_members(self):
+        # seq expiry 路由整组到 EXPIRED pool，但只标记和清理实际过期的 state。
+        for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:
+            with self.subTest(replay_buffer_config=config_name):
+                replay_buffer = replay_buffer_config_cls().build()
+                stale = make_rollout_state(
+                    1,
+                    response="stale response",
+                    response_model_steps=[0],
+                )
+                fresh = make_rollout_state(
+                    2,
+                    response="fresh response",
+                    response_model_steps=[4],
+                )
+
+                await replay_buffer.put(
+                    [stale, fresh],
+                    "task",
+                    current_train_step=5,
+                    stale_threshold=4,
+                    expired_groups_retryable=True,
+                )
+
+                group = (await replay_buffer.get(1, "task", Status.EXPIRED))[0]
+                self.assertEqual([item.status for item in group], [Status.EXPIRED, Status.COMPLETED])
+                self.assertEqual([item.response for item in group], ["", "fresh response"])
+
+    async def test_common_put_drops_entire_token_expired_group_when_rerollout_is_disabled(self):
+        # 无 rerollout consumer 时，混合 group 整体终止并释放，缺口由新 prompt 补齐。
+        for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:
+            with self.subTest(replay_buffer_config=config_name):
+                replay_buffer = replay_buffer_config_cls().build()
+                expired = make_rollout_state(1, response_model_steps=[0])
+                fresh = make_rollout_state(2, response_model_steps=[4])
+
+                await replay_buffer.put(
+                    [expired, fresh],
+                    "task",
+                    current_train_step=5,
+                    stale_threshold=10,
+                    token_stale_threshold=4,
+                    expired_groups_retryable=False,
+                )
+
+                self.assertEqual(await replay_buffer.count("task", Status.EXPIRED), 0)
+                self.assertEqual(len(replay_buffer), 0)
+                self.assertEqual([item.status for item in (expired, fresh)], [Status.EXPIRED, Status.EXPIRED])
+                self.assertIsNone(expired.prompt_ids)
+                self.assertIsNone(fresh.prompt_ids)
+
+    async def test_common_refresh_token_expiry_moves_mixed_group_to_expired_pool(self):
+        # batch-start refresh 使用 consumer step 重新判定，并保留仍新鲜 state 的完整训练数据。
+        for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:
+            with self.subTest(replay_buffer_config=config_name):
+                replay_buffer = replay_buffer_config_cls().build()
+                expired = make_rollout_state(1, response_model_steps=[0], reward={"score": 0.1})
+                fresh = make_rollout_state(2, response_model_steps=[4], reward={"score": 0.9})
+                await replay_buffer.put([expired, fresh], "task")
+
+                expired_counts = await replay_buffer.refresh_staleness(
+                    task_stale_thresholds={"task": 10},
+                    task_token_stale_thresholds={"task": 4},
+                    expired_groups_retryable_by_task={"task": True},
+                    current_train_step=5,
+                )
+
+                self.assertEqual(expired_counts, {"task": 1})
+                self.assertEqual(await replay_buffer.count("task", Status.COMPLETED), 0)
+                self.assertEqual(await replay_buffer.count("task", Status.EXPIRED), 1)
+                group = (await replay_buffer.get(1, "task", Status.EXPIRED))[0]
+                self.assertEqual([item.status for item in group], [Status.EXPIRED, Status.COMPLETED])
+                self.assertEqual(group[0].response_ids, [])
+                self.assertEqual(group[1].response_ids, [12])
+                self.assertEqual(group[1].reward, {"score": 0.9})
 
     async def test_common_refresh_staleness_drops_only_terminal_expired_groups(self):
         # 同一轮 refresh 仍统计两类过期；只删除 terminal EXPIRED，保留 tail batch 可重试项。
