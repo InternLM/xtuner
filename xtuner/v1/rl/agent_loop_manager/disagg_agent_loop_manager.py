@@ -373,6 +373,7 @@ class DisaggAgentLoopManager:
                     manager_name=self.name,
                     task_batch_sizes=task_batch_sizes,
                     progress=progress,
+                    current_train_step=train_step,
                     pause_time_s=self._consume_pause_time(),
                 )
                 if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:

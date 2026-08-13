@@ -12,15 +12,19 @@
 import asyncio
 import unittest
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from xtuner.v1.data_proto.rl_data import Status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
     AgentLoopManager,
     AgentLoopManagerConfig,
     TaskSpecConfig,
 )
-from xtuner.v1.rl.agent_loop_manager.disagg_agent_loop_manager import DisaggAgentLoopManager
+from xtuner.v1.rl.agent_loop_manager.disagg_agent_loop_manager import (
+    DisaggAgentLoopManager,
+    DisaggAgentLoopManagerConfig,
+    DisaggTaskSpecConfig,
+)
 from xtuner.v1.rl.agent_loop_manager.produce_utils import (
     GROUP_GENERATE_TIME_KEY,
     ProduceBatchStatus,
@@ -42,9 +46,11 @@ class _FakeProduceStrategy:
         cleanup_pause_time_s: float = 0.0,
         stale_threshold: int = 1,
         tail_batch_trigger_size: int = 0,
+        token_stale_threshold: int | None = None,
     ):
         self.cleanup_pause_time_s = cleanup_pause_time_s
         self.stale_threshold = stale_threshold
+        self.token_stale_threshold = token_stale_threshold
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self.called_batch_sizes: list[int] = []
         self.called_train_steps: list[int] = []
@@ -191,6 +197,8 @@ def _fake_rollout_controller():
 
 
 class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
+    """共卡与多 task manager 的 batch 生产、消费和统计行为。"""
+
     def test_manager_config_accepts_single_task_spec(self):
         # 单 task 配置可以直接传入，兼容最小 AgentLoopManager 配置。
         task = TaskSpecConfig.model_construct(
@@ -204,6 +212,73 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         manager_config = AgentLoopManagerConfig(tasks=task)
 
         self.assertEqual(manager_config.tasks.task_name, "single_task")
+
+    async def test_take_train_batch_applies_token_staleness_mask(self):
+        # 启用 token staleness 时，公开 produce_batch 路径应返回最终 effective mask。
+        state = RolloutState(
+            rollout_id=1,
+            group_id=1,
+            message=[{"role": "user", "content": "prompt"}],
+            prompt_ids=[1, 2],
+            response_ids=[3, 4],
+            response_model_steps=[0, 4],
+            status=Status.COMPLETED,
+        )
+        strategy = _FakeProduceStrategy(token_stale_threshold=4)
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=strategy,
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                )
+            ],
+            replay_buffer=_FakeReplayBuffer(
+                rollout_states_by_task={"task": [[state]]},
+                leftover_counts={},
+            ),
+            rollout_controller=_fake_rollout_controller(),
+        )
+
+        result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
+
+        self.assertEqual(result.rollout_states[0][0].response_mask, [0, 1])
+
+    async def test_take_train_batch_skips_agentic_token_staleness_mask(self):
+        state = RolloutState(
+            rollout_id=1,
+            group_id=1,
+            message=[{"role": "user", "content": "prompt"}],
+            input_ids=[1, 2],
+            labels=[-100, 2],
+            response_mask=[1],
+            status=Status.COMPLETED,
+        )
+        strategy = _FakeProduceStrategy(token_stale_threshold=4)
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=strategy,
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                )
+            ],
+            replay_buffer=_FakeReplayBuffer(
+                rollout_states_by_task={"task": [[state]]},
+                leftover_counts={},
+            ),
+            rollout_controller=_fake_rollout_controller(),
+        )
+
+        result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
+
+        self.assertEqual(result.rollout_states[0][0].response_mask, [1])
 
     async def test_produce_batch_allocates_by_weight_and_returns_task_sorted_results(self):
         # 共卡 produce_batch 按 task 权重分配 batch，并按 task 名稳定返回训练数据和 leftover 统计。

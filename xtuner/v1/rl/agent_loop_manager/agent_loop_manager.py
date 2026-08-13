@@ -287,6 +287,7 @@ class AgentLoopManager:
             manager_name=self.name,
             task_batch_sizes=current_sizes,
             progress=local_progress,
+            current_train_step=train_step,
             pause_time_s=pause_time_s,
         )
         assert result.rollout_states, (

@@ -177,7 +177,8 @@ class SyncProduceStrategyConfig(ProduceStrategyConfig):
         rollout_controller: "Optional[RolloutControllerProxy]" = None,
     ) -> "SyncProduceStrategy":
         return SyncProduceStrategy(
-            is_valid_sample_fn=self.is_valid_sample_fn, should_continue_fn=self.should_continue_fn
+            is_valid_sample_fn=self.is_valid_sample_fn,
+            should_continue_fn=self.should_continue_fn,
         )
 
 
@@ -202,6 +203,13 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
             continued after a weight sync. Defaults to False.
         max_staleness (int): Maximum allowed model-step staleness for replayed
             samples. Defaults to 0.
+        max_token_staleness (int | None): Maximum extra weight-sync periods a
+            response token may lag behind before it is masked out of the loss.
+            ``None`` disables token-level masking, ``0`` accepts only tokens
+            produced within the current sync period, and ``N`` allows ``N``
+            extra periods. Unlike ``max_staleness``, this does not expire or
+            re-roll a group; it only shrinks ``response_mask``. Defaults to
+            None.
         tail_batch_trigger_size (int): Minimum pending tail size that can
             trigger a final batch. Defaults to 0.
 
@@ -219,6 +227,7 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
     over_sample_threshold: float = 0.0
     enable_partial_rollout: bool = False
     max_staleness: int = Field(default=0, ge=0)
+    max_token_staleness: int | None = Field(default=None, ge=0)
     tail_batch_trigger_size: int = 0
 
     def build(
@@ -227,6 +236,11 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
         sync_weights_interval: int = 1,
         rollout_controller: "Optional[RolloutControllerProxy]" = None,
     ) -> "AsyncProduceStrategy":
+        if self.max_token_staleness is not None and self.max_token_staleness > self.max_staleness:
+            logger.warning(
+                "max_token_staleness is greater than max_staleness; token-level masking will not take effect "
+                "before the group expires."
+            )
         if rollout_controller is not None:
             import ray
 
@@ -235,6 +249,7 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
             over_sample_threshold=self.over_sample_threshold,
             enable_partial_rollout=self.enable_partial_rollout,
             max_staleness=self.max_staleness,
+            max_token_staleness=self.max_token_staleness,
             sync_weights_interval=sync_weights_interval,
             tail_batch_trigger_size=self.tail_batch_trigger_size,
             is_valid_sample_fn=self.is_valid_sample_fn,
@@ -315,6 +330,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         enable_partial_rollout: bool,
         tail_batch_trigger_size: int,
         max_staleness: int,
+        max_token_staleness: int | None,
         sync_weights_interval: int,
         is_valid_sample_fn: IsValidSampleFn,
         should_continue_fn: ShouldContinueFn,
@@ -336,8 +352,12 @@ class AsyncProduceStrategy(ProduceStrategy):
         self.over_sample_threshold = over_sample_threshold
         self.enable_partial_rollout = enable_partial_rollout
         self.max_staleness = max_staleness
-        self.sync_weights_interval = sync_weights_interval
         self.stale_threshold = calculate_stale_threshold(max_staleness, sync_weights_interval)
+        self.token_stale_threshold = (
+            None
+            if max_token_staleness is None
+            else calculate_stale_threshold(max_token_staleness, sync_weights_interval)
+        )
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self._local_pending_tasks: set[asyncio.Task] = set()
 

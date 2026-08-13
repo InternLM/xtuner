@@ -8,15 +8,17 @@
 #    会补齐 response_model_steps，并刷新 seq_staleness。
 # 4. tail batch disabled 时将 EXPIRED 当作终态，释放重字段且不写入 buffer；enabled 时保留
 #    prompt/mm_info，只重置 response 和 routed experts 以便重新 rollout。
-# 5. refresh_staleness 的公共契约：可以刷新 completed/aborted 记录，也要尊重显式传入的
+# 5. 写入过期结果时会触发 rerollout：超过 stale_threshold 的 group 会被重置 response 相关字段，
+#    并保留 prompt/message 等重新 rollout 所需的输入字段。
+# 6. refresh_staleness 的公共契约：可以刷新 completed/aborted 记录，也要尊重显式传入的
 #    status 过滤条件。
-# 6. SyncReplayBufferConfig 的采样策略：按 FIFO 顺序返回 group。
-# 7. AsyncReplayBufferConfig 的采样策略：优先返回 seq_staleness 更高的 group；
+# 7. SyncReplayBufferConfig 的采样策略：按 FIFO 顺序返回 group。
+# 8. AsyncReplayBufferConfig 的采样策略：优先返回 seq_staleness 更高的 group；
 #    staleness 相同时使用 FIFO 作为 tie-breaker。
-# 8. save/resume 保留采样顺序：sync 恢复后仍是 FIFO，async 恢复后仍按 staleness 排序。
-# 9. save/resume 保留真实 RolloutState 字段：状态、response、tokens、logprobs、reward、
+# 9. save/resume 保留采样顺序：sync 恢复后仍是 FIFO，async 恢复后仍按 staleness 排序。
+# 10. save/resume 保留真实 RolloutState 字段：状态、response、tokens、logprobs、reward、
 #    error_msg、extra_fields 等字段恢复后应一致。
-# 10. save/resume 保留 Ray ObjectRef：直接 ObjectRef 和 dict(dict(ObjectRef)) 嵌套结构恢复后，
+# 11. save/resume 保留 Ray ObjectRef：直接 ObjectRef 和 dict(dict(ObjectRef)) 嵌套结构恢复后，
 #     解引用得到的内容都应与保存前一致。
 
 import tempfile
