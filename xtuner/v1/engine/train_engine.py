@@ -58,6 +58,47 @@ logger = get_logger()
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
+
+def _prune_uncheckpointed_optimizer_state(optimizer_state_dict: dict[str, Any], saved_keys: set[str]) -> list[str]:
+    """Remove wholly absent lazy optimizer states from a DCP load target.
+
+    ``get_optimizer_state_dict`` materializes optimizer states for every
+    trainable parameter. A checkpoint may legitimately omit all state slots
+    for a parameter that had not received a gradient when it was saved. DCP
+    treats the materialized load target as authoritative and otherwise reports
+    those absent slots as missing checkpoint keys.
+
+    A partially saved parameter state is not lazy initialization and is kept as
+    an error: optimizers such as AdamW cannot step with only a subset of
+    ``step``, ``exp_avg``, and ``exp_avg_sq`` restored.
+    """
+
+    state = optimizer_state_dict.get("state")
+    if not isinstance(state, dict):
+        return []
+
+    removed: list[str] = []
+    for parameter_name, parameter_state in list(state.items()):
+        if not isinstance(parameter_state, dict) or not parameter_state:
+            continue
+
+        checkpoint_keys = {
+            state_name: f"optimizer.state.{parameter_name}.{state_name}" for state_name in parameter_state
+        }
+        present_state_names = {name for name, key in checkpoint_keys.items() if key in saved_keys}
+
+        if not present_state_names:
+            state.pop(parameter_name)
+            removed.extend(checkpoint_keys.values())
+            continue
+
+        if len(present_state_names) != len(checkpoint_keys):
+            missing = [key for name, key in checkpoint_keys.items() if name not in present_state_names]
+            raise RuntimeError(f"Incomplete optimizer state for parameter '{parameter_name}': missing {missing}")
+
+    return removed
+
+
 threading_lock = threading.Lock()
 
 
@@ -497,15 +538,22 @@ class TrainEngine:
         load_optimizer = load_states or load_args
         state_dict = self._get_dcp_state_dict(cpu_offload=True, save_optimizer=load_optimizer)
 
-        if self.has_freeze_params:
-            set_options = StateDictOptions(cpu_offload=True, strict=False)
-        else:
-            set_options = StateDictOptions(cpu_offload=True, strict=True)
+        model_options = StateDictOptions(cpu_offload=True, strict=not self.has_freeze_params)
 
         with profile_time_and_memory(f"[Load DCP from {weights_dir}]"):
+            if load_optimizer:
+                metadata = dcp.FileSystemReader(weights_dir).read_metadata()
+                saved_keys = {str(key) for key in metadata.state_dict_metadata}
+                removed = _prune_uncheckpointed_optimizer_state(state_dict["optimizer"], saved_keys)
+                if removed:
+                    logger.warning(
+                        f"Ignoring {len(removed)} lazy optimizer-state leaves absent from the checkpoint; "
+                        f"examples={removed[:5]}"
+                    )
+
             dcp.load(state_dict=state_dict, checkpoint_id=weights_dir)
 
-            set_model_state_dict(self.model, state_dict["model"], options=set_options)
+            set_model_state_dict(self.model, state_dict["model"], options=model_options)
 
             if not load_optimizer:
                 return
@@ -532,7 +580,9 @@ class TrainEngine:
                 self.model,
                 self.optimizer,
                 optim_state_dict=optimizer_state_dict,
-                options=set_options,
+                # PyTorch 2.10+ treats wholly absent per-parameter optimizer
+                # states as valid lazy state when strict loading is disabled.
+                options=StateDictOptions(cpu_offload=True, strict=False),
             )
 
     def put_model_to_device(self, device: torch.device | str) -> bool:
