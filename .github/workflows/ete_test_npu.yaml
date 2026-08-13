@@ -27,7 +27,7 @@ on:
       CI_E2E_DEBUG:
         required: false
         description: >-
-          If true, start "sleep inf &" after install and before training so the
+          CI_E2E_DEBUG:if true, start "sleep inf &" after install and before training so the
           cluster job stays alive for interactive debug (including after OOM).
           Default false.
         type: boolean
