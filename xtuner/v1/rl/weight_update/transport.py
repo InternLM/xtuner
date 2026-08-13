@@ -73,10 +73,6 @@ class WeightTransport(ABC, Generic[AdapterT]):
 
         self.rollout_url = self.rollout_info.rollout_url
 
-    def reset_rollout_info(self, rollout_info: RolloutWeightUpdateInfo):
-        self.rollout_info = rollout_info
-        self.rollout_url = rollout_info.rollout_url
-
     @staticmethod
     def post_json(url: str, endpoint: str, payload: dict, *, api_key=None) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -852,7 +848,6 @@ class NCCLWeightTransport(WeightTransport[NCCLBackendAdapter]):
         self.group_name = None
         self.engine_urls = []
         self.external_group_world_size = None
-
 
 class CheckpointEngineAdapter:
     """Build adapter for CheckpointEngine."""
