@@ -54,17 +54,17 @@ enable_evaluate = eval_meta_data_path is not None and eval_meta_data_path != ""
 
 # basic settings
 experimental_name = "rl_qwen3p5_vl_35B_mtp_ep"
-total_epochs = 5
-global_batch_size = 128
-prompt_repeat_k = 8
+total_epochs = 1
+global_batch_size = 64
+prompt_repeat_k = 4
 rollout_tp_size = 1
 rollout_ep_size = 2
 train_ep_size = 2
 max_prompt_length = 2048
-max_response_length = 8192
+max_response_length = 4096
 pack_max_length = 32768
 train_optimizer_steps = 8
-hf_interval = 30
+hf_interval = 15
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
