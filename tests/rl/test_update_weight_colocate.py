@@ -42,6 +42,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
         os.environ["NCCL_CUMEM_ENABLE"] = "0"
         os.environ["NCCL_IB_HCA"] = "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
         os.environ["PS_P2P_STORE_RDMA_DEVICES"] = "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:False"
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -49,6 +50,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
         del os.environ["NCCL_CUMEM_ENABLE"]
         del os.environ["NCCL_IB_HCA"]
         del os.environ["PS_P2P_STORE_RDMA_DEVICES"]
+        del os.environ["PYTORCH_CUDA_ALLOC_CONF"]
 
     def setUp(self):
         self.model_path = MODEL_PATH
@@ -101,6 +103,8 @@ class TestUpdateWeightColocate(unittest.TestCase):
 
         model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
         model_cfg.text_config.mtp_config = MTPConfig(num_layers=1)
+        model_cfg.text_config.ep_size = 1
+
         optim_cfg = AdamWConfig(lr=1e-6, foreach=False, weight_decay=0.1)
         fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
         lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
@@ -173,36 +177,26 @@ class TestUpdateWeightColocate(unittest.TestCase):
             results.append(response.json())
         return results
 
-    def _bind_and_update_colocate_weights(self, train_controller, rollout_controller,need_register:bool=False):
-        targets = ray.get(rollout_controller.get_weight_update_targets.remote())
-        train_controller.bind_rollout_weight_update(
-            targets=targets,
-            rollout_config=self.rollout_cfg,
-        )
-        ray.get(rollout_controller.offload.remote(), timeout=300)
-        train_controller.onload(target="model")
-        ray.get(rollout_controller.onload_weights.remote(), timeout=300)
-        train_controller.update_weights(need_register=need_register)
-        train_controller.offload(target="model")
-        ray.get(rollout_controller.onload_kvcache.remote(), timeout=300)
-
     @unittest.skip("skip sglang parameter-only weight check test until the parameter-check-only patch is applied")
     def test_sglang_colocate_ipc_update_weight(self):
         train_controller, rollout_controller = self._setup_engines(weight_transport_type='ipc')
 
         self._check_sglang_weights(rollout_controller, action="snapshot_parameters")
         self._check_sglang_weights(rollout_controller, action="reset_parameters")
-        self._bind_and_update_colocate_weights(train_controller, rollout_controller, "ipc")
+        
+        targets = ray.get(rollout_controller.get_weight_update_targets.remote())
+        train_controller.bind_rollout_weight_update(
+            targets=targets,
+            rollout_config=self.rollout_cfg,
+        )
+
+        ray.get(rollout_controller.offload.remote(), timeout=300)
+        ray.get(self.rollout_controller.onload_weights.remote(), timeout=300)
+        train_controller.onload(target="model")
+        train_controller.update_weights()
+
         self._check_sglang_weights(rollout_controller, action="compare_parameters")
 
-    @unittest.skip("skip sglang parameter-only weight check test until the parameter-check-only patch is applied")
-    def test_sglang_colocate_checkpoint_engine_update_weight_disk_register(self):
-        train_controller, rollout_controller = self._setup_engines(weight_transport_type="checkpoint_engine")
-
-        self._check_sglang_weights(rollout_controller, action="snapshot_parameters")
-        self._check_sglang_weights(rollout_controller, action="reset_parameters")
-        self._bind_and_update_colocate_weights(train_controller, rollout_controller, "checkpoint_engine", False)
-        self._check_sglang_weights(rollout_controller, action="compare_parameters")
 
     @unittest.skip("skip sglang parameter-only weight check test until the parameter-check-only patch is applied")
     def test_sglang_colocate_checkpoint_engine_update_weight_train_register(self):
@@ -210,7 +204,19 @@ class TestUpdateWeightColocate(unittest.TestCase):
 
         self._check_sglang_weights(rollout_controller, action="snapshot_parameters")
         self._check_sglang_weights(rollout_controller, action="reset_parameters")
-        self._bind_and_update_colocate_weights(train_controller, rollout_controller, "checkpoint_engine", True)
+        
+        targets = ray.get(rollout_controller.get_weight_update_targets.remote())
+        train_controller.bind_rollout_weight_update(
+            targets=targets,
+            rollout_config=self.rollout_cfg,
+        )
+        ray.get(rollout_controller.offload.remote(), timeout=300)
+        train_controller.onload(target="model")
+        train_controller.update_weights(need_register=True, need_update=False)
+        train_controller.offload(target="model")
+        ray.get(self.rollout_controller.onload_weights.remote(), timeout=300)
+        train_controller.update_weights(need_register=False, need_update=True)
+
         self._check_sglang_weights(rollout_controller, action="compare_parameters")
 
 if __name__ == "__main__":

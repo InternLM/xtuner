@@ -173,6 +173,11 @@ class TestRolloutTopologyAPI(unittest.TestCase):
             num_gpus_per_engine=num_gpus_per_engine,
             gpus_per_node=gpus_per_node,
             weight_transport_type="ipc",
+            weight_update_host=None,
+            weight_update_port=30000,
+            checkpoint_name_prefix="xtuner-rl",
+            checkpoint_engine_timeout=300.0,
+            checkpoint_engine_sync_after_register=False,
             extra_rollout_config={"lmdeploy_backend": "pytorch"},
         )
 

@@ -900,15 +900,17 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
 
         super().__init__(rank=rank, logger=logger, rollout_info=rollout_info)
 
+        os.environ["NCCL_IB_HCA"] = "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
+        os.environ["PS_P2P_STORE_RDMA_DEVICES"] = "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
+
         self.ps_world_size = int(os.environ.get("WORLD_SIZE", dist.get_world_size()))
         self._adapter = SGlangCheckpointEngineAdapter(rank=rank)
-        # record the local checkpoint keys per PS-rank
-        self._local_checkpoint_keys: set[Any] | None = None
         # record the update counter of PS
         self._update_counter = 0
         self._checkpoint_path = self.rollout_info.rollout_config.model_path
         self._checkpoint_name_prefix = self.rollout_info.rollout_config.checkpoint_name_prefix
         self._timeout = self.rollout_info.rollout_config.checkpoint_engine_timeout
+        self._sync_after_register = self.rollout_info.checkpoint_engine_sync_after_register
         # record the checkpoint name of PS and will use it to register the checkpoint and unregister the previous checkpoint
         self._checkpoint_name: str | None = None
 
@@ -917,7 +919,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         )
 
         self._ps = self.build_parameter_server()
-
+        # record the local checkpoint keys per PS-rank
         self._local_checkpoint_keys = self.split_tensors_for_rank(self._checkpoint_path, self.ps_world_size, self.rank)
 
     def build_parameter_server(self):
@@ -951,8 +953,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         with open(index_path) as f:
             weight_map: dict[str, str] = json.load(f)["weight_map"]
         weight_keys = [key_name for key_name, file_name in weight_map.items()]
-        per_rank = (len(weight_keys) + world_size - 1) // world_size
-        local_keys = set(weight_keys[rank * per_rank : (rank + 1) * per_rank])
+        local_keys = set(weight_keys[rank::world_size])
 
         self.logger.info(
             f"[checkpoint_engine] split keys from {index_path} "
@@ -963,6 +964,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
     def _collect_named_tensors(self, weight_iterator, local_keys=None):
         """Collect all train weights from the iterator onto CPU."""
         named = {}
+        named_total_bytes = 0
         for batches in weight_iterator.iter_batch_groups():
             for batch in batches:
                 sd = batch.state_dict
@@ -970,28 +972,30 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
                     continue
                 # batch 级快路径：完全无交集可跳过
                 if local_keys is not None and sd.keys().isdisjoint(local_keys):
+                    sd.clear()
                     del sd, batch
+                    DEVICE_MODULE.empty_cache()
                     continue
-                for key, tensor in sd.items():
+                for key, tensor in list(sd.items()):
                     if local_keys is not None and key not in local_keys:
+                        sd.pop(key)
+                        del tensor
                         continue
                     # 占显存更少，但速度慢
-                    named[key] = tensor.detach().to("cpu", non_blocking=True)
+                    # named[key] = tensor.detach().to("cpu", non_blocking=True)
                     # 占显存多，速度快
-                    # named[key] = tensor
+                    named[key] = tensor
+                    named_total_bytes += named[key].numel() * named[key].element_size()
+                sd.clear()
                 del sd, batch
+                DEVICE_MODULE.empty_cache()
             DEVICE_MODULE.empty_cache()
+        if local_keys is not None:
+            self.logger.info(
+                f"[checkpoint_engine] collect matched local keys rank={self.rank} "
+                f"parameter server shard total={named_total_bytes / 1024**3:.3f}GiB "
+            )
         return named
-
-    def _shard_named_tensors(
-        self, named_tensors: dict[str, torch.Tensor], rank: int, world_size: int
-    ) -> dict[str, torch.Tensor]:
-        """Shard named tensors by sorted keys when disk keys are
-        unavailable."""
-        keys = sorted(named_tensors.keys())
-        per_rank = (len(keys) + world_size - 1) // world_size
-        my_keys = keys[rank * per_rank : (rank + 1) * per_rank]
-        return {k: named_tensors[k] for k in my_keys}
 
     def register_checkpoint_from_train_engine(self, weight_iterator: Any) -> None:
         """Register current train engine weights into Checkpoint Engine PS."""
@@ -1003,24 +1007,20 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         # 1. Collect named tensors from weight iterator
         all_tensors = self._collect_named_tensors(weight_iterator, local_keys=self._local_checkpoint_keys)
 
-        # 2. Shard named tensors for the current rank
-        if self._local_checkpoint_keys is None:
-            # 未做 disk init 时的兜底
-            shard = self._shard_named_tensors(all_tensors, self.rank, self.ps_world_size)
-        else:
-            missing = self._local_checkpoint_keys - all_tensors.keys()
-            if missing:
-                missing_mtp_keys = {key for key in missing if key.startswith("mtp.")}
-                missing_non_mtp_keys = missing - missing_mtp_keys
-                if missing_non_mtp_keys:
-                    self.logger.error(
-                        f"[checkpoint_engine] ParameterServer Rank={self.rank} Missing non-MTP keys: {missing_non_mtp_keys}"
-                    )
-                else:
-                    self.logger.error(
-                        f"[checkpoint_engine] ParameterServer Rank={self.rank} Missing MTP-only keys: {missing_mtp_keys}"
-                    )
-            shard = {k: all_tensors[k] for k in self._local_checkpoint_keys if k in all_tensors}
+        # 2. Shard tensors for the current parameter server
+        missing = self._local_checkpoint_keys - all_tensors.keys()
+        if missing:
+            missing_mtp_keys = {key for key in missing if key.startswith("mtp.")}
+            missing_non_mtp_keys = missing - missing_mtp_keys
+            if missing_non_mtp_keys:
+                self.logger.error(
+                    f"[checkpoint_engine] ParameterServer Rank={self.rank} Missing non-MTP keys: {missing_non_mtp_keys}"
+                )
+            else:
+                self.logger.error(
+                    f"[checkpoint_engine] ParameterServer Rank={self.rank} Missing MTP-only keys: {missing_mtp_keys}"
+                )
+        shard = {k: all_tensors[k] for k in self._local_checkpoint_keys if k in all_tensors}
 
         # 3. Register checkpoint
         self._update_counter += 1
@@ -1030,8 +1030,8 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
             f"rank={self.rank} tensors={len(shard)}/{len(all_tensors)}"
         )
         self._ps.register_checkpoint(name, files=[], named_tensors=shard, use_shared_memory_pool=True)
-        del all_tensors, shard
-        DEVICE_MODULE.empty_cache()
+        if self._sync_after_register:
+            DEVICE_MODULE.synchronize()
         dist.barrier()
         self._checkpoint_name = name
 
