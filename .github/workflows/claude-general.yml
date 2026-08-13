@@ -17,12 +17,14 @@ jobs:
       CLAUDE_REVIEW_ANALYSIS_MAX_TURNS: 34
       CLAUDE_REVIEW_SUMMARY_MAX_TURNS: 1
       CLAUDE_REVIEW_INLINE_MAX_TURNS: 10
-      # allowed_non_write_users otherwise enables the action's additional bubblewrap isolation.
-      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
+      # Trusted maintainers trigger reviews, but PR content can still be untrusted. Keep credential scrubbing and
+      # Linux PID-namespace isolation enabled for Claude subprocesses.
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
       CLAUDE_REVIEW_DIFF_PATH: .claude-review/pr.diff
       CLAUDE_REVIEW_PR_REF: refs/remotes/origin/claude-review-pr
+    # The workflow token only needs repository reads; PR and issue writes are used to publish review comments.
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
       issues: write
       id-token: write
@@ -32,6 +34,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          # The review never pushes through checkout, so do not leave its workflow token in the local Git config.
+          persist-credentials: false
 
       - name: Prepare pull request review inputs
         env:
