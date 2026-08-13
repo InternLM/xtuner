@@ -335,6 +335,23 @@ class RolloutTraceStore:
         trie = self.sessions.pop(session_id) if key is None else self.sessions[session_id]
         trie.release(key)
 
+    def release_sessions(self, session_ids: list[str]) -> list[str]:
+        """Release existing trace sessions in one actor call.
+
+        Args:
+            session_ids (list[str]): Session identifiers that no longer own live rollout state.
+
+        Returns:
+            list[str]: Session identifiers that existed and were released.
+        """
+        released_session_ids = []
+        for session_id in dict.fromkeys(session_ids):
+            if session_id not in self.sessions:
+                continue
+            self.release(session_id)
+            released_session_ids.append(session_id)
+        return released_session_ids
+
     def release_all(self):
         """Release all sessions and free associated resources."""
         for session_id in list(self.sessions):
@@ -462,12 +479,33 @@ def get_existing_store():
     global _handle_cache
     if _handle_cache is not None:
         return _handle_cache
+    if not ray.is_initialized():
+        return None
 
     try:
         _handle_cache = ray.get_actor(_STORE_NAME, namespace=_STORE_NAMESPACE)
     except ValueError:
         return None
     return _handle_cache
+
+
+async def release_existing_sessions(session_ids: list[str]) -> set[str]:
+    """Release trace sessions that exist without creating the singleton store.
+
+    Args:
+        session_ids (list[str]): Candidate trace session identifiers.
+
+    Returns:
+        set[str]: Session identifiers that existed and were released.
+    """
+    if not session_ids:
+        return set()
+
+    store = get_existing_store()
+    if store is None:
+        return set()
+
+    return set(await store.release_sessions.remote(session_ids))
 
 
 if __name__ == "__main__":

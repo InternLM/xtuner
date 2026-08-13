@@ -21,6 +21,7 @@ from xtuner.v1.data_proto.rl_data import (
 )
 from xtuner.v1.rl.agent_loop import AgentLoopSpec
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
+from xtuner.v1.rl.rollout.trace_store import release_existing_sessions
 from xtuner.v1.rl.utils import (
     AGENT_LOOP_PAUSE_REQUEST_TIMEOUT_S,
     PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S,
@@ -197,7 +198,13 @@ class BaseProduceContext:
             # 失败样本和业务过滤样本都不进入 replay buffer。
             self.progress.add_produced(self.task_name, samples=len(group), tokens=produced_tokens)
             self.progress.add_discarded(self.task_name, discard_status, samples=len(group))
+            released_session_ids = await release_existing_sessions(
+                [str(item.session_id) for item in group if item.session_id is not None]
+            )
             for item in group:
+                if item.session_id is not None and str(item.session_id) in released_session_ids:
+                    # TraceStore.release_sessions() already freed these routed-expert refs.
+                    item.routed_experts = None
                 discard_rollout_state(item)
             return False
 

@@ -882,20 +882,37 @@ class BaseRLTrainer:
         finally:
             self._release_trace_store()
 
-    def _release_trace_store(self) -> None:
+    def _release_trace_store(self, train_batch: list[list[RolloutState]] | None = None) -> None:
         from xtuner.v1.rl.rollout.trace_store import get_existing_store
 
         store = get_existing_store()
         if store is None:
             return
 
-        self.logger.info("Release all sessions and free associated resources")
-        ray.get(store.release_all.remote())
-        keys = ray.get(store.list_sessions.remote())
-        # NOTE: previously asserted ``len(keys) == 0`` here, but a leftover session key should not crash the whole
-        # fit() at teardown. Warn instead so the leak stays visible without aborting the run.
-        if keys:
-            self.logger.warning(f"Trace store keys not released after release_all: {keys}")
+        if train_batch is None:
+            self.logger.info("Release all sessions and free associated resources")
+            ray.get(store.release_all.remote())
+            keys = ray.get(store.list_sessions.remote())
+            # A leftover session key should stay visible without crashing fit()
+            # during teardown.
+            if keys:
+                self.logger.warning(f"Trace store keys not released after release_all: {keys}")
+            return
+
+        session_ids = {
+            str(rollout_state.session_id)
+            for group in train_batch
+            for rollout_state in group
+            if rollout_state.session_id is not None
+        }
+        if not session_ids:
+            return
+
+        released_session_ids = ray.get(store.release_sessions.remote(sorted(session_ids)))
+        self.logger.info(
+            "Release consumed trace sessions and preserve concurrent rollout sessions: "
+            f"released={len(released_session_ids)}, requested={len(session_ids)}"
+        )
 
     def _train_one_batch(
         self,
@@ -905,6 +922,7 @@ class BaseRLTrainer:
         *,
         offload_rollout_before_train: bool = False,
         onload_train_before_train: bool = False,
+        release_only_consumed_trace_sessions: bool = False,
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ) -> TrainInfo:
@@ -949,7 +967,13 @@ class BaseRLTrainer:
                 rollout_idx=train_step,
             )
 
-        self._release_trace_store()
+        if release_only_consumed_trace_sessions:
+            # Disaggregated rollout keeps producing while learner.fit() runs. Release
+            # only the sessions consumed by this batch so concurrent rollout traces
+            # remain valid until their own batches are trained.
+            self._release_trace_store(train_batch)
+        else:
+            self._release_trace_store()
 
         return {
             "data_info": data_info,
@@ -1983,6 +2007,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             train_batch,
                             train_step,
                             step_timer_dict,
+                            release_only_consumed_trace_sessions=True,
                             raw_rewards_sum=produce_result.raw_rewards_sum,
                             raw_rewards_count=produce_result.raw_rewards_count,
                         )

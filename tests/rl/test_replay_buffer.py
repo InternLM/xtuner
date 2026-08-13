@@ -24,6 +24,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import ray
@@ -41,6 +42,7 @@ REPLAY_BUFFER_CONFIGS = [
 def make_rollout_state(
     uid: int,
     *,
+    session_id: int | None = None,
     status: Status = Status.COMPLETED,
     seq_staleness: int = 0,
     prompt_ids: list[int] | None = None,
@@ -66,6 +68,7 @@ def make_rollout_state(
         group_id=uid,
         message=[{"role": "user", "content": f"prompt {uid}"}],
         prompt_ids=prompt_ids,
+        session_id=session_id,
         tokens=list(tokens) if tokens is not None else list(prompt_ids),
         response=response if response is not None else f"response {uid}",
         response_ids=response_ids,
@@ -193,6 +196,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 replay_buffer = replay_buffer_config_cls().build()
                 stale = make_rollout_state(
                     1,
+                    session_id=101,
                     prompt_ids=[101, 102],
                     tokens=[999],
                     response="stale response",
@@ -205,14 +209,19 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                     extra_fields={"train_prompt_ids": [101, 102]},
                 )
 
-                await replay_buffer.put(
-                    [stale],
-                    "task",
-                    current_train_step=5,
-                    stale_threshold=3,
-                    expired_groups_retryable=False,
-                )
+                with patch(
+                    "xtuner.v1.rl.replay_buffer.release_existing_sessions",
+                    new=AsyncMock(return_value={"101"}),
+                ) as release_sessions:
+                    await replay_buffer.put(
+                        [stale],
+                        "task",
+                        current_train_step=5,
+                        stale_threshold=3,
+                        expired_groups_retryable=False,
+                    )
 
+                release_sessions.assert_awaited_once_with(["101"])
                 assert stale.status == Status.EXPIRED
                 assert stale.prompt_ids is None
                 assert stale.tokens is None
@@ -230,6 +239,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 pixel_values = np.ones((2, 3), dtype=np.float32)
                 stale = make_rollout_state(
                     1,
+                    session_id=102,
                     prompt_ids=[101, 102],
                     tokens=[999],
                     response="stale response",
@@ -243,13 +253,18 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                     extra_fields={"train_prompt_ids": [101, 102]},
                 )
 
-                await replay_buffer.put(
-                    [stale],
-                    "task",
-                    current_train_step=5,
-                    stale_threshold=3,
-                )
+                with patch(
+                    "xtuner.v1.rl.replay_buffer.release_existing_sessions",
+                    new=AsyncMock(),
+                ) as release_sessions:
+                    await replay_buffer.put(
+                        [stale],
+                        "task",
+                        current_train_step=5,
+                        stale_threshold=3,
+                    )
 
+                release_sessions.assert_not_awaited()
                 expired = await replay_buffer.get(1, "task", Status.EXPIRED)
                 reusable = expired[0][0]
                 assert reusable.status == Status.EXPIRED
@@ -419,11 +434,13 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 replay_buffer = replay_buffer_config_cls().build()
                 terminal_stale = make_rollout_state(
                     1,
+                    session_id=201,
                     response_model_steps=[1],
                     mm_info={"pixel_values": np.ones((2, 3), dtype=np.float32)},
                 )
                 retryable_stale = make_rollout_state(
                     2,
+                    session_id=202,
                     response_model_steps=[1],
                     mm_info={"pixel_values": np.ones((2, 3), dtype=np.float32)},
                 )
@@ -431,15 +448,20 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 await replay_buffer.put([retryable_stale], "retryable_task")
                 assert len(replay_buffer) == 2
 
-                expired_counts = await replay_buffer.refresh_staleness(
-                    task_stale_thresholds={"terminal_task": 2, "retryable_task": 2},
-                    expired_groups_retryable_by_task={
-                        "terminal_task": False,
-                        "retryable_task": True,
-                    },
-                    current_train_step=4,
-                )
+                with patch(
+                    "xtuner.v1.rl.replay_buffer.release_existing_sessions",
+                    new=AsyncMock(return_value={"201"}),
+                ) as release_sessions:
+                    expired_counts = await replay_buffer.refresh_staleness(
+                        task_stale_thresholds={"terminal_task": 2, "retryable_task": 2},
+                        expired_groups_retryable_by_task={
+                            "terminal_task": False,
+                            "retryable_task": True,
+                        },
+                        current_train_step=4,
+                    )
 
+                release_sessions.assert_awaited_once_with(["201"])
                 assert expired_counts == {"terminal_task": 1, "retryable_task": 1}
                 assert terminal_stale.status == Status.EXPIRED
                 assert terminal_stale.prompt_ids is None

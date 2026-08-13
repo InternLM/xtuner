@@ -305,6 +305,38 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertIn("produce_loop_tick_during_training", manager.calls)
         self.assertEqual(trainer._cur_step, 1)
 
+    def test_train_batch_releases_only_consumed_trace_sessions_for_disaggregated_rollout(self):
+        # 后台 producer 在 learner 训练期间仍会创建 trace；训练结束只能释放当前消费 batch 的 session。
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1, session_id=101)
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer._release_trace_store = RLDisaggregatedTrainer._release_trace_store.__get__(
+            trainer, RLDisaggregatedTrainer
+        )
+        live_session_ids = {"101", "202"}
+
+        def release_sessions(session_ids):
+            released = [session_id for session_id in session_ids if session_id in live_session_ids]
+            live_session_ids.difference_update(released)
+            return released
+
+        store = SimpleNamespace(
+            release_sessions=SimpleNamespace(remote=MagicMock(side_effect=release_sessions)),
+        )
+
+        with (
+            patch("xtuner.v1.rl.rollout.trace_store.get_existing_store", return_value=store),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda value: value),
+        ):
+            trainer._train_one_batch(
+                [[train_sample]],
+                train_step=1,
+                step_timer_dict={},
+                release_only_consumed_trace_sessions=True,
+            )
+
+        store.release_sessions.remote.assert_called_once_with(["101"])
+        self.assertEqual(live_session_ids, {"202"})
+
     def test_fit_observes_background_producer_failure_before_training_waited_batch(self):
         # 后台 producer 异常是终止性失败；前台 get_batch 还在等待时必须立刻暴露，不能先训练随后才失败。
         train_sample = SimpleNamespace(group_id=1, rollout_id=1)
