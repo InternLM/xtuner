@@ -147,6 +147,12 @@ jobs:
 
             5. 仅在解释 Warning 及以上问题的修复方案确有必要时，提供精简伪代码。
 
+            #### Summary 内容顺序
+
+            Summary 内容必须按以下顺序组织；标注“按需”的章节仅在发现对应 Warning 及以上问题时输出：
+
+            `Summary` → `Main Flowchart after this PR`（按需） → `核心原理实现与单测` → `抽象与信息隐藏评估`（按需） → `公开 Interface 的线性业务流程评估`（按需） → `单测建议`（按需） → `其他 Issues`
+
             ---
 
             #### 附录 A：架构审查规则
@@ -266,7 +272,14 @@ jobs:
                for the workflow to post, and use `mcp__github_inline_comment__create_inline_comment` for specific code
                issues. Do not post comments during this analysis phase.
 
-            8. Prefix all inline GitHub comments with "Claude: ". The workflow adds this prefix to the top-level summary.
+            8. Prefix every inline GitHub comment with `Claude: [分类] `, using exactly one primary category from
+               `设计`, `正确性`, `安全`, `性能`, `兼容性`, `测试`, or `其他`. If an issue genuinely requires cross-file,
+               multi-step, or multi-condition evidence that cannot be explained accurately within the normal limit,
+               add a separate `[复杂]` marker after its primary category.
+
+            9. Except for `[设计]` findings and findings marked `[复杂]`, keep each inline comment's explanatory text
+               within 150 characters. The fixed `Claude: ` prefix, category markers, and Markdown link targets
+               do not count toward this limit. Do not mark an issue as complex merely to include extra background.
 
             ### Code Linking Format
 
@@ -415,8 +428,10 @@ jobs:
             2. Finish immediately after publishing the selected inline comments. Do not call `gh pr comment`.
 
             Follow all project-specific requirements, code-linking format, and review-output rules from the analysis-phase
-            prompt. Write every inline comment in Chinese, retain English technical terms where useful, and prefix every
-            comment with `Claude: `. If no specific issue is sufficiently supported, finish without posting one.
+            prompt. Write every inline comment in Chinese and retain English technical terms where useful. Start it with
+            `Claude: [分类] `; add `[复杂]` only when the issue meets the analysis-phase definition. Except for `[设计]`
+            and `[复杂]` findings, keep the explanatory text within 150 characters, excluding the fixed prefix,
+            markers, and Markdown link targets. If no specific issue is sufficiently supported, finish without posting one.
           claude_args: |
               --resume ${{ steps.claude-review-session.outputs.session_id }}
               --max-turns ${{ env.CLAUDE_REVIEW_INLINE_MAX_TURNS }}
