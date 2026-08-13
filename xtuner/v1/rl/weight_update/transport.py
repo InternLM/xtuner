@@ -889,9 +889,6 @@ class CheckpointEngineWeightTransport:
         self.rollout_tp = self.rollout_info.tp
         self.rollout_url = self.rollout_info.rollout_url
 
-        os.environ["NCCL_IB_HCA"] = "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
-        os.environ["PS_P2P_STORE_RDMA_DEVICES"] = "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
-
         assert dist.is_initialized(), "Checkpoint Engine requires an initialized torch.distributed process group."
         self.ps_world_size = dist.get_world_size()
 
