@@ -849,6 +849,7 @@ class NCCLWeightTransport(WeightTransport[NCCLBackendAdapter]):
         self.engine_urls = []
         self.external_group_world_size = None
 
+
 class CheckpointEngineAdapter:
     """Build adapter for CheckpointEngine."""
 
@@ -887,7 +888,9 @@ class CheckpointEngineWeightTransport:
         os.environ["NCCL_IB_HCA"] = "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
         os.environ["PS_P2P_STORE_RDMA_DEVICES"] = "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
 
-        self.ps_world_size = int(os.environ.get("WORLD_SIZE", dist.get_world_size()))
+        assert dist.is_initialized(), "Checkpoint Engine requires an initialized torch.distributed process group."
+        self.ps_world_size = dist.get_world_size()
+
         self._adapter = CheckpointEngineAdapter(rank=rank)
         # record the update counter of PS
         self._update_counter = 0
@@ -897,10 +900,6 @@ class CheckpointEngineWeightTransport:
         self._sync_after_register = self.rollout_info.checkpoint_engine_sync_after_register
         # record the checkpoint name of PS and will use it to register the checkpoint and unregister the previous checkpoint
         self._checkpoint_name: str | None = None
-
-        assert dist.is_initialized() and self.ps_world_size > 0, (
-            "Checkpoint Engine requires an initialized torch.distributed process group and world size > 0."
-        )
 
         self._ps = self.build_parameter_server()
         # record the local checkpoint keys per PS-rank
@@ -995,14 +994,10 @@ class CheckpointEngineWeightTransport:
         if missing:
             missing_mtp_keys = {key for key in missing if key.startswith("mtp.")}
             missing_non_mtp_keys = missing - missing_mtp_keys
-            if missing_non_mtp_keys:
-                self.logger.error(
-                    f"[checkpoint_engine] ParameterServer Rank={self.rank} Missing non-MTP keys: {missing_non_mtp_keys}"
-                )
-            else:
-                self.logger.error(
-                    f"[checkpoint_engine] ParameterServer Rank={self.rank} Missing MTP-only keys: {missing_mtp_keys}"
-                )
+            raise RuntimeError(
+                f"[checkpoint_engine] ParameterServer Rank={self.rank}. Missing non-MTP keys: [{missing_non_mtp_keys}]. Missing MTP-only keys: [{missing_mtp_keys}]"
+            )
+
         shard = {k: all_tensors[k] for k in self._local_checkpoint_keys if k in all_tensors}
 
         # 3. Register checkpoint
@@ -1031,8 +1026,6 @@ class CheckpointEngineWeightTransport:
                     raise ValueError(f"Duplicate update rank {r} across active CE targets.")
                 rank_to_target[r] = target
         adapter = self._adapter
-        if adapter is None:
-            raise RuntimeError("Weight transport adapter is not initialized.")
 
         def req_func(socket_paths: list[tuple[str, str]]) -> None:
             target = rank_to_target.get(rank)

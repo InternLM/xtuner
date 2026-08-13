@@ -165,7 +165,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer.train_controller = SimpleNamespace(
             onload=MagicMock(return_value="train_onloaded"),
             offload=MagicMock(return_value="train_offloaded"),
-            update_weights=MagicMock(return_value="weights_updated"),
+            weight_update=MagicMock(return_value="weights_updated"),
             fit=MagicMock(
                 return_value=[
                     {

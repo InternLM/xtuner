@@ -350,7 +350,7 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
             self.update_weight_calls += 1
             return original_weight_update(*args, **kwargs)
 
-        trainer.train_controller.update_weights = update_weights_wrapper
+        trainer.train_controller.weight_update = update_weights_wrapper
 
     def _load_step_metrics(self, work_dir: Path) -> list[dict[str, float]]:
         rows: list[dict[str, float]] = []
