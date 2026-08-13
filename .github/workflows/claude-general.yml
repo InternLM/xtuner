@@ -13,9 +13,9 @@ jobs:
     if: contains(github.event.comment.body, '@claude review')
     runs-on: ubuntu-latest
     env:
-      # Keep the complete review within the original 45-turn budget.
+      # Bound each review phase explicitly. Summary keeps one extra turn for the StructuredOutput handoff.
       CLAUDE_REVIEW_ANALYSIS_MAX_TURNS: 34
-      CLAUDE_REVIEW_SUMMARY_MAX_TURNS: 1
+      CLAUDE_REVIEW_SUMMARY_MAX_TURNS: 2
       CLAUDE_REVIEW_INLINE_MAX_TURNS: 10
       # Trusted maintainers trigger reviews, but PR content can still be untrusted. Keep credential scrubbing and
       # Linux PID-namespace isolation enabled for Claude subprocesses.
@@ -250,7 +250,9 @@ jobs:
 
             1. Write all review comments posted to GitHub, including inline comments and the top-level summary, in Chinese. Technical terms may remain in English.
 
-            2. For every issue, rate how significant it is. Make sure you are confident in your diagnosis.
+            2. Only analyze and report issues at `Warning` severity or above. Ignore `Nit` and all lower-severity
+               findings to keep the review concise. For every reported issue, rate its significance and make sure you
+               are confident in your diagnosis.
 
             3. Read `${{ env.CLAUDE_REVIEW_INPUT_DIR }}/discussion.jsonl` to avoid reporting the same issue twice.
 
@@ -357,12 +359,13 @@ jobs:
             do not add the `Claude: ` prefix because the trusted publication step adds it. If no specific issue is
             sufficiently supported, state that explicitly. Do not wrap the summary in an outer code fence and do not add
             meta-commentary before or after it.
+          # --json-schema returns through the StructuredOutput tool, so keep that single tool available.
           claude_args: |
               --resume ${{ steps.claude-review-session.outputs.session_id }}
               --max-turns ${{ env.CLAUDE_REVIEW_SUMMARY_MAX_TURNS }}
               --model opus
               --json-schema '{"type":"object","properties":{"summary":{"type":"string","minLength":1}},"required":["summary"],"additionalProperties":false}'
-              --disallowedTools "*"
+              --tools "StructuredOutput"
           # Hidden Action coupling: a non-empty value installs the bubblewrap/socat subprocess-isolation dependencies.
           # No github_token input is passed, so "*" does not bypass the Action's write-permission check here.
           allowed_non_write_users: "*"
