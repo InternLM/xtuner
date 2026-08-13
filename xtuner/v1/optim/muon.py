@@ -26,7 +26,7 @@ import math
 from collections import defaultdict
 from functools import partial
 from itertools import chain, product
-from typing import Callable, Generator, Iterator, Literal, Sequence, cast, overload
+from typing import Any, Callable, Generator, Iterator, Literal, Sequence, cast, overload
 
 import torch
 import torch.distributed as dist
@@ -350,6 +350,8 @@ class Muon(Optimizer):
         self._enable_all2all = enable_all2all
         self._remainder_strategy = remainder_strategy
         self._muon_split_sizes = muon_split_sizes or {}
+        self.register_state_dict_post_hook(self._remove_clip_grad_policy)
+        self.register_load_state_dict_pre_hook(self._restore_clip_grad_policy)
 
         # Pre-compute lr adjustment ratios for each Muon parameter based on global shape.
         # This must happen at init time because DTensor.shape here is guaranteed to be
@@ -399,6 +401,27 @@ class Muon(Optimizer):
         # This must happen in __init__ so that all ranks call dist.new_group collectively.
         self._subgroup_cache: dict[tuple[int, int, int], ProcessGroup] = {}
         self._init_moe_subgroups()
+
+    def add_param_group(self, param_group: dict[str, Any]) -> None:
+        param_group.setdefault("clip_grad", param_group.get("algorithm", "muon") != "muon")
+        super().add_param_group(param_group)
+
+    @staticmethod
+    def _remove_clip_grad_policy(_optimizer: Optimizer, state_dict: dict[str, Any]) -> dict[str, Any]:
+        for group in state_dict["param_groups"]:
+            group.pop("clip_grad", None)
+        return state_dict
+
+    @staticmethod
+    def _restore_clip_grad_policy(optimizer: Optimizer, state_dict: dict[str, Any]) -> dict[str, Any]:
+        if len(state_dict["param_groups"]) != len(optimizer.param_groups):
+            return state_dict
+
+        state_dict = state_dict.copy()
+        state_dict["param_groups"] = [group.copy() for group in state_dict["param_groups"]]
+        for loaded_group, current_group in zip(state_dict["param_groups"], optimizer.param_groups):
+            loaded_group["clip_grad"] = current_group.get("clip_grad", True)
+        return state_dict
 
     @overload
     def step(self, closure: None = None) -> None: ...

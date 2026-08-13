@@ -22,6 +22,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
+from torch.distributed.tensor import DTensor
 from torch.nn.utils.clip_grad import _no_grad
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
@@ -258,38 +259,52 @@ class TrainEngine:
         ProberList.before_clip_grad_norm(self.model)
         self.model.scale_and_reduce_grad()
 
-        params = self.model.trainable_parameters()
-        grads = [p.grad for _, p in params if p.grad is not None]
-        grad_norm, grouped_grads = cal_grad_norm(grads, dtype=dtype)
+        trainable_params = [p for _, p in self.model.trainable_parameters()]
+        all_grads = [p.grad for p in trainable_params if p.grad is not None]
+        total_grad_norm, grouped_all_grads = cal_grad_norm(all_grads, dtype=dtype)
 
         if do_clip:
-            if any(group.get("algorithm") == "muon" for group in self.optimizer.param_groups):
-                clip_params = (
-                    p
-                    for group in self.optimizer.param_groups
-                    if group.get("algorithm") != "muon"
-                    for p in group["params"]
-                )
-                clip_grads = [p.grad for p in clip_params if p.grad is not None]
-                if clip_grads:
-                    clip_grad_norm, grouped_grads = cal_grad_norm(clip_grads, dtype=dtype)
-                else:
-                    clip_grad_norm = torch.zeros((), device=DEVICE, dtype=dtype)
-                    grouped_grads = {}
+            clip_param_ids = {
+                id(p) for group in self.optimizer.param_groups if group.get("clip_grad", True) for p in group["params"]
+            }
+            clip_grads = [
+                cast(DTensor, p.grad) for p in trainable_params if id(p) in clip_param_ids and p.grad is not None
+            ]
+            clip_all_grads = len(clip_param_ids) == len(trainable_params) and clip_param_ids == {
+                id(p) for p in trainable_params
+            }
+            self._clip_gradients(
+                clip_grads,
+                max_norm=self.optim_cfg.max_grad_norm,
+                dtype=dtype,
+                precomputed_grad_info=(total_grad_norm, grouped_all_grads) if clip_all_grads else None,
+            )
+        ProberList.after_clip_grad_norm(self.model, total_grad_norm)
+        return total_grad_norm
+
+    @staticmethod
+    def _clip_gradients(
+        grads: list[DTensor],
+        max_norm: float,
+        dtype: torch.dtype,
+        precomputed_grad_info: tuple[torch.Tensor, dict[Any, list[DTensor]]] | None = None,
+    ) -> None:
+        if not grads:
+            return
+
+        if precomputed_grad_info is not None:
+            grad_norm, grouped_grads = precomputed_grad_info
+        else:
+            grad_norm, grouped_grads = cal_grad_norm(grads, dtype=dtype)
+        clip_coef = torch.clamp(max_norm / (grad_norm + 1e-6), max=1.0)
+        for device_grads in grouped_grads.values():
+            device = device_grads[0].device
+            device_clip_coef = clip_coef.to(device)
+            if _device_has_foreach_support(device):
+                torch._foreach_mul_(cast(list[torch.Tensor], device_grads), device_clip_coef)
             else:
-                clip_grad_norm = grad_norm
-            clip_coef = self.optim_cfg.max_grad_norm / (clip_grad_norm + 1e-6)
-            clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
-            for grads in grouped_grads.values():
-                device = grads[0].device
-                if _device_has_foreach_support(device):
-                    torch._foreach_mul_(grads, clip_coef_clamped.to(device))
-                else:
-                    clip_coef_clamped_device = clip_coef_clamped.to(device)
-                    for g in grads:
-                        g.mul_(clip_coef_clamped_device)
-        ProberList.after_clip_grad_norm(self.model, grad_norm)
-        return grad_norm
+                for grad in device_grads:
+                    grad.mul_(device_clip_coef)
 
     def step_optimizer(self, grad_norm):
         """Step the optimizer to update the model parameters."""

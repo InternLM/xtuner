@@ -26,7 +26,7 @@ from xtuner.v1.config.optim import MuonConfig
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.model.base import BaseModel, XTunerBaseModelConfig
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseMLP
-from xtuner.v1.optim.muon import _muonsplit_newton_schulz, zeropower_via_newtonschulz5
+from xtuner.v1.optim.muon import Muon, _muonsplit_newton_schulz, zeropower_via_newtonschulz5
 
 
 # ─── Test: Newton-Schulz functions ───────────────────────────────────────────
@@ -409,12 +409,15 @@ class TestMuonSingleGPU(DeterministicDDPTestCase):
         adamw_squared = 0
         for group in optimizer.param_groups:
             is_muon = group["algorithm"] == "muon"
+            assert group["clip_grad"] is not is_muon
             grad_value = 2.0 if is_muon else 1.0
             for param in group["params"]:
                 param.grad = torch.full_like(param, grad_value)
                 total_squared += param.numel() * grad_value**2
                 if not is_muon:
                     adamw_squared += param.numel()
+            # The engine must consume only the generic policy, not optimizer-specific metadata.
+            group["algorithm"] = "test"
 
         engine = object.__new__(TrainEngine)
         engine.model = model
@@ -425,9 +428,32 @@ class TestMuonSingleGPU(DeterministicDDPTestCase):
         torch.testing.assert_close(grad_norm, torch.tensor(math.sqrt(total_squared), device=device))
         clip_coef = min(1.0, optim_config.max_grad_norm / (math.sqrt(adamw_squared) + 1e-6))
         for group in optimizer.param_groups:
-            expected = 2.0 if group["algorithm"] == "muon" else clip_coef
+            expected = clip_coef if group["clip_grad"] else 2.0
             for param in group["params"]:
                 torch.testing.assert_close(param.grad.to_local(), torch.full_like(param.grad.to_local(), expected))
+
+    def test_clip_grad_policy_is_preserved_on_load(self):
+        muon_param = nn.Parameter(torch.empty(4, 4))
+        adamw_param = nn.Parameter(torch.empty(4))
+        optimizer = Muon(
+            [
+                {"params": [muon_param]},
+                {"params": [adamw_param], "algorithm": "adamw"},
+            ]
+        )
+        assert [group["clip_grad"] for group in optimizer.param_groups] == [False, True]
+
+        state_dict = optimizer.state_dict()
+        assert all("clip_grad" not in group for group in state_dict["param_groups"])
+
+        state_dict["param_groups"][0]["clip_grad"] = True
+        state_dict["param_groups"][1]["clip_grad"] = False
+        optimizer.load_state_dict(state_dict)
+        assert [group["clip_grad"] for group in optimizer.param_groups] == [False, True]
+        assert [group["clip_grad"] for group in state_dict["param_groups"]] == [True, False]
+
+        optimizer.add_param_group({"params": [nn.Parameter(torch.empty(4, 4))]})
+        assert optimizer.param_groups[-1]["clip_grad"] is False
 
 
 # ─── Test: end-to-end FSDP ───────────────────────────────────────────────────
