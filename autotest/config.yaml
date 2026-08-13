@@ -33,8 +33,8 @@ case:
                 config: autotest/config/glm5p2_30B.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
-                num_nodes: 1
-                cpus_per_task: 80
+                cpus_per_task: 120
+                memory_per_task: 1200
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
