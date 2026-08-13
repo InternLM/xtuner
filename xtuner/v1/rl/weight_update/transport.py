@@ -849,6 +849,7 @@ class NCCLWeightTransport(WeightTransport[NCCLBackendAdapter]):
         self.engine_urls = []
         self.external_group_world_size = None
 
+
 class CheckpointEngineAdapter:
     """Build adapter for CheckpointEngine."""
 
