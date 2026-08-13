@@ -8,11 +8,11 @@ from .data import (
     RolloutWeightUpdateInfo,
     RolloutWeightUpdateTarget,
 )
-from .transport import CheckpointEngineWeightTransport, IPCWeightTransport, NCCLWeightTransport, WeightTransport
+from .transport import CheckpointEngineWeightTransport, IPCWeightTransport, NCCLWeightTransport
 from .weight_iterator import WeightIterator
 
 
-class UpdateWeighter:
+class WeightUpdater:
     def __init__(self, *, rank: int, logger: Any, config: Any, engine: Any):
         self.rank = rank
         self.logger = logger
@@ -24,7 +24,7 @@ class UpdateWeighter:
         self.weight_iterator: WeightIterator | None = None
         self._global_hf_keys_mapping_cache: dict[str, list[str]] = {}
         # Transport is initialized after bind_rollout_weight_update() is called.
-        self._transport: WeightTransport | None = None
+        self._transport: Any | None = None
         # Used to detect changes in rollout metadata that require resetting the transport.
         self._transport_signature: tuple[Any, ...] | None = None
 
@@ -65,10 +65,10 @@ class UpdateWeighter:
         if self._transport is None:
             self._set_transport()
 
-    def update_weights(self, **kwargs: Any) -> None:
+    def weight_update(self, **kwargs: Any) -> None:
         """Update the model weights."""
 
-        assert self.rollout_info is not None, "bind_rollout_weight_update() must be called before update_weights()."
+        assert self.rollout_info is not None, "bind_rollout_weight_update() must be called before weight_update()."
         assert self._transport is not None, (
             f"Weight transport is not initialized. transport_type={self.rollout_info.transport_type!r}, "
             f"backend={self.rollout_info.backend!r}."

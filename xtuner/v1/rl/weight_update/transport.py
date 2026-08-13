@@ -73,10 +73,6 @@ class WeightTransport(ABC, Generic[AdapterT]):
 
         self.rollout_url = self.rollout_info.rollout_url
 
-    def reset_rollout_info(self, rollout_info: RolloutWeightUpdateInfo):
-        self.rollout_info = rollout_info
-        self.rollout_url = rollout_info.rollout_url
-
     @staticmethod
     def post_json(url: str, endpoint: str, payload: dict, *, api_key=None) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -602,7 +598,7 @@ class LMDeployNCCLBackendAdapter(NCCLBackendAdapter):
             return payload, flattened_tensor, weight_names
         else:
             # finalize-only request: no tensors to broadcast, just trigger the
-            # rollout side's mod.update_weights() finalization hooks.
+            # rollout side's mod.weight_update() finalization hooks.
             payload = {
                 "names": [],
                 "dtypes": [],
@@ -853,25 +849,8 @@ class NCCLWeightTransport(WeightTransport[NCCLBackendAdapter]):
         self.engine_urls = []
         self.external_group_world_size = None
 
-
-class CheckpointEngineBackendAdapter:
-    """Build SGLang IPC weight-update URLs for Checkpoint Engine req_func."""
-
-    def __init__(self, *, rank: int):
-        self.rank = rank
-
-    def build_update_url(self, server_url: str) -> str:
-        raise NotImplementedError
-
-    def before_update(self) -> None:
-        return
-
-    def after_update_all_groups(self) -> None:
-        return
-
-
-class SGlangCheckpointEngineAdapter(CheckpointEngineBackendAdapter):
-    """Build SGLang IPC weight-update URLs for Checkpoint Engine req_func."""
+class CheckpointEngineAdapter:
+    """Build adapter for CheckpointEngine."""
 
     def __init__(self, *, rank: int):
         self.rank = rank
@@ -880,13 +859,13 @@ class SGlangCheckpointEngineAdapter(CheckpointEngineBackendAdapter):
         return f"{server_url.rstrip('/')}/update_weights_from_ipc"
 
 
-class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAdapter]):
+class CheckpointEngineWeightTransport:
     """In-process Checkpoint Engine transport via ParameterServer.
 
     Each train rank owns a PS and collectively register / gather_metas / update.
     """
 
-    _adapter: CheckpointEngineBackendAdapter
+    _adapter: CheckpointEngineAdapter
 
     def __init__(
         self,
@@ -895,16 +874,21 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         logger: Any,
         rollout_info: RolloutWeightUpdateInfo,
     ):
-        """Build PS and optionally register the initial disk checkpoint from
-        disk."""
+        """Build PS and split weight keys in HF json file."""
 
-        super().__init__(rank=rank, logger=logger, rollout_info=rollout_info)
+        self.rollout_info = rollout_info
+        self.logger = logger
+        self.rank = rank
+        self.backend = self.rollout_info.backend
+        self.rollout_ep = self.rollout_info.ep
+        self.rollout_tp = self.rollout_info.tp
+        self.rollout_url = self.rollout_info.rollout_url
 
         os.environ["NCCL_IB_HCA"] = "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
         os.environ["PS_P2P_STORE_RDMA_DEVICES"] = "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
 
         self.ps_world_size = int(os.environ.get("WORLD_SIZE", dist.get_world_size()))
-        self._adapter = SGlangCheckpointEngineAdapter(rank=rank)
+        self._adapter = CheckpointEngineAdapter(rank=rank)
         # record the update counter of PS
         self._update_counter = 0
         self._checkpoint_path = self.rollout_info.rollout_config.model_path
@@ -941,8 +925,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         return ps
 
     def split_tensors_for_rank(self, checkpoint_path: str | Path, world_size: int, rank: int) -> set[str]:
-        """Register an HF safetensors checkpoint into the local
-        ParameterServer."""
+        """Split an HF keys for each ParameterServer."""
 
         path = Path(checkpoint_path)
         index_path = path / "model.safetensors.index.json"
@@ -1122,7 +1105,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         self._ps.gather_metas(self._checkpoint_name)
         self._ps.update(self._checkpoint_name, req_func, ranks=ranks)
 
-    def update(self, weight_iterator: Any, need_register: bool = True, need_update: bool = True, **_: Any) -> None:
+    def update(self, weight_iterator: Any, **kwargs: Any) -> None:
         """Update rollout engine weights through the checkpoint parameter
         server.
 
@@ -1141,6 +1124,9 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
             False to split registration and rollout update into separate calls, which
             can reduce peak GPU memory usage under memory pressure.
         """
+
+        need_register = kwargs.pop("need_register", True)
+        need_update = kwargs.pop("need_update", True)
         assert need_register or need_update, (
             "At least one of need_register or need_update must be True when use checkpoint engine update."
         )
@@ -1155,8 +1141,9 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineBackendAda
         if need_update:
             self._update_engines()
 
-    def send(self, batch: WeightUpdateBatch) -> None:
-        raise NotImplementedError("CheckpointEngineWeightTransport uses update() end-to-end; send() is unused.")
+    def reset_rollout_info(self, rollout_info: RolloutWeightUpdateInfo):
+        self.rollout_info = rollout_info
+        self.rollout_url = rollout_info.rollout_url
 
     def teardown(self) -> None:
         if self._ps is None:

@@ -46,7 +46,7 @@ from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, finalize_train_policy_metrics, kl_penalty
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
-from xtuner.v1.rl.weight_update import UpdateWeighter
+from xtuner.v1.rl.weight_update import WeightUpdater
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
@@ -277,7 +277,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             # 非 compose 模型的 mtp_config 直接放在了 model_cfg 中
             self.mtp_config = worker_cfg.model_cfg.mtp_config
 
-        self.update_weighter = UpdateWeighter(
+        self.update_weighter = WeightUpdater(
             rank=self.rank,
             logger=self.logger,
             config=self.config,
@@ -328,8 +328,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         return self.update_weighter.bind_rollout_weight_update(*args, **kwargs)
 
     @ray_method
-    def update_weights(self, **kwargs):
-        return self.update_weighter.update_weights(**kwargs)
+    def weight_update(self, **kwargs):
+        return self.update_weighter.weight_update(**kwargs)
 
     def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg

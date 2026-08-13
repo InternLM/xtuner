@@ -1666,10 +1666,10 @@ class RLColocateTrainer(BaseRLTrainer):
         if self._rollout_config.weight_transport_type == "checkpoint_engine":
             ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
             self.train_controller.onload(target="model")
-            self.train_controller.update_weights(need_register=True, need_update=False)
+            self.train_controller.weight_update(need_register=True, need_update=False)
             self.train_controller.offload(target="model")
             ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
-            self.train_controller.update_weights(need_register=False, need_update=True)
+            self.train_controller.weight_update(need_register=False, need_update=True)
             ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
             self.logger.info("Rollout workers updated weights from Checkpoint Engine.")
             return
@@ -1678,7 +1678,7 @@ class RLColocateTrainer(BaseRLTrainer):
             ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
             self.train_controller.onload(target="model")
             ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
-            self.train_controller.update_weights()
+            self.train_controller.weight_update()
             self.train_controller.offload(target="model")
             ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
             self.logger.info("Rollout workers updated weights from train workers.")
@@ -1825,20 +1825,20 @@ class RLColocateTrainer(BaseRLTrainer):
                 )
 
                 if self._rollout_config.weight_transport_type == "checkpoint_engine":
-                    self.train_controller.update_weights(need_register=True, need_update=False)
+                    self.train_controller.weight_update(need_register=True, need_update=False)
                     self.train_controller.offload(target="model")
                     ray.get(
                         self.rollout_controller.onload_weights.remote(),
                         timeout=RL_TRAINER_RAY_GET_TIMEOUT,
                     )
-                    self.train_controller.update_weights(need_register=False, need_update=True)
+                    self.train_controller.weight_update(need_register=False, need_update=True)
 
                 else:
                     ray.get(
                         self.rollout_controller.onload_weights.remote(),
                         timeout=RL_TRAINER_RAY_GET_TIMEOUT,
                     )
-                    self.train_controller.update_weights()
+                    self.train_controller.weight_update()
                     self.train_controller.offload(target="model")
                 self.logger.info("Rollout workers update weights successfully in colocate mode")
                 suspend_train_nccl = (
@@ -1939,7 +1939,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         saved_model_step = asyncio_run(self._resume_agent_loop_manager(checkpoint_path))
         assert self._cur_step == saved_model_step
 
-        self.update_weights()
+        self.weight_update()
         asyncio_run(self.agent_loop_manager.continue_produce(model_step=saved_model_step))
 
     def fit(self):
@@ -2096,9 +2096,9 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 rollout_controller=self.rollout_controller,
                 rollout_config=self._rollout_config,
             )
-            self.update_weights()
+            self.weight_update()
 
-    def update_weights(self):
+    def weight_update(self):
         # rollout 恢复由 AgentLoopManager 控制。
-        self.train_controller.update_weights()
+        self.train_controller.weight_update()
         self.logger.info("Rollout workers update weights successfully in disaggregated mode")

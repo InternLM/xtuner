@@ -193,7 +193,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
         ray.get(rollout_controller.offload.remote(), timeout=300)
         ray.get(self.rollout_controller.onload_weights.remote(), timeout=300)
         train_controller.onload(target="model")
-        train_controller.update_weights()
+        train_controller.weight_update()
 
         self._check_sglang_weights(rollout_controller, action="compare_parameters")
 
@@ -212,10 +212,10 @@ class TestUpdateWeightColocate(unittest.TestCase):
         )
         ray.get(rollout_controller.offload.remote(), timeout=300)
         train_controller.onload(target="model")
-        train_controller.update_weights(need_register=True, need_update=False)
+        train_controller.weight_update(need_register=True, need_update=False)
         train_controller.offload(target="model")
         ray.get(self.rollout_controller.onload_weights.remote(), timeout=300)
-        train_controller.update_weights(need_register=False, need_update=True)
+        train_controller.weight_update(need_register=False, need_update=True)
 
         self._check_sglang_weights(rollout_controller, action="compare_parameters")
 

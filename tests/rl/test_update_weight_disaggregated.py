@@ -161,7 +161,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
             targets=targets,
             rollout_config=self.rollout_cfg,
         )
-        train_controller.update_weights()
+        train_controller.weight_update()
 
         res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
         self.assertEqual(res_update_weight.response, res_baseline.response)
@@ -199,7 +199,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
                 targets=targets,
                 rollout_config=self.rollout_cfg,
             )
-            train_controller.update_weights()
+            train_controller.weight_update()
 
             self._check_sglang_weights(rollout_controller, action="compare_parameters")
         finally:
@@ -237,7 +237,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
             targets=targets,
             rollout_config=self.rollout_cfg,
         )
-        train_controller.update_weights()
+        train_controller.weight_update()
 
         res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
         self.assertEqual(res_update_weight.response, res_baseline.response)

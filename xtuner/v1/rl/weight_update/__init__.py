@@ -17,7 +17,7 @@ from .transport import (
     WeightTransport,
     WeightUpdateRequest,
 )
-from .update_weighter import UpdateWeighter
+from .update_weighter import WeightUpdater
 from .weight_iterator import WeightIterator
 
 
@@ -33,7 +33,7 @@ __all__ = [
     "RolloutWeightUpdateInfo",
     "SGLangIPCBackendAdapter",
     "SGLangNCCLBackendAdapter",
-    "UpdateWeighter",
+    "WeightUpdater",
     "WeightIterator",
     "WeightTransportType",
     "WeightUpdateBatch",

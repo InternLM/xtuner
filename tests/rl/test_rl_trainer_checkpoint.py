@@ -145,7 +145,7 @@ class _FakeTrainController:
     def offload(self, target="all"):
         return f"offload:{target}"
 
-    def update_weights(self):
+    def weight_update(self):
         self.update_weights_count += 1
         return "updated"
 
