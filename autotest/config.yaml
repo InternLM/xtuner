@@ -38,6 +38,10 @@ case:
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_GC_ENABLE=1
+                    - SWAP_OPTIMIZER=0
+                    - XTUNER_ACTIVATION_OFFLOAD=0
+                    - XTUNER_USE_CUTLASS_GROUP_GEMM=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
                 base_metric: glm5-2-sft-30B/tracker.jsonl

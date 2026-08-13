@@ -15,10 +15,10 @@ from xtuner.v1.train import TrainerConfig
 MODEL_PATH = os.environ["MODEL_PATH"]
 ALPACA_PATH = os.environ["ALPACA_PATH"]
 
-ep_size = 1
+ep_size = 4
 
 moe_cfg = get_model_config_from_hf(MODEL_PATH)
-moe_cfg.dispatcher = "all2all"
+moe_cfg.dispatcher = "deepep"
 moe_cfg.ep_size = ep_size
 moe_cfg.compile_cfg = False
 if hasattr(moe_cfg.attention, "sparse_mla_backend"):
@@ -34,7 +34,7 @@ fsdp_cfg = FSDPConfig(
 dataset_config = [
     {
         "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-        "tokenize_fn": OpenaiTokenizeFunctionConfig(chat_template="glm5.2", max_length=16384),
+        "tokenize_fn": OpenaiTokenizeFunctionConfig(chat_template="glm5.2", max_length=4096),
     },
 ]
 
