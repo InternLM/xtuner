@@ -22,6 +22,7 @@ diff_path="$output_dir/pr.diff"
 diff_index_path="$output_dir/diff-index.txt"
 files_path="$output_dir/files.jsonl"
 discussion_path="$output_dir/discussion.jsonl"
+discussion_index_path="$output_dir/discussion-index.tsv"
 manifest_path="$output_dir/manifest.json"
 rm -f "$manifest_path"
 
@@ -107,6 +108,27 @@ gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$pr_number/comments?per_page=1
     url: .html_url
   }' >> "$discussion_path"
 
+# Keep the common deduplication fields compact so review agents only open full discussion records when needed.
+jq -nr '
+  def normalize_body:
+    (. // "")
+    | tostring
+    | gsub("[\\t\\r\\n]+"; " ")
+    | gsub(" {2,}"; " ")
+    | sub("^ "; "")
+    | sub(" $"; "");
+
+  (["kind", "author", "commit_id", "path", "line", "body"] | @tsv),
+  (inputs | [
+    (.kind // ""),
+    (.author // ""),
+    (.commit_id // .original_commit_id // ""),
+    (.path // ""),
+    (.line // .original_line // .start_line // .original_start_line // ""),
+    (.body | normalize_body)
+  ] | @tsv)
+' "$discussion_path" > "$discussion_index_path"
+
 # Reject a mixed code snapshot if either side moved while the bundle was being built.
 if ! gh pr view "$pr_number" --repo "$GITHUB_REPOSITORY" --json baseRefOid,headRefOid |
   jq -e --arg base "$base_sha" --arg head "$head_sha" \
@@ -136,6 +158,7 @@ jq -n \
   --arg files_path "$files_path" \
   --argjson file_count "$file_count" \
   --arg discussion_path "$discussion_path" \
+  --arg discussion_index_path "$discussion_index_path" \
   --argjson discussion_count "$discussion_count" \
   '{
     schema_version: 1,
@@ -147,5 +170,5 @@ jq -n \
     metadata: {path: $pr_path},
     diff: {path: $diff_path, index_path: $diff_index_path, sha256: $diff_sha256},
     files: {path: $files_path, count: $file_count},
-    discussion: {path: $discussion_path, count: $discussion_count}
+    discussion: {path: $discussion_path, index_path: $discussion_index_path, count: $discussion_count}
   }' > "$manifest_path"

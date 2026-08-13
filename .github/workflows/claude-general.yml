@@ -13,9 +13,9 @@ jobs:
     if: contains(github.event.comment.body, '@claude review')
     runs-on: ubuntu-latest
     env:
-      # Keep the complete review within the original 45-turn budget.
+      # Leave external turn headroom for the analysis handoff and the StructuredOutput summary handoff.
       CLAUDE_REVIEW_ANALYSIS_MAX_TURNS: 34
-      CLAUDE_REVIEW_SUMMARY_MAX_TURNS: 1
+      CLAUDE_REVIEW_SUMMARY_MAX_TURNS: 2
       CLAUDE_REVIEW_INLINE_MAX_TURNS: 10
       # Trusted maintainers trigger reviews, but PR content can still be untrusted. Keep credential scrubbing and
       # Linux PID-namespace isolation enabled for Claude subprocesses.
@@ -73,8 +73,11 @@ jobs:
             - Use `files.jsonl` to identify changed files and prioritize critical code and tests.
             - Use `diff-index.txt` to locate each file in `pr.diff`, then use `Read` with offsets and limits to inspect
               only the needed hunks.
-            - Use `jq`, `Grep`, and targeted `Read` calls on `discussion.jsonl` to inspect existing top-level comments,
-              reviews, and inline comments without loading irrelevant threads.
+            - Use `discussion-index.tsv` as the primary deduplication source. It contains normalized `kind`, `author`,
+              `commit_id`, `path`, `line`, and single-line `body` columns for every discussion item.
+            - Complete deduplication with one query of `discussion-index.tsv`. Only when a possible match needs full thread
+              context, make one additional targeted query against `discussion.jsonl`; keep the deduplication pass to one
+              or two tool calls total and never scan the full JSONL by default.
             - Read the local Git refs from `manifest.json`. Use `git show <merge-base-ref>:<path>` and
               `git show <head-ref>:<path>` for complete before/after file context. Use the base ref only when the captured
               PR base commit is specifically relevant.
@@ -109,10 +112,11 @@ jobs:
             changed critical paths and their tests. Once sufficient evidence has been collected, stop further exploration
             and finish with a compact handoff of supported findings and the material needed for the required summary.
 
-            You have at most `${{ env.CLAUDE_REVIEW_ANALYSIS_MAX_TURNS }}` agentic turns in this phase. This is a hard
-            external limit, and no remaining-turn countdown will be injected. Do not use subagents. If full coverage is
-            impossible, retain the prioritized evidence already established; the same session will be resumed by a
-            summary phase and then an inline-comment publication phase.
+            You may make at most 28 tool calls in this phase; count every invocation separately. After the 24th tool call,
+            stop expanding the review scope and use any remaining calls only to verify or organize evidence already found.
+            The workflow also enforces at most `${{ env.CLAUDE_REVIEW_ANALYSIS_MAX_TURNS }}` agentic turns. Do not use
+            subagents. If full coverage is impossible, retain the prioritized evidence already established; the same
+            session will be resumed by a summary phase and then an inline-comment publication phase.
 
             ## Review Instructions
 
@@ -125,37 +129,29 @@ jobs:
 
             #### 设计接口 review
 
-            1. 在 summary 中对这次代码涉及到的主要流程和关键抽象(类):
-               - 按照修改前的状态画一个增强的 mermaid Flowchart, 每个关键类的关键接口一个 subgraph, 图中要有相关的类和接口全称
-               - 按照修改后的状态再画一个Flowchart, 有修改的部分做突出, 并做文字简要说明
+            1. 根据下文“附录 A：架构审查规则”的标准，检查此次类、接口等改动是否合理，是否做到了良好抽象和信息隐藏。
 
-            2. 根据下文“附录 A：架构审查规则”的标准，检查此次类、接口等改动是否合理，是否做到了良好抽象和信息隐藏。
-
-            3. 根据下文“附录 B：线性业务流程”的标准，检查此次关键抽象的公开接口实现是否把高层方法写成线性业务流程。
+            2. 根据下文“附录 B：线性业务流程”的标准，检查此次关键抽象的公开接口实现是否把高层方法写成线性业务流程。
 
             #### 核心实现 review
 
-            4. 指出本次修改中的核心实现及其对应单测, 并解释其中的原理.
+            3. 检查本次修改中的核心实现及其对应单测，确认核心行为有真实代码路径的覆盖。
 
             #### 单测建议
 
-            5. 当前向 upstream/main 提 PR，如涉及到很多单测新增和改动，需要检查这些单测，并给出重构和精简建议：
-               去掉 Bad Tests，去掉过于简单测试，去掉冗余测试，只保留必要的单测。
-               - 原则: 测试的时候写 Good Tests。Good Tests 测试模块的 public API 和行为，他们测试真实的代码路径，
-                 项目内的模块尽量不做 mock，项目外的依赖才 mock。Bad Tests 则测试内部实现细节。
-               - 格式要求: 将文件中不同类别的 testcase 整理在不同的 TestClass 中，TestClass 的 docstring
-                 说明当前测试的类别。在文件 docstring 里按两个层级（一级 TestClass，二级 test_func）来说明
-                 当前文件做了哪些行为测试。
-               - 注释: 在每个测试用例开头加一行中文的注释说明测试哪种行为。
+            4. 单测问题只关注可能造成回归、真实测试失败或核心行为缺少覆盖的情况。忽略测试组织、冗余或过于
+               简单的测试、未使用 import 和格式问题等 Nit。测试应尽量通过 public API 覆盖真实代码路径；
+               项目内模块尽量不 mock，只 mock 项目外依赖。
 
             #### 其他
 
-            6. 无论是设计接口还是核心实现, 如有改进意见, 在相关位置以伪代码说明.
+            5. 仅在解释 Warning 及以上问题的修复方案确有必要时，提供精简伪代码。
 
-            7. top-level summary 要体现上述所有 review 内容，并按照 summary, Main Flowchart before this PR,
-               Main Flowchart after this PR, 核心原理实现与单测, 抽象与信息隐藏评估, 公开 Interface 的线性业务流程评估,
-               单测建议, 其他 issues 顺序组织。根据实际情况可以增删章节，并且详略得当: 简单的修改, 行文精简;
-               复杂的修改, 行文按需扩展.
+            #### Summary 内容顺序
+
+            Summary 内容必须按以下顺序组织；标注“按需”的章节仅在发现对应 Warning 及以上问题时输出：
+
+            `Summary` → `Main Flowchart after this PR`（按需） → `核心原理实现与单测` → `抽象与信息隐藏评估`（按需） → `公开 Interface 的线性业务流程评估`（按需） → `单测建议`（按需） → `其他 Issues`
 
             ---
 
@@ -215,7 +211,8 @@ jobs:
 
             ##### 改进意见格式
 
-            只有发现真实摩擦时才提出改进。每条意见应包含：
+            只有发现 Warning 及以上的真实摩擦时才提出改进。完整证据用于 analysis handoff 和 inline comment，
+            每条完整意见应包含：
 
             - **Files**：涉及的文件和 Module。
             - **Problem**：当前设计造成的具体摩擦和证据。
@@ -250,15 +247,39 @@ jobs:
 
             1. Write all review comments posted to GitHub, including inline comments and the top-level summary, in Chinese. Technical terms may remain in English.
 
-            2. For every issue, rate how significant it is. Make sure you are confident in your diagnosis.
+            2. Only analyze and report issues at `Warning` severity or above. Ignore `Nit` and all lower-severity
+               findings to keep the review concise. For every reported issue, rate its significance and make sure you
+               are confident in your diagnosis.
 
-            3. Read `${{ env.CLAUDE_REVIEW_INPUT_DIR }}/discussion.jsonl` to avoid reporting the same issue twice.
+            3. Query `${{ env.CLAUDE_REVIEW_INPUT_DIR }}/discussion-index.tsv` first to avoid reporting an issue twice.
+               Use at most one additional targeted query against `discussion.jsonl` only when a possible duplicate needs
+               complete context; keep the entire deduplication pass to one or two tool calls.
 
-            4. In the subsequent publication phases, return the top-level summary through the required structured output
+            4. Include a Mermaid Flowchart only when a `Warning` or higher finding concerns a flow or architecture change.
+               Show at most one post-PR flowchart, mark the changed and problematic nodes, and do not draw a before diagram.
+
+            5. Include architecture assessment, linear-flow assessment, or test-advice sections only when that category
+               has a corresponding `Warning` or higher finding. Otherwise omit the section entirely; do not write
+               "not affected", "no issue", or equivalent placeholders.
+
+            6. Keep the top-level summary concise. Do not repeat the full evidence intended for inline comments. Represent
+               each issue with only its severity, location, and a one-sentence conclusion. Organize sections in this order:
+               `Summary`; `Main Flowchart after this PR` when required by rule 4; `核心原理实现与单测`;
+               `抽象与信息隐藏评估`, `公开 Interface 的线性业务流程评估`, and `单测建议` only when required by rule 5;
+               then `其他 Issues`. Omit inapplicable optional sections while preserving the relative order of the rest.
+
+            7. In the subsequent publication phases, return the top-level summary through the required structured output
                for the workflow to post, and use `mcp__github_inline_comment__create_inline_comment` for specific code
                issues. Do not post comments during this analysis phase.
 
-            5. Prefix all inline GitHub comments with "Claude: ". The workflow adds this prefix to the top-level summary.
+            8. Prefix every inline GitHub comment with `Claude: [分类] `, using exactly one primary category from
+               `设计`, `正确性`, `安全`, `性能`, `兼容性`, `测试`, or `其他`. If an issue genuinely requires cross-file,
+               multi-step, or multi-condition evidence that cannot be explained accurately within the normal limit,
+               add a separate `[复杂]` marker after its primary category.
+
+            9. Except for `[设计]` findings and findings marked `[复杂]`, keep each inline comment's explanatory text
+               within 150 characters. The fixed `Claude: ` prefix, category markers, and Markdown link targets
+               do not count toward this limit. Do not mark an issue as complex merely to include extra background.
 
             ### Code Linking Format
 
@@ -348,21 +369,24 @@ jobs:
             subagents. Use only evidence already present in this session. Omit uncertain findings instead of starting
             new exploration.
 
-            You have exactly one new agentic turn. Do not call any review or research tool. Return exactly one structured
-            result immediately, with the complete publish-ready Markdown summary in its `summary` field. The workflow will
-            read this field from the Action's official `structured_output` and post it to GitHub.
+            You have at most two new agentic turns. Do not call any review or research tool. Return exactly one structured
+            result as soon as the summary is ready, with the complete publish-ready Markdown summary in its `summary`
+            field. The workflow will read this field from the Action's official `structured_output` and post it to GitHub.
 
             Follow all project-specific requirements, output structure, code-linking format, and review-output rules from
             the analysis-phase prompt. Write the summary in Chinese, retain English technical terms where useful, and
-            do not add the `Claude: ` prefix because the trusted publication step adds it. If no specific issue is
-            sufficiently supported, state that explicitly. Do not wrap the summary in an outer code fence and do not add
-            meta-commentary before or after it.
+            do not add the `Claude: ` prefix because the trusted publication step adds it. For each issue, include only
+            severity, location, and a one-sentence conclusion; leave full evidence to inline comments. If no `Warning` or
+            higher issue is sufficiently supported, state that in one concise sentence and omit all optional sections.
+            Preserve the required section order after omitting optional sections. Do not wrap the summary in an outer
+            code fence or add meta-commentary before or after it.
+          # --json-schema returns through the StructuredOutput tool, so keep that single tool available.
           claude_args: |
               --resume ${{ steps.claude-review-session.outputs.session_id }}
               --max-turns ${{ env.CLAUDE_REVIEW_SUMMARY_MAX_TURNS }}
               --model opus
               --json-schema '{"type":"object","properties":{"summary":{"type":"string","minLength":1}},"required":["summary"],"additionalProperties":false}'
-              --disallowedTools "*"
+              --tools "StructuredOutput"
           # Hidden Action coupling: a non-empty value installs the bubblewrap/socat subprocess-isolation dependencies.
           # No github_token input is passed, so "*" does not bypass the Action's write-permission check here.
           allowed_non_write_users: "*"
@@ -404,8 +428,10 @@ jobs:
             2. Finish immediately after publishing the selected inline comments. Do not call `gh pr comment`.
 
             Follow all project-specific requirements, code-linking format, and review-output rules from the analysis-phase
-            prompt. Write every inline comment in Chinese, retain English technical terms where useful, and prefix every
-            comment with `Claude: `. If no specific issue is sufficiently supported, finish without posting one.
+            prompt. Write every inline comment in Chinese and retain English technical terms where useful. Start it with
+            `Claude: [分类] `; add `[复杂]` only when the issue meets the analysis-phase definition. Except for `[设计]`
+            and `[复杂]` findings, keep the explanatory text within 150 characters, excluding the fixed prefix,
+            markers, and Markdown link targets. If no specific issue is sufficiently supported, finish without posting one.
           claude_args: |
               --resume ${{ steps.claude-review-session.outputs.session_id }}
               --max-turns ${{ env.CLAUDE_REVIEW_INLINE_MAX_TURNS }}
