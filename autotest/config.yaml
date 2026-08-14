@@ -96,6 +96,7 @@ case:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
+                    - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
             assert_info:
                 base_metric: glm5-2-sft-30B-sp2-tp2/tracker.jsonl
                 check_metrics:
