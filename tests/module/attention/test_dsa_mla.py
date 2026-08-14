@@ -3,6 +3,7 @@
 TestTorchSparseMLA
     test_padded_indices_support_int32_and_backward: PyTorch 后端处理 padding、int32 和反向传播。
 TestDSAAttention
+    test_source_layer_passes_real_query_mask_to_indexer_loss: padding query 不进入 indexer KL。
     test_packed_inputs_respect_causal_boundaries_and_backward: packed attention 遵守分段因果边界并可反传。
     test_shared_layers_reuse_topk_without_cross_context_leak: shared layer 复用当前样本 top-k 且不跨样本泄漏。
     test_reentrant_checkpoint_reuses_and_releases_topk: checkpoint 重算复用并最终释放 top-k。
@@ -28,8 +29,10 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import Checkpoi
 
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.model.moe.moe import MoE
 from xtuner.v1.model.utils import checkpoint_wrapper
-from xtuner.v1.module.attention import DSAMLAConfig
+from xtuner.v1.module.attention import DSAIndexerTrainingConfig, DSAMLAConfig
+from xtuner.v1.module.attention import dsa_mla as dsa_mla_module
 from xtuner.v1.module.attention.dsa_topk_sharing import register_dsa_topk_decoder_lifecycle_hooks
 from xtuner.v1.ops.sparse_mla import dsa_topk_indices, sparse_mla
 from xtuner.v1.utils.test_utils import init_data_mesh
@@ -102,6 +105,7 @@ def _cudnn_dsa_sparse_mla_inputs():
 def _tiny_dsa_attention(
     indexer_types: list[str] | None = None,
     layer_idx: int = 0,
+    indexer_training: DSAIndexerTrainingConfig | None = None,
 ):
     return DSAMLAConfig(
         num_attention_heads=2,
@@ -115,6 +119,7 @@ def _tiny_dsa_attention(
         index_head_dim=4,
         index_n_heads=2,
         indexer_types=indexer_types,
+        indexer_training=indexer_training,
         sparse_mla_backend="torch",
     ).build(hidden_size=4, layer_idx=layer_idx)
 
@@ -167,6 +172,201 @@ class TestTorchSparseMLA:
 
 
 class TestDSAAttention:
+    def test_source_layer_losses_are_averaged_and_released_at_model_boundary(self):
+        first_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu")
+        second_ctx = SequenceContext.from_input_ids((torch.tensor([[3, 4]]),), device="cpu")
+        first_ctx.dsa_topk_cache.indexer_losses.extend([torch.tensor(1.0), torch.tensor(3.0)])
+        second_ctx.dsa_topk_cache.indexer_losses.append(torch.tensor(5.0))
+
+        indexer_loss = MoE._consume_indexer_losses([first_ctx, second_ctx])
+
+        torch.testing.assert_close(indexer_loss, torch.tensor(3.0))
+        assert first_ctx.dsa_topk_cache.indexer_losses == []
+        assert second_ctx.dsa_topk_cache.indexer_losses == []
+
+    def test_indexer_training_is_opt_in_and_only_materializes_on_source_layers(self):
+        # None 是严格 frozen baseline；启用后也只有 Full/source layer 持有可训练 indexer。
+        frozen = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0)
+        trainable = _tiny_dsa_attention(
+            indexer_types=["full", "shared"],
+            layer_idx=0,
+            indexer_training=DSAIndexerTrainingConfig(loss_coeff=1.0),
+        )
+        shared = _tiny_dsa_attention(
+            indexer_types=["full", "shared"],
+            layer_idx=1,
+            indexer_training=DSAIndexerTrainingConfig(loss_coeff=1.0),
+        )
+
+        assert all(not parameter.requires_grad for parameter in frozen.indexer.parameters())
+        assert all(parameter.requires_grad for parameter in trainable.indexer.parameters())
+        assert not hasattr(shared, "indexer")
+
+    def test_training_weights_preserve_existing_topk_score_scaling(self):
+        attention = _tiny_dsa_attention(
+            indexer_types=["full"],
+            indexer_training=DSAIndexerTrainingConfig(loss_coeff=1.0),
+        )
+        hidden_states = torch.randn(1, 4, 4)
+        q_resid = torch.randn(1, 4, 4)
+        position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
+        seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
+
+        features = attention.indexer.project_features(hidden_states, q_resid, position_embeddings, seq_ctx)
+        dot = torch.einsum("bshd,btd->bsht", features.q.float(), features.k.float())
+        selection_logits = torch.einsum(
+            "bsht,bsh->bst",
+            torch.relu(dot * (attention.index_head_dim**-0.5)),
+            features.selection_weights,
+        )
+        training_logits = torch.einsum("bsht,bsh->bst", torch.relu(dot), features.training_weights.float())
+
+        torch.testing.assert_close(training_logits, selection_logits)
+
+    def test_source_layer_loss_updates_only_indexer_and_detaches_model_inputs(self, monkeypatch):
+        # Use a differentiable PyTorch oracle to verify the source-layer autograd boundary.
+        def fake_indexer_loss(
+            index_q,
+            index_k,
+            index_weights,
+            attention_q,
+            attention_k,
+            softmax_lse,
+            topk_indices,
+            *,
+            softmax_scale,
+            row_coefficient,
+            valid_query_mask,
+            debug_name,
+            debug_interval,
+        ):
+            del attention_q, attention_k, softmax_lse, topk_indices, softmax_scale, debug_name, debug_interval
+            query_mask = valid_query_mask.unsqueeze(-1)
+            return row_coefficient * (
+                index_q.float().square().masked_fill(~query_mask.unsqueeze(-1), 0.0).sum()
+                + index_k.float().square().sum()
+                + index_weights.float().square().masked_fill(~query_mask, 0.0).sum()
+            )
+
+        monkeypatch.setattr(dsa_mla_module, "dsa_indexer_kl_loss", fake_indexer_loss)
+        torch.manual_seed(17)
+        frozen = _tiny_dsa_attention(indexer_types=["full"], layer_idx=0)
+        trainable = _tiny_dsa_attention(
+            indexer_types=["full"],
+            layer_idx=0,
+            indexer_training=DSAIndexerTrainingConfig(loss_coeff=0.25),
+        )
+        trainable.load_state_dict(frozen.state_dict())
+        position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
+        frozen_hidden = torch.randn(1, 4, 4, requires_grad=True)
+        trained_hidden = frozen_hidden.detach().clone().requires_grad_()
+
+        frozen_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
+        frozen_output = frozen(frozen_hidden, position_embeddings, frozen_ctx)["projected_output"]
+        frozen_output.square().mean().backward()
+
+        trained_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
+        trained_output = trainable(trained_hidden, position_embeddings, trained_ctx)["projected_output"]
+        assert len(trained_ctx.dsa_topk_cache.indexer_losses) == 1
+        indexer_loss = trained_ctx.dsa_topk_cache.indexer_losses[0]
+        (trained_output.square().mean() + indexer_loss).backward()
+
+        torch.testing.assert_close(trained_hidden.grad, frozen_hidden.grad)
+        frozen_parameters = dict(frozen.named_parameters())
+        for name, trained_parameter in trainable.named_parameters():
+            if name.startswith("indexer."):
+                continue
+            frozen_grad = frozen_parameters[name].grad
+            assert (trained_parameter.grad is None) == (frozen_grad is None)
+            if trained_parameter.grad is not None:
+                torch.testing.assert_close(trained_parameter.grad, frozen_grad)
+        assert all(parameter.grad is not None for parameter in trainable.indexer.parameters())
+        assert all(torch.isfinite(parameter.grad).all() for parameter in trainable.indexer.parameters())
+
+    def test_source_layer_passes_real_query_mask_to_indexer_loss(self, monkeypatch):
+        captured = {}
+
+        def capture_indexer_loss(
+            index_q,
+            index_k,
+            index_weights,
+            attention_q,
+            attention_k,
+            softmax_lse,
+            topk_indices,
+            *,
+            softmax_scale,
+            row_coefficient,
+            valid_query_mask,
+            debug_name,
+            debug_interval,
+        ):
+            del index_k, index_weights, attention_q, attention_k, softmax_lse, softmax_scale
+            captured["row_coefficient"] = row_coefficient
+            captured["valid_query_mask"] = valid_query_mask.detach().clone()
+            captured["topk_valid_rows"] = (topk_indices != -1).any(dim=-1).detach().clone()
+            captured["debug_name"] = debug_name
+            captured["debug_interval"] = debug_interval
+            return index_q.float().sum() * 0.0
+
+        monkeypatch.setattr(dsa_mla_module, "dsa_indexer_kl_loss", capture_indexer_loss)
+        attention = _tiny_dsa_attention(
+            indexer_types=["full"],
+            layer_idx=0,
+            indexer_training=DSAIndexerTrainingConfig(loss_coeff=0.25),
+        )
+        hidden_states = torch.randn(1, 4, 4)
+        position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
+        # The final two physical rows form a causal padding chunk. Its top-k
+        # indices are valid-looking, but num_padding must still exclude it.
+        seq_ctx = SequenceContext(
+            input_ids=torch.tensor([[1, 2, 0, 0]]),
+            cu_seq_lens_q=torch.tensor([0, 2, 4], dtype=torch.int32),
+            cu_seq_lens_k=torch.tensor([0, 2, 4], dtype=torch.int32),
+            max_length_q=2,
+            max_length_k=2,
+            num_padding=2,
+            device="cpu",
+        )
+
+        attention(hidden_states, position_embeddings, seq_ctx)
+
+        assert captured["topk_valid_rows"].tolist() == [[True, True, True, True]]
+        torch.testing.assert_close(captured["valid_query_mask"], torch.tensor([[True, True, False, False]]))
+        assert captured["row_coefficient"] == pytest.approx(0.25 / 2)
+        assert captured["debug_name"] == "layer0"
+        assert captured["debug_interval"] == 0
+
+    def test_source_layer_training_rejects_no_grad_checkpoint_forward(self):
+        attention = _tiny_dsa_attention(
+            indexer_types=["full"],
+            layer_idx=0,
+            indexer_training=DSAIndexerTrainingConfig(loss_coeff=1.0),
+        )
+        hidden_states = torch.randn(1, 4, 4)
+        position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
+        seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
+
+        with torch.no_grad(), pytest.raises(RuntimeError, match="does not support activation checkpointing"):
+            attention(hidden_states, position_embeddings, seq_ctx)
+
+    def test_zero_loss_coefficient_keeps_trainable_indexer_grad_none(self):
+        # coeff=0 必须完全绕过 autograd，避免 AdamW 对 zero grad tensor 执行 weight decay。
+        attention = _tiny_dsa_attention(
+            indexer_types=["full"],
+            layer_idx=0,
+            indexer_training=DSAIndexerTrainingConfig(loss_coeff=0.0),
+        )
+        hidden_states = torch.randn(1, 4, 4, requires_grad=True)
+        position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
+        seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
+
+        output = attention(hidden_states, position_embeddings, seq_ctx)["projected_output"]
+        output.square().mean().backward()
+
+        assert seq_ctx.dsa_topk_cache.indexer_losses == []
+        assert all(parameter.grad is None for parameter in attention.indexer.parameters())
+
     def test_packed_inputs_respect_causal_boundaries_and_backward(self):
         # 验证 packed attention 不跨子序列取 key，并能对真实输入完成有限反向传播。
         torch.manual_seed(0)

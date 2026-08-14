@@ -84,11 +84,24 @@ class Glm52MoE(MoE):
                 assert isinstance(self_attn, DSAMultiLatentAttention), (
                     f"GLM-5.2 MTP requires DSAMultiLatentAttention, got {type(self_attn).__name__}."
                 )
+                # Train only main-stack Full/source indexers.
+                # Freeze before optimizer construction, so MTP parameters are
+                # neither updated nor used to build an auxiliary loss graph.
+                if self_attn.indexer_training is not None:
+                    self_attn.disable_indexer_training()
                 dsa_layers.append((decoder_layer, self_attn))
                 if mtp_idx == 0:
                     mtp_attention = self_attn
 
         sample_attn = dsa_layers[0][1]
+        if sample_attn.indexer_training is not None and sample_attn.indexer_training.indexer_only:
+            # Make the sparse-attention teacher stationary for the strict
+            # overfit gate. Only main-stack Full/source indexers are restored
+            # to trainable; shared layers own no indexer and MTP stays frozen.
+            self.requires_grad_(False)
+            for _, self_attn in dsa_layers[: self.config.num_hidden_layers]:
+                if self_attn.source_layer_idx == self_attn.layer_idx:
+                    self_attn.indexer.requires_grad_(True)
         release_plan = build_dsa_topk_release_plan(
             num_main_layers=self.config.num_hidden_layers,
             num_mtp_layers=num_physical_mtp_layers,
