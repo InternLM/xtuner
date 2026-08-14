@@ -23,9 +23,10 @@ import torch.nn.functional as F
 from xtuner._testing.testcase import DeterministicDDPTestCase
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.config.optim import MuonConfig
+from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.model.base import BaseModel, XTunerBaseModelConfig
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseMLP
-from xtuner.v1.optim.muon import zeropower_via_newtonschulz5
+from xtuner.v1.optim.muon import Muon, _muonsplit_newton_schulz, zeropower_via_newtonschulz5
 
 
 # ─── Test: Newton-Schulz functions ───────────────────────────────────────────
@@ -57,6 +58,34 @@ class TestNewtonSchulz(DeterministicDDPTestCase):
             assert not torch.isnan(result1).any()
             assert not torch.isnan(result2).any()
             torch.testing.assert_close(result1, result2, atol=3e-2, rtol=3e-2)
+
+    def test_muonsplit_matches_independent_blocks(self):
+        self.create_pg("cuda")
+        split_sizes = (6, 2, 6, 2)
+        logical_rows = sum(split_sizes)
+        G = torch.randn(logical_rows + 2, 4, device="cuda", dtype=torch.float32)
+
+        result = _muonsplit_newton_schulz(
+            G,
+            epsilon=1e-7,
+            num_experts=1,
+            newton_schulz_func=zeropower_via_newtonschulz5,
+            split_sizes=split_sizes,
+            adjust_lr="rms_norm",
+        )
+
+        expected_chunks = []
+        offset = 0
+        for size in split_sizes:
+            chunk = G.narrow(0, offset, size)
+            chunk = zeropower_via_newtonschulz5(chunk, epsilon=1e-7)
+            chunk.mul_(0.2 * math.sqrt(max(size, G.size(1))))
+            expected_chunks.append(chunk)
+            offset += size
+        expected_chunks.append(torch.zeros_like(G[logical_rows:]))
+        expected = torch.cat(expected_chunks)
+
+        torch.testing.assert_close(result, expected)
 
 
 # ─── Model for end-to-end tests ──────────────────────────────────────────────
@@ -362,6 +391,70 @@ class TestMuonSingleGPU(DeterministicDDPTestCase):
                 msg=f"mismatch on '{name}': max_abs={abs_diff.max().item():.2e}, max_rel={rel_diff.max().item():.2e}",
             )
 
+    def test_clip_grad_norm_only_clips_adamw(self):
+        self.create_pg("cuda")
+        device = "cuda"
+        model = ToyMoEModelConfig(compile_cfg=False).build().to(device)
+        model.fully_shard(
+            FSDPConfig(
+                param_dtype=torch.float32,
+                reduce_dtype=torch.float32,
+                torch_compile=False,
+            )
+        )
+
+        optim_config = MuonConfig(max_grad_norm=1.0)
+        optimizer = optim_config.build(model)
+        total_squared = 0
+        adamw_squared = 0
+        for group in optimizer.param_groups:
+            is_muon = group["algorithm"] == "muon"
+            assert group["clip_grad"] is not is_muon
+            grad_value = 2.0 if is_muon else 1.0
+            for param in group["params"]:
+                param.grad = torch.full_like(param, grad_value)
+                total_squared += param.numel() * grad_value**2
+                if not is_muon:
+                    adamw_squared += param.numel()
+            # The engine must consume only the generic policy, not optimizer-specific metadata.
+            group["algorithm"] = "test"
+
+        engine = object.__new__(TrainEngine)
+        engine.model = model
+        engine.optimizer = optimizer
+        engine.optim_cfg = optim_config
+        grad_norm = engine.clip_grad_norm()
+
+        torch.testing.assert_close(grad_norm, torch.tensor(math.sqrt(total_squared), device=device))
+        clip_coef = min(1.0, optim_config.max_grad_norm / (math.sqrt(adamw_squared) + 1e-6))
+        for group in optimizer.param_groups:
+            expected = clip_coef if group["clip_grad"] else 2.0
+            for param in group["params"]:
+                torch.testing.assert_close(param.grad.to_local(), torch.full_like(param.grad.to_local(), expected))
+
+    def test_clip_grad_policy_is_preserved_on_load(self):
+        muon_param = nn.Parameter(torch.empty(4, 4))
+        adamw_param = nn.Parameter(torch.empty(4))
+        optimizer = Muon(
+            [
+                {"params": [muon_param]},
+                {"params": [adamw_param], "algorithm": "adamw"},
+            ]
+        )
+        assert [group["clip_grad"] for group in optimizer.param_groups] == [False, True]
+
+        state_dict = optimizer.state_dict()
+        assert all("clip_grad" not in group for group in state_dict["param_groups"])
+
+        state_dict["param_groups"][0]["clip_grad"] = True
+        state_dict["param_groups"][1]["clip_grad"] = False
+        optimizer.load_state_dict(state_dict)
+        assert [group["clip_grad"] for group in optimizer.param_groups] == [False, True]
+        assert [group["clip_grad"] for group in state_dict["param_groups"]] == [True, False]
+
+        optimizer.add_param_group({"params": [nn.Parameter(torch.empty(4, 4))]})
+        assert optimizer.param_groups[-1]["clip_grad"] is False
+
 
 # ─── Test: end-to-end FSDP ───────────────────────────────────────────────────
 
@@ -430,7 +523,9 @@ class TestMuonFSDP(DeterministicDDPTestCase):
         fsdp_loss.backward()
 
         # ── Production Muon optimizer step ────────────────────────────────────
-        muon_config = MuonConfig(lr=LR, momentum=MU, weight_decay=WD, eps=EPSILON, betas=BETAS, enable_all2all=enable_all2all)
+        muon_config = MuonConfig(
+            lr=LR, momentum=MU, weight_decay=WD, eps=EPSILON, betas=BETAS, enable_all2all=enable_all2all
+        )
         optim = muon_config.build(model)
         optim.step()
 

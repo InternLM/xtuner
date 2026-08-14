@@ -41,15 +41,19 @@ class _FakeProduceStrategy:
         self,
         cleanup_pause_time_s: float = 0.0,
         stale_threshold: int = 1,
+        tail_batch_trigger_size: int = 0,
     ):
         self.cleanup_pause_time_s = cleanup_pause_time_s
         self.stale_threshold = stale_threshold
+        self.tail_batch_trigger_size = tail_batch_trigger_size
         self.called_batch_sizes: list[int] = []
         self.called_train_steps: list[int] = []
         self.called_model_steps: list[int] = []
         self.called_progresses: list[object] = []
         self.cleanup_model_steps: list[int] = []
         self.cleanup_progresses: list[object | None] = []
+        self.called_expired_groups_retryable: list[bool] = []
+        self.cleanup_expired_groups_retryable: list[bool] = []
         self.cleanup_call_count = 0
 
     async def produce_batch(self, ctx) -> None:
@@ -58,6 +62,7 @@ class _FakeProduceStrategy:
         self.called_model_steps.append(ctx.model_step)
         self.assert_colocate_context(ctx)
         self.called_progresses.append(ctx.progress)
+        self.called_expired_groups_retryable.append(ctx.expired_groups_retryable)
 
     def assert_colocate_context(self, ctx) -> None:
         for disagg_only_name in ("update_event", "available_count", "total_target"):
@@ -68,6 +73,7 @@ class _FakeProduceStrategy:
         self.cleanup_call_count += 1
         self.cleanup_model_steps.append(ctx.model_step)
         self.cleanup_progresses.append(ctx.progress)
+        self.cleanup_expired_groups_retryable.append(ctx.expired_groups_retryable)
         return self.cleanup_pause_time_s
 
 
@@ -115,6 +121,7 @@ class _FakeReplayBuffer:
         self._rollout_states_by_task = rollout_states_by_task
         self._leftover_counts = leftover_counts
         self.refresh_staleness_calls: list[tuple[str, int, int, tuple[Status, ...]]] = []
+        self.expired_groups_retryable_calls: list[dict[str, bool]] = []
 
     async def get(self, batch_size: int, task_name: str, group_status: Status):
         assert group_status == Status.COMPLETED
@@ -130,9 +137,11 @@ class _FakeReplayBuffer:
         self,
         *,
         task_stale_thresholds: dict[str, int],
+        expired_groups_retryable_by_task: dict[str, bool] | None = None,
         current_train_step: int,
         statuses: list[Status] | None = None,
     ):
+        self.expired_groups_retryable_calls.append(dict(expired_groups_retryable_by_task or {}))
         expired_counts = {}
         for task_name, stale_threshold in task_stale_thresholds.items():
             self.refresh_staleness_calls.append(
@@ -198,7 +207,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
     async def test_produce_batch_allocates_by_weight_and_returns_task_sorted_results(self):
         # 共卡 produce_batch 按 task 权重分配 batch，并按 task 名稳定返回训练数据和 leftover 统计。
-        strategy_a = _FakeProduceStrategy()
+        strategy_a = _FakeProduceStrategy(tail_batch_trigger_size=2)
         strategy_b = _FakeProduceStrategy()
         strategy_c = _FakeProduceStrategy()
         replay_buffer = _FakeReplayBuffer(
@@ -257,6 +266,14 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertIn("task_a", result.task_results)
         self.assertIn("task_b", result.task_results)
         self.assertIn("task_c", result.task_results)
+        self.assertEqual(
+            replay_buffer.expired_groups_retryable_calls,
+            [{"task_b": False, "task_a": True, "task_c": False}],
+        )
+        self.assertEqual(strategy_a.called_expired_groups_retryable, [True])
+        self.assertEqual(strategy_a.cleanup_expired_groups_retryable, [True])
+        self.assertEqual(strategy_b.called_expired_groups_retryable, [False])
+        self.assertEqual(strategy_b.cleanup_expired_groups_retryable, [False])
 
     async def test_disagg_get_batch_aggregates_multi_task_results_without_colocate_surface(self):
         # 非共卡 get_batch 使用后台 progress 消费 replay buffer，不依赖共卡 produce_batch 继承面。
