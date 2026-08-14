@@ -5,7 +5,7 @@ from transformers import AutoTokenizer, AutoProcessor,Qwen3VLProcessor
 import json
 import torch
 import parametrize
-from xtuner.v1.utils.test_utils import add_video_root
+from xtuner.v1.utils.test_utils import add_video_root, get_qwen3_vl_video_chat_template
 from packaging.version import Version
 from transformers import __version__ as transformers_version
 import unittest
@@ -287,10 +287,16 @@ class TestMLLMTokenizeFn(TestCase):
                 add_video_root(messages, VIDEO_ROOT)
 
                 if i not in [8, 9]:
-                    ret = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=True,
-                                                             do_sample_frames=do_sample_frames,
-                                                             return_dict=True, add_vision_id=add_vision_id,
-                                                             return_tensors="pt")
+                    ret = self.processor.apply_chat_template(
+                        messages,
+                        chat_template=get_qwen3_vl_video_chat_template(self.processor),
+                        add_generation_prompt=False,
+                        tokenize=True,
+                        return_dict=True,
+                        add_vision_id=add_vision_id,
+                        return_tensors="pt",
+                        processor_kwargs={"do_sample_frames": do_sample_frames},
+                    )
                     input_ids_hf = ret['input_ids'][0]
                     pixel_values_hf = ret['pixel_values_videos']
                     image_grid_thw_hf = ret['video_grid_thw']

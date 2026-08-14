@@ -32,15 +32,19 @@ VIDEO_ROOT = os.environ["VIDEO_ROOT"]
 )
 class TestQwen3_5_VL(DeterministicDDPTestCase):
     def _patch_xtuner_fast_pos_embed_interpolate(self) -> None:
-        from xtuner.v1.model.compose.qwen3_vl.modeling_vision import Qwen3VLVisionModel
-        from transformers.models.qwen3_5_moe import Qwen3_5MoeVisionModel
+        from transformers.vision_utils import get_vision_bilinear_indices_and_weights
 
-        hf_fast_pos_embed_interpolate = Qwen3_5MoeVisionModel.fast_pos_embed_interpolate
+        from xtuner.v1.model.compose.qwen3_vl.modeling_vision import Qwen3VLVisionModel
 
         def _fast_pos_embed_interpolate(self, grid_thw):
             # Transformers 5.14 accumulates interpolation in fp32 and casts in its
             # forward; XTuner's older forward expects this helper to keep the model dtype.
-            return hf_fast_pos_embed_interpolate(self, grid_thw).to(self.pos_embed.weight.dtype)
+            indices, weights = get_vision_bilinear_indices_and_weights(
+                grid_thw,
+                num_grid_per_side=self.num_grid_per_side,
+                spatial_merge_size=self.config.spatial_merge_size,
+            )
+            return (self.pos_embed(indices) * weights[:, :, None]).sum(0).to(self.pos_embed.weight.dtype)
 
         Qwen3VLVisionModel.fast_pos_embed_interpolate = _fast_pos_embed_interpolate
 
@@ -213,6 +217,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
             # hf_save_cfg of text_model is ignored to align with transformers's forward result
             model_cfg.text_config.hf_save_cfg = HFSaveCfg()
             model_cfg.text_config.router_compute_dtype = "native"
+            model_cfg.text_config.hf_compatible_moe_combine = True
             qwen3vl_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         qwen3vl_model.from_hf(QWEN3_VL_MOE_PATH)
@@ -222,8 +227,14 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         loss_xtuner_image = self._forward(qwen3vl_model, type='image',device=device, sp_size=sp_size)
         loss_xtuner_video = self._forward(qwen3vl_model, type='video',device=device, sp_size=sp_size)
         
-        self.assertTrue(torch.allclose(loss_xtuner_text, loss_hf_text.to(loss_xtuner_text.dtype), atol=tol, rtol=tol))
-        self.assertTrue(torch.allclose(loss_xtuner_image, loss_hf_image.to(loss_xtuner_image.dtype), atol=tol, rtol=tol))
+        self.assertTrue(
+            torch.allclose(loss_xtuner_text, loss_hf_text.to(loss_xtuner_text.dtype), atol=tol, rtol=tol),
+            f"Text loss mismatch: XTuner={loss_xtuner_text.item()}, HF={loss_hf_text.item()}",
+        )
+        self.assertTrue(
+            torch.allclose(loss_xtuner_image, loss_hf_image.to(loss_xtuner_image.dtype), atol=tol, rtol=tol),
+            f"Image loss mismatch: XTuner={loss_xtuner_image.item()}, HF={loss_hf_image.item()}",
+        )
         # self.assertTrue(torch.allclose(loss_xtuner_video, loss_hf_video.to(loss_xtuner_video.dtype), atol=tol, rtol=tol))
         
         del qwen3vl_model
@@ -235,6 +246,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
             # hf_save_cfg of text_model is ignored to align with transformers's forward result
             model_cfg.text_config.hf_save_cfg = HFSaveCfg()
             model_cfg.text_config.router_compute_dtype = "native"
+            model_cfg.text_config.hf_compatible_moe_combine = True
             qwen3vl_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
         
         fsdp_config = FSDPConfig(cpu_offload=False)
@@ -263,12 +275,12 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         self.create_pg(device)
         self._patch_xtuner_fast_pos_embed_interpolate()
 
-        # pt29 + transformers 5.2.0 with XTUNER_DETERMINISTIC=true, which pins Triton autotune.
+        # pt29 + transformers 5.14.1 with XTUNER_DETERMINISTIC=true, which pins Triton autotune.
         # The 11.5k-token video has a stable SP-specific LM-loss baseline on this path.
         loss_reference = {
             "text": 1.4981,
             "image": 3.6109,
-            "video": {1: 9.3212, 4: 8.6532}[sp_size],
+            "video": {1: 8.5521, 4: 8.1323}[sp_size],
         }
 
         QWEN3_VL_MOE_PATH = os.environ["QWEN3_5_MOE_PATH"]
@@ -309,7 +321,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
                     atol=tol,
                     rtol=tol
                 ),
-                f"Expected text loss around {key}, but got {loss.item()}"
+                f"Expected {key} loss around {loss_reference[key]}, but got {loss.item()}"
             )
 
 
