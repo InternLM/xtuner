@@ -560,14 +560,6 @@ class MoE(BaseModel):
         moe_info = cast(MoEBatchForwardInfo, base_info)
         return moe_info
 
-    @staticmethod
-    def _prepare_seq_ctx_topk_cache(seq_ctx_list: Sequence[SequenceContext]) -> None:
-        # A slot owns both runtime offload state and pinned storage. TrainEngine
-        # finishes backward before the next accumulation group, so only contexts
-        # in one model call can be live concurrently and need distinct slots.
-        for offload_slot, seq_ctx in enumerate(seq_ctx_list):
-            seq_ctx.dsa_topk_cache.offload_slot = offload_slot
-
     def _micro_batch_forward(
         self,
         seq_ctx_list: list[SequenceContext],
@@ -579,7 +571,6 @@ class MoE(BaseModel):
         This method processes multiple micro-batches in parallel, similar to how MoEDecoderLayer handles micro-batching
         at the layer level.
         """
-        self._prepare_seq_ctx_topk_cache(seq_ctx_list)
         if self.config.return_hidden_states:
             raise NotImplementedError
 
@@ -854,7 +845,6 @@ class MoE(BaseModel):
         loss_ctx: MoELossContextDict | None,
         return_router_logits: bool = False,
     ) -> MoEModelOutputs:
-        self._prepare_seq_ctx_topk_cache([seq_ctx])
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
 
