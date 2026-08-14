@@ -31,6 +31,7 @@ from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridP
 from .preset_pack import PresetPackDataset
 from .preset_sampler import PresetSampler
 from .sampler import LengthGroupedSampler, ParallelSampler
+from .tokenize_debug import maybe_dump_tokenize_debug_samples
 from .utils import CachableTokenizeFunction, tokenizer_xxhash
 from .vlm_jsonl import VLMJsonlDataset
 
@@ -132,6 +133,11 @@ def build_datasets(
             _tokenize_fn = _tokenize_fn_name.build(tokenizer, tokenizer_hash=tokenizer_hash, anno_name=anno_name)
             _dataset = _dataset_config.build(_tokenize_fn)
             if get_rank() == 0:
+                maybe_dump_tokenize_debug_samples(
+                    dataset=_dataset,
+                    tokenize_fn=_tokenize_fn,
+                    dataset_name=_dataset_config.name,
+                )
                 logger.info(
                     f"[Dataset] (Original) {_dataset_config.name}/{os.path.basename(anno_path)}: {len(_dataset)} samples."
                 )

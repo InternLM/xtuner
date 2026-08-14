@@ -138,6 +138,7 @@ def qwen35_tokenize_fn_fastspeed(
     add_generation_prompt=False,
     add_vision_id=False,
     return_labels=True,
+    _tool_call_args_renderer=_render_tool_call_args,
 ):
     enable_thinking = any("reasoning_content" in msg for msg in messages)
 
@@ -175,16 +176,8 @@ def qwen35_tokenize_fn_fastspeed(
             sys_content = _render(messages[0]["content"], False).strip()
             _append(f"<|im_start|>system\n{sys_content}<|im_end|>\n", False)
 
-    # ── 计算 last_query_index ─────────────────────────────────────────────
-    multi_step_tool = True
-    last_query_index = len(messages) - 1
-    for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
-        if multi_step_tool and msg["role"] == "user":
-            content_str = _render(msg["content"], False).strip()
-            if not (content_str.startswith("<tool_response>") and content_str.endswith("</tool_response>")):
-                multi_step_tool = False
-                last_query_index = i
+    # 强制所有 assistant turn 都走训练分支，保留并训练历史 thinking/content。
+    last_query_index = -1
 
     # ── 主循环 ────────────────────────────────────────────────────────────
     for idx, message in enumerate(messages):
@@ -256,7 +249,7 @@ def qwen35_tokenize_fn_fastspeed(
                         _append(f"\n<tool_call>\n<function={tc_name}>\n", body_is_loss)
 
                     if isinstance(tc_args, dict):
-                        _append(_render_tool_call_args(tc_args), body_is_loss)
+                        _append(_tool_call_args_renderer(tc_args), body_is_loss)
                     _append("</function>\n</tool_call>", body_is_loss)
 
             _append("<|im_end|>\n", body_is_loss)
@@ -390,6 +383,11 @@ class Qwen35ChatMessages(BaseModel):
     messages: List[dict]  # 暂时不做校验
     tools: Optional[List[Dict]] = None
 
+    def _tokenize_chat(self, tokenizer, add_vision_id):
+        return qwen35_tokenize_fn_fastspeed(
+            self.messages, tokenizer, self.tools, add_vision_id=add_vision_id, return_labels=True
+        )
+
     def tokenize(
         self, tokenizer: PreTrainedTokenizer, chat_template: HybridChatTemplate, add_vision_id=False, **kwargs
     ) -> Dict:
@@ -415,7 +413,5 @@ class Qwen35ChatMessages(BaseModel):
                 else:
                     self.messages.insert(0, {"role": "system", "content": chat_template.default_system})
 
-            token_ids, label_ids = qwen35_tokenize_fn_fastspeed(
-                self.messages, tokenizer, self.tools, add_vision_id=add_vision_id, return_labels=True
-            )
+            token_ids, label_ids = self._tokenize_chat(tokenizer, add_vision_id)
         return {"input_ids": token_ids, "labels": label_ids}

@@ -248,12 +248,22 @@ class TestChatTemplate(TestCase):
         for j, data in enumerate(all_data):
             if j in [13,14]: # video 肯定和 hf 对不上
                 continue
-            gt_token_ids, gt_labels = qwen35_tokenize_fn_slowspeed(tokenizer, data['messages'], tools=data.get('tools'), add_vision_id=True)
             _messages = Qwen35ChatMessages(messages=data["messages"], tools=data.get("tools"))
             tokenized = _messages.tokenize(tokenizer, chat_template, add_vision_id=True)
             decode_str = tokenizer.decode(tokenized['input_ids'], skip_special_tokens=False)
+            has_multiple_user_queries = sum(msg["role"] == "user" for msg in data["messages"]) > 1
 
-            if j!=15 and j!=16:
+            if has_multiple_user_queries:
+                # XTuner 内部渲染会保留所有 assistant turn，不再与会丢弃历史 thinking 的 HF 模板对齐。
+                for message in data["messages"]:
+                    if message["role"] == "assistant":
+                        self.assertIn(message["content"].strip(), decode_str)
+                        if message.get("reasoning_content"):
+                            self.assertIn(message["reasoning_content"].strip(), decode_str)
+            elif j!=15 and j!=16:
+                gt_token_ids, gt_labels = qwen35_tokenize_fn_slowspeed(
+                    tokenizer, data["messages"], tools=data.get("tools"), add_vision_id=True
+                )
                 self.assertEqual(tokenized['input_ids'], gt_token_ids)
                 self.assertEqual(tokenized['labels'], gt_labels)
 
