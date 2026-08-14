@@ -226,14 +226,22 @@ class Qwen3VLVisionLayer(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         sequence_parallel_mesh: DeviceMesh | None = None,
     ) -> torch.Tensor:
+        # LayerNorm may stay fp32 while Linear weights / activations are bf16 (or the
+        # reverse after a float32 pos-embed promote). Cast explicitly around each op.
+        compute_dtype = self.attn.qkv.weight.dtype
+        hidden_states = hidden_states.to(dtype=compute_dtype)
         hidden_states = hidden_states + self.attn(
-            self.norm1(hidden_states),
+            self.norm1(hidden_states.to(dtype=self.norm1.weight.dtype)).to(compute_dtype),
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             position_embeddings=position_embeddings,
             sequence_parallel_mesh=sequence_parallel_mesh,
         )["projected_output"]
-        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
+        hidden_states = hidden_states + self.mlp(
+            self.norm2(hidden_states.to(dtype=self.norm2.weight.dtype)).to(
+                dtype=self.mlp.linear_fc1.weight.dtype
+            )
+        ).to(compute_dtype)
         return hidden_states
 
 
@@ -512,7 +520,9 @@ class Qwen3VLVisionModel(BaseModel):
             rotary_pos_emb = split_for_sequence_parallel(rotary_pos_emb, dim=0, sp_mesh=sequence_parallel_mesh)
 
         hidden_states = self.patch_embed(hidden_states)
-        hidden_states = hidden_states + pos_embeds
+        # HF `fast_pos_embed_interpolate` may emit float32; keep the residual stream
+        # on the patch-embed / Linear weight dtype (usually bf16).
+        hidden_states = hidden_states + pos_embeds.to(dtype=hidden_states.dtype)
 
         seq_len, _ = hidden_states.size()
         hidden_states = hidden_states.reshape(seq_len, -1)

@@ -180,6 +180,12 @@ class slice_weight(torch.autograd.Function):
 
 
 class TileWiseFloat8Linear(nn.Linear):
+    # Re-declared so mypy can type attributes that this class also assigns
+    # (e.g. pad_for_fsdp updates out_features / weight).
+    in_features: int
+    out_features: int
+    weight: nn.Parameter
+
     def __init__(
         self,
         # in_features: int,
@@ -195,9 +201,10 @@ class TileWiseFloat8Linear(nn.Linear):
 
         self.ori_shape = (self.out_features, self.in_features)
         self.pad_shape: Optional[Tuple[int, int]] = None
+        weight = self.weight
         self.weight = torch.nn.Parameter(
             WeightWithDynamicTilewiseFloat8CastTensor(
-                self.weight,
+                weight,
                 torch.float8_e4m3fn,
                 self.ori_shape,
             )

@@ -5,7 +5,7 @@ from transformers import AutoTokenizer, AutoProcessor,Qwen3VLProcessor
 import json
 import torch
 import parametrize
-from xtuner.v1.utils.test_utils import add_video_root
+from xtuner.v1.utils.test_utils import add_video_root, normalize_hf_qwen3_vl_video_input_ids
 from packaging.version import Version
 from transformers import __version__ as transformers_version
 import unittest
@@ -292,6 +292,8 @@ class TestMLLMTokenizeFn(TestCase):
                                                              return_dict=True, add_vision_id=add_vision_id,
                                                              return_tensors="pt")
                     input_ids_hf = ret['input_ids'][0]
+                    # transformers>=5.14 wraps video_pad with an extra vision_start/end pair.
+                    input_ids_hf = normalize_hf_qwen3_vl_video_input_ids(input_ids_hf, self.tokenizer)
                     pixel_values_hf = ret['pixel_values_videos']
                     image_grid_thw_hf = ret['video_grid_thw']
 
@@ -313,7 +315,7 @@ class TestMLLMTokenizeFn(TestCase):
                         if i == 7:
                             self.assertEqual(len(input_ids_xtuner), len(input_ids_hf))
                         else:
-                            self.assertEqual(input_ids_xtuner, input_ids_hf.tolist())
+                            self.assertEqual(input_ids_xtuner, input_ids_hf)
                         self.assertTrue('seconds>' in text)
                         self.assertTrue(torch.allclose(pixel_values_xtuner, pixel_values_hf))
                         self.assertTrue(torch.allclose(image_grid_thw_xtuner, image_grid_thw_hf))

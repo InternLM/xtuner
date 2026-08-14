@@ -881,9 +881,9 @@ def _layer_norm_bwd_impl(
             RECOMPUTE_OUTPUT=y is not None,
         )
     dw = _dw.sum(0).to(weight.dtype)
-    db = _db.sum(0).to(bias.dtype) if bias is not None else None
-    dw1 = _dw1.sum(0).to(weight1.dtype) if weight1 is not None else None  # type: ignore
-    db1 = _db1.sum(0).to(bias1.dtype) if bias1 is not None else None  # type: ignore
+    db = _db.sum(0).to(bias.dtype) if _db is not None and bias is not None else None
+    dw1 = _dw1.sum(0).to(weight1.dtype) if _dw1 is not None and weight1 is not None else None
+    db1 = _db1.sum(0).to(bias1.dtype) if _db1 is not None and bias1 is not None else None
     # dresidual_in and dx1 could be None, the wrapper will handle assigning them from dx
     return dx, dw, db, dresidual_in, dx1, dw1, db1, y  # type: ignore
 

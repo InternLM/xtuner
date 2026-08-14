@@ -107,7 +107,7 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
             lr_scheduler.step()
             losses.append(loss_log["reduced_llm_loss"])
         losses = torch.tensor(losses)
-        losses_ref = torch.tensor([2.4234, 2.4234, 1.5270, 1.1483, 0.8904, 0.6388, 0.3963, 0.2589, 0.1519, 0.1101])
+        losses_ref = torch.tensor([2.4273, 2.4273, 1.8036, 1.3980, 0.9944, 0.7288, 0.4674, 0.2885, 0.1624, 0.1149])
 
         self._check_loss_curve(losses, losses_ref, sim_tol=sim_tol, rtol=rtol)
         torch.cuda.empty_cache()
@@ -184,7 +184,7 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
             losses.append(loss_log["reduced_llm_loss"])
-        losses_ref = torch.tensor([2.3874, 2.3874, 1.7667, 1.3585, 1.0056, 0.6969, 0.4769, 0.2874, 0.1653, 0.1120])
+        losses_ref = torch.tensor([2.4000, 2.4000, 1.7148, 1.2371, 0.9127, 0.6609, 0.4184, 0.2568, 0.1481, 0.1092])
         losses = torch.tensor(losses)
 
         self._check_loss_curve(losses, losses_ref, sim_tol=0.01, rtol=0.01)

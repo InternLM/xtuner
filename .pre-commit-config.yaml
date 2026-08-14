@@ -1,77 +1,116 @@
+# Offline-friendly config: all hooks are `repo: local` and install via pip
+# (internal PyPI / mirrors). Avoids cloning github.com which is unreachable
+# on many GPU clusters.
 files: >
   (?x)^(
     xtuner/v1/.* |
     autotest/.*
   )$
 repos:
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+  - repo: local
     hooks:
       - id: check-yaml
+        name: check-yaml
+        entry: check-yaml
+        language: python
+        types: [yaml]
+        additional_dependencies: ["pre-commit-hooks==5.0.0"]
       - id: requirements-txt-fixer
+        name: requirements-txt-fixer
+        entry: requirements-txt-fixer
+        language: python
+        types: [text]
+        files: requirements.*\.txt$
+        additional_dependencies: ["pre-commit-hooks==5.0.0"]
       - id: check-merge-conflict
+        name: check-merge-conflict
+        entry: check-merge-conflict
+        language: python
+        additional_dependencies: ["pre-commit-hooks==5.0.0"]
       - id: mixed-line-ending
+        name: mixed-line-ending
+        entry: mixed-line-ending
+        language: python
         args: ["--fix=lf"]
-  - repo: https://github.com/codespell-project/codespell
-    rev: v2.2.1
-    hooks:
+        additional_dependencies: ["pre-commit-hooks==5.0.0"]
+
       - id: codespell
-  - repo: https://github.com/executablebooks/mdformat
-    rev: 0.7.9
-    hooks:
+        name: codespell
+        entry: codespell
+        language: python
+        types: [text]
+        additional_dependencies: ["codespell==2.2.1"]
+
       - id: mdformat
+        name: mdformat
+        entry: mdformat
+        language: python
+        types: [markdown]
         args: ["--number"]
         additional_dependencies:
+          - mdformat==0.7.9
           - mdformat-openmmlab
           - mdformat_frontmatter
           - linkify-it-py
         exclude: 'docs/zh_cn/user_guides/sequence_parallel.md'
-  - repo: https://github.com/myint/docformatter
-    rev: 06907d0
-    hooks:
-      - id: docformatter
-        args: ["--in-place", "--wrap-descriptions", "119"]
-  - repo: https://github.com/asottile/pyupgrade
-    rev: v3.20.0
-    hooks:
-      - id: pyupgrade
-        args: ["--py36-plus"]
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    # Ruff version.
-    rev: v0.9.10
-    hooks:
-      # Run the linter.
+      - id: docformatter
+        name: docformatter
+        entry: docformatter
+        language: python
+        types: [python]
+        args: ["--in-place", "--wrap-descriptions", "119"]
+        additional_dependencies: ["docformatter==1.7.5"]
+
+      - id: pyupgrade
+        name: pyupgrade
+        entry: pyupgrade
+        language: python
+        types: [python]
+        args: ["--py36-plus"]
+        additional_dependencies: ["pyupgrade==3.20.0"]
+
       - id: ruff
-        types_or: [ python, pyi ]
-        args: [ --diff ]
-      - id: ruff
-        types_or: [ python, pyi ]
-        args: [ --fix ]
-      # Run the formatter.
+        name: ruff
+        entry: ruff check --force-exclude
+        language: python
+        types_or: [python, pyi]
+        args: [--diff]
+        additional_dependencies: ["ruff==0.9.10"]
+      - id: ruff-fix
+        name: ruff-fix
+        entry: ruff check --force-exclude
+        language: python
+        types_or: [python, pyi]
+        args: [--fix]
+        additional_dependencies: ["ruff==0.9.10"]
+      - id: ruff-format-diff
+        name: ruff-format
+        entry: ruff format --force-exclude
+        language: python
+        types_or: [python, pyi]
+        args: [--diff]
+        additional_dependencies: ["ruff==0.9.10"]
       - id: ruff-format
-        types_or: [ python, pyi ]
-        args: [ --diff ]
-      - id: ruff-format
-        types_or: [ python, pyi ]
-  - repo: local
-  # We do not use pre-commit/mirrors-mypy, 
-  # as it comes with opinionated defaults 
-  # (like --ignore-missing-imports)
-  # and is difficult to configure to run 
-  # with the dependencies correctly installed.
-    hooks:
+        name: ruff-format
+        entry: ruff format --force-exclude
+        language: python
+        types_or: [python, pyi]
+        additional_dependencies: ["ruff==0.9.10"]
+
+      # We do not use pre-commit/mirrors-mypy (opinionated defaults).
+      # Torch is intentionally not pinned here: installing it into the hook
+      # env is heavy; missing third-party imports are ignored via pyproject.
       - id: mypy
         name: mypy
         entry: .dev_scripts/mypy_entrypoint.sh
         language: python
-        # For 3rd party lib, we only do type check for torch
-        additional_dependencies: ["mypy==1.16.1", "torch==2.6.0", "types-requests"]
+        additional_dependencies: ["mypy==1.16.1", "types-requests"]
         require_serial: true
         verbose: true
         types: [python]
       - id: pydantic-extra-check
-        name: pydantic-extra-check 
+        name: pydantic-extra-check
         language: system
         entry: .dev_scripts/test_pydantic.py
         verbose: false

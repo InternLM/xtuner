@@ -19,6 +19,43 @@ from huggingface_hub import constants  # noqa: E402
 from xtuner._testing.patch_rollout_config import patch_rollout_config_dist_port_base
 
 
+def _patch_parametrize_namespace_scan() -> None:
+    """Avoid lazy imports mutating module dictionaries during collection."""
+    parametrize_module = importlib.import_module("parametrize.parametrize")
+    original = parametrize_module._find_possible_decorators
+
+    def find_possible_decorators(namespace, search_in_modules=True):
+        return original(dict(namespace), search_in_modules=search_in_modules)
+
+    parametrize_module._find_possible_decorators = find_possible_decorators
+
+
+def _isolate_pytest_compiler_cache() -> None:
+    """Give the pytest parent process its own Triton/Inductor cache dirs.
+
+    Distributed ranks already isolate via ``DeterministicDDPTestCase``; this
+    covers non-DDP tests and the parent process so serial full-suite runs do not
+    corrupt a shared ``/tmp/.triton`` under torch 2.12 / triton 3.7.
+    """
+    import tempfile
+
+    base = os.environ.get("TRITON_CACHE_DIR") or os.path.join(tempfile.gettempdir(), ".triton")
+    leaf = os.path.basename(base)
+    if leaf.startswith("pytest_p") or leaf.startswith("r"):
+        cache_dir = base
+    else:
+        cache_dir = os.path.join(base, f"pytest_p{os.getpid()}")
+    os.makedirs(cache_dir, exist_ok=True)
+    os.environ["TRITON_CACHE_DIR"] = cache_dir
+    inductor_dir = cache_dir + "_inductor"
+    os.makedirs(inductor_dir, exist_ok=True)
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_dir
+
+
+_patch_parametrize_namespace_scan()
+_isolate_pytest_compiler_cache()
+
+
 _HF_DYNAMIC_MODULE_PREFIX = "transformers_modules"
 _HF_PATCH_MODULES_CACHE_PREFIX = "modules_cache"
 

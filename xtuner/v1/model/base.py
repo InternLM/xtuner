@@ -7,7 +7,7 @@ import pydoc
 import re
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from functools import reduce
+from functools import reduce, wraps
 from importlib import import_module
 from itertools import chain
 from pathlib import Path
@@ -2536,7 +2536,24 @@ class BaseModel(nn.Module):
                 cls = getattr(import_module(module_name), class_name)
 
                 if not is_compiled_function(compiled_function):
-                    setattr(cls, method_name, torch.compile(compiled_function, **compile_options))
+                    compiled = torch.compile(compiled_function, **compile_options)
+
+                    # NOTE: torch>=2.12 dynamo drops the bound ``self`` when a compiled
+                    # outer forward (e.g. FSDP ``torch_compile`` or a compiled sibling
+                    # method) calls a method whose class attribute is the raw
+                    # ``torch.compile`` object, raising
+                    # ``<method>() missing 1 required positional argument: 'self'`` under
+                    # activation checkpointing. Wrapping the compiled callable in a thin
+                    # plain method that forwards ``self`` explicitly restores correct
+                    # method binding while keeping the compiled region intact.
+                    @wraps(compiled_function)
+                    def _compiled_method(self, *args, **kwargs):
+                        return compiled(self, *args, **kwargs)
+
+                    # Mark as compiled so re-locating this attribute on subsequent model
+                    # builds is a no-op (``is_compiled_function`` checks ``get_compiler_config``).
+                    _compiled_method.get_compiler_config = compiled.get_compiler_config  # type: ignore[attr-defined]
+                    setattr(cls, method_name, _compiled_method)
 
         full_name = get_function_full_qualname(compiled_function)  # type: ignore[arg-type]
         logger.debug(f"Enabling torch.compile for function {full_name} with options: {compile_options}")

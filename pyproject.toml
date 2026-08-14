@@ -24,7 +24,6 @@ classifiers = [
 ]
 dependencies = [
   "astor",
-  "bitsandbytes==0.45.0",
   "datasets<4.0.0",
   "einops",
   "loguru",
@@ -77,11 +76,13 @@ rl = [
   "pylatexenc"
 ]
 video = [
+  "torchcodec==0.15.0",
   "decord",
   "av",
 ]
 all = [
   "jsonlines",
+  "torchcodec==0.15.0",
   "decord",
   "av",
   "ray[default]",

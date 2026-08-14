@@ -19,7 +19,7 @@ from typing_extensions import overload, override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import BaseLossContext, CELossContext
+from xtuner.v1.loss import BaseLossContext, CELossContext, LMHeadLossContext
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     BaseModel,
@@ -115,7 +115,8 @@ class Dense(BaseModel):
             output["logits"] = logits
         else:
             # Training mode
-            loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx["lm"])  # type: ignore[call-overload]
+            lm_loss_ctx = cast(LMHeadLossContext, loss_ctx["lm"])
+            loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)
             output["loss"] = loss
             output["logits"] = logits
             output["extra_info"] = extra_info
