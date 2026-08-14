@@ -1,10 +1,15 @@
 set -ex
 ray stop --force
 # examples of usage:
-# qwen3_8B_grpo_gsm8k training: 
+# qwen3_8B_grpo_gsm8k training:
 # bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_qwen3_8B_grpo.py "sglang" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
-# qwen2.5_7B_dapo_math training: 
+# qwen2.5_7B_dapo_math training:
 # bash examples/v1/scripts/run_rl.sh  examples/v1/config/rl_qwen25_7B_dapo.py "sglang" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
+# Intern-S2-Preview VL/text RL with lmdeploy:
+# export LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1  # FP32 Mamba/SSM recurrent state for numerical stability
+# bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_interns2_preview_vl_grpo.py "lmdeploy" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
+# bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_interns2_preview_vl_dapo.py "lmdeploy" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
+# bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_interns2_preview_gsm8k_dapo.py "lmdeploy" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
 CONFIG_PATH=$1
 INFER_BACKEND=$2
 MODEL_PATH=$3

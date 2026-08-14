@@ -1,28 +1,33 @@
 """RL Colocate Trainer 示例配置（GRPO + GSM8K）。
 
-用法：通过环境变量传入路径后，由 CLI 加载本配置并 trainer_cfg.build().fit()。
-需设置: WORK_DIR, MODEL_PATH, DATA_PATH, EVAL_DATA_PATH
-可选: WORLD_SIZE, ENABLE_RETURN_ROUTED_EXPERTS, LOSS_TYPE, LOSS_MODE, SP_SIZE
+用法：通过环境变量传入路径后，由 CLI 加载本配置并 trainer_cfg.build().fit()。 需设置: WORK_DIR, MODEL_PATH, DATA_PATH, EVAL_DATA_PATH 可选:
+WORLD_SIZE, ENABLE_RETURN_ROUTED_EXPERTS, LOSS_TYPE, LOSS_MODE, SP_SIZE
 """
+
 import os
-from pathlib import Path
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
-from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
-from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig
-from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.judger import GSM8KJudgerConfig
-from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
-from xtuner.v1.rl.trainer import WorkerConfig
+from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
+from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
-from xtuner.v1.rl.agent_loop_manager import AgentLoopManagerConfig, SamplerConfig, SyncProduceStrategyConfig, TaskSpecConfig
+from xtuner.v1.rl.agent_loop_manager import (
+    AgentLoopManagerConfig,
+    SamplerConfig,
+    SyncProduceStrategyConfig,
+    TaskSpecConfig,
+)
 from xtuner.v1.rl.evaluator import EvaluatorConfig
+from xtuner.v1.rl.judger import GSM8KJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
+from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
+from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.trainer import WorkerConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
+
 
 # env
 work_dir = os.environ["WORK_DIR"]
@@ -64,6 +69,10 @@ rollout_config = RolloutConfig(
     gpu_memory_utilization=0.8,
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=(enable_return_routed_experts == "1"),
+    extra_rollout_config=dict(
+        lmdeploy_log_level="INFO",
+        lmdeploy_uvicorn_log_level="INFO",
+    ),
 )
 
 # 3. judger
@@ -146,9 +155,7 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
 )
 
 # 6. eval agent loop manager
-eval_dataset = DatasetConfig(
-    name=experimental_name, anno_path=eval_data_path, sample_ratio=1.0
-)
+eval_dataset = DatasetConfig(name=experimental_name, anno_path=eval_data_path, sample_ratio=1.0)
 eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}]
 eval_dataloader_cfg = DataloaderConfig(
     dataset_config_list=eval_dataset_cfg,

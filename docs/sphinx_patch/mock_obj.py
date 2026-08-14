@@ -106,9 +106,18 @@ _orig_mockmod_getattr = mock._MockModule.__getattr__
 _orig_mockobj_getattr = mock._MockObject.__getattr__
 
 
+def _mock_ray_method(*args: Any, **kwargs: Any) -> Any:
+    """Keep ``ray.method`` as a pass-through decorator during autodoc imports."""
+    if len(args) == 1 and callable(args[0]) and not kwargs:
+        return args[0]
+    return lambda func: func
+
+
 def _patched_mockmod_getattr(self, name: str) -> Any:
     if name == "__version__":
         return _MOCK_VERSION
+    if self.__name__ == "ray" and name == "method":
+        return _mock_ray_method
     return _orig_mockmod_getattr(self, name)
 
 

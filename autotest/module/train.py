@@ -42,11 +42,18 @@ class Train:
                 "if [[ $TORCH_VERSION == 2.9.1 ]]; then pip install nvidia-cudnn-cu12==9.15.1.9; fi; "
             )
 
+            # CI_E2E_DEBUG: start sleep before training so the job stays alive after OOM.
+            debug_keepalive = ""
+            if os.environ.get("CI_E2E_DEBUG", "False").strip().lower() in ("1", "true", "yes"):
+                print("CI_E2E_DEBUG=true: start 'sleep inf &' before training (after install)")
+                debug_keepalive = "sleep inf & "
+
             if train_type == "sft":
                 command = (
                     f"cd {current_dir}; pwd; {pip_package}; {image_version_check}"
                     f"export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + cudnn_patch
+                    + debug_keepalive
                     + f"torchrun --nproc-per-node {nproc_per_node} --master_addr=${{MASTER_ADDR}} --master_port=${{MASTER_PORT}} --nnodes=${{WORLD_SIZE}} --node_rank=${{RANK}} "
                     + f"xtuner/v1/train/cli/{train_type}.py"
                 )
@@ -65,6 +72,9 @@ class Train:
                         command += f" --dataset {dataset_path}"
                     command += f" --work_dir {work_dir}"
 
+                if debug_keepalive:
+                    command += "; wait"
+
                 return command, config
             elif train_type == "rl":
                 infer_type = config.get("parameters", {}).get("infer_backend", "lmdeploy")
@@ -73,8 +83,11 @@ class Train:
                     f"cd {current_dir}; pwd; {pip_package}; {image_version_check}"
                     f"export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + cudnn_patch
+                    + debug_keepalive
                     + f"bash -x autotest/utils/ci_run_rl.sh {accelerator} {infer_type} {config_path} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
                 )
+                if debug_keepalive:
+                    command += "; wait"
                 return command, config
         else:
             return "", config

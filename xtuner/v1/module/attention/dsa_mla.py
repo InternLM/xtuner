@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, cast
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field
@@ -341,6 +341,15 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         self.indexer_training = None
         if hasattr(self, "indexer"):
             self.indexer.requires_grad_(False)
+    def get_muon_split_sizes(self) -> dict[nn.Parameter, tuple[int, ...]]:
+        """Return the logical row blocks used by GLM MuonSplit."""
+        return {
+            cast(nn.Parameter, self.q_b_proj.weight): (self.qk_nope_head_dim, self.qk_rope_head_dim)
+            * self.num_attention_heads,
+            cast(nn.Parameter, self.kv_a_proj_with_mqa.weight): (self.kv_lora_rank, self.qk_rope_head_dim),
+            cast(nn.Parameter, self.kv_b_proj.weight): (self.qk_nope_head_dim, self.v_head_dim)
+            * self.num_attention_heads,
+        }
 
     def forward(
         self,
