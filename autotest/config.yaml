@@ -887,9 +887,10 @@ case:
                        operator: <
                     -
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0005
-                       method: absolute
-                       operator: <=
+                       # Per-step bound on the metric itself (not vs baseline).
+                       threshold: 0.001
+                       method: value
+                       operator: <
                     -
                        metric: response/response_len/mean
                        threshold: 0.25
