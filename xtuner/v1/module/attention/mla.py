@@ -58,6 +58,7 @@ class MLAConfig(BaseModel):
     qk_rope_head_dim: int
     qk_nope_head_dim: int
     v_head_dim: int
+    rope_interleave: bool = True
 
     def build(
         self,
@@ -165,6 +166,24 @@ def mla_apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     return q_embed, k_embed
 
 
+def mla_apply_rotary_pos_emb_non_interleaved(q, k, cos, sin, unsqueeze_dim=1):
+    """Apply half-split RoPE without converting interleaved feature pairs.
+
+    Args:
+        q (torch.Tensor): Query rotary features.
+        k (torch.Tensor): Key rotary features.
+        cos (torch.Tensor): Cosine rotary coefficients.
+        sin (torch.Tensor): Sine rotary coefficients.
+        unsqueeze_dim (int): Head dimension used to broadcast the coefficients.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: Rotated query and key features.
+    """
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
+
+
 def yarn_get_mscale(scale=1.0, mscale=1.0):
     if scale <= 1:
         return 1.0
@@ -196,6 +215,7 @@ class MultiLatentAttention(nn.Module):
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         sliding_window: int = -1,
         layer_idx: int = 0,
+        rope_interleave: bool = True,
     ):
         super().__init__()
         self.name = f"layers.{layer_idx}.self_attn"
@@ -212,6 +232,7 @@ class MultiLatentAttention(nn.Module):
         self.qkv_bias = qkv_bias
         self.o_bias = o_bias
         self.qk_norm = qk_norm
+        self.rope_interleave = rope_interleave
         self.float8_cfg = float8_cfg
         self.generate_config = generate_config
         self.q_head_dim = qk_nope_head_dim + qk_rope_head_dim
@@ -304,7 +325,8 @@ class MultiLatentAttention(nn.Module):
         k_nope, value_states = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
         cos, sin = position_embeddings
-        q_pe, k_pe = mla_apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
+        rope_fn = mla_apply_rotary_pos_emb if self.rope_interleave else mla_apply_rotary_pos_emb_non_interleaved
+        q_pe, k_pe = rope_fn(q_pe, k_pe, cos, sin)
 
         query_states = k_pe.new_empty(bsz, self.num_attention_heads, q_len, self.q_head_dim)
         query_states[:, :, :, : self.qk_nope_head_dim] = q_nope
@@ -383,7 +405,8 @@ class MultiLatentAttention(nn.Module):
         cos, sin = position_embeddings
         q_pe = q_pe.transpose(1, 2)
         k_pe = k_pe.transpose(1, 2)
-        q_pe, k_pe = mla_apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
+        rope_fn = mla_apply_rotary_pos_emb if self.rope_interleave else mla_apply_rotary_pos_emb_non_interleaved
+        q_pe, k_pe = rope_fn(q_pe, k_pe, cos, sin)
         q_pe = q_pe.transpose(1, 2)
         k_pe = k_pe.transpose(1, 2)
 
@@ -502,7 +525,8 @@ class MultiLatentAttention(nn.Module):
         q_pe = q_pe.transpose(1, 2)
         k_pe = k_pe.transpose(1, 2)
 
-        q_pe, k_pe = mla_apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
+        rope_fn = mla_apply_rotary_pos_emb if self.rope_interleave else mla_apply_rotary_pos_emb_non_interleaved
+        q_pe, k_pe = rope_fn(q_pe, k_pe, cos, sin)
         q_pe = q_pe.transpose(1, 2)
         k_pe = k_pe.transpose(1, 2)
 
@@ -586,7 +610,8 @@ class MultiLatentAttention(nn.Module):
         cos, sin = position_embeddings
         # cos = torch.load('cos.pth').cuda()
         # sin = torch.load('sin.pth').cuda()
-        q_pe, k_pe = mla_apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
+        rope_fn = mla_apply_rotary_pos_emb if self.rope_interleave else mla_apply_rotary_pos_emb_non_interleaved
+        q_pe, k_pe = rope_fn(q_pe, k_pe, cos, sin)
 
         query_states = k_pe.new_empty(bsz, self.num_attention_heads, q_len, self.q_head_dim)
         query_states[:, :, :, : self.qk_nope_head_dim] = q_nope
