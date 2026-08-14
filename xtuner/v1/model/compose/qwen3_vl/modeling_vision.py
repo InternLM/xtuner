@@ -340,7 +340,9 @@ class Qwen3VLVisionModel(BaseModel):
             if layer_idx < num_recompute_layers:
                 layer = apply_gradient_checkpointing(layer, preserve_rng_state=checkpoint_preserve_rng_state)
                 if self.compile_cfg:
-                    layer.forward = torch.compile(layer.forward, fullgraph=True)
+                    # Compile the class function, then restore descriptor binding on this instance.
+                    compiled_forward = torch.compile(type(layer).forward, fullgraph=True)
+                    layer.forward = compiled_forward.__get__(layer, type(layer))
 
             self.blocks[layer_idx] = layer
 

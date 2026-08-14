@@ -244,7 +244,9 @@ class Dense(BaseModel):
                 # graph-break.
                 if self.compile_cfg:
                     fullgraph = self.config.layers_type[layer_idx] != "linear_attention"
-                    layer.forward = torch.compile(layer.forward, fullgraph=fullgraph)
+                    # Compile the class function, then restore descriptor binding on this instance.
+                    compiled_forward = torch.compile(type(layer).forward, fullgraph=fullgraph)
+                    layer.forward = compiled_forward.__get__(layer, type(layer))
 
             self.layers[str(layer_idx)] = layer
             self._fully_shard(
