@@ -826,16 +826,28 @@ async def _sandbox_alive(client: Any, timeout_sec: float = 5.0) -> bool:
 # ─────────────────────────────────────────────────────────────────
 
 
+@dataclass
+class _SandboxLease:
+    name: str
+    client: Any
+    env_id: str
+
+
 class SandboxPool:
-    """Per-run sandbox client pool: lazily acquires + caches clients by name.
+    """Per-run sandbox pool with transactional dependency groups.
 
     One ``SandboxPool`` instance is created at the start of ``Runner.run`` and
     released in the ``finally`` block.  The pool owns:
 
-      - ``provider.create`` / ``provider.delete`` lifecycle
-      - retry loop with health-check polling on acquire
-      - the ``client`` / ``env_id`` / ``url`` triplet per name
+      - every ``provider.create`` / ``provider.delete`` and client close
+      - rate limiting, health polling, group retry, and reverse-order rollback
+      - the primary ``client`` / ``env_id`` / ``url`` triplet per public name
       - sandbox-name validation against the configured spec map
+
+    Providers create and delete exactly one physical sandbox per call. They
+    must not manage dependency groups or close returned clients.  An optional
+    spec provisioner runs only after every member is healthy and must restrict
+    itself to in-sandbox setup and application-level readiness.
 
     ``get(name, record=...)`` writes the failure to ``record.error`` with
     ``category="acquire"`` so the caller does not need its own try/except.
@@ -855,6 +867,10 @@ class SandboxPool:
     ):
         self._provider = create_object(provider)
         self._specs: dict[str, SandboxSpec] = {name: create_object(spec) for name, spec in specs.items()}
+        self._provisioners = {
+            name: create_object(spec.provisioner) if spec.provisioner is not None else None
+            for name, spec in self._specs.items()
+        }
         self._max_attempts = max_attempts
         self._health_max_wait_sec = health_max_wait_sec
         self._health_poll_interval_sec = health_poll_interval_sec
@@ -866,6 +882,7 @@ class SandboxPool:
         self._clients: dict[str, Any] = {}
         self._env_ids: dict[str, str] = {}
         self._urls: dict[str, str | None] = {}
+        self._groups: dict[str, list[_SandboxLease]] = {}
 
     async def get(self, name: str, *, record: StageRecord | None = None) -> Any:
         if name in self._clients:
@@ -873,7 +890,12 @@ class SandboxPool:
         self.validate_name(name)
         spec = self._specs[name]
         try:
-            client, env_id = await self._acquire_ready(spec, record=record)
+            group = await self._acquire_ready(
+                name,
+                spec,
+                provisioner=self._provisioners[name],
+                record=record,
+            )
         except Exception as exc:
             if record is not None:
                 record.status = StageStatus.FAILED
@@ -884,6 +906,10 @@ class SandboxPool:
                     message="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip(),
                 )
             raise
+        primary = group[-1]
+        client = primary.client
+        env_id = primary.env_id
+        self._groups[name] = group
         self._clients[name] = client
         self._env_ids[name] = env_id
         self._urls[name] = self._url_of(client)
@@ -907,21 +933,11 @@ class SandboxPool:
             client = self._clients.pop(name)
             env_id = self._env_ids.pop(name, None)
             self._urls.pop(name, None)
-            if env_id is not None:
-                try:
-                    await self._provider.delete(env_id)
-                except Exception as exc:
-                    get_logger().warning(
-                        f"gateway delete failed for sandbox {name} env_id={env_id}:\n"
-                        f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
-                    )
-            try:
-                await client.aclose()
-            except Exception as exc:
-                get_logger().warning(
-                    f"client aclose failed for sandbox {name} env_id={env_id}:\n"
-                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
-                )
+            group = self._groups.pop(name, None)
+            if group is None and env_id is not None:
+                group = [_SandboxLease(name="primary", client=client, env_id=env_id)]
+            if group:
+                await self._release_group(name, group)
 
     @staticmethod
     def _url_of(client: Any) -> str | None:
@@ -931,69 +947,97 @@ class SandboxPool:
                 return str(val)
         return None
 
-    async def _acquire_ready(self, spec: SandboxSpec, *, record: StageRecord | None = None) -> tuple[Any, str]:
+    async def _acquire_ready(
+        self,
+        name: str,
+        spec: SandboxSpec,
+        *,
+        provisioner: Any | None,
+        record: StageRecord | None = None,
+    ) -> list[_SandboxLease]:
         last_err: Exception | None = None
         t_ready: float | None = None
         for attempt in range(1, self._max_attempts + 1):
             if record is not None:
                 record.metadata["sandbox_create_attempts"] = attempt
+            group: list[_SandboxLease] = []
             try:
-                create_kwargs: dict[str, Any] = {}
-                if spec.cluster_name:
-                    create_kwargs["cluster_name"] = spec.cluster_name
-                if spec.key:
-                    create_kwargs["key"] = spec.key
-                if spec.env_vars:
-                    create_kwargs["env_vars"] = spec.env_vars
-                if spec.resources:
-                    create_kwargs["resources"] = spec.resources
-                if self._create_limiter is not None:
-                    t_limit = time.monotonic()
-                    await self._create_limiter.acquire()
-                    if record is not None:
-                        record.metadata["sandbox_acquire_rate_limit_wait_s"] = (
-                            record.metadata.get("sandbox_acquire_rate_limit_wait_s", 0.0) + time.monotonic() - t_limit
-                        )
                 if t_ready is None:
                     t_ready = time.monotonic()
-                client, env_id = await self._provider.create(
-                    image_tag=spec.image,
-                    ttl_seconds=spec.ttl_seconds,
-                    **create_kwargs,
-                )
-            except Exception as exc:
-                last_err = exc
-                await asyncio.sleep(min(2**attempt, 8))
-                continue
+                members = [*spec.dependencies.items(), ("primary", spec)]
+                for member_name, member_spec in members:
+                    client, env_id = await self._create(member_spec, record=record)
+                    lease = _SandboxLease(name=member_name, client=client, env_id=env_id)
+                    group.append(lease)
+                    if not await self._wait_healthy(client):
+                        raise RuntimeError(f"sandbox group {name!r} member {member_name!r} ({env_id}) unhealthy")
 
-            healthy = await self._wait_healthy(client)
-            if healthy:
+                if provisioner is not None:
+                    dependencies = {lease.name: lease.client for lease in group[:-1]}
+                    await provisioner(group[-1].client, dependencies)
+
                 if record is not None and t_ready is not None:
                     record.metadata["sandbox_create_to_ready_time_s"] = time.monotonic() - t_ready
-                return client, env_id
-
-            try:
-                await self._provider.delete(env_id)
+                return group
+            except asyncio.CancelledError:
+                cleanup = asyncio.create_task(self._release_group(name, group))
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    await cleanup
+                raise
             except Exception as exc:
-                get_logger().warning(
-                    f"delete of unhealthy sandbox env_id={env_id} failed:\n"
-                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
-                )
-            try:
-                await client.aclose()
-            except Exception as exc:
-                get_logger().warning(
-                    f"aclose of unhealthy sandbox env_id={env_id} failed:\n"
-                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
-                )
-            last_err = RuntimeError(f"sandbox {env_id} unhealthy")
+                last_err = exc
+                await self._release_group(name, group)
+                if attempt < self._max_attempts:
+                    await asyncio.sleep(min(2**attempt, 8))
 
         last_err_msg = (
             "".join(traceback.format_exception(type(last_err), last_err, last_err.__traceback__)).rstrip()
             if last_err is not None
             else "unknown"
         )
-        raise RuntimeError(f"could not acquire a healthy sandbox after {self._max_attempts} attempts: {last_err_msg}")
+        raise RuntimeError(f"could not acquire sandbox group after {self._max_attempts} attempts: {last_err_msg}")
+
+    async def _create(self, spec: SandboxSpec, *, record: StageRecord | None = None) -> tuple[Any, str]:
+        create_kwargs: dict[str, Any] = {}
+        if spec.cluster_name:
+            create_kwargs["cluster_name"] = spec.cluster_name
+        if spec.key:
+            create_kwargs["key"] = spec.key
+        if spec.env_vars:
+            create_kwargs["env_vars"] = spec.env_vars
+        if spec.resources:
+            create_kwargs["resources"] = spec.resources
+        if self._create_limiter is not None:
+            t_limit = time.monotonic()
+            await self._create_limiter.acquire()
+            if record is not None:
+                record.metadata["sandbox_acquire_rate_limit_wait_s"] = (
+                    record.metadata.get("sandbox_acquire_rate_limit_wait_s", 0.0) + time.monotonic() - t_limit
+                )
+        return await self._provider.create(
+            image_tag=spec.image,
+            ttl_seconds=spec.ttl_seconds,
+            **create_kwargs,
+        )
+
+    async def _release_group(self, name: str, group: list[_SandboxLease]) -> None:
+        for lease in reversed(group):
+            try:
+                await self._provider.delete(lease.env_id)
+            except Exception as exc:
+                get_logger().warning(
+                    f"gateway delete failed for sandbox {name} member={lease.name} env_id={lease.env_id}:\n"
+                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
+                )
+            try:
+                await lease.client.aclose()
+            except Exception as exc:
+                get_logger().warning(
+                    f"client aclose failed for sandbox {name} member={lease.name} env_id={lease.env_id}:\n"
+                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
+                )
 
     async def _wait_healthy(self, client: Any) -> bool:
         deadline = time.monotonic() + self._health_max_wait_sec
