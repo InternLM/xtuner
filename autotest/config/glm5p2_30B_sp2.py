@@ -15,7 +15,7 @@ from xtuner.v1.train import TrainerConfig
 MODEL_PATH = os.environ["MODEL_PATH"]
 ALPACA_PATH = os.environ["ALPACA_PATH"]
 
-ep_size = 1
+ep_size = 2
 
 moe_cfg = get_model_config_from_hf(MODEL_PATH)
 moe_cfg.dispatcher = "all2all"
@@ -29,7 +29,7 @@ lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
     cpu_offload=False,
     ep_size=ep_size,
-    tp_size=2,
+    tp_size=1,
 )
 
 dataset_config = [
@@ -56,9 +56,9 @@ trainer = TrainerConfig(
     tokenizer_path=MODEL_PATH,
     strict_load=True,
     global_batch_size=4,
-    intra_layer_micro_batch=1,
+    intra_layer_micro_batch=2,
     sp_size=2,
-    total_epoch=1,
+    total_step=20,
     work_dir=f"{os.environ['WORK_DIR']}",
     seed=0,
 )

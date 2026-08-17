@@ -83,11 +83,11 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1500
 
-    glm5-2-sft-30B-sp2-tp2:
+    glm5-2-sft-30B-sp2:
         -
             type: sft
             parameters:
-                config: autotest/config/glm5p2_30B_sp2_tp2.py
+                config: autotest/config/glm5p2_30B_sp2.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 cpus_per_task: 120
@@ -98,7 +98,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
             assert_info:
-                base_metric: glm5-2-sft-30B-sp2-tp2/tracker.jsonl
+                base_metric: glm5-2-sft-30B-sp2/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/local_loss: 0.000001
@@ -168,6 +168,33 @@ case:
             post_action:
                 command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output glm5-2-sft-30B-ep2-resume sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
             timeout: 1500
+
+    glm5-2-sft-30B-ep8-sp2-tp2:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/glm5p2_30B_ep8_sp2_tp2.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                cpus_per_task: 80
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+                    - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+            assert_info:
+                base_metric: glm5-2-sft-30B-ep8-sp2-tp2/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1800
 
     # InternS2-Preview: Qwen3.5-VL-MoE-35B-A3B architecture; MODEL_PATH may need adjust on share.
     s2-preview-rl-vl-lmdeploy-grpo:
