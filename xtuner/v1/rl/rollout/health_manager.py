@@ -612,7 +612,6 @@ class RolloutHealthManager:
 
         return False
 
-
     def notify_worker_group_recovered(self, groups: Iterable[WorkerGroup]) -> None:
         self._notify_worker_lifecycle_listeners(
             groups,

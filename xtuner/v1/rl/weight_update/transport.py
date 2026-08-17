@@ -1158,7 +1158,7 @@ class CheckpointEngineWeightTransport:
         need_register = kwargs.pop("need_register", True)
         need_update = kwargs.pop("need_update", True)
         update_pending_only = kwargs.pop("update_pending_only", True)
-        
+
         assert need_register or need_update, (
             "At least one of need_register or need_update must be True when use checkpoint engine update."
         )
@@ -1172,7 +1172,6 @@ class CheckpointEngineWeightTransport:
         # 2. Broadcast checkpoint to engines
         if need_update:
             self._update_engines(update_pending_only=update_pending_only)
-
 
     def has_registered_checkpoint(self) -> bool:
         return self._checkpoint_name is not None

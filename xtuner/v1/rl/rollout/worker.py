@@ -557,8 +557,9 @@ class RolloutConfig(BaseModel):
             .remote(self, placement_group)
         )
 
-def _response_preview_for_log(response: dict) -> dict:
-    preview = {}
+
+def _response_preview_for_log(response: dict[str, Any]) -> dict[str, Any]:
+    preview: dict[str, Any] = {}
     for key, value in response.items():
         if key in ("logprobs", "response_ids", "routed_experts", "meta_info"):
             if isinstance(value, dict):
@@ -569,6 +570,7 @@ def _response_preview_for_log(response: dict) -> dict:
             text = repr(value)
             preview[key] = text[:512] + ("...(truncated)" if len(text) > 512 else "")
     return preview
+
 
 class RolloutWorker(SingleAcceleratorWorker):
     """Base class for a rollout worker that runs an inference server.
@@ -784,7 +786,6 @@ class RolloutWorker(SingleAcceleratorWorker):
             return True
 
         return False
-
 
     def _start_session_server(self) -> None:
         """Start the per-worker SessionServer proxy."""

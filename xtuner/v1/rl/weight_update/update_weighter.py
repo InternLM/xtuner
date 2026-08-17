@@ -74,6 +74,7 @@ class WeightUpdater:
         )
         assert self.weight_iterator is not None, "Weight iterator is not initialized."
         self._transport.update(self.weight_iterator, **kwargs)
+
     def has_registered_weight_checkpoint(self) -> bool:
         transport = self._transport
         if transport is None:
