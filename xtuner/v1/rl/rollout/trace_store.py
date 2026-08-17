@@ -498,6 +498,7 @@ async def release_existing_sessions(session_ids: list[str]) -> set[str]:
     Returns:
         set[str]: Session identifiers that existed and were released.
     """
+    session_ids = list(dict.fromkeys(str(session_id) for session_id in session_ids))
     if not session_ids:
         return set()
 

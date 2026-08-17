@@ -21,6 +21,7 @@
 # 11. save/resume 保留 Ray ObjectRef：直接 ObjectRef 和 dict(dict(ObjectRef)) 嵌套结构恢复后，
 #     解引用得到的内容都应与保存前一致。
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -474,6 +475,51 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 assert await replay_buffer.count("retryable_task", Status.EXPIRED) == 1
                 assert len(replay_buffer) == 1
                 assert await replay_buffer.get(1, "terminal_task", Status.EXPIRED) == []
+
+    async def test_refresh_staleness_batches_terminal_release_outside_lock(self):
+        replay_buffer = AsyncReplayBufferConfig().build()
+        first = make_rollout_state(1, session_id=301, response_model_steps=[1])
+        second = make_rollout_state(2, session_id=302, response_model_steps=[1])
+        await replay_buffer.put([first], "terminal_task")
+        await replay_buffer.put([second], "terminal_task")
+
+        release_started = asyncio.Event()
+        allow_release = asyncio.Event()
+
+        async def delayed_release(session_ids):
+            release_started.set()
+            await allow_release.wait()
+            return set(session_ids)
+
+        with patch(
+            "xtuner.v1.rl.replay_buffer.release_existing_sessions",
+            new=AsyncMock(side_effect=delayed_release),
+        ) as release_sessions:
+            refresh_task = asyncio.create_task(
+                replay_buffer.refresh_staleness(
+                    task_stale_thresholds={"terminal_task": 2},
+                    expired_groups_retryable_by_task={"terminal_task": False},
+                    current_train_step=4,
+                )
+            )
+            await asyncio.wait_for(release_started.wait(), timeout=1.0)
+            try:
+                # The terminal records are already removed and the buffer lock is
+                # available while the trace-store RPC is still blocked.
+                count = await asyncio.wait_for(
+                    replay_buffer.count("terminal_task", Status.COMPLETED),
+                    timeout=1.0,
+                )
+                assert count == 0
+            finally:
+                allow_release.set()
+            expired_counts = await refresh_task
+
+        release_sessions.assert_awaited_once_with(["301", "302"])
+        assert expired_counts == {"terminal_task": 2}
+        assert first.status == Status.EXPIRED
+        assert second.status == Status.EXPIRED
+        assert len(replay_buffer) == 0
 
     async def test_common_refresh_staleness_contract(self):
         # refresh_staleness 同时覆盖默认刷新 completed/aborted，以及 status filter 只刷新指定状态。
