@@ -95,6 +95,7 @@ def _step_errors(base_vals: list[float], cur_vals: list[float], method: str) -> 
     """Compute per-step quantities compared against ``threshold``.
 
     - ``absolute`` / ``relative``: drift vs baseline
+    - ``slowdown``: only penalize regressions (``max(0, cur - base)``); faster is OK
     - ``value``: current metric itself (baseline ignored); used for bounds like
       ``mismatch_k3_kl < 0.001`` on every step
     """
@@ -105,6 +106,8 @@ def _step_errors(base_vals: list[float], cur_vals: list[float], method: str) -> 
     for base_val, cur_val in zip(base_vals, cur_vals):
         if method == "absolute":
             errors.append(abs(cur_val - base_val))
+        elif method == "slowdown":
+            errors.append(max(0.0, cur_val - base_val))
         elif method == "relative":
             if abs(base_val) < 1e-10:
                 errors.append(float("inf") if abs(cur_val) > 1e-10 else 0.0)
@@ -246,14 +249,14 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
                 if abs(old) < 1e-10:
                     relative_error = float("inf") if abs(cur) > 1e-10 else 0.0
                 else:
-                    relative_error = round(abs(old - cur) / abs(old), 2)
+                    relative_error = abs(old - cur) / abs(old)
                 if relative_error > max_error:
                     max_error = relative_error
                     max_error_idx = idx
                 if relative_error > threshold:
                     fail_metric[metric] = (
                         f"{metric} relative error bigger than {threshold} in {idx} steps, "
-                        f"baseline: {old:.6f}, now: {cur:.6f}, relative error: {relative_error}"
+                        f"baseline: {old:.6f}, now: {cur:.6f}, relative error: {relative_error:.6f}"
                     )
                     check_flag = False
                     break
@@ -282,16 +285,14 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
                 if abs(old) < 1e-10:
                     relative_error = float("inf") if abs(cur) > 1e-10 else 0.0
                 else:
-                    relative_error = round(abs(old - cur) / abs(old), 2)
+                    relative_error = abs(old - cur) / abs(old)
                 if relative_error > max_error:
                     max_error = relative_error
                     max_error_idx = idx
                 if relative_error > threshold:
-                    baseline_old = f"{old:.6f}"
-                    baseline_cur = f"{cur:.6f}"
-
                     fail_metric[metric] = (
-                        f"{metric} relative error bigger than {threshold} in {idx} steps, baseline: {baseline_old}, now: {baseline_cur}, relative error: {relative_error}"
+                        f"{metric} relative error bigger than {threshold} in {idx} steps, "
+                        f"baseline: {old:.6f}, now: {cur:.6f}, relative error: {relative_error:.6f}"
                     )
                     check_flag = False
                     break
