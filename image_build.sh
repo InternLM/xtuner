@@ -12,7 +12,7 @@ export CAUSAL_CONV1D_URL=https://github.com/Dao-AILab/causal-conv1d@da6dbaa9fd5a
 export FLA_URL="${FLA_URL-https://github.com/HAOCHENYE/flash-linear-attention@tmp-tensor-cache}"
 
 export TORCH_VERSION=${TORCH_VERSION:-"2.9.1"}
-export LMDEPLOY_URL="${LMDEPLOY_URL:-https://github.com/RunningLeon/lmdeploy@c14f389e9b2346f9835954ed90aefc0a0aac7ad4}"
+export LMDEPLOY_URL="${LMDEPLOY_URL:-https://github.com/Internlm/lmdeploy@9929ab0a485c16789fa117149013e29943f8784c}"
 # export LMDEPLOY_VERSION="0.15.0"
 export PPA_SOURCE="https://mirrors.aliyun.com"
 export DEFAULT_PYPI_URL=${DEFAULT_PYPI_URL:-"https://mirrors.aliyun.com/pypi/simple"}
