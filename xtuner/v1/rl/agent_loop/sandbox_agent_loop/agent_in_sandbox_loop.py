@@ -48,6 +48,13 @@ def _resolve_runner(pipeline: Any, session_id: str) -> Any:
     return pipeline
 
 
+def _drop_failed_train_samples(samples: list[RolloutState], mode: Literal["train", "eval"]) -> list[RolloutState]:
+    if mode != "train":
+        return samples
+    filtered = [sample for sample in samples if sample.status != Status.FAILED]
+    return filtered or samples
+
+
 def _validate_trace_segment(
     segment: dict[str, Any],
     *,
@@ -66,6 +73,13 @@ def _validate_trace_segment(
     return messages, None if tools is _MISSING else tools
 
 
+def _trim_to_last_assistant_turn(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") == "assistant":
+            return messages[: index + 1]
+    return []
+
+
 def _load_train_trace_segments(artifacts: dict[str, Any]) -> list[tuple[list[dict[str, Any]], Any]]:
     trace = _load_messages_artifact(artifacts)
     if not trace:
@@ -74,7 +88,10 @@ def _load_train_trace_segments(artifacts: dict[str, Any]) -> list[tuple[list[dic
     for segment in trace:
         if not isinstance(segment, dict):
             raise TypeError("Agent messages trace segment must be a dict.")
-        segments.append(_validate_trace_segment(segment, require_tools=True))
+        messages, tools = _validate_trace_segment(segment, require_tools=True)
+        messages = _trim_to_last_assistant_turn(messages)
+        if messages:
+            segments.append((messages, tools))
     return segments
 
 
@@ -225,7 +242,8 @@ class AgentInSandboxLoop(AgentLoop):
             pending_tasks.append(task)
         generated_samples = asyncio.gather(*pending_tasks)
         sample_groups = await generated_samples
-        return [sample for sample_group in sample_groups for sample in sample_group]
+        samples = [sample for sample_group in sample_groups for sample in sample_group]
+        return _drop_failed_train_samples(samples, self.mode)
 
     # NOTE: A single sandbox session may yield multiple trainable segments, so this returns a list
     # rather than the base class's single RolloutState. The base contract is never exercised for
@@ -319,6 +337,12 @@ class AgentInSandboxLoop(AgentLoop):
                 token_id for token_id, label in zip(data["input_ids"][1:], data["labels"][1:]) if label != -100
             ]
             segment_state.logprobs = data["logprobs"]
+            # ``routed_experts`` is a per-node list for a MoE trace or ``None`` for a dense one; trace_store's
+            # ``_resolve_routed_experts`` already enforces the all-or-nothing invariant (a trace mixing MoE turns with
+            # missing-expert turns raises there and the sample is dropped as FAILED), so we pass it through as-is.
+            # TODO(incomplete): a MoE run that produced routed experts for *no* node collapses to ``None`` here and is
+            # indistinguishable from a dense trace; catching that would need the MoE-vs-dense signal the loop lacks
+            # (session_server gates on ``enable_return_routed_experts``).
             segment_state.routed_experts = data["routed_experts"]
             if segment_state.response_ids:
                 segment_state.response = self.tokenizer.decode(segment_state.response_ids)

@@ -214,6 +214,9 @@ class ReadFileHook(Hook):
         errors: str = "replace",
         parse_json: bool = False,
         optional: bool = False,
+        attempts: int = 1,
+        retry_interval_sec: float = 1.0,
+        download_timeout_sec: float | None = None,
     ):
         self.path = path
         self.key = key
@@ -221,17 +224,32 @@ class ReadFileHook(Hook):
         self.errors = errors
         self.parse_json = parse_json
         self.optional = optional
+        self.attempts = max(1, int(attempts))
+        self.retry_interval_sec = max(0.0, retry_interval_sec)
+        self.download_timeout_sec = download_timeout_sec
 
     async def __call__(self, client: Any, item: AgentRolloutItem, record: StageRecord) -> None:
-        try:
-            blob = await client.download_file(self.path)
-            text = blob.decode(self.encoding, errors=self.errors)
-            item.artifacts[self.key] = json.loads(text) if self.parse_json else text
-        except Exception as exc:
-            if self.optional:
-                get_logger().warning("read_file %s (key=%r) failed: %s", self.path, self.key, exc)
-            else:
-                raise
+        last_exc: Exception | None = None
+        for attempt in range(1, self.attempts + 1):
+            try:
+                download = client.download_file(self.path)
+                blob = (
+                    await asyncio.wait_for(download, timeout=self.download_timeout_sec)
+                    if self.download_timeout_sec is not None
+                    else await download
+                )
+                text = blob.decode(self.encoding, errors=self.errors)
+                item.artifacts[self.key] = json.loads(text) if self.parse_json else text
+                return
+            except Exception as exc:
+                last_exc = exc
+                if attempt < self.attempts and self.retry_interval_sec > 0:
+                    await asyncio.sleep(self.retry_interval_sec)
+        assert last_exc is not None
+        if self.optional:
+            get_logger().warning("read_file %s (key=%r) failed: %s", self.path, self.key, last_exc)
+        else:
+            raise last_exc
 
 
 # ─────────────────────────────────────────────────────────────────
