@@ -80,7 +80,8 @@ class SaveUnit(StrEnum):
     """
 
     DSA_INDEXER = "dsa_indexer"
-    """Keep the no-grad DSA top-k selection result, without keeping its projections."""
+    """Keep the no-grad DSA top-k selection result, without keeping its
+    projections."""
 
     MOE_GATE = "moe_gate"
     """Keep the MoE router: gating projection, top-k selection, and routing weights."""
