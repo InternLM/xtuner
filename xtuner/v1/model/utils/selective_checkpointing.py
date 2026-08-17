@@ -73,8 +73,8 @@ class RecomputeUnit(StrEnum):
     """
 
     SAVE_ATTN = "save_attn"
-    """Keep the attention kernel's output -- the flash-attention call itself, not the projections
-    around it.
+    """Keep the attention kernel's output -- the flash-attention call itself,
+    not the projections around it.
 
     This is the narrowest unit and the only one that costs no compilation, because the attention
     kernel is a custom op: inductor cannot fuse it, so it is always called as a fallback kernel and
