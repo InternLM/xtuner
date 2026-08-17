@@ -1678,7 +1678,7 @@ class RLColocateTrainer(BaseRLTrainer):
             self.train_controller.weight_update(need_register=True, need_update=False)
             self.train_controller.offload(target="model")
             ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
-            self.train_controller.weight_update(need_register=False, need_update=True)
+            self.train_controller.weight_update(need_register=False, need_update=True, update_pending_only=False)
             ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
             self.logger.info("Rollout workers updated weights from Checkpoint Engine.")
             return
@@ -1855,7 +1855,7 @@ class RLColocateTrainer(BaseRLTrainer):
                             self.rollout_controller.onload_weights.remote(),
                             timeout=RL_TRAINER_RAY_GET_TIMEOUT,
                         )
-                        self.train_controller.weight_update(need_register=False, need_update=True)
+                        self.train_controller.weight_update(need_register=False, need_update=True, update_pending_only=False)
                     else:
                         ray.get(
                             self.rollout_controller.onload_weights.remote(),
@@ -1896,10 +1896,13 @@ class RLColocateTrainer(BaseRLTrainer):
             to active.
         """
 
-        if getattr(self, "_transport_type", None) != "checkpoint_engine":
+        if self._rollout_config.weight_transport_type != "checkpoint_engine":
             return ()
 
         if not self.train_controller.has_registered_weight_checkpoint():
+            self.logger.info(
+                "Skip pending rollout checkpoint-engine update because no train checkpoint has been registered yet."
+            )
             return ()
 
         pending_targets = ray.get(
@@ -1911,18 +1914,19 @@ class RLColocateTrainer(BaseRLTrainer):
 
         pending_group_ranks = tuple((target.endpoint_rank,) for target in pending_targets)
         try:
+            self.logger.info(
+                "Updating pending rollout workers from Checkpoint Engine: "
+                f"group_ranks={pending_group_ranks}, targets={pending_targets}."
+            )
             self.train_controller.bind_rollout_weight_update(
                 targets=pending_targets,
                 rollout_config=self._rollout_config,
-                weight_transport_type=self._transport_type,
-                weight_update_host=getattr(self._rollout_config, "weight_update_host", None),
-                weight_update_port=getattr(self._rollout_config, "weight_update_port", None),
             )
             ray.get(
                 self.rollout_controller.onload_pending_weight_update_workers.remote(),
                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
             )
-            self.train_controller.update_weights(need_register=False, need_update=True, update_pending_only=True)
+            self.train_controller.weight_update(need_register=False, need_update=True, update_pending_only=True)
             ray.get(
                 self.rollout_controller.onload_kvcache_pending_weight_update_workers.remote(),
                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
@@ -1947,7 +1951,7 @@ class RLColocateTrainer(BaseRLTrainer):
         """
         Start the background checker for searching pending weight updates rollout worker.
         """
-        if getattr(self, "_transport_type", None) != "checkpoint_engine":
+        if self._rollout_config.weight_transport_type != "checkpoint_engine":
             return
         if getattr(self, "_pending_rollout_weight_update_thread", None) is not None:
             return
@@ -1959,6 +1963,7 @@ class RLColocateTrainer(BaseRLTrainer):
             daemon=True,
         )
         self._pending_rollout_weight_update_thread.start()
+        self.logger.info("Started pending rollout checkpoint-engine update thread.")
 
     def _stop_check_pending_rollout_worker_thread(self) -> None:
         """
@@ -1978,6 +1983,7 @@ class RLColocateTrainer(BaseRLTrainer):
                 return
             
         self._pending_rollout_weight_update_thread = None
+        self.logger.info("Stopped pending rollout checkpoint-engine update thread.")
 
 
     def _pending_rollout_worker_weight_update_loop(self) -> None:
@@ -1992,11 +1998,17 @@ class RLColocateTrainer(BaseRLTrainer):
             PENDING_ROLLOUT_WORKER_CHECK_INTERVAL
         ):
             if not self._rollout_resources_available.is_set():
+                self.logger.debug("Skip pending rollout checkpoint-engine update because rollout resources are unavailable.")
                 continue
             if not self._rollout_weight_update_lock.acquire(blocking=False):
+                self.logger.debug("Skip pending rollout checkpoint-engine update because weight update lock is held.")
                 continue
             try:
-                self._update_pending_rollout_weights_from_checkpoint_engine()
+                updated_groups = self._update_pending_rollout_weights_from_checkpoint_engine()
+                if updated_groups:
+                    self.logger.info(
+                        f"Background pending rollout checkpoint-engine update completed: {updated_groups}."
+                    )
             except Exception:
                 self.logger.exception("Background pending rollout weight update failed.")
             finally:

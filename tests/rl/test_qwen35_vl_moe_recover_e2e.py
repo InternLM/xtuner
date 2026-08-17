@@ -348,7 +348,7 @@ class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
         resources = AcceleratorResourcesConfig(
             accelerator="GPU",
             num_workers=8,
-            num_cpus_per_worker=12,
+            num_cpus_per_worker=16,
             cpu_memory_per_worker=32 * 1024**3,
         )
         rollout_config = RolloutConfig(
@@ -364,7 +364,7 @@ class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
             rollout_max_batch_size_per_instance=128,
             allow_over_concurrency_ratio=1.0,
             enable_return_routed_experts=False,
-            enable_checkpoint_engine=True,
+            weight_transport_type="checkpoint_engine",
             skip_load_weights=True,
             checkpoint_name_prefix=EXPERIMENT_NAME,
             checkpoint_engine_timeout=RECOVERY_TIMEOUT_S,
