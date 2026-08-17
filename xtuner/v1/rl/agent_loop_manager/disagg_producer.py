@@ -262,13 +262,15 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
             response token may lag behind before it is masked out of the loss.
             ``None`` disables token-level masking, ``0`` accepts only tokens
             produced within the current sync period, and ``N`` allows ``N``
-            extra periods. Unlike ``max_staleness``, this does not expire or
-            re-roll a group; it only shrinks ``response_mask``. Defaults to
-            None.
+            extra periods. Partially stale responses have their
+            ``response_mask`` reduced before training. If a state has no
+            trainable response token left, the state expires and its group
+            enters the expired-group lifecycle. Defaults to None.
         tail_batch_trigger_size (int): Expired-group rerollout policy. ``-1``
-            disables rerollout, ``0`` rerolls out immediately without entering
-            tail-batch mode, and ``N > 0`` waits until the expired pool contains
-            at least ``N`` groups before entering tail-batch mode.
+            disables rerollout and terminally discards expired groups, ``0``
+            rerolls out immediately without entering tail-batch mode, and
+            ``N > 0`` waits until the expired pool contains at least ``N``
+            groups before entering tail-batch mode.
     """
 
     over_sample_threshold: float = 0.0
@@ -283,11 +285,17 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
         sync_weights_interval: int = 1,
         rollout_controller: "Optional[RolloutControllerProxy]" = None,
     ) -> "DisaggAsyncProduceStrategy":
-        if self.max_token_staleness is not None and self.max_token_staleness > self.max_staleness:
-            logger.warning(
-                "max_token_staleness is greater than max_staleness; token-level masking will not take effect "
-                "before the group expires."
-            )
+        if self.max_token_staleness is not None:
+            if self.max_token_staleness > self.max_staleness:
+                logger.warning(
+                    "max_token_staleness is greater than max_staleness; token-level masking will not take effect "
+                    "before the group expires."
+                )
+            if self.tail_batch_trigger_size == -1:
+                logger.warning(
+                    "Token-expired groups will be terminally discarded because tail_batch_trigger_size=-1 disables "
+                    "rerollout."
+                )
         if rollout_controller is not None:
             import ray
 

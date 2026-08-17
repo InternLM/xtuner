@@ -505,6 +505,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         mock_agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
         task_name = "test_task"
         call_count = 0
+
         async def mock_gen(rs, **kwargs):
             nonlocal call_count
             call_count += 1
@@ -700,13 +701,14 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             over_sample_threshold=1.0,
             tail_batch_trigger_size=0,
         ).build()
+        progress = self._build_progress(task_name, target=1)
         ctx = self._build_context(
             strategy,
             task_name,
             self._build_agent_loop(),
             sampler,
             batch_size=1,
-            progress=self._build_progress(task_name, target=1),
+            progress=progress,
         )
 
         await strategy.produce_batch(ctx)
@@ -715,6 +717,78 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             sampled_statuses,
             [[Status.EXPIRED, Status.ABORTED], [Status.EXPIRED, Status.ABORTED]],
         )
+
+    async def test_async_produce_strategy_rerolls_expired_state_and_preserves_fresh_group_member(self):
+        task_name = "test_selective_rerollout"
+        expired = make_rollout_state(900)
+        expired.response = "expired response"
+        expired.response_ids = [11]
+        expired.response_model_steps = [0]
+        expired.response_mask = None
+        expired.reward = {"score": 0.1}
+        fresh = make_rollout_state(901)
+        fresh.group_id = expired.group_id
+        fresh.response = "fresh response"
+        fresh.response_ids = [21]
+        fresh.response_model_steps = [5]
+        fresh.response_mask = None
+        fresh.logprobs = [-0.2]
+        fresh.reward = {"score": 0.9}
+
+        await self.replay_buffer.put(
+            [expired, fresh],
+            task_name,
+            current_train_step=5,
+            stale_threshold=11,
+            token_stale_threshold=1,
+            expired_groups_retryable=True,
+        )
+
+        generated_rollout_ids = []
+        agent_loop = self._build_agent_loop()
+
+        async def generate_expired_state_only(group, **kwargs):
+            for state in group:
+                if state.status == Status.COMPLETED:
+                    continue
+                generated_rollout_ids.append(state.rollout_id)
+                state.response = "rerolled response"
+                state.response_ids = [31]
+                state.logprobs = [-0.1]
+                state.reward = {"score": 0.2}
+                state.finish_reason = "stop"
+                state.status = Status.COMPLETED
+            return group
+
+        agent_loop.generate_group = generate_expired_state_only
+        strategy = AsyncProduceStrategyConfig(
+            over_sample_threshold=0.0,
+            max_staleness=10,
+            max_token_staleness=0,
+            tail_batch_trigger_size=0,
+        ).build()
+        ctx = self._build_context(
+            strategy,
+            task_name,
+            agent_loop,
+            self._build_sampler(),
+            batch_size=1,
+            train_step=5,
+            model_step=5,
+        )
+
+        await strategy.produce_batch(ctx)
+
+        completed = await self.replay_buffer.get(1, task_name, Status.COMPLETED)
+        self.assertEqual(generated_rollout_ids, [expired.rollout_id])
+        self.assertEqual(len(completed), 1)
+        self.assertEqual([state.status for state in completed[0]], [Status.COMPLETED, Status.COMPLETED])
+        self.assertEqual(completed[0][0].response, "rerolled response")
+        self.assertEqual(completed[0][0].response_model_steps, [5])
+        self.assertEqual(completed[0][1].response, "fresh response")
+        self.assertEqual(completed[0][1].response_ids, [21])
+        self.assertEqual(completed[0][1].response_model_steps, [5])
+        self.assertEqual(completed[0][1].logprobs, [-0.2])
 
     async def test_async_produce_strategy_fails_fast_on_invalid_progress(self):
         # 验证 progress 缺少当前 task key 时 fail fast，避免静默用 0 掩盖调度状态损坏。

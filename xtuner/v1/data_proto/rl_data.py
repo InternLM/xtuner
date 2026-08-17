@@ -321,7 +321,7 @@ def refresh_seq_staleness(group: list[RolloutState], current_train_step: int) ->
     return group
 
 
-def calculate_effective_response_mask(
+def _calculate_effective_response_mask(
     rollout_state: RolloutState,
     *,
     current_train_step: int,
@@ -355,3 +355,33 @@ def calculate_effective_response_mask(
         for semantic_mask_value, token_staleness_mask_value in zip(semantic_mask, token_staleness_mask)
     ]
     return effective_mask
+
+
+def calculate_group_effective_response_masks(
+    group: list[RolloutState],
+    *,
+    current_train_step: int,
+    token_stale_threshold: int | None,
+) -> list[list[int] | None]:
+    """Calculate token-staleness masks for the applicable states in a group.
+
+    Each ``None`` means that token staleness is disabled or does not apply to
+    that state. Agentic groups currently return one ``None`` per state.
+    """
+    if token_stale_threshold is None:
+        return [None] * len(group)
+    if any(item.input_ids is not None or item.labels is not None for item in group):
+        return [None] * len(group)
+
+    return [
+        (
+            None
+            if not item.response_ids or (item.response_mask is not None and not any(item.response_mask))
+            else _calculate_effective_response_mask(
+                item,
+                current_train_step=current_train_step,
+                token_stale_threshold=token_stale_threshold,
+            )
+        )
+        for item in group
+    ]

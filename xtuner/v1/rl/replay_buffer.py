@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
-    calculate_effective_response_mask,
+    calculate_group_effective_response_masks,
     discard_rollout_state,
     get_group_status,
     refresh_seq_staleness,
@@ -453,14 +453,18 @@ class ReplayBuffer:
         storage_status = get_group_status(group)
         if current_train_step is None or storage_status not in (Status.COMPLETED, Status.ABORTED, Status.EXPIRED):
             return storage_status
-        # NOTE: input_ids/labels 表示 agentic 训练分支，当前暂不支持 agentic token-expired lifecycle。
-        is_agentic_group = any(item.input_ids is not None or item.labels is not None for item in group)
         # NOTE: An EXPIRED group may still contain COMPLETED states whose responses were preserved.
         # Refresh the group again so those states can also expire while waiting for rerollout.
         expired_mask = [item.status == Status.EXPIRED for item in group]
 
         # 1. update seq-level staleness
         refresh_seq_staleness(group, current_train_step)
+        # 2. calculate token-level staleness
+        token_level_effective_masks = calculate_group_effective_response_masks(
+            group,
+            current_train_step=current_train_step,
+            token_stale_threshold=token_stale_threshold,
+        )
 
         for index, item in enumerate(group):
             if expired_mask[index]:
@@ -468,18 +472,8 @@ class ReplayBuffer:
             if stale_threshold is not None and item.seq_staleness >= stale_threshold:
                 expired_mask[index] = True
                 continue
-            if is_agentic_group or token_stale_threshold is None:
-                continue
-            if not item.response_ids or (item.response_mask is not None and not any(item.response_mask)):
-                continue
-
-            # 2. update token-level staleness
-            effective_mask = calculate_effective_response_mask(
-                item,
-                current_train_step=current_train_step,
-                token_stale_threshold=token_stale_threshold,
-            )
-            if not any(effective_mask):
+            effective_mask = token_level_effective_masks[index]
+            if effective_mask is not None and not any(effective_mask):
                 expired_mask[index] = True
 
         # 3. return storage_status when no expired sample in group

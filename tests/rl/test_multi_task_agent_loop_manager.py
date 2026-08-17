@@ -12,7 +12,7 @@
 import asyncio
 import unittest
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
@@ -22,8 +22,6 @@ from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop_manager.disagg_agent_loop_manager import (
     DisaggAgentLoopManager,
-    DisaggAgentLoopManagerConfig,
-    DisaggTaskSpecConfig,
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import (
     GROUP_GENERATE_TIME_KEY,
@@ -123,7 +121,9 @@ class _FakeRolloutState:
 
 
 class _FakeReplayBuffer:
-    def __init__(self, rollout_states_by_task: dict[str, list[list[Any]]], leftover_counts: dict[tuple[str, Status], int]):
+    def __init__(
+        self, rollout_states_by_task: dict[str, list[list[Any]]], leftover_counts: dict[tuple[str, Status], int]
+    ):
         self._rollout_states_by_task = rollout_states_by_task
         self._leftover_counts = leftover_counts
         self.refresh_staleness_calls: list[tuple[str, int, int, tuple[Status, ...]]] = []

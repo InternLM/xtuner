@@ -7,7 +7,11 @@ import unittest
 
 from pydantic import ValidationError
 
-from xtuner.v1.data_proto.rl_data import RolloutState, calculate_effective_response_mask, reset_rollout_response
+from xtuner.v1.data_proto.rl_data import (
+    RolloutState,
+    calculate_group_effective_response_masks,
+    reset_rollout_response,
+)
 from xtuner.v1.rl.agent_loop_manager import (
     AsyncProduceStrategyConfig,
     DisaggAsyncProduceStrategyConfig,
@@ -66,6 +70,7 @@ class TestStalenessPolicy(unittest.TestCase):
                     8,
                 )
 
+
 class TestTokenStalenessMask(unittest.TestCase):
     """Token 级 staleness mask 的阈值与 semantic mask 行为。"""
 
@@ -75,40 +80,40 @@ class TestTokenStalenessMask(unittest.TestCase):
             with self.subTest(token_stale_threshold=token_stale_threshold):
                 state = self._state(response_model_steps=[0, 4])
 
-                mask = calculate_effective_response_mask(
-                    state,
+                masks = calculate_group_effective_response_masks(
+                    [state],
                     current_train_step=5,
                     token_stale_threshold=token_stale_threshold,
                 )
 
-                self.assertEqual(mask, expected)
+                self.assertEqual(masks, [expected])
                 self.assertIsNone(state.response_mask)
 
     def test_token_staleness_intersects_semantic_response_mask(self):
         # 最终 mask 必须同时满足 semantic mask 和 token staleness mask。
         state = self._state(response_model_steps=[0, 4], response_mask=[1, 0])
 
-        mask = calculate_effective_response_mask(
-            state,
+        masks = calculate_group_effective_response_masks(
+            [state],
             current_train_step=5,
             token_stale_threshold=4,
         )
 
-        self.assertEqual(mask, [0, 0])
+        self.assertEqual(masks, [[0, 0]])
 
     def test_rerolled_state_without_semantic_mask_uses_token_staleness_only(self):
         state = reset_rollout_response(self._state(response_model_steps=[0, 4], response_mask=[0, 1]))
         state.response_ids = [3, 4]
         state.response_model_steps = [4, 4]
 
-        mask = calculate_effective_response_mask(
-            state,
+        masks = calculate_group_effective_response_masks(
+            [state],
             current_train_step=5,
             token_stale_threshold=4,
         )
 
         self.assertIsNone(state.response_mask)
-        self.assertEqual(mask, [1, 1])
+        self.assertEqual(masks, [[1, 1]])
 
     @staticmethod
     def _state(

@@ -15,7 +15,7 @@ from mmengine.dist import get_rank
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
-    calculate_effective_response_mask,
+    calculate_group_effective_response_masks,
     discard_rollout_state,
     get_group_status,
 )
@@ -617,15 +617,14 @@ async def take_train_batch(
         if task.token_stale_threshold is None:
             continue
         for group in batch_by_task.get(task.task_name, []):
-            # NOTE: input_ids/labels 表示 agentic 训练分支，当前暂不支持 agentic token-staleness masking。
-            if any(item.input_ids is not None or item.labels is not None for item in group):
-                continue
-            for rollout_state in group:
-                rollout_state.response_mask = calculate_effective_response_mask(
-                    rollout_state,
-                    current_train_step=current_train_step,
-                    token_stale_threshold=task.token_stale_threshold,
-                )
+            effective_masks = calculate_group_effective_response_masks(
+                group,
+                current_train_step=current_train_step,
+                token_stale_threshold=task.token_stale_threshold,
+            )
+            for rollout_state, effective_mask in zip(group, effective_masks):
+                if effective_mask is not None:
+                    rollout_state.response_mask = effective_mask
 
     if hasattr(progress, "mark_consumed"):
         progress.mark_consumed(consumed_counts)

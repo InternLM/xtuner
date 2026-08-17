@@ -24,16 +24,16 @@ from xtuner.v1.rl.agent_loop import AgentLoopConfig
 from xtuner.v1.rl.rollout.controller import RolloutController
 from xtuner.v1.rl.rollout.health_manager import RolloutHealthManager
 from xtuner.v1.rl.rollout.lmdeploy import LMDeployWorker
-from xtuner.v1.rl.rollout.rollout_topology import RolloutEngine, RolloutTopology, RolloutServerProcess
 from xtuner.v1.rl.rollout.proxy_manager import RolloutProxyManager
+from xtuner.v1.rl.rollout.rollout_topology import RolloutEngine, RolloutServerProcess, RolloutTopology
+from xtuner.v1.rl.rollout.sglang import SGLangWorker
+from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, SessionRouter
+from xtuner.v1.rl.rollout.worker import RolloutWorker, RolloutWorkerInitResult
 from xtuner.v1.rl.rollout.worker_registry import (
     RolloutWorkerRegistry,
     WorkerLifecycleState,
     WorkerSnapshot,
 )
-from xtuner.v1.rl.rollout.sglang import SGLangWorker
-from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, SessionRouter
-from xtuner.v1.rl.rollout.worker import RolloutWorker, RolloutWorkerInitResult
 from xtuner.v1.rl.utils.misc import delete_from_routedapiproxy
 from xtuner.v1.rl.weight_update.data import RolloutWeightUpdateInfo
 from xtuner.v1.train.rl_trainer import BaseRLTrainer, _agent_loop_manager_requires_rollout_proxy
@@ -263,7 +263,9 @@ class TestRolloutTopologyAPI(unittest.TestCase):
             tuple((target.endpoint_rank, target.update_ranks) for target in targets),
             ((0, tuple(range(16))),),
         )
-        self.assertEqual(self._rollout_info(config=config, targets=targets, train_rank=0).rollout_url, "http://worker-0")
+        self.assertEqual(
+            self._rollout_info(config=config, targets=targets, train_rank=0).rollout_url, "http://worker-0"
+        )
         self.assertIsNone(self._rollout_info(config=config, targets=targets, train_rank=1).rollout_url)
         self.assertEqual(
             self._rollout_info(config=config, targets=targets, train_rank=1).ipc_rank_mesh,
@@ -283,7 +285,9 @@ class TestRolloutTopologyAPI(unittest.TestCase):
             tuple((target.endpoint_rank, target.update_ranks) for target in targets),
             tuple((rank, (rank,)) for rank in range(16)),
         )
-        self.assertEqual(self._rollout_info(config=config, targets=targets, train_rank=0).rollout_url, "http://worker-0")
+        self.assertEqual(
+            self._rollout_info(config=config, targets=targets, train_rank=0).rollout_url, "http://worker-0"
+        )
         self.assertEqual(
             self._rollout_info(config=config, targets=targets, train_rank=15).rollout_url,
             "http://worker-15",
@@ -307,7 +311,9 @@ class TestRolloutTopologyAPI(unittest.TestCase):
             tuple((target.endpoint_rank, target.update_ranks) for target in targets),
             ((0, tuple(range(16))),),
         )
-        self.assertEqual(self._rollout_info(config=config, targets=targets, train_rank=0).rollout_url, "http://worker-0")
+        self.assertEqual(
+            self._rollout_info(config=config, targets=targets, train_rank=0).rollout_url, "http://worker-0"
+        )
         self.assertIsNone(self._rollout_info(config=config, targets=targets, train_rank=8).rollout_url)
         self.assertEqual(
             self._rollout_info(config=config, targets=targets, train_rank=8).ipc_rank_mesh,
@@ -658,6 +664,7 @@ class TestRolloutWorkerRegistry(unittest.TestCase):
         self.assertEqual(target.server_url, "http://worker-0")
         self.assertEqual(target.lifecycle_state, WorkerLifecycleState.ACTIVE.value)
         self.assertTrue(target.is_active)
+
 
 class TestSessionRouter(unittest.IsolatedAsyncioTestCase):
     async def test_sticky_session_reselects_when_previous_entrypoint_is_inactive(self):
