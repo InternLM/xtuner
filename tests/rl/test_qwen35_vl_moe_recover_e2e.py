@@ -114,6 +114,7 @@ class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
         if hasattr(self, "_old_env"):
             self._restore_env()
 
+    @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "sglang backend is not enabled")
     def test_checkpoint_engine_backend_failure_recovery(self) -> None:
         trainer = self._build_config().build()
         self._install_rollout_probe(trainer)
