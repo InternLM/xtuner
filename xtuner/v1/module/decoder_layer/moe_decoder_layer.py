@@ -28,7 +28,6 @@ from xtuner.v1.module import (
 from xtuner.v1.module.dispatcher import (
     CombineResult,
     DispatchResult,
-    NaiveDispatcher,
     PostDispatchResult,
     PreCombineResult,
     PreDispatchResult,
@@ -218,7 +217,6 @@ class MoEDecoderLayer(nn.Module):
         generate_config: GenerateConfig | None = None,
         router_config: GreedyRouterConfig | NoAuxRouterConfig,
         router_compute_dtype: Literal["float32", "native"] = "float32",
-        hf_compatible_moe_combine: bool = False,
         moe_act_fn_cfg: MoEActFnConfig,
         float8_cfg: Float8Config | None = None,
         layer_idx: int = 0,
@@ -290,11 +288,6 @@ class MoEDecoderLayer(nn.Module):
             training_dtype="fp8" if float8_cfg is not None else "bf16",
             generate_dtype=generate_config.dtype if generate_config is not None else "bf16",
         )
-        if hf_compatible_moe_combine and not isinstance(self.dispatcher, NaiveDispatcher):
-            raise ValueError("hf_compatible_moe_combine only supports expert parallel size 1")
-        if hf_compatible_moe_combine and float8_cfg is not None:
-            raise ValueError("hf_compatible_moe_combine does not support float8 experts")
-        self.hf_compatible_moe_combine = hf_compatible_moe_combine
 
     def forward(
         self,
@@ -378,22 +371,6 @@ class MoEDecoderLayer(nn.Module):
         combined_hidden_states = combined_hidden_states.view(*origin_shape)
         return combined_hidden_states
 
-    @staticmethod
-    def _hf_compatible_moe_combine(
-        experts_out: torch.Tensor, router_results: RouterResults, origin_shape: torch.Size
-    ) -> torch.Tensor:
-        """Reduce routed expert outputs in the model dtype, matching Hugging
-        Face."""
-        topk_ids = router_results["topk_ids"]
-        topk_weights = router_results["topk_weights"].to(experts_out.dtype)
-        # The naive dispatcher groups expert inputs with the same stable ordering.
-        sorted_indices = torch.argsort(topk_ids.flatten(), stable=True)
-        unpermuted_experts = torch.empty_like(experts_out)
-        unpermuted_experts.index_copy_(0, sorted_indices, experts_out)
-        unpermuted_experts = unpermuted_experts.view(*topk_ids.shape, experts_out.shape[-1])
-        combined = (unpermuted_experts * topk_weights.unsqueeze(-1)).sum(dim=1)
-        return combined.view(*origin_shape)
-
     def _forward(
         self,
         hidden_states: torch.Tensor,
@@ -444,33 +421,30 @@ class MoEDecoderLayer(nn.Module):
         #     post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
         #     dispatched["topk_weights"],
         # )
-        if self.hf_compatible_moe_combine:
-            combined_hidden_states = self._hf_compatible_moe_combine(experts_out, router_results, origin_shape)
-        else:
-            pre_combined = self.dispatcher.combine_preprocess(
-                hidden_states=experts_out,
-                pre_dispatched=pre_dispatched,
-                dispatched=dispatched,
-                post_dispatched=post_dispatched,
-                decoding=False,
-            )
+        pre_combined = self.dispatcher.combine_preprocess(
+            hidden_states=experts_out,
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            decoding=False,
+        )
 
-            combined = self.dispatcher.combine(
-                pre_dispatched=pre_dispatched,
-                dispatched=dispatched,
-                post_dispatched=post_dispatched,
-                pre_combined=pre_combined,
-                decoding=False,
-            )
-            post_combined = self.dispatcher.combine_postprocess(
-                pre_dispatched=pre_dispatched,
-                dispatched=dispatched,
-                post_dispatched=post_dispatched,
-                pre_combined=pre_combined,
-                combined=combined,
-            )
-            combined_hidden_states = post_combined["hidden_states"]
-            combined_hidden_states = combined_hidden_states.view(*origin_shape)
+        combined = self.dispatcher.combine(
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            pre_combined=pre_combined,
+            decoding=False,
+        )
+        post_combined = self.dispatcher.combine_postprocess(
+            pre_dispatched=pre_dispatched,
+            dispatched=dispatched,
+            post_dispatched=post_dispatched,
+            pre_combined=pre_combined,
+            combined=combined,
+        )
+        combined_hidden_states = post_combined["hidden_states"]
+        combined_hidden_states = combined_hidden_states.view(*origin_shape)
 
         # debug for aligning with hf implementation.
         # combined_hidden_states = self._hf_expert_forward_for_debug(hidden_states, router_results, origin_shape)

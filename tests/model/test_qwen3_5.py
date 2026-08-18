@@ -1,5 +1,7 @@
 import os
 import unittest
+from unittest.mock import patch
+
 import parametrize
 import torch
 from packaging.version import Version
@@ -31,6 +33,25 @@ VIDEO_ROOT = os.environ["VIDEO_ROOT"]
     f"transformers >= 5.2.0 is required, but got {transformers_version}"
 )
 class TestQwen3_5_VL(DeterministicDDPTestCase):
+    @staticmethod
+    def _patch_hf_router_keep_fp32_topk_weights():
+        from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTopKRouter
+
+        def _forward(router, hidden_states):
+            hidden_states = hidden_states.reshape(-1, router.hidden_dim)
+            router_logits = torch.nn.functional.linear(hidden_states, router.weight)
+            router_probs = torch.nn.functional.softmax(router_logits, dtype=torch.float, dim=-1)
+            router_top_value, router_indices = torch.topk(router_probs, router.top_k, dim=-1)
+            router_top_value /= router_top_value.sum(dim=-1, keepdim=True)
+
+            # Transformers 5.2 overwrote router_logits with the fp32 softmax result,
+            # so this dtype conversion was effectively a no-op. Keep the 5.14 logits
+            # semantics while restoring the fp32 top-k weights used by XTuner's
+            # historical HF-parity baseline.
+            return router_logits, router_top_value, router_indices
+
+        return patch.object(Qwen3_5MoeTopKRouter, "forward", _forward)
+
     def _patch_xtuner_fast_pos_embed_interpolate(self) -> None:
         from transformers.vision_utils import get_vision_bilinear_indices_and_weights
 
@@ -195,19 +216,20 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         from transformers import Qwen3_5MoeForConditionalGeneration
         QWEN3_VL_MOE_PATH = os.environ["QWEN3_5_MOE_PATH"]
 
-        hf_model = Qwen3_5MoeForConditionalGeneration.from_pretrained(
-                    QWEN3_VL_MOE_PATH,
-                    dtype=torch.bfloat16,
-                    attn_implementation="flash_attention_2",
-                    device_map="cuda",
-                    trust_remote_code=True
-                ).eval()
-        # Cannot understand, but must accept. Once there is no this code, it will appear cuda access illegal memory error in multi-GPU
-        torch.distributed.barrier()
+        with self._patch_hf_router_keep_fp32_topk_weights():
+            hf_model = Qwen3_5MoeForConditionalGeneration.from_pretrained(
+                        QWEN3_VL_MOE_PATH,
+                        dtype=torch.bfloat16,
+                        attn_implementation="flash_attention_2",
+                        device_map="cuda",
+                        trust_remote_code=True
+                    ).eval()
+            # Cannot understand, but must accept. Once there is no this code, it will appear cuda access illegal memory error in multi-GPU
+            torch.distributed.barrier()
 
-        loss_hf_text = self._forward(hf_model, type='text', device=device, sp_size=sp_size)
-        loss_hf_image = self._forward(hf_model, type='image', device=device, sp_size=sp_size)
-        # loss_hf_video = self._forward(hf_model, type='video', device=device, sp_size=sp_size)
+            loss_hf_text = self._forward(hf_model, type='text', device=device, sp_size=sp_size)
+            loss_hf_image = self._forward(hf_model, type='image', device=device, sp_size=sp_size)
+            # loss_hf_video = self._forward(hf_model, type='video', device=device, sp_size=sp_size)
 
         del hf_model
         torch.cuda.empty_cache()
@@ -217,7 +239,6 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
             # hf_save_cfg of text_model is ignored to align with transformers's forward result
             model_cfg.text_config.hf_save_cfg = HFSaveCfg()
             model_cfg.text_config.router_compute_dtype = "native"
-            model_cfg.text_config.hf_compatible_moe_combine = True
             qwen3vl_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         qwen3vl_model.from_hf(QWEN3_VL_MOE_PATH)
@@ -246,7 +267,6 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
             # hf_save_cfg of text_model is ignored to align with transformers's forward result
             model_cfg.text_config.hf_save_cfg = HFSaveCfg()
             model_cfg.text_config.router_compute_dtype = "native"
-            model_cfg.text_config.hf_compatible_moe_combine = True
             qwen3vl_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
         
         fsdp_config = FSDPConfig(cpu_offload=False)
