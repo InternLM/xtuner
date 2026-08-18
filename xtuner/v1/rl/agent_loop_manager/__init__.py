@@ -17,7 +17,7 @@ from .disagg_producer import (
     DisaggProduceStrategy,
     DisaggProduceStrategyConfig,
 )
-from .produce_utils import ProduceBatchResult, ProduceBatchStatus, calculate_stale_threshold
+from .produce_utils import ProduceBatchResult, ProduceBatchStatus
 from .producer import (
     AsyncProduceStrategy,
     AsyncProduceStrategyConfig,
@@ -56,7 +56,6 @@ __all__ = [
     "SyncProduceStrategy",
     "AsyncProduceStrategy",
     "DisaggAsyncProduceStrategy",
-    "calculate_stale_threshold",
     "SamplerConfig",
     "Sampler",
 ]

@@ -832,7 +832,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     f"No generation needed for request {uid}: max_tokens={payload_max_tokens} or last input_id={last_id} is in eos_token."
                 )
                 finish_reason = "stop" if is_eos_reached else "length"
-                # 对于是否开 partial rollout 的情况都直接标记为完成并返回，因为本轮 rollout 未开始，也不需要拼接
+                # 本轮 rollout 未开始，不需要执行 partial-rollout 拼接。
                 rollout_state.finish_reason = finish_reason
                 rollout_state.status = Status.COMPLETED
                 return rollout_state

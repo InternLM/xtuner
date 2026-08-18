@@ -131,7 +131,7 @@ produce_strategy_config = AsyncProduceStrategyConfig(
 | `over_sample_threshold` | 允许额外生成的比例。值越大，rollout 侧越容易保持满载，但也可能产生更多非当前 step 的样本。 |
 | `enable_partial_rollout` | 权重同步前被暂停的 rollout 是否允许在同步后续跑。工具调用或多轮任务使用前需要确认 AgentLoop 支持续跑。 |
 | `max_staleness` | 允许样本相对当前训练进度滞后的同步周期数。值越大，吞吐更宽松，on-policy 程度更弱。 |
-| `tail_batch_trigger_size` | 过期样本累计到一定数量后，进入 tail batch 模式，优先重试这些样本。 |
+| `tail_batch_trigger_size` | 过期样本重试策略：`-1` 关闭 rerollout，`0` 立即重试但不进入 tail batch 模式，正数表示累计到指定 group 数量后进入 tail batch 模式。 |
 
 `max_staleness` 按“权重同步周期”计数。代码中实际使用的过期阈值是：
 
@@ -146,7 +146,7 @@ stale_threshold = (max_staleness + 1) * sync_weights_interval
 - `over_sample_threshold>0` 会为未来 step 提前生成样本。如果这些样本跨过下一次权重同步点，只有 `max_staleness` 允许时才会继续保留为可训练样本。
 - `enable_partial_rollout=True` 会让被暂停的 response 在同步后续跑。样本的 staleness 按 response 中最早的模型版本计算，因此跨同步周期续跑时也需要 `max_staleness` 留出空间。
 
-tail batch 用于处理异步生产中已经过期的样本。当 `expired` 样本数量达到 `tail_batch_trigger_size` 时，`AsyncProduceStrategy` 会进入 tail batch 模式：本轮不再按 `over_sample_threshold` 超发，只补齐必要目标，并优先从过期样本池中取样重试。可以把它理解为一次非超发的同步补齐生产；它的目的不是提高吞吐，而是把长尾过期样本重新收集起来，避免它们长期留在 buffer 中。
+`tail_batch_trigger_size` 控制过期样本的 rerollout。设置为 `-1` 时关闭 rerollout；设置为 `0` 时，过期 group 一出现就立即优先重试，但仍保持普通异步生产和 oversampling 策略；设置为正数时，`AsyncProduceStrategy` 等待 expired pool 累积到指定数量后进入 tail batch 模式，本轮不再按 `over_sample_threshold` 超发，只补齐必要目标，并优先从过期样本池中取样重试。
 
 注意：不建议同时设置 `max_staleness>0` 且 `enable_partial_rollout=False`。这种组合下，长尾超发样本在权重同步后可能因为不支持 partial rollout 被重置（当前在 `RolloutWorker` 中重置样本只保留 prompt 字段）；但由于每次重置过期信息归0，它们不会过期，tail batch 不会及时接管，下一轮同步窗口内仍然可能生成不完并反复重试。当前还没有支持 `tail_batch_max_tries` 机制来按重试次数触发 tail batch。因此 `max_staleness>0` 时，优先开启 `enable_partial_rollout=True`。
 

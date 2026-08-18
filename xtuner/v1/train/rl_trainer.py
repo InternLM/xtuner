@@ -1169,7 +1169,7 @@ class BaseRLTrainer:
                 response_len_list.append(len(response_ids))
 
                 # 根据 response_mask 计算 response_ids 对应的shifted_labels
-                if not group[i].response_mask:
+                if group[i].response_mask is None:
                     response_mask = [1] * len(response_ids)
                     response_labels = response_ids
                 else:
