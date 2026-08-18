@@ -440,6 +440,11 @@ class MoEDecoderLayer(nn.Module):
         #     post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
         #     dispatched["topk_weights"],
         # )
+        if self.ep_mesh is not None:
+            # MoEBlock is fullgraph-compiled and shared by all decoder layers. Only the routed-token
+            # dimension varies, so make it dynamic before entering the compile boundary to keep one
+            # AOT Autograd save plan across the original forward and checkpoint replay.
+            torch._dynamo.mark_dynamic(post_dispatched["hidden_states"], 0)
         experts_out = self.experts(
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
@@ -564,6 +569,9 @@ class MoEDecoderLayer(nn.Module):
                 dispatched=dispatched,
                 async_op=True,
             )
+            if self.ep_mesh is not None:
+                # Preserve the same dynamic-token compile contract for every in-layer micro-batch.
+                torch._dynamo.mark_dynamic(post_dispatched["hidden_states"], 0)
             experts_out = self.experts(
                 post_dispatched["hidden_states"],
                 post_dispatched["tokens_per_expert"],

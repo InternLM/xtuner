@@ -90,8 +90,9 @@ DEVICE = get_device()
 logger = get_logger()
 
 
+MOE_BLOCK_FORWARD = "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward"
 MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
-    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward": TorchCompileOption(fullgraph=True),
+    MOE_BLOCK_FORWARD: TorchCompileOption(fullgraph=True),
     "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward": TorchCompileOption(fullgraph=True),
     "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._pre_moe_forward": TorchCompileOption(
         fullgraph=True
@@ -1275,8 +1276,7 @@ class MoE(BaseModel):
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
         if self.config.ep_size > 1:
             return MOE_EP_COMPILE_CFG
-        else:
-            return MOE_NON_EP_COMPILE_CFG
+        return MOE_NON_EP_COMPILE_CFG
 
     @property
     def need_update_bias(self) -> bool:
