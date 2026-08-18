@@ -29,7 +29,6 @@ lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
     cpu_offload=False,
     ep_size=ep_size,
-    recompute_ratio=0.25,
 )
 
 dataset_config = [
