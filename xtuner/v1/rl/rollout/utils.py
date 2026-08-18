@@ -115,8 +115,8 @@ class PartialRolloutHandler:
     request.
 
     This handler only knows how to continue a single interrupted generation by reusing the previous response as the
-    next engine input. Agent-loop level multi-turn rollout, including tool messages and response masks, must be handled
-    by the agent loop itself.
+    next engine input. Agent-loop level multi-turn rollout, including tool messages, must be handled by the agent loop
+    itself.
     """
 
     def __init__(self) -> None:
@@ -151,6 +151,7 @@ class PartialRolloutHandler:
         prompt_tokens: int,
         completion_tokens: int,
     ) -> RolloutState:
+        """Postprocess a partial rollout using the default semantics."""
         rollout_state.finish_reason = finish_reason
         rollout_state.status = status
         history_response = rollout_state.response or ""

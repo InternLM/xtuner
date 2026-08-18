@@ -52,6 +52,7 @@ class _FakeRolloutState:
         self.extra_fields = {}
         self.response_model_steps = []
 
+
 class _FakeSampler:
     def __init__(self):
         self._next_id = 0

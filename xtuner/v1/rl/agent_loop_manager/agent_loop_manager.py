@@ -226,14 +226,14 @@ class AgentLoopManager:
             task_names=self.task_names,
             target_samples=current_sizes,
         )
-        # 生产前刷新已有 completed / aborted 的 staleness。
+        # 生产前刷新可训练/可重试数据的 staleness。
         await refresh_for_all_tasks(
             task_runners=self.task_runners,
             replay_buffer=self.replay_buffer,
             logger=self.logger,
             manager_name=self.name,
             train_step=train_step,
-            statuses=[Status.COMPLETED, Status.ABORTED],
+            statuses=[Status.COMPLETED, Status.ABORTED, Status.EXPIRED],
         )
         produce_start = time.perf_counter()
         produce_futures = []
@@ -252,6 +252,7 @@ class AgentLoopManager:
                         progress=local_progress,
                         is_valid_sample_fn=task.is_valid_sample_fn,
                         stale_threshold=task.stale_threshold,
+                        token_stale_threshold=task.token_stale_threshold,
                         expired_groups_retryable=task.expired_groups_retryable,
                     )
                 )
@@ -277,6 +278,7 @@ class AgentLoopManager:
                     progress=local_progress,
                     is_valid_sample_fn=task.is_valid_sample_fn,
                     stale_threshold=task.stale_threshold,
+                    token_stale_threshold=task.token_stale_threshold,
                     expired_groups_retryable=task.expired_groups_retryable,
                 )
             )
@@ -287,6 +289,7 @@ class AgentLoopManager:
             manager_name=self.name,
             task_batch_sizes=current_sizes,
             progress=local_progress,
+            current_train_step=train_step,
             pause_time_s=pause_time_s,
         )
         assert result.rollout_states, (

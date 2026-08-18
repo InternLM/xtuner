@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, reset_rollout_response
 from xtuner.v1.train.rl_trainer import BaseRLTrainer
 
 
@@ -110,6 +110,22 @@ class TestPrepareTrainData(unittest.TestCase):
         self.assertEqual(info["rewards/mean"], 1.0)
         self.assertEqual(info["response_len/mean"], 3.0)
         self.assertEqual(info["prompt_len/mean"], 3.0)
+
+    def test_rerolled_state_without_semantic_mask_uses_all_response_tokens(self):
+        trainer = self._build_trainer([1.0])
+        state = reset_rollout_response(self._state(response_mask=[0, 1, 0]))
+        state.response = "rerolled response"
+        state.response_ids = [30, 31]
+        state.logprobs = [0.1, 0.2]
+        state.reward = {"score": 1.0}
+        state.status = Status.COMPLETED
+        state.finish_reason = "stop"
+
+        data_batches, _ = self._prepare(trainer, [[state]])
+
+        self.assertIsNone(state.response_mask)
+        self.assertEqual(data_batches[0]["shifted_labels"].tolist(), [[-100, -100, 30, 31]])
+        self.assertEqual(data_batches[0]["advantage"], [1.0, 1.0, 1.0, 1.0, 1.0])
 
     def test_multi_sample_group_uses_each_sample_reward_and_advantage(self):
         # 同一个 prompt 下的多个 response 要分别使用自己的 reward 和 advantage。

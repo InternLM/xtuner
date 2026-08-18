@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import math
 import time
@@ -13,6 +15,7 @@ from mmengine.dist import get_rank
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
+    calculate_group_effective_response_masks,
     discard_rollout_state,
     get_group_status,
 )
@@ -44,7 +47,7 @@ class _ProgressDisplayer:
         self._tqdm = progress_bar
 
     @classmethod
-    def create(cls, *, strategy_name: str, task_name: str, total: int, initial: int) -> "_ProgressDisplayer":
+    def create(cls, *, strategy_name: str, task_name: str, total: int, initial: int) -> _ProgressDisplayer:
         total = max(0, total)
         initial = min(total, max(0, initial))
         if total <= 0 or get_rank() != 0:
@@ -92,11 +95,6 @@ def default_should_continue_fn(completed_count: int, batch_size: int, **kwargs) 
 
 
 def calculate_stale_threshold(max_staleness: int, sync_weights_interval: int) -> int:
-    if max_staleness < 0:
-        raise ValueError(f"max_staleness must be non-negative, got {max_staleness}.")
-    if sync_weights_interval <= 0:
-        raise ValueError(f"sync_weights_interval must be positive, got {sync_weights_interval}.")
-
     # max_staleness 按同步周期计数；+1 表示训练天然必须接受的当前同步周期滞后。
     return (max_staleness + 1) * sync_weights_interval
 
@@ -122,10 +120,11 @@ class BaseProduceContext:
     task_name: str
     train_step: int
     model_step: int
-    progress: "ProduceProgress | DisaggProduceProgress"
+    progress: ProduceProgress | DisaggProduceProgress
     is_valid_sample_fn: IsValidSampleFn = default_is_valid_sample_fn
     stale_threshold: int | None = None
     expired_groups_retryable: bool = True
+    token_stale_threshold: int | None = None
 
     @property
     def consumer_step(self) -> int:
@@ -171,7 +170,7 @@ class BaseProduceContext:
         return result
 
     async def put_generated_group(self, group: list[RolloutState]) -> bool:
-        produced_tokens = sum(len(item.response_ids) for item in group if item.response_ids is not None)
+        produced_tokens = sum(len(item.response_ids or []) - len(item.response_model_steps or []) for item in group)
         initial_status = get_group_status(group)
         discard_status: Status | None = None
 
@@ -209,6 +208,7 @@ class BaseProduceContext:
             model_step=self.model_step,
             current_train_step=self.consumer_step,
             stale_threshold=self.stale_threshold,
+            token_stale_threshold=self.token_stale_threshold,
             expired_groups_retryable=self.expired_groups_retryable,
         )
         self.progress.add_produced(self.task_name, samples=len(group), tokens=produced_tokens)
@@ -265,7 +265,7 @@ class ProduceBatchResult:
     produced_tokens: int = 0
     produce_time_s: float = 0.0
     task_batch_sizes: dict[str, int] | None = None
-    task_results: dict[str, "ProduceBatchResult"] | None = None
+    task_results: dict[str, ProduceBatchResult] | None = None
 
 
 @dataclass(frozen=True)
@@ -287,7 +287,11 @@ class _TaskRunner:
 
     @property
     def expired_groups_retryable(self) -> bool:
-        return getattr(self.produce_strategy, "tail_batch_trigger_size", 0) > 0
+        return getattr(self.produce_strategy, "tail_batch_trigger_size", -1) >= 0
+
+    @property
+    def token_stale_threshold(self) -> int | None:
+        return getattr(self.produce_strategy, "token_stale_threshold", None)
 
 
 class _TaskSamplerView:
@@ -357,7 +361,7 @@ def _fill_leftover_counts(result: ProduceBatchResult, status_counts: dict[Status
 
 def _merge_discarded_counts(
     result: ProduceBatchResult,
-    progress: "ProduceProgress | DisaggProduceProgress",
+    progress: ProduceProgress | DisaggProduceProgress,
     task_name: str,
 ) -> None:
     discarded_failed, discarded_filtered = progress.consume_discarded(task_name)
@@ -430,14 +434,18 @@ async def refresh_for_all_tasks(
     statuses: list[Status],
 ) -> None:
     task_stale_thresholds: dict[str, int] = {}
+    task_token_stale_thresholds: dict[str, int] = {}
     expired_groups_retryable_by_task: dict[str, bool] = {}
     for task in task_runners:
         # 没有 stale_threshold 的同步策略按 1 处理。
         task_stale_thresholds[task.task_name] = task.stale_threshold if task.stale_threshold is not None else 1
+        if task.token_stale_threshold is not None:
+            task_token_stale_thresholds[task.task_name] = task.token_stale_threshold
         expired_groups_retryable_by_task[task.task_name] = task.expired_groups_retryable
 
     expired_counts = await replay_buffer.refresh_staleness(
         task_stale_thresholds=task_stale_thresholds,
+        task_token_stale_thresholds=task_token_stale_thresholds,
         expired_groups_retryable_by_task=expired_groups_retryable_by_task,
         current_train_step=train_step,
         statuses=statuses,
@@ -547,7 +555,7 @@ def build_produce_batch_result(
     task_batch_sizes: dict[str, int],
     batch_by_task: dict[str, list[list[RolloutState]]],
     leftover_counts: dict[str, dict[Status, int]],
-    progress: "ProduceProgress | DisaggProduceProgress",
+    progress: ProduceProgress | DisaggProduceProgress,
     pause_time_s: float,
 ) -> ProduceBatchResult:
     if len(task_runners) == 1:
@@ -599,10 +607,25 @@ async def take_train_batch(
     logger,
     manager_name: str,
     task_batch_sizes: dict[str, int],
-    progress: "ProduceProgress | DisaggProduceProgress",
+    progress: ProduceProgress | DisaggProduceProgress,
+    current_train_step: int,
     pause_time_s: float = 0.0,
 ) -> ProduceBatchResult:
     batch_by_task, consumed_counts = await replay_buffer.take_batch(task_batch_sizes)
+
+    for task in task_runners:
+        if task.token_stale_threshold is None:
+            continue
+        for group in batch_by_task.get(task.task_name, []):
+            effective_masks = calculate_group_effective_response_masks(
+                group,
+                current_train_step=current_train_step,
+                token_stale_threshold=task.token_stale_threshold,
+            )
+            for rollout_state, effective_mask in zip(group, effective_masks):
+                if effective_mask is not None:
+                    rollout_state.response_mask = effective_mask
+
     if hasattr(progress, "mark_consumed"):
         progress.mark_consumed(consumed_counts)
     task_names = [task.task_name for task in task_runners]
