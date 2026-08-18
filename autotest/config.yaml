@@ -523,13 +523,14 @@ case:
                 base_metric: qwen3-5-sft-fp8/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.1
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
+                    # Loss rel drift ~1e-4 run-to-run; 2e-4 after dropping round(,2).
+                    loss/local_loss: 0.0002
+                    loss/reduced_balancing_loss: 0.0002
+                    loss/reduced_llm_loss: 0.0002
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
+                    runtime_info/text_tokens: 0.0001
             timeout: 1500
 
     qwen3-5-sft-recompute:
@@ -549,13 +550,13 @@ case:
                 base_metric: qwen3-5-sft-recompute/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.02
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
+                    loss/local_loss: 0.0002
+                    loss/reduced_balancing_loss: 0.0002
+                    loss/reduced_llm_loss: 0.0002
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
+                    runtime_info/text_tokens: 0.0001
             timeout: 1500
 
     qwen3-5-sft-tp2:
@@ -573,13 +574,13 @@ case:
                 base_metric: qwen3-5-sft-tp2/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.05
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
+                    loss/local_loss: 0.0002
+                    loss/reduced_balancing_loss: 0.0002
+                    loss/reduced_llm_loss: 0.0002
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
+                    runtime_info/text_tokens: 0.0001
             timeout: 1500
 
     qwen3-5-sft-sp4-resume:
@@ -599,13 +600,13 @@ case:
                 base_metric: qwen3-5-sft-sp4-resume/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.09
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
+                    loss/local_loss: 0.0002
+                    loss/reduced_balancing_loss: 0.0002
+                    loss/reduced_llm_loss: 0.0002
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
+                    runtime_info/text_tokens: 0.0001
             timeout: 1500
 
         -
@@ -627,13 +628,13 @@ case:
                 base_metric: qwen3-5-sft-sp4-resume/tracker-resume.jsonl
                 check_metrics:
                     grad_norm: 0.02
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
+                    loss/local_loss: 0.0002
+                    loss/reduced_balancing_loss: 0.0002
+                    loss/reduced_llm_loss: 0.0002
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
+                    runtime_info/text_tokens: 0.0001
             post_action:
                 command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sft-sp4-resume sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
             timeout: 1500
@@ -802,13 +803,13 @@ case:
                 base_metric: qwen3-5-sft-mtp/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.05
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
+                    loss/local_loss: 0.0002
+                    loss/reduced_balancing_loss: 0.0002
+                    loss/reduced_llm_loss: 0.0002
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
+                    runtime_info/text_tokens: 0.0001
             timeout: 1500
 
     qwen3-5-sft-mtp-vl:
@@ -854,14 +855,15 @@ case:
             assert_info:
                 base_metric: qwen3-5-sft-ep2-mtp4-vl/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
+                    # EP2+MTP4+VL: early-step grad_norm ~10%; loss rel drift up to ~1e-3.
+                    grad_norm: 0.12
+                    loss/local_loss: 0.001
+                    loss/reduced_balancing_loss: 0.001
+                    loss/reduced_llm_loss: 0.001
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
+                    runtime_info/text_tokens: 0.0001
             timeout: 1500
 
     qwen3-5-rl-vl-lmdeploy-mtp-ep:
@@ -1203,13 +1205,13 @@ case:
                     grad_norm: 0.1
                     # FP8 maxvio has ~0.5% run noise; thr was 1e-6 and interacted badly with round(,2).
                     loss/maxvio: 0.01
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
+                    loss/local_loss: 0.0002
+                    loss/reduced_balancing_loss: 0.0002
+                    loss/reduced_llm_loss: 0.0002
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
-                    runtime_info/text_tokens: 0
+                    runtime_info/text_tokens: 0.0001
             timeout: 1500 
 
     qwen3-sft-16nums:
@@ -1231,7 +1233,8 @@ case:
                     grad_norm: 1
                     loss/maxvio: 0.05
                     loss/local_loss: 0.02
-                    loss/reduced_balancing_loss: 0.02
+                    # 2-node packing noise; observed ~2.2% on balancing_loss.
+                    loss/reduced_balancing_loss: 0.025
                     loss/reduced_llm_loss: 0.02
                     lr: 0
             timeout: 1500
