@@ -404,7 +404,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
                 item.routed_experts = MagicMock()
 
                 with patch(
-                    "xtuner.v1.rl.agent_loop_manager.produce_utils.release_existing_sessions",
+                    "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
                     new=AsyncMock(return_value={str(session_id)}),
                 ) as release_sessions:
                     self.assertFalse(await ctx.put_generated_group([item]))

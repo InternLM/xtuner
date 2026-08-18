@@ -9,8 +9,38 @@ from xtuner.v1.rl.rollout.trace_store import (
     RolloutTraceStore,
     _free_ray_refs,
     get_existing_store,
+    release_and_discard_rollout_groups,
     release_existing_sessions,
 )
+
+
+class TestRolloutTraceCleanup(unittest.TestCase):
+    def test_release_and_discard_detaches_only_trace_owned_refs(self):
+        trace_owned_ref = object()
+        rollout_owned_ref = object()
+        trace_owned = SimpleNamespace(session_id="trace-owned", routed_experts=trace_owned_ref)
+        rollout_owned = SimpleNamespace(session_id="rollout-owned", routed_experts=rollout_owned_ref)
+        routed_experts_seen_by_discard = {}
+
+        def record_discard(item):
+            routed_experts_seen_by_discard[item.session_id] = item.routed_experts
+
+        with (
+            patch(
+                "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
+                new=AsyncMock(return_value={"trace-owned"}),
+            ) as release_sessions,
+            patch(
+                "xtuner.v1.rl.rollout.trace_store.discard_rollout_state",
+                side_effect=record_discard,
+            ) as discard,
+        ):
+            asyncio.run(release_and_discard_rollout_groups([[trace_owned, rollout_owned]]))
+
+        release_sessions.assert_awaited_once_with(["trace-owned", "rollout-owned"])
+        self.assertIsNone(routed_experts_seen_by_discard["trace-owned"])
+        self.assertIs(routed_experts_seen_by_discard["rollout-owned"], rollout_owned_ref)
+        self.assertEqual(discard.call_count, 2)
 
 
 class TestRolloutTraceStore(unittest.TestCase):

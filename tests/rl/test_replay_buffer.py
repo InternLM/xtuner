@@ -211,7 +211,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 )
 
                 with patch(
-                    "xtuner.v1.rl.replay_buffer.release_existing_sessions",
+                    "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
                     new=AsyncMock(return_value={"101"}),
                 ) as release_sessions:
                     await replay_buffer.put(
@@ -255,7 +255,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 )
 
                 with patch(
-                    "xtuner.v1.rl.replay_buffer.release_existing_sessions",
+                    "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
                     new=AsyncMock(),
                 ) as release_sessions:
                     await replay_buffer.put(
@@ -450,7 +450,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 assert len(replay_buffer) == 2
 
                 with patch(
-                    "xtuner.v1.rl.replay_buffer.release_existing_sessions",
+                    "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
                     new=AsyncMock(return_value={"201"}),
                 ) as release_sessions:
                     expired_counts = await replay_buffer.refresh_staleness(
@@ -492,7 +492,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
             return set(session_ids)
 
         with patch(
-            "xtuner.v1.rl.replay_buffer.release_existing_sessions",
+            "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
             new=AsyncMock(side_effect=delayed_release),
         ) as release_sessions:
             refresh_task = asyncio.create_task(

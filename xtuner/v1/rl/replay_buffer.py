@@ -14,13 +14,12 @@ from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
     calculate_group_effective_response_masks,
-    discard_rollout_state,
     get_group_status,
     refresh_seq_staleness,
     reset_rollout_response,
     update_sample_version,
 )
-from xtuner.v1.rl.rollout.trace_store import release_existing_sessions
+from xtuner.v1.rl.rollout.trace_store import release_and_discard_rollout_groups
 from xtuner.v1.rl.utils import (
     BetweenNode,
     ConditionNode,
@@ -499,15 +498,9 @@ class ReplayBuffer:
         if not groups:
             return
 
-        released_session_ids = await release_existing_sessions(
-            [str(item.session_id) for group in groups for item in group if item.session_id is not None]
-        )
+        await release_and_discard_rollout_groups(groups)
         for group in groups:
             for item in group:
-                if item.session_id is not None and str(item.session_id) in released_session_ids:
-                    # TraceStore.release_sessions() already freed these routed-expert refs.
-                    item.routed_experts = None
-                discard_rollout_state(item)
                 item.status = Status.EXPIRED
 
     async def put(

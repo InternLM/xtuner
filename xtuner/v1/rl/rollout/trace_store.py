@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import ray
 from pydantic import BaseModel, ConfigDict, Field
 
+from xtuner.v1.data_proto.rl_data import RolloutState, discard_rollout_state
 from xtuner.v1.utils import get_logger
 
 
@@ -354,9 +355,7 @@ class RolloutTraceStore:
 
     def release_all(self):
         """Release all sessions and free associated resources."""
-        for session_id in list(self.sessions):
-            self.release(session_id)
-        self.sessions.clear()
+        self.release_sessions(list(self.sessions))
         self.objects.clear()
         self.updated_at.clear()
 
@@ -507,6 +506,25 @@ async def release_existing_sessions(session_ids: list[str]) -> set[str]:
         return set()
 
     return set(await store.release_sessions.remote(session_ids))
+
+
+async def release_and_discard_rollout_groups(groups: list[list[RolloutState]]) -> None:
+    """Release trace-owned resources before discarding terminal rollouts.
+
+    Sessions released by the trace store have already freed their routed-expert
+    references. Detach those references before the generic rollout-state
+    cleanup so it does not explicitly free them a second time. Rollouts whose
+    sessions are absent from the store retain their references for the generic
+    cleanup path.
+    """
+    released_session_ids = await release_existing_sessions(
+        [str(item.session_id) for group in groups for item in group if item.session_id is not None]
+    )
+    for group in groups:
+        for item in group:
+            if item.session_id is not None and str(item.session_id) in released_session_ids:
+                item.routed_experts = None
+            discard_rollout_state(item)
 
 
 if __name__ == "__main__":
