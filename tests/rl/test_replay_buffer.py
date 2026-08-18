@@ -428,12 +428,12 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(group[1].response_ids, [12])
                 self.assertEqual(group[1].reward, {"score": 0.9})
 
-    async def test_common_refresh_staleness_drops_only_terminal_expired_groups(self):
-        # 同一轮 refresh 仍统计两类过期；只删除 terminal EXPIRED，保留 tail batch 可重试项。
+    async def test_common_refresh_staleness_drops_only_non_retryable_expired_groups(self):
+        # 同一轮 refresh 仍统计两类过期；只删除 non-retryable EXPIRED，保留 tail batch 可重试项。
         for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:
             with self.subTest(replay_buffer_config=config_name):
                 replay_buffer = replay_buffer_config_cls().build()
-                terminal_stale = make_rollout_state(
+                non_retryable_stale = make_rollout_state(
                     1,
                     session_id=201,
                     response_model_steps=[1],
@@ -445,7 +445,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                     response_model_steps=[1],
                     mm_info={"pixel_values": np.ones((2, 3), dtype=np.float32)},
                 )
-                await replay_buffer.put([terminal_stale], "terminal_task")
+                await replay_buffer.put([non_retryable_stale], "non_retryable_task")
                 await replay_buffer.put([retryable_stale], "retryable_task")
                 assert len(replay_buffer) == 2
 
@@ -454,34 +454,34 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                     new=AsyncMock(return_value={"201"}),
                 ) as release_sessions:
                     expired_counts = await replay_buffer.refresh_staleness(
-                        task_stale_thresholds={"terminal_task": 2, "retryable_task": 2},
+                        task_stale_thresholds={"non_retryable_task": 2, "retryable_task": 2},
                         expired_groups_retryable_by_task={
-                            "terminal_task": False,
+                            "non_retryable_task": False,
                             "retryable_task": True,
                         },
                         current_train_step=4,
                     )
 
                 release_sessions.assert_awaited_once_with(["201"])
-                assert expired_counts == {"terminal_task": 1, "retryable_task": 1}
-                assert terminal_stale.status == Status.EXPIRED
-                assert terminal_stale.prompt_ids is None
-                assert terminal_stale.mm_info is None
+                assert expired_counts == {"non_retryable_task": 1, "retryable_task": 1}
+                assert non_retryable_stale.status == Status.EXPIRED
+                assert non_retryable_stale.prompt_ids is None
+                assert non_retryable_stale.mm_info is None
                 assert retryable_stale.status == Status.EXPIRED
                 assert retryable_stale.prompt_ids == [2, 1002]
                 assert retryable_stale.mm_info is not None
-                assert await replay_buffer.count("terminal_task", Status.COMPLETED) == 0
-                assert await replay_buffer.count("terminal_task", Status.EXPIRED) == 0
+                assert await replay_buffer.count("non_retryable_task", Status.COMPLETED) == 0
+                assert await replay_buffer.count("non_retryable_task", Status.EXPIRED) == 0
                 assert await replay_buffer.count("retryable_task", Status.EXPIRED) == 1
                 assert len(replay_buffer) == 1
-                assert await replay_buffer.get(1, "terminal_task", Status.EXPIRED) == []
+                assert await replay_buffer.get(1, "non_retryable_task", Status.EXPIRED) == []
 
-    async def test_refresh_staleness_batches_terminal_release_outside_lock(self):
+    async def test_refresh_staleness_batches_non_retryable_release_outside_lock(self):
         replay_buffer = AsyncReplayBufferConfig().build()
         first = make_rollout_state(1, session_id=301, response_model_steps=[1])
         second = make_rollout_state(2, session_id=302, response_model_steps=[1])
-        await replay_buffer.put([first], "terminal_task")
-        await replay_buffer.put([second], "terminal_task")
+        await replay_buffer.put([first], "non_retryable_task")
+        await replay_buffer.put([second], "non_retryable_task")
 
         release_started = asyncio.Event()
         allow_release = asyncio.Event()
@@ -497,17 +497,17 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         ) as release_sessions:
             refresh_task = asyncio.create_task(
                 replay_buffer.refresh_staleness(
-                    task_stale_thresholds={"terminal_task": 2},
-                    expired_groups_retryable_by_task={"terminal_task": False},
+                    task_stale_thresholds={"non_retryable_task": 2},
+                    expired_groups_retryable_by_task={"non_retryable_task": False},
                     current_train_step=4,
                 )
             )
             await asyncio.wait_for(release_started.wait(), timeout=1.0)
             try:
-                # The terminal records are already removed and the buffer lock is
+                # The non-retryable records are already removed and the buffer lock is
                 # available while the trace-store RPC is still blocked.
                 count = await asyncio.wait_for(
-                    replay_buffer.count("terminal_task", Status.COMPLETED),
+                    replay_buffer.count("non_retryable_task", Status.COMPLETED),
                     timeout=1.0,
                 )
                 assert count == 0
@@ -516,7 +516,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
             expired_counts = await refresh_task
 
         release_sessions.assert_awaited_once_with(["301", "302"])
-        assert expired_counts == {"terminal_task": 2}
+        assert expired_counts == {"non_retryable_task": 2}
         assert first.status == Status.EXPIRED
         assert second.status == Status.EXPIRED
         assert len(replay_buffer) == 0

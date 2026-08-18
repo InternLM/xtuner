@@ -383,7 +383,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.failed_samples, 1)
         self.assertEqual(result.filtered_samples, 1)
 
-    async def test_put_generated_group_releases_terminal_trace_sessions(self):
+    async def test_put_generated_group_releases_non_retryable_trace_sessions(self):
         # FAILED / FILTERED 不进入 replay buffer，必须在丢弃 RolloutState 前释放对应 trace session。
         cases = (
             (Status.FAILED, True, 101),
@@ -394,7 +394,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
                 strategy = SyncProduceStrategyConfig(is_valid_sample_fn=lambda _samples: is_valid).build()
                 ctx = self._build_context(
                     strategy,
-                    f"terminal_{status.name.lower()}",
+                    f"non_retryable_{status.name.lower()}",
                     self._build_agent_loop(),
                     self._build_sampler(),
                     batch_size=1,

@@ -493,8 +493,8 @@ class ReplayBuffer:
         return Status.EXPIRED
 
     @staticmethod
-    async def _discard_terminal_expired_groups(groups: list[list[RolloutState]]) -> None:
-        """Release terminal trace sessions in one RPC, then discard groups."""
+    async def _discard_non_retryable_expired_groups(groups: list[list[RolloutState]]) -> None:
+        """Release non-retryable trace sessions in one RPC, then discard groups."""
         if not groups:
             return
 
@@ -528,7 +528,7 @@ class ReplayBuffer:
         )
         staleness = max(item.seq_staleness for item in items)
         if status == Status.EXPIRED and not expired_groups_retryable:
-            await self._discard_terminal_expired_groups([items])
+            await self._discard_non_retryable_expired_groups([items])
             return
         storage_item = StorageItem(
             item=items,
@@ -569,7 +569,7 @@ class ReplayBuffer:
         expired_counts: dict[str, int] = {}
         retryable_by_task = expired_groups_retryable_by_task or {}
         token_stale_thresholds = task_token_stale_thresholds or {}
-        terminal_expired_groups: list[list[RolloutState]] = []
+        non_retryable_expired_groups: list[list[RolloutState]] = []
         async with self._lock:
             updated_records: list[StorageItem] = []
             deleted_uids: list[int] = []
@@ -595,14 +595,14 @@ class ReplayBuffer:
                     if status == Status.EXPIRED:
                         expired_count += 1
                         if not retryable:
-                            terminal_expired_groups.append(record.item)
+                            non_retryable_expired_groups.append(record.item)
                             deleted_uids.append(record.uid)
                             continue
                     updated_records.append(replace(record, status=status, staleness=staleness))
                 expired_counts[task_name] = expired_count
             await self._storage.delete(deleted_uids)
             await self._storage.update(updated_records)
-        await self._discard_terminal_expired_groups(terminal_expired_groups)
+        await self._discard_non_retryable_expired_groups(non_retryable_expired_groups)
         return expired_counts
 
     async def is_ready(
