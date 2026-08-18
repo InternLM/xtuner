@@ -511,11 +511,9 @@ async def release_existing_sessions(session_ids: list[str]) -> set[str]:
 async def release_and_discard_rollout_groups(groups: list[list[RolloutState]]) -> None:
     """Release trace-owned resources before discarding terminal rollouts.
 
-    Sessions released by the trace store have already freed their routed-expert
-    references. Detach those references before the generic rollout-state
-    cleanup so it does not explicitly free them a second time. Rollouts whose
-    sessions are absent from the store retain their references for the generic
-    cleanup path.
+    Sessions released by the trace store have already freed their routed-expert references. Detach those references
+    before the generic rollout-state cleanup so it does not explicitly free them a second time. Rollouts whose sessions
+    are absent from the store retain their references for the generic cleanup path.
     """
     released_session_ids = await release_existing_sessions(
         [str(item.session_id) for group in groups for item in group if item.session_id is not None]

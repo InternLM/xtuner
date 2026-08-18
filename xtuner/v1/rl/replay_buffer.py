@@ -494,7 +494,8 @@ class ReplayBuffer:
 
     @staticmethod
     async def _discard_non_retryable_expired_groups(groups: list[list[RolloutState]]) -> None:
-        """Release non-retryable trace sessions in one RPC, then discard groups."""
+        """Release non-retryable trace sessions in one RPC, then discard
+        groups."""
         if not groups:
             return
 
