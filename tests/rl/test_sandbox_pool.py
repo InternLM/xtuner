@@ -254,9 +254,7 @@ async def test_rate_limiter_is_acquired_for_every_physical_create(monkeypatch: p
     sandbox_pool = SandboxPool(
         provider=provider,
         specs={
-            "main": spec(
-                dependencies={"db": SandboxSpec(image="database"), "target": SandboxSpec(image="target")}
-            )
+            "main": spec(dependencies={"db": SandboxSpec(image="database"), "target": SandboxSpec(image="target")})
         },
         creates_per_sec=1.0,
     )
