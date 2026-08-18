@@ -1673,7 +1673,7 @@ class RLColocateTrainer(BaseRLTrainer):
             self.train_controller.weight_update(need_register=True, need_update=False)
             self.train_controller.offload(target="model")
             ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
-            self.train_controller.weight_update(need_register=False, need_update=True, update_pending_only=False)
+            self.train_controller.weight_update(need_register=False, need_update=True)
             ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
             self.logger.info("Rollout workers updated weights from Checkpoint Engine.")
             return
@@ -1852,9 +1852,7 @@ class RLColocateTrainer(BaseRLTrainer):
                             self.rollout_controller.onload_weights.remote(),
                             timeout=RL_TRAINER_RAY_GET_TIMEOUT,
                         )
-                        self.train_controller.weight_update(
-                            need_register=False, need_update=True, update_pending_only=False
-                        )
+                        self.train_controller.weight_update(need_register=False, need_update=True)
                         if pending_group_ranks:
                             # 权重更新成功后将 pending状态变为activate状态
                             ray.get(
@@ -1938,7 +1936,7 @@ class RLColocateTrainer(BaseRLTrainer):
                 self.rollout_controller.onload_pending_weight_update_workers.remote(),
                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
             )
-            self.train_controller.weight_update(need_register=False, need_update=True, update_pending_only=True)
+            self.train_controller.weight_update(need_register=False, need_update=True)
             ray.get(
                 self.rollout_controller.onload_kvcache_pending_weight_update_workers.remote(),
                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,

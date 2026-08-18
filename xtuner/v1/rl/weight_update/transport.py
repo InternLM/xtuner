@@ -481,8 +481,6 @@ class IPCWeightTransport(WeightTransport[IPCBackendAdapter]):
     def send(self, batch: WeightUpdateBatch) -> None:
         ipc_update_target = self.rollout_info._ipc_update_target
         assert ipc_update_target is not None, "IPC rollout target for current train rank is not resolved."
-        if not ipc_update_target.is_active:
-            return
         rollout_url = ipc_update_target.server_url
 
         DEVICE_MODULE.empty_cache()
@@ -1095,18 +1093,14 @@ class CheckpointEngineWeightTransport:
 
         return len(update_ranks) == world_size and list(update_ranks) == list(range(world_size))
 
-    def _update_engines(self, update_pending_only: bool = False) -> None:
+    def _update_engines(self) -> None:
         """``gather_metas`` then ``update`` to push checkpoint to rollout
         engines."""
 
-        if update_pending_only:
-            targets = self.rollout_info.pending_update_targets
-        else:
-            targets = self.rollout_info.active_update_targets
+        targets = self.rollout_info.update_targets
 
         self.logger.info(
-            f"[Checkpoint engine debug] rank={self.rank} update_pending_only={update_pending_only} "
-            f"all_targets={self.rollout_info.weight_update_targets} selected_targets={targets}"
+            f"[checkpoint_engine] update rollout engine info rank={self.rank} selected rollout workers for weight update: {self.rollout_info.update_target_infos}"
         )
 
         if not targets:
@@ -1125,9 +1119,9 @@ class CheckpointEngineWeightTransport:
             )
         req_func = self._make_req_func(targets)
         self.logger.info(
-            f"[checkpoint_engine] gather_metas+update name={self._checkpoint_name} "
-            f"active_targets={len(targets)}/{len(self.rollout_info.weight_update_targets)} "
-            f"method={'broadcast' if use_broadcast else 'p2p'} update_ranks={update_ranks} ranks={ranks}"
+            f"[checkpoint_engine] gather_metas+update name={self._checkpoint_name} ranks={self.rank} "
+            f"selected_targets={len(targets)}/{self.ps_world_size} "
+            f"method={'broadcast' if use_broadcast else 'p2p'} update_ranks={update_ranks} "
         )
         self._ps.gather_metas(self._checkpoint_name)
         self._ps.update(self._checkpoint_name, req_func, ranks=ranks)
@@ -1150,14 +1144,10 @@ class CheckpointEngineWeightTransport:
             Whether to load the registered checkpoint into rollout engines. Set this to
             False to split registration and rollout update into separate calls, which
             can reduce peak GPU memory usage under memory pressure.
-        update_pending_only : bool, optional
-            Whether to update only rollout targets that are pending weight updates. If True, skip rollout targets
-            that have already received the latest checkpoint.
         """
 
         need_register = kwargs.pop("need_register", True)
         need_update = kwargs.pop("need_update", True)
-        update_pending_only = kwargs.pop("update_pending_only", True)
 
         assert need_register or need_update, (
             "At least one of need_register or need_update must be True when use checkpoint engine update."
@@ -1171,7 +1161,7 @@ class CheckpointEngineWeightTransport:
 
         # 2. Broadcast checkpoint to engines
         if need_update:
-            self._update_engines(update_pending_only=update_pending_only)
+            self._update_engines()
 
     def has_registered_checkpoint(self) -> bool:
         return self._checkpoint_name is not None

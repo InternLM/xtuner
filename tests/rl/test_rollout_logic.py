@@ -668,7 +668,6 @@ class TestRolloutWorkerRegistry(unittest.TestCase):
         self.assertEqual(target.engine_size, 2)
         self.assertEqual(target.server_url, "http://worker-0")
         self.assertEqual(target.lifecycle_state, WorkerLifecycleState.ACTIVE.value)
-        self.assertTrue(target.is_active)
 
 
 class TestSessionRouter(unittest.IsolatedAsyncioTestCase):
