@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from xtuner.v1.model.adapter.lora import LoraModel
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 
 from .data import (
@@ -76,7 +77,24 @@ class UpdateWeighter:
             f"backend={self.rollout_info.backend!r}."
         )
         assert self.weight_iterator is not None, "Weight iterator is not initialized."
-        self._transport.update(self.weight_iterator)
+
+        model = self._engine.model
+        lora_model = None
+        if isinstance(model, LoraModel):
+            lora_model = model
+            # TODO: 当前 weight update 流程只支持发送全量参数（base weight + merged LoRA delta），
+            #       不支持直接发送 LoRA 参数（lora_A/lora_B）到推理引擎。
+            #       因此这里需要先把 LoRA merge 进 base weight，更新完成后再 unmerge 恢复。
+            #       后续优化方向：weight iterator 区分 base weight 和 LoRA 参数，推理引擎支持
+            #       直接加载 LoRA 参数，避免 merge/unmerge 的开销和精度损失。
+            lora_model.merge_lora()
+
+        try:
+            self._transport.update(self.weight_iterator)
+        finally:
+            if lora_model is not None:
+                # 恢复 LoRA 状态，保持训练侧模型可继续训练
+                lora_model.unmerge_lora()
 
     def _set_transport(self) -> None:
         rollout_info = self.rollout_info
