@@ -326,6 +326,8 @@ class TrainEngine:
     # TODO: Should be removed
     @staticmethod
     def clean_param_name(name: str) -> str:
+        if "_checkpoint_wrapped_module." in name:
+            name = name.replace("_checkpoint_wrapped_module.", "")
         if "_orig_mod." in name:
             name = name.replace("_orig_mod.", "")
         return name

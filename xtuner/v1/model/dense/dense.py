@@ -235,7 +235,10 @@ class Dense(BaseModel):
             layer = self.layers[str(int(layer_idx))]
             layer_idx = int(layer_idx)
             if layer_idx < num_recompute_layers:
-                layer = apply_gradient_checkpointing(layer, preserve_rng_state=checkpoint_preserve_rng_state)
+                layer = apply_gradient_checkpointing(
+                    layer,
+                    preserve_rng_state=checkpoint_preserve_rng_state,
+                )
 
                 # Linear-attention (GatedDeltaNet) layers write ``seq_ctx.seq_idx`` inside the
                 # checkpoint region; compiling the checkpointed layer with ``fullgraph=True`` turns

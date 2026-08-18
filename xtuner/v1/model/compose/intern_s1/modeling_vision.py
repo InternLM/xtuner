@@ -407,7 +407,10 @@ class InternS1VisionModel(BaseModel):
             layer = self.encoder.layer[layer_idx]
 
             if layer_idx < num_recompute_layers:
-                layer = apply_gradient_checkpointing(layer, preserve_rng_state=checkpoint_preserve_rng_state)
+                layer = apply_gradient_checkpointing(
+                    layer,
+                    preserve_rng_state=checkpoint_preserve_rng_state,
+                )
                 if self.config.drop_path_rate == 0.0 and self.compile_cfg:
                     # Compile the class function, then restore descriptor binding on this instance.
                     compiled_forward = torch.compile(type(layer).forward, fullgraph=True)

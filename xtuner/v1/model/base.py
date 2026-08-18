@@ -1693,6 +1693,8 @@ class BaseModel(nn.Module):
 
     # TODO: Using `xtuenr.v1.utils.misc.clean_param_name`
     def _clean_param_name(self, name: str) -> str:
+        if "_checkpoint_wrapped_module." in name:
+            name = name.replace("_checkpoint_wrapped_module.", "")
         if "_orig_mod." in name:
             name = name.replace("_orig_mod.", "")
         return name

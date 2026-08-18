@@ -366,6 +366,8 @@ class InternalMetricsRecorder:
                 raise TypeError("Only Tensor type is allowed!")
 
     def _clean_module_name(self, name: str) -> str:
+        if "._checkpoint_wrapped_module" in name:
+            name = name.replace("._checkpoint_wrapped_module", "")
         if "._orig_mod" in name:
             name = name.replace("._orig_mod", "")
         return name
