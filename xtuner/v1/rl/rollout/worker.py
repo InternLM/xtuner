@@ -351,6 +351,13 @@ class RolloutConfig(BaseModel):
             help="Use float32 for language model head.",
         ),
     ] = False
+    enable_prefix_caching: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Whether to enable prefix caching for the rollout worker.",
+        ),
+    ] = False
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
     health_check_interval_seconds: Annotated[
         float,
