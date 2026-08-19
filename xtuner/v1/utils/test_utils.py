@@ -267,3 +267,22 @@ def add_video_root(messages: list[dict], video_root: Path | str):
                 content["path"] = new_image_list
             else:
                 content["path"] = str(content_path)
+
+
+def get_qwen3_vl_video_chat_template(processor) -> str:
+    """Return a Qwen3-VL template compatible with Transformers 5.14.1.
+
+    Qwen3VLProcessor.replace_video_token() already adds a vision-start/end pair for every video frame. Transformers
+    5.14.1's generic ProcessorMixin replaces only the video token, leaving the template's outer pair in the prompt. Use
+    a bare video token in the processor template so the expanded prompt keeps exactly one vision-start/end pair per
+    frame.
+    """
+    chat_template = processor.chat_template
+    if not isinstance(chat_template, str):
+        raise TypeError("Qwen3-VL processor chat_template must be a string")
+
+    video_placeholder = processor.vision_start_token + processor.video_token + processor.vision_end_token
+    if video_placeholder not in chat_template:
+        raise ValueError("Qwen3-VL video placeholder was not found in processor chat_template")
+
+    return chat_template.replace(video_placeholder, processor.video_token)
