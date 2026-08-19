@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import ray
 
+from xtuner.v1.rl.rollout import trace_store as trace_store_module
 from xtuner.v1.rl.rollout.trace_store import (
     RolloutTraceStore,
     _free_ray_refs,
@@ -41,6 +42,15 @@ class TestRolloutTraceCleanup(unittest.TestCase):
         self.assertIsNone(routed_experts_seen_by_discard["trace-owned"])
         self.assertIs(routed_experts_seen_by_discard["rollout-owned"], rollout_owned_ref)
         self.assertEqual(discard.call_count, 2)
+
+    def test_get_existing_store_returns_none_when_ray_is_uninitialized(self):
+        cached_store = object()
+        with (
+            patch.object(trace_store_module, "_handle_cache", cached_store),
+            patch.object(trace_store_module.ray, "is_initialized", return_value=False),
+        ):
+            self.assertIsNone(get_existing_store())
+            self.assertIsNone(trace_store_module._handle_cache)
 
 
 class TestRolloutTraceStore(unittest.TestCase):
@@ -94,10 +104,6 @@ class TestRolloutTraceStore(unittest.TestCase):
             return_value=None,
         ):
             self.assertEqual(asyncio.run(release_existing_sessions(["missing"])), set())
-
-    def test_get_existing_store_returns_none_when_ray_is_uninitialized(self):
-        with patch("xtuner.v1.rl.rollout.trace_store.ray.is_initialized", return_value=False):
-            self.assertIsNone(get_existing_store())
 
     def test_free_ray_refs_recurses_into_nested_containers(self):
         object_ref = ray.put({"payload": [1, 2, 3]})
