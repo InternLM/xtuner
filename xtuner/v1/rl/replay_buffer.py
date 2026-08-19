@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
+    calculate_group_effective_response_masks,
+    discard_rollout_state,
     get_group_status,
     refresh_seq_staleness,
     reset_rollout_response,
@@ -33,19 +35,6 @@ from xtuner.v1.utils import get_logger
 
 
 logger = get_logger(__name__)
-
-
-def maybe_expire_group(group: list[RolloutState], stale_threshold: int) -> None:
-    if stale_threshold <= 0:
-        raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
-
-    group_status = get_group_status(group)
-    if group_status not in (Status.COMPLETED, Status.ABORTED):
-        return
-    if any(getattr(sample, "seq_staleness", 0) >= stale_threshold for sample in group):
-        # 生成结果入库前统一做过期翻转，后续存储逻辑只按最终 group status 分类。
-        for sample in group:
-            sample.status = Status.EXPIRED
 
 
 @dataclass
@@ -450,6 +439,60 @@ class ReplayBuffer:
         self._storage = storage_backend
         self._lock = asyncio.Lock()
 
+    def _apply_staleness_lifecycle(
+        self,
+        group: list[RolloutState],
+        *,
+        current_train_step: int | None,
+        stale_threshold: int | None,
+        token_stale_threshold: int | None,
+        expired_groups_retryable: bool,
+    ) -> Status:
+        """Refresh one group's staleness, expire it when needed, and clean it
+        up."""
+        storage_status = get_group_status(group)
+        if current_train_step is None or storage_status not in (Status.COMPLETED, Status.ABORTED, Status.EXPIRED):
+            return storage_status
+        # NOTE: An EXPIRED group may still contain COMPLETED states whose responses were preserved.
+        # Refresh the group again so those states can also expire while waiting for rerollout.
+        expired_mask = [item.status == Status.EXPIRED for item in group]
+
+        # 1. update seq-level staleness
+        refresh_seq_staleness(group, current_train_step)
+        # 2. calculate token-level staleness
+        token_level_effective_masks = calculate_group_effective_response_masks(
+            group,
+            current_train_step=current_train_step,
+            token_stale_threshold=token_stale_threshold,
+        )
+
+        for index, item in enumerate(group):
+            if expired_mask[index]:
+                continue
+            if stale_threshold is not None and item.seq_staleness >= stale_threshold:
+                expired_mask[index] = True
+                continue
+            effective_mask = token_level_effective_masks[index]
+            if effective_mask is not None and not any(effective_mask):
+                expired_mask[index] = True
+
+        # 3. return storage_status when no expired sample in group
+        if not any(expired_mask):
+            return storage_status
+
+        # 4. cleanup sample or cleanup response for expired sample
+        if expired_groups_retryable:
+            for item, expired in zip(group, expired_mask):
+                if expired:
+                    item.status = Status.EXPIRED
+                    reset_rollout_response(item)
+        else:
+            for item in group:
+                discard_rollout_state(item)
+                item.status = Status.EXPIRED
+
+        return Status.EXPIRED
+
     async def put(
         self,
         items: list[RolloutState],
@@ -458,28 +501,31 @@ class ReplayBuffer:
         model_step: int | None = None,
         current_train_step: int | None = None,
         stale_threshold: int | None = None,
+        token_stale_threshold: int | None = None,
+        expired_groups_retryable: bool = True,
     ) -> None:
         if not items:
             return
         if model_step is not None:
             for item in items:
                 update_sample_version(item, model_step)
-        if current_train_step is not None:
-            refresh_seq_staleness(items, current_train_step)
-        if stale_threshold is not None:
-            maybe_expire_group(items, stale_threshold)
-
-        status = get_group_status(items)
-        if status == Status.EXPIRED:
-            for item in items:
-                reset_rollout_response(item)
+        status = self._apply_staleness_lifecycle(
+            items,
+            current_train_step=current_train_step,
+            stale_threshold=stale_threshold,
+            token_stale_threshold=token_stale_threshold,
+            expired_groups_retryable=expired_groups_retryable,
+        )
+        staleness = max(item.seq_staleness for item in items)
+        if status == Status.EXPIRED and not expired_groups_retryable:
+            return
         storage_item = StorageItem(
             item=items,
             uid=0,
             timestamp_id=0,
             task_name=task_name,
             status=status,
-            staleness=max(item.seq_staleness for item in items),
+            staleness=staleness,
         )
         async with self._lock:
             await self._policy.put(storage_item, self._storage)
@@ -500,18 +546,21 @@ class ReplayBuffer:
         self,
         *,
         task_stale_thresholds: dict[str, int],
+        task_token_stale_thresholds: dict[str, int] | None = None,
+        expired_groups_retryable_by_task: dict[str, bool] | None = None,
         current_train_step: int,
         statuses: list[Status] | None = None,
     ) -> dict[str, int]:
-        # 刷新可复用样本的 staleness；completed / aborted 都可能来自旧权重，需要按 train_step 淘汰。
-        for task_name, stale_threshold in task_stale_thresholds.items():
-            if stale_threshold <= 0:
-                raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
+        # 刷新可复用样本的 staleness；EXPIRED group 中保留的 COMPLETED state
+        # 在等待 rerollout 期间也可能继续变旧。
         if statuses is None:
-            statuses = [Status.COMPLETED, Status.ABORTED]
+            statuses = [Status.COMPLETED, Status.ABORTED, Status.EXPIRED]
         expired_counts: dict[str, int] = {}
+        retryable_by_task = expired_groups_retryable_by_task or {}
+        token_stale_thresholds = task_token_stale_thresholds or {}
         async with self._lock:
             updated_records: list[StorageItem] = []
+            deleted_uids: list[int] = []
             for task_name, stale_threshold in task_stale_thresholds.items():
                 query_dsl: QueryDict = {
                     "$and": [
@@ -522,20 +571,23 @@ class ReplayBuffer:
                 records = await self._storage.get(query_dsl)
                 expired_count = 0
                 for record in records:
-                    refresh_seq_staleness(record.item, current_train_step)
+                    retryable = retryable_by_task.get(task_name, True)
+                    status = self._apply_staleness_lifecycle(
+                        record.item,
+                        current_train_step=current_train_step,
+                        stale_threshold=stale_threshold,
+                        token_stale_threshold=token_stale_thresholds.get(task_name),
+                        expired_groups_retryable=retryable,
+                    )
                     staleness = max((getattr(item, "seq_staleness", 0) for item in record.item), default=0)
-                    should_expire = any(getattr(item, "seq_staleness", 0) >= stale_threshold for item in record.item)
-                    if should_expire:
-                        # completed / aborted 样本超过 step 级阈值时整组翻转，后续 sampler 可按 EXPIRED 重新取样。
-                        for item in record.item:
-                            reset_rollout_response(item)
-                            item.status = Status.EXPIRED
-                        status = Status.EXPIRED
+                    if status == Status.EXPIRED:
                         expired_count += 1
-                    else:
-                        status = get_group_status(record.item)
+                        if not retryable:
+                            deleted_uids.append(record.uid)
+                            continue
                     updated_records.append(replace(record, status=status, staleness=staleness))
                 expired_counts[task_name] = expired_count
+            await self._storage.delete(deleted_uids)
             await self._storage.update(updated_records)
         return expired_counts
 

@@ -145,6 +145,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             progress=progress,
             is_valid_sample_fn=strategy.is_valid_sample_fn,
             stale_threshold=getattr(strategy, "stale_threshold", None),
+            token_stale_threshold=getattr(strategy, "token_stale_threshold", None),
+            expired_groups_retryable=getattr(strategy, "tail_batch_trigger_size", -1) >= 0,
         )
 
     def _build_disagg_progress(
@@ -195,6 +197,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             progress=progress,
             is_valid_sample_fn=strategy.is_valid_sample_fn,
             stale_threshold=getattr(strategy, "stale_threshold", None),
+            token_stale_threshold=getattr(strategy, "token_stale_threshold", None),
+            expired_groups_retryable=getattr(strategy, "tail_batch_trigger_size", -1) >= 0,
         )
 
     async def test_contexts_keep_colocate_and_disagg_control_surface_separate(self):
@@ -240,6 +244,53 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         update_event.set()
         self.assertTrue(disagg_ctx.should_abort())
 
+    async def test_disagg_put_uses_consumer_step_for_token_expiry(self):
+        # 非共卡 put-time check 必须读取 live consumer step，而不是 producer future step。
+        task_name = "test_disagg_token_expiry"
+        strategy = DisaggAsyncProduceStrategyConfig(
+            max_staleness=3,
+            max_token_staleness=0,
+            tail_batch_trigger_size=1,
+        ).build(sync_weights_interval=1)
+        progress = self._build_disagg_progress(
+            task_name,
+            target=1,
+            train_step=5,
+            producer_future_step=9,
+            target_upto_future_step=9,
+        )
+        ctx = self._build_disagg_context(
+            strategy,
+            task_name,
+            self._build_agent_loop(),
+            self._build_sampler(),
+            batch_size=1,
+            train_step=9,
+            model_step=3,
+            progress=progress,
+        )
+        state = RolloutState(
+            rollout_id=1,
+            group_id=1,
+            message=[{"role": "user", "content": "prompt"}],
+            prompt_ids=[1],
+            tokens=[1, 11],
+            response="old response",
+            response_ids=[11],
+            response_mask=[1],
+            response_model_steps=[3],
+            logprobs=[0.1],
+            finish_reason="stop",
+            reward={"score": 1.0},
+            status=Status.COMPLETED,
+        )
+
+        self.assertFalse(await ctx.put_generated_group([state]))
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 0)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.EXPIRED), 1)
+        self.assertEqual(state.status, Status.EXPIRED)
+        self.assertEqual(state.response_ids, [])
+
     async def test_sampler_with_replay_buffer(self):
         # 验证 sampler 优先复用 replay buffer 中可重试的 rollout group，耗尽后回退 dataloader。
         task_name = "test_task"
@@ -253,7 +304,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         aborted_item = make_rollout_state(999, status=Status.ABORTED)
         expired_item = make_rollout_state(1000, status=Status.EXPIRED)
         await self.replay_buffer.put([aborted_item], task_name)
-        await self.replay_buffer.put([expired_item], task_name)
+        await self.replay_buffer.put([expired_item], task_name, expired_groups_retryable=True)
 
         data = await sampler.sample(task_name, group_status=[Status.EXPIRED, Status.ABORTED])
         self.assertEqual(data[0].group_id, 1000)
@@ -454,6 +505,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         mock_agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
         task_name = "test_task"
         call_count = 0
+
         async def mock_gen(rs, **kwargs):
             nonlocal call_count
             call_count += 1
@@ -589,7 +641,11 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # 验证 tail-batch 模式固定从 expired/aborted pool 补必要缺口，并禁用额外超发。
         task_name = "test_tail_static"
         for sample_id in (900, 901):
-            await self.replay_buffer.put([make_rollout_state(sample_id, status=Status.EXPIRED)], task_name)
+            await self.replay_buffer.put(
+                [make_rollout_state(sample_id, status=Status.EXPIRED)],
+                task_name,
+                expired_groups_retryable=True,
+            )
 
         sampler = self._build_sampler()
         original_sample = sampler.sample
@@ -621,6 +677,118 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         completed = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
         self.assertEqual(sorted(group[0].group_id for group in completed), [900, 901])
         self.assertTrue(all(group[0].seq_staleness == 0 for group in completed))
+
+    async def test_async_produce_strategy_immediate_rerollout_keeps_oversampling(self):
+        # trigger size 为 0 只立即启用 expired 采样，不进入禁用超发的 tail-batch 模式。
+        task_name = "test_immediate_rerollout"
+        for sample_id in (900, 901):
+            await self.replay_buffer.put(
+                [make_rollout_state(sample_id, status=Status.EXPIRED)],
+                task_name,
+                expired_groups_retryable=True,
+            )
+
+        sampler = self._build_sampler()
+        original_sample = sampler.sample
+        sampled_statuses: list[list[Status] | None] = []
+
+        async def instrumented_sample(task_name, group_status=None):
+            sampled_statuses.append(group_status)
+            return await original_sample(task_name=task_name, group_status=group_status)
+
+        sampler.sample = instrumented_sample
+        strategy = AsyncProduceStrategyConfig(
+            over_sample_threshold=1.0,
+            tail_batch_trigger_size=0,
+        ).build()
+        progress = self._build_progress(task_name, target=1)
+        ctx = self._build_context(
+            strategy,
+            task_name,
+            self._build_agent_loop(),
+            sampler,
+            batch_size=1,
+            progress=progress,
+        )
+
+        await strategy.produce_batch(ctx)
+
+        self.assertEqual(
+            sampled_statuses,
+            [[Status.EXPIRED, Status.ABORTED], [Status.EXPIRED, Status.ABORTED]],
+        )
+
+    async def test_async_produce_strategy_rerolls_expired_state_and_preserves_fresh_group_member(self):
+        task_name = "test_selective_rerollout"
+        expired = make_rollout_state(900)
+        expired.response = "expired response"
+        expired.response_ids = [11]
+        expired.response_model_steps = [0]
+        expired.response_mask = None
+        expired.reward = {"score": 0.1}
+        fresh = make_rollout_state(901)
+        fresh.group_id = expired.group_id
+        fresh.response = "fresh response"
+        fresh.response_ids = [21]
+        fresh.response_model_steps = [5]
+        fresh.response_mask = None
+        fresh.logprobs = [-0.2]
+        fresh.reward = {"score": 0.9}
+
+        await self.replay_buffer.put(
+            [expired, fresh],
+            task_name,
+            current_train_step=5,
+            stale_threshold=11,
+            token_stale_threshold=1,
+            expired_groups_retryable=True,
+        )
+
+        generated_rollout_ids = []
+        agent_loop = self._build_agent_loop()
+
+        async def generate_expired_state_only(group, **kwargs):
+            for state in group:
+                if state.status == Status.COMPLETED:
+                    continue
+                generated_rollout_ids.append(state.rollout_id)
+                state.response = "rerolled response"
+                state.response_ids = [31]
+                state.logprobs = [-0.1]
+                state.reward = {"score": 0.2}
+                state.finish_reason = "stop"
+                state.status = Status.COMPLETED
+            return group
+
+        agent_loop.generate_group = generate_expired_state_only
+        strategy = AsyncProduceStrategyConfig(
+            over_sample_threshold=0.0,
+            max_staleness=10,
+            max_token_staleness=0,
+            tail_batch_trigger_size=0,
+        ).build()
+        ctx = self._build_context(
+            strategy,
+            task_name,
+            agent_loop,
+            self._build_sampler(),
+            batch_size=1,
+            train_step=5,
+            model_step=5,
+        )
+
+        await strategy.produce_batch(ctx)
+
+        completed = await self.replay_buffer.get(1, task_name, Status.COMPLETED)
+        self.assertEqual(generated_rollout_ids, [expired.rollout_id])
+        self.assertEqual(len(completed), 1)
+        self.assertEqual([state.status for state in completed[0]], [Status.COMPLETED, Status.COMPLETED])
+        self.assertEqual(completed[0][0].response, "rerolled response")
+        self.assertEqual(completed[0][0].response_model_steps, [5])
+        self.assertEqual(completed[0][1].response, "fresh response")
+        self.assertEqual(completed[0][1].response_ids, [21])
+        self.assertEqual(completed[0][1].response_model_steps, [5])
+        self.assertEqual(completed[0][1].logprobs, [-0.2])
 
     async def test_async_produce_strategy_fails_fast_on_invalid_progress(self):
         # 验证 progress 缺少当前 task key 时 fail fast，避免静默用 0 掩盖调度状态损坏。

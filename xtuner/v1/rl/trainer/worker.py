@@ -273,6 +273,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         if isinstance(worker_cfg.model_cfg, BaseComposeConfig):
             if hasattr(worker_cfg.model_cfg.text_config, "mtp_config"):
                 self.mtp_config = worker_cfg.model_cfg.text_config.mtp_config
+        elif hasattr(worker_cfg.model_cfg, "mtp_config"):
+            # 非 compose 模型的 mtp_config 直接放在了 model_cfg 中
+            self.mtp_config = worker_cfg.model_cfg.mtp_config
 
         self.update_weighter = UpdateWeighter(
             rank=self.rank,
