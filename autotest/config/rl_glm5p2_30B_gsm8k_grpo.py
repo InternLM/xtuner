@@ -40,10 +40,10 @@ train_optimizer_steps = 1
 train_batch_size = 64 * train_optimizer_steps
 prompt_repeat_k = 5
 rollout_tp_size = 1
-rollout_ep_size = 1
+rollout_ep_size = 8
 max_prompt_length = 512
 max_response_length = 1024
-pack_max_length = 32 * 1024
+pack_max_length = 8192
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
@@ -113,7 +113,7 @@ train_worker_cfg = WorkerConfig(
     loss_cfg=loss_cfg,
     lr_cfg=lr_cfg,
     fsdp_cfg=fsdp_cfg,
-    sp_size=int(os.environ.get("SP_SIZE", "1")),
+    sp_size=2,
     optimizer_steps=train_optimizer_steps,
     pack_max_length=pack_max_length,
 )

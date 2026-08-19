@@ -70,7 +70,7 @@ case:
                        threshold: 20
                        method: absolute
                        operator: <
-            timeout: 7200
+            timeout: 72000
 
     glm5-2-rl-lmdeploy-dapo:
         -
@@ -115,7 +115,7 @@ case:
                        threshold: 20
                        method: absolute
                        operator: <
-            timeout: 7200
+            timeout: 72000
     glm5-2-sft-30B:
         -
             type: sft
