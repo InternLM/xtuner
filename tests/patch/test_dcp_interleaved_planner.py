@@ -27,7 +27,7 @@ from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.patch import InterleavedShardLoadPlanner, InterleavedShardSavePlanner
-from xtuner.v1.utils.interleaved_shard import InterleavedShard, compute_runs, reconstruct_full_tensor
+from xtuner.v1.utils.interleaved_shard import InterleavedShard, RuntimeLayout, reconstruct_full_tensor
 
 
 NUM_EXPERTS = 4
@@ -56,7 +56,7 @@ def _build_interleaved_dtensor(ep_size: int, tp_size: int) -> DTensor:
     # real, distinct data (from_local does not scatter — the caller must supply the local shard).
     local = torch.empty(GLOBAL_ROWS // (ep_size * tp_size), IN_FEATURES, device="cuda")
     dt = DTensor.from_local(local, mesh, placements, run_check=False)
-    for run in compute_runs(dt):
+    for run in RuntimeLayout.from_dtensor(dt).owned_runs():
         start = run.global_offset[0]
         local[run.local_start : run.local_start + run.local_size] = g[start : start + run.local_size]
     return dt
@@ -69,7 +69,7 @@ class TestDCPInterleavedPlanner(DeterministicDDPTestCase):
         pg = self.create_pg(device)
 
         src = _build_interleaved_dtensor(ep_size=2, tp_size=2)
-        assert len(compute_runs(src)) > 1, "expected multiple interleaved runs per rank"
+        assert len(RuntimeLayout.from_dtensor(src).owned_runs()) > 1, "expected multiple interleaved runs per rank"
         local_before = src._local_tensor.clone()
         full_before = reconstruct_full_tensor(src).clone()
         optimizer_moment = _build_interleaved_dtensor(ep_size=2, tp_size=2)

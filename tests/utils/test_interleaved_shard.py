@@ -1,23 +1,13 @@
-"""Unit tests for ``xtuner.v1.utils.interleaved_shard``.
+"""Distributed behavior tests for ``xtuner.v1.utils.interleaved_shard``.
 
-These tests cover the InterleavedShard placement and the ``reconstruct_full_tensor`` helper
-across the layouts that XTuner actually uses:
-
-  * Plain ``(Shard, InterleavedShard)`` on a 2D (ep, tp) mesh — the layout produced by
-    ``GroupedLinear`` when TP is enabled.
-  * The post-``fully_shard`` 3D layout with FSDP prepended on top — what HF save sees in
-    practice.
-
-Run with::
-
-    torchrun --nproc-per-node=8 tests/utils/test_interleaved_shard.py
+The 2D cases cover the ``(Shard, InterleavedShard)`` layout produced by
+``GroupedLinear``. The 3D case prepends FSDP, matching the runtime layout seen
+by HF save/load.
 """
 
 from __future__ import annotations
 
-import os
 import shutil
-import sys
 import tempfile
 
 import torch
@@ -27,226 +17,178 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
-sys.path.insert(0, _REPO_ROOT)
-# Import the module directly to avoid pulling in xtuner package's heavy deps (loguru etc.) that
-# aren't required for this unit test.
-import importlib.util as _ilu
-
-_spec = _ilu.spec_from_file_location(
-    "interleaved_shard",
-    os.path.join(_REPO_ROOT, "xtuner", "v1", "utils", "interleaved_shard.py"),
+from xtuner._testing import DeterministicDDPTestCase
+from xtuner.v1.utils.interleaved_shard import (
+    InterleavedShard,
+    RuntimeLayout,
+    reconstruct_full_tensor,
 )
-assert _spec is not None and _spec.loader is not None
-_mod = _ilu.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-InterleavedShard = _mod.InterleavedShard
-compute_runs = _mod.compute_runs
-has_interleaved_placement = _mod.has_interleaved_placement
-reconstruct_full_tensor = _mod.reconstruct_full_tensor
 
 
 NUM_EXPERTS = 4
 OUT_PER_EXPERT = 4
 IN_FEATURES = 8
-GLOBAL_ROWS = NUM_EXPERTS * OUT_PER_EXPERT  # 16
+GLOBAL_ROWS = NUM_EXPERTS * OUT_PER_EXPERT
 
 
 def _build_expected_local(
-    g: torch.Tensor,
+    global_tensor: torch.Tensor,
     ep_rank: int,
     tp_rank: int,
     ep_size: int,
     tp_size: int,
 ) -> torch.Tensor:
-    """Hand-computed per-expert column parallel slice."""
+    """Return the hand-computed per-expert column-parallel slice."""
     experts_per_ep = NUM_EXPERTS // ep_size
-    rows_per_expert = g.shape[0] // NUM_EXPERTS
+    rows_per_expert = global_tensor.shape[0] // NUM_EXPERTS
     rows_per_tp_per_expert = rows_per_expert // tp_size
     chunks = []
     for local_expert in range(experts_per_ep):
         global_expert = ep_rank * experts_per_ep + local_expert
         expert_start = global_expert * rows_per_expert
         row_start = expert_start + tp_rank * rows_per_tp_per_expert
-        chunks.append(g[row_start : row_start + rows_per_tp_per_expert])
+        chunks.append(global_tensor[row_start : row_start + rows_per_tp_per_expert])
     return torch.cat(chunks, dim=0)
 
 
-def test_2d_layout_and_reconstruct():
-    """Build a DTensor on (ep, tp) with (Shard, InterleavedShard) and reconstruct."""
-    mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("ep", "tp"))
-    ep_rank = mesh.get_local_rank("ep")
-    tp_rank = mesh.get_local_rank("tp")
+class TestInterleavedShard2D(DeterministicDDPTestCase):
+    def test_layout_and_reconstruct(self) -> None:
+        self.create_pg("cuda")
+        mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("ep", "tp"))
+        ep_rank = mesh.get_local_rank("ep")
+        tp_rank = mesh.get_local_rank("tp")
 
-    g = torch.arange(GLOBAL_ROWS * IN_FEATURES, device="cuda", dtype=torch.float32).reshape(
-        GLOBAL_ROWS, IN_FEATURES
-    )
-    dist.broadcast(g, src=0)
+        global_tensor = torch.arange(
+            GLOBAL_ROWS * IN_FEATURES,
+            device="cuda",
+            dtype=torch.float32,
+        ).reshape(GLOBAL_ROWS, IN_FEATURES)
+        dist.broadcast(global_tensor, src=0)
 
-    placements = (Shard(0), InterleavedShard(0, num_local_stripes=NUM_EXPERTS // 2))
-    dt = distribute_tensor(g, mesh, placements)
+        placements = (Shard(0), InterleavedShard(0, num_local_stripes=NUM_EXPERTS // 2))
+        tensor = distribute_tensor(global_tensor, mesh, placements)
 
-    # Layout correctness: per-rank local matches hand-computed per-expert column parallel.
-    expected = _build_expected_local(g, ep_rank, tp_rank, 2, 2)
-    assert torch.allclose(dt.to_local(), expected), (
-        f"rank {dist.get_rank()} local mismatch"
-    )
+        expected = _build_expected_local(global_tensor, ep_rank, tp_rank, 2, 2)
+        torch.testing.assert_close(tensor.to_local(), expected)
+        assert RuntimeLayout.from_dtensor(tensor).is_interleaved
+        torch.testing.assert_close(reconstruct_full_tensor(tensor), global_tensor)
 
-    # Detection helper works on this placement. ``shard_order`` only exists on torch>=2.10;
-    # the implementation guards with ``getattr`` so the test must too.
-    assert has_interleaved_placement(dt), "shard_order should be None for this placement"
-    assert getattr(dt._spec, "shard_order", None) is None
+    def test_hf_round_trip(self) -> None:
+        """Exercise the public BaseModel HF save/load path."""
+        from transformers import PretrainedConfig
+        from xtuner.v1.model.base import BaseModel, XTunerBaseModelConfig
 
-    # Reconstruct gives back the global tensor.
-    full = reconstruct_full_tensor(dt)
-    assert torch.allclose(full, g), (
-        f"reconstruct mismatch on 2D layout: max_diff={(full - g).abs().max().item()}"
-    )
+        class _ToyConfig(XTunerBaseModelConfig):
+            @property
+            def hf_config(self) -> PretrainedConfig:
+                return PretrainedConfig()
 
+        class _ToyModel(BaseModel):
+            def __init__(self, weight: DTensor):
+                super().__init__(_ToyConfig())
+                self.weight = nn.Parameter(weight)
+                self._init_load_spec()
 
-def test_hf_round_trip():
-    """Exercise InterleavedShard through BaseModel's public HF save/load API."""
-    from transformers import PretrainedConfig
+            def to_hf_key_list(self, key: str) -> list[str]:
+                return [key]
 
-    from xtuner.v1.model.base import BaseModel, XTunerBaseModelConfig
+        self.create_pg("cuda")
+        mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("ep", "tp"))
+        placements = (Shard(0), InterleavedShard(0, num_local_stripes=NUM_EXPERTS // 2))
+        global_weight = torch.arange(
+            GLOBAL_ROWS * IN_FEATURES,
+            device="cuda",
+            dtype=torch.bfloat16,
+        ).reshape(GLOBAL_ROWS, IN_FEATURES)
+        dist.broadcast(global_weight, src=0)
+        model = _ToyModel(distribute_tensor(global_weight, mesh, placements))
 
-    class _ToyConfig(XTunerBaseModelConfig):
-        @property
-        def hf_config(self) -> PretrainedConfig:
-            return PretrainedConfig()
+        checkpoint_dirs = [tempfile.mkdtemp() if dist.get_rank() == 0 else None]
+        dist.broadcast_object_list(checkpoint_dirs, src=0)
+        checkpoint_dir = checkpoint_dirs[0]
+        assert checkpoint_dir is not None
 
-    class _ToyModel(BaseModel):
-        def __init__(self, weight: DTensor):
-            super().__init__(_ToyConfig())
-            self.weight = nn.Parameter(weight)
-            self._init_load_spec()
+        try:
+            model.save_hf(checkpoint_dir)
+            restored_weight = distribute_tensor(torch.zeros_like(global_weight), mesh, placements)
+            restored = _ToyModel(restored_weight)
+            restored.from_hf(checkpoint_dir)
+            torch.testing.assert_close(restored.weight.to_local(), model.weight.to_local(), rtol=0, atol=0)
+        finally:
+            dist.barrier()
+            if dist.get_rank() == 0:
+                shutil.rmtree(checkpoint_dir)
 
-        def to_hf_key_list(self, key: str) -> list[str]:
-            return [key]
-
-    mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("ep", "tp"))
-    placements = (Shard(0), InterleavedShard(0, num_local_stripes=NUM_EXPERTS // 2))
-    global_weight = torch.arange(
-        GLOBAL_ROWS * IN_FEATURES,
-        device="cuda",
-        dtype=torch.bfloat16,
-    ).reshape(GLOBAL_ROWS, IN_FEATURES)
-    dist.broadcast(global_weight, src=0)
-    model = _ToyModel(distribute_tensor(global_weight, mesh, placements))
-
-    checkpoint_dir = tempfile.mkdtemp() if dist.get_rank() == 0 else None
-    checkpoint_dirs = [checkpoint_dir]
-    dist.broadcast_object_list(checkpoint_dirs, src=0)
-    checkpoint_dir = checkpoint_dirs[0]
-    assert checkpoint_dir is not None
-
-    try:
-        model.save_hf(checkpoint_dir)
-        restored_weight = distribute_tensor(torch.zeros_like(global_weight), mesh, placements)
-        restored = _ToyModel(restored_weight)
-        restored.from_hf(checkpoint_dir)
-        assert torch.equal(restored.weight.to_local(), model.weight.to_local())
-    finally:
-        dist.barrier()
-        if dist.get_rank() == 0:
-            shutil.rmtree(checkpoint_dir)
+    @property
+    def world_size(self) -> int:
+        return 4
 
 
 class _ToyGroupedLinear(nn.Module):
-    def __init__(self, weight):
+    def __init__(self, weight: DTensor):
         super().__init__()
         self.weight = nn.Parameter(weight)
 
-    def forward(self, x):
-        w = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
-        return torch.nn.functional.linear(x, w)
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
+        return torch.nn.functional.linear(inputs, weight)
 
 
-def test_post_fully_shard_reconstruct():
-    """Layout after FSDP wraps the (ep, tp) DTensor — the case HF save actually sees."""
-    mesh = init_device_mesh("cuda", (2, 2, 2), mesh_dim_names=("fsdp", "ep", "tp"))
-    ep_tp = mesh["ep", "tp"]
-    fsdp_mesh = mesh["fsdp"]
+class TestInterleavedShardPostFSDP(DeterministicDDPTestCase):
+    def test_reconstruct_and_load(self) -> None:
+        self.create_pg("cuda")
+        mesh = init_device_mesh("cuda", (2, 2, 2), mesh_dim_names=("fsdp", "ep", "tp"))
+        ep_tp_mesh = mesh["ep", "tp"]
+        fsdp_mesh = mesh["fsdp"]
 
-    g = torch.arange(GLOBAL_ROWS * IN_FEATURES, device="cuda", dtype=torch.float32).reshape(
-        GLOBAL_ROWS, IN_FEATURES
-    )
-    dist.broadcast(g, src=0)
+        global_tensor = torch.arange(
+            GLOBAL_ROWS * IN_FEATURES,
+            device="cuda",
+            dtype=torch.float32,
+        ).reshape(GLOBAL_ROWS, IN_FEATURES)
+        dist.broadcast(global_tensor, src=0)
 
-    placements = (Shard(0), InterleavedShard(0, num_local_stripes=NUM_EXPERTS // 2))
-    dt = distribute_tensor(g, ep_tp, placements)
+        placements = (Shard(0), InterleavedShard(0, num_local_stripes=NUM_EXPERTS // 2))
+        tensor = distribute_tensor(global_tensor, ep_tp_mesh, placements)
+        model = _ToyGroupedLinear(tensor).cuda()
+        fully_shard(
+            model,
+            mesh=fsdp_mesh,
+            mp_policy=MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32),
+            reshard_after_forward=True,
+        )
 
-    model = _ToyGroupedLinear(dt).cuda()
-    fully_shard(
-        model,
-        mesh=fsdp_mesh,
-        mp_policy=MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32),
-        reshard_after_forward=True,
-    )
+        inputs = torch.randn(6, IN_FEATURES, device="cuda", dtype=torch.bfloat16)
+        dist.broadcast(inputs, src=0)
+        output = model(inputs)
+        expected_local = _build_expected_local(
+            global_tensor,
+            mesh.get_local_rank("ep"),
+            mesh.get_local_rank("tp"),
+            2,
+            2,
+        ).to(torch.bfloat16)
+        expected_output = torch.nn.functional.linear(inputs, expected_local)
+        torch.testing.assert_close(output.detach(), expected_output, atol=1e-2, rtol=1e-2)
+        output.sum().backward()
 
-    # Sanity: a forward pass through the wrapped model still produces the right output.
-    x = torch.randn(6, IN_FEATURES, device="cuda", dtype=torch.bfloat16)
-    dist.broadcast(x, src=0)
-    y = model(x)
-    ep_rank = mesh.get_local_rank("ep")
-    tp_rank = mesh.get_local_rank("tp")
-    expected_local = _build_expected_local(g, ep_rank, tp_rank, 2, 2).to(torch.bfloat16)
-    expected_y = torch.nn.functional.linear(x, expected_local)
-    assert torch.allclose(y.detach(), expected_y, atol=1e-2, rtol=1e-2)
-    y.sum().backward()
+        assert RuntimeLayout.from_dtensor(model.weight).is_interleaved
+        torch.testing.assert_close(reconstruct_full_tensor(model.weight), global_tensor)
 
-    # Detection helper still recognizes the wrapped DTensor.
-    assert has_interleaved_placement(model.weight)
+        # LoadSpec compiles the same post-FSDP layout into source-to-local copy
+        # runs, so loading does not need model-specific Expert TP branches.
+        from xtuner.v1.utils.load_spec import LoadSpec
 
-    # Reconstruct from the post-FSDP local matches the original global.
-    full = reconstruct_full_tensor(model.weight)
-    assert torch.allclose(full, g), (
-        f"reconstruct mismatch on post-FSDP layout: max_diff={(full - g).abs().max().item()}"
-    )
+        local = model.weight._local_tensor
+        loaded_local = torch.empty_like(local, dtype=global_tensor.dtype)
+        load_spec = LoadSpec.from_tensor(name="weight", hf_keys=["weight"], tensor=model.weight)
+        load_spec.plan_hf_load().load_into(
+            [global_tensor],
+            loaded_local,
+            lambda _, checkpoint_tensor: checkpoint_tensor,
+        )
+        torch.testing.assert_close(loaded_local, local.to(global_tensor.dtype))
 
-    # HF load uses compute_runs to copy from the concatenated global tensor into the post-FSDP
-    # local tensor. This must describe FSDP's prepended shard as a contiguous cut; otherwise a
-    # valid HF checkpoint is loaded into the wrong local rows before training starts.
-    local = model.weight._local_tensor
-    loaded_local = torch.empty_like(local, dtype=g.dtype)
-    for run in compute_runs(model.weight):
-        loaded_slice = g.narrow(0, run.global_offset[0], run.local_size)
-        loaded_local.narrow(0, run.local_start, run.local_size).copy_(loaded_slice)
-    expected_local = local.to(g.dtype)
-    assert torch.allclose(loaded_local, expected_local), (
-        f"compute_runs load mismatch on post-FSDP layout: "
-        f"max_diff={(loaded_local - expected_local).abs().max().item()}"
-    )
-
-
-def main():
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
-    world = dist.get_world_size()
-
-    rank = dist.get_rank()
-    if world == 4:
-        test_2d_layout_and_reconstruct()
-        test_hf_round_trip()
-        if rank == 0:
-            print("[2d_layout_and_hf_round_trip] PASSED", flush=True)
-    elif world == 8:
-        test_post_fully_shard_reconstruct()
-        if rank == 0:
-            print("[post_fully_shard_reconstruct] PASSED", flush=True)
-    else:
-        if rank == 0:
-            print(
-                f"World size {world} not handled (expected 4 or 8). Skipping.", flush=True
-            )
-        dist.destroy_process_group()
-        sys.exit(0)
-
-    dist.barrier()
-    dist.destroy_process_group()
-
-
-if __name__ == "__main__":
-    main()
+    @property
+    def world_size(self) -> int:
+        return 8

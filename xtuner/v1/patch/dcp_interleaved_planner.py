@@ -9,8 +9,8 @@ placement: on torch >= 2.9 it raises (``_StridedShard`` split_factor != aggregat
 and on 2.8 it silently returns a wrong ``(size, offset)``. Either way the default path is
 unusable for these params, which is why they used to be dropped from DCP.
 
-The fix routes those DTensors through :func:`xtuner.v1.utils.interleaved_shard.compute_runs`,
-which decomposes the local tensor into contiguous ``Run`` records mapped to their true global
+The fix routes those DTensors through ``RuntimeLayout.owned_runs()``, which
+decomposes the local tensor into contiguous ``Run`` records mapped to their true global
 offsets. Each run becomes one ``WriteItem`` (save) / ``ReadItem`` (load), so the checkpoint is
 stored in global coordinates and reshards correctly across different tp/ep topologies.
 
@@ -47,7 +47,7 @@ from torch.distributed.checkpoint.planner_helpers import (  # type: ignore[attr-
 )
 from torch.distributed.tensor import DTensor
 
-from xtuner.v1.utils.interleaved_shard import Run, compute_runs, has_interleaved_placement
+from xtuner.v1.utils.interleaved_shard import Run, RuntimeLayout
 
 from .xtuner_cache_planner import XtunerCacheSavePlanner
 
@@ -74,14 +74,15 @@ class InterleavedShardSavePlanner(XtunerCacheSavePlanner):
         requests: list[WriteItem] = []
         self._interleaved_runs = {}
         for fqn, obj in self.state_dict.items():
-            if isinstance(obj, DTensor) and has_interleaved_placement(obj):
+            if isinstance(obj, DTensor):
                 if obj.device_mesh.get_coordinate() is None:
                     continue
-                items, run_map = _interleaved_write_items(fqn, obj)
-                requests.extend(items)
-                self._interleaved_runs[fqn] = run_map
-            elif isinstance(obj, DTensor):
-                if obj.device_mesh.get_coordinate() is not None:
+                layout = RuntimeLayout.from_dtensor(obj)
+                if layout.is_interleaved:
+                    items, run_map = _interleaved_write_items(fqn, obj, layout.owned_runs())
+                    requests.extend(items)
+                    self._interleaved_runs[fqn] = run_map
+                else:
                     requests.extend(_create_write_items(fqn, obj))
             else:
                 requests.extend(_create_write_items(fqn, obj))
@@ -133,18 +134,19 @@ class InterleavedShardLoadPlanner(DefaultLoadPlanner):
                     raise RuntimeError(f"Missing key in checkpoint state_dict: {fqn}.")
                 continue
             md = self.metadata.state_dict_metadata[fqn]
-            if isinstance(obj, DTensor) and has_interleaved_placement(obj):
+            if isinstance(obj, DTensor):
                 if obj.device_mesh.get_coordinate() is None:
                     continue
-                runs = compute_runs(obj)
-                local_chunks = [
-                    ChunkStorageMetadata(offsets=torch.Size(run.global_offset), sizes=torch.Size(run.sizes))
-                    for run in runs
-                ]
-                self._interleaved_runs[fqn] = {tuple(run.global_offset): run for run in runs}
-                requests.extend(create_read_items_for_chunk_list(fqn, md, local_chunks))  # type: ignore[arg-type]
-            elif isinstance(obj, DTensor):
-                if obj.device_mesh.get_coordinate() is not None:
+                layout = RuntimeLayout.from_dtensor(obj)
+                if layout.is_interleaved:
+                    runs = layout.owned_runs()
+                    local_chunks = [
+                        ChunkStorageMetadata(offsets=torch.Size(run.global_offset), sizes=torch.Size(run.sizes))
+                        for run in runs
+                    ]
+                    self._interleaved_runs[fqn] = {tuple(run.global_offset): run for run in runs}
+                    requests.extend(create_read_items_for_chunk_list(fqn, md, local_chunks))  # type: ignore[arg-type]
+                else:
                     requests.extend(_create_read_items(fqn, md, obj))
             else:
                 requests.extend(_create_read_items(fqn, md, obj))
@@ -164,12 +166,16 @@ class InterleavedShardLoadPlanner(DefaultLoadPlanner):
         return super().resolve_tensor(read_item)
 
 
-def _interleaved_write_items(fqn: str, dt: DTensor) -> tuple[list[WriteItem], dict[tuple, Run]]:
+def _interleaved_write_items(
+    fqn: str,
+    dt: DTensor,
+    runs: list[Run],
+) -> tuple[list[WriteItem], dict[tuple, Run]]:
     properties = TensorProperties.create_from_tensor(dt._local_tensor)
     global_size = torch.Size(dt.shape)
     items: list[WriteItem] = []
     run_map: dict[tuple, Run] = {}
-    for run in compute_runs(dt):
+    for run in runs:
         offsets = torch.Size(run.global_offset)
         sizes = torch.Size(run.sizes)
         items.append(

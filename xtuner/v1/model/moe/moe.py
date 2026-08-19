@@ -222,8 +222,8 @@ class MoE(BaseModel):
                 )
                 self.ep_mesh = _init_mesh[f"{self.config.mesh_prefix}.ep"]
                 self.expert_tp_mesh = _init_mesh[f"{self.config.mesh_prefix}.etp"]
-                # 2D (ep, etp) sub-mesh — needed by GroupedLinear for per-expert column-parallel weights
-                # so HF save can reconstruct the full tensor via `reconstruct_full_tensor`.
+                # 2D (ep, etp) sub-mesh used by GroupedLinear for per-expert column-parallel weights.
+                # LoadSpec records both placements so HF plans can load and reconstruct the layout.
                 self.ep_tp_mesh = _init_mesh[f"{self.config.mesh_prefix}.ep", f"{self.config.mesh_prefix}.etp"]
             else:
                 _init_mesh = init_device_mesh(
