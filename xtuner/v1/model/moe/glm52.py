@@ -23,7 +23,6 @@ from xtuner.v1.module.attention.dsa_topk_sharing import (
 from xtuner.v1.module.mtp import MTPConfig, MTPLayer
 from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
-from xtuner.v1.utils.load_spec import HFLoadPlan
 
 from .moe import MoE
 
@@ -158,21 +157,10 @@ class Glm52MoE(MoE):
         else:
             return [key]
 
-    def safetensors_to_params(
-        self,
-        safetensors: list[torch.Tensor],
-        local_tensor: torch.Tensor,
-        load_plan: HFLoadPlan,
-    ) -> None:
-        loaded_tensor = self._cat_safetensors(safetensors, load_plan)
-
-        if (
-            "fused_w1w3.weight" in load_plan.name or "fused_w2.weight" in load_plan.name
-        ) and loaded_tensor.ndim == local_tensor.ndim + 1:
+    def hf_tensor_to_canonical(self, name: str, loaded_tensor: torch.Tensor) -> torch.Tensor:
+        if ("fused_w1w3.weight" in name or "fused_w2.weight" in name) and loaded_tensor.ndim == 3:
             loaded_tensor = loaded_tensor.flatten(0, 1)
-
-        loaded_tensor = self._apply_load_slices(loaded_tensor, load_plan)
-        self._copy_loaded_tensor_to_local(loaded_tensor, local_tensor)
+        return loaded_tensor
 
     def param_to_safetensor(
         self,

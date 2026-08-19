@@ -10,11 +10,10 @@ from xtuner.v1.model.base import (
     HFSaveCfg,
     TorchCompileOption,
 )
-from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
+from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig, use_moe_ep_compile_cfg
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig
 from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
-from xtuner.v1.utils.load_spec import HFLoadPlan
 
 from .qwen3vl_text import Qwen3VLTextMoE
 
@@ -123,27 +122,19 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
         else:
             return [key]
 
-    def safetensors_to_params(
-        self,
-        safetensors: list[torch.Tensor],
-        local_tensor: torch.Tensor,
-        load_plan: HFLoadPlan,
-    ) -> None:
-        loaded_tensor = self._cat_safetensors(safetensors, load_plan)
-
-        if "fused_w1w3.weight" in load_plan.name and "mtp" not in load_plan.name:
+    def hf_tensor_to_canonical(self, name: str, loaded_tensor: torch.Tensor) -> torch.Tensor:
+        if "fused_w1w3.weight" in name and "mtp" not in name:
             # hf: num_experts, 2 * expert_dim, hidden_size
             # xtuner: num_experts * 2 * expert_dim, hidden_size
             # num_experts * 2 * expert_dim, hidden_size
             loaded_tensor = loaded_tensor.flatten(0, 1)
 
-        elif "fused_w2.weight" in load_plan.name and "mtp" not in load_plan.name:
+        elif "fused_w2.weight" in name and "mtp" not in name:
             # hf: num_experts, hidden_size, expert_dim
             # xtuner: num_experts * hidden_size, expert_dim
             loaded_tensor = loaded_tensor.flatten(0, 1)
 
-        loaded_tensor = self._apply_load_slices(loaded_tensor, load_plan)
-        self._copy_loaded_tensor_to_local(loaded_tensor, local_tensor)
+        return loaded_tensor
 
     def param_to_safetensor(
         self,
@@ -173,7 +164,7 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
     @property
     @override
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
-        if self.config.ep_size > 1:
+        if use_moe_ep_compile_cfg(self.config):
             return MOE_EP_COMPILE_CFG
         else:
             return MOE_NON_EP_COMPILE_CFG
