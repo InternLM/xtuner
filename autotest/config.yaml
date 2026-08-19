@@ -26,6 +26,96 @@ default_config:
                 - HF_HUB_OFFLINE=1
 
 case: 
+    
+    glm5-2-rl-lmdeploy-grpo:
+        -
+            type: rl
+            parameters:
+                config: autotest/config/rl_glm5p2_30B_gsm8k_grpo.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: glm5-2-rl-lmdeploy-grpo/tracker.jsonl
+                check_metrics:
+                    -
+                       metric:  eval/accuracy
+                       threshold: 0.1
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 20
+                       method: absolute
+                       operator: <
+            timeout: 7200
+
+    glm5-2-rl-lmdeploy-dapo:
+        -
+            type: rl
+            parameters:
+                config: autotest/config/rl_glm5p2_30B_gsm8k_dapo.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: glm5-2-rl-lmdeploy-dapo/tracker.jsonl
+                check_metrics:
+                    -
+                       metric:  eval/accuracy
+                       threshold: 0.1
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 20
+                       method: absolute
+                       operator: <
+            timeout: 7200
     glm5-2-sft-30B:
         -
             type: sft
