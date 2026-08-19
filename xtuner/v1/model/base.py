@@ -48,7 +48,6 @@ from xtuner.v1.module.rope import RopeParametersConfig, RopeScalingConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, log_rank0, profile_time_and_memory
 from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_compile
 from xtuner.v1.utils.load_spec import (
-    HFLoadPlan,
     HFSavePlan,
     LoadSpec,
     unshard_tensors_for_hf_save,
@@ -535,6 +534,7 @@ class _HFSaveBucketItem(NamedTuple):
     tensor: torch.Tensor
     save_plan: HFSavePlan
     runtime_is_float8: bool
+    byte_size: int
 
 
 class BaseModel(nn.Module):
@@ -667,7 +667,7 @@ class BaseModel(nn.Module):
                 load_spec = self.load_spec_mapping.get(full_name)
                 if load_spec is None:
                     raise ValueError(f"Internal Error. Parameter {full_name} not found in load_spec_mapping.")
-                hf_name_list = load_spec.hf_keys
+                hf_name_list = load_spec.global_hf_keys
 
                 for hf_name in hf_name_list:
                     if any(re.search(p, hf_name) for p in patterns):  # type: ignore
@@ -871,6 +871,11 @@ class BaseModel(nn.Module):
         safetensors_prefix: str = "model",
         device: torch.device | str = DEVICE,
     ) -> tuple[list[tuple[str, list[str]]], dict[str, str]]:
+        # Compose models enter async save through their child modules directly.
+        # Refresh here so every snapshot is planned from the post-FSDP runtime layout,
+        # matching the public synchronous save path.
+        self._init_load_spec()
+        self._assert_load_spec_initialized()
         file_to_names: list[tuple[str, list[str]]] = []
         weight_map: dict[str, str] = {}
         for safetensor_name, name_list, hf_tensor_list in self._iter_hf_save_chunks(
@@ -942,76 +947,15 @@ class BaseModel(nn.Module):
         log_rank0.info(f"[Async saving HF to {hf_dir}] finalized")
         return hf_dir
 
-    def safetensors_to_params(
-        self,
-        safetensors: list[torch.Tensor],
-        local_tensor: torch.Tensor,
-        load_plan: HFLoadPlan,
-    ) -> None:
-        """Copy loaded HF tensors into a local parameter tensor.
-
-        Args:
-            safetensors (list[torch.Tensor]): HF tensors loaded for ``load_plan.hf_keys``, in key order.
-            local_tensor (torch.Tensor): Destination local parameter or buffer tensor.
-            load_plan (HFLoadPlan): Plan whose ``slices`` are relative to ``safetensors`` after concatenation.
-        """
-        loaded_tensor = self._cat_safetensors(safetensors, load_plan)
-        loaded_tensor = self.hf_tensor_to_canonical(load_plan.name, loaded_tensor)
-        loaded_tensor = self._apply_load_slices(loaded_tensor, load_plan)
-        self._copy_loaded_tensor_to_local(loaded_tensor, local_tensor)
-
     def hf_tensor_to_canonical(self, name: str, loaded_tensor: torch.Tensor) -> torch.Tensor:
-        """Convert one loaded HF tensor to XTuner's canonical layout."""
+        """Convert one checkpoint tensor to XTuner's unsharded canonical
+        layout.
+
+        ``HFLoadPlan`` owns HF-key concatenation, rank-local slicing, interleaved
+        copies, and runtime padding. Model subclasses override only this format
+        adapter when their HF tensor shape/order differs from XTuner's layout.
+        """
         return loaded_tensor
-
-    def _cat_safetensors(self, safetensors: list[torch.Tensor], load_plan: HFLoadPlan) -> torch.Tensor:
-        assert safetensors, f"Internal Error. No safetensors were loaded for {load_plan.name}"
-        if len(safetensors) > 1:
-            dim = load_plan.fused_dim
-            assert dim is not None, "Internal Error dim must not be None when len(safetensors) > 1"
-            return torch.cat(safetensors, dim=dim)
-        return safetensors[0]
-
-    def _apply_load_slices(self, loaded_tensor: torch.Tensor, load_plan: HFLoadPlan) -> torch.Tensor:
-        for load_slice in load_plan.slices:
-            start = min(load_slice.start, loaded_tensor.shape[load_slice.dim])
-            end = min(load_slice.end, loaded_tensor.shape[load_slice.dim])
-            assert start <= end, f"Invalid load slice [{start}, {end}) for {load_plan.name}"
-            loaded_tensor = loaded_tensor.narrow(load_slice.dim, start, end - start)
-        return loaded_tensor
-
-    def _copy_loaded_tensor_to_local(self, loaded_tensor: torch.Tensor, local_tensor: torch.Tensor) -> None:
-        if loaded_tensor.shape == local_tensor.shape:
-            local_tensor.copy_(loaded_tensor)
-            return
-
-        assert loaded_tensor.dim() == local_tensor.dim(), (
-            f"Loaded tensor shape {tuple(loaded_tensor.shape)} is incompatible with local tensor shape "
-            f"{tuple(local_tensor.shape)}"
-        )
-        # HF checkpoints never store FSDP padding. After applying the LoadPlan slices, only the FSDP shard dim may be
-        # shorter than the runtime local tensor; all other dims must match exactly.
-        non_pad_dim_matches = all(
-            loaded_tensor.shape[dim] == local_tensor.shape[dim]
-            for dim in range(local_tensor.dim())
-            if dim != self.FSDP_SHARD_DIM
-        )
-        assert non_pad_dim_matches, (
-            f"Loaded tensor shape {tuple(loaded_tensor.shape)} is incompatible with local tensor shape "
-            f"{tuple(local_tensor.shape)}; padding is only expected on dim {self.FSDP_SHARD_DIM}"
-        )
-        non_pad_len = loaded_tensor.shape[self.FSDP_SHARD_DIM]
-        assert non_pad_len <= local_tensor.shape[self.FSDP_SHARD_DIM], (
-            f"Loaded tensor shape {tuple(loaded_tensor.shape)} is larger than local tensor shape "
-            f"{tuple(local_tensor.shape)}"
-        )
-        local_tensor.narrow(self.FSDP_SHARD_DIM, 0, non_pad_len).copy_(loaded_tensor)
-
-        if non_pad_len < local_tensor.shape[self.FSDP_SHARD_DIM]:
-            assert self.config.float8_cfg is not None
-            pad_len = local_tensor.shape[self.FSDP_SHARD_DIM] - non_pad_len
-            # Torch casts the scalar to the destination dtype; for fp8 this writes the canonical zero value.
-            local_tensor.narrow(self.FSDP_SHARD_DIM, non_pad_len, pad_len).copy_(0.0)  # type: ignore
 
     def param_to_safetensor(
         self,
@@ -1369,53 +1313,30 @@ class BaseModel(nn.Module):
         if bucket_size is None:
             bucket_size = self.config.hf_save_cfg.bucket_size
 
-        safetensor_size = 0
+        bucket_bytes = 0
         bucket: list[_HFSaveBucketItem] = []
         buffer_names = {self._clean_param_name(name) for name, _ in self.named_buffers()}
 
         for param, load_spec in params:
-            # InterleavedShard-bearing DTensors (e.g. fused MoE column-parallel weights) have
-            # `shard_order=None`; their layout cannot be described by per-step ShardDescriptors.
-            # Materialize the global tensor up-front via `reconstruct_full_tensor` and treat the
-            # result as already-unsharded by the rest of the save pipeline (load_spec.shards is
-            # empty, so `unshard_tensors_for_hf_save` becomes a no-op for these items).
-            if load_spec.needs_full_reconstruct:
-                assert isinstance(param, DTensor), (
-                    f"needs_full_reconstruct=True implies a DTensor param, got {type(param).__name__}"
-                )
-                from xtuner.v1.utils.interleaved_shard import reconstruct_full_tensor
-
-                runtime_tensor = reconstruct_full_tensor(param)
-            else:
-                runtime_tensor = param._local_tensor if isinstance(param, DTensor) else param
-            runtime_is_float8 = is_float8_weight(runtime_tensor)
-            is_buffer = load_spec.name in buffer_names
-            if runtime_tensor.is_floating_point() and not is_buffer:
-                save_dtype = self._get_save_dtype(load_spec.global_hf_keys[0], torch.bfloat16)
-                local_tensor = runtime_tensor.to(dtype=save_dtype)
-            else:
-                # Persistent buffers, e.g. FoPE rotary coefficients, are part of HF state but are not trainable
-                # weights. Keep the legacy behavior and write them in their runtime dtype instead of save_dtype.
-                local_tensor = runtime_tensor
-            tensor_size = self._get_tensor_size(runtime_tensor, dtype)
-
-            if safetensor_size + tensor_size > bucket_size and bucket:
+            save_item = self._make_hf_save_item(
+                param,
+                load_spec,
+                checkpoint_dtype=dtype,
+                is_buffer=load_spec.name in buffer_names,
+                distributed_save=distributed_save,
+                preserved_fused_shard_group=preserved_fused_shard_group,
+            )
+            if bucket_bytes + save_item.byte_size > bucket_size and bucket:
                 yield self._build_hf_param_bucket(
                     bucket,
                     dtype=dtype,
                     device=device,
                 )
-                safetensor_size = 0
+                bucket_bytes = 0
                 bucket = []
 
-            safetensor_size += tensor_size
-            save_plan = load_spec.plan_hf_save(
-                distributed_save=distributed_save,
-                preserve_process_group=preserved_fused_shard_group,
-            )
-            bucket.append(
-                _HFSaveBucketItem(tensor=local_tensor, save_plan=save_plan, runtime_is_float8=runtime_is_float8)
-            )
+            bucket_bytes += save_item.byte_size
+            bucket.append(save_item)
 
         if bucket:
             yield self._build_hf_param_bucket(
@@ -1423,6 +1344,38 @@ class BaseModel(nn.Module):
                 dtype=dtype,
                 device=device,
             )
+
+    def _make_hf_save_item(
+        self,
+        param: torch.Tensor,
+        load_spec: LoadSpec,
+        *,
+        checkpoint_dtype: torch.dtype,
+        is_buffer: bool,
+        distributed_save: bool,
+        preserved_fused_shard_group: dist.ProcessGroup | None,
+    ) -> _HFSaveBucketItem:
+        """Normalize one runtime parameter and compile its checkpoint save
+        policy."""
+        # LoadSpec records both continuous and interleaved shard history, so every
+        # parameter enters the same SavePlan path from its runtime-local tensor.
+        runtime_tensor = param._local_tensor if isinstance(param, DTensor) else param
+        if runtime_tensor.is_floating_point() and not is_buffer:
+            save_dtype = self._get_save_dtype(load_spec.global_hf_keys[0], torch.bfloat16)
+            checkpoint_tensor = runtime_tensor.to(dtype=save_dtype)
+        else:
+            # Persistent buffers, e.g. FoPE rotary coefficients, keep their runtime dtype.
+            checkpoint_tensor = runtime_tensor
+
+        return _HFSaveBucketItem(
+            tensor=checkpoint_tensor,
+            save_plan=load_spec.plan_hf_save(
+                distributed_save=distributed_save,
+                preserve_process_group=preserved_fused_shard_group,
+            ),
+            runtime_is_float8=is_float8_weight(runtime_tensor),
+            byte_size=self._get_tensor_size(runtime_tensor, checkpoint_dtype),
+        )
 
     def _load_spec_params(self) -> list[tuple[torch.Tensor, LoadSpec]]:
         ret: list[tuple[torch.Tensor, LoadSpec]] = []
@@ -1858,93 +1811,81 @@ class BaseModel(nn.Module):
 
         return loaded_keys, unloaded_keys, missing_keys
 
-    def _is_loaded_param_fp8(self, hf_key: str, checkpoint_loader: HFCheckpointLoader) -> bool:
-        hf_key_scale_inv = hf_key + "_scale_inv"
-        return checkpoint_loader.is_key_exist(hf_key) and checkpoint_loader.is_key_exist(hf_key_scale_inv)
-
-    def _load_fp8(self, hf_key: str, checkpoint_loader: HFCheckpointLoader) -> torch.Tensor | None:
-        hf_key_scale_inv = hf_key + "_scale_inv"
-        loaded_tensor_fp8 = checkpoint_loader.load(hf_key)
-        loaded_tensor_scales = checkpoint_loader.load(hf_key_scale_inv)
-        if loaded_tensor_fp8 is None or loaded_tensor_scales is None:
-            return None
-
-        from xtuner.v1.float8.triton_kernels import per_block_dequant_gemm
-
-        loaded_tensor = per_block_dequant_gemm(
-            loaded_tensor_fp8.to(DEVICE),
-            loaded_tensor_scales.to(DEVICE),
-        )
-        return loaded_tensor
-
     def _load_hf_param(
         self, param: torch.Tensor, load_spec: LoadSpec, checkpoint_loader: HFCheckpointLoader
     ) -> list[str]:
         """Unified HF load path for a single parameter / buffer.
 
-        ``LoadSpec.plan_hf_load`` computes this rank's HF keys and loaded-tensor-relative slices from the new
-        schema. This method only executes that plan: load keys, dequantize fp8 when needed, then hand off to
-        ``safetensors_to_params`` for cat + narrow + copy.
+        ``LoadSpec.plan_hf_load`` computes this rank's HF keys and canonical source-to-local copy regions. This
+        method reads and dequantizes those keys, then lets the plan drive model canonicalization and local writes.
 
         Returns the list of hf_keys that were expected but missing from the
         checkpoint; callers aggregate these for strict-mode reporting.
         """
         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
         load_plan = load_spec.plan_hf_load()
-        if load_plan.zero_fill:
-            # No checkpoint key overlaps this rank. This can be fp8 runtime padding, or a legal zero-sized DTensor
-            # shard when a tiny tensor dimension is split across more ranks than it has elements.
-            assert load_spec.origin_shape is not None or local_tensor.numel() == 0, (
-                "Empty load plan is only legal for runtime pad-only or zero-sized local tensors"
-            )
-            local_tensor.zero_()  # type: ignore
-            return []
-
-        missing_keys: list[str] = []
-        loaded_tensors: list[torch.Tensor] = []
-        for hf_key in load_plan.hf_keys:
-            if self._is_loaded_param_fp8(hf_key, checkpoint_loader):
-                if not _is_float8_available():
-                    raise RuntimeError(
-                        f"Float8 is not available on {DEVICE}. Please convert the checkpoint from float8 "
-                        "to bfloat16 on SM89 or later (H100+ GPUs)."
-                    )
-                weight = self._load_fp8(hf_key, checkpoint_loader)
-            else:
-                weight = checkpoint_loader.load(hf_key)
-            if weight is None:
-                missing_keys.append(hf_key)
-                continue
-            loaded_tensors.append(weight.to(local_tensor.device))
-
+        loaded_tensors, missing_keys = self._read_hf_tensors(
+            load_plan.hf_keys,
+            checkpoint_loader,
+            device=local_tensor.device,
+        )
         if missing_keys:
             return missing_keys
 
-        if load_spec.needs_full_reconstruct:
-            # InterleavedShard-style placements: this rank owns N contiguous "runs" of rows in
-            # the global tensor (one per local expert). Copy each run from the concatenated
-            # HF tensor to the matching slice of the local tensor.
-            assert isinstance(param, DTensor), (
-                f"needs_full_reconstruct=True implies a DTensor param, got {type(param).__name__}"
-            )
-            from xtuner.v1.utils.interleaved_shard import compute_runs
-
-            loaded_tensor = self._cat_safetensors(loaded_tensors, load_plan)
-            # Interleaved runs use canonical global coordinates. Packed model
-            # formats such as GPT-OSS must be converted before applying them.
-            loaded_tensor = self.hf_tensor_to_canonical(load_plan.name, loaded_tensor)
-            local = param._local_tensor
-            for run in compute_runs(param):
-                loaded_slice = loaded_tensor.narrow(0, run.global_offset[0], run.local_size)
-                local.narrow(0, run.local_start, run.local_size).copy_(loaded_slice)
-            return []
-
-        self.safetensors_to_params(
+        load_plan.load_into(
             loaded_tensors,
             local_tensor,
-            load_plan,
+            canonicalize=self.hf_tensor_to_canonical,
         )
         return []
+
+    def _read_hf_tensors(
+        self,
+        hf_keys: list[str],
+        checkpoint_loader: HFCheckpointLoader,
+        *,
+        device: torch.device,
+    ) -> tuple[list[torch.Tensor], list[str]]:
+        """Read one plan's HF keys, dequantizing checkpoint FP8 when
+        present."""
+        loaded_tensors: list[torch.Tensor] = []
+        missing_keys: list[str] = []
+        for hf_key in hf_keys:
+            tensor = self._read_hf_tensor(hf_key, checkpoint_loader)
+            if tensor is None:
+                missing_keys.append(hf_key)
+            else:
+                loaded_tensors.append(tensor.to(device))
+        return loaded_tensors, missing_keys
+
+    def _read_hf_tensor(
+        self,
+        hf_key: str,
+        checkpoint_loader: HFCheckpointLoader,
+    ) -> torch.Tensor | None:
+        scale_key = hf_key + "_scale_inv"
+        is_checkpoint_fp8 = checkpoint_loader.is_key_exist(hf_key) and checkpoint_loader.is_key_exist(scale_key)
+        if not is_checkpoint_fp8:
+            return checkpoint_loader.load(hf_key)
+        if not _is_float8_available():
+            raise RuntimeError(
+                f"Float8 is not available on {DEVICE}. Please convert the checkpoint from float8 "
+                "to bfloat16 on SM89 or later (H100+ GPUs)."
+            )
+        return self._load_fp8(hf_key, checkpoint_loader)
+
+    def _load_fp8(self, hf_key: str, checkpoint_loader: HFCheckpointLoader) -> torch.Tensor | None:
+        loaded_tensor_fp8 = checkpoint_loader.load(hf_key)
+        loaded_tensor_scales = checkpoint_loader.load(hf_key + "_scale_inv")
+        if loaded_tensor_fp8 is None or loaded_tensor_scales is None:
+            return None
+
+        from xtuner.v1.float8.triton_kernels import per_block_dequant_gemm
+
+        return per_block_dequant_gemm(
+            loaded_tensor_fp8.to(DEVICE),
+            loaded_tensor_scales.to(DEVICE),
+        )
 
     def _has_meta_param(self, module: nn.Module, recurse: bool = False) -> bool:
         """Check if the module has meta parameters."""
@@ -2172,11 +2113,11 @@ class BaseModel(nn.Module):
         for name, param in module.state_dict().items():  # type: ignore[attr-defined]
             if isinstance(param, DTensor):
                 from xtuner.v1.utils.interleaved_shard import (
-                    has_interleaved_placement,
+                    RuntimeLayout,
                     reconstruct_full_tensor,
                 )
 
-                if has_interleaved_placement(param):
+                if RuntimeLayout.from_dtensor(param).is_interleaved:
                     # `(Shard, InterleavedShard)`-style placements can't be redistributed; use the
                     # explicit reconstruct path instead of `.full_tensor()`.
                     param = reconstruct_full_tensor(param)

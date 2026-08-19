@@ -1,403 +1,355 @@
-# LoadSpec 设计
+# LoadSpec、DTensor 与 DCP 设计
 
-> 面向 `xtuner/v1/utils/load_spec.py` 与 `xtuner/v1/model/base.py` 的加载/保存路径。
-> TP 设计（`dense_tp.md`）依赖本文档描述的抽象。
+## 结论
 
-## TL;DR
+HF checkpoint、DTensor runtime layout 和 DCP checkpoint 描述的是同一个逻辑
+tensor，但面向的协议不同：
 
-LoadSpec 描述 xtuner 运行时 tensor 与 HF safetensors 之间的**纯布局映射**。对一个
-param，它回答两件事：
+- `LoadSpec` 记录 checkpoint 映射与 runtime 分片的稳定事实。
+- `HFLoadPlan` / `HFSavePlan` 把这些事实编译成当前 rank 可直接执行的 HF I/O
+  程序。
+- `ShardDescriptor` 同时描述 continuous shard 和 Expert TP even interleave。
+- DCP 不经过 HF plan；它用 `compute_runs()` 把一个离散 local shard 展开成多个
+  标准全局 chunk，从而保持分布式保存、原地加载和跨拓扑 reshard。
 
-1. 这个 param 由哪些 HF key 组成？怎么拼？ — `global_hf_keys` + `fused_dim`
-2. 本 rank 持有全量 tensor 的哪一块？ — `shards`（按外到内顺序施加）
+~~~mermaid
+flowchart LR
+    A["HF keys + canonical runtime layout"] --> B["LoadSpec：稳定事实"]
+    B --> C["HFLoadPlan：读取与 local copy"]
+    B --> D["HFSavePlan：逆分片与 padding trim"]
+    E["DTensor placements"] --> B
+    E --> F["compute_runs"]
+    F --> G["DCP WriteItem / ReadItem"]
+~~~
 
-加载/保存执行路径不直接读 LoadSpec，而是调用 `plan_hf_load()` /
-`plan_hf_save(...)` 拿到一份**不可变的 plan**，按 plan 驱动 IO 与通信。
+核心边界是：HF plan 负责“checkpoint 格式与 runtime tensor 之间如何搬运”，DCP
+planner 负责“local storage 对应哪些全局坐标”。两者复用相同的布局数学，不强行共用
+协议对象。
 
-**核心约束**：LoadSpec 只承担"同 dtype 下的形状/索引映射"。fp8 的量化反量化、
-padding 的 zero-fill 等 dtype 语义都住在 `base.py` 的 load/save 路径里，
-LoadSpec 不感知。
+## 一、LoadSpec 与 Plan 的职责
 
----
+### 1.1 为什么需要两层对象
 
-## 1. 设计理念
+可以把 `LoadSpec` 理解成地图，把 Plan 理解成一次具体行程：地图不会保存“今天从哪条
+路走”，而同一张地图可以生成完整保存、保留 EP 或只 gather FSDP 等不同路线。
 
-### 1.1 单一抽象，两条正交轴
+| 对象 | 负责 | 不负责 |
+| --- | --- | --- |
+| `LoadSpec` | 参数名、HF keys、fused dim、runtime/global shape、checkpoint 可见 shape、forward shard history | 当前 rank 的 copy offsets、collective 顺序、save policy |
+| `HFLoadPlan` | 选择本 rank 所需 keys、拼接、调用 canonical adapter、执行 copy regions、清零 runtime padding | 推断模型格式、执行 collective |
+| `HFSavePlan` | 标记 preserved shards、逆序 gather、最终 FP8 trim、输出 keys | 保存稳定布局事实 |
+| `SaveShardStep` | 一个 descriptor 的逆操作、操作前 runtime shape、是否 preserved | 模型格式转换、跨参数策略 |
+| 模型 adapter | HF layout 与 XTuner canonical layout 的 transpose/reshape/flatten | EP、ETP、FSDP、rank 和 process group |
 
-原先三类映射（SAME / FUSED / SHARD）统一成一个 schema 上的两个正交维度：
+Plan 生成后，executor 不再回读 `LoadSpec`。因此 Plan 是 self-contained 的
+rank-local 程序，也可以独立测试。
 
-| 问题 | 表达 |
-| --- | --- |
-| 这个 param 对应几个 HF key？怎么拼？ | `len(global_hf_keys)`；多 key 时 `fused_dim` 指定拼接维 |
-| 本 rank 持有哪一块？ | `shards`（可为空；按施加顺序排列） |
+### 1.2 LoadSpec 保存哪些 shape
 
-消费方用派生属性 `is_fused` / `is_sharded` 查询，**不需要**任何枚举分支。
+- `global_shape`：所有 runtime shard 之前的完整 shape，可能包含 FP8 kernel 所需的
+  尾部 padding。
+- `origin_shape`：HF checkpoint 实际可见的 shape；没有 FP8 padding 时为空或等于
+  `global_shape`。
+- `local_shape`：真实 runtime local tensor shape，用于校验 descriptor 推导结果。
 
-### 1.2 多维切分按顺序叠加
+`LoadSpec` 不保存旧设计中的 `explicit_owned_regions` 或
+`save_requires_full_reconstruct`。regions 属于某次 load plan 的编译结果；是否 gather
+以及保留哪个 group 属于某次 save plan 的策略。
 
-`shards` 是列表，原生支持 TP × FSDP、EP × FSDP 等多轴组合。每条
-`ShardDescriptor.start/end` 的含义是"在**前面所有** descriptor 切完之后的
-子 tensor 上的偏移"。这条规则完全对齐 DTensor `placements` 从 `mesh_dim=0` 到
-`mesh_dim=N-1` 逐步施加的语义 —— 你可以把 `shards[i]` 理解成 `placements[i]`
-在"此刻本 rank 实际持有"这个问题上的等价形式。
+## 二、统一的分片描述
 
-### 1.3 Plan 是冻结快照
-
-`plan_hf_load()` / `plan_hf_save(...)` 返回的是 Pydantic dataclass：
-
-- 一次性从当前 LoadSpec 状态计算出执行所需的全部信息；
-- 不持有对 LoadSpec 的引用；
-- 执行器（`_load_hf_param` / `unshard_tensors_for_hf_save` / `_split_hf_tensors_for_save`）
-  只读 plan，**不读** LoadSpec。
-
-这条边界保证"布局规划"和"IO/通信执行"解耦。未来要接入新的持久化格式（例如
-DCP），只需要替换 plan 的消费者，不牵涉 LoadSpec 内部结构。
-
-### 1.4 fp8 与 LoadSpec 解耦
-
-LoadSpec 是"同 dtype 下的布局描述"。fp8 涉及的两件事 —— 量化/反量化、运行时
-padding —— 归属如下：
-
-- **运行时 padding**：用 `LoadSpec.origin_shape` 表达 checkpoint-visible shape
-  （剥掉运行时 padding 之后）。今天这个字段的唯一来源是 fp8 tensor metadata；
-  它只记录 shape，不记录 dtype / wrapper 类型。
-- **量化/反量化**：只在 `base.py._to_float8` / 反量化分支里现场判断（通过
-  `is_float8_weight(tensor)`）。LoadSpec 不包含 `runtime_is_float8` 这类
-  dtype-specific 字段。
-
-### 1.5 Spec → Plan → Executor 的分层
-
-```
-┌────────────────────┐  plan_hf_load()    ┌──────────────┐
-│                    │ ──────────────────▶│ HFLoadPlan   │──▶ _load_hf_param
-│     LoadSpec       │                    └──────────────┘
-│  (pure layout)     │  plan_hf_save(...) ┌──────────────┐
-│                    │ ──────────────────▶│ HFSavePlan   │──▶ unshard_tensors_for_hf_save
-└────────────────────┘                    └──────────────┘                    │
-                                                                              ▼
-                                                                      _split_hf_tensors_for_save
-```
-
-"Spec 是源、Plan 是派生、Executor 只依赖 Plan"。这条线保持单向。
-
----
-
-## 2. 数据模型
-
-### 2.1 `ShardDescriptor`
+### 2.1 ShardDescriptor
 
 ```python
 class ShardDescriptor(BaseModel):
-    dim: int                           # 被切的维
-    start: int                         # 在"前面切完的 sub-tensor"上的起点
-    end: int                           # 在"前面切完的 sub-tensor"上的终点
-    group: dist.ProcessGroup           # 产生这次切分的通信组
+    dim: int
+    group: dist.ProcessGroup
+    interleave_factor: int = 1
 ```
 
-`group` 是 load/save 双向通信域。load 时只需要知道本 rank 的范围；save 时需要沿
-`group` 做 all-gather 复原全量 tensor。
+- `interleave_factor == 1`：普通 continuous `Shard`，支持 PyTorch 原有的 uneven
+  分片。
+- `interleave_factor > 1`：Expert TP even interleave；factor 是每个 rank 持有的
+  有序连续 run 数。
+- descriptor 按 full runtime tensor 到 local tensor 的语义顺序排列，典型顺序是
+  `EP continuous → ETP interleave → FSDP continuous`。
+- save 严格反向执行：`FSDP gather → ETP gather/deinterleave → EP gather`。
 
-### 2.2 `LoadSpec`
+even interleave 设当前维长度为 `N`，group size 为 `M`，factor 为 `F`，要求：
+
+```text
+N % (M * F) == 0
+run_size = N / (M * F)
+```
+
+rank `r` 持有第 `(j * M + r)` 个 run，`j = 0 ... F - 1`。当前不支持 uneven
+interleave；不整除会明确报错。
+
+### 2.2 DTensor placement 如何表达 Expert TP
+
+MoE column-parallel 权重需要 EP 分 expert、TP 再在每个 expert/projection 内部分列：
 
 ```python
-class LoadSpec(BaseModel):
-    name: str                          # xtuner 侧 fully-qualified param name
-    global_hf_keys: list[str]          # 对应的 HF key 列表（按 fused_dim 拼接顺序）
-    global_shape: tuple[int, ...]      # 全量 tensor（fused 之后）的 runtime shape
-                                       # 可能包含运行时 padding（例如 fp8 的 FSDP 对齐 pad）
-    fused_dim: int | None = None       # 多 HF key 时的拼接维；单 key 时必须为 None
-    shards: list[ShardDescriptor] = [] # 从外到内的切分列表
-    origin_shape: tuple[int, ...] | None = None  # checkpoint-visible shape after runtime padding is trimmed
-                                       # None 表示"runtime shape 就是 checkpoint shape"
+placements = (
+    Shard(0),
+    InterleavedShard(0, num_local_stripes=local_experts * fused_projections),
+)
 ```
 
-派生属性：
+`InterleavedShard` 继承 PyTorch 私有 `_StridedShard`。其 `split_factor` 不是“当前
+rank 数”，而是当前切分前已经存在的逻辑 stripe 数；在这里就是本 EP rank 的
+`expert × projection` 数。
 
-```python
-is_fused            # len(global_hf_keys) > 1
-is_sharded          # bool(shards)
-unpadded_global_shape  # origin_shape or global_shape
+DTensor 构造时 placements 按 mesh 维从左到右作用；从 placements 推导 carving
+order、HF save 重建时则按相反方向撤销。FSDP2 还会在 mesh 最左侧 prepend 一个
+`_StridedShard` 标签，但它实际切的是已经完成 EP/ETP 的 local parameter。因此
+`LoadSpec.from_tensor()` 在唯一的转换边界上做两件事：
+
+1. 真正的 `InterleavedShard` 转成 `interleave_factor > 1`。
+2. FSDP prepend placement 归一化成最后应用的 continuous descriptor。
+
+后续 plan 不再依赖 `_StridedShard` 类型或 `DTensorSpec.shard_order`。
+
+### 2.3 通俗例子：两位仓库员各拿每个货架的一半
+
+设 fused W1/W3 的 dim-0 共 16 行，业务顺序为：
+
+```text
+expert 0 gate: [0,1,2,3]    expert 0 up: [4,5,6,7]
+expert 1 gate: [8,9,10,11]  expert 1 up: [12,13,14,15]
 ```
 
-**不变量**（`model_post_init` 强制）：
+`EP=2, TP=2` 时，每个 EP rank 只有一个 expert，因 gate/up 融合所以
+`interleave_factor=2`：
 
-- `is_fused` ⇔ `fused_dim is not None`；
-- 每条 shard 的 `start/end` 必须落在"前面切完之后的 sub-tensor"范围内；
-- 若 `origin_shape` 给定，它的秩与 `global_shape` 相同，且每维 `≤ global_shape`。
-
-### 2.3 `HFLoadPlan`
-
-`plan_hf_load()` 的产出：
-
-```python
-class HFLoadPlan(BaseModel):
-    name: str
-    hf_keys: list[str]                 # 本 rank 实际需要读的 HF key
-    fused_dim: int | None = None       # 多 key 时的拼接维
-    slices: list[LoadSlice] = []       # 读完拼接后，再做的 narrow 列表
-    zero_fill: bool = False            # 本 rank 完全落在运行时 padding 区，跳过 IO
-```
-
-`slices` 的 start/end 是**相对已加载 tensor 的坐标**，不是相对 `global_shape`。
-zero_fill=True 时 `hf_keys` 和 `slices` 都为空。
-
-### 2.4 `HFSavePlan`
-
-`plan_hf_save(...)` 的产出，承载两类信息：
-
-```python
-class HFSavePlan(BaseModel):
-    name: str
-    hf_keys: list[str]                  # 当前 save tensor 最终要写/同步的 HF keys
-    global_shape: tuple[int, ...]
-    unpadded_global_shape: tuple[int, ...]
-    fused_dim: int | None = None
-    distributed_save: bool = False
-    preserves_shards: bool = False      # True 表示 hf_keys 来自保留 shard 后的局部 tensor
-    unshard_steps: list[SaveShardStep] = []      # 所有 shard 的逆操作 + preserved 标记
-```
-
-`SaveShardStep` 记录一次 shard 在"施加前的 runtime shape / checkpoint-visible
-shape"两个快照 —— save 执行时倒序跑每一步、all-gather 还原、narrow 回
-checkpoint-visible shape。`preserved` 标记把某些 shard 排除在 all-gather 之外
-（见 §3.3）。`HFSavePlan.hf_keys` 始终是执行器要处理的 key 集合：普通 save 下
-它是完整 HF key list，preserved shard save 下它是当前局部 shard 覆盖的 key list。
-
----
-
-## 3. 计划生成
-
-### 3.1 `plan_hf_load()`
-
-不接受参数 —— 本 rank 的所有信息已经在 LoadSpec 里。步骤：
-
-1. 计算本 rank 最终持有的区间 `final_intervals`（顺序应用 `shards`）；
-2. 用 `unpadded_global_shape` 裁剪掉运行时 padding 部分；若裁完为空，返回
-   `zero_fill=True`；
-3. 若 `is_fused`，按 `fused_dim` 上的区间算出需要的 HF key 下标范围（floor/ceil
-   支持 mid-key shard，例如 FSDP 在 EP-local 专家 tensor 内部再切）；
-4. 对每个 dim，如果"最终区间"比"加载后的 tensor 区间"窄，生成一条 `LoadSlice`。
-
-### 3.2 `plan_hf_save(distributed_save=, preserve_process_group=, gather_process_group=)`
-
-三个参数对应三种 save 策略，互斥使用：
-
-| 参数 | 用途 |
+| `(ep,tp)` | local tensor 对应的 global rows |
 | --- | --- |
-| `distributed_save=True` | HF save：非 fused tensor 只在 rank0 写；fused tensor 的 HF key 在 save rank 间分配 |
-| `preserve_process_group=ep_group` | RL 权重同步：保留 EP 在 `fused_dim` 上的 shard，每个 EP rank 只流自己的 expert key；其他 shard 照常 all-gather |
-| `gather_process_group=fsdp_group` | FSDP-only all-gather：只 gather 这个 group 的 shard，其他 shard 保留 |
+| `(0,0)` | `[0,1,4,5]` |
+| `(0,1)` | `[2,3,6,7]` |
+| `(1,0)` | `[8,9,12,13]` |
+| `(1,1)` | `[10,11,14,15]` |
 
-策略统一落到 `_preserved_shard_indices` 这一步上 —— 决定哪些 `LoadSpec.shards`
-需要保留。之后 `_save_shard_steps` 给每个 shard 生成带 `preserved` 标记的
-`SaveShardStep`。若有 preserved shard，`LoadSpec` 直接从这些 shard 推导
-`HFSavePlan.hf_keys`；save plan 只暴露最终要写/同步的 HF keys，以及
-`preserves_shards` 说明这些 keys 来自局部 tensor 还是完整 tensor。
+这像两位仓库员分别负责每个货架的左半或右半，而不是一人搬走完整货架。若误用第二个
+`Shard(0)`，TP rank 会拿到连续的完整 projection 子集，gate/up 的列并行语义就错了。
 
-### 3.3 preserve vs gather 的正交性
+这种 `(Shard, InterleavedShard)` 同维布局在部分 PyTorch 版本无法归约出
+`shard_order`，因此 `full_tensor()` / `redistribute()` 不能作为稳定实现。XTuner
+训练直接使用 `DTensor.from_local()` / `to_local()`，HF 和 DCP 则使用本文的自定义
+布局编译路径。
 
-`preserve_process_group` 是"显式保留某个 group"的策略，`gather_process_group`
-是"显式 gather 某个 group（其余保留）"的策略。两者不能同时使用（assert 拦截）。
-在今天的代码里：
+## 三、HF Load
 
-- 普通 HF save：两者都不传，全部 all-gather；
-- RL 权重同步：传 `preserve_process_group=ep_group`；
-- `_fsdp_foreach_allgather`：传 `gather_process_group=fsdp_group`，只做 FSDP
-  层的 all-gather，不动 EP / TP。
+### 3.1 Plan 生成
 
----
+`LoadSpec.plan_hf_load()` 从完整 canonical tensor 开始，按 descriptors 正向计算
+当前 rank 的 ownership：
 
-## 4. 执行
+1. continuous shard 生成一个 slice；uneven 时复用 PyTorch shard size/offset
+   语义。
+2. even interleave 生成多个有序 runs。
+3. 后续 FSDP continuous shard 切的是已拼接的 ETP-local tensor，segment compiler
+   再把它映射回 global runs。
+4. 用 `origin_shape` 裁掉 checkpoint 中不存在的 FP8 padding。
+5. 选择覆盖这些 regions 的最小 HF-key envelope，并编译为
+   `HFLoadPlan.copy_regions`。
 
-### 4.1 加载路径
+编译使用连续 segments 表达 ownership，不会按 tensor 大小展开逐元素索引。
 
-```python
-def _load_hf_param(self, param, load_spec, loader):
-    plan = load_spec.plan_hf_load()
-    if plan.zero_fill:
-        # 本 rank 只持有运行时 padding，写 0 返回
-        local_tensor.zero_()
-        return []
-    # 按 plan.hf_keys 逐个读（fp8 走 dequant 分支，这里 base.py 现场处理）
-    loaded_tensors = self._load_hf_keys(plan, loader, ...)
-    # 拼接 + narrow 全部交给 safetensors_to_params
-    self.safetensors_to_params(loaded_tensors, local_tensor, plan)
+### 3.2 固定执行顺序
+
+~~~mermaid
+flowchart LR
+    A["读取 plan.hf_keys"] --> B["沿 fused_dim 拼接"]
+    B --> C["模型 hf_tensor_to_canonical"]
+    C --> D["校验 canonical shape"]
+    D --> E["执行 source-to-local copies"]
+    E --> F["未写 FP8 padding 保持为 0"]
+~~~
+
+必须先 canonicalize 再按 ownership copy。例如 GPT-OSS 的 HF
+`gate_up_proj` 先 transpose、重排 gate/up 并 flatten，之后 dim-0 才与
+`ShardDescriptor` 描述的 expert-major runtime 维一致；先 slice HF tensor 会切错
+语义维。
+
+### 3.3 模型差异被限制在 adapter
+
+| 模型 | HF → canonical 的主要差异 |
+| --- | --- |
+| GPT-OSS | `gate_up_proj` transpose、gate/up 重排并 flatten；`down_proj` transpose；bias 同步重排 |
+| Qwen3.5 | 非 MTP expert 权重主要 flatten expert 维；MTP 保留自己的布局 |
+| Qwen3-VL | `gate_up_proj` 的 HF 维序不同，需要 transpose 后 flatten |
+| GLM | 一个 fused XTuner 参数对应多个 per-expert HF keys，先拼接再 flatten |
+
+新增模型只需提供 key mapping 和 canonical adapter，不复制 EP/ETP/FSDP load
+流程。
+
+## 四、HF Save、padding 与重建
+
+### 4.1 逆分片
+
+`plan_hf_save()` 为每个 descriptor 生成 `SaveShardStep`，executor 逆序执行所有未
+preserve 的 step：
+
+- continuous：把各 rank local shard 补到 collective 所需等长，all-gather 后按
+  rank concat，再 trim 到该 step 的 `shape_before_shard`。
+- even interleave：各 rank/run 已等长；all-gather 后把 rank-major 数据重排成
+  `[run][rank]`，不需要 collective padding。
+
+例如 `TP=2, F=2`，gather 得到：
+
+```text
+rank0: [A0, A2]
+rank1: [A1, A3]
 ```
 
-`safetensors_to_params` 的签名是 `(safetensors, local_tensor, plan)`。三个 MoE
-子类（`gpt_oss`、`qwen3_5_text`、`qwen3vl_text`）按 `plan.name` 做 reshape /
-transpose 等模型特有变换后，调通用的 `_apply_load_slices` + `_copy_loaded_tensor_to_local`。
+deinterleave 后必须为 `[A0, A1, A2, A3]`，不能像 continuous shard 一样直接按
+rank concat。
 
-### 4.2 保存路径
+### 4.2 collective padding 与 FP8 padding
 
-所有 save 场景（HF save、RL 权重同步、FSDP-only gather）共用一条管道：
+两类 padding 分层处理：
 
-```python
-save_items = [HFSaveItem(tensor, load_spec.plan_hf_save(...)) for ...]
-full_tensors = unshard_tensors_for_hf_save(save_items)
-for full_tensor, item in zip(full_tensors, save_items):
-    names, tensors = self._split_hf_tensors_for_save(full_tensor, item.save_plan)
-```
-
-`unshard_tensors_for_hf_save` 自带**依赖感知的批量 foreach all-gather**：
-
-- 同一个 tensor 的多个 step 必须串行（例如 "先还原 FSDP，再还原 EP"）；
-- 不同 tensor 的 step 如果 `(group, dtype)` 兼容，可以 foreach 批到同一次 NCCL 调用。
-
-每一轮由 `_build_ready_save_unshard_groups` 从每个 pending 队列取头部 step，按
-group + dtype 分桶；`_foreach_all_gather_save_shards` 跑一次批量 gather；下一轮
-再消费队列的下一层。MoE EP+FSDP 的 save 就是这样两轮跑完的。
-
-### 4.3 `HFSaveItem`
-
-```python
-class HFSaveItem(NamedTuple):
-    tensor: torch.Tensor
-    save_plan: HFSavePlan
-```
-
-这是**跨 LoadSpec 和 BaseModel 边界**的 bundle：一边是 runtime tensor（模型侧
-概念，带 fp8 wrapper / DTensor wrapper），一边是纯布局的 `HFSavePlan`。它的
-归属地是 `base.py` ——`load_spec.py` 保持"不认识模型侧概念"。
-`unshard_tensors_for_hf_save` 的签名使用两个平行列表（`list[torch.Tensor]` +
-`list[HFSavePlan]`）而不是 `list[HFSaveItem]`，避免 `load_spec.py` 反向依赖
-`base.py`。
-
----
-
-## 5. 调用时机
-
-`_init_load_spec` 被定位为"从当前 DTensor 布局反推 HF 映射的纯函数"。
-调用约定：**谁改 param 布局谁负责重算，后者覆盖前者**。
-
-| 时机 | 调用方 | spec 代表 |
+| padding | 原因 | 处理位置 |
 | --- | --- | --- |
-| 子类 `__init__` 末尾 | 子类自己 | 构建完成时的布局（EP-only / Replicate / 其它 init-time 切分） |
-| `parallelize(tp_mesh)` 结束 | `BaseModel.parallelize` | TP + 已有切分 |
-| `fully_shard` 结束 | `BaseModel.fully_shard` | 叠加 FSDP（训练态） |
-| `Float8Handler.pad_for_fsdp` 回调 | 回调内 | fp8 pad 后的真实 shape |
+| collective padding | uneven continuous ranks 的 collective 输入必须等长 | 当前 continuous `SaveShardStep` merge 后 trim 到 runtime `shape_before_shard` |
+| FP8 padding | runtime kernel 对齐，HF checkpoint 不存在这些尾部元素 | 所有目标 gather 完成后，从 `runtime_output_shape` 一次 trim 到 `output_shape` |
 
-`from_hf` / `save_hf` 入口有 assert 兜底：
+通俗例子：runtime 长度 10、HF 可见长度 9，以 3 ranks continuous shard。三个
+local 长度是 `4, 4, 2`，第三个 rank 先临时补成 4；gather 得到长度 12 后先 trim
+到 runtime 长度 10，这一步只去 collective padding；所有逆分片结束后再 trim 到
+HF 长度 9，这一步才去 FP8 padding。这样外层 gather 不会把已经提前裁掉的 FP8
+尾部重新当作 collective padding 补回来。
+
+load 侧没有 collective trim：plan 只复制 `origin_shape` 内存在的数据，并先把未写
+runtime padding 清零。
+
+### 4.3 Save policy
+
+| 场景 | preserved shards | 实际逆分片 | 输出语义 |
+| --- | --- | --- | --- |
+| full / distributed HF save | 无 | FSDP → ETP → EP | 完整 checkpoint-visible canonical tensor |
+| preserve EP | EP | FSDP → ETP | 连续的 EP-local canonical tensor，供 RL expert-key sync |
+| only gather FSDP | EP、ETP | 仅 FSDP | 完整 EP/ETP-local runtime tensor，供 layer-wise IPC |
+
+`distributed_save` 是写出分配策略，不是部分重建策略；当前仍先正确重建完整
+canonical tensor，再决定哪些 rank 写哪些 keys。
+
+### 4.4 reconstruct_full_tensor
+
+`reconstruct_full_tensor(dt)` 仍是 public convenience API，因为 PyTorch
+`DTensor.full_tensor()` 不稳定支持 `(Shard, InterleavedShard)`。它现在只是薄封装：
+
+1. 从 DTensor placements 构造 descriptor history。
+2. 生成不 preserve 任何 shard 的 full-runtime save steps。
+3. 调用与 `HFSavePlan` 相同的逆分片 executor。
+4. 返回 `global_shape` 的 runtime tensor。
+
+它不做模型格式转换，也不 trim `origin_shape`；`distributed_save` 和 preserve group
+属于 `HFSavePlan` 策略，不进入这个 API。生产 HF save 不再通过
+`save_requires_full_reconstruct` 走特殊旁路。
+
+## 五、DCP 的独立协议
+
+### 5.1 为什么默认 DCP 不够
+
+普通 DTensor rank 可由一个 `local_shape + global_offset` 描述；interleaved rank
+对应多个不连续区间。若把 `[0,1,4,5]` 错当成从 offset 0 开始的连续四行，DCP 会把
+后两行写到 global rows 2、3，checkpoint 看似成功但内容错误。
+
+`compute_runs()` 只根据 global shape、mesh coordinate 和 placements 做几何计算，
+不读取 tensor value，也不发 collective。它把 local tensor 拆为若干“local 连续且
+global 也连续”的 `Run`：
 
 ```python
-assert "load_spec_mapping" in self.__dict__, (
-    f"{type(self).__name__}.__init__ must call self._init_load_spec() at the end."
+Run(
+    global_offset=(global_row, 0),
+    sizes=(num_rows, hidden_size),
+    local_start=local_row,
+    local_size=num_rows,
 )
 ```
 
-这条约定是硬契约；子类若跳过会在第一次 load/save 时被抓。
+### 5.2 通俗例子：给一本交错装订的书编页码
 
----
+沿用 `(ep=0,tp=0)` 的 local rows `[0,1,4,5]`。它在内存中是连续四行，但
+`compute_runs()` 返回两段：
 
-## 6. 示例
-
-### 6.1 Dense, tp=2, fsdp=4, `q_proj.weight`
-
-```python
-LoadSpec(
-    name="layers.0.self_attn.q_proj.weight",
-    global_hf_keys=["model.layers.0.self_attn.q_proj.weight"],
-    global_shape=(n*d, h),
-    fused_dim=None,
-    shards=[
-        ShardDescriptor(dim=0, start=tp_start,   end=tp_end,   group=tp_group),
-        ShardDescriptor(dim=0, start=fsdp_start, end=fsdp_end, group=fsdp_group),
-    ],
-)
+```text
+Run(global rows [0,2), local rows [0,2))
+Run(global rows [4,6), local rows [2,4))
 ```
 
-`fsdp_start/end` 相对于"已经被 TP 切过的 sub-tensor"而言，不是相对
-`global_shape`。
+就像一本小册子依次装订了原书第 0、1、4、5 页；保存时必须在目录中记录成两段，
+不能声称它是原书第 0 到 3 页。
 
-### 6.2 MoE, ep=8, fsdp=4, fused expert weight
+Save planner 为它生成：
 
-```python
-LoadSpec(
-    name="layers.0.experts.fused_w1w3.weight",
-    global_hf_keys=[f"model.layers.0.mlp.experts.{i}.gate_proj.weight" for i in range(64)]
-                 + [f"model.layers.0.mlp.experts.{i}.up_proj.weight"  for i in range(64)],
-    global_shape=(128 * I_padded, H),    # I_padded 含 fp8 FSDP 对齐 pad
-    fused_dim=0,
-    shards=[
-        ShardDescriptor(dim=0, start=ep_start,   end=ep_end,   group=ep_group),
-        ShardDescriptor(dim=0, start=fsdp_start, end=fsdp_end, group=fsdp_group),
-    ],
-    origin_shape=(128 * I, H),           # 剥掉 pad 后的 checkpoint shape
-)
+```text
+Chunk(offset=(0,0), size=(2,H)) <- local.narrow(0, 0, 2)
+Chunk(offset=(4,0), size=(2,H)) <- local.narrow(0, 2, 2)
 ```
 
-RL 权重同步调用 `plan_hf_save(preserve_process_group=ep_group)` —— EP shard 被
-标记 preserved，保存管道只做 FSDP 还原，结果留在 EP-local 坐标系；再由
-`_request_ep_sequential_update` 按 EP rank 顺序广播。
+Load planner 在当前目标拓扑重新计算 runs，让 DCP 用 saved chunk 与 destination
+chunk 的全局坐标求交，并把数据直接写入对应 local `narrow()` view。
 
-### 6.3 embed_tokens, 纯 FSDP
+~~~mermaid
+flowchart LR
+    A["Interleaved DTensor local storage"] --> B["compute_runs：多个全局连续区间"]
+    B --> C["SavePlanner：每个 run 一个 WriteItem"]
+    C --> D["DCP metadata + distributed storage"]
+    D --> E["LoadPlanner：目标拓扑 runs"]
+    E --> F["saved/destination chunk 求交"]
+    F --> G["原地写入 local views"]
+~~~
 
-```python
-LoadSpec(
-    name="embed_tokens.weight",
-    global_hf_keys=["model.embed_tokens.weight"],
-    global_shape=(V, H),
-    fused_dim=None,
-    shards=[ShardDescriptor(dim=0, start=fsdp_start, end=fsdp_end, group=fsdp_group)],
-)
-```
+### 5.3 分布式保存与跨拓扑恢复
 
----
+- 每个 rank 只写自己已有的 local views，不 materialize full tensor，也不把权重集中
+  到 coordinator。
+- metadata 保存 FQN、global shape、offset 和 size，不保存“rank N 的业务含义”。
+- 因此可执行 `save EP=2,TP=2 → load EP=1,TP=4`：新 TP ranks 按当前 placements
+  声明目标 runs，DCP 从旧 chunks 中读取相交区域。
+- model 参数和 optimizer 的 `exp_avg` / `exp_avg_sq` 都使用相同 planner，才能完整
+  resume。
+- `TrainEngine.save_dcp/load_dcp` 显式传入
+  `InterleavedShardSavePlanner/LoadPlanner`；正确性不依赖 Torch 2.7 的可选 monkey
+  patch。
 
-## 7. 为什么这样设计
+`InterleavedShardSavePlanner` 继承 `XtunerCacheSavePlanner`，但 cache 只复用 plan、
+metadata、`WriteResult` 等 control-plane 信息，不比较权重值，也不会省略本次 tensor
+写盘。显式构造 planner 的默认路径当前以正确性为主，并未开启 plan cache。
 
-几个关键取舍的归档。
+### 5.4 与 HF plan 的边界
 
-### 7.1 为什么 `shards` 是列表而不是单轴四元组
+HF 要处理 key 拼接、canonical adapter、save policy 和 FP8 trim；DCP 已有自己的
+`WriteItem` / `ReadItem`、global metadata 和 storage 协议。因此 DCP 不调用
+`reconstruct_full_tensor`，也不经过 `HFSavePlan`。二者只共享 even interleave 的
+几何语义。
 
-旧的 `(dim, shard_start, shard_end, group)` 只表达一刀。TP × FSDP 或 EP × FSDP
-是常见组合，旧 schema 只能靠"加载时临时推导第二刀"这种硬编码绕过（
-`FSDP_SHARD_DIM == 0` 就是这条路径的残留）。列表 + DTensor 施加顺序是最小的
-统一表达。
+## 六、约束与验证
 
-### 7.2 为什么删 `LoadEnum`
+当前有意保留以下边界：
 
-`SAME/FUSED/SHARD` 给定 `global_hf_keys` 和 `shards` 后是可派生的。保留它相当于
-同一份状态的两种表达，下游分支要同步维护。直接用 `is_fused` / `is_sharded` 两个
-独立 bool 可以正交表达所有组合（包括原本需要新造 `FUSED_SHARD` 的情况）。
+- HF `ShardDescriptor` 支持 uneven continuous，但 ETP 只支持 even interleave。
+- `compute_runs()` 当前只支持 tensor dim-0 sharding，strided run 要求均匀切分。
+- `InterleavedShard` 和 DCP planner 使用部分 PyTorch 私有 API，升级 PyTorch 时需要
+  回归。
+- FSDP prepend placement 必须在 EP/ETP 后应用；不能按 placements 的表面顺序直接
+  推导数据 ownership。
 
-### 7.3 为什么 fp8 不进 LoadSpec
+行为测试应覆盖：continuous even/uneven、ETP even interleave、EP→ETP→FSDP、
+FP8 load padding、collective+FP8 save padding、full/preserve EP/only gather FSDP、
+`reconstruct_full_tensor`、DCP 同拓扑 round-trip 与跨拓扑 reshard，以及 GPT-OSS、
+Qwen3.5、Qwen3-VL、GLM 的 canonical adapter。
 
-LoadSpec 的定位是"同 dtype 下的映射"。fp8 涉及的反量化需要的是 tensor 的真实
-dtype / wrapper 类型，这些只有在 IO 路径里拿到 runtime tensor 才能判断。若把
-`runtime_is_float8` 放进 spec，一方面是状态重复（`is_float8_weight(tensor)` 已经
-是事实来源），另一方面污染 LoadSpec 的语义 —— 它不再是纯布局描述。
+## 总结
 
-`origin_shape` 是 checkpoint-visible shape。它今天只服务 fp8 runtime padding，
-但仍然只携带 shape 信息；fp8 的 dtype / wrapper 判断不进入 LoadSpec。
+当前设计把 Expert TP 的特殊性收敛到三个清晰位置：
 
-### 7.4 为什么 `unshard_tensors_for_hf_save` 住在 `load_spec.py`
+1. `ShardDescriptor.interleave_factor > 1` 描述 HF I/O 所需的 even runs。
+2. HF load segment compiler 与 save deinterleave 分支负责 rank-local 数据搬运。
+3. DCP `compute_runs()` 把离散 storage 转成标准全局 chunks。
 
-尽管它做的是分布式 all-gather，但它**只依赖 HFSavePlan + 一个通信原语**。把它
-放在 `load_spec.py` 让"spec → plan → 执行"三层都在一个文件里闭环，调用方
-（base.py）只需要准备 `(tensor, plan)` 对，不需要理解 shard 调度。
-
-若将来 `unshard_tensors_for_hf_save` 进一步膨胀，可以拆到独立模块（例如
-`save_runner.py`），但当前规模尚不需要。
-
-### 7.5 为什么保存不用 `_fuse_contiguous_chunks_without_alloc`
-
-旧代码对 `dim == 0` 的单 tensor all-gather 用过一个零拷贝 view 合并优化。这条
-优化只在"一次 gather 一个 tensor"时成立 —— 当前批量 foreach 把多个 tensor 交错
-塞进同一个扁平缓冲区，per-tensor chunks 不再连续，这条路径失效。换掉 NCCL 调用
-次数（O(num_tensors) → O(rounds)）比 dim=0 多一次 cat alloc 更划算。如果某个
-特定场景发现这次 trade-off 不值，可以单独给那条路走非批量路径，但默认策略保持
-批量。
-
----
-
-## 8. 测试
-
-核心测试都在 `tests/utils/test_load_spec.py`：
-
-- `TestLoadSpecSchema`：字段契约 + `shards` 顺序验证；
-- `TestHFLoadPlan`：`plan_hf_load` 在 fused / non-fused / fp8 padding 下的产出；
-- `TestHFSavePolicy`：`distributed_save` 的 HF key 分配规则。
-
-行为等价性由 `tests/model/test_qwen3_dense.py::test_save_hf` 和
-`tests/model/test_qwen3_moe.py::test_save_hf` 的 safetensors bit-equal 保证。
+模型与 `BaseModel` 主流程不再判断 `InterleavedShard`，HF save 和
+`reconstruct_full_tensor` 也不再维护两套重建算法。continuous 与 interleave 共用
+布局描述、计划调度和 padding 边界，但保留各自最直观的 merge 算法。

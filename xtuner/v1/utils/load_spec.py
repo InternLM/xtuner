@@ -1,15 +1,16 @@
 import math
-from typing import NamedTuple
+from itertools import product
+from typing import Callable, NamedTuple
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 from torch.distributed.tensor import DTensor, Shard
-from torch.distributed.tensor.placement_types import _StridedShard
 
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils.device import get_device
+from xtuner.v1.utils.interleaved_shard import RuntimeLayout
 
 
 def _is_same_process_group(left: dist.ProcessGroup, right: dist.ProcessGroup) -> bool:
@@ -19,159 +20,268 @@ def _is_same_process_group(left: dist.ProcessGroup, right: dist.ProcessGroup) ->
 
 
 class ShardDescriptor(BaseModel):
-    """A single partition applied to the fused full tensor.
+    """One runtime partition applied to the canonical full tensor.
 
-    The full tensor is obtained by concatenating every ``LoadSpec.global_hf_keys`` along
-    ``LoadSpec.fused_dim`` (or taking the sole HF tensor when ``len(global_hf_keys) == 1``).
-    Descriptors are applied in order; later descriptors use offsets relative to the sub-tensor produced by all
-    earlier descriptors, matching DTensor placement semantics.
+    Descriptors are applied in forward layout order. ``interleave_factor == 1``
+    follows normal ``Shard`` semantics, including uneven continuous shards.
+    Larger factors describe even interleave: every rank owns that many equal
+    runs from the current tensor dimension.
 
     Args:
         dim (int): Tensor dim on which this partition cuts.
-        start (int): Inclusive start offset relative to the current sub-tensor.
-        end (int): Exclusive end offset relative to the current sub-tensor.
         group (dist.ProcessGroup): Communication group that produced this partition.
+        interleave_factor (int): Number of ordered runs owned by each rank. One means a continuous shard.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     dim: int
-    start: int
-    end: int
     group: dist.ProcessGroup
+    interleave_factor: int = Field(default=1, ge=1)
 
+    def local_intervals(self, dim_size: int) -> list[tuple[int, int]]:
+        """Return this rank's intervals in the current tensor coordinate."""
+        world_size = dist.get_world_size(group=self.group)
+        rank = dist.get_rank(group=self.group)
+        assert rank >= 0, "ShardDescriptor process group must contain the current rank"
 
-def _dtensor_shards(tensor: DTensor) -> list[ShardDescriptor]:
-    current_shape = list(tensor.shape)
-    shards: list[ShardDescriptor] = []
-    for mesh_dim, placement in _ordered_dtensor_placements(tensor):
-        if not isinstance(placement, Shard):
-            continue
+        if self.interleave_factor == 1:
+            # XTuner may initialize modules while the default device is meta. PyTorch's
+            # placement helper inherits that default for temporary shape arithmetic.
+            with torch.device(get_device()):
+                local_size, offset = Shard(self.dim)._local_shard_size_and_offset(  # type: ignore[attr-defined]
+                    dim_size,
+                    world_size,
+                    rank,
+                )
+            return [(offset, offset + local_size)] if local_size else []
 
-        # DTensor placement order is not always the raw mesh-dim order. FSDP2 can represent right-to-left sharding
-        # with _StridedShard, and PyTorch's checkpoint offset helper first expands that into the effective shard
-        # order. LoadSpec must preserve the same order so its descriptor intervals match DTensor local tensors.
-        #
-        # XTuner may initialize modules while the default device is "meta". PyTorch's Shard placement helpers can
-        # inherit that default device for temporary shape arithmetic, so force XTuner's real runtime device before
-        # calling the helper.
-        with torch.device(get_device()):
-            local_size, offset = placement._local_shard_size_and_offset(  # type: ignore[attr-defined]
-                current_shape[placement.dim],
-                tensor.device_mesh.size(mesh_dim),
-                tensor.device_mesh.get_local_rank(mesh_dim),
+        split_count = world_size * self.interleave_factor
+        if dim_size % split_count != 0:
+            raise NotImplementedError(
+                "Even interleave requires size_before_shard to be divisible by "
+                f"group_size * interleave_factor, got {dim_size} % "
+                f"({world_size} * {self.interleave_factor}) != 0"
             )
-        shards.append(
-            ShardDescriptor(
-                dim=placement.dim,
-                start=offset,
-                end=offset + local_size,
-                group=tensor.device_mesh.get_group(mesh_dim),
-            )
-        )
-        current_shape[placement.dim] = local_size
-    return shards
+        run_size = dim_size // split_count
+        return [
+            ((run_index * world_size + rank) * run_size, (run_index * world_size + rank + 1) * run_size)
+            for run_index in range(self.interleave_factor)
+        ]
+
+    def local_size(self, dim_size: int) -> int:
+        return sum(end - start for start, end in self.local_intervals(dim_size))
 
 
-def _ordered_dtensor_placements(tensor: DTensor) -> list[tuple[int, object]]:
-    # Return placements expanded into carving order: for each tensor dim that is sharded, emit one
-    # (mesh_dim, Shard(tensor_dim)) entry per mesh dim, listed in the order each mesh dim cuts the
-    # tensor. `_StridedShard` placements are normalized to plain `Shard` so downstream code can
-    # treat every entry as a contiguous slice on its current sub-tensor.
-    #
-    # Algorithm mirrors torch 2.10's `_maybe_convert_StridedShard_to_shard_order`: process
-    # placements right-to-left and, for each `_StridedShard(d, split_factor=sf)`, insert it into
-    # the carving order for its tensor dim at the position where the product of mesh sizes of
-    # already-inserted entries on its right equals `sf`. Plain `Shard` is treated as `sf == 1`,
-    # so it always slots into the outermost free position.
-    #
-    # We re-implement the algorithm here instead of importing torch's helper because the relevant
-    # PyTorch symbol changed across versions (`_explicit_order_placements` in <2.10,
-    # `DTensorSpec._normalize_placements_into_shard_order` in >=2.10) and both are private. Keeping
-    # the math local insulates LoadSpec from future PyTorch refactors.
-    mesh = tensor.device_mesh
-    placements = tensor.placements
+class _OwnedRegion(BaseModel):
+    """One contiguous region of the global tensor owned by this rank.
 
-    tensor_dim_to_carving_order: dict[int, list[int]] = {}
-    for mesh_dim in reversed(range(len(placements))):
-        placement = placements[mesh_dim]
-        if not isinstance(placement, (Shard, _StridedShard)):
-            continue
-        tensor_dim = placement.dim
-        split_factor = placement.split_factor if isinstance(placement, _StridedShard) else 1
-        carving_order = tensor_dim_to_carving_order.setdefault(tensor_dim, [])
-
-        # Walk the existing carving order from outermost (index 0) inward, accumulating mesh sizes.
-        # The current placement slots in at the position where accumulated size equals split_factor.
-        accumulated = 1
-        inserted = False
-        for position in range(len(carving_order) + 1):
-            if accumulated == split_factor:
-                carving_order.insert(position, mesh_dim)
-                inserted = True
-                break
-            if position < len(carving_order):
-                accumulated *= mesh.size(carving_order[position])
-        if not inserted:
-            # No insertion point matched: split_factor is inconsistent with the cumulative mesh
-            # sizes of the other placements on this tensor dim. The placement is malformed for this
-            # mesh (PyTorch's algorithm would also reject it).
-            raise RuntimeError(
-                f"Cannot place {placement} at mesh dim {mesh_dim} into carving order for tensor "
-                f"dim {tensor_dim}: split_factor {split_factor} does not match any cumulative "
-                f"mesh size produced by the other placements on this dim."
-            )
-
-    ordered: list[tuple[int, object]] = []
-    for tensor_dim in sorted(tensor_dim_to_carving_order):
-        for mesh_dim in tensor_dim_to_carving_order[tensor_dim]:
-            ordered.append((mesh_dim, Shard(tensor_dim)))
-    return ordered
-
-
-class LoadSlice(BaseModel):
-    """A narrow operation in the loaded HF tensor coordinate system.
-
-    Args:
-        dim (int): Tensor dimension to narrow.
-        start (int): Inclusive start offset in the loaded tensor.
-        end (int): Exclusive end offset in the loaded tensor.
+    ``global_offsets`` locate the region in XTuner's canonical global tensor,
+    while ``local_offsets`` locate the same data in the runtime local tensor.
+    A regular FSDP/EP shard has one region; an interleaved Expert TP layout has
+    one region per contiguous run.
     """
 
     model_config = ConfigDict(extra="forbid")
-    dim: int
-    start: int
-    end: int
+    global_offsets: tuple[int, ...]
+    local_offsets: tuple[int, ...]
+    sizes: tuple[int, ...]
+
+
+class LoadCopyRegion(BaseModel):
+    """One source-to-target copy executed by :class:`HFLoadPlan`."""
+
+    model_config = ConfigDict(extra="forbid")
+    source_offsets: tuple[int, ...]
+    target_offsets: tuple[int, ...]
+    sizes: tuple[int, ...]
 
 
 class HFLoadPlan(BaseModel):
-    """Execution plan for reading HF safetensors into one local tensor.
+    """Rank-local program for loading HF tensors into one runtime tensor.
 
     Args:
         name (str): Fully-qualified parameter or buffer name on the xtuner side.
         hf_keys (list[str]): HF keys that must be read for this rank.
         fused_dim (int | None): Concatenation dimension when multiple HF keys are loaded.
-        slices (list[LoadSlice]): Narrow operations to apply after loading. Offsets are relative to the loaded
-            tensor, not the original ``LoadSpec.global_shape``.
-        zero_fill (bool): Whether this rank falls entirely in a padded region and should skip checkpoint reads.
+        canonical_source_shape (tuple[int, ...] | None): Expected shape after the model adapter converts the loaded
+            HF tensor to XTuner's canonical layout. ``None`` means the plan has no checkpoint-backed copy work.
+        target_shape (tuple[int, ...]): Expected runtime local-tensor shape.
+        copy_regions (list[LoadCopyRegion]): Source-to-target copies in canonical coordinates.
+        zero_unwritten_target (bool): Whether to zero the target before executing copies, used for runtime padding.
     """
 
     model_config = ConfigDict(extra="forbid")
     name: str
     hf_keys: list[str]
     fused_dim: int | None = None
-    slices: list[LoadSlice] = Field(default_factory=list)
-    zero_fill: bool = False
+    canonical_source_shape: tuple[int, ...] | None = None
+    target_shape: tuple[int, ...]
+    copy_regions: list[LoadCopyRegion] = Field(default_factory=list)
+    zero_unwritten_target: bool = False
+
+    @torch.no_grad()
+    def load_into(
+        self,
+        checkpoint_tensors: list[torch.Tensor],
+        local_tensor: torch.Tensor,
+        canonicalize: Callable[[str, torch.Tensor], torch.Tensor],
+    ) -> None:
+        """Convert loaded HF tensors and execute this rank's copy program.
+
+        Model adapters own only the HF-layout-to-canonical transformation. This method owns the ordering around that
+        adapter and all runtime-layout details, including regular slices, interleaved runs, and padding.
+        """
+        assert tuple(local_tensor.shape) == self.target_shape, (
+            f"Load target shape {tuple(local_tensor.shape)} does not match planned shape "
+            f"{self.target_shape} for {self.name}"
+        )
+        assert len(checkpoint_tensors) == len(self.hf_keys), (
+            f"Loaded {len(checkpoint_tensors)} tensors for {len(self.hf_keys)} planned HF keys of {self.name}"
+        )
+
+        if self.zero_unwritten_target:
+            local_tensor.zero_()
+        if not self.copy_regions:
+            return
+
+        canonical_tensor = self._canonicalize_source(checkpoint_tensors, canonicalize)
+        for region in self.copy_regions:
+            source = self._narrow_region(canonical_tensor, region.source_offsets, region.sizes)
+            target = self._narrow_region(local_tensor, region.target_offsets, region.sizes)
+            target.copy_(source)
+
+    def _canonicalize_source(
+        self,
+        checkpoint_tensors: list[torch.Tensor],
+        canonicalize: Callable[[str, torch.Tensor], torch.Tensor],
+    ) -> torch.Tensor:
+        """Build and validate the canonical source before any rank-local
+        copy."""
+        assert checkpoint_tensors, f"Internal Error. No safetensors were loaded for {self.name}"
+        if len(checkpoint_tensors) == 1:
+            loaded_tensor = checkpoint_tensors[0]
+        else:
+            assert self.fused_dim is not None, (
+                f"Internal Error. fused_dim must be set when loading multiple HF keys for {self.name}"
+            )
+            loaded_tensor = torch.cat(checkpoint_tensors, dim=self.fused_dim)
+
+        canonical_tensor = canonicalize(self.name, loaded_tensor)
+        assert self.canonical_source_shape is not None
+        assert tuple(canonical_tensor.shape) == self.canonical_source_shape, (
+            f"Canonical HF tensor shape {tuple(canonical_tensor.shape)} does not match planned shape "
+            f"{self.canonical_source_shape} for {self.name}"
+        )
+        return canonical_tensor
+
+    @staticmethod
+    def _narrow_region(
+        tensor: torch.Tensor,
+        offsets: tuple[int, ...],
+        sizes: tuple[int, ...],
+    ) -> torch.Tensor:
+        assert tensor.dim() == len(offsets) == len(sizes)
+        for dim, (offset, size) in enumerate(zip(offsets, sizes)):
+            tensor = tensor.narrow(dim, offset, size)
+        return tensor
 
 
-def _final_intervals(
+def _layout_segments(
     global_shape: tuple[int, ...],
     shards: list[ShardDescriptor],
-) -> list[tuple[int, int]]:
-    intervals = [(0, dim_size) for dim_size in global_shape]
+) -> list[list[tuple[int, int]]]:
+    """Map each local tensor dimension to ordered global segments.
+
+    A dimension starts as one full global segment. Each descriptor slices the *current local order*, so a later FSDP
+    shard can cut across multiple ETP runs without materializing an index for every tensor row.
+    """
+    segments_by_dim = [[(0, dim_size)] if dim_size else [] for dim_size in global_shape]
     for shard in shards:
-        current_start, _ = intervals[shard.dim]
-        intervals[shard.dim] = (current_start + shard.start, current_start + shard.end)
-    return intervals
+        assert 0 <= shard.dim < len(global_shape), f"Invalid shard dim {shard.dim} for shape {global_shape}"
+        source_segments = segments_by_dim[shard.dim]
+        current_size = sum(size for _, size in source_segments)
+        selected_intervals = shard.local_intervals(current_size)
+        selected_segments: list[tuple[int, int]] = []
+
+        for selected_start, selected_end in selected_intervals:
+            local_start = 0
+            for global_start, segment_size in source_segments:
+                local_end = local_start + segment_size
+                overlap_start = max(selected_start, local_start)
+                overlap_end = min(selected_end, local_end)
+                if overlap_start < overlap_end:
+                    mapped_start = global_start + overlap_start - local_start
+                    mapped_size = overlap_end - overlap_start
+                    previous_start, previous_size = selected_segments[-1] if selected_segments else (0, 0)
+                    if selected_segments and previous_start + previous_size == mapped_start:
+                        selected_segments[-1] = (previous_start, previous_size + mapped_size)
+                    else:
+                        selected_segments.append((mapped_start, mapped_size))
+                local_start = local_end
+
+        segments_by_dim[shard.dim] = selected_segments
+    return segments_by_dim
+
+
+def _shape_from_segments(
+    segments_by_dim: list[list[tuple[int, int]]],
+    *,
+    visible_shape: tuple[int, ...] | None = None,
+) -> tuple[int, ...]:
+    if visible_shape is None:
+        return tuple(sum(size for _, size in segments) for segments in segments_by_dim)
+
+    assert len(visible_shape) == len(segments_by_dim)
+    return tuple(
+        sum(
+            max(0, min(global_start + size, visible_size) - min(global_start, visible_size))
+            for global_start, size in segments
+        )
+        for segments, visible_size in zip(segments_by_dim, visible_shape, strict=True)
+    )
+
+
+def _visible_regions_from_segments(
+    segments_by_dim: list[list[tuple[int, int]]],
+    *,
+    visible_shape: tuple[int, ...],
+) -> list[_OwnedRegion]:
+    """Compile rank ownership into rectangular global-to-local copies."""
+    if any(not segments for segments in segments_by_dim):
+        return []
+
+    located_segments: list[list[tuple[int, int, int]]] = []
+    for segments in segments_by_dim:
+        local_offset = 0
+        current: list[tuple[int, int, int]] = []
+        for global_offset, size in segments:
+            current.append((global_offset, local_offset, size))
+            local_offset += size
+        located_segments.append(current)
+
+    regions: list[_OwnedRegion] = []
+    for segment_tuple in product(*located_segments):
+        global_offsets: list[int] = []
+        local_offsets: list[int] = []
+        sizes: list[int] = []
+        for dim, (global_offset, local_offset, size) in enumerate(segment_tuple):
+            clipped_start = min(global_offset, visible_shape[dim])
+            clipped_end = min(global_offset + size, visible_shape[dim])
+            clipped_size = max(0, clipped_end - clipped_start)
+            if clipped_size == 0:
+                break
+            global_offsets.append(clipped_start)
+            local_offsets.append(local_offset + clipped_start - global_offset)
+            sizes.append(clipped_size)
+        else:
+            regions.append(
+                _OwnedRegion(
+                    global_offsets=tuple(global_offsets),
+                    local_offsets=tuple(local_offsets),
+                    sizes=tuple(sizes),
+                )
+            )
+    return regions
 
 
 class SaveShardStep(BaseModel):
@@ -182,12 +292,6 @@ class SaveShardStep(BaseModel):
     item that contains the shard itself plus the tensor shapes that existed immediately before that shard was applied.
     The save path then executes these work items in reverse order and batches compatible all-gathers by process group.
 
-    ``load_spec_shard_index`` is only needed when some original shards should stay sharded. RL weight sync preserves
-    the EP shard on the fused HF dimension so each EP rank streams only its local expert keys, while later shards such
-    as FSDP still need to be all-gathered. Because execution reverses and groups the work items, their list positions
-    no longer match ``LoadSpec.shards``. The original index is the stable handle used by the save plan to decide
-    which work items to skip and which preserved shards should define the final expected shape.
-
     Example:
         ``LoadSpec.shards == [ep_shard, fsdp_shard]`` means the full HF tensor was first cut by EP, then the
         EP-local tensor was cut by FSDP. Normal HF save executes ``[fsdp_step, ep_step]`` to rebuild the full tensor.
@@ -195,18 +299,14 @@ class SaveShardStep(BaseModel):
         EP-local.
 
     Args:
-        load_spec_shard_index (int): Index of ``shard`` in the original ``LoadSpec.shards`` list.
         shard (ShardDescriptor): Shard descriptor this save step reverses.
         shape_before_shard (tuple[int, ...]): Runtime tensor shape immediately before ``shard`` was applied.
-        unpadded_shape_before_shard (tuple[int, ...]): Checkpoint-visible shape before ``shard`` was applied.
         preserved (bool): Whether this shard should remain applied instead of being all-gathered.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
-    load_spec_shard_index: int
     shard: ShardDescriptor
     shape_before_shard: tuple[int, ...]
-    unpadded_shape_before_shard: tuple[int, ...]
     preserved: bool = False
 
 
@@ -216,62 +316,28 @@ class HFSavePlan(BaseModel):
     Args:
         name (str): Fully-qualified parameter or buffer name on the xtuner side.
         hf_keys (list[str]): HF keys represented by the tensor after this plan's pending unshard steps finish.
-        global_shape (tuple[int, ...]): Runtime full tensor shape before any shard is applied.
-        unpadded_global_shape (tuple[int, ...]): Checkpoint-visible full tensor shape after removing runtime padding.
+        runtime_output_shape (tuple[int, ...]): Shape after pending gathers, before removing FP8 runtime padding.
+        output_shape (tuple[int, ...]): Checkpoint-visible shape after pending gathers and final padding trim.
         fused_dim (int | None): HF key concatenation dim when the underlying ``LoadSpec`` is fused; ``None``
             otherwise.
         distributed_save (bool): Whether non-fused tensors are written only on rank0 and fused keys are split across
             save ranks.
-        preserves_shards (bool): Whether the save tensor intentionally remains sharded by some original
-            ``LoadSpec.shards`` entries.
         unshard_steps (list[SaveShardStep]): Forward-order shard history with save-time preserved flags.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     name: str
     hf_keys: list[str]
-    global_shape: tuple[int, ...]
-    unpadded_global_shape: tuple[int, ...]
+    runtime_output_shape: tuple[int, ...]
+    output_shape: tuple[int, ...]
     fused_dim: int | None = None
     distributed_save: bool = False
-    preserves_shards: bool = False
     unshard_steps: list[SaveShardStep] = Field(default_factory=list)
 
-    def _pending_unshard_steps(self) -> list[SaveShardStep]:
-        return [step for step in reversed(self.unshard_steps) if not step.preserved]
-
-    def _preserved_shards(self) -> list[ShardDescriptor]:
-        return [step.shard for step in self.unshard_steps if step.preserved]
-
-    def _expected_unsharded_shape(self) -> tuple[int, ...]:
-        """Return the save tensor shape after intentionally preserved shards
-        remain applied.
-
-        The save path starts from the local tensor and all-gathers every pending shard step. If no shard is preserved,
-        the final shape should be ``unpadded_global_shape``. If some shards are preserved, for example an EP shard
-        during RL weight sync, the final tensor should still be cut by those preserved shards. This helper applies
-        only the preserved shard descriptors to ``unpadded_global_shape`` to compute that expected partially-unsharded
-        shape for the final assert.
-
-        Example:
-            Suppose the runtime full tensor shape is ``(16, 8)`` because fp8 padding added rows, while
-            ``unpadded_global_shape == (14, 8)`` is the shape that should exist in HF. If the preserved EP shard is
-            ``ShardDescriptor(dim=0, start=8, end=16)``, that shard owns runtime rows ``[8, 16)``. The last two rows
-            are padding-only in HF coordinates, so the checkpoint-visible interval is clipped to ``[8, 14)`` and the
-            expected preserved tensor shape is ``(6, 8)``. If a shard were ``[14, 16)``, both boundaries would clip to
-            ``14`` and the expected shape on that rank would be ``(0, 8)``.
-
-        Returns:
-            tuple[int, ...]: Expected shape after the preserved shards are still applied.
-        """
-        effective_shape = list(self.unpadded_global_shape)
-        for shard in self._preserved_shards():
-            # ShardDescriptor offsets are defined against the runtime shape, which may include XTuner-only padding.
-            # Clip preserved shard boundaries to the currently visible unpadded shape before computing its length.
-            clipped_start = min(shard.start, effective_shape[shard.dim])
-            clipped_end = min(shard.end, effective_shape[shard.dim])
-            effective_shape[shard.dim] = max(0, clipped_end - clipped_start)
-        return tuple(effective_shape)
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def preserves_shards(self) -> bool:
+        return any(step.preserved for step in self.unshard_steps)
 
 
 class _SaveUnshardGroup(NamedTuple):
@@ -310,21 +376,23 @@ def unshard_tensors_for_hf_save(
 
     # Convert each tensor's forward shard history into the save-time work queue. Save must undo shards from
     # inner to outer, so the steps are reversed; preserved shards, such as an EP shard kept local for RL weight
-    # sync, are removed from the queue and only used later to compute the expected partially-unsharded shape.
+    # sync, are removed from the queue. Their effect is already represented by the plan's output shapes.
 
     # Example:
-    #   tensor A: [ep_a(index=0), fsdp_a(index=1)], preserved {0} -> pending [fsdp_a]
-    #   tensor B: [ep_b(index=0), fsdp_b(index=1)], preserved {} -> pending [fsdp_b, ep_b]
-    #   tensor C: [fsdp_c(index=0)], preserved {} -> pending [fsdp_c]
-    #   tensor D: [tp_d(index=0)], preserved {} -> pending [tp_d]
-    #   tensor E: [ep_e(index=0)], preserved {0} -> pending []
+    #   tensor A: [ep_a(preserved), fsdp_a] -> pending [fsdp_a]
+    #   tensor B: [ep_b, fsdp_b] -> pending [fsdp_b, ep_b]
+    #   tensor C: [fsdp_c] -> pending [fsdp_c]
+    #   tensor D: [tp_d] -> pending [tp_d]
+    #   tensor E: [ep_e(preserved)] -> pending []
     # This produces one pending queue per tensor; the loop below consumes compatible queue heads by group.
-    pending_shard_steps_list = [save_plan._pending_unshard_steps() for save_plan in save_plans]
+    pending_shard_steps_list = [
+        [step for step in reversed(save_plan.unshard_steps) if not step.preserved] for save_plan in save_plans
+    ]
 
     while True:
         # Build one all-gather round. For one tensor, reverse-unshard steps must run one by one: if a local
         # tensor needs to undo FSDP and then EP, the EP gather must use the tensor produced by the FSDP gather.
-        # `_build_ready_save_unshard_groups` consumes `pending_shard_steps_list` gradually. For example, a queue
+        # `_take_ready_save_unshard_groups` consumes `pending_shard_steps_list` gradually. For example, a queue
         # `[fsdp_step, ep_step]` contributes `fsdp_step` in the first round; after its gathered tensor is written
         # back, the next loop consumes `ep_step`. Independent tensors with compatible group/dtype can still be
         # batched together in each round.
@@ -332,7 +400,7 @@ def unshard_tensors_for_hf_save(
         # With the A-E example above, round 1 consumes fsdp_a/fsdp_b/fsdp_c together if they share group/dtype,
         # and consumes tp_d in another group. tensor E contributes no work. Round 2 can then consume ep_b, because
         # ep_b must use tensor B after fsdp_b has been gathered and written back.
-        unshard_groups = _build_ready_save_unshard_groups(tensor_list, pending_shard_steps_list)
+        unshard_groups = _take_ready_save_unshard_groups(tensor_list, pending_shard_steps_list)
         if not unshard_groups:
             break
 
@@ -344,17 +412,14 @@ def unshard_tensors_for_hf_save(
             for index, gathered_tensor in zip(unshard_group.tensor_indices, gathered_tensors, strict=True):
                 tensor_list[index] = gathered_tensor
 
-    for tensor, save_plan in zip(tensor_list, save_plans, strict=True):
-        expected_shape = save_plan._expected_unsharded_shape()
-        assert tuple(tensor.shape) == expected_shape, (
-            f"Saved tensor shape {tuple(tensor.shape)} is incompatible with HFSavePlan global_shape="
-            f"{save_plan.global_shape} and unpadded_global_shape={save_plan.unpadded_global_shape} "
-            f"for {save_plan.name}"
-        )
-    return tensor_list
+    # Collectives reconstruct runtime shapes; checkpoint-invisible FP8 tail
+    # padding is removed only after the requested shard history is complete.
+    return [
+        _finalize_hf_save_tensor(tensor, save_plan) for tensor, save_plan in zip(tensor_list, save_plans, strict=True)
+    ]
 
 
-def _build_ready_save_unshard_groups(
+def _take_ready_save_unshard_groups(
     tensor_list: list[torch.Tensor],
     pending_shard_steps_list: list[list[SaveShardStep]],
 ) -> list[_SaveUnshardGroup]:
@@ -395,6 +460,22 @@ def _build_ready_save_unshard_groups(
     return unshard_groups
 
 
+def _finalize_hf_save_tensor(tensor: torch.Tensor, save_plan: HFSavePlan) -> torch.Tensor:
+    """Validate the reconstructed runtime shape and trim FP8 tail padding."""
+    assert tuple(tensor.shape) == save_plan.runtime_output_shape, (
+        f"Save reconstruction produced shape {tuple(tensor.shape)}, expected runtime shape "
+        f"{save_plan.runtime_output_shape} for {save_plan.name}"
+    )
+    assert all(output_size <= tensor.shape[dim] for dim, output_size in enumerate(save_plan.output_shape))
+
+    output = tensor[tuple(slice(0, size) for size in save_plan.output_shape)].contiguous()
+    assert tuple(output.shape) == save_plan.output_shape, (
+        f"Saved tensor shape {tuple(output.shape)} is incompatible with HFSavePlan output_shape="
+        f"{save_plan.output_shape} for {save_plan.name}"
+    )
+    return output
+
+
 def _foreach_all_gather_save_shards(
     tensor_list: list[torch.Tensor],
     shard_steps: list[SaveShardStep],
@@ -420,6 +501,17 @@ def _pad_tensor_for_save_shard(tensor: torch.Tensor, shard_step: SaveShardStep) 
     world_size = dist.get_world_size(group=shard_step.shard.group)
     dim = shard_step.shard.dim
     shard_dim_size = shard_step.shape_before_shard[dim]
+
+    expected_local_size = shard_step.shard.local_size(shard_dim_size)
+    assert tensor.shape[dim] == expected_local_size, (
+        f"Local tensor shape {tuple(tensor.shape)} does not match descriptor-local size "
+        f"{expected_local_size} for {shard_step.shard}"
+    )
+    if shard_step.shard.interleave_factor > 1:
+        # Even interleave guarantees equal local tensors, so collective padding
+        # would only hide an invalid layout.
+        return tensor
+
     padded_local_size = math.ceil(shard_dim_size / world_size)
     pad_len = padded_local_size - tensor.shape[dim]
     assert pad_len >= 0, (
@@ -440,8 +532,22 @@ def _merge_gathered_save_shard(
     shard_step: SaveShardStep,
 ) -> torch.Tensor:
     dim = shard_step.shard.dim
-    gathered_tensor = torch.cat(gathered_chunks, dim=dim)
-    return gathered_tensor.narrow(dim, 0, shard_step.unpadded_shape_before_shard[dim]).contiguous()
+    runtime_dim_size = shard_step.shape_before_shard[dim]
+    if shard_step.shard.interleave_factor == 1:
+        gathered_tensor = torch.cat(gathered_chunks, dim=dim)
+        return gathered_tensor.narrow(dim, 0, runtime_dim_size).contiguous()
+
+    world_size = dist.get_world_size(group=shard_step.shard.group)
+    interleave_factor = shard_step.shard.interleave_factor
+    assert len(gathered_chunks) == world_size
+    assert runtime_dim_size % (world_size * interleave_factor) == 0
+    run_size = runtime_dim_size // (world_size * interleave_factor)
+    ordered_runs = [
+        gathered_chunks[rank].narrow(dim, run_index * run_size, run_size)
+        for run_index in range(interleave_factor)
+        for rank in range(world_size)
+    ]
+    return torch.cat(ordered_runs, dim=dim).contiguous()
 
 
 class LoadSpec(BaseModel):
@@ -458,7 +564,8 @@ class LoadSpec(BaseModel):
         origin_shape (tuple[int, ...] | None): Checkpoint-visible global shape after trimming runtime-only padding.
             The current caller sets it from fp8 tensor metadata; ``None`` means the runtime shape is already the
             checkpoint shape.
-        needs_full_reconstruct (bool): Whether HF I/O must use the explicit InterleavedShard reconstruction/run path.
+        local_shape (tuple[int, ...] | None): Runtime local-tensor shape. It is recorded explicitly for layouts such
+            as InterleavedShard and checked against the shape derived from ``global_shape`` and ``shards``.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
@@ -468,12 +575,7 @@ class LoadSpec(BaseModel):
     fused_dim: int | None = None
     shards: list[ShardDescriptor] = Field(default_factory=list)
     origin_shape: tuple[int, ...] | None = None
-    # When True, this tensor's layout cannot be described by the ``shards`` list — typically an
-    # ``InterleavedShard``-bearing DTensor whose spec has ``shard_order=None``. The HF save path
-    # must call :func:`xtuner.v1.utils.interleaved_shard.reconstruct_full_tensor` on the param at
-    # save time to materialize the global tensor, and treat the result as already-unsharded
-    # (i.e. ``shards`` is empty, no per-step all-gather work needed).
-    needs_full_reconstruct: bool = False
+    local_shape: tuple[int, ...] | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -501,10 +603,10 @@ class LoadSpec(BaseModel):
     ) -> "LoadSpec":
         """Build a load spec from a runtime tensor and its HF key mapping.
 
-        This is the conversion boundary from PyTorch runtime layout to ``LoadSpec``. It derives the fused HF
-        dimension from ``hf_keys`` and converts DTensor ``Shard`` placements into ``ShardDescriptor`` entries. It does
-        not inspect XTuner fp8 wrapper types; callers should pass ``origin_shape`` when runtime-only padding makes the
-        checkpoint-visible shape smaller than the runtime shape.
+        It derives the fused HF dimension from ``hf_keys`` and converts the stable
+        ``RuntimeLayout`` records into ``ShardDescriptor`` entries. Callers should
+        pass ``origin_shape`` when runtime-only padding makes the checkpoint-visible
+        shape smaller than the runtime shape.
 
         Args:
             name (str): Fully-qualified parameter or buffer name on the xtuner side.
@@ -517,14 +619,19 @@ class LoadSpec(BaseModel):
             LoadSpec: Spec derived from the runtime tensor layout.
         """
         global_hf_keys = list(hf_keys)
-        shards: list[ShardDescriptor] = []
-        needs_full_reconstruct = False
         if isinstance(tensor, DTensor):
-            from xtuner.v1.utils.interleaved_shard import has_interleaved_placement
-
-            needs_full_reconstruct = has_interleaved_placement(tensor)
-            if not needs_full_reconstruct:
-                shards = _dtensor_shards(tensor)
+            runtime_layout = RuntimeLayout.from_dtensor(tensor)
+            shards = [
+                ShardDescriptor(
+                    dim=shard.dim,
+                    group=shard.group,
+                    interleave_factor=shard.interleave_factor,
+                )
+                for shard in runtime_layout.ordered_shards
+            ]
+        else:
+            shards = []
+        local_tensor = tensor._local_tensor if isinstance(tensor, DTensor) else tensor
         return cls(
             name=name,
             global_hf_keys=global_hf_keys,
@@ -532,7 +639,7 @@ class LoadSpec(BaseModel):
             fused_dim=0 if len(global_hf_keys) > 1 else None,
             shards=shards,
             origin_shape=origin_shape,
-            needs_full_reconstruct=needs_full_reconstruct,
+            local_shape=tuple(local_tensor.shape),
         )
 
     def plan_hf_load(self) -> HFLoadPlan:
@@ -543,38 +650,70 @@ class LoadSpec(BaseModel):
         runtime layout that this rank owns.
 
         Returns:
-            HFLoadPlan: The selected HF keys and loaded-tensor-relative slices for this rank.
+            HFLoadPlan: The selected HF keys and canonical source-to-local copy program for this rank.
         """
-        effective_intervals = self._effective_intervals_for_shards(self.shards)
-        if effective_intervals is None:
-            return HFLoadPlan(name=self.name, hf_keys=[], fused_dim=self.fused_dim, zero_fill=True)
-
-        loaded_starts = [0 for _ in self.global_shape]
-        loaded_ends = list(self.unpadded_global_shape)
-        key_start, key_end = self._local_hf_key_indices(effective_intervals)
-        hf_keys = self.global_hf_keys[key_start:key_end]
-
-        if self.is_fused:
-            key_size = self._fused_key_size()
-            assert self.fused_dim is not None
-            loaded_starts[self.fused_dim] = key_start * key_size
-            loaded_ends[self.fused_dim] = key_end * key_size
-
-        slices: list[LoadSlice] = []
-        for dim, (effective_start, effective_end) in enumerate(effective_intervals):
-            loaded_start = loaded_starts[dim]
-            loaded_end = loaded_ends[dim]
-            if effective_start == loaded_start and effective_end == loaded_end:
-                continue
-            slices.append(
-                LoadSlice(
-                    dim=dim,
-                    start=effective_start - loaded_start,
-                    end=effective_end - loaded_start,
-                )
+        segments_by_dim = _layout_segments(self.global_shape, self.shards)
+        target_shape = _shape_from_segments(segments_by_dim)
+        owned_regions = _visible_regions_from_segments(
+            segments_by_dim,
+            visible_shape=self.unpadded_global_shape,
+        )
+        if not owned_regions:
+            return HFLoadPlan(
+                name=self.name,
+                hf_keys=[],
+                fused_dim=self.fused_dim,
+                target_shape=target_shape,
+                zero_unwritten_target=math.prod(target_shape) > 0,
             )
 
-        return HFLoadPlan(name=self.name, hf_keys=hf_keys, fused_dim=self.fused_dim, slices=slices)
+        hf_keys, source_offsets, source_shape = self._hf_load_source(owned_regions)
+        copy_regions = [
+            LoadCopyRegion(
+                source_offsets=tuple(
+                    region.global_offsets[dim] - source_offsets[dim] for dim in range(len(self.global_shape))
+                ),
+                target_offsets=region.local_offsets,
+                sizes=region.sizes,
+            )
+            for region in owned_regions
+        ]
+        copied_numel = sum(math.prod(region.sizes) for region in copy_regions)
+        target_numel = math.prod(target_shape)
+        assert copied_numel <= target_numel, (
+            f"Owned regions for {self.name} copy {copied_numel} values into a target with {target_numel} values"
+        )
+
+        return HFLoadPlan(
+            name=self.name,
+            hf_keys=hf_keys,
+            fused_dim=self.fused_dim,
+            canonical_source_shape=source_shape,
+            target_shape=target_shape,
+            copy_regions=copy_regions,
+            zero_unwritten_target=copied_numel < target_numel,
+        )
+
+    def _hf_load_source(
+        self,
+        owned_regions: list[_OwnedRegion],
+    ) -> tuple[list[str], tuple[int, ...], tuple[int, ...]]:
+        """Select HF keys and express their canonical tensor in global
+        coordinates."""
+        key_start, key_end = self._hf_key_range_for_regions(owned_regions)
+        source_offsets = [0 for _ in self.global_shape]
+        source_shape = list(self.unpadded_global_shape)
+        if self.is_fused:
+            assert self.fused_dim is not None
+            key_size = self._fused_key_size()
+            source_offsets[self.fused_dim] = key_start * key_size
+            source_shape[self.fused_dim] = (key_end - key_start) * key_size
+
+        return (
+            self.global_hf_keys[key_start:key_end],
+            tuple(source_offsets),
+            tuple(source_shape),
+        )
 
     def plan_hf_save(
         self,
@@ -605,20 +744,27 @@ class LoadSpec(BaseModel):
         )
         unshard_steps = self._save_shard_steps(preserved_shard_indices)
         preserved_shards = [step.shard for step in unshard_steps if step.preserved]
-        hf_keys = (
-            self._local_hf_keys_for_shards(preserved_shards, require_fused_key_aligned=True)
-            if preserved_shards
-            else list(self.global_hf_keys)
+        if preserve_process_group is not None and preserved_shards:
+            hf_keys = self._local_hf_keys_for_shards(preserved_shards, require_fused_key_aligned=True)
+        else:
+            # FSDP-only gather keeps ETP's runtime layout and does not produce HF
+            # tensors, so its key list is informational and needs no key alignment.
+            hf_keys = list(self.global_hf_keys)
+
+        output_segments = _layout_segments(self.global_shape, preserved_shards)
+        runtime_output_shape = _shape_from_segments(output_segments)
+        output_shape = _shape_from_segments(
+            output_segments,
+            visible_shape=self.unpadded_global_shape,
         )
 
         return HFSavePlan(
             name=self.name,
             hf_keys=hf_keys,
-            global_shape=self.global_shape,
-            unpadded_global_shape=self.unpadded_global_shape,
+            runtime_output_shape=runtime_output_shape,
+            output_shape=output_shape,
             fused_dim=self.fused_dim,
             distributed_save=distributed_save,
-            preserves_shards=bool(preserved_shards),
             unshard_steps=unshard_steps,
         )
 
@@ -630,28 +776,6 @@ class LoadSpec(BaseModel):
         self._validate_origin_shape()
         self._validate_shards()
 
-    def _effective_intervals_for_shards(
-        self,
-        shards: list[ShardDescriptor],
-    ) -> list[tuple[int, int]] | None:
-        effective_shape = self.unpadded_global_shape
-        assert len(effective_shape) == len(self.global_shape), (
-            f"origin_shape={effective_shape} must have the same rank as global_shape={self.global_shape}"
-        )
-        assert all(effective <= global_ for effective, global_ in zip(effective_shape, self.global_shape)), (
-            f"origin_shape={effective_shape} must not exceed global_shape={self.global_shape}"
-        )
-
-        final_intervals = _final_intervals(self.global_shape, shards)
-        effective_intervals: list[tuple[int, int]] = []
-        for dim, (start, end) in enumerate(final_intervals):
-            effective_start = min(start, effective_shape[dim])
-            effective_end = min(end, effective_shape[dim])
-            if effective_start >= effective_end:
-                return None
-            effective_intervals.append((effective_start, effective_end))
-        return effective_intervals
-
     def _fused_key_size(self) -> int:
         assert self.fused_dim is not None, "fused_dim must be set when global_hf_keys has multiple entries"
         key_size = self.unpadded_global_shape[self.fused_dim] / len(self.global_hf_keys)
@@ -661,9 +785,9 @@ class LoadSpec(BaseModel):
         )
         return int(key_size)
 
-    def _local_hf_key_indices(
+    def _hf_key_range_for_regions(
         self,
-        effective_intervals: list[tuple[int, int]],
+        regions: list[_OwnedRegion],
         *,
         require_fused_key_aligned: bool = False,
     ) -> tuple[int, int]:
@@ -672,7 +796,8 @@ class LoadSpec(BaseModel):
 
         assert self.fused_dim is not None
         key_size = self._fused_key_size()
-        fused_start, fused_end = effective_intervals[self.fused_dim]
+        fused_start = min(region.global_offsets[self.fused_dim] for region in regions)
+        fused_end = max(region.global_offsets[self.fused_dim] + region.sizes[self.fused_dim] for region in regions)
         if require_fused_key_aligned:
             assert fused_start % key_size == 0 and fused_end % key_size == 0, (
                 f"Preserved fused shard range [{fused_start}, {fused_end}) for {self.name} must align with "
@@ -680,7 +805,7 @@ class LoadSpec(BaseModel):
             )
 
         # Shards may start or end inside a fused HF key, e.g. FSDP slicing an EP-local expert tensor.
-        # floor/ceil keeps every overlapping key; LoadSlice later trims load tensors to the exact local range.
+        # floor/ceil keeps every overlapping key; the load plan's copy regions trim to the exact local range.
         key_start = fused_start // key_size
         key_end = math.ceil(fused_end / key_size)
         assert 0 <= key_start < key_end <= len(self.global_hf_keys), (
@@ -694,11 +819,15 @@ class LoadSpec(BaseModel):
         *,
         require_fused_key_aligned: bool = False,
     ) -> list[str]:
-        effective_intervals = self._effective_intervals_for_shards(shards)
-        if effective_intervals is None:
+        segments_by_dim = _layout_segments(self.global_shape, shards)
+        regions = _visible_regions_from_segments(
+            segments_by_dim,
+            visible_shape=self.unpadded_global_shape,
+        )
+        if not regions:
             return []
-        key_start, key_end = self._local_hf_key_indices(
-            effective_intervals,
+        key_start, key_end = self._hf_key_range_for_regions(
+            regions,
             require_fused_key_aligned=require_fused_key_aligned,
         )
         return self.global_hf_keys[key_start:key_end]
@@ -715,16 +844,13 @@ class LoadSpec(BaseModel):
         )
 
     def _validate_shards(self) -> None:
-        current_shape = list(self.global_shape)
-        for shard in self.shards:
-            assert 0 <= shard.dim < len(current_shape), (
-                f"Invalid shard dim {shard.dim} for global_shape={self.global_shape}"
-            )
-            current_size = current_shape[shard.dim]
-            assert 0 <= shard.start <= shard.end <= current_size, (
-                f"Invalid shard descriptor {shard} against current_shape={tuple(current_shape)}"
-            )
-            current_shape[shard.dim] = shard.end - shard.start
+        segments_by_dim = _layout_segments(self.global_shape, self.shards)
+        derived_shape = _shape_from_segments(segments_by_dim)
+
+        assert self.local_shape is None or derived_shape == self.local_shape, (
+            f"Recorded local_shape={self.local_shape} does not match descriptor-derived shape "
+            f"{derived_shape} for {self.name}"
+        )
 
     def _preserved_shard_indices(
         self,
@@ -778,29 +904,9 @@ class LoadSpec(BaseModel):
         """Convert ``LoadSpec.shards`` into save-time reverse-unshard work
         items.
 
-        ``LoadSpec.shards`` is ordered in the forward partitioning direction: start from the full runtime tensor,
-        apply one shard after another, and end at this rank's local tensor. The returned steps keep that same
-        largest-to-smallest order. Each step snapshots the runtime shape and the unpadded checkpoint-visible shape
-        that existed immediately before its shard was applied.
-
-        Save executes these steps in reverse. Starting from the smallest local tensor, each reverse step all-gathers
-        one shard and narrows the gathered tensor back to ``unpadded_shape_before_shard``. This is how the save path
-        reconstructs the original shape information one partition layer at a time, while still avoiding fp8 runtime
-        padding in the checkpoint-visible tensor.
-
-        Example:
-            Suppose ``global_shape=(16, 8)``, ``unpadded_global_shape=(14, 8)``, and
-            ``LoadSpec.shards == [ep(dim=0, start=8, end=16), fsdp(dim=0, start=3, end=5)]``. The returned steps are
-            in forward order:
-
-            * ``ep_step`` records ``shape_before_shard=(16, 8)`` and
-              ``unpadded_shape_before_shard=(14, 8)``.
-            * ``fsdp_step`` records ``shape_before_shard=(8, 8)`` and
-              ``unpadded_shape_before_shard=(6, 8)``.
-
-            A local save tensor has shape ``(2, 8)``. Save runs ``[fsdp_step, ep_step]``: gather FSDP back toward
-            ``(6, 8)``, then gather EP back toward ``(14, 8)``. If EP is preserved, only ``fsdp_step`` remains
-            pending and the result stays EP-local.
+        ``LoadSpec.shards`` is ordered in the forward partitioning direction. Each step snapshots only the runtime
+        shape before its shard. Save executes the steps in reverse and restores those runtime shapes; checkpoint-only
+        FP8 trimming happens once at the final ``HFSavePlan`` output boundary.
 
         Args:
             preserved_shard_indices (set[int]): Original ``LoadSpec.shards`` indices that should remain sharded.
@@ -809,21 +915,17 @@ class LoadSpec(BaseModel):
             list[SaveShardStep]: Work items in the same largest-to-smallest order as ``LoadSpec.shards``.
         """
         current_shape = list(self.global_shape)
-        effective_shape = list(self.unpadded_global_shape)
         steps: list[SaveShardStep] = []
 
         for shard_index, shard in enumerate(self.shards):
             steps.append(
                 SaveShardStep(
-                    load_spec_shard_index=shard_index,
                     shard=shard,
                     shape_before_shard=tuple(current_shape),
-                    unpadded_shape_before_shard=tuple(effective_shape),
                     preserved=shard_index in preserved_shard_indices,
                 )
             )
-            effective_start = min(shard.start, effective_shape[shard.dim])
-            effective_end = min(shard.end, effective_shape[shard.dim])
-            effective_shape[shard.dim] = max(0, effective_end - effective_start)
-            current_shape[shard.dim] = shard.end - shard.start
+            current_shape[shard.dim] = sum(
+                end - start for start, end in shard.local_intervals(current_shape[shard.dim])
+            )
         return steps

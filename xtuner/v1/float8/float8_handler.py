@@ -7,8 +7,6 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._tensor import DTensor
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from torch.distributed.tensor import Shard
-from torch.distributed.tensor.placement_types import _StridedShard
 
 from xtuner.v1.float8.config import ScalingGranularity
 from xtuner.v1.float8.fsdp_utils import (
@@ -16,6 +14,7 @@ from xtuner.v1.float8.fsdp_utils import (
     precompute_tilewise_float8_scale_for_fsdp,
 )
 from xtuner.v1.utils import get_logger, is_evenly_distributed, log_rank0
+from xtuner.v1.utils.interleaved_shard import RuntimeLayout
 
 from .fsdp_utils import WeightWithDynamicTensorWiseFloat8CastTensor, WeightWithDynamicTilewiseFloat8CastTensor
 
@@ -111,12 +110,7 @@ class Float8Handler:
     def get_shard_size_on_dim(tensor: torch.Tensor | DTensor, dim: int) -> int:
         if not isinstance(tensor, DTensor):
             return 1
-
-        shard_size = 1
-        for mesh_dim, placement in enumerate(tensor.placements):
-            if isinstance(placement, (Shard, _StridedShard)) and placement.dim == dim:
-                shard_size *= tensor.device_mesh.size(mesh_dim)
-        return shard_size
+        return RuntimeLayout.from_dtensor(tensor).shard_size(dim)
 
     @staticmethod
     def pad_for_fsdp(model: nn.Module, fsdp_mesh: DeviceMesh, callback_after_pad: Callable | None = None):
