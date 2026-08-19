@@ -13,6 +13,7 @@ TestUnsupportedUnits
     test_mutating_a_kept_tensor_is_caught_by_torch: 写到被留驻张量上时由 torch 精确拦下。
     test_in_place_op_outside_kept_unit_is_fine: 单元之外的 in-place 写不受影响。
 TestRecomputeIsObservable
+    test_checkpoint_algorithm_follows_sac_activation: SAC 开启时走 non-reentrant，否则走 reentrant。
     test_recompute_reproduces_the_plain_gradients: 重算与不重算的梯度逐位相同。
     test_checkpointing_actually_recomputes: 重算确实发生——op 执行次数翻倍。
     test_a_kept_op_is_not_recomputed: 被留驻的 op 不参与重算，计数不翻倍。
@@ -235,6 +236,21 @@ class TestDeclarations:
 
 class TestRecomputeIsObservable:
     """按 reviewer 的三个目标直接观察：精度对齐、重算生效、重算+SAC 生效。"""
+
+    @pytest.mark.parametrize(
+        ("keeps_any_unit", "expected_grad_modes"),
+        [(False, [False, True]), (True, [True, True])],
+        ids=["full-recompute-is-reentrant", "sac-is-non-reentrant"],
+    )
+    def test_checkpoint_algorithm_follows_sac_activation(self, keeps_any_unit, expected_grad_modes):
+        module = _Block()
+        grad_modes = []
+        module.register_forward_pre_hook(lambda _module, _inputs: grad_modes.append(torch.is_grad_enabled()))
+        wrapped = apply_selective_checkpointing(module, keeps_any_unit=keeps_any_unit)
+
+        wrapped(torch.randn(2, 4, requires_grad=True)).sum().backward()
+
+        assert grad_modes == expected_grad_modes
 
     def test_recompute_reproduces_the_plain_gradients(self):
         # 目标 1：精度与不重算完全一致（逐位，不给容差）。

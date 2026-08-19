@@ -37,7 +37,6 @@ def apply_selective_checkpointing(
     *,
     keeps_any_unit: bool = False,
     preserve_rng_state: bool = True,
-    use_reentrant: bool = True,
 ) -> nn.Module:
     """Wrap ``module`` so its forward is recomputed during backward, keeping
     the selected units.
@@ -57,10 +56,6 @@ def apply_selective_checkpointing(
             reach the same answer would only put a dispatch mode in the way of every op.
         preserve_rng_state (bool): Restore the RNG state before recomputing, so dropout and other
             stochastic ops replay identically. Defaults to True.
-        use_reentrant (bool): Use reentrant checkpointing when no selective policy is active.
-            Selective checkpointing itself always uses non-reentrant checkpointing. Defaults to
-            True.
-
     Returns:
         nn.Module: The checkpoint-wrapped layer, transparent to parameter names and ``state_dict``.
     """
@@ -68,7 +63,9 @@ def apply_selective_checkpointing(
     return apply_gradient_checkpointing(
         module,
         preserve_rng_state=preserve_rng_state,
-        use_reentrant=use_reentrant if context_fn is None else False,
+        # torch only supports a selective context with non-reentrant checkpointing. Full
+        # recompute keeps the established reentrant default and avoids SAC's dispatch mode.
+        use_reentrant=context_fn is None,
         context_fn=context_fn,
     )
 
