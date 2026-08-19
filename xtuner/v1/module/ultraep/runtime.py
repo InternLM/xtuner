@@ -216,7 +216,8 @@ class UltraEPManager:
         fc1_weight: torch.Tensor,
         fc2_weight: torch.Tensor,
     ) -> None:
-        """Refresh only FSDP-movable master-weight addresses in cached pools."""
+        """Refresh only FSDP-movable master-weight addresses in cached
+        pools."""
         hosts = self._master_weight_ptr_hosts.get(layer_id)
         if hosts is None:
             raise RuntimeError(f"UltraEP master pointer pool for layer {layer_id} is not registered")
@@ -276,9 +277,10 @@ class UltraEPManagerProvider:
         cls,
         *,
         group: dist.ProcessGroup,
-        config: "MoEConfig",
-    ) -> "UltraEPManagerProvider":
-        """Build a provider from Xtuner's model config for the single-microbatch path."""
+        config: MoEConfig,
+    ) -> UltraEPManagerProvider:
+        """Build a provider from Xtuner's model config for the single-
+        microbatch path."""
         ultraep_cfg = config.ultraep_cfg
         if ultraep_cfg is None:
             raise ValueError("UltraEP manager provider requires config.ultraep_cfg")
@@ -312,44 +314,11 @@ class UltraEPManagerProvider:
         return self._manager
 
 
-class _UltraEPGradReduceStart(torch.autograd.Function):
-    """Start replica-gradient reduction after expert and dispatch backward."""
-
-    @staticmethod
-    def forward(ctx, hidden_states: torch.Tensor, runtime: "UltraEPLayerRuntime", virtual_layer_id: int):
-        ctx.runtime = runtime
-        ctx.virtual_layer_id = virtual_layer_id
-        return hidden_states
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):  # type: ignore[override]
-        ctx.runtime.start_grad_reduce(ctx.virtual_layer_id)
-        return grad_output, None, None
-
-
-class _UltraEPGradReduceJoin(torch.autograd.Function):
-    """Join replica-gradient reduction after attention backward."""
-
-    @staticmethod
-    def forward(ctx, hidden_states: torch.Tensor, runtime: "UltraEPLayerRuntime", virtual_layer_id: int):
-        ctx.runtime = runtime
-        ctx.virtual_layer_id = virtual_layer_id
-        return hidden_states
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):  # type: ignore[override]
-        ctx.runtime.finish_grad_reduce(ctx.virtual_layer_id)
-        return grad_output, None, None
-
-
 class UltraEPLayerRuntime:
     """Runtime-only UltraEP binding for one MoE layer.
 
-    The decoder owns ordinary model modules and only calls this object at the
-    three pipeline boundaries: allocate a virtual slot, produce physical routing
-    IDs, and bracket gradient reduction.  This object owns every interaction
-    with the process-group-level UltraEP manager and never registers a tensor as
-    model state.
+    The decoder owns ordinary model modules and the autograd graph boundaries. This object owns every interaction with
+    the process-group-level UltraEP manager and never registers a tensor as model state.
     """
 
     def __init__(
@@ -383,7 +352,8 @@ class UltraEPLayerRuntime:
         return self.manager_provider.num_dispatch_experts
 
     def validate_microbatch_capacity(self, requested_microbatches: int) -> None:
-        """Fail before allocation rather than silently reusing a virtual slot."""
+        """Fail before allocation rather than silently reusing a virtual
+        slot."""
         if requested_microbatches > self.max_microbatches:
             raise ValueError(
                 "UltraEP virtual-layer capacity is too small for this layer call: "
@@ -391,10 +361,10 @@ class UltraEPLayerRuntime:
                 "UltraEP capacity is resolved from Trainer/TrainEngine.intra_layer_micro_batch."
             )
 
-    def begin_microbatch(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, int]:
-        manager = self._ensure_manager()
-        virtual_layer_id = manager.allocate_microbatch_slot(self.layer_id)
-        return _UltraEPGradReduceJoin.apply(hidden_states, self, virtual_layer_id), virtual_layer_id
+    def allocate_virtual_layer_id(self) -> int:
+        """Allocate the UltraEP virtual-layer slot for this forward
+        microbatch."""
+        return self._ensure_manager().allocate_microbatch_slot(self.layer_id)
 
     def update_placement(
         self,
@@ -418,9 +388,6 @@ class UltraEPLayerRuntime:
             fc2_weight=self.fused_w2.weight,
         )
         return manager.weight_sync(virtual_layer_id, async_finish=async_finish)
-
-    def mark_dispatch_input(self, hidden_states: torch.Tensor, virtual_layer_id: int) -> torch.Tensor:
-        return _UltraEPGradReduceStart.apply(hidden_states, self, virtual_layer_id)
 
     def start_grad_reduce(self, virtual_layer_id: int) -> None:
         if virtual_layer_id in self._grad_reduce_events:
@@ -508,7 +475,8 @@ def get_or_create_ultra_ep_manager(
     expert_fc2_numel: int,
     max_microbatches: int,
 ) -> UltraEPManager:
-    """Return the single Manager associated with this process-local EP group."""
+    """Return the single Manager associated with this process-local EP
+    group."""
     signature = (
         group.size(),
         num_layers,

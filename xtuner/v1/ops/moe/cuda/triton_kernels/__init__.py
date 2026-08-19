@@ -16,6 +16,7 @@ if check_torch_accelerator_available() and check_triton_available():
     elif triton.__version__ >= "3.2.0":
         from .k_grouped_gemm_TMA import k_grouped_gemm
         from .m_grouped_gemm_TMA import m_grouped_gemm
+
         m_grouped_gemm_dual_weight = get_env_not_available_func(["triton>=3.4"])
     else:
         env_not_available_func = get_env_not_available_func(["torch.accelerator", "triton"])

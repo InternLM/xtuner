@@ -167,7 +167,8 @@ class GroupedLinear(nn.Module):
         replica_weight: torch.Tensor,
         replica_grad: torch.Tensor,
     ) -> None:
-        """Attach Manager-owned replica buffers without registering parameters."""
+        """Attach Manager-owned replica buffers without registering
+        parameters."""
         if self.moe_bias:
             raise NotImplementedError("UltraEP does not currently support grouped expert bias")
         if replica_weight.ndim != 3 or replica_weight.shape[1:] != (self.out_features, self.in_features):

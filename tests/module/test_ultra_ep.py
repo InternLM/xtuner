@@ -5,6 +5,11 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.model.moe.moe import MoE
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
+    _UltraEPGradReduceJoin,
+    _UltraEPGradReduceStart,
+    _UltraEPWeightSyncForBackward,
+)
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.ultraep import UltraEPConfig
@@ -355,11 +360,35 @@ def test_ultra_ep_grad_reduce_lifecycle_stages_reduces_and_restores():
     assert runtime._grad_reduce_events == {}
 
 
-def test_ultra_ep_group_gemm_backward_uses_forward_weight_snapshot(monkeypatch):
+def test_ultra_ep_grad_reduce_autograd_nodes_start_before_join():
+    runtime = object.__new__(UltraEPLayerRuntime)
+    calls = []
+
+    def start_grad_reduce(virtual_layer_id):
+        calls.append(("start", virtual_layer_id))
+
+    def finish_grad_reduce(virtual_layer_id):
+        calls.append(("finish", virtual_layer_id))
+
+    runtime.start_grad_reduce = start_grad_reduce
+    runtime.finish_grad_reduce = finish_grad_reduce
+
+    x = torch.ones(2, requires_grad=True)
+    joined = _UltraEPGradReduceJoin.apply(x, runtime, 11)
+    output = _UltraEPGradReduceStart.apply(joined, runtime, 11)
+    output.sum().backward()
+
+    assert calls == [("start", 11), ("finish", 11)]
+    torch.testing.assert_close(x.grad, torch.ones_like(x))
+
+
+def test_ultra_ep_output_wrapper_restores_replica_weight_before_group_gemm_backward(monkeypatch):
     dual_gemm_calls = []
 
     def fake_m_grouped_gemm_dual_weight(x, master_weight, replica_weight, tokens_per_expert, *, trans_b):
-        dual_gemm_calls.append((master_weight.shape[0], replica_weight.shape[0], trans_b))
+        dual_gemm_calls.append(
+            (master_weight.shape[0], replica_weight.shape[0], trans_b, replica_weight.data_ptr())
+        )
         weight = torch.cat((master_weight, replica_weight), dim=0)
         chunks = []
         offset = 0
@@ -385,8 +414,20 @@ def test_ultra_ep_group_gemm_backward_uses_forward_weight_snapshot(monkeypatch):
     x = torch.tensor([[1.0, 1.0], [2.0, 1.0]], requires_grad=True)
     master_weight = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]], requires_grad=True)
     replica_weight = torch.tensor([[[5.0, 6.0], [7.0, 8.0]]])
+    original_replica_weight = replica_weight.clone()
     replica_grad = torch.empty_like(replica_weight, dtype=torch.float32)
     tokens_per_expert = torch.tensor([1, 1])
+
+    # The production wrapper invokes Manager.weight_sync during backward.
+    # A bare runtime instance is sufficient to validate autograd ordering.
+    runtime = object.__new__(UltraEPLayerRuntime)
+    sync_calls = []
+
+    def fake_sync_weights(virtual_layer_id, *, async_finish):
+        sync_calls.append((virtual_layer_id, async_finish))
+        replica_weight.copy_(original_replica_weight)
+
+    runtime.sync_weights = fake_sync_weights
 
     output = group_gemm_module.ultra_ep_group_gemm(
         x,
@@ -396,14 +437,18 @@ def test_ultra_ep_group_gemm_backward_uses_forward_weight_snapshot(monkeypatch):
         tokens_per_expert,
     )
     # UltraEP reuses its persistent slots for the next layer before this
-    # layer's backward. Dgrad must still use this layer's forward-time copy.
+    # layer's backward.  The output-side node restores them before DGrad.
     replica_weight.fill_(100.0)
-    output.sum().backward()
+    _UltraEPWeightSyncForBackward.apply(output, runtime, 7).sum().backward()
 
+    assert sync_calls == [(7, False)]
     torch.testing.assert_close(x.grad, torch.tensor([[4.0, 6.0], [12.0, 14.0]]))
     torch.testing.assert_close(master_weight.grad, torch.tensor([[[1.0, 1.0], [1.0, 1.0]]]))
     torch.testing.assert_close(replica_grad, torch.tensor([[[2.0, 1.0], [2.0, 1.0]]]))
-    assert dual_gemm_calls == [(1, 1, True), (1, 1, False)]
+    assert dual_gemm_calls == [
+        (1, 1, True, replica_weight.data_ptr()),
+        (1, 1, False, replica_weight.data_ptr()),
+    ]
 
 
 def test_ultra_ep_group_gemm_supports_empty_local_dispatch():

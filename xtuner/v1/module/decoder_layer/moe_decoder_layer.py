@@ -48,6 +48,63 @@ RouterTopKIds: TypeAlias = torch.Tensor
 HiddenStates: TypeAlias = torch.Tensor
 
 
+class _UltraEPGradReduceStart(Function):
+    """Start replica-gradient reduction after expert and dispatch backward."""
+
+    @staticmethod
+    def forward(ctx, hidden_states: torch.Tensor, runtime: UltraEPLayerRuntime, virtual_layer_id: int):
+        ctx.runtime = runtime
+        ctx.virtual_layer_id = virtual_layer_id
+        return hidden_states
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):  # type: ignore[override]
+        ctx.runtime.start_grad_reduce(ctx.virtual_layer_id)
+        return grad_output, None, None
+
+
+class _UltraEPGradReduceJoin(Function):
+    """Join replica-gradient reduction after attention backward."""
+
+    @staticmethod
+    def forward(ctx, hidden_states: torch.Tensor, runtime: UltraEPLayerRuntime, virtual_layer_id: int):
+        ctx.runtime = runtime
+        ctx.virtual_layer_id = virtual_layer_id
+        return hidden_states
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):  # type: ignore[override]
+        ctx.runtime.finish_grad_reduce(ctx.virtual_layer_id)
+        return grad_output, None, None
+
+
+class _UltraEPWeightSyncForBackward(Function):
+    """Restore Manager-owned replica slots before expert DGrad runs.
+
+    Replica weights are reusable communication buffers, not model parameters. A later virtual layer can overwrite them
+    after this layer's forward.  This identity node sits immediately after expert compute, so its backward runs after
+    combine backward but before the grouped-GEMM backward that needs the replica weights for DGrad.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        expert_output: torch.Tensor,
+        runtime: UltraEPLayerRuntime,
+        virtual_layer_id: int,
+    ) -> torch.Tensor:
+        ctx.runtime = runtime
+        ctx.virtual_layer_id = virtual_layer_id
+        return expert_output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):  # type: ignore[override]
+        # The blocking form establishes the compute-stream dependency before
+        # UltraEPGroupedGemm reads the mutable slots for DGrad.
+        ctx.runtime.sync_weights(ctx.virtual_layer_id, async_finish=False)
+        return grad_output, None, None
+
+
 class MoEActFnProtocol(Protocol):
     def __call__(self, fused_x: torch.Tensor, split_dim: int = -1) -> torch.Tensor: ...
 
@@ -411,7 +468,8 @@ class MoEDecoderLayer(nn.Module):
         ultraep = self._ultraep
         virtual_layer_id: int | None = None
         if ultraep is not None:
-            hidden_states, virtual_layer_id = ultraep.begin_microbatch(hidden_states)
+            virtual_layer_id = ultraep.allocate_virtual_layer_id()
+            hidden_states = _UltraEPGradReduceJoin.apply(hidden_states, ultraep, virtual_layer_id)
 
         residual, hidden_states, router_results = self._pre_moe_forward(
             hidden_states=hidden_states,
@@ -428,13 +486,13 @@ class MoEDecoderLayer(nn.Module):
         # )
         dispatch_hidden_states = hidden_states
         dispatch_topk_ids = router_results["topk_ids"]
+        weight_sync_event = None
         if ultraep is not None:
             assert virtual_layer_id is not None
             ultraep.update_placement(dispatch_topk_ids, virtual_layer_id)
             weight_sync_event = ultraep.sync_weights(virtual_layer_id, async_finish=True)
             dispatch_topk_ids = ultraep.reroute(dispatch_topk_ids, virtual_layer_id)
-            weight_sync_event.current_stream_wait()
-            dispatch_hidden_states = ultraep.mark_dispatch_input(hidden_states, virtual_layer_id)
+            dispatch_hidden_states = _UltraEPGradReduceStart.apply(hidden_states, ultraep, virtual_layer_id)
 
         pre_dispatched = self.dispatcher.dispatch_preprocess(
             hidden_states=dispatch_hidden_states.view(-1, dispatch_hidden_states.shape[-1]),
@@ -457,11 +515,18 @@ class MoEDecoderLayer(nn.Module):
         #     post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
         #     dispatched["topk_weights"],
         # )
+        if weight_sync_event is not None:
+            # Replica slots are first used by expert GEMMs.  Deferring this
+            # wait overlaps their async refresh with DeepEP dispatch work.
+            weight_sync_event.current_stream_wait()
         experts_out = self.experts(
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
             decoding=False,
         )
+        if ultraep is not None:
+            assert virtual_layer_id is not None
+            experts_out = _UltraEPWeightSyncForBackward.apply(experts_out, ultraep, virtual_layer_id)
         # ProberList.before_combine(
         #     self.layer_idx,
         #     experts_out,

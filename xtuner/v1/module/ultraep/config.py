@@ -23,7 +23,7 @@ class UltraEPConfig(BaseModel):
     ]
 
     @model_validator(mode="after")
-    def validate_redundant_experts(self) -> "UltraEPConfig":
+    def validate_redundant_experts(self) -> UltraEPConfig:
         if self.num_redundant_experts_per_rank <= 0:
             raise ValueError("num_redundant_experts_per_rank must be > 0")
         return self
