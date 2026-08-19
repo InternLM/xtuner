@@ -60,7 +60,7 @@ from xtuner.v1.utils import get_logger
 
 EXPERIMENT_NAME = "qwen35_vl_moe_checkpoint_engine_recovery_e2e"
 TOTAL_TRAIN_STEPS = 3
-TRAIN_BATCH_SIZE_BY_STEP = {1: 8, 2: 128, 3: 8}
+TRAIN_BATCH_SIZE_BY_STEP = {1: 8, 2: 256, 3: 8}
 PROMPT_REPEAT_K = 2
 MAX_PROMPT_LENGTH = 4096
 MAX_RESPONSE_LENGTH = 2048
@@ -349,8 +349,8 @@ class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
         resources = AcceleratorResourcesConfig(
             accelerator="GPU",
             num_workers=8,
-            num_cpus_per_worker=16,
-            cpu_memory_per_worker=32 * 1024**3,
+            num_cpus_per_worker=12,
+            cpu_memory_per_worker=24 * 1024**3,
         )
         rollout_config = RolloutConfig(
             env=EXPERIMENT_NAME,
@@ -465,6 +465,7 @@ class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
                         over_sample_threshold=1.0,
                         enable_partial_rollout=False,
                         max_staleness=1,
+                        max_pending_tasks=16,
                     ),
                     sampler_config=SamplerConfig(
                         dataloader_cfg=dataloader_cfg,

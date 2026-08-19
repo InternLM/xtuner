@@ -22,7 +22,7 @@ from .worker import (
     RolloutConfig,
     get_rollout_worker_base_cls,
 )
-from .worker_registry import RolloutWorkerRegistry
+from .worker_registry import RolloutWorkerRegistry, WorkerLifecycleState
 
 
 # Keep this as a Ray actor because Ray AgentLoop actors need a shared, cross-process handle to the same controller
@@ -187,40 +187,45 @@ class RolloutController:
         groups = await asyncio.to_thread(self.health_manager.restart_inactive_workers)
         return tuple(group.ranks for group in groups)
 
-    def mark_pending_weight_update_groups_active(self, group_ranks: tuple[tuple[int, ...], ...]) -> None:
-        groups_by_ranks = {group.ranks: group for group in self.registry.pending_weights_worker_groups()}
-        groups = tuple(groups_by_ranks[ranks] for ranks in group_ranks if ranks in groups_by_ranks)
-        recovered_groups = self.registry.mark_pending_weights_groups_active(groups)
-        self.health_manager.notify_worker_group_recovered(recovered_groups)
+    def mark_worker_groups_lifecycle_state(
+        self,
+        group_ranks: list[tuple[int, ...]],
+        source_state: WorkerLifecycleState,
+        target_state: WorkerLifecycleState,
+    ) -> None:
+        """Move selected worker groups from source_state to target_state.
 
-    def mark_pending_weight_update_groups_inactive(self, group_ranks: tuple[tuple[int, ...], ...]) -> None:
-        groups_by_ranks = {group.ranks: group for group in self.registry.pending_weights_worker_groups()}
+        Only groups whose current lifecycle state matches source_state are considered. When groups are moved to ACTIVE
+        or INACTIVE, the health manager is notified so routing and lifecycle listeners stay in sync.
+        """
+        groups_by_ranks = {group.ranks: group for group in self.registry.get_target_state_worker_groups(source_state)}
         groups = tuple(groups_by_ranks[ranks] for ranks in group_ranks if ranks in groups_by_ranks)
-        inactive_groups = self.registry.mark_groups_inactive(groups)
-        self.health_manager.notify_worker_group_inactive(inactive_groups)
+        updated_groups = self.registry.set_groups_state(
+            groups,
+            target_state,
+            source_state=source_state,
+        )
+        if target_state is WorkerLifecycleState.ACTIVE:
+            self.health_manager.notify_worker_group_recovered(updated_groups)
+        elif target_state is WorkerLifecycleState.INACTIVE:
+            self.health_manager.notify_worker_group_inactive(updated_groups)
 
     def continue_generation(self):
-        self._broadcast_to_active_workers("continue_generation")
+        self._broadcast_to_workers("continue_generation", WorkerLifecycleState.ACTIVE)
         self.health_manager.resume()
 
     def offload(self):
-        self._broadcast_to_active_workers("offload")
+        self._broadcast_to_workers("offload", WorkerLifecycleState.ACTIVE)
 
     def onload(self):
-        self._broadcast_to_active_workers("onload_weights")
-        self._broadcast_to_active_workers("onload_kvcache")
+        self._broadcast_to_workers("onload_weights", WorkerLifecycleState.ACTIVE)
+        self._broadcast_to_workers("onload_kvcache", WorkerLifecycleState.ACTIVE)
 
-    def onload_weights(self):
-        self._broadcast_to_active_workers("onload_weights")
+    def onload_weights(self, target_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE):
+        self._broadcast_to_workers("onload_weights", target_state)
 
-    def onload_pending_weight_update_workers(self):
-        self._broadcast_to_pending_weight_update_workers("onload_weights")
-
-    def onload_kvcache(self):
-        self._broadcast_to_active_workers("onload_kvcache")
-
-    def onload_kvcache_pending_weight_update_workers(self):
-        self._broadcast_to_pending_weight_update_workers("onload_kvcache")
+    def onload_kvcache(self, target_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE):
+        self._broadcast_to_workers("onload_kvcache", target_state)
 
     def shutdown(self):
         """Shut down all rollout workers tracked by the controller."""
@@ -231,14 +236,8 @@ class RolloutController:
             timeout=ROLLOUT_RAY_GET_TIMEOUT,
         )
 
-    def _broadcast_to_active_workers(self, method_name: str, **kwargs):
-        workers = self.registry.active_workers()
-        futures = [getattr(worker.actor, method_name).remote(**kwargs) for worker in workers]
-        return ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
-
-    def _broadcast_to_pending_weight_update_workers(self, method_name: str, **kwargs):
-        groups = self.registry.pending_weights_worker_groups()
-        workers = [worker for group in groups for worker in group.workers]
+    def _broadcast_to_workers(self, method_name: str, target_state: WorkerLifecycleState, **kwargs):
+        workers = self.registry.get_target_state_workers(target_state)
         futures = [getattr(worker.actor, method_name).remote(**kwargs) for worker in workers]
         return ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
 

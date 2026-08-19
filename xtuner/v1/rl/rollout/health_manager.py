@@ -392,7 +392,10 @@ class RolloutHealthManager:
                         )
                         + "]"
                     )
-                    recorded_group = self._registry.set_group_pending_weights(group)
+                    recorded_group = self._registry.set_groups_state(
+                        groups=(group,),
+                        target_state=WorkerLifecycleState.PENDING_WEIGHTS,
+                    )[0]
                     logger.info(
                         "[recovery-test] marked rollout worker group pending_weight_update: "
                         f"ranks={recorded_group.ranks}, workers=["

@@ -42,6 +42,7 @@ from xtuner.v1.rl.replay_buffer import (
 )
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.rollout.worker_registry import WorkerLifecycleState
 from xtuner.v1.rl.trace import TraceConfig, close_trace, configure_trace
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
@@ -1840,12 +1841,14 @@ class RLColocateTrainer(BaseRLTrainer):
                             self.rollout_controller.get_pending_weight_update_targets.remote(),
                             timeout=RL_TRAINER_RAY_GET_TIMEOUT,
                         )
-                        pending_group_ranks = tuple((target.endpoint_rank,) for target in pending_targets)
+                        pending_group_ranks = [(target.endpoint_rank,) for target in pending_targets]
                         self.train_controller.weight_update(need_register=True, need_update=False)
                         self.train_controller.offload(target="model")
                         if pending_group_ranks:
                             ray.get(
-                                self.rollout_controller.onload_pending_weight_update_workers.remote(),
+                                self.rollout_controller.onload_weights.remote(
+                                    target_state=WorkerLifecycleState.PENDING_WEIGHTS
+                                ),
                                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
                             )
                         ray.get(
@@ -1856,8 +1859,10 @@ class RLColocateTrainer(BaseRLTrainer):
                         if pending_group_ranks:
                             # 权重更新成功后将 pending状态变为activate状态
                             ray.get(
-                                self.rollout_controller.mark_pending_weight_update_groups_active.remote(
-                                    pending_group_ranks
+                                self.rollout_controller.mark_worker_groups_lifecycle_state.remote(
+                                    pending_group_ranks,
+                                    source_state=WorkerLifecycleState.PENDING_WEIGHTS,
+                                    target_state=WorkerLifecycleState.ACTIVE,
                                 ),
                                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
                             )
@@ -1922,7 +1927,7 @@ class RLColocateTrainer(BaseRLTrainer):
         if not pending_targets:
             return ()
 
-        pending_group_ranks = tuple((target.endpoint_rank,) for target in pending_targets)
+        pending_group_ranks = [(target.endpoint_rank,) for target in pending_targets]
         try:
             self.logger.info(
                 "Updating pending rollout workers from Checkpoint Engine: "
@@ -1933,28 +1938,36 @@ class RLColocateTrainer(BaseRLTrainer):
                 rollout_config=self._rollout_config,
             )
             ray.get(
-                self.rollout_controller.onload_pending_weight_update_workers.remote(),
+                self.rollout_controller.onload_weights.remote(target_state=WorkerLifecycleState.PENDING_WEIGHTS),
                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
             )
             self.train_controller.weight_update(need_register=False, need_update=True)
             ray.get(
-                self.rollout_controller.onload_kvcache_pending_weight_update_workers.remote(),
+                self.rollout_controller.onload_kvcache.remote(target_state=WorkerLifecycleState.PENDING_WEIGHTS),
                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
             )
             ray.get(
-                self.rollout_controller.mark_pending_weight_update_groups_active.remote(pending_group_ranks),
+                self.rollout_controller.mark_worker_groups_lifecycle_state.remote(
+                    pending_group_ranks,
+                    source_state=WorkerLifecycleState.PENDING_WEIGHTS,
+                    target_state=WorkerLifecycleState.ACTIVE,
+                ),
                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
             )
             self.logger.info(
                 f"Recovered rollout workers weight updated from Checkpoint Engine: {pending_group_ranks}."
             )
-            return pending_group_ranks
+            return tuple(pending_group_ranks)
         except Exception:
             self.logger.exception(
                 f"Failed to update recovered rollout workers weight from Checkpoint Engine: {pending_group_ranks}."
             )
             ray.get(
-                self.rollout_controller.mark_pending_weight_update_groups_inactive.remote(pending_group_ranks),
+                self.rollout_controller.mark_worker_groups_lifecycle_state.remote(
+                    pending_group_ranks,
+                    source_state=WorkerLifecycleState.PENDING_WEIGHTS,
+                    target_state=WorkerLifecycleState.INACTIVE,
+                ),
                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
             )
             return ()
