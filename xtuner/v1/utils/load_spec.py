@@ -322,6 +322,8 @@ class HFSavePlan(BaseModel):
             otherwise.
         distributed_save (bool): Whether non-fused tensors are written only on rank0 and fused keys are split across
             save ranks.
+        fused_key_range (tuple[int, int] | None): Optional half-open HF key range selected for a rollout EP target
+            after the full training layout is reconstructed.
         unshard_steps (list[SaveShardStep]): Forward-order shard history with save-time preserved flags.
     """
 
@@ -332,6 +334,7 @@ class HFSavePlan(BaseModel):
     output_shape: tuple[int, ...]
     fused_dim: int | None = None
     distributed_save: bool = False
+    fused_key_range: tuple[int, int] | None = None
     unshard_steps: list[SaveShardStep] = Field(default_factory=list)
 
     @computed_field  # type: ignore[prop-decorator]
@@ -721,6 +724,7 @@ class LoadSpec(BaseModel):
         distributed_save: bool = False,
         preserve_process_group: dist.ProcessGroup | None = None,
         gather_process_group: dist.ProcessGroup | None = None,
+        target_fused_key_partition: tuple[int, int] | None = None,
     ) -> HFSavePlan:
         """Build a safetensors save plan from this layout spec.
 
@@ -731,12 +735,20 @@ class LoadSpec(BaseModel):
                 used by RL weight sync to stream EP-local expert slices.
             gather_process_group (dist.ProcessGroup | None): If set, only shards from this group are gathered and
                 all other shards are preserved. This is used by callers that need an FSDP-only all-gather.
+            target_fused_key_partition (tuple[int, int] | None): Rollout expert-parallel ``(rank, size)`` used to
+                select a fused HF key range after gathering the training layout.
 
         Returns:
             HFSavePlan: Save-time unshard and HF key planning information.
         """
         assert not (preserve_process_group is not None and gather_process_group is not None), (
             "preserve_process_group and gather_process_group describe different save policies and cannot be combined"
+        )
+        assert not (preserve_process_group is not None and target_fused_key_partition is not None), (
+            "A training shard cannot be preserved while selecting a different rollout fused-key partition"
+        )
+        assert not (distributed_save and target_fused_key_partition is not None), (
+            "distributed checkpoint save and rollout fused-key selection are different save policies"
         )
         preserved_shard_indices = self._preserved_shard_indices(
             preserve_process_group=preserve_process_group,
@@ -758,6 +770,18 @@ class LoadSpec(BaseModel):
             visible_shape=self.unpadded_global_shape,
         )
 
+        fused_key_range = None
+        if target_fused_key_partition is not None:
+            assert self.is_fused, "Rollout fused-key partition requires a fused LoadSpec"
+            target_rank, target_size = target_fused_key_partition
+            assert 0 <= target_rank < target_size
+            assert len(self.global_hf_keys) % target_size == 0, (
+                f"{len(self.global_hf_keys)} HF keys for {self.name} must be divisible by rollout EP size "
+                f"{target_size}"
+            )
+            keys_per_rank = len(self.global_hf_keys) // target_size
+            fused_key_range = (target_rank * keys_per_rank, (target_rank + 1) * keys_per_rank)
+
         return HFSavePlan(
             name=self.name,
             hf_keys=hf_keys,
@@ -765,6 +789,7 @@ class LoadSpec(BaseModel):
             output_shape=output_shape,
             fused_dim=self.fused_dim,
             distributed_save=distributed_save,
+            fused_key_range=fused_key_range,
             unshard_steps=unshard_steps,
         )
 

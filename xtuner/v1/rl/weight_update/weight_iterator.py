@@ -4,6 +4,7 @@ from itertools import chain
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import tqdm
 from torch.distributed.tensor import DTensor
 
@@ -67,29 +68,34 @@ class WeightIterator:
         ep_mesh = getattr(model, "ep_mesh", None)
         ep_group = ep_mesh.get_group() if ep_mesh is not None and ep_mesh.size() > 1 else None
 
-        # IPC maps train ranks directly to rollout ranks, so keep the fused expert EP shard local and only gather
-        # later shards such as FSDP. NCCL is driven by train rank 0 and therefore needs globally gathered weights.
-        preserve_ep_shards = self.rollout_info.transport_type == "ipc" and ep_group is not None
-        ep_fused_params = []
+        fused_params = []
         other_params = []
         for param, load_spec in params:
-            is_ep_fused = (
-                preserve_ep_shards
-                and load_spec.is_fused
-                and load_spec.fused_dim is not None
-                and any(
-                    shard.dim == load_spec.fused_dim and model._is_same_process_group(shard.group, ep_group)
-                    for shard in load_spec.shards
-                )
-            )
-            (ep_fused_params if is_ep_fused else other_params).append((param, load_spec))
+            (fused_params if load_spec.is_fused else other_params).append((param, load_spec))
 
-        ep_fused_gen = model._get_hf_param(
-            ep_fused_params,
+        preserved_fused_shard_group = None
+        target_fused_key_partition = None
+        if fused_params and self.rollout_info.transport_type == "ipc" and self.rollout_info.ep > 1:
+            target_rank = self.rollout_info.ipc_engine_parallel_rank
+            target_size = self.rollout_info.ipc_engine_parallel_size
+            assert target_rank is not None, "IPC rollout target for current train rank is not resolved."
+            assert target_size is not None, "IPC rollout target size for current train rank is not resolved."
+
+            # Preserve the train EP shard only when it is exactly the rollout
+            # target shard. Other topologies reconstruct globally, then select
+            # the rollout-owned expert key range in the HF save plan.
+            if ep_group is not None and target_size == ep_mesh.size() and target_rank == dist.get_rank(ep_group):
+                preserved_fused_shard_group = ep_group
+            else:
+                target_fused_key_partition = (target_rank, target_size)
+
+        fused_gen = model._get_hf_param(
+            fused_params,
             dtype=dtype,
             device=DEVICE,
             bucket_size=bucket_size,
-            preserved_fused_shard_group=ep_group,
+            preserved_fused_shard_group=preserved_fused_shard_group,
+            target_fused_key_partition=target_fused_key_partition,
         )
         other_gen = model._get_hf_param(
             other_params,
@@ -97,7 +103,7 @@ class WeightIterator:
             device=DEVICE,
             bucket_size=bucket_size,
         )
-        for name_list, param_list in chain(ep_fused_gen, other_gen):
+        for name_list, param_list in chain(fused_gen, other_gen):
             # FlattenedTensorBucket stores one dtype per payload. Qwen3.5 keeps
             # selected norm and A_log weights in fp32, so split those from the
             # otherwise bf16 HF-save bucket before handing it to the transport.

@@ -1287,6 +1287,7 @@ class BaseModel(nn.Module):
         bucket_size: int | None = None,
         distributed_save: bool = False,
         preserved_fused_shard_group: dist.ProcessGroup | None = None,
+        target_fused_key_partition: tuple[int, int] | None = None,
     ) -> Generator[tuple[list[str], list[torch.Tensor]], None, None]:
         """Yield HF checkpoint tensors for the given runtime params.
 
@@ -1299,6 +1300,8 @@ class BaseModel(nn.Module):
                 yielded only on rank0 and fused HF keys are divided across save ranks.
             preserved_fused_shard_group (dist.ProcessGroup | None): Communication group whose fused-dim shard should
                 stay local instead of being all-gathered. RL weight sync uses this to stream EP-local expert slices.
+            target_fused_key_partition (tuple[int, int] | None): Rollout expert-parallel ``(rank, size)`` used to
+                select fused HF keys after gathering the training layout.
 
         Returns:
             Generator[tuple[list[str], list[torch.Tensor]], None, None]: HF key names and tensors to save.
@@ -1306,6 +1309,9 @@ class BaseModel(nn.Module):
         assert not (distributed_save and preserved_fused_shard_group is not None), (
             "distributed_save writes checkpoint files, while preserved_fused_shard_group streams local fused shards "
             "for RL."
+        )
+        assert not (preserved_fused_shard_group is not None and target_fused_key_partition is not None), (
+            "preserved_fused_shard_group and target_fused_key_partition are mutually exclusive RL policies."
         )
         if not params:
             return
@@ -1325,6 +1331,7 @@ class BaseModel(nn.Module):
                 is_buffer=load_spec.name in buffer_names,
                 distributed_save=distributed_save,
                 preserved_fused_shard_group=preserved_fused_shard_group,
+                target_fused_key_partition=target_fused_key_partition,
             )
             if bucket_bytes + save_item.byte_size > bucket_size and bucket:
                 yield self._build_hf_param_bucket(
@@ -1354,6 +1361,7 @@ class BaseModel(nn.Module):
         is_buffer: bool,
         distributed_save: bool,
         preserved_fused_shard_group: dist.ProcessGroup | None,
+        target_fused_key_partition: tuple[int, int] | None,
     ) -> _HFSaveBucketItem:
         """Normalize one runtime parameter and compile its checkpoint save
         policy."""
@@ -1372,6 +1380,7 @@ class BaseModel(nn.Module):
             save_plan=load_spec.plan_hf_save(
                 distributed_save=distributed_save,
                 preserve_process_group=preserved_fused_shard_group,
+                target_fused_key_partition=target_fused_key_partition,
             ),
             runtime_is_float8=is_float8_weight(runtime_tensor),
             byte_size=self._get_tensor_size(runtime_tensor, checkpoint_dtype),
@@ -1439,14 +1448,12 @@ class BaseModel(nn.Module):
             tensor_to_split = full_tensor
         else:
             hf_names = save_plan.hf_keys.copy()
-            key_start, key_end = (
-                self._hf_save_key_range(save_plan)
-                if save_plan.distributed_save
-                else (
-                    0,
-                    len(hf_names),
-                )
-            )
+            if save_plan.fused_key_range is not None:
+                key_start, key_end = save_plan.fused_key_range
+            elif save_plan.distributed_save:
+                key_start, key_end = self._hf_save_key_range(save_plan)
+            else:
+                key_start, key_end = 0, len(hf_names)
             if key_start == key_end:
                 return [], []
             hf_names = hf_names[key_start:key_end]
