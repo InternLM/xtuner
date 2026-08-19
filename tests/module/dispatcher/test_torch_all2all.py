@@ -65,6 +65,7 @@ class TestNoETorchAll2AllDispatcher(DistributedTestBase):
         pre_dispatched = dispatcher.dispatch_preprocess(
             hidden_states=hidden_states,
             topk_ids=topk_ids,
+            topk_weights=topk_weights,
         )
         dispatched = dispatcher.dispatch(
             pre_dispatched=pre_dispatched,

@@ -262,7 +262,7 @@ class TrainEngine:
 
         trainable_params = [p for _, p in self.model.trainable_parameters()]
         all_grads = [p.grad for p in trainable_params if p.grad is not None]
-        total_grad_norm, grouped_all_grads = cal_grad_norm(all_grads, dtype=dtype)
+        total_grad_norm, grouped_all_grads = self.model.cal_grad_norm(all_grads, dtype=dtype)
 
         if do_clip:
             clip_param_ids = {

@@ -596,6 +596,11 @@ class BaseModel(nn.Module):
     def scale_and_reduce_grad(self):
         return
 
+    def cal_grad_norm(self, grads: list[DTensor], dtype=torch.float32):
+        from xtuner.v1.utils.grad_norm import cal_grad_norm
+
+        return cal_grad_norm(grads, dtype=dtype)
+
     def to_hf_key_list(self, key: str) -> list[str]:
         raise NotImplementedError()
 
@@ -951,8 +956,13 @@ class BaseModel(nn.Module):
             load_plan (HFLoadPlan): Plan whose ``slices`` are relative to ``safetensors`` after concatenation.
         """
         loaded_tensor = self._cat_safetensors(safetensors, load_plan)
+        loaded_tensor = self.hf_tensor_to_canonical(load_plan.name, loaded_tensor)
         loaded_tensor = self._apply_load_slices(loaded_tensor, load_plan)
         self._copy_loaded_tensor_to_local(loaded_tensor, local_tensor)
+
+    def hf_tensor_to_canonical(self, name: str, loaded_tensor: torch.Tensor) -> torch.Tensor:
+        """Convert one loaded HF tensor to XTuner's canonical layout."""
+        return loaded_tensor
 
     def _cat_safetensors(self, safetensors: list[torch.Tensor], load_plan: HFLoadPlan) -> torch.Tensor:
         assert safetensors, f"Internal Error. No safetensors were loaded for {load_plan.name}"
@@ -1920,6 +1930,9 @@ class BaseModel(nn.Module):
             from xtuner.v1.utils.interleaved_shard import compute_runs
 
             loaded_tensor = self._cat_safetensors(loaded_tensors, load_plan)
+            # Interleaved runs use canonical global coordinates. Packed model
+            # formats such as GPT-OSS must be converted before applying them.
+            loaded_tensor = self.hf_tensor_to_canonical(load_plan.name, loaded_tensor)
             local = param._local_tensor
             for run in compute_runs(param):
                 loaded_slice = loaded_tensor.narrow(0, run.global_offset[0], run.local_size)

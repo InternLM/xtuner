@@ -7,6 +7,8 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._tensor import DTensor
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.tensor import Shard
+from torch.distributed.tensor.placement_types import _StridedShard
 
 from xtuner.v1.float8.config import ScalingGranularity
 from xtuner.v1.float8.fsdp_utils import (
@@ -106,6 +108,17 @@ class Float8Handler:
         return chunk_size * num_chunks
 
     @staticmethod
+    def get_shard_size_on_dim(tensor: torch.Tensor | DTensor, dim: int) -> int:
+        if not isinstance(tensor, DTensor):
+            return 1
+
+        shard_size = 1
+        for mesh_dim, placement in enumerate(tensor.placements):
+            if isinstance(placement, (Shard, _StridedShard)) and placement.dim == dim:
+                shard_size *= tensor.device_mesh.size(mesh_dim)
+        return shard_size
+
+    @staticmethod
     def pad_for_fsdp(model: nn.Module, fsdp_mesh: DeviceMesh, callback_after_pad: Callable | None = None):
         from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
         from xtuner.v1.float8.float8_linear_tensor_wise import TensorWiseFloat8Linear
@@ -120,7 +133,7 @@ class Float8Handler:
                         "Currently only support even distributed TP or EP weight for float8 training."
                     )
                     tensor_size = module.weight._local_tensor.size()
-                    parallel_size = module.weight.device_mesh.size()
+                    parallel_size = Float8Handler.get_shard_size_on_dim(module.weight, dim=0)
                 else:
                     tensor_size = module.weight.size()
                     parallel_size = 1
