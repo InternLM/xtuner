@@ -6,6 +6,7 @@ TestDSAAttention
     test_packed_inputs_respect_causal_boundaries_and_backward: packed attention 遵守分段因果边界并可反传。
     test_shared_layer_consumes_explicit_topk_ids: shared layer 复用显式 top-k IDs，漏传时立即报错。
     test_selective_checkpoint_preserves_explicit_topk_storage: 显式 IDs 穿过 non-reentrant selective checkpoint。
+    test_selective_checkpoint_keeps_indexer_out_of_replay: selective checkpoint 不在反向中重跑 indexer。
 TestAcceleratedSparseMLA
     test_tilelang_forward_backward_matches_torch: TileLang 前反向数值与 PyTorch 后端一致。
     test_compiled_cudnn_backward_matches_tilelang: 编译后的 cuDNN DSA 前反向与 TileLang 一致。
@@ -23,13 +24,15 @@ from functools import cache
 import pytest
 import torch
 import torch.distributed as dist
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.model.moe.glm52 import DSAMLAConfig
 from xtuner.v1.model.moe.glm52.decoder_layer import GLM52DenseDecoderLayer
-from xtuner.v1.model.utils import apply_selective_checkpointing
+from xtuner.v1.model.utils import apply_selective_checkpointing, in_recompute_unit
 from xtuner.v1.ops.sparse_mla import dsa_topk_indices, sparse_mla
+from xtuner.v1.utils import SaveUnit
 from xtuner.v1.utils.test_utils import init_data_mesh
 
 
@@ -39,6 +42,19 @@ DKV_ATOL = 1e-1
 DKV_RTOL = 1e-1
 CUDNN_DQ_ATOL = 5e-2
 CUDNN_DQ_RTOL = 5e-2
+
+
+class _TopKExecutionCounter(TorchDispatchMode):
+    """Count real top-k executions below the selective-checkpoint cache mode."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.count = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if func is torch.ops.aten.topk.default:
+            self.count += 1
+        return func(*args, **(kwargs or {}))
 
 
 @cache
@@ -213,14 +229,8 @@ class TestDSAAttention:
     def test_selective_checkpoint_preserves_explicit_topk_storage(self):
         # 验证显式 IDs 可穿过 non-reentrant selective checkpoint 并完成反向。
         torch.manual_seed(0)
-        source_block = apply_selective_checkpointing(
-            _tiny_dsa_decoder(["full", "shared"], layer_idx=0),
-            [("mlp.begin", "mlp.end")],
-        )
-        shared_block = apply_selective_checkpointing(
-            _tiny_dsa_decoder(["full", "shared"], layer_idx=1),
-            [("mlp.begin", "mlp.end")],
-        )
+        source_block = apply_selective_checkpointing(_tiny_dsa_decoder(["full", "shared"], layer_idx=0))
+        shared_block = apply_selective_checkpointing(_tiny_dsa_decoder(["full", "shared"], layer_idx=1))
         hidden_states = torch.randn(1, 4, 4, requires_grad=True)
         position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
         seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
@@ -243,6 +253,35 @@ class TestDSAAttention:
 
         assert torch.isfinite(hidden_states.grad).all()
         assert source_ids.dtype == torch.int32
+
+    @pytest.mark.parametrize("compile_layer", [False, True], ids=["eager", "compile"])
+    def test_selective_checkpoint_keeps_indexer_out_of_replay(self, compile_layer):
+        # Counter 位于 SAC cache mode 之下：命中 cache 的 top-k 不会到达这里，
+        # 因而只统计 backward 中真正再次执行的 indexer。
+        torch.manual_seed(0)
+        decoder = _tiny_dsa_decoder(["full"], layer_idx=0)
+        indexer = decoder.self_attn.indexer
+        indexer._select_topk = torch._dynamo.disable(  # type: ignore[method-assign]
+            in_recompute_unit(SaveUnit.DSA_INDEXER, indexer._select_topk)
+        )
+        if compile_layer:
+            decoder = torch.compile(decoder, backend="eager", fullgraph=False)
+        source_block = apply_selective_checkpointing(decoder, keeps_any_unit=True)
+        hidden_states = torch.randn(1, 4, 4, requires_grad=True)
+        position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
+        seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
+
+        outputs = source_block(
+            hidden_states,
+            position_embeddings=position_embeddings,
+            seq_ctx=seq_ctx,
+        )
+        counter = _TopKExecutionCounter()
+        with counter:
+            outputs["hidden_states"].square().mean().backward()
+
+        assert counter.count == 0
+        assert torch.isfinite(hidden_states.grad).all()
 
 
 class TestAcceleratedSparseMLA:

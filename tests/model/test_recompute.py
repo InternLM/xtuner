@@ -42,6 +42,7 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.model.base import BaseModel, TorchCompileOption, XTunerBaseModelConfig, _disable_nested_switch
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLMoE30BA3Config
 from xtuner.v1.model.dense.dense import DENSE_RECOMPUTE_CFG
+from xtuner.v1.model.moe.glm52.glm52 import GLM52_RECOMPUTE_CFG
 from xtuner.v1.model.moe.moe import MOE_RECOMPUTE_CFG, MoE, MoEConfig
 from xtuner.v1.model.utils import (
     KeptCallables,
@@ -267,7 +268,9 @@ class TestRecomputeCfgResolution:
         # error rather than something to silently drop. It surfaces at construction, before the run
         # spends anything on materializing and sharding weights.
         with pytest.raises(ValueError, match="does not support"):
-            _ProbeModel(_ProbeConfig(text_config=_NestedProbeConfig(), recompute_cfg=RecomputeConfig(save=[SaveUnit.ATTN])))
+            _ProbeModel(
+                _ProbeConfig(text_config=_NestedProbeConfig(), recompute_cfg=RecomputeConfig(save=[SaveUnit.ATTN]))
+            )
 
     def test_disable_propagates_into_nested_configs(self):
         # A sub-model resolves its own switch, so `False` on the outer config only means something
@@ -305,7 +308,11 @@ class TestRecomputeCfgResolution:
 
 
 class TestDeclaredTargets:
-    @pytest.mark.parametrize("target_map", [MOE_RECOMPUTE_CFG, DENSE_RECOMPUTE_CFG], ids=["moe", "dense"])
+    @pytest.mark.parametrize(
+        "target_map",
+        [MOE_RECOMPUTE_CFG, DENSE_RECOMPUTE_CFG, GLM52_RECOMPUTE_CFG],
+        ids=["moe", "dense", "glm52"],
+    )
     def test_declared_targets_resolve(self, target_map):
         # A renamed method or op would not fail anywhere at runtime on its own: the unit would
         # simply keep nothing and the region would stay recomputed, silently costing the memory the
@@ -364,7 +371,9 @@ class TestUnitCostIsProportionate:
 
     def test_no_unit_withdraws_the_method_that_holds_most_compilation(self):
         for unit in MOE_RECOMPUTE_CFG:
-            assert _PRE_MOE_FORWARD in self._compile_cfg(recompute_cfg=RecomputeConfig(save=[unit])), f"{unit} withdrew {_PRE_MOE_FORWARD}"
+            assert _PRE_MOE_FORWARD in self._compile_cfg(recompute_cfg=RecomputeConfig(save=[unit])), (
+                f"{unit} withdrew {_PRE_MOE_FORWARD}"
+            )
 
     def test_attention_is_kept_by_op_identity(self):
         # The attention kernel is a custom op, so it reaches the policy from inside a compiled

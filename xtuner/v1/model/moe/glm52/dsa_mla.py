@@ -94,6 +94,24 @@ class DSAIndexer(nn.Module):
         # parameters must not be registered with the training optimizer.
         self.requires_grad_(False)
 
+    def _select_topk(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        weights: torch.Tensor,
+        seq_ctx: SequenceContext,
+    ) -> torch.Tensor:
+        # This narrow callable is the SAC unit boundary: index projections and
+        # the SP gather remain recomputed, while only the discrete IDs are kept.
+        return self.dsa_topk_indices_func(
+            q,
+            k,
+            weights,
+            seq_ctx,
+            index_head_dim=self.index_head_dim,
+            index_topk=self.index_topk,
+        )
+
     @torch.no_grad()
     def forward(
         self,
@@ -158,14 +176,7 @@ class DSAIndexer(nn.Module):
         # k: [bsz, S_g, Di]
         k = gather_for_sequence_parallel(k, dim=1, sp_mesh=seq_ctx.sequence_parallel_mesh)
         # returns topk_indices: [S, 1, K]
-        return self.dsa_topk_indices_func(
-            q,
-            k,
-            weights,
-            seq_ctx,
-            index_head_dim=self.index_head_dim,
-            index_topk=self.index_topk,
-        )
+        return self._select_topk(q, k, weights, seq_ctx)
 
 
 class DSAMLAConfig(MLAConfig):
