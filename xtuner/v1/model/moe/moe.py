@@ -46,7 +46,7 @@ from xtuner.v1.model.base import (
 )
 from xtuner.v1.model.utils import (
     ModelForwardExtraLogInfo,
-    apply_gradient_checkpointing,
+    apply_selective_checkpointing,
     module_dict_repr,
 )
 from xtuner.v1.module import (
@@ -91,9 +91,13 @@ logger = get_logger()
 
 
 MOE_BLOCK_FORWARD = "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward"
+# Compiling the decoder layer as a whole is what makes marker intervals inert, so the key is named
+# rather than spelled out at each use site.
+MOE_DECODER_LAYER_FORWARD = "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward"
+
 MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
     MOE_BLOCK_FORWARD: TorchCompileOption(fullgraph=True),
-    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward": TorchCompileOption(fullgraph=True),
+    MOE_DECODER_LAYER_FORWARD: TorchCompileOption(fullgraph=True),
     "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._pre_moe_forward": TorchCompileOption(
         fullgraph=True
     ),
@@ -108,7 +112,7 @@ MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
 }
 
 MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
-MOE_EP_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward")
+MOE_EP_COMPILE_CFG.pop(MOE_DECODER_LAYER_FORWARD)
 
 
 class MoEModelOutputs(ModelOutputs):
@@ -1183,7 +1187,11 @@ class MoE(BaseModel):
                 layer_idx=layer_idx,
                 mtp_idx=None,
             ):
-                layer = apply_gradient_checkpointing(layer)
+                layer = apply_selective_checkpointing(
+                    layer,
+                    self.kept_ops,
+                    keeps_any_unit=self.keeps_any_recompute_unit,
+                )
 
             self.layers[str(layer_idx)] = layer
             if layer_idx >= len(self.layers) - 1 and self.mtp_block is None:
@@ -1235,7 +1243,9 @@ class MoE(BaseModel):
                 if self._should_recompute(None, mtp_idx=mtp_idx) or (
                     self.config.mtp_config is not None and self.config.mtp_config.share_weights
                 ):  # share mtp head must recompute
-                    mtp_layer = apply_gradient_checkpointing(mtp_layer)
+                    # Marker intervals are declared against the decoder layer, so an MTP layer
+                    # gets the same mechanism with nothing kept: recomputed whole, as before.
+                    mtp_layer = apply_selective_checkpointing(mtp_layer)
                 self.mtp_block.layers[mtp_idx] = mtp_layer
 
                 reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1
@@ -1439,6 +1449,13 @@ class MoE(BaseModel):
             self.scale_grad_by_freq,
             self.sparse,
         )
+
+    def _compiles_whole_decoder_layer(self) -> bool:
+        # Without EP the decoder layer's own forward is compiled, so the layer is one opaque region
+        # and no marker inside it can delimit anything. With EP that entry is dropped and only the
+        # methods below it are compiled, which leaves the dispatcher-call boundaries in eager python
+        # for markers to land on.
+        return MOE_DECODER_LAYER_FORWARD in self.compile_cfg
 
     def _should_recompute(
         self,
