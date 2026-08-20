@@ -318,7 +318,7 @@ class vLLMWorker(RolloutWorker):
         args["enable_sleep_mode"] = True
         args["worker_extension_cls"] = "xtuner.v1.rl.rollout.vllm.WorkerWrap"
         args["trust_remote_code"] = True
-        args["enable_prefix_caching"] = False
+        args["enable_prefix_caching"] = self.config.enable_prefix_caching
         args["allowed_local_media_path"] = "/"
         args["mm_processor_cache_gb"] = 0
         args["max_num_batched_tokens"] = 4096
