@@ -10,18 +10,18 @@ from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
 from xtuner.v1.train import TrainerConfig
+from xtuner.v1.utils import RecomputeConfig
 
 
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 ALPACA_PATH = os.environ["ALPACA_PATH"]
 
 
-moe_cfg = Qwen3_5_VLMoE35BA3Config(compile_cfg=False)
+moe_cfg = Qwen3_5_VLMoE35BA3Config(recompute_cfg=RecomputeConfig(ratio=0.25), compile_cfg=False)
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
     cpu_offload=False,  # qwen3.5 don't support True
-    recompute_ratio=0.25,
 )
 
 dataset_config = [

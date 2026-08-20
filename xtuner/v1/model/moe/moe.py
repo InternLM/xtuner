@@ -45,7 +45,11 @@ from xtuner.v1.model.base import (
     TransformerConfig,
 )
 from xtuner.v1.model.utils import (
+    KeptCallables,
+    KeptOps,
     ModelForwardExtraLogInfo,
+    RecomputeTargetMap,
+    SaveUnit,
     apply_selective_checkpointing,
     module_dict_repr,
 )
@@ -113,6 +117,44 @@ MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
 
 MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
 MOE_EP_COMPILE_CFG.pop(MOE_DECODER_LAYER_FORWARD)
+
+_MOE_GATE = "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEGate"
+_DISPATCHERS = (
+    "xtuner.v1.module.dispatcher.torch_all2all.TorchAll2AllDispatcher",
+    "xtuner.v1.module.dispatcher.deepep.DeepEPDispatcher",
+    "xtuner.v1.module.dispatcher.agrs.MoEAGRSDispatcher",
+    "xtuner.v1.module.dispatcher.base.NaiveDispatcher",
+)
+_DISPATCH_STAGES = (
+    "dispatch_preprocess",
+    "dispatch",
+    "dispatch_postprocess",
+    "combine_preprocess",
+    "combine",
+    "combine_postprocess",
+)
+
+MOE_RECOMPUTE_CFG: RecomputeTargetMap = {
+    # The attention kernel identifies itself, so this unit needs nothing taken out of the compiled
+    # set: a custom op is never fused, so it reaches the checkpoint policy compiled or not. Both
+    # flash-attention spellings are listed because only one is registered in a given build.
+    SaveUnit.ATTN: KeptOps(
+        "flash_attn::_flash_attn_varlen_forward_v3",
+        "flash_attn::_flash_attn_varlen_forward_v2",
+    ),
+    # The router's ops are ordinary `addmm`/`topk` that appear all over the layer, so it has to be
+    # named by callable -- and the callable is the projection alone, not `MoEGate.forward`. The
+    # projection holds all the activation memory the router has (the logits are
+    # `tokens x n_routed_experts` while the router's own tensors are top-k sized), and unlike the
+    # router it contains no in-place write, which the policy refuses to keep.
+    SaveUnit.MOE_GATE: KeptCallables(f"{_MOE_GATE}.project"),
+    # The dispatcher stages are already the finest callables there are, and none of them is
+    # compiled, so this unit costs no compilation either. Its stages call into the backend library,
+    # so ops the library performs on its own buffers -- deep_ep swaps storage with `aten.set_` --
+    # fall inside the unit and are reported once; they are recomputed rather than kept, and torch
+    # catches the case where such a write lands on a tensor the unit did keep.
+    SaveUnit.MOE_DISPATCH: KeptCallables(*(f"{cls}.{stage}" for cls in _DISPATCHERS for stage in _DISPATCH_STAGES)),
+}
 
 
 class MoEModelOutputs(ModelOutputs):
@@ -585,8 +627,9 @@ class MoE(BaseModel):
                         d2h_stream=self.offload_stream,
                         block_idx=layer_idx - self.config.first_k_dense_replace,
                         group="text",
-                        custom_check_fn=lambda x: x.data_ptr()
-                        in [hidden_states.data_ptr() for hidden_states in hidden_states_list],
+                        custom_check_fn=lambda x: (
+                            x.data_ptr() in [hidden_states.data_ptr() for hidden_states in hidden_states_list]
+                        ),
                         prefetch=True,
                         reserve_pin_memory=True,
                     ):
@@ -1243,8 +1286,8 @@ class MoE(BaseModel):
                 if self._should_recompute(None, mtp_idx=mtp_idx) or (
                     self.config.mtp_config is not None and self.config.mtp_config.share_weights
                 ):  # share mtp head must recompute
-                    # Marker intervals are declared against the decoder layer, so an MTP layer
-                    # gets the same mechanism with nothing kept: recomputed whole, as before.
+                    # Recompute units are declared against the decoder layer, so an MTP layer gets
+                    # the same mechanism with nothing kept: recomputed whole, as before.
                     mtp_layer = apply_selective_checkpointing(mtp_layer)
                 self.mtp_block.layers[mtp_idx] = mtp_layer
 
@@ -1287,6 +1330,31 @@ class MoE(BaseModel):
         if self.config.ep_size > 1:
             return MOE_EP_COMPILE_CFG
         return MOE_NON_EP_COMPILE_CFG
+
+    @property
+    @override
+    def default_recompute_cfg(self) -> RecomputeTargetMap:
+        """What each supported unit resolves to for this architecture.
+
+        Both units are fine-grained: neither names ``_pre_moe_forward``, the method that holds attention, the
+        layernorms and the gate together so that ``torch.compile`` can cover the ops on either side of attention.
+        Withdrawing that would cost most of what an MoE layer compiles.
+
+        - ``SAVE_ATTN`` is resolved by op identity and costs no compilation at all.
+        - ``SAVE_MOE_GATE`` names ``MoEGate.project``, which holds the router's activation memory. Its callers are
+          compiled with ``fullgraph=False`` so they can split at it.
+
+        ``SAVE_MOE_DISPATCH`` is not declared here; see the note next to :data:`MOE_RECOMPUTE_CFG`.
+
+        Returns:
+            RecomputeTargetMap: Supported units mapped to the marker intervals that implement them.
+        """
+        # Linear-attention layers carry in-place convolution state across the forward, so replaying them under a
+        # selective checkpoint is untested. Hybrid models declare no units until it is.
+        if "linear_attention" in self.config.layers_type:
+            return {}
+
+        return MOE_RECOMPUTE_CFG
 
     @property
     def need_update_bias(self) -> bool:
@@ -1450,13 +1518,6 @@ class MoE(BaseModel):
             self.sparse,
         )
 
-    def _compiles_whole_decoder_layer(self) -> bool:
-        # Without EP the decoder layer's own forward is compiled, so the layer is one opaque region
-        # and no marker inside it can delimit anything. With EP that entry is dropped and only the
-        # methods below it are compiled, which leaves the dispatcher-call boundaries in eager python
-        # for markers to land on.
-        return MOE_DECODER_LAYER_FORWARD in self.compile_cfg
-
     def _should_recompute(
         self,
         layer_idx: int | None,
@@ -1495,7 +1556,7 @@ class MoE(BaseModel):
             mtp_layers = 1 if self.config.mtp_config.share_weights else self.config.mtp_config.num_layers
         else:
             mtp_layers = 0
-        recompute_ratio = self.fsdp_config.recompute_ratio if self.fsdp_config is not None else 0.0
+        recompute_ratio = self.config.recompute_cfg.ratio
 
         total_layers = num_layers + mtp_layers
         num_recompute_layers = int(total_layers * recompute_ratio)

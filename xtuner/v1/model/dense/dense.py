@@ -26,7 +26,7 @@ from xtuner.v1.model.base import (
     TorchCompileOption,
     TransformerConfig,
 )
-from xtuner.v1.model.utils import apply_selective_checkpointing
+from xtuner.v1.model.utils import KeptOps, RecomputeTargetMap, SaveUnit, apply_selective_checkpointing
 from xtuner.v1.module import (
     GatedDeltaNetConfig,
     LMHead,
@@ -49,6 +49,15 @@ logger = get_logger()
 DENSE_COMPILE_CFG: dict[str, TorchCompileOption] = {
     "xtuner.v1.module.decoder_layer.dense_decoder_layer.DenseDecoderLayer.forward": TorchCompileOption(fullgraph=True),
     **DEFAULT_FLOAT8_CFG,
+}
+
+DENSE_RECOMPUTE_CFG: RecomputeTargetMap = {
+    # A dense stack has no router and no expert dispatch, so attention is the only unit it can keep
+    # -- and it keeps it by op identity, which costs no compilation.
+    SaveUnit.ATTN: KeptOps(
+        "flash_attn::_flash_attn_varlen_forward_v3",
+        "flash_attn::_flash_attn_varlen_forward_v2",
+    ),
 }
 
 
@@ -164,6 +173,26 @@ class Dense(BaseModel):
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
         return DENSE_COMPILE_CFG
 
+    @property
+    @override
+    def default_recompute_cfg(self) -> RecomputeTargetMap:
+        """Marker intervals this architecture can keep resident, keyed by
+        semantic unit.
+
+        Both units are **eager-only**: ``DenseDecoderLayer.forward`` is compiled as one fullgraph region, so the
+        markers that delimit them are folded away and every region falls back to being recomputed. They are declared
+        because eager training addresses them normally, and because the regions become effective as soon as the layer
+        is compiled at a finer granularity.
+
+        Returns:
+            RecomputeTargetMap: Supported units mapped to the marker intervals that implement them.
+        """
+        # Linear-attention layers carry in-place convolution state across the forward, so replaying them under a
+        # selective checkpoint is untested. Hybrid models declare no units until it is.
+        if "linear_attention" in self.config.layers_type:
+            return {}
+        return DENSE_RECOMPUTE_CFG
+
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore
     def __call__(  # type: ignore
@@ -225,7 +254,7 @@ class Dense(BaseModel):
             lm_head_mp_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
         else:
             lm_head_mp_policy = mp_policy
-        num_recompute_layers = int(self.config.num_hidden_layers * self.fsdp_config.recompute_ratio)
+        num_recompute_layers = int(self.config.num_hidden_layers * self.config.recompute_cfg.ratio)
 
         generator = torch.Generator()
         generator.manual_seed(dist.get_rank())

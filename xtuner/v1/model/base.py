@@ -19,7 +19,6 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from cyclopts import Parameter
-from more_itertools import consume
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict, Field, computed_field, model_validator
 from pydantic.fields import FieldInfo
@@ -62,7 +61,16 @@ from xtuner.v1.utils.process import (
     set_async_save_process_qos,
 )
 
-from .utils import ModelForwardExtraLogInfo
+from .utils import (
+    KeptCallables,
+    KeptOps,
+    ModelForwardExtraLogInfo,
+    RecomputeConfig,
+    RecomputeTargetMap,
+    SaveUnit,
+    in_recompute_unit,
+    resolve_kept_ops,
+)
 
 
 logger = get_logger()
@@ -143,6 +151,14 @@ class XTunerBaseModelConfig(PydanticBaseModel):
             "`dict[str, TorchCompileOption]`: Customize the compile option",
         ),
     ] = None
+    # `activation_offload_cfg` belongs here, next to `recompute_cfg` and sharing its `SaveUnit`
+    # vocabulary and per-model interval declarations: offloading applies to the regions SAC keeps
+    # resident, since recomputed regions never land in memory to begin with. Not declared until it is
+    # implemented -- a config field nothing reads is a switch that silently does nothing.
+    recompute_cfg: Annotated[
+        RecomputeConfig,
+        Parameter(group="model", help="Which layers are recomputed, and what stays saved inside them"),
+    ] = RecomputeConfig()
     hf_key_mapping: Annotated[dict[str, str] | None, "Remapping hf key based on the `to_hf_key_list`"] = None
     dcp_ignore_frozen_params: bool = True
     lm_loss_cfg: BaseLossConfig = CELossConfig()
@@ -538,6 +554,42 @@ def _save_file(
     save_file(tensors, filename, metadata=metadata)
 
 
+def _disable_nested_switch(obj: Any, field_name: str, *, subfield: str | None = None) -> None:
+    """Turn a tri-state feature switch off on every config reachable from
+    ``obj``.
+
+    Sub-model configs carry their own copy of switches such as ``compile_cfg`` and ``recompute_cfg``, and each
+    sub-model resolves its own. Turning a feature off on the outer config therefore only means something if the
+    ``False`` reaches them, which is what this walk does.
+
+    Traversal stops at configs that do not declare ``field_name``: a config that does not take part in the feature
+    cannot hide a participant behind it, and stopping keeps unrelated sub-configs out of the walk.
+
+    Args:
+        obj (Any): Config, container, or leaf value to walk.
+        field_name (str): Name of the field holding the switch.
+        subfield (str | None): When the switch is one field *inside* ``field_name`` -- as
+            ``recompute_cfg.save`` is inside ``RecomputeConfig`` -- the name of that inner field.
+            Defaults to None, i.e. ``field_name`` is itself the switch.
+    """
+    if isinstance(obj, PydanticBaseModel):
+        if not hasattr(obj, field_name):
+            return
+        if subfield is None:
+            setattr(obj, field_name, False)
+        else:
+            setattr(getattr(obj, field_name), subfield, False)
+        for nested_field in type(obj).model_fields:
+            _disable_nested_switch(getattr(obj, nested_field), field_name, subfield=subfield)
+    elif isinstance(obj, Mapping):
+        for value in obj.values():
+            _disable_nested_switch(value, field_name, subfield=subfield)
+    # str & bytes are Iterables of themselves and would recurse forever.
+    elif isinstance(obj, Iterable) and not isinstance(obj, (str, bytes)):
+        for value in obj:
+            _disable_nested_switch(value, field_name, subfield=subfield)
+
+
 class BaseModel(nn.Module):
     load_spec_mapping: dict[str, LoadSpec] = {}
     fsdp_mesh: DeviceMesh | None = None
@@ -556,6 +608,10 @@ class BaseModel(nn.Module):
         self._pending_async_hf: AsyncHFSaveHandle | None = None
         self._async_hf_resources: AsyncHFResources | None = None
 
+        # Recompute resolves first: selecting a unit withdraws the callables enclosing its region
+        # from the compiled set, so the compile config depends on the answer.
+        self._selected_recompute_units: set[SaveUnit] = set()
+        self._kept_ops, self._kept_callables = self._resolve_recompute_cfg(self.config)
         self._compile_cfg = self._resolve_compile_cfg(self.config)
         self._float8_handler: Float8Handler | None = None
 
@@ -592,6 +648,7 @@ class BaseModel(nn.Module):
     ) -> Self:
         """Fully shard the model parameters."""
         self.fsdp_config = fsdp_config
+        self._migrate_recompute_ratio(fsdp_config)
         self.fsdp_mesh = self._init_world_mesh()
         self._world_mesh = self.fsdp_mesh
 
@@ -985,6 +1042,22 @@ class BaseModel(nn.Module):
         return _compile_cfg
 
     @property
+    def default_recompute_cfg(self) -> RecomputeTargetMap:
+        """What each recompute unit this architecture supports resolves to.
+
+        This is the model author's vocabulary: it declares which :class:`SaveUnit` s the architecture supports and
+        what each one is made of, not which of them are worth enabling. An architecture that supports none declares
+        nothing.
+
+        Like ``default_compile_cfg``, an override must be answerable from ``self.config`` alone: it is read while
+        ``BaseModel.__init__`` resolves the user's selection, which is before the subclass has built its layers.
+
+        Returns:
+            RecomputeTargetMap: Supported units mapped to what implements them for this architecture.
+        """
+        return {}
+
+    @property
     def kept_ops(self) -> frozenset:
         """Op overloads kept resident wherever they run, as selected by
         ``config.recompute_cfg``.
@@ -992,20 +1065,16 @@ class BaseModel(nn.Module):
         Returns:
             frozenset: Overloads to keep. Empty means no op-identity unit was selected.
         """
-        return frozenset()
+        return self._kept_ops
 
     @property
     def keeps_any_recompute_unit(self) -> bool:
         """Whether any unit at all was selected.
 
-        This is what tells the sharding paths whether to install the per-op policy at all: with
-        nothing selected, torch's own default already recomputes everything, so a policy that
-        reaches the same answer would only put a dispatch mode in the way of every op.
-
         Returns:
             bool: True when ``config.recompute_cfg`` selected something, by either resolution.
         """
-        return False
+        return bool(self._selected_recompute_units)
 
     @property
     def float8_handler(self):
@@ -2573,14 +2642,14 @@ class BaseModel(nn.Module):
 
         custom_cfg = config.compile_cfg
         if custom_cfg is False:
-            self._disable_compile_cfg(self.config)
+            _disable_nested_switch(self.config, "compile_cfg")
             return {}
 
         # torch.compile is not supported on NPU
         if DEVICE == "npu":
             if custom_cfg is not False:
                 log_rank0.warning("torch.compile is not supported on NPU, disabling torch.compile.")
-            self._disable_compile_cfg(self.config)
+            _disable_nested_switch(self.config, "compile_cfg")
             return {}
 
         if custom_cfg is True or custom_cfg is None:
@@ -2588,26 +2657,171 @@ class BaseModel(nn.Module):
         else:
             compile_cfg = custom_cfg
 
-        return compile_cfg
+        return self._without_compiled_selected_regions(compile_cfg)
 
-    def _disable_compile_cfg(self, obj):
-        if isinstance(obj, PydanticBaseModel) and hasattr(obj, "compile_cfg"):
-            obj.compile_cfg = False
-            consume(self._disable_compile_cfg(getattr(obj, x)) for x in obj.__class__.model_fields)
-        elif isinstance(obj, Mapping):
-            consume(map(self._disable_compile_cfg, obj.values()))
-        # str&bytes are special Iterable, need to exclude it, otherwise it will infinite loop
-        elif isinstance(obj, Iterable) and not isinstance(obj, (str, bytes)):
-            consume(map(self._disable_compile_cfg, obj))
-        else:
-            return
+    def _migrate_recompute_ratio(self, fsdp_config: FSDPConfig) -> None:
+        # Compatibility shim for the two ratios that used to live on `FSDPConfig`. Remove together
+        # with those fields once downstream configs have moved to `recompute_cfg`.
+        moves = (
+            ("recompute_ratio", "ratio", "recompute_cfg.ratio"),
+            ("vision_recompute_ratio", "vision_ratio", "recompute_cfg.vision_ratio"),
+        )
+        for old_name, new_name, new_path in moves:
+            old_value = getattr(fsdp_config, old_name, None)
+            if old_value is None:
+                continue
+            if new_name in self.config.recompute_cfg.model_fields_set:
+                raise ValueError(
+                    f"`fsdp_cfg.{old_name}` and `model_cfg.{new_path}` are both set. They are the same setting; "
+                    f"keep only `model_cfg.{new_path}`."
+                )
+            log_rank0.warning(
+                f"`fsdp_cfg.{old_name}` is deprecated and will be removed; use `model_cfg.{new_path}` instead."
+            )
+            setattr(self.config.recompute_cfg, new_name, old_value)
+
+    def _resolve_recompute_cfg(self, config: XTunerBaseModelConfig) -> tuple[frozenset, set[str]]:
+        """Turn the user's ``recompute_cfg.save`` selection into what the
+        policy needs.
+
+        Args:
+            config (XTunerBaseModelConfig): The model config carrying the selection.
+
+        Returns:
+            tuple[frozenset, set[str]]: The op overloads to keep by identity, and the qualified
+            names of the callables to keep by marker.
+        """
+        selected = config.recompute_cfg.save
+
+        # `False` has to reach the nested sub-model configs, which a compose model builds after this
+        # returns and which resolve their own switch against them.
+        if selected is False:
+            _disable_nested_switch(self.config, "recompute_cfg", subfield="save")
+            return frozenset(), set()
+
+        # `None` means "keep the memory profile of plain full recompute", not "use the model default" as it does
+        # for `compile_cfg`. `default_recompute_cfg` is the vocabulary of what an architecture *can* keep resident,
+        # not a recommendation: keeping a unit trades memory for speed, and retaining everything can even exceed
+        # the peak of not checkpointing at all, because SAC storage duplicates what autograd already holds. Only the
+        # user knows which side of that trade they want, so an unset config changes nothing.
+        if selected is None:
+            return frozenset(), set()
+
+        supported = self.default_recompute_cfg
+
+        # `True` asks for whatever the model offers, so an empty vocabulary is not a user error --
+        # but it does mean the request is a no-op, which is worth saying out loud rather than
+        # letting the run look configured when it is not.
+        if selected is True and not supported:
+            log_rank0.warning(
+                f"`recompute_cfg.save=True` has no effect: {type(self).__name__} declares no recompute units, so every "
+                "region is recomputed."
+            )
+        units = list(supported) if selected is True else selected
+
+        op_names: list[str] = []
+        callables: set[str] = set()
+        for unit in units:
+            if unit not in supported:
+                supported_desc = ", ".join(sorted(supported)) if supported else "none"
+                raise ValueError(
+                    f"`recompute_cfg.save` selects {unit!r}, which {type(self).__name__} does not support. "
+                    f"Units supported by this model: {supported_desc}. Note that a compose model declares no units "
+                    "of its own -- set `recompute_cfg.save` on the sub-model config that owns the layers instead."
+                )
+            target = supported[unit]
+            if isinstance(target, KeptOps):
+                op_names.extend(target.names)
+            else:
+                callables.update(target.names)
+            self._selected_recompute_units.add(unit)
+        return resolve_kept_ops(tuple(op_names)), callables
+
+    def _without_compiled_selected_regions(
+        self, compile_cfg: dict[str, TorchCompileOption]
+    ) -> dict[str, TorchCompileOption]:
+        """Let the compiled callables tolerate the gap a selected unit leaves
+        in them.
+
+        A unit resolved by callable is excluded from compilation, and a compiled caller that reaches it sees that as
+        a graph break -- which ``fullgraph=True`` reports as an error rather than a split. Which callers those are is
+        not knowable from the config: Dynamo inlines across call sites, so the break can surface in any compiled
+        method upstream of the unit. Relaxing all of them is the only rule that is correct without tracing.
+
+        Units resolved by op identity cost nothing here; they never leave a gap.
+        """
+        if not self._kept_callables:
+            return compile_cfg
+
+        log_rank0.info(
+            f"Keeping {sorted(self._selected_recompute_units)} resident excludes {sorted(self._kept_callables)} "
+            f"from torch.compile, so the callers that reach them are compiled with `fullgraph=False`."
+        )
+        return {
+            target: TorchCompileOption(**{**option, "fullgraph": False})
+            for target, option in compile_cfg.items()
+            if target not in self._kept_callables
+        }
 
     def _maybe_enable_compile(self, compile_cfg: dict[str, TorchCompileOption]):
         if compile_cfg:
             torch._dynamo.config.cache_size_limit = 256
 
+        # Before compiling anything: install the unit wrappers, each excluded from compilation.
+        # Being absent from `compile_cfg` is not enough to be outside the compiled set -- Dynamo
+        # inlines a callee into whichever compiled caller reaches it, and the wrapper's ContextVar
+        # is then a hard error rather than a graph break. On a callable no compiled caller reaches,
+        # the exclusion costs nothing.
+        self._install_recompute_units()
+
         for target, option in compile_cfg.items():
             self._compile_overwrite(target, option)
+
+    def _install_recompute_units(self) -> None:
+        """Wrap each selected unit's callables so the policy can recognise
+        their ops."""
+        for unit in sorted(self._selected_recompute_units):
+            target = self.default_recompute_cfg.get(unit)
+            if not isinstance(target, KeptCallables):
+                continue
+            for name in sorted(target.names):
+                self._recompute_unit_overwrite(unit, name)
+
+    def _recompute_unit_overwrite(self, unit: SaveUnit, func_name: str) -> None:
+        """Install the unit wrapper on one callable, and keep it out of the
+        compiled set.
+
+        Args:
+            unit (SaveUnit): The unit this callable implements.
+            func_name (str): Qualified name of the callable, as written in ``compile_cfg``.
+        """
+        function = cast(FunctionType | MaybeCompile, pydoc.locate(func_name))
+        if function is None:
+            raise AttributeError(f"Recompute config error! Cannot locate the callable: {func_name}")
+
+        def install(fn: Any) -> Any:
+            return torch._dynamo.disable(in_recompute_unit(unit, fn))
+
+        if isinstance(function, MaybeCompile):
+            function.disable_compile()
+            function.func = install(function.func)
+            return
+
+        function = cast(FunctionType, function)
+        if get_function_type(function) is not FunctionEnum.CLASS_LEVEL_FUNCTION:
+            raise ValueError(
+                f"Recompute config error! {func_name} must be a method or a `@maybe_compile` function to implement "
+                f"a recompute unit."
+            )
+        qualname_split = function.__qualname__.split(".")
+        assert len(qualname_split) == 2, (
+            f"XTuner Internal Error! the name of {function} should be recognized as "
+            f"<class_name>.<method_name>, but got {qualname_split}"
+        )
+        class_name, method_name = qualname_split
+        cls = getattr(import_module(function.__module__), class_name)
+        setattr(cls, method_name, install(function))
+        logger.debug(f"{func_name} now implements {unit} and is excluded from compilation.")
 
     def _mark_dynamic(self, seq_ctx: SequenceContext, dim=0):
         """`cu_seq_lens_q` and `cu_seq_lens_k` are dynamic shapes in each

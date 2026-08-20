@@ -10,20 +10,20 @@ from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.train import TrainerConfig
+from xtuner.v1.utils import RecomputeConfig
 
 
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 ALPACA_PATH = os.environ["ALPACA_PATH"]
 
 
-moe_cfg = Qwen3MoE30BA3Config(compile_cfg=False)
+moe_cfg = Qwen3MoE30BA3Config(recompute_cfg=RecomputeConfig(ratio=0.25), compile_cfg=False)
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
     cpu_offload=False,
     ep_size=moe_cfg.ep_size,
     tp_size=4,
-    recompute_ratio=0.25,
 )
 
 dataset_config = [

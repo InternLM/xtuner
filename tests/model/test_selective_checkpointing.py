@@ -6,11 +6,14 @@ TestKeptOps
 TestKeptCallables
     test_kept_callable_reproduces_full_recompute: 按 callable 留驻与全重算逐位相同。
     test_unit_marker_outside_a_region_is_noop: 未被包装时不产生任何可观察行为。
+TestContractLayering
+    test_module_layer_imports_the_contract_without_the_model_layer: 契约模块必须能被 module/ 层单独导入。
 TestUnsupportedUnits
     test_in_place_op_in_kept_unit_is_recomputed_not_refused: 只动自己缓冲区的 in-place 写不该被拒。
     test_mutating_a_kept_tensor_is_caught_by_torch: 写到被留驻张量上时由 torch 精确拦下。
     test_in_place_op_outside_kept_unit_is_fine: 单元之外的 in-place 写不受影响。
 TestRecomputeIsObservable
+    test_checkpoint_algorithm_follows_sac_activation: SAC 开启时走 non-reentrant，否则走 reentrant。
     test_recompute_reproduces_the_plain_gradients: 重算与不重算的梯度逐位相同。
     test_checkpointing_actually_recomputes: 重算确实发生——op 执行次数翻倍。
     test_a_kept_op_is_not_recomputed: 被留驻的 op 不参与重算，计数不翻倍。
@@ -19,6 +22,8 @@ TestRegionRecomputeUnderDominoEP
     test_kept_unit_matches_full_recompute_under_compile: compile 下同上，且不触发 cached-tensor-mutated。
 """
 
+import subprocess
+import sys
 from collections import Counter
 
 import pytest
@@ -27,7 +32,8 @@ from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from xtuner.v1.model.utils import (
-    RecomputeUnit,
+    KeptOps,
+    SaveUnit,
     apply_selective_checkpointing,
     in_recompute_unit,
     resolve_kept_ops,
@@ -52,7 +58,7 @@ class _UnitBlock(_Block):
 
     def __init__(self) -> None:
         super().__init__()
-        self.second_stage = in_recompute_unit(RecomputeUnit.SAVE_ATTN, self._second_stage)
+        self.second_stage = in_recompute_unit(SaveUnit.ATTN, self._second_stage)
 
     def _second_stage(self, hidden: torch.Tensor) -> torch.Tensor:
         return torch.tanh(self.second(hidden))
@@ -67,7 +73,7 @@ class _InPlaceUnitBlock(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.linear = nn.Linear(4, 4)
-        self.unit = in_recompute_unit(RecomputeUnit.SAVE_ATTN, self._unit)
+        self.unit = in_recompute_unit(SaveUnit.ATTN, self._unit)
 
     def _unit(self, x: torch.Tensor) -> torch.Tensor:
         hidden = self.linear(x)
@@ -85,7 +91,7 @@ class _MutatesKeptTensorBlock(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.linear = nn.Linear(4, 4)
-        self.unit = in_recompute_unit(RecomputeUnit.SAVE_ATTN, self._unit)
+        self.unit = in_recompute_unit(SaveUnit.ATTN, self._unit)
 
     def _unit(self, x: torch.Tensor) -> torch.Tensor:
         kept = torch.tanh(self.linear(x))
@@ -186,6 +192,19 @@ class TestKeptCallables:
         assert inputs.grad is not None
 
 
+class TestContractLayering:
+    def test_module_layer_imports_the_contract_without_the_model_layer(self):
+        # 契约之所以在 xtuner/v1/utils 而不是挨着 engine，是因为它命名的 callable 在
+        # xtuner/v1/module 里：一旦契约里出现指向 model/ 的 import，这条独立导入就会变成
+        # 循环导入而失败。必须用干净的解释器：同进程里 xtuner.v1.model 早就被导入了。
+        result = subprocess.run(
+            [sys.executable, "-c", "import xtuner.v1.module.decoder_layer.moe_decoder_layer"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+
 class TestUnsupportedUnits:
     def test_in_place_op_in_kept_unit_is_recomputed_not_refused(self):
         # in-place op 本身不危险，危险的是它写到了被 unit 留驻的张量上——那由 torch 的
@@ -202,8 +221,36 @@ class TestUnsupportedUnits:
         _run(_InPlaceOutsideBlock(), keeps_any_unit=True)
 
 
+class TestDeclarations:
+    def test_kept_ops_and_callables_are_distinct_targets(self):
+        # 两种解析方式的代价完全不同（一个零编译代价，一个要退出编译集合），所以类型必须能区分。
+        from xtuner.v1.model.moe.moe import MOE_RECOMPUTE_CFG
+
+        assert isinstance(MOE_RECOMPUTE_CFG[SaveUnit.ATTN], KeptOps)
+        assert set(MOE_RECOMPUTE_CFG) == {
+            SaveUnit.ATTN,
+            SaveUnit.MOE_GATE,
+            SaveUnit.MOE_DISPATCH,
+        }
+
+
 class TestRecomputeIsObservable:
     """按 reviewer 的三个目标直接观察：精度对齐、重算生效、重算+SAC 生效。"""
+
+    @pytest.mark.parametrize(
+        ("keeps_any_unit", "expected_grad_modes"),
+        [(False, [False, True]), (True, [True, True])],
+        ids=["full-recompute-is-reentrant", "sac-is-non-reentrant"],
+    )
+    def test_checkpoint_algorithm_follows_sac_activation(self, keeps_any_unit, expected_grad_modes):
+        module = _Block()
+        grad_modes = []
+        module.register_forward_pre_hook(lambda _module, _inputs: grad_modes.append(torch.is_grad_enabled()))
+        wrapped = apply_selective_checkpointing(module, keeps_any_unit=keeps_any_unit)
+
+        wrapped(torch.randn(2, 4, requires_grad=True)).sum().backward()
+
+        assert grad_modes == expected_grad_modes
 
     def test_recompute_reproduces_the_plain_gradients(self):
         # 目标 1：精度与不重算完全一致（逐位，不给容差）。
