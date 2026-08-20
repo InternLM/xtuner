@@ -81,6 +81,7 @@ case:
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 memory_per_task: 1200
+                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/wmk/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl

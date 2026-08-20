@@ -43,7 +43,7 @@ rollout_tp_size = 1
 rollout_ep_size = 1
 max_prompt_length = 512
 max_response_length = 1024
-pack_max_length = 32 * 1024
+pack_max_length = 16 * 1024
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
@@ -81,7 +81,7 @@ judger_config = GSM8KJudgerConfig(
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
 fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
 model_cfg = get_model_config_from_hf(Path(model_path))
-model_cfg.dispatcher = "all2all"
+model_cfg.dispatcher = "deepep"
 model_cfg.compile_cfg = False
 if hasattr(model_cfg, "balancing_loss_cfg"):
     model_cfg.balancing_loss_cfg = None
@@ -113,7 +113,7 @@ train_worker_cfg = WorkerConfig(
     loss_cfg=loss_cfg,
     lr_cfg=lr_cfg,
     fsdp_cfg=fsdp_cfg,
-    sp_size=int(os.environ.get("SP_SIZE", "1")),
+    sp_size=4,
     optimizer_steps=train_optimizer_steps,
     pack_max_length=pack_max_length,
 )
