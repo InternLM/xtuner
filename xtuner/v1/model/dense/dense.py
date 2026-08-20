@@ -6,7 +6,6 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
@@ -27,7 +26,7 @@ from xtuner.v1.model.base import (
     TorchCompileOption,
     TransformerConfig,
 )
-from xtuner.v1.model.utils import checkpoint_wrapper
+from xtuner.v1.model.utils import apply_gradient_checkpointing
 from xtuner.v1.module import (
     GatedDeltaNetConfig,
     LMHead,
@@ -35,7 +34,7 @@ from xtuner.v1.module import (
     MLAConfig,
     RMSNorm,
 )
-from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
+from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer, DenseDecoderLayerOutput
 from xtuner.v1.utils import (
     get_device,
     get_logger,
@@ -98,11 +97,12 @@ class Dense(BaseModel):
         self._mark_dynamic(seq_ctx)
 
         for idx, decoder_layer in self.layers.items():
-            hidden_states = decoder_layer(
+            layer_results: DenseDecoderLayerOutput = decoder_layer(
                 hidden_states,
                 position_embeddings=position_embeddings,
                 seq_ctx=seq_ctx,
             )
+            hidden_states = layer_results["hidden_states"]
 
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
@@ -235,18 +235,21 @@ class Dense(BaseModel):
             layer = self.layers[str(int(layer_idx))]
             layer_idx = int(layer_idx)
             if layer_idx < num_recompute_layers:
-                layer = checkpoint_wrapper(
-                    layer, preserve_rng_state=checkpoint_preserve_rng_state, checkpoint_impl=CheckpointImpl.REENTRANT
+                layer = apply_gradient_checkpointing(
+                    layer,
+                    preserve_rng_state=checkpoint_preserve_rng_state,
                 )
-                # __class__ without self attribute
 
                 # Linear-attention (GatedDeltaNet) layers write ``seq_ctx.seq_idx`` inside the
-                # checkpoint region; compiling the wrapped layer with ``fullgraph=True`` turns the
-                # checkpoint into a HigherOrderOperator that rejects that side effect. Such layers are
-                # still compiled, but with ``fullgraph=False`` so the write can graph-break.
+                # checkpoint region; compiling the checkpointed layer with ``fullgraph=True`` turns
+                # the checkpoint into a HigherOrderOperator that rejects that side effect. Such
+                # layers are still compiled, but with ``fullgraph=False`` so the write can
+                # graph-break.
                 if self.compile_cfg:
                     fullgraph = self.config.layers_type[layer_idx] != "linear_attention"
-                    layer.forward = torch.compile(layer.forward, fullgraph=fullgraph)
+                    # Compile the class function, then restore descriptor binding on this instance.
+                    compiled_forward = torch.compile(type(layer).forward, fullgraph=fullgraph)
+                    layer.forward = compiled_forward.__get__(layer, type(layer))
 
             self.layers[str(layer_idx)] = layer
             self._fully_shard(

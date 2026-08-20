@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Literal, Protocol, TypeAlias, cast
+from typing import Literal, Protocol, TypeAlias, TypedDict, cast
 
 import torch
 import torch.nn as nn
@@ -45,6 +45,28 @@ RouterLogits: TypeAlias = torch.Tensor
 RouterWeights: TypeAlias = torch.Tensor
 RouterTopKIds: TypeAlias = torch.Tensor
 HiddenStates: TypeAlias = torch.Tensor
+
+
+class MoEDecoderLayerOutput(TypedDict):
+    """Per-micro-batch outputs of one :class:`MoEDecoderLayer` forward."""
+
+    hidden_states: HiddenStates
+    router_logits: RouterLogits
+    router_weights: RouterWeights
+    router_topk_ids: RouterTopKIds
+
+
+class MoEDecoderLayerMicroBatchOutput(TypedDict):
+    """Outputs of one :class:`MoEDecoderLayer` forward over several micro-
+    batches (domino EP).
+
+    Each field holds one entry per micro-batch, in input order.
+    """
+
+    hidden_states: list[HiddenStates]
+    router_logits: list[RouterLogits]
+    router_weights: list[RouterWeights]
+    router_topk_ids: list[RouterTopKIds]
 
 
 class MoEActFnProtocol(Protocol):
@@ -291,23 +313,31 @@ class MoEDecoderLayer(nn.Module):
 
     def forward(
         self,
-        *hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | list[torch.Tensor],
+        *,
         seq_ctx: SequenceContext | list[SequenceContext],
-        position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]] | None = None,
-    ) -> tuple[HiddenStates, RouterLogits, RouterWeights, RouterTopKIds] | tuple[torch.Tensor, ...]:
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
+    ) -> MoEDecoderLayerOutput | MoEDecoderLayerMicroBatchOutput:
         """Forward pass of the MoE decoder layer.
 
+        Passing lists runs several equal-shaped micro-batches in one layer invocation (domino EP),
+        so that the expert dispatch/combine communication of one micro-batch overlaps the expert
+        compute of another.
+
         Args:
-            hidden_states (torch.Tensor): Input hidden states.
-            seq_ctx (SequenceContext): Sequence context.
-            position_embeddings (tuple[torch.Tensor, torch.Tensor]): Position embeddings.
-            past_key_values (list[list[torch.Tensor]], optional): Past key values for pre-filling or decoding.
+            hidden_states (torch.Tensor | list[torch.Tensor]): Input hidden states, one tensor per
+                micro-batch.
+            seq_ctx (SequenceContext | list[SequenceContext]): Sequence context, aligned with
+                ``hidden_states``.
+            position_embeddings (tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]]):
+                Rotary position embeddings ``(cos, sin)``, aligned with ``hidden_states``.
 
         Returns:
-            tuple: Output hidden states, router logits, router weights, and the
-                expert IDs selected by the router.
+            MoEDecoderLayerOutput | MoEDecoderLayerMicroBatchOutput: Hidden states and router
+            results. Scalar fields for a single ``hidden_states`` tensor, per-micro-batch lists for
+            a list of them.
         """
-        if len(hidden_states) == 1:
+        if not isinstance(hidden_states, list):
             assert isinstance(seq_ctx, SequenceContext), (
                 f"seq_ctx should be a SequenceContext instance but got {seq_ctx}"
             )
@@ -315,7 +345,7 @@ class MoEDecoderLayer(nn.Module):
                 "position_embeddings should be a tuple of two tensors (position_ids, position_embeds)"
             )
             return self._forward(
-                hidden_states=hidden_states[0],
+                hidden_states=hidden_states,
                 seq_ctx=seq_ctx,
                 position_embeddings=position_embeddings,
             )
@@ -328,7 +358,7 @@ class MoEDecoderLayer(nn.Module):
             )
 
             return self._micro_batch_forward(
-                hidden_states_list=list(hidden_states),
+                hidden_states_list=hidden_states,
                 seq_ctx_list=seq_ctx,
                 position_embeddings_list=position_embeddings,
             )
@@ -376,7 +406,7 @@ class MoEDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         seq_ctx: SequenceContext,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-    ) -> tuple[HiddenStates, RouterLogits, RouterWeights, RouterTopKIds]:
+    ) -> MoEDecoderLayerOutput:
         residual, hidden_states, router_results = self._pre_moe_forward(
             hidden_states=hidden_states,
             seq_ctx=seq_ctx,
@@ -410,6 +440,11 @@ class MoEDecoderLayer(nn.Module):
         #     post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
         #     dispatched["topk_weights"],
         # )
+        if self.ep_mesh is not None:
+            # MoEBlock is fullgraph-compiled and shared by all decoder layers. Only the routed-token
+            # dimension varies, so make it dynamic before entering the compile boundary to keep one
+            # AOT Autograd save plan across the original forward and checkpoint replay.
+            torch._dynamo.mark_dynamic(post_dispatched["hidden_states"], 0)
         experts_out = self.experts(
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
@@ -461,19 +496,19 @@ class MoEDecoderLayer(nn.Module):
             residual=residual,
             shared_experts_out=shared_experts_out,
         )
-        return (
-            hidden_states,
-            router_results["logits"],
-            router_results["router_weights"],
-            router_results["topk_ids"],
-        )
+        return {
+            "hidden_states": hidden_states,
+            "router_logits": router_results["logits"],
+            "router_weights": router_results["router_weights"],
+            "router_topk_ids": router_results["topk_ids"],
+        }
 
     def _micro_batch_forward(
         self,
         hidden_states_list: list[torch.Tensor],
         seq_ctx_list: list[SequenceContext],
         position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> MoEDecoderLayerMicroBatchOutput:
         origin_shape = hidden_states_list[0].shape
         assert all(hidden_states.shape == origin_shape for hidden_states in hidden_states_list), (
             "All hidden states should have the same shape"
@@ -534,6 +569,9 @@ class MoEDecoderLayer(nn.Module):
                 dispatched=dispatched,
                 async_op=True,
             )
+            if self.ep_mesh is not None:
+                # Preserve the same dynamic-token compile contract for every in-layer micro-batch.
+                torch._dynamo.mark_dynamic(post_dispatched["hidden_states"], 0)
             experts_out = self.experts(
                 post_dispatched["hidden_states"],
                 post_dispatched["tokens_per_expert"],
@@ -598,10 +636,12 @@ class MoEDecoderLayer(nn.Module):
             )
             hidden_states_out_list.append(hidden_states)
 
-        router_logits = [router_results["logits"] for router_results in router_results_list]
-        router_weights = [router_results["router_weights"] for router_results in router_results_list]
-        router_topk_ids = [router_results["topk_ids"] for router_results in router_results_list]
-        return tuple(hidden_states_out_list + router_logits + router_weights + router_topk_ids)
+        return {
+            "hidden_states": hidden_states_out_list,
+            "router_logits": [router_results["logits"] for router_results in router_results_list],
+            "router_weights": [router_results["router_weights"] for router_results in router_results_list],
+            "router_topk_ids": [router_results["topk_ids"] for router_results in router_results_list],
+        }
 
     def _pre_moe_forward(
         self,
