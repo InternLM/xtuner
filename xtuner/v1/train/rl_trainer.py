@@ -95,7 +95,7 @@ def _trainer_config_requires_rollout_proxy(cfg: "BaseRLTrainerConfig") -> bool:
     ) or _agent_loop_manager_requires_rollout_proxy(cfg.eval_agent_loop_manager_cfg)
 
 
-# 在使用了 trace_store 情况下，我们不能提前释放 obj ref 而是由 _release_trace_store 统一释放
+# 在使用了 trace_store 情况下，我们不能提前释放 obj ref，而是由 trainer 在消费后统一释放
 # 这样可以确保一拆多情况下正确。判断逻辑和 rollout_proxy 一致。
 def _agent_loop_manager_uses_trace_store(
     cfg: AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None,
@@ -103,6 +103,18 @@ def _agent_loop_manager_uses_trace_store(
     # Agent loops that require the rollout proxy currently export train traces
     # through RolloutTraceStore. Those trace refs are shared across segments.
     return _agent_loop_manager_requires_rollout_proxy(cfg)
+
+
+def _trace_session_ids(rollout_batches: list[list[RolloutState]]) -> list[str]:
+    """Return stable, unique trace session ids owned by rollout batches."""
+    return list(
+        dict.fromkeys(
+            str(rollout_state.session_id)
+            for group in rollout_batches
+            for rollout_state in group
+            if rollout_state.session_id is not None
+        )
+    )
 
 
 def check_fa3():
@@ -859,6 +871,7 @@ class BaseRLTrainer:
             self.tokenizer.save_pretrained(str(save_hf_path))
 
     async def _run_initial_evaluate(self) -> None:
+        eval_batch: list[list[RolloutState]] = []
         try:
             eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
                 self.evaluator.eval_batch_size,
@@ -880,9 +893,27 @@ class BaseRLTrainer:
             tb_scores = {f"eval/{k}": v for k, v in eval_metrics.items()}
             self._exp_tracker.add_scalars(tag_scalar_dict=tb_scores, global_step=0)
         finally:
-            self._release_trace_store()
+            self._release_trace_sessions(_trace_session_ids(eval_batch))
 
-    def _release_trace_store(self) -> None:
+    def _release_trace_sessions(self, session_ids: list[str]) -> set[str]:
+        from xtuner.v1.rl.rollout.trace_store import get_existing_store
+
+        session_ids = list(dict.fromkeys(str(session_id) for session_id in session_ids))
+        if not session_ids:
+            return set()
+
+        store = get_existing_store()
+        if store is None:
+            return set()
+
+        released_session_ids = ray.get(store.release_sessions.remote(session_ids))
+        self.logger.info(
+            "Release owned trace sessions and preserve sessions held by other consumers: "
+            f"released={len(released_session_ids)}, requested={len(session_ids)}"
+        )
+        return set(released_session_ids)
+
+    def _release_all_trace_sessions(self) -> None:
         from xtuner.v1.rl.rollout.trace_store import get_existing_store
 
         store = get_existing_store()
@@ -892,10 +923,14 @@ class BaseRLTrainer:
         self.logger.info("Release all sessions and free associated resources")
         ray.get(store.release_all.remote())
         keys = ray.get(store.list_sessions.remote())
-        # NOTE: previously asserted ``len(keys) == 0`` here, but a leftover session key should not crash the whole
-        # fit() at teardown. Warn instead so the leak stays visible without aborting the run.
+        # A leftover session key should stay visible without crashing fit()
+        # during teardown.
         if keys:
             self.logger.warning(f"Trace store keys not released after release_all: {keys}")
+
+    def _release_trace_sessions_after_train_batch(self, train_batch: list[list[RolloutState]]) -> None:
+        """Release training traces when no concurrent rollout owner exists."""
+        self._release_all_trace_sessions()
 
     def _train_one_batch(
         self,
@@ -949,7 +984,7 @@ class BaseRLTrainer:
                 rollout_idx=train_step,
             )
 
-        self._release_trace_store()
+        self._release_trace_sessions_after_train_batch(train_batch)
 
         return {
             "data_info": data_info,
@@ -957,6 +992,7 @@ class BaseRLTrainer:
         }
 
     async def _run_evaluation(self, train_step: int) -> dict[str, float]:
+        eval_batch: list[list[RolloutState]] = []
         try:
             eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
                 self.evaluator.eval_batch_size,
@@ -976,7 +1012,7 @@ class BaseRLTrainer:
             self.logger.info(f"Train step {train_step} eval trajectories saved to {eval_trajectory_path}")
             return eval_metrics
         finally:
-            self._release_trace_store()
+            self._release_trace_sessions(_trace_session_ids(eval_batch))
 
     def _save_debug_rollout_batch(self, train_batch: list[list[RolloutState]], train_step: int) -> None:
         assert self._debug_rollout_dir is not None
@@ -1849,6 +1885,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
 
         self._cpu_resource_manager.log_registered_summary()
+
+    def _release_trace_sessions_after_train_batch(self, train_batch: list[list[RolloutState]]) -> None:
+        """Release only consumed traces while the background producer runs."""
+        self._release_trace_sessions(_trace_session_ids(train_batch))
 
     def _build_disaggregated_placement_groups(
         self,

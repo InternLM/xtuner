@@ -135,7 +135,8 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         )
         trainer._save_trajectories = MagicMock()
         trainer._save_eval_trajectories = MagicMock()
-        trainer._release_trace_store = MagicMock()
+        trainer._release_trace_sessions = MagicMock(return_value=set())
+        trainer._release_all_trace_sessions = MagicMock()
         trainer._log_step = MagicMock()
         trainer._maybe_save_checkpoint = AsyncMock()
         trainer._maybe_save_hf = MagicMock()
@@ -185,7 +186,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
     def test_fit_persists_checkpoint_for_completed_model_step(self):
         # 验证 checkpoint 以 fit 完成的 model_step 为准，并通过 async manager.save 落盘。
-        train_sample = SimpleNamespace(group_id=1, rollout_id=1)
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1, session_id=None)
         manager = _FakeManager([ProduceBatchResult(rollout_states=[[train_sample]])])
         manager.save = AsyncMock()
         trainer = self._make_trainer(manager)
@@ -217,7 +218,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
     def test_fit_retries_same_step_after_empty_expired_skip(self):
         # 验证空 expired batch 只同步上一版模型，不推进 train_step，并重试同一步。
-        train_sample = SimpleNamespace(group_id=1, rollout_id=1)
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1, session_id=None)
         manager = _FakeManager(
             [
                 ProduceBatchResult(rollout_states=[], status=ProduceBatchStatus.EXPIRED_BATCH),
@@ -243,7 +244,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
     def test_fit_trains_non_empty_expired_batch_then_syncs_current_step(self):
         # 验证非空 expired batch 仍会训练，并用当前完成的 model_step 恢复 producer。
-        train_sample = SimpleNamespace(group_id=1, rollout_id=1)
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1, session_id=None)
         manager = _FakeManager(
             [ProduceBatchResult(rollout_states=[[train_sample]], status=ProduceBatchStatus.EXPIRED_BATCH)]
         )
@@ -258,7 +259,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
     def test_fit_rebinds_weight_update_with_rollout_update_address(self):
         # 验证非共卡后续同步权重时继续沿用 rollout config 中的 NCCL update 地址。
-        train_sample = SimpleNamespace(group_id=1, rollout_id=1)
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1, session_id=None)
         manager = _FakeManager([ProduceBatchResult(rollout_states=[[train_sample]])])
         trainer = self._make_trainer(manager)
         trainer._rollout_config = SimpleNamespace(weight_update_host="10.0.0.1", weight_update_port=23456)
@@ -280,7 +281,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
     def test_fit_keeps_background_producer_running_while_training_blocks(self):
         # 验证非共卡训练阻塞在同步训练 batch 时，后台 producer 仍能继续调度。
-        train_sample = SimpleNamespace(group_id=1, rollout_id=1)
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1, session_id=None)
         training_started = threading.Event()
         producer_ticked = threading.Event()
         manager = _TickingManager(
@@ -305,9 +306,94 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertIn("produce_loop_tick_during_training", manager.calls)
         self.assertEqual(trainer._cur_step, 1)
 
+    def test_train_batch_releases_only_consumed_trace_sessions_for_disaggregated_rollout(self):
+        # 后台 producer 在 learner 训练期间仍会创建 trace；训练结束只能释放当前消费 batch 的 session。
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1, session_id=101)
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer._release_trace_sessions = RLDisaggregatedTrainer._release_trace_sessions.__get__(
+            trainer, RLDisaggregatedTrainer
+        )
+        live_session_ids = {"101", "202"}
+
+        def release_sessions(session_ids):
+            released = [session_id for session_id in session_ids if session_id in live_session_ids]
+            live_session_ids.difference_update(released)
+            return released
+
+        store = SimpleNamespace(
+            release_sessions=SimpleNamespace(remote=MagicMock(side_effect=release_sessions)),
+        )
+
+        with (
+            patch("xtuner.v1.rl.rollout.trace_store.get_existing_store", return_value=store),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda value: value),
+        ):
+            trainer._train_one_batch(
+                [[train_sample]],
+                train_step=1,
+                step_timer_dict={},
+            )
+
+        store.release_sessions.remote.assert_called_once_with(["101"])
+        self.assertEqual(live_session_ids, {"202"})
+
+    def test_evaluation_releases_only_eval_sessions_and_preserves_leftovers(self):
+        eval_sample = SimpleNamespace(group_id=2, rollout_id=2, session_id="eval")
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer._release_trace_sessions = RLDisaggregatedTrainer._release_trace_sessions.__get__(
+            trainer, RLDisaggregatedTrainer
+        )
+        trainer.eval_agent_loop_manager.produce_batch = AsyncMock(
+            return_value=ProduceBatchResult(rollout_states=[[eval_sample]])
+        )
+        live_session_ids = {"leftover", "eval"}
+
+        def release_sessions(session_ids):
+            released = [session_id for session_id in session_ids if session_id in live_session_ids]
+            live_session_ids.difference_update(released)
+            return released
+
+        store = SimpleNamespace(
+            release_sessions=SimpleNamespace(remote=MagicMock(side_effect=release_sessions)),
+        )
+        with (
+            patch("xtuner.v1.rl.rollout.trace_store.get_existing_store", return_value=store),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda value: value),
+        ):
+            metrics = asyncio.run(trainer._run_evaluation(train_step=1))
+
+        self.assertEqual(metrics, {"acc": 1.0})
+        store.release_sessions.remote.assert_called_once_with(["eval"])
+        self.assertEqual(live_session_ids, {"leftover"})
+
+    def test_evaluation_releases_eval_sessions_when_evaluator_fails(self):
+        eval_sample = SimpleNamespace(group_id=2, rollout_id=2, session_id="eval")
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer.eval_agent_loop_manager.produce_batch = AsyncMock(
+            return_value=ProduceBatchResult(rollout_states=[[eval_sample]])
+        )
+        trainer.evaluator.run = MagicMock(side_effect=RuntimeError("evaluation failed"))
+
+        with self.assertRaisesRegex(RuntimeError, "evaluation failed"):
+            asyncio.run(trainer._run_evaluation(train_step=1))
+
+        trainer._release_trace_sessions.assert_called_once_with(["eval"])
+
+    def test_initial_evaluation_releases_only_its_sessions(self):
+        eval_sample = SimpleNamespace(group_id=2, rollout_id=2, session_id="initial-eval")
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer.eval_agent_loop_manager.produce_batch = AsyncMock(
+            return_value=ProduceBatchResult(rollout_states=[[eval_sample]])
+        )
+
+        asyncio.run(trainer._run_initial_evaluate())
+
+        trainer._release_trace_sessions.assert_called_once_with(["initial-eval"])
+        trainer._release_all_trace_sessions.assert_not_called()
+
     def test_fit_observes_background_producer_failure_before_training_waited_batch(self):
         # 后台 producer 异常是终止性失败；前台 get_batch 还在等待时必须立刻暴露，不能先训练随后才失败。
-        train_sample = SimpleNamespace(group_id=1, rollout_id=1)
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1, session_id=None)
         manager = _FailingProducerManager([ProduceBatchResult(rollout_states=[[train_sample]])])
         trainer = self._make_trainer(manager)
 
@@ -320,11 +406,9 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
     def test_fit_runs_eval_before_reset_and_stops_producer(self):
         # 验证 eval 在 producer 恢复前执行，避免生产侧提前抢占 rollout 资源。
         # 确定性排序依赖 RolloutState 的 group_id 和 rollout_id，测试用轻量对象模拟即可。
-        train_sample = SimpleNamespace(group_id=1, rollout_id=1)
-        eval_sample = SimpleNamespace(group_id=2, rollout_id=2)
-        manager = _FakeManager(
-            [ProduceBatchResult(rollout_states=[[train_sample]], status=ProduceBatchStatus.NORMAL)]
-        )
+        train_sample = SimpleNamespace(group_id=1, rollout_id=1, session_id=None)
+        eval_sample = SimpleNamespace(group_id=2, rollout_id=2, session_id=None)
+        manager = _FakeManager([ProduceBatchResult(rollout_states=[[train_sample]], status=ProduceBatchStatus.NORMAL)])
         trainer = self._make_trainer(manager)
         trainer._enable_evaluate = True
         events: list[str] = []
