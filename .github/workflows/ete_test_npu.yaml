@@ -32,8 +32,7 @@ on:
           Default false.
         type: boolean
         default: false
-  schedule:
-    - cron:  '00 16 * * 0-5'
+
 env:
   CI_NPU_IMAGE_REGISTRY: ${{ secrets.CI_NPU_IMAGE_REGISTRY }}
   CI_REPORTS_REPOSITORY: ${{ vars.CI_REPORTS_REPOSITORY || 'llmcitester/xtuner' }}

@@ -1,5 +1,6 @@
-name: ete_test_gpu
-run-name: ete_test_gpu-${{ github.event.inputs.run_case || 'all' }}
+name: weekly ete test
+run-name: weekly-ete-test-${{ github.event.inputs.run_case || 'all' }}
+
 permissions:
   contents: read
 
@@ -8,42 +9,67 @@ on:
     inputs:
       repo_org:
         required: false
-        description: 'Tested repository organization name. Default is InternLM'
+        description: 'Tested repository organization name. Default is InternLM/xtuner'
         type: string
         default: 'InternLM/xtuner'
       repo_ref:
         required: false
-        description: 'Set branch or tag or commit id. Default is "main"'
+        description: 'Branch, tag, or commit to build the image from and run ETE against. Default is main'
         type: string
         default: 'main'
+      torch_version:
+        required: true
+        description: 'Docker torch version. Default is 2.9.1'
+        type: string
+        default: '2.9.1'
+      image_repo_short:
+        required: true
+        description: 'Docker image repository short name under ailab-llmrazor/. Default is xtuner'
+        type: choice
+        options:
+          - xtuner
+          - xtuner_tmp
+        default: 'xtuner'
+      image_tag:
+        required: false
+        description: >-
+          Docker image tag. Default is auto (pt{torch}_{YYYYMMDD}_{commit}).
+          Required when skip_build is true.
+        type: string
+        default: 'auto'
+      skip_build:
+        required: false
+        description: 'Skip image build and run ETE with image_tag on the cluster registry'
+        type: boolean
+        default: false
+      build_only:
+        required: false
+        description: 'Only build and push the docker image, do not run ETE'
+        type: boolean
+        default: false
       run_case:
         required: false
         description: >-
           Case name(s) from autotest/config.yaml. Use "all" for every case,
-          one name (e.g. "qwen3-rl-lmdeploy"), or comma-separated names
-          (e.g. "qwen3-5-rl-vl-lmdeploy-grpo,s2-preview-rl-vl-lmdeploy-grpo").
+          one name (e.g. "qwen3-rl-lmdeploy"), or comma-separated names.
         type: string
         default: 'all'
       parallel:
         required: false
         description: >-
-          pytest-xdist worker count (-n). Cases from config.yaml run in parallel.
-          Use a number (e.g. 4), or "all" for one worker per selected case.
-          Resume phases within one case stay sequential.
+          pytest-xdist worker count (-n). Use a number (e.g. 4), or "all"
+          for one worker per selected case.
         type: string
         default: '4'
       CI_E2E_DEBUG:
         required: false
         description: >-
-          CI_E2E_DEBUG:if true, start "sleep inf &" after install and before training so the
-          cluster job stays alive for interactive debug (including after OOM).
-          Default false.
+          If true, keep the cluster job alive after install for interactive debug.
         type: boolean
         default: false
 
 env:
   CI_GPU_IMAGE_REGISTRY: ${{ secrets.CI_GPU_IMAGE_REGISTRY }}
-  # ETE PNG reports: llmcitester/xtuner @ branch reports, under ete/{run_id}/
   CI_REPORTS_REPOSITORY: ${{ vars.CI_REPORTS_REPOSITORY || 'llmcitester/xtuner' }}
   CI_REPORTS_BRANCH: ${{ vars.CI_REPORTS_BRANCH || 'reports' }}
   CI_REPORTS_RAW_URL_BASE: ${{ vars.CI_REPORTS_RAW_URL_BASE || 'https://raw.githubusercontent.com/llmcitester/xtuner/reports/ete' }}
@@ -51,37 +77,128 @@ env:
   CI_REPORTS_KEEP_RUNS: ${{ vars.CI_REPORTS_KEEP_RUNS || '30' }}
 
 jobs:
+  build_image:
+    if: ${{ !inputs.skip_build }}
+    runs-on: [docker-inner]
+    outputs:
+      image_tag: ${{ steps.parse_tag.outputs.image_tag }}
+      docker_tag: ${{ steps.parse_tag.outputs.docker_tag }}
+      short_docker_tag: ${{ steps.parse_tag.outputs.short_docker_tag }}
+    env:
+      IMAGE_NAME: ailab-llmrazor/${{ inputs.image_repo_short || 'xtuner' }}
+      IMAGE_TAG: ${{ inputs.image_tag || 'auto' }}
+      TORCH_VERSION: ${{ inputs.torch_version || '2.9.1' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.repo_ref || 'main' }}
+
+      - name: Parse tag
+        id: parse_tag
+        run: |
+          if [[ "${IMAGE_TAG}" == 'auto' ]]; then
+            DATE_TODAY="$(date +'%Y%m%d')"
+            COMMIT_SHA="$(git rev-parse --short HEAD)"
+            IMAGE_TAG="pt$(echo "${TORCH_VERSION}" | awk -F. '{print $1$2}')_${DATE_TODAY}_${COMMIT_SHA}"
+          fi
+          DOCKER_TAG="${{ secrets.CI_GPU_IMAGE_REGISTRY }}/${IMAGE_NAME}:${IMAGE_TAG}"
+          SHORT_DOCKER_TAG="${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "docker_tag=${DOCKER_TAG}" >> "$GITHUB_OUTPUT"
+          echo "short_docker_tag=${SHORT_DOCKER_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: |
+          cat "${{ vars.EXTRA_DOCKERFILE }}" >> "${{ github.workspace }}/Dockerfile"
+          echo "IMAGE_NAME: ${IMAGE_NAME}, IMAGE_TAG: ${IMAGE_TAG}"
+          export IMAGE_NAME="${{ secrets.CI_GPU_IMAGE_REGISTRY }}/${IMAGE_NAME}"
+          bash "${{ github.workspace }}/image_build.sh"
+          echo "Built image with tag: ${IMAGE_NAME}:${IMAGE_TAG}"
+
+      - name: Push to cluster registry
+        run: |
+          echo "pushing ${IMAGE_NAME}:${IMAGE_TAG} ..."
+          docker login "${{ secrets.CI_GPU_IMAGE_REGISTRY }}" \
+            -p "${{ secrets.CLUSTER_DOCKERHUB_TOKEN }}" \
+            -u "${{ secrets.CLUSTER_DOCKERHUB_USERNAME }}"
+          docker push "${{ secrets.CI_GPU_IMAGE_REGISTRY }}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+      - name: Publish build summary
+        run: |
+          {
+            echo "## Docker image built"
+            echo ""
+            echo "- Image tag: \`${{ steps.parse_tag.outputs.short_docker_tag }}\`"
+            echo "- Full reference: \`${{ steps.parse_tag.outputs.docker_tag }}\`"
+            echo "- Commit: \`$(git rev-parse --short HEAD)\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
   ete_test:
-    if: ${{!cancelled() }}
+    needs: build_image
+    if: >-
+      ${{
+        !cancelled() &&
+        !inputs.build_only &&
+        (needs.build_image.result == 'success' || inputs.skip_build)
+      }}
     runs-on: [h_cluster_ete]
     timeout-minutes: 1440
+    env:
+      CI_ETE_TRAIN_IMAGE: >-
+        ${{
+          inputs.skip_build
+          && format(
+            '{0}/ailab-llmrazor/{1}:{2}',
+            secrets.CI_GPU_IMAGE_REGISTRY,
+            inputs.image_repo_short || 'xtuner',
+            inputs.image_tag
+          )
+          || needs.build_image.outputs.docker_tag
+        }}
     steps:
+      - name: Validate inputs
+        if: ${{ inputs.skip_build }}
+        run: |
+          if [ "${{ inputs.image_tag }}" = "auto" ] || [ -z "${{ inputs.image_tag }}" ]; then
+            echo "image_tag must be a concrete tag when skip_build is true (not 'auto')"
+            exit 1
+          fi
+
       - name: Clean workdir
         run: sudo git clean -ffdx
+
       - name: Clone repository
         uses: actions/checkout@v2
         with:
           repository: ${{ github.event.inputs.repo_org || 'InternLM/xtuner' }}
-          ref: ${{github.event.inputs.repo_ref || 'main'}}
+          ref: ${{ github.event.inputs.repo_ref || 'main' }}
+
       - name: Init job summary
         run: |
           {
-            echo "## ETE test report"
+            echo "## Weekly ETE test report"
             echo ""
             echo "- Workflow run: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo "- Train image: \`${{ env.CI_ETE_TRAIN_IMAGE }}\`"
             echo "- Reports: [ete/${{ github.run_id }}](${{ env.CI_REPORTS_BROWSE_URL_BASE }}/${{ github.run_id }})"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
+
       - name: run-test
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
           CI_REPORTS_RAW_URL_BASE: ${{ env.CI_REPORTS_RAW_URL_BASE }}
           CI_E2E_DEBUG: ${{ github.event.inputs.CI_E2E_DEBUG || 'false' }}
+          CI_ETE_TRAIN_IMAGE: ${{ env.CI_ETE_TRAIN_IMAGE }}
         run: |
           source /mnt/shared-storage-user/opencompass-shared/qa-llm-cicd/miniconda3/bin/activate
-          conda activate clusterx 
+          conda activate clusterx
           conda env list
-          unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
+          unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+          echo "Using train image: ${CI_ETE_TRAIN_IMAGE}"
           CASE_INPUT="${{ github.event.inputs.run_case || 'all' }}"
           PARALLEL_INPUT="${{ github.event.inputs.parallel || '4' }}"
           PYTEST_NODES=()
@@ -92,7 +209,6 @@ jobs:
               PYTEST_NODES+=("autotest/test_all.py::test_all[${case_name}]")
             done
           else
-            # Support one or more cases: "case_a" or "case_a,case_b, case_c"
             IFS=',' read -ra RAW_CASES <<< "$CASE_INPUT"
             for raw in "${RAW_CASES[@]}"; do
               case_name="$(echo "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
@@ -118,7 +234,7 @@ jobs:
           fi
           echo "Running ${CASE_COUNT} case(s) with pytest-xdist -n ${PARALLEL}"
           echo "Cases: ${PYTEST_NODES[*]}"
-          pytest "${PYTEST_NODES[@]}" -m all -n "${PARALLEL}" -s -vv --run_id ${{ github.run_id }}
+          pytest "${PYTEST_NODES[@]}" -m all -n "${PARALLEL}" -s -vv --run_id "${{ github.run_id }}"
 
       - name: Check report files
         if: always()
