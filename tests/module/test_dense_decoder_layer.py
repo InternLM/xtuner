@@ -69,24 +69,24 @@ class TestDenseDecoderLayerMicroBatch:
         ]
 
         outputs = layer(
-            *hidden_states,
+            hidden_states,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
-        )
-        reference_outputs = tuple(
+        )["hidden_states"]
+        reference_outputs = [
             reference_layer(
                 hidden,
                 position_embeddings=position_embedding,
                 seq_ctx=context,
-            )
+            )["hidden_states"]
             for hidden, position_embedding, context in zip(
                 reference_hidden_states,
                 position_embeddings,
                 reference_seq_ctx,
             )
-        )
+        ]
 
-        assert isinstance(outputs, tuple)
+        assert isinstance(outputs, list)
         for output, reference_output in zip(outputs, reference_outputs):
             torch.testing.assert_close(output, reference_output)
 
