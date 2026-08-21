@@ -1,7 +1,7 @@
 """RLDisaggregatedTrainer 的 public 行为测试。
 
 Good Tests:
-- 通过 fit()、update_weights()、同步周期校验和资源布局不变量验证行为。
+- 通过 fit()、weight_update()、同步周期校验和资源布局不变量验证行为。
 - 用 _FakeManager 和轻量 controller 替代真实 Ray worker。
 - 只断言 step 递进、producer 恢复 model_step、checkpoint 文件等可观察结果。
 - 对 async producer/consumer 只验证最终业务结果；内部任务编排放到 AgentLoopManager 测试中。
@@ -16,7 +16,7 @@ Bad Tests:
 - disaggregated fit 遇到空 EXPIRED_BATCH 时重试同一个 train_step，不推进 _cur_step。
 - 非空 EXPIRED_BATCH 仍会训练，并用当前完成的 model_step 恢复 producer。
 - checkpoint 保存发生在 fit 完成的 model_step 上，且 manager.save 为 async 调用。
-- eval 在 producer 恢复前运行；update_weights 本身不直接 pause/continue rollout controller。
+- eval 在 producer 恢复前运行；weight_update 本身不直接 pause/continue rollout controller。
 - sync/checkpoint/eval interval 必须是 sync_weights_interval 的整数倍，资源布局必须 fail fast。
 - 前台训练 batch 阻塞时，后台 producer 仍能在事件循环中继续推进。
 """
@@ -145,7 +145,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             fit=MagicMock(return_value=[{"train_metrics": [], "sft_train_metrics": {}}]),
             onload=MagicMock(return_value="onload"),
             offload=MagicMock(return_value="offload"),
-            update_weights=MagicMock(return_value="update"),
+            weight_update=MagicMock(return_value="update"),
         )
         trainer.rollout_controller = SimpleNamespace(
             check_and_shutdown_inactive_workers=SimpleNamespace(
@@ -274,9 +274,6 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             train_controller=trainer.train_controller,
             rollout_controller=trainer.rollout_controller,
             rollout_config=trainer._rollout_config,
-            weight_transport_type="nccl",
-            weight_update_host="10.0.0.1",
-            weight_update_port=23456,
         )
 
     def test_fit_keeps_background_producer_running_while_training_blocks(self):
@@ -478,8 +475,8 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer = self._make_trainer(manager)
 
         with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
-            trainer.update_weights = RLDisaggregatedTrainer.update_weights.__get__(trainer, RLDisaggregatedTrainer)
-            trainer.update_weights()
+            trainer.weight_update = RLDisaggregatedTrainer.weight_update.__get__(trainer, RLDisaggregatedTrainer)
+            trainer.weight_update()
 
         trainer.rollout_controller.pause_generation.remote.assert_not_called()
         trainer.rollout_controller.continue_generation.remote.assert_not_called()
@@ -508,7 +505,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             resume=AsyncMock(side_effect=manager_resume),
             continue_produce=AsyncMock(side_effect=manager_continue_produce),
         )
-        trainer.update_weights = MagicMock(side_effect=lambda: events.append("update_weights"))
+        trainer.weight_update = MagicMock(side_effect=lambda: events.append("update_weights"))
 
         train_state_path = Path(self.temp_dir.name) / trainer._SAVE_TRAIN_STATE_PATH
         train_state_path.write_text('{"cur_step": 3}')
