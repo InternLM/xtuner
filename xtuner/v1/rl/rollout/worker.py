@@ -558,20 +558,6 @@ class RolloutConfig(BaseModel):
         )
 
 
-def _response_preview_for_log(response: dict[str, Any]) -> dict[str, Any]:
-    preview: dict[str, Any] = {}
-    for key, value in response.items():
-        if key in ("logprobs", "response_ids", "routed_experts", "meta_info"):
-            if isinstance(value, dict):
-                preview[key] = {"keys": sorted(value.keys())}
-            else:
-                preview[key] = f"<omitted {type(value).__name__}>"
-        else:
-            text = repr(value)
-            preview[key] = text[:512] + ("...(truncated)" if len(text) > 512 else "")
-    return preview
-
-
 class RolloutWorker(SingleAcceleratorWorker):
     """Base class for a rollout worker that runs an inference server.
 
@@ -1320,26 +1306,26 @@ class RolloutWorker(SingleAcceleratorWorker):
                     rollout_state.status = rollout_status
                 return rollout_state
             except KeyError as e:
-                response_for_log = _response_preview_for_log(response)
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
                 error_msg = f"Missing expected key {e} in response {response_for_log} for {uid}"
                 raise RuntimeError(error_msg)
             except IndexError as e:
-                response_for_log = _response_preview_for_log(response)
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
                 error_msg = f"Index error {e} while processing response {response_for_log} for {uid}"
                 raise RuntimeError(error_msg)
             except AssertionError as e:
-                response_for_log = _response_preview_for_log(response)
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
                 error_msg = f"AssertionError: {e} when processing response {response_for_log} for {uid}"
                 raise RuntimeError(error_msg)
             except json.JSONDecodeError as e:
                 error_msg = f"JSONDecodeError: {e} when processing response {response} for {uid}"
                 raise RuntimeError(error_msg)
             except TypeError as e:
-                response_for_log = _response_preview_for_log(response)
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
                 error_msg = f"TypeError: {e} when processing response {response_for_log} for {uid}"
                 raise RuntimeError(error_msg)
             except Exception as e:
-                response_for_log = _response_preview_for_log(response)
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
                 error_msg = f"Unexpected error: {e} when processing response {response_for_log} for {uid}\nTraceback: {traceback.format_exc()}"
                 raise RuntimeError(error_msg)
         else:

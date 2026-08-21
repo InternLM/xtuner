@@ -73,7 +73,9 @@ class RolloutController:
     def get_pending_weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
         """Return recovered rollout endpoints waiting for weights."""
         return tuple(
-            target for target in self.registry.weight_update_targets() if target.lifecycle_state == "pending_weights"
+            target
+            for target in self.registry.weight_update_targets()
+            if target.lifecycle_state == WorkerLifecycleState.PENDING_WEIGHTS
         )
 
     def inject_backend_crash_for_test(self, *, rank: int = 0) -> None:

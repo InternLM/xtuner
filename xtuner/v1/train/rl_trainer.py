@@ -1665,7 +1665,6 @@ class RLColocateTrainer(BaseRLTrainer):
 
         if self._rollout_config.skip_load_weights:
             self._sync_weights_from_train_workers()
-        # self._rollout_resources_available.set()
 
     def _sync_weights_from_train_workers(self) -> None:
         if self._rollout_config.weight_transport_type == "checkpoint_engine":

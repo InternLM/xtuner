@@ -23,8 +23,6 @@ from xtuner.v1.rl.agent_loop_manager import AgentLoopManagerConfig, AsyncProduce
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
-from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
-from xtuner.v1.module.mtp import MTPConfig
 
 # env
 work_dir = os.environ["WORK_DIR"]
@@ -36,13 +34,13 @@ NNODE = int(os.environ.get("WORLD_SIZE", "1"))
 
 # basic settings
 experimental_name = "grpo_gsm8k"
-total_train_steps = 5
-evaluate_step = 5
+total_train_steps = 45
+evaluate_step = 45
 train_optimizer_steps = 1
 train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", 64 * train_optimizer_steps))
 prompt_repeat_k = 5
 rollout_tp_size = 1
-rollout_ep_size = 4
+rollout_ep_size = 1
 max_prompt_length = 2048
 max_response_length = 8192
 pack_max_length = 10 * 1024
@@ -89,10 +87,7 @@ eval_judger_config = GSM8KJudgerConfig(
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
 fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
-# model_cfg = get_model_config_from_hf(Path(model_path))
-model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
-model_cfg.text_config.mtp_config = MTPConfig(num_layers=1)
-
+model_cfg = get_model_config_from_hf(Path(model_path))
 if hasattr(model_cfg, "balancing_loss_cfg"):
     model_cfg.balancing_loss_cfg = None
 if hasattr(model_cfg, "z_loss_cfg"):
