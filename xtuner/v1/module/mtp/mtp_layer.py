@@ -107,7 +107,6 @@ class MTPLayer(nn.Module):
                 Rotary position embeddings ``(cos, sin)``, aligned with ``hidden_states``.
             seq_ctx (SequenceContext | list[SequenceContext]): Sequence context, aligned with
                 ``hidden_states``.
-
         Returns:
             MoEDecoderLayerOutput | MoEDecoderLayerMicroBatchOutput: The wrapped decoder layer's
             outputs with the MTP final layernorm applied to the hidden states.
@@ -185,7 +184,6 @@ class MTPLayer(nn.Module):
             self._preprocess(hidden_states=h, future_embeddings=e)
             for h, e in zip(hidden_states_list, future_embeddings_list)
         ]
-
         layer_results: MoEDecoderLayerMicroBatchOutput = self.decoder_layer(
             projected_list,
             position_embeddings=position_embeddings_list,
