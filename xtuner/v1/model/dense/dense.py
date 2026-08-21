@@ -240,17 +240,6 @@ class Dense(BaseModel):
                     preserve_rng_state=checkpoint_preserve_rng_state,
                 )
 
-                # Linear-attention (GatedDeltaNet) layers write ``seq_ctx.seq_idx`` inside the
-                # checkpoint region; compiling the checkpointed layer with ``fullgraph=True`` turns
-                # the checkpoint into a HigherOrderOperator that rejects that side effect. Such
-                # layers are still compiled, but with ``fullgraph=False`` so the write can
-                # graph-break.
-                if self.compile_cfg:
-                    fullgraph = self.config.layers_type[layer_idx] != "linear_attention"
-                    # Compile the class function, then restore descriptor binding on this instance.
-                    compiled_forward = torch.compile(type(layer).forward, fullgraph=fullgraph)
-                    layer.forward = compiled_forward.__get__(layer, type(layer))
-
             self.layers[str(layer_idx)] = layer
             self._fully_shard(
                 mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
