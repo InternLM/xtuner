@@ -29,7 +29,7 @@ from xtuner._testing import DeterministicDDPTestCase, HFConfigFieldDependency, c
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import Glm52MoEConfig, get_model_config, get_model_config_from_hf
-from xtuner.v1.module.attention import DSAMLAConfig
+from xtuner.v1.module.attention import DSAIndexerTrainingConfig, DSAMLAConfig
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 from xtuner.v1.utils.test_utils import init_data_mesh
@@ -181,6 +181,36 @@ class TestGlm52Config:
 
         with pytest.raises(ValueError, match="physical MTP indexer_types"):
             config.build()
+
+    def test_indexer_training_keeps_physical_mtp_indexer_frozen_by_default(self):
+        # 主干 source indexer 解冻时，physical MTP indexer 仍保持 frozen。
+        config = _tiny_glm52_config()
+        config.attention.indexer_training = DSAIndexerTrainingConfig(loss_coeff=1.0)
+        config.mtp_config = MTPConfig(num_layers=1, share_weights=True)
+
+        with mock.patch("torch.cuda.Stream"):
+            model = config.build()
+
+        main_attention = model.layers["0"].self_attn
+        mtp_attention = model.mtp_block.layers[0].decoder_layer.self_attn  # type: ignore[union-attr]
+        assert all(parameter.requires_grad for parameter in main_attention.indexer.parameters())
+        assert all(not parameter.requires_grad for parameter in mtp_attention.indexer.parameters())
+        assert mtp_attention.indexer_training is None
+
+    def test_indexer_only_trains_main_source_indexers_exclusively(self):
+        # 严格过拟合模式固定 attention teacher，只训练主干 source indexer。
+        config = _tiny_glm52_config()
+        config.attention.indexer_training = DSAIndexerTrainingConfig(loss_coeff=1.0, indexer_only=True)
+        config.mtp_config = MTPConfig(num_layers=1, share_weights=True)
+
+        with mock.patch("torch.cuda.Stream"):
+            model = config.build()
+
+        trainable_names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+        assert trainable_names
+        assert all(name.startswith("layers.0.self_attn.indexer.") for name in trainable_names)
+        assert all(not parameter.requires_grad for parameter in model.layers["1"].parameters())
+        assert all(not parameter.requires_grad for parameter in model.mtp_block.parameters())  # type: ignore[union-attr]
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
