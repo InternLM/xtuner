@@ -22,7 +22,7 @@ from .worker import (
     RolloutConfig,
     get_rollout_worker_base_cls,
 )
-from .worker_registry import RolloutWorkerRegistry
+from .worker_registry import RolloutWorkerRegistry, WorkerLifecycleState
 
 
 # Keep this as a Ray actor because Ray AgentLoop actors need a shared, cross-process handle to the same controller
@@ -69,6 +69,28 @@ class RolloutController:
     def get_weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
         """Return rollout endpoints that can receive weight update requests."""
         return self.registry.weight_update_targets()
+
+    def get_pending_weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
+        """Return recovered rollout endpoints waiting for weights."""
+        return tuple(
+            target
+            for target in self.registry.weight_update_targets()
+            if target.lifecycle_state == WorkerLifecycleState.PENDING_WEIGHTS
+        )
+
+    def inject_backend_crash_for_test(self, *, rank: int = 0) -> None:
+        """Crash one active rollout backend for the immediate-recovery test."""
+        worker = self.registry.active_entrypoint_by_rank(rank)
+        if worker is None:
+            raise RuntimeError(f"No active rollout request entrypoint found for test fault injection: rank={rank}.")
+
+        accepted = ray.get(
+            worker.actor.inject_backend_crash_for_test.remote(),  # type: ignore[attr-defined]
+            timeout=ROLLOUT_RAY_GET_TIMEOUT,
+        )
+        if not accepted:
+            raise RuntimeError(f"Rollout worker rejected test fault injection: rank={rank}, url={worker.url}.")
+        self.logger.warning(f"[ImmediateRecoveryExperiment] backend_crash_injected rank={rank} url={worker.url}")
 
     def register_active_workers_to_proxy(self) -> None:
         if self.proxy_manager is None:
@@ -120,6 +142,11 @@ class RolloutController:
                 f"Rollout request timed out after {self.config.rollout_timeout * self.timeout_multiplier} seconds."
             )
             return rollout_state
+        except Exception as e:
+            self.logger.exception(f"RolloutController.generate failed: session_id={session_id}")
+            rollout_state.status = Status.FAILED
+            rollout_state.error_msg = f"Rollout request failed: {type(e).__name__}: {str(e)[:1024]}"
+            return rollout_state
 
     def set_enable_partial_rollout(self, enable: bool) -> None:
         """Propagate enable_partial_rollout flag to all active workers."""
@@ -159,24 +186,48 @@ class RolloutController:
 
     async def restart_inactive_workers(self):
         """Restart inactive groups before a sync-step weight update."""
-        await asyncio.to_thread(self.health_manager.restart_inactive_workers)
+        groups = await asyncio.to_thread(self.health_manager.restart_inactive_workers)
+        return tuple(group.ranks for group in groups)
+
+    def mark_worker_groups_lifecycle_state(
+        self,
+        group_ranks: list[tuple[int, ...]],
+        source_state: WorkerLifecycleState,
+        target_state: WorkerLifecycleState,
+    ) -> None:
+        """Move selected worker groups from source_state to target_state.
+
+        Only groups whose current lifecycle state matches source_state are considered. When groups are moved to ACTIVE
+        or INACTIVE, the health manager is notified so routing and lifecycle listeners stay in sync.
+        """
+        groups_by_ranks = {group.ranks: group for group in self.registry.get_target_state_worker_groups(source_state)}
+        groups = tuple(groups_by_ranks[ranks] for ranks in group_ranks if ranks in groups_by_ranks)
+        updated_groups = self.registry.set_groups_state(
+            groups,
+            target_state,
+            source_state=source_state,
+        )
+        if target_state is WorkerLifecycleState.ACTIVE:
+            self.health_manager.notify_worker_group_recovered(updated_groups)
+        elif target_state is WorkerLifecycleState.INACTIVE:
+            self.health_manager.notify_worker_group_inactive(updated_groups)
 
     def continue_generation(self):
-        self._broadcast_to_active_workers("continue_generation")
+        self._broadcast_to_workers("continue_generation", WorkerLifecycleState.ACTIVE)
         self.health_manager.resume()
 
     def offload(self):
-        self._broadcast_to_active_workers("offload")
+        self._broadcast_to_workers("offload", WorkerLifecycleState.ACTIVE)
 
     def onload(self):
-        self._broadcast_to_active_workers("onload_weights")
-        self._broadcast_to_active_workers("onload_kvcache")
+        self._broadcast_to_workers("onload_weights", WorkerLifecycleState.ACTIVE)
+        self._broadcast_to_workers("onload_kvcache", WorkerLifecycleState.ACTIVE)
 
-    def onload_weights(self):
-        self._broadcast_to_active_workers("onload_weights")
+    def onload_weights(self, target_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE):
+        self._broadcast_to_workers("onload_weights", target_state)
 
-    def onload_kvcache(self):
-        self._broadcast_to_active_workers("onload_kvcache")
+    def onload_kvcache(self, target_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE):
+        self._broadcast_to_workers("onload_kvcache", target_state)
 
     def shutdown(self):
         """Shut down all rollout workers tracked by the controller."""
@@ -187,8 +238,8 @@ class RolloutController:
             timeout=ROLLOUT_RAY_GET_TIMEOUT,
         )
 
-    def _broadcast_to_active_workers(self, method_name: str, **kwargs):
-        workers = self.registry.active_workers()
+    def _broadcast_to_workers(self, method_name: str, target_state: WorkerLifecycleState, **kwargs):
+        workers = self.registry.get_target_state_workers(target_state)
         futures = [getattr(worker.actor, method_name).remote(**kwargs) for worker in workers]
         return ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
 

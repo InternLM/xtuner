@@ -32,6 +32,8 @@ class WorkerLifecycleState(str, Enum):
     INACTIVE = "inactive"
     # Temporarily owned by recovery shutdown/init/check_health.
     RECOVERING = "recovering"
+    # Server is healthy after recovery, but waiting for trainer-side weights..
+    PENDING_WEIGHTS = "pending_weights"
 
 
 @dataclass(frozen=True)
@@ -122,8 +124,24 @@ class RolloutWorkerRegistry:
 
     def active_workers(self) -> tuple[WorkerSnapshot, ...]:
         """Return workers whose lifecycle state is active."""
+        return self.get_target_state_workers(WorkerLifecycleState.ACTIVE)
+
+    def get_target_state_workers(self, target_state: WorkerLifecycleState) -> tuple[WorkerSnapshot, ...]:
+        """Return workers matching the requested lifecycle state."""
         with self._lock:
-            return tuple(worker for worker in self._workers.values() if worker.is_active())
+            return tuple(worker for worker in self._workers.values() if worker.lifecycle_state is target_state)
+
+    def get_target_state_worker_groups(self, target_state: WorkerLifecycleState) -> tuple[WorkerGroup, ...]:
+        """Return lifecycle groups containing workers in the requested
+        state."""
+        with self._lock:
+            worker_groups = self._build_worker_groups()
+            matched_groups = [
+                group
+                for group in worker_groups.values()
+                if any(worker.lifecycle_state is target_state for worker in group.workers)
+            ]
+            return tuple(sorted(matched_groups, key=lambda group: group.ranks))
 
     def active_entrypoints(self) -> tuple[WorkerSnapshot, ...]:
         """Return active workers that can receive rollout generation
@@ -170,6 +188,10 @@ class RolloutWorkerRegistry:
                 if any(worker.lifecycle_state is WorkerLifecycleState.INACTIVE for worker in group.workers)
             ]
             return tuple(sorted(inactive_groups, key=lambda group: group.ranks))
+
+    def pending_weights_worker_groups(self) -> tuple[WorkerGroup, ...]:
+        """Return lifecycle groups waiting for a rollout weight update."""
+        return self.get_target_state_worker_groups(WorkerLifecycleState.PENDING_WEIGHTS)
 
     def claim_inactive_groups_for_recovery(self) -> tuple[WorkerGroup, ...]:
         """Claim inactive worker groups by moving them to RECOVERING state."""
@@ -235,6 +257,33 @@ class RolloutWorkerRegistry:
                     "is not registered."
                 )
             return recorded_group
+
+    def set_groups_state(
+        self,
+        groups: Iterable[WorkerGroup],
+        target_state: WorkerLifecycleState,
+        *,
+        source_state: WorkerLifecycleState | None = None,
+    ) -> tuple[WorkerGroup, ...]:
+        """Move worker groups from source_state to target_state.
+
+        If source_state is provided, only workers currently in that state are updated.
+        """
+        with self._lock:
+            groups = tuple(groups)
+            for group in groups:
+                for rank in group.ranks:
+                    worker = self._workers.get(rank)
+                    if worker is not None and (source_state is None or worker.lifecycle_state is source_state):
+                        self._workers[rank] = replace(worker, lifecycle_state=target_state)
+            worker_groups = self._build_worker_groups()
+            recorded_groups = []
+            for group in groups:
+                recorded_group = worker_groups.get(group.ranks)
+                if recorded_group is None:
+                    continue
+                recorded_groups.append(recorded_group)
+            return tuple(recorded_groups)
 
     def weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
         """Return weight-update targets resolved with current runtime state."""

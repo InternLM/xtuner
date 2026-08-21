@@ -14,7 +14,7 @@ import ray
 
 from xtuner.v1.utils import get_logger
 
-from .worker_registry import RolloutWorkerRegistry, WorkerGroup, WorkerSnapshot
+from .worker_registry import RolloutWorkerRegistry, WorkerGroup, WorkerLifecycleState, WorkerSnapshot
 
 
 if TYPE_CHECKING:
@@ -36,6 +36,8 @@ __all__ = [
 
 class RolloutWorkerLifecycleListener(Protocol):
     def on_worker_group_inactive(self, group: WorkerGroup) -> None: ...
+
+    def on_worker_group_pending_weights(self, group: WorkerGroup) -> None: ...
 
     def on_worker_group_recovered(self, group: WorkerGroup) -> None: ...
 
@@ -210,33 +212,14 @@ class RolloutHealthManager:
             event_name="inactive",
             notify_listener=lambda listener, group: listener.on_worker_group_inactive(group),
         )
+        # TODO: Recovery runs synchronously on the health-check thread, so the next
+        # periodic health check waits until this restart finishes. Move restart to another thread.
+        self._restart_inactive_workers()
 
-    def restart_inactive_workers(self) -> None:
+    def restart_inactive_workers(self) -> tuple[WorkerGroup, ...]:
         """Synchronously restart inactive groups before the next sync-step
         weight update."""
-        recovered_groups: list[WorkerGroup] = []
-        groups_to_recover: tuple[WorkerGroup, ...] = ()
-
-        try:
-            with self._paused_lifecycle_operation():
-                groups_to_recover = self._registry.claim_inactive_groups_for_recovery()
-                if groups_to_recover:
-                    recovered_groups = self._restart_claimed_recovery_groups(groups_to_recover)
-        except _HealthManagerStopping:
-            return
-
-        if not groups_to_recover:
-            logger.info("No failed rollout workers detected during recovery.")
-            return
-
-        self._notify_worker_lifecycle_listeners(
-            recovered_groups,
-            event_name="recovered",
-            notify_listener=lambda listener, group: listener.on_worker_group_recovered(group),
-        )
-        inactive_workers = [f"rank={worker.rank}, url={worker.url}" for worker in self._registry.inactive_workers()]
-        if inactive_workers:
-            logger.error("inactive rollout workers before sync-step weight update: " + ", ".join(inactive_workers))
+        return self._restart_inactive_workers()
 
     def check_and_shutdown_inactive_workers(self) -> None:
         """Fail-fast health-check active workers, mark failures inactive, and
@@ -394,15 +377,39 @@ class RolloutHealthManager:
             group_recovery_results = self._restart_worker_groups(groups)
             self._checkpoint_not_stopping()
 
-            recovered_groups: list[WorkerGroup] = []
+            pending_weights_groups: list[WorkerGroup] = []
             for group in groups:
                 recovered = group_recovery_results.get(group.ranks, False)
-                recorded_group = self._registry.set_group_recovery_result(group, recovered=recovered)
                 if recovered:
+                    # The recovered server can accept a weight update, but must
+                    # stay out of rollout routing until the trainer pushes weights.
+                    logger.info(
+                        "[recovery-test] marking recovered rollout worker group pending_weight_update: "
+                        f"ranks={group.ranks}, workers=["
+                        + ", ".join(
+                            f"rank={worker.rank}, url={worker.url}, state={worker.lifecycle_state.value}"
+                            for worker in group.workers
+                        )
+                        + "]"
+                    )
+                    recorded_group = self._registry.set_groups_state(
+                        groups=(group,),
+                        target_state=WorkerLifecycleState.PENDING_WEIGHTS,
+                    )[0]
+                    logger.info(
+                        "[recovery-test] marked rollout worker group pending_weight_update: "
+                        f"ranks={recorded_group.ranks}, workers=["
+                        + ", ".join(
+                            f"rank={worker.rank}, url={worker.url}, state={worker.lifecycle_state.value}"
+                            for worker in recorded_group.workers
+                        )
+                        + "]"
+                    )
                     self._worker_health_failure_tracker.clear(group.ranks)
                     groups_needing_cleanup.pop(group.ranks, None)
-                    recovered_groups.append(recorded_group)
+                    pending_weights_groups.append(recorded_group)
                 else:
+                    recorded_group = self._registry.set_group_recovery_result(group, recovered=False)
                     groups_needing_cleanup.pop(group.ranks, None)
                     logger.error(
                         "Failed to restart rollout worker group; training can continue with remaining active "
@@ -411,7 +418,7 @@ class RolloutHealthManager:
                         + ", ".join(f"rank={worker.rank}, url={worker.url}" for worker in recorded_group.workers)
                         + "]"
                     )
-            return recovered_groups
+            return pending_weights_groups
         except BaseException:
             self._cleanup_unfinalized_recovery_groups(tuple(groups_needing_cleanup.values()))
             raise
@@ -483,7 +490,7 @@ class RolloutHealthManager:
             self._checkpoint_not_stopping()
             with self._skip_load_weights_during_restart(group):
                 self._checkpoint_not_stopping()
-                ray.get(
+                init_results = ray.get(
                     [
                         # reinit() reuses the server launch spec bound during
                         # controller startup.
@@ -492,9 +499,21 @@ class RolloutHealthManager:
                     ],
                     timeout=ROLLOUT_RAY_GET_TIMEOUT,
                 )
+                logger.info(
+                    "[recovery-test] reinit returned for rollout worker group "
+                    f"ranks={group.ranks}, init_results=["
+                    + ", ".join(
+                        f"rank={result.rank}, server_url={result.server_url}, session_url={result.session_url}"
+                        for result in init_results
+                    )
+                    + "]"
+                )
 
                 self._checkpoint_not_stopping()
                 health_results = self._check_workers_health(group.workers)
+                logger.info(
+                    f"[recovery-test] post-reinit health results for group ranks={group.ranks}: {health_results}"
+                )
                 unhealthy_ranks = [
                     worker.rank for worker in group.workers if not health_results.get(worker.rank, False)
                 ]
@@ -595,6 +614,50 @@ class RolloutHealthManager:
                 time.sleep(retry_interval_seconds)
 
         return False
+
+    def notify_worker_group_recovered(self, groups: Iterable[WorkerGroup]) -> None:
+        self._notify_worker_lifecycle_listeners(
+            groups,
+            event_name="recovered",
+            notify_listener=lambda listener, group: listener.on_worker_group_recovered(group),
+        )
+
+    def notify_worker_group_inactive(self, groups: Iterable[WorkerGroup]) -> None:
+        self._notify_worker_lifecycle_listeners(
+            groups,
+            event_name="inactive",
+            notify_listener=lambda listener, group: listener.on_worker_group_inactive(group),
+        )
+
+    def _restart_inactive_workers(self) -> tuple[WorkerGroup, ...]:
+        pending_weights_groups: tuple[WorkerGroup, ...] = ()
+        groups_to_recover: tuple[WorkerGroup, ...] = ()
+
+        try:
+            with self._paused_lifecycle_operation():
+                groups_to_recover = self._registry.claim_inactive_groups_for_recovery()
+                if groups_to_recover:
+                    pending_weights_groups = tuple(self._restart_claimed_recovery_groups(groups_to_recover))
+        except _HealthManagerStopping:
+            return ()
+
+        if not groups_to_recover:
+            return ()
+
+        self._notify_worker_lifecycle_listeners(
+            pending_weights_groups,
+            event_name="pending_weights",
+            notify_listener=lambda listener, group: listener.on_worker_group_pending_weights(group),
+        )
+
+        inactive_workers = [
+            f"rank={worker.rank}, url={worker.url}"
+            for worker in self._registry.inactive_workers()
+            if worker.lifecycle_state is WorkerLifecycleState.INACTIVE
+        ]
+        if inactive_workers:
+            logger.error("inactive rollout workers before sync-step weight update: " + ", ".join(inactive_workers))
+        return pending_weights_groups
 
     # ------------------------------------------------------------------
     # Worker lifecycle notifications
