@@ -950,6 +950,10 @@ class BaseRLTrainer:
 
         # 共卡训练前切换资源：检查 rollout -> offload rollout -> onload train。
         if offload_rollout_before_train:
+            ray.get(
+                self.rollout_controller.check_and_shutdown_inactive_workers.remote(),
+                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+            )
             ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         if onload_train_before_train:
             if getattr(self, "_train_nccl_suspended", False):
@@ -1606,6 +1610,11 @@ class RLColocateTrainer(BaseRLTrainer):
         self._cpu_resource_manager.log_initial_snapshot()
         set_cpu_resource_manager(self._cpu_resource_manager)
 
+        self._rollout_resources_available = threading.Event()
+        self._rollout_weight_update_lock = threading.Lock()
+        self._pending_rollout_weight_update_stop_event = threading.Event()
+        self._pending_rollout_weight_update_thread: threading.Thread | None = None
+
         if self._debug_rollout:
             if self._rollout_config.skip_load_weights:
                 self.logger.info(
@@ -1637,11 +1646,6 @@ class RLColocateTrainer(BaseRLTrainer):
                 "Debug train mode is enabled. Only training workers will be started and rollout weights will not be synchronized."
             )
             return
-
-        self._rollout_resources_available = threading.Event()
-        self._rollout_weight_update_lock = threading.Lock()
-        self._pending_rollout_weight_update_stop_event = threading.Event()
-        self._pending_rollout_weight_update_thread: threading.Thread | None = None
 
         # 先释放训练显存，再启动共卡 rollout worker。
         self.train_controller.offload(target="all")

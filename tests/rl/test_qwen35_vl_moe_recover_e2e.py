@@ -22,15 +22,6 @@ import unittest
 from pathlib import Path
 from typing import Any, Callable
 
-
-# These values are consumed while XTuner modules are imported.
-os.environ["XTUNER_DETERMINISTIC"] = "false"
-os.environ["XTUNER_USE_LMDEPLOY"] = "0"
-os.environ["XTUNER_USE_SGLANG"] = "1"
-os.environ["XTUNER_USE_VLLM"] = "0"
-os.environ["XTUNER_TEST_IMMEDIATE_RECOVERY"] = "1"
-os.environ["MASTER_PORT"] = "6000"
-
 import ray
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig

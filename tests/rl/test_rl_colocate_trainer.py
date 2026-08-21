@@ -19,6 +19,7 @@ Bad Tests:
 """
 
 import asyncio
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -112,6 +113,11 @@ class TestRLColocateTrainer(unittest.TestCase):
 
     def _make_trainer(self, agent_loop_manager, *, total_train_steps: int = 1, sync_weights_interval: int = 1):
         trainer = RLColocateTrainer.__new__(RLColocateTrainer)
+        trainer._rollout_resources_available = threading.Event()
+        trainer._rollout_weight_update_lock = threading.Lock()
+        trainer._pending_rollout_weight_update_stop_event = threading.Event()
+        trainer._pending_rollout_weight_update_thread: threading.Thread | None = None
+        trainer._rollout_config = SimpleNamespace(weight_transport_type='ipc')
         trainer.logger = MagicMock()
         trainer._total_train_steps = total_train_steps
         trainer._cur_step = 0
