@@ -381,3 +381,75 @@ class TestDecoupledMoEParamPlacements:
             _assert_placements(
                 params["layers.1.self_attn.q_proj.weight"], (f"{PREFIX}.fsdp", f"{PREFIX}.ep"), (Shard(0), Replicate())
             )
+
+
+class TestDecoupledFloat8Meshes:
+    """Tile-wise fp8 bookkeeping on the decoupled path: per-class FSDP chunk counts and reduce meshes."""
+
+    def test_reduce_meshes_follow_each_class_shard_stride(self) -> None:
+        from xtuner.v1.float8.config import Float8Config, ScalingGranularity
+
+        world_size, ep_size, rank = 64, 8, 37
+        with _fake_world(world_size, rank):
+            config = _build_model(ep_size).config.model_copy(
+                update={
+                    "hidden_size": 256,
+                    "n_routed_experts": 16,
+                    "moe_intermediate_size": 128,
+                    "attention": MHAConfig(num_attention_heads=4, num_key_value_heads=4, head_dim=64),
+                    "float8_cfg": Float8Config(
+                        scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+                        scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+                    ),
+                }
+            )
+            with torch.device("meta"):
+                model = MoE(config)
+            model.fully_shard(FSDPConfig(ep_size=ep_size, torch_compile=False, decouple_ep_fsdp=True))
+            params = _named_params(model)
+            handler = model.float8_handler
+            assert handler is not None
+
+            # dense q_proj (256, 256) is sharded 64 ways -> 4 local rows -> absmax reduced over 32 contiguous ranks
+            dense_local = tuple(params["layers.1.self_attn.q_proj.weight"].to_local().shape)
+            assert dense_local == (4, 256)
+            assert _ranks(handler.tilewise_reduce_mesh_mapping[dense_local]) == list(range(32, 64))
+            # experts: 16 experts x 256 rows = 4096 rows sharded (efsdp=8) x (ep=8) ways -> 64 local rows
+            # -> absmax reduced over 2 ranks that are `ep` apart (neighbours on the efsdp dim)
+            expert_local = tuple(params["layers.1.experts.fused_w1w3.weight"].to_local().shape)
+            assert expert_local == (64, 256)
+            assert handler.expert_tilewise_reduce_mesh_mapping is not None
+            assert _ranks(handler.expert_tilewise_reduce_mesh_mapping[expert_local]) == [37, 45]
+            assert dense_local not in handler.expert_tilewise_reduce_mesh_mapping
+            assert expert_local not in handler.tilewise_reduce_mesh_mapping
+
+            # "n*128+64" straddling blocks: dense neighbours are adjacent ranks, expert neighbours are `ep` apart
+            assert _ranks(handler.tilewise_reduce_mesh_devided_64) == [36, 37]
+            assert _ranks(handler.expert_tilewise_reduce_mesh_devided_64) == [37, 45]
+
+    def test_legacy_float8_meshes_unchanged(self) -> None:
+        from xtuner.v1.float8.config import Float8Config, ScalingGranularity
+
+        world_size, ep_size, rank = 64, 8, 37
+        with _fake_world(world_size, rank):
+            config = _build_model(ep_size).config.model_copy(
+                update={
+                    "hidden_size": 256,
+                    "n_routed_experts": 16,
+                    "moe_intermediate_size": 128,
+                    "attention": MHAConfig(num_attention_heads=4, num_key_value_heads=4, head_dim=64),
+                    "float8_cfg": Float8Config(
+                        scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+                        scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+                    ),
+                }
+            )
+            with torch.device("meta"):
+                model = MoE(config)
+            model.fully_shard(FSDPConfig(ep_size=ep_size, torch_compile=False))
+            handler = model.float8_handler
+            assert handler is not None
+            assert handler.expert_tilewise_reduce_mesh_mapping is None
+            assert handler.expert_tilewise_reduce_mesh_devided_64 is None
+            # legacy: every class is sharded on the same (fsdp=8, stride ep=8) mesh
+            assert _ranks(handler.tilewise_reduce_mesh_devided_64) == [37, 45]

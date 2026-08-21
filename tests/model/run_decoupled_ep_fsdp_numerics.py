@@ -27,6 +27,7 @@ from torch.distributed.tensor import DTensor
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 from xtuner.v1.config import AdamWConfig, FSDPConfig
 from xtuner.v1.engine.train_engine import TrainEngine
+from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.model.moe.moe import SequenceContext
@@ -145,7 +146,7 @@ def per_param_grad_norms(model: torch.nn.Module) -> dict[str, float]:
 
 
 def run_mode(
-    mode: dict[str, Any], hf_path: Path, steps: int, seq_len: int, lr: float, dispatcher: str
+    mode: dict[str, Any], hf_path: Path, steps: int, seq_len: int, lr: float, dispatcher: str, fp8: bool
 ) -> dict[str, Any]:
     rank = dist.get_rank()
     torch.cuda.reset_peak_memory_stats()
@@ -157,12 +158,16 @@ def run_mode(
     model_cfg.dispatcher = dispatcher
     model_cfg.compile_cfg = False
     model_cfg.mesh_prefix = f"numerics_{mode['name']}"
-    fsdp_cfg = FSDPConfig(
-        ep_size=mode["ep"],
-        decouple_ep_fsdp=mode["decouple"],
-        hsdp_sharding_size=mode["hsdp"],
-        torch_compile=False,
-    )
+    if fp8:
+        model_cfg.float8_cfg = Float8Config(
+            scaling_granularity_gemm=ScalingGranularity.TILEWISE,
+            scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+        )
+    fsdp_kwargs: dict[str, Any] = {"ep_size": mode["ep"], "hsdp_sharding_size": mode["hsdp"], "torch_compile": False}
+    if mode["decouple"]:
+        # Only pass the flag when set so the script also runs against checkouts that predate it.
+        fsdp_kwargs["decouple_ep_fsdp"] = True
+    fsdp_cfg = FSDPConfig(**fsdp_kwargs)
     optim_cfg = AdamWConfig(lr=lr)
 
     engine = TrainEngine(model_cfg=model_cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg)
@@ -197,6 +202,7 @@ def run_mode(
 
     warm = step_times[5:] if len(step_times) > 10 else step_times
     result["step_time_s"] = sum(warm) / len(warm)
+    result["step_times_s"] = step_times
     result["memory"]["peak_allocated_mib"] = (torch.cuda.max_memory_allocated() - base_allocated) / 2**20
     result["memory"]["peak_reserved_mib"] = torch.cuda.max_memory_reserved() / 2**20
 
@@ -215,6 +221,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--model-size", choices=tuple(MODEL_SIZES), default="tiny")
     parser.add_argument("--dispatcher", choices=("all2all", "deepep"), default="all2all")
+    parser.add_argument("--fp8", action="store_true", help="tile-wise float8 for linear and grouped linear")
     parser.add_argument("--hf-dir", type=str, default=None, help="where to build / reuse the tiny HF checkpoint")
     parser.add_argument("--out", type=str, required=True)
     args = parser.parse_args()
@@ -234,7 +241,7 @@ def main() -> None:
         mode = parse_mode(spec)
         if rank == 0:
             print(f"===== running mode {mode}", flush=True)
-        results.append(run_mode(mode, hf_dir, args.steps, args.seq_len, args.lr, args.dispatcher))
+        results.append(run_mode(mode, hf_dir, args.steps, args.seq_len, args.lr, args.dispatcher, args.fp8))
         dist.barrier()
         if rank == 0:
             last = results[-1]

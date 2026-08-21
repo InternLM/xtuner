@@ -564,6 +564,9 @@ class BaseModel(nn.Module):
     load_spec_mapping: dict[str, LoadSpec] = {}
     fsdp_mesh: DeviceMesh | None = None
     hsdp_mesh: DeviceMesh | None = None
+    # Only set by MoE models on the decoupled EP/FSDP path: the mesh routed experts are
+    # `fully_shard`ed on, `(efsdp,)` or `(replicate, efsdp)` with `efsdp = dp_shard / ep_size`.
+    expert_fsdp_mesh: DeviceMesh | None = None
     fsdp_config: FSDPConfig | None = None
     config: XTunerBaseModelConfig
 
@@ -1009,7 +1012,7 @@ class BaseModel(nn.Module):
             self._float8_handler = self.config.float8_cfg.build()
 
             if self.fsdp_mesh is not None:
-                self._float8_handler.build_reduce_mesh(self, self.fsdp_mesh)
+                self._float8_handler.build_reduce_mesh(self, self.fsdp_mesh, expert_fsdp_mesh=self.expert_fsdp_mesh)
         return self._float8_handler
 
     @torch.no_grad()
@@ -1917,8 +1920,30 @@ class BaseModel(nn.Module):
             return tensor_list
 
         fsdp_group = self.fsdp_mesh.get_group()
-        save_plan_list = [load_spec.plan_hf_save(gather_process_group=fsdp_group) for load_spec in load_spec_list]
+        expert_fsdp_group: dist.ProcessGroup | None = None
+        if self.expert_fsdp_mesh is not None:
+            # Decoupled EP/FSDP: routed experts are FSDP-sharded on the innermost (`efsdp`) dim of
+            # `expert_fsdp_mesh`, so their FSDP-only gather must use that group instead.
+            expert_fsdp_group = self.expert_fsdp_mesh.get_group(self.expert_fsdp_mesh.ndim - 1)
+        save_plan_list = [
+            load_spec.plan_hf_save(
+                gather_process_group=self._fsdp_gather_group(load_spec, fsdp_group, expert_fsdp_group)
+            )
+            for load_spec in load_spec_list
+        ]
         return unshard_tensors_for_hf_save(list(tensor_list), save_plan_list)
+
+    def _fsdp_gather_group(
+        self,
+        load_spec: LoadSpec,
+        fsdp_group: dist.ProcessGroup,
+        expert_fsdp_group: dist.ProcessGroup | None,
+    ) -> dist.ProcessGroup:
+        if expert_fsdp_group is None:
+            return fsdp_group
+        if any(self._is_same_process_group(shard.group, expert_fsdp_group) for shard in load_spec.shards):
+            return expert_fsdp_group
+        return fsdp_group
 
     @staticmethod
     def _is_same_process_group(left: dist.ProcessGroup, right: dist.ProcessGroup) -> bool:

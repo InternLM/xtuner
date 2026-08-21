@@ -201,9 +201,6 @@ class MoE(BaseModel):
     ep_mesh: DeviceMesh | None = None
     expert_tp_mesh: DeviceMesh | None = None
     ep_tp_mesh: DeviceMesh | None = None
-    # Only set on the decoupled EP/FSDP path: mesh used to `fully_shard` routed experts,
-    # i.e. `(efsdp,)` or `(replicate, efsdp)` with `efsdp = dp_shard / ep_size`.
-    expert_fsdp_mesh: DeviceMesh | None = None
     dense_decoder_layer_cls = DenseDecoderLayer
     moe_decoder_layer_cls = MoEDecoderLayer
     mtp_layer_cls = MTPLayer
@@ -1279,13 +1276,20 @@ class MoE(BaseModel):
         self._init_device_mesh(fsdp_config)
 
         if self.config.float8_cfg is not None:
-            if self.fsdp_config.decouple_ep_fsdp:
-                # Experts and dense params are sharded on meshes of different sizes; the fp8
-                # padding / tile-wise reduce meshes need per-class shard sizes (PR-3).
-                raise NotImplementedError("float8 training with `decouple_ep_fsdp` is not supported yet")
             # As we modify the shape of the model's parameters,
             # we need to reinitialize the load spec mapping.
-            Float8Handler.pad_for_fsdp(self, cast(DeviceMesh, self.fsdp_mesh), callback_after_pad=self._init_load_spec)
+            if self.fsdp_config.decouple_ep_fsdp:
+                # Routed experts are padded for `efsdp` FSDP chunks, everything else for `dp_shard`.
+                Float8Handler.pad_for_fsdp(
+                    self,
+                    cast(DeviceMesh, self.fsdp_mesh),
+                    callback_after_pad=self._init_load_spec,
+                    expert_fsdp_mesh=self.expert_fsdp_mesh,
+                )
+            else:
+                Float8Handler.pad_for_fsdp(
+                    self, cast(DeviceMesh, self.fsdp_mesh), callback_after_pad=self._init_load_spec
+                )
 
         # Just for narrowing the type of self.fsdp_mesh and self.ep_mesh
         assert self.fsdp_mesh is not None
