@@ -1022,9 +1022,12 @@ class CheckpointEngineWeightTransport:
             f"[checkpoint_engine] register train checkpoint name={name} "
             f"rank={self.rank} tensors={len(shard)}/{len(all_tensors)}"
         )
-        self._ps.register_checkpoint(name, files=[], named_tensors=shard, use_shared_memory_pool=True)
-        if self._sync_after_register:
-            DEVICE_MODULE.synchronize()
+        try:
+            self._ps.register_checkpoint(name, files=[], named_tensors=shard, use_shared_memory_pool=True)
+            if self._sync_after_register:
+                DEVICE_MODULE.synchronize()
+        except Exception:
+            self.logger.error("[checkpoint_engine] register_checkpoint failed rank={self.rank} name={name}")
         self._checkpoint_name = name
 
     def _make_req_func(self, targets: Sequence[RolloutWeightUpdateTarget]):
