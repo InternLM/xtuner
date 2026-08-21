@@ -1,5 +1,7 @@
 """Activation checkpointing entry points."""
 
+from collections import deque
+from contextvars import ContextVar
 from typing import Any, Callable
 
 import torch
@@ -9,7 +11,58 @@ from torch.utils._pytree import TreeSpec, tree_flatten, tree_unflatten
 from torch.utils.checkpoint import checkpoint
 
 
-__all__ = ["apply_activation_checkpointing"]
+__all__ = ["apply_activation_checkpointing", "reuse_during_recompute"]
+
+
+class _ActivationCheckpointFrame:
+    """Reusable outputs owned by one checkpoint invocation."""
+
+    def __init__(self) -> None:
+        self.outputs: dict[Callable[..., Any], deque[Any]] = {}
+
+    def save(self, function: Callable[..., Any], output: Any) -> None:
+        self.outputs.setdefault(function, deque()).append(output)
+
+    def replay(self, function: Callable[..., Any]) -> Any:
+        queue = self.outputs.get(function)
+        if not queue:
+            raise RuntimeError("Checkpoint replay has no matching reusable output from the original forward")
+        return queue.popleft()
+
+    def assert_consumed(self) -> None:
+        if any(self.outputs.values()):
+            raise RuntimeError("Checkpoint replay did not consume every reusable output from the original forward")
+
+
+# The bool is true only while a reentrant checkpoint invocation is replaying.
+_CURRENT_ACTIVATION_CHECKPOINT: ContextVar[tuple[_ActivationCheckpointFrame, bool] | None] = ContextVar(
+    "xtuner_current_activation_checkpoint",
+    default=None,
+)
+
+
+@torch.compiler.disable(recursive=False)
+def reuse_during_recompute(function: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Run a no-grad callable once and reuse its output during checkpoint
+    replay.
+
+    Outside :func:`apply_activation_checkpointing`, this is a direct call. Inside a
+    checkpoint invocation, calls to the same stable callable are matched in FIFO order.
+    """
+    state = _CURRENT_ACTIVATION_CHECKPOINT.get()
+    if state is None:
+        return function(*args, **kwargs)
+
+    frame, is_replay = state
+    if is_replay:
+        return frame.replay(function)
+
+    output = function(*args, **kwargs)
+    flat_output, _ = tree_flatten(output)
+    if any(isinstance(leaf, torch.Tensor) and leaf.requires_grad for leaf in flat_output):
+        raise RuntimeError("reuse_during_recompute only supports Tensor outputs that do not require gradients")
+    frame.save(function, output)
+    return output
 
 
 def apply_activation_checkpointing(
@@ -65,17 +118,28 @@ def _checkpoint_pytree(
         checkpoint_entry = torch.empty(0, device=first_tensor.device, requires_grad=True)
         checkpoint_inputs = [checkpoint_entry, *flat_inputs]
     output_spec: TreeSpec | None = None
+    frame = _ActivationCheckpointFrame()
 
+    @torch.compiler.disable(recursive=False)
     def call_with_original_signature(*replayed_inputs: Any) -> tuple[Any, ...]:
         nonlocal output_spec
         if needs_grad_entry:
             replayed_inputs = replayed_inputs[1:]
         replayed_args, replayed_kwargs = tree_unflatten(list(replayed_inputs), input_spec)
-        flat_outputs, current_output_spec = tree_flatten(function(*replayed_args, **replayed_kwargs))
+        is_replay = torch.is_grad_enabled()
+        token = _CURRENT_ACTIVATION_CHECKPOINT.set((frame, is_replay))
+        try:
+            output = function(*replayed_args, **replayed_kwargs)
+        finally:
+            _CURRENT_ACTIVATION_CHECKPOINT.reset(token)
+
+        flat_outputs, current_output_spec = tree_flatten(output)
         if output_spec is None:
             output_spec = current_output_spec
         elif current_output_spec != output_spec:
             raise RuntimeError("Checkpoint replay returned a different output PyTree structure")
+        if is_replay:
+            frame.assert_consumed()
         return tuple(flat_outputs)
 
     flat_outputs = checkpoint(
