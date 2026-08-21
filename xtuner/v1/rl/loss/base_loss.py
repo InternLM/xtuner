@@ -106,7 +106,6 @@ class BaseRLLossConfig(CELossConfig):
                 - shifted_labels (torch.Tensor): The shifted labels
                 - advantages (torch.Tensor): Advantage estimates
                 - rollout_logprobs (torch.Tensor | None): Rollout log probabilities
-                - teacher_logprobs (torch.Tensor | None): Teacher log probabilities for OPD
                 - old_logprobs (torch.Tensor | None): Old policy log probabilities (optional, can be set later)
                 - rollout_is_weights (torch.Tensor | None): Importance sampling weights
                 - ref_logprobs (torch.Tensor | None): Reference model log probabilities
@@ -123,7 +122,6 @@ class BaseRLLossConfig(CELossConfig):
         shifted_labels = data["shifted_labels"]
         advantages = data["advantages"]
         rollout_logprobs = data.get("rollout_logprobs", None)
-        teacher_logprobs = data.get("teacher_logprobs", None)
         old_logprobs = data.get("old_logprobs", None)
         rollout_is_weights = data.get("rollout_is_weights", None)
         ref_logprobs = data.get("ref_logprobs", None)
@@ -134,7 +132,6 @@ class BaseRLLossConfig(CELossConfig):
             old_logprobs=old_logprobs,
             advantages=advantages,
             rollout_logprobs=rollout_logprobs,
-            teacher_logprobs=teacher_logprobs,
             is_weights=rollout_is_weights,
             ref_logprobs=ref_logprobs,
         ).to(DEVICE)
@@ -156,12 +153,10 @@ class BaseRLLossKwargs(CELossKwargs):
         ref_logprobs (torch.Tensor | None): Reference log probabilities for KL penalty, if used.
         kl_loss_weight (torch.Tensor | None): Weights for each token in the KL loss computation, if used.
         rollout_logprobs (torch.Tensor | None): Rollout log probabilities from inference engine, used for importance sampling.
-        teacher_logprobs (torch.Tensor | None): Teacher log probabilities used to apply the OPD KL penalty.
         is_weights (torch.Tensor | None): Importance sampling weights. If None, importance sampling is not used.
     """
 
     rollout_logprobs: torch.Tensor | None = None
-    teacher_logprobs: torch.Tensor | None = None
     advantages: torch.Tensor
     old_logprobs: torch.Tensor | None = None
     policy_loss_weight: torch.Tensor | None = None
@@ -177,8 +172,6 @@ class BaseRLLossKwargs(CELossKwargs):
         self.advantages = sp_split(self.advantages, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = sp_split(self.rollout_logprobs, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
-        if self.teacher_logprobs is not None:
-            self.teacher_logprobs = sp_split(self.teacher_logprobs, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
         if self.is_weights is not None:
             self.is_weights = sp_split(self.is_weights, sp_mesh=sp_mesh, split_dim=1, padding_value=1.0)
         # 1. 这里不用对old_logprobs和ref_logprobs进行sp_split，因为他是模型 fwd 生成的，
@@ -199,8 +192,6 @@ class BaseRLLossKwargs(CELossKwargs):
             self.ref_logprobs = self.ref_logprobs.to(device)
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = self.rollout_logprobs.to(device)
-        if self.teacher_logprobs is not None:
-            self.teacher_logprobs = self.teacher_logprobs.to(device)
         if self.is_weights is not None:
             self.is_weights = self.is_weights.to(device)
         if self.global_grad_tokens is not None:
@@ -313,4 +304,5 @@ def finalize_train_policy_metrics(extra_info_dict: dict[str, Any], device: str |
     extra_info_dict["reduced_train_policy_ratio_min"] = ratio_min
     # legacy metric，keep here
     extra_info_dict["max_ratio"] = ratio_max
+
     return extra_info_dict

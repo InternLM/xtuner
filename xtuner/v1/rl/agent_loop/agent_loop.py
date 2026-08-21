@@ -11,13 +11,13 @@ from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
-from xtuner.v1.rl.judger import Judger
-from xtuner.v1.rl.on_policy_distillation import (
-    OPDConfig,
-    TeacherLogprobClient,
-    route_teacher_client,
+from xtuner.v1.rl.distillation import (
+    DistillationConfig,
+    RolloutTeacherClient,
+    route_rollout_teacher_client,
     validate_opd_sample_params,
 )
+from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.constants import AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
 from xtuner.v1.rl.trace.rollout_api import (
@@ -52,7 +52,7 @@ class AgentLoopConfig(ABC, BaseModel):
         judger: Judger | None = None,
         logger=None,
         *,
-        opd_config: OPDConfig | None = None,
+        distillation_config: DistillationConfig | None = None,
     ) -> AgentLoopSpec:
         if self.cpu_resources is None:
             agent_loop = self.build_local(
@@ -60,7 +60,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 judger=judger,
                 logger=logger,
             )
-            agent_loop.configure_opd(opd_config)
+            agent_loop.configure_distillation(distillation_config)
             return agent_loop
 
         concurrency = AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
@@ -77,7 +77,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 concurrency=concurrency,
                 judger=judger,
                 logger=logger,
-                opd_config=opd_config,
+                distillation_config=distillation_config,
             )
         return self._build_ray_actor(
             rollout_controller=rollout_controller,
@@ -85,7 +85,7 @@ class AgentLoopConfig(ABC, BaseModel):
             concurrency=concurrency,
             judger=judger,
             logger=logger,
-            opd_config=opd_config,
+            distillation_config=distillation_config,
         )
 
     @abstractmethod
@@ -104,7 +104,7 @@ class AgentLoopConfig(ABC, BaseModel):
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
-        opd_config: OPDConfig | None = None,
+        distillation_config: DistillationConfig | None = None,
     ) -> RayAgentLoopProxy:
         ray_agent_loop = ray.remote(
             concurrency_groups={
@@ -123,7 +123,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 actor_num_cpus=cpu_resources.num_cpus_per_worker,
                 actor_memory=cpu_resources.cpu_memory_per_worker,
                 capture_child_tasks=True,
-                opd_config=opd_config,
+                distillation_config=distillation_config,
             ),
         )
 
@@ -136,7 +136,7 @@ class AgentLoopConfig(ABC, BaseModel):
         judger: Judger | None = None,
         logger=None,
         start_bundle_idx: int = 0,
-        opd_config: OPDConfig | None = None,
+        distillation_config: DistillationConfig | None = None,
     ) -> list[RayAgentLoopProxy]:
         ray_agent_loop = ray.remote(
             concurrency_groups={
@@ -156,7 +156,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 actor_num_cpus_per_worker=cpu_resources.num_cpus_per_worker,
                 actor_memory_per_worker=cpu_resources.cpu_memory_per_worker,
                 capture_child_tasks=True,
-                opd_config=opd_config,
+                distillation_config=distillation_config,
             ),
         )
 
@@ -169,7 +169,7 @@ class AgentLoopConfig(ABC, BaseModel):
         judger: Judger | None = None,
         logger=None,
         start_bundle_idx: int = 0,
-        opd_config: OPDConfig | None = None,
+        distillation_config: DistillationConfig | None = None,
     ) -> RouterAgentLoop:
         return RouterAgentLoop(
             workers=self._build_ray_actors(
@@ -180,7 +180,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 judger=judger,
                 logger=logger,
                 start_bundle_idx=start_bundle_idx,
-                opd_config=opd_config,
+                distillation_config=distillation_config,
             ),
             rollout_ctl=rollout_controller,
         )
@@ -208,16 +208,18 @@ class AgentLoop(ABC):
         else:
             self.logger = logger
         self._judger_pause_event = asyncio.Event()
-        self.teacher_clients: dict[str, TeacherLogprobClient] = {}
+        self.teacher_clients: dict[str, RolloutTeacherClient] = {}
         self.data_source_teacher_map: dict[str, str] = {}
 
-    def configure_opd(self, opd_config: OPDConfig | None) -> None:
-        if opd_config is None:
+    def configure_distillation(self, distillation_config: DistillationConfig | None) -> None:
+        if distillation_config is None:
             return
 
         validate_opd_sample_params(self.sample_params)
-        self.teacher_clients = {teacher.name: TeacherLogprobClient(teacher) for teacher in opd_config.teachers}
-        self.data_source_teacher_map = dict(opd_config.data_source_teacher_map)
+        self.teacher_clients = {
+            teacher.name: RolloutTeacherClient(teacher) for teacher in distillation_config.rollout_teachers
+        }
+        self.data_source_teacher_map = dict(distillation_config.data_source_teacher_map)
 
     @abstractmethod
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
@@ -243,7 +245,7 @@ class AgentLoop(ABC):
         **kwargs,
     ) -> list[RolloutState]:
         if is_valid_sample_func is None and self.teacher_clients:
-            teacher = route_teacher_client(
+            teacher = route_rollout_teacher_client(
                 rollout_state[0],
                 data_source_teacher_map=self.data_source_teacher_map,
                 teacher_clients=self.teacher_clients,
@@ -269,7 +271,7 @@ class AgentLoop(ABC):
                 state.status = Status.FILTERED
             return group
         if self.teacher_clients:
-            teacher = route_teacher_client(
+            teacher = route_rollout_teacher_client(
                 group[0],
                 data_source_teacher_map=self.data_source_teacher_map,
                 teacher_clients=self.teacher_clients,
@@ -398,14 +400,14 @@ class AgentLoopActor:
         judger: Judger | None = None,
         logger=None,
         *,
-        opd_config: OPDConfig | None = None,
+        distillation_config: DistillationConfig | None = None,
     ):
         self.agent_loop = agent_loop_config.build_local(
             rollout_controller=rollout_controller,
             judger=judger,
             logger=logger,
         )
-        self.agent_loop.configure_opd(opd_config)
+        self.agent_loop.configure_distillation(distillation_config)
 
     @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:

@@ -9,8 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop import AgentLoopConfig
+from xtuner.v1.rl.distillation import DistillationConfig
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
-from xtuner.v1.rl.on_policy_distillation import OPDConfig
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.utils import get_logger
@@ -131,7 +131,7 @@ class AgentLoopManagerConfig(BaseModel):
         replay_buffer: ReplayBuffer,
         logger=None,
         sync_weights_interval: int = 1,
-        opd_config: OPDConfig | None = None,
+        distillation_config: DistillationConfig | None = None,
     ) -> "AgentLoopManager":
         tasks = self.tasks if isinstance(self.tasks, list) else [self.tasks]
         if not tasks:
@@ -148,7 +148,7 @@ class AgentLoopManagerConfig(BaseModel):
                 rollout_controller=rollout_controller,
                 judger=build_judger(task_cfg.judger_config) if task_cfg.judger_config is not None else None,
                 logger=logger,
-                opd_config=opd_config,
+                distillation_config=distillation_config,
             )
             produce_strategy = task_cfg.produce_strategy_config.build(
                 sync_weights_interval=sync_weights_interval,

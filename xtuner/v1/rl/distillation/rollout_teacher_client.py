@@ -5,82 +5,17 @@ import math
 import os
 import time
 from hashlib import blake2b
-from pathlib import Path
 from typing import Any, Literal, cast
 
 import httpx
-import torch
-from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
-from xtuner.v1.rl.loss.base_loss import BaseRLLossContext
 from xtuner.v1.utils import get_logger
+
+from .config import RolloutTeacherConfig
 
 
 logger = get_logger()
-
-
-class OPDTeacherLaunchConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    model_path: str | Path
-    num_workers: int = Field(default=1, gt=0)
-    server_port: int = Field(gt=0, le=65535)
-    dtype: Literal["auto", "float16", "bfloat16"] = "bfloat16"
-    tensor_parallel_size: int = Field(default=1, gt=0)
-    expert_parallel_size: int = Field(default=1, gt=0)
-    context_length: int | None = Field(default=None, gt=0)
-    max_batch_size: int | None = Field(default=None, gt=0)
-    log_level: Literal["critical", "error", "warning", "info", "debug"] | None = None
-    chunked_prefill_size: int | None = Field(default=4096, gt=0)
-    max_prefill_token_num: int | None = Field(default=4096, gt=0)
-    gpu_memory_utilization: float = Field(default=0.6, gt=0.0, le=1.0)
-
-
-class OPDTeacherConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    num_replicas: int = Field(default=1, gt=0)
-    endpoints: list[str] = Field(default_factory=list)
-    api_key: str | None = None
-    request_timeout_s: float = Field(default=1200.0, gt=0.0)
-    max_retry_per_sample: int = Field(default=2, ge=0)
-    max_concurrency: int = Field(default=128, gt=0)
-    enable_prefix_caching: bool = False
-    launch_config: OPDTeacherLaunchConfig | None = None
-
-
-class OPDConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    mode: Literal["pg-opd"] = "pg-opd"
-    task_adv_weight: float = Field(default=0.0, ge=0.0)
-    opd_adv_weight: float = Field(default=1.0, ge=0.0)
-    teachers: list[OPDTeacherConfig] = Field(min_length=1)
-    data_source_teacher_map: dict[str, str] = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def validate_teacher_names(self) -> OPDConfig:
-        teacher_names = [teacher.name for teacher in self.teachers]
-        if len(teacher_names) != len(set(teacher_names)):
-            raise ValueError("OPD teacher names must be unique")
-        unknown_teachers = set(self.data_source_teacher_map.values()) - set(teacher_names)
-        if unknown_teachers:
-            raise ValueError(f"data_source_teacher_map references unknown teachers: {sorted(unknown_teachers)}")
-        return self
-
-    def resolve_teacher_endpoints(
-        self,
-        endpoint_map: dict[str, list[str]],
-    ) -> OPDConfig:
-        teachers = [
-            teacher
-            if teacher.launch_config is None
-            else teacher.model_copy(update={"endpoints": endpoint_map[teacher.name]})
-            for teacher in self.teachers
-        ]
-        return self.model_copy(update={"teachers": teachers})
 
 
 def validate_opd_sample_params(sample_params: SampleParams) -> None:
@@ -104,7 +39,7 @@ def validate_opd_sample_params(sample_params: SampleParams) -> None:
         raise ValueError("PG-OPD requires return_logprob=True and return_token_ids=True")
 
 
-class TeacherReplicaRouter:
+class RolloutTeacherReplicaRouter:
     """Resolve a physical teacher replica for one scoring request."""
 
     def __init__(self, num_replicas: int) -> None:
@@ -126,16 +61,16 @@ class TeacherReplicaRouter:
         return int.from_bytes(digest, byteorder="big") % self._num_replicas
 
 
-class TeacherLogprobClient:
+class RolloutTeacherClient:
     """Asynchronous teacher client scoped to one AgentLoop."""
 
-    def __init__(self, config: OPDTeacherConfig) -> None:
+    def __init__(self, config: RolloutTeacherConfig) -> None:
         self.config = config
         self.name = config.name
         self.backend = self._resolve_backend_from_env()
         self.urls = [f"{endpoint.rstrip('/')}/generate" for endpoint in config.endpoints]
         self._semaphores = [asyncio.Semaphore(config.max_concurrency) for _ in self.urls]
-        self._replica_router = TeacherReplicaRouter(len(self.urls))
+        self._replica_router = RolloutTeacherReplicaRouter(len(self.urls))
 
         headers = {"Content-Type": "application/json"}
         if config.api_key is not None:
@@ -151,17 +86,11 @@ class TeacherLogprobClient:
                 state.status = Status.FAILED
                 state.error_msg = f"Teacher {self.name!r} scoring requires non-empty prompt_ids and response_ids"
                 return state
-            try:
-                routed_replica_idx = self._replica_router.resolve_replica_idx(
-                    teacher_name=self.name,
-                    data_source=str(state.extra_fields.get("origin_data_source", "")),
-                    group_id=state.group_id,
-                )
-            except ValueError as exc:
-                state.status = Status.FAILED
-                state.error_msg = f"Teacher {self.name!r} replica routing failed: {exc}"
-                logger.warning(state.error_msg)
-                return state
+            routed_replica_idx = self._replica_router.resolve_replica_idx(
+                teacher_name=self.name,
+                data_source=str(state.extra_fields.get("origin_data_source", "")),
+                group_id=state.group_id,
+            )
             image_data = state.extra_fields.get("image_data")
             expanded_prompt_len = None
             # Recompute the final prompt token so the first response token's
@@ -180,7 +109,8 @@ class TeacherLogprobClient:
                 image_data=image_data,
             )
 
-            for attempt_idx in range(self.config.max_retry_per_sample + 1):
+            attempt_idx = 0
+            while True:
                 replica_idx = (routed_replica_idx + attempt_idx) % len(self.urls)
                 url = self.urls[replica_idx]
                 try:
@@ -206,8 +136,8 @@ class TeacherLogprobClient:
                         )
                         logger.warning(state.error_msg)
                         return state
+                    attempt_idx += 1
                     await asyncio.sleep(0.1)
-            raise RuntimeError("Teacher scoring retry loop exited unexpectedly")
         finally:
             state.extra_fields["teacher_score_time_s"] = time.perf_counter() - start
 
@@ -218,7 +148,7 @@ class TeacherLogprobClient:
         use_vllm = os.environ.get("XTUNER_USE_VLLM", "0") == "1"
 
         if use_vllm:
-            raise RuntimeError("TeacherLogprobClient supports only SGLang or LMDeploy, not vLLM")
+            raise RuntimeError("RolloutTeacherClient supports only SGLang or LMDeploy, not vLLM")
         if use_sglang == use_lmdeploy:
             raise RuntimeError("Exactly one of XTUNER_USE_SGLANG and XTUNER_USE_LMDEPLOY must be set to 1")
         return "sglang" if use_sglang else "lmdeploy"
@@ -316,7 +246,7 @@ class TeacherLogprobClient:
         logprob_start_len: int,
         expanded_prompt_len: int | None = None,
     ) -> list[Any]:
-        raw_logprobs = TeacherLogprobClient._get_input_token_logprobs(response)
+        raw_logprobs = RolloutTeacherClient._get_input_token_logprobs(response)
         prompt_token_count = response.json()["meta_info"]["prompt_tokens"]
         if expanded_prompt_len is not None:
             expected_prompt_token_count = expanded_prompt_len + len(response_ids)
@@ -346,7 +276,7 @@ class TeacherLogprobClient:
         logprob_start_len: int,
         expanded_prompt_len: int | None = None,
     ) -> list[Any]:
-        raw_logprobs = TeacherLogprobClient._get_input_token_logprobs(response)
+        raw_logprobs = RolloutTeacherClient._get_input_token_logprobs(response)
         prompt_token_count = response.json()["meta_info"]["prompt_tokens"]
         if expanded_prompt_len is not None:
             expected_prompt_token_count = expanded_prompt_len + len(response_ids)
@@ -398,35 +328,12 @@ class TeacherLogprobClient:
         return teacher_tokens, teacher_logprobs
 
 
-def route_teacher_client(
+def route_rollout_teacher_client(
     state: RolloutState,
     *,
     data_source_teacher_map: dict[str, str],
-    teacher_clients: dict[str, TeacherLogprobClient],
-) -> TeacherLogprobClient:
+    teacher_clients: dict[str, RolloutTeacherClient],
+) -> RolloutTeacherClient:
     data_source = state.extra_fields["origin_data_source"]
     teacher_name = data_source_teacher_map[data_source]
     return teacher_clients[teacher_name]
-
-
-def apply_opd_kl_to_advantages(
-    loss_ctx: BaseRLLossContext,
-    *,
-    config: OPDConfig,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply the OPD reverse-KL penalty and return signed and absolute valid-
-    token sums."""
-    loss_kwargs = loss_ctx.loss_kwargs
-    old_logprobs = cast(torch.Tensor, loss_kwargs.old_logprobs)
-    teacher_logprobs = cast(torch.Tensor, loss_kwargs.teacher_logprobs)
-    response_mask = loss_kwargs.shifted_labels != loss_ctx.loss_cfg.ignore_idx
-    reverse_kl = old_logprobs - teacher_logprobs
-    reverse_kl_sum = (reverse_kl * response_mask).sum().detach()
-    abs_logprob_loss_sum = (reverse_kl.abs() * response_mask).sum().detach()
-    loss_kwargs.advantages = torch.where(
-        response_mask,
-        loss_kwargs.advantages - config.opd_adv_weight * reverse_kl,
-        loss_kwargs.advantages,
-    )
-    loss_kwargs.teacher_logprobs = None
-    return reverse_kl_sum, abs_logprob_loss_sum
