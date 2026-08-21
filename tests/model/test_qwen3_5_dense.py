@@ -99,7 +99,7 @@ class TestQwen3_5_VLDense(DeterministicDDPTestCase):
             loss_hf.backward()
 
             x_xt = base.clone().requires_grad_(True)
-            o_xt = xt_layer(x_xt, position_embeddings=(cos, sin), seq_ctx=seq_ctx)
+            o_xt = xt_layer(x_xt, position_embeddings=(cos, sin), seq_ctx=seq_ctx)["hidden_states"]
             loss_xt = F.cross_entropy(F.linear(model.norm(o_xt), model.lm_head.weight).reshape(-1, cfg.vocab_size), labels)
             loss_xt.backward()
 
