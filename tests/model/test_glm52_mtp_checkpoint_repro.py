@@ -20,8 +20,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.base import ModelItem
-from xtuner.v1.model.moe.glm52 import Glm52MoEConfig
-from xtuner.v1.module.attention import DSAMLAConfig
+from xtuner.v1.model.moe.glm52 import DSAMLAConfig, Glm52MoEConfig
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 

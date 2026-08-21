@@ -1,6 +1,6 @@
 """Multi-Token Prediction (MTP) Block implementation."""
 
-from typing import Callable
+from typing import Callable, cast
 
 import torch
 import torch.nn as nn
@@ -19,6 +19,8 @@ from .utils import roll_sequence_context
 MTPDepthOutput = MoEDecoderLayerOutput
 """One MTP depth produces the same keyed outputs as the decoder layer it
 wraps."""
+
+MTPInternalOutput = MoEDecoderLayerOutput | MoEDecoderLayerMicroBatchOutput
 
 
 class MTPBlock(nn.Module):
@@ -175,10 +177,11 @@ class MTPBlock(nn.Module):
         mtp_outputs: list[MTPDepthOutput] = []
         current_hidden_states = hidden_states.detach() if self.mtp_config.detach_mtp_inputs else hidden_states
         current_seq_ctx = seq_ctx
+        previous_layer_results: MTPInternalOutput | None = None
 
         num_steps = self.mtp_config.num_layers
         for step in range(num_steps):
-            layer = self.layers[0] if self.mtp_config.share_weights else self.layers[step]
+            layer = cast(MTPLayer, self.layers[0] if self.mtp_config.share_weights else self.layers[step])
             # Roll each packed sequence independently so we get the (i+k)-th token while
             # respecting per-sequence boundaries inside the packed batch.
             current_seq_ctx = roll_sequence_context(current_seq_ctx, shifts=-1)
@@ -187,16 +190,51 @@ class MTPBlock(nn.Module):
             if self.mtp_config.detach_mtp_inputs:
                 future_embeddings = future_embeddings.detach()
 
-            layer_results: MTPDepthOutput = layer(
-                current_hidden_states,
-                future_embeddings=future_embeddings,
-                position_embeddings=position_embeddings,
-                seq_ctx=current_seq_ctx,
+            layer_results = cast(
+                MoEDecoderLayerOutput,
+                self._call_decoder_layer(
+                    layer,
+                    current_hidden_states,
+                    previous_layer_results=previous_layer_results,
+                    future_embeddings=future_embeddings,
+                    position_embeddings=position_embeddings,
+                    seq_ctx=current_seq_ctx,
+                ),
             )
+            previous_layer_results = layer_results
             current_hidden_states = layer_results["hidden_states"]
-            mtp_outputs.append(layer_results)
+            mtp_outputs.append(
+                {
+                    "hidden_states": current_hidden_states,
+                    "router_logits": layer_results["router_logits"],
+                    "router_weights": layer_results["router_weights"],
+                    "router_topk_ids": layer_results["router_topk_ids"],
+                }
+            )
 
         return mtp_outputs
+
+    def _call_decoder_layer(
+        self,
+        layer: MTPLayer,
+        hidden_states: torch.Tensor | list[torch.Tensor],
+        *,
+        previous_layer_results: MTPInternalOutput | None,
+        future_embeddings: torch.Tensor | list[torch.Tensor],
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
+        seq_ctx: SequenceContext | list[SequenceContext],
+    ) -> MTPInternalOutput:
+        """Call one MTP decoder layer.
+
+        Subclasses can consume model-specific fields from ``previous_layer_results`` while the
+        generic MTP input and public output stay model-agnostic.
+        """
+        return layer(
+            hidden_states,
+            future_embeddings=future_embeddings,
+            position_embeddings=position_embeddings,
+            seq_ctx=seq_ctx,
+        )
 
     def _micro_batch_forward(
         self,
@@ -212,20 +250,27 @@ class MTPBlock(nn.Module):
         outputs_per_mb: list[list[MTPDepthOutput]] = [[] for _ in range(n)]
         current_hidden_states_list = list(hidden_states_list)
         current_seq_ctx_list = list(seq_ctx_list)
+        previous_layer_results: MTPInternalOutput | None = None
 
         num_steps = self.mtp_config.num_layers
         for step in range(num_steps):
-            layer = self.layers[0] if self.mtp_config.share_weights else self.layers[step]
+            layer = cast(MTPLayer, self.layers[0] if self.mtp_config.share_weights else self.layers[step])
 
             current_seq_ctx_list = [roll_sequence_context(ctx, shifts=-1) for ctx in current_seq_ctx_list]
             future_embeddings_list = [self._embed_future(ctx, embed_tokens_fn) for ctx in current_seq_ctx_list]
 
-            layer_results: MoEDecoderLayerMicroBatchOutput = layer(
-                current_hidden_states_list,
-                future_embeddings=future_embeddings_list,
-                position_embeddings=position_embeddings_list,
-                seq_ctx=current_seq_ctx_list,
+            layer_results = cast(
+                MoEDecoderLayerMicroBatchOutput,
+                self._call_decoder_layer(
+                    layer,
+                    current_hidden_states_list,
+                    previous_layer_results=previous_layer_results,
+                    future_embeddings=future_embeddings_list,
+                    position_embeddings=position_embeddings_list,
+                    seq_ctx=current_seq_ctx_list,
+                ),
             )
+            previous_layer_results = layer_results
 
             for mb_idx in range(n):
                 outputs_per_mb[mb_idx].append(

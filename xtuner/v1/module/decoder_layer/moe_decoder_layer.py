@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Literal, Protocol, TypeAlias, TypedDict, cast
+from typing import Callable, Literal, Protocol, TypeAlias, TypedDict, cast
 
 import torch
 import torch.nn as nn
@@ -367,19 +367,19 @@ class MoEDecoderLayer(nn.Module):
                 seq_ctx=seq_ctx,
                 position_embeddings=position_embeddings,
             )
-        else:
-            assert isinstance(seq_ctx, list) and len(seq_ctx) == len(hidden_states), (
-                "seq_ctx should be a list of SequenceContext instances with the same length as hidden_states"
-            )
-            assert isinstance(position_embeddings, list) and len(position_embeddings) == len(hidden_states), (
-                "position_embeddings should be a list of tuples with the same length as hidden_states"
-            )
 
-            return self._micro_batch_forward(
-                hidden_states_list=hidden_states,
-                seq_ctx_list=seq_ctx,
-                position_embeddings_list=position_embeddings,
-            )
+        assert isinstance(seq_ctx, list) and len(seq_ctx) == len(hidden_states), (
+            "seq_ctx should be a list of SequenceContext instances with the same length as hidden_states"
+        )
+        assert isinstance(position_embeddings, list) and len(position_embeddings) == len(hidden_states), (
+            "position_embeddings should be a list of tuples with the same length as hidden_states"
+        )
+
+        return self._micro_batch_forward(
+            hidden_states_list=hidden_states,
+            seq_ctx_list=seq_ctx,
+            position_embeddings_list=position_embeddings,
+        )
 
     def _hf_expert_forward_for_debug(self, hidden_states: torch.Tensor, router_results: RouterResults, origin_shape):
         # xtuner: num_experts * 2 * expert_dim, hidden_size
@@ -424,12 +424,14 @@ class MoEDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         seq_ctx: SequenceContext,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_kwargs: dict[str, object] | None = None,
     ) -> MoEDecoderLayerOutput:
-        residual, hidden_states, router_results = self._pre_moe_forward(
+        residual, hidden_states, router_results, attn_outputs = self._pre_moe_forward(
             hidden_states=hidden_states,
             seq_ctx=seq_ctx,
             position_embeddings=position_embeddings,
             state=ForwardState.TRAINING,
+            attention_kwargs=attention_kwargs,
         )
 
         origin_shape = hidden_states.shape
@@ -515,6 +517,20 @@ class MoEDecoderLayer(nn.Module):
             residual=residual,
             shared_experts_out=shared_experts_out,
         )
+        return self._build_output(
+            hidden_states=hidden_states,
+            router_results=router_results,
+            attn_outputs=attn_outputs,
+        )
+
+    def _build_output(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        router_results: RouterResults,
+        attn_outputs: AttnOutputs,
+    ) -> MoEDecoderLayerOutput:
+        """Build the public output; model-specific decoders may extend it."""
         return {
             "hidden_states": hidden_states,
             "router_logits": router_results["logits"],
@@ -527,6 +543,7 @@ class MoEDecoderLayer(nn.Module):
         hidden_states_list: list[torch.Tensor],
         seq_ctx_list: list[SequenceContext],
         position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
+        attention_kwargs_list: list[dict[str, object]] | None = None,
     ) -> MoEDecoderLayerMicroBatchOutput:
         origin_shape = hidden_states_list[0].shape
         assert all(hidden_states.shape == origin_shape for hidden_states in hidden_states_list), (
@@ -535,6 +552,10 @@ class MoEDecoderLayer(nn.Module):
         intra_layer_micro_batch = len(hidden_states_list)
         residual_list: list[torch.Tensor] = []
         router_results_list: list[RouterResults] = []
+        attn_outputs_list: list[AttnOutputs] = []
+        if attention_kwargs_list is None:
+            attention_kwargs_list = [{} for _ in hidden_states_list]
+        assert len(attention_kwargs_list) == intra_layer_micro_batch
 
         pre_dispatched_list: list[PreDispatchResult] = []
         dispatched_list: list[DispatchResult] = []
@@ -543,18 +564,21 @@ class MoEDecoderLayer(nn.Module):
         # Attention + gate + pre-dispatch
         for (
             hidden_states,
+            attention_kwargs,
             seq_ctx,
             position_embeddings,
         ) in zip(
             hidden_states_list,
+            attention_kwargs_list,
             seq_ctx_list,
             position_embeddings_list,
         ):
-            residual, hidden_states, router_results = self._pre_moe_forward(
+            residual, hidden_states, router_results, attn_outputs = self._pre_moe_forward(
                 hidden_states=hidden_states,
                 seq_ctx=seq_ctx,
                 position_embeddings=position_embeddings,
                 state=ForwardState.TRAINING,
+                attention_kwargs=attention_kwargs,
             )
             pre_moe_forward_out_list.append(hidden_states)
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -567,6 +591,7 @@ class MoEDecoderLayer(nn.Module):
             pre_dispatched_list.append(pre_dispatched)
             residual_list.append(residual)
             router_results_list.append(router_results)
+            attn_outputs_list.append(attn_outputs)
 
         post_dispatched_list: list[PostDispatchResult] = []
         experts_out_list: list[torch.Tensor] = []
@@ -656,8 +681,23 @@ class MoEDecoderLayer(nn.Module):
             )
             hidden_states_out_list.append(hidden_states)
 
+        return self._build_micro_batch_output(
+            hidden_states_list=hidden_states_out_list,
+            router_results_list=router_results_list,
+            attn_outputs_list=attn_outputs_list,
+        )
+
+    def _build_micro_batch_output(
+        self,
+        *,
+        hidden_states_list: list[torch.Tensor],
+        router_results_list: list[RouterResults],
+        attn_outputs_list: list[AttnOutputs],
+    ) -> MoEDecoderLayerMicroBatchOutput:
+        """Build the public micro-batch output; model-specific decoders may
+        extend it."""
         return {
-            "hidden_states": hidden_states_out_list,
+            "hidden_states": hidden_states_list,
             "router_logits": [router_results["logits"] for router_results in router_results_list],
             "router_weights": [router_results["router_weights"] for router_results in router_results_list],
             "router_topk_ids": [router_results["topk_ids"] for router_results in router_results_list],
@@ -670,7 +710,8 @@ class MoEDecoderLayer(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         state: ForwardState,
         past_key_values: list[list[torch.Tensor]] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, RouterResults]:
+        attention_kwargs: dict[str, object] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, RouterResults, AttnOutputs]:
         # NOTE: In order to allow `torch.compile` to compile the ops before and after attention as much as possible,
         # attention, post-layernorm and gate are implemented in one function
         residual = hidden_states
@@ -678,13 +719,16 @@ class MoEDecoderLayer(nn.Module):
 
         # Self Attention
         if state == ForwardState.TRAINING:
-            attn_outputs: AttnOutputs = self.self_attn(
+            attention_forward = cast(Callable[..., AttnOutputs], self.self_attn)
+            attn_outputs = attention_forward(
                 hidden_states=hidden_states,
                 position_embeddings=position_embeddings,
                 seq_ctx=seq_ctx,
+                **(attention_kwargs or {}),
             )
             hidden_states = attn_outputs["projected_output"]
         elif state == ForwardState.PREFILLING:
+            attn_outputs = {}
             assert past_key_values is not None, "past_key_values should be provided in pre-filling state"
             hidden_states = self.self_attn.prefilling(  # type: ignore
                 hidden_states=hidden_states,
@@ -693,6 +737,7 @@ class MoEDecoderLayer(nn.Module):
                 past_key_values=past_key_values,
             )
         elif state == ForwardState.DECODING:
+            attn_outputs = {}
             assert past_key_values is not None, "past_key_values should be provided in decoding state"
             hidden_states = self.self_attn.decoding(  # type: ignore
                 hidden_states=hidden_states,
@@ -716,7 +761,7 @@ class MoEDecoderLayer(nn.Module):
         else:
             rollout_routed_experts = None
         router_results: RouterResults = self.gate(hidden_states, rollout_routed_experts)
-        return residual, hidden_states, router_results
+        return residual, hidden_states, router_results, attn_outputs
 
     def _shared_experts_forward(
         self,
