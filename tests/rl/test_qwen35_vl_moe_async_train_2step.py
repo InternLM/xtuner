@@ -149,7 +149,7 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
         start_s = time.perf_counter()
         trainer = self.build_config(work_dir).build()
         self._record_produce_batch(trainer)
-        self._record_update_weights(trainer)
+        self._record_weight_update(trainer)
         try:
             trainer.fit()
         finally:
@@ -343,14 +343,14 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
 
         trainer.agent_loop_manager.produce_batch = produce_batch_wrapper
 
-    def _record_update_weights(self, trainer) -> None:
-        original_update_weights = trainer.train_controller.update_weights
+    def _record_weight_update(self, trainer) -> None:
+        original_weight_update = trainer.train_controller.weight_update
 
         def update_weights_wrapper(*args, **kwargs):
             self.update_weight_calls += 1
-            return original_update_weights(*args, **kwargs)
+            return original_weight_update(*args, **kwargs)
 
-        trainer.train_controller.update_weights = update_weights_wrapper
+        trainer.train_controller.weight_update = update_weights_wrapper
 
     def _load_step_metrics(self, work_dir: Path) -> list[dict[str, float]]:
         rows: list[dict[str, float]] = []

@@ -108,6 +108,14 @@ class RolloutConfig(BaseModel):
             group. Defaults to None.
         weight_update_port (Optional[int]): Port used by train rank 0 to initialize the external NCCL weight update
             group. Defaults to 30000.
+        weight_transport_type (Optional[str]): Transport path used to update rollout weights from training workers.
+            Supported values are "ipc" and "checkpoint_engine" for colocated mode, "nccl" for disaggregated mode. If not set, "ipc" will use in colocate and "nccl" will use in disaggregated. "checkpoint_engine" is currently supported only by the SGLang rollout backend in colocated mode. Defaults to None.
+        checkpoint_name_prefix (str): Prefix used for Checkpoint Engine checkpoint names registered in the
+            ParameterServer. Defaults to "xtuner-rl".
+        checkpoint_engine_timeout (float): Timeout in seconds for Checkpoint Engine rollout weight update requests.
+            Defaults to 300.0.
+        checkpoint_engine_sync_after_register (bool): Whether to explicitly synchronize the accelerator after
+            registering a checkpoint into Checkpoint Engine. Defaults to True.
         rollout_max_batch_size_per_instance (int): Maximum batch size for the rollout worker. If not set, it
             will be determined automatically based on `context_length`. Defaults to 512.
         allow_over_concurrency_ratio (float): Deprecated compatibility option. Rollout runtime concurrency is
@@ -187,6 +195,18 @@ class RolloutConfig(BaseModel):
             help="Base port number for distributed communication among rollout workers.",
         ),
     ] = 25000
+    weight_transport_type: Annotated[
+        Optional[str],
+        Parameter(
+            group=infer_group,
+            help=(
+                "Transport path used to update rollout weights from training workers. "
+                "Supported values: 'ipc' for colocated in-process transfer, 'nccl' for disaggregated GPU-to-GPU "
+                "transfer, and 'checkpoint_engine' for SGLang rollout workers that fetch sharded checkpoints "
+                "from Checkpoint Engine ParameterServer instances. Defaults to None."
+            ),
+        ),
+    ] = None
     weight_update_host: Annotated[
         Optional[str],
         Parameter(
@@ -207,6 +227,30 @@ class RolloutConfig(BaseModel):
             ),
         ),
     ] = 30000
+    checkpoint_name_prefix: Annotated[
+        str,
+        Parameter(
+            group=infer_group,
+            help="Prefix used for Checkpoint Engine checkpoint names.",
+        ),
+    ] = "xtuner-rl"
+    checkpoint_engine_timeout: Annotated[
+        float,
+        Parameter(
+            group=infer_group,
+            help="Timeout in seconds for Checkpoint Engine rollout weight update requests.",
+        ),
+    ] = 300.0
+    checkpoint_engine_sync_after_register: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help=(
+                "Whether to explicitly synchronize the accelerator after registering a checkpoint into "
+                "Checkpoint Engine."
+            ),
+        ),
+    ] = True
     rollout_max_batch_size_per_instance: Annotated[
         Optional[int],
         Parameter(
@@ -349,6 +393,13 @@ class RolloutConfig(BaseModel):
         Parameter(
             group=infer_group,
             help="Use float32 for language model head.",
+        ),
+    ] = False
+    enable_prefix_caching: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Whether to enable prefix caching for the rollout worker.",
         ),
     ] = False
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"

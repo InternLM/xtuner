@@ -398,6 +398,8 @@ class LMDeployWorker(RolloutWorker):
             hf_overrides.update(fp32_lm_head=self.config.fp32_lm_head)
         if backend == "pytorch" and self.config.max_prefill_token_num:
             extra_engine_config["max_prefill_token_num"] = self.config.max_prefill_token_num
+        if backend == "pytorch" and self.config.enable_prefix_caching:
+            extra_engine_config["enable_prefix_caching"] = True
 
         assert self.server_launch_spec is not None
         dp_rank = 0
