@@ -4,8 +4,9 @@ TestTorchSparseMLA
     test_padded_indices_support_int32_and_backward: PyTorch 后端处理 padding、int32 和反向传播。
 TestDSAAttention
     test_packed_inputs_respect_causal_boundaries_and_backward: packed attention 遵守分段因果边界并可反传。
+    test_indexer_freeze_contract: indexer 默认冻结，未实现的可训练模式在 build 时拒绝。
     test_shared_layer_consumes_explicit_topk_ids: shared layer 复用显式 top-k IDs，漏传时立即报错。
-    test_checkpoint_preserves_explicit_topk_storage: 显式 IDs 穿过 reentrant checkpoint。
+    test_checkpoint_reuses_source_topk_storage: 显式 IDs 穿过 checkpoint，source indexer 不重算。
 TestAcceleratedSparseMLA
     test_tilelang_forward_backward_matches_torch: TileLang 前反向数值与 PyTorch 后端一致。
     test_compiled_cudnn_backward_matches_tilelang: 编译后的 cuDNN DSA 前反向与 TileLang 一致。
@@ -187,6 +188,16 @@ class TestDSAAttention:
             assert valid_indices.min().item() >= seq_start
             assert valid_indices.max().item() <= token_idx
 
+    def test_indexer_freeze_contract(self):
+        attention = _tiny_dsa_attention(indexer_types=["full"], layer_idx=0)
+
+        assert all(not parameter.requires_grad for parameter in attention.indexer.parameters())
+
+        config = _tiny_dsa_config(["full"])
+        config.freeze_dsa_indexer = False
+        with pytest.raises(ValueError, match="freeze_dsa_indexer=False"):
+            config.build(hidden_size=4, layer_idx=0)
+
     def test_shared_layer_consumes_explicit_topk_ids(self):
         # 验证 shared attention 复用显式 IDs，并在漏传时立即报错。
         torch.manual_seed(0)
@@ -210,8 +221,8 @@ class TestDSAAttention:
         with pytest.raises(RuntimeError, match="requires dsa_topk_ids"):
             shared_attention(hidden_states, position_embeddings, seq_ctx)
 
-    def test_checkpoint_preserves_explicit_topk_storage(self):
-        # 验证显式 IDs 可穿过 reentrant checkpoint 并完成反向。
+    def test_checkpoint_reuses_source_topk_storage(self):
+        # 验证显式 IDs 穿过 checkpoint 且真实 indexer backend 只执行一次。
         torch.manual_seed(0)
         source_block = apply_activation_checkpointing(
             _tiny_dsa_decoder(["full", "shared"], layer_idx=0)
@@ -222,25 +233,36 @@ class TestDSAAttention:
         hidden_states = torch.randn(1, 4, 4, requires_grad=True)
         position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
         seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
+        indexer_calls = 0
 
-        source_outputs = source_block(
-            hidden_states,
-            position_embeddings=position_embeddings,
-            seq_ctx=seq_ctx,
-        )
-        source_ids = source_outputs["dsa_topk_ids"]
-        shared_outputs = shared_block(
-            source_outputs["hidden_states"],
-            position_embeddings=position_embeddings,
-            seq_ctx=seq_ctx,
-            dsa_topk_ids=source_ids,
-        )
-        shared_ids = shared_outputs["dsa_topk_ids"]
-        assert shared_ids.untyped_storage().data_ptr() == source_ids.untyped_storage().data_ptr()
-        shared_outputs["hidden_states"].square().mean().backward()
+        def count_indexer_call(*_args):
+            nonlocal indexer_calls
+            indexer_calls += 1
+
+        hook = source_block.self_attn.indexer.register_forward_hook(count_indexer_call)
+
+        try:
+            source_outputs = source_block(
+                hidden_states,
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+            )
+            source_ids = source_outputs["dsa_topk_ids"]
+            shared_outputs = shared_block(
+                source_outputs["hidden_states"],
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+                dsa_topk_ids=source_ids,
+            )
+            shared_ids = shared_outputs["dsa_topk_ids"]
+            assert shared_ids.untyped_storage().data_ptr() == source_ids.untyped_storage().data_ptr()
+            shared_outputs["hidden_states"].square().mean().backward()
+        finally:
+            hook.remove()
 
         assert torch.isfinite(hidden_states.grad).all()
         assert source_ids.dtype == torch.int32
+        assert indexer_calls == 1
 
 
 # The multiprocess cases must run before TileLang JIT is initialized in the
