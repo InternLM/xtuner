@@ -26,22 +26,30 @@ RL_PERCENTILE_METRICS: dict[str, int] = {
 
 # SFT metrics may opt into percentile aggregation via config:
 #   metric: {threshold: 0.2, aggregate: 80}
-# Without ``aggregate``, behavior stays step-by-step relative error.
+#   metric: {threshold: 5, method: absolute}
+# Without ``aggregate``, behavior stays step-by-step drift vs baseline.
+SFT_METRIC_DEFAULT_METHOD: dict[str, str] = {
+    "runtime_info/text_tokens": "absolute",
+}
 
 
-def _normalize_sft_metric_cfg(metric: str, value) -> tuple[float, int | None]:
-    """Accept ``metric: threshold`` or ``metric: {threshold, aggregate}``.
+def _normalize_sft_metric_cfg(metric: str, value) -> tuple[float, int | None, str]:
+    """Accept ``metric: threshold`` or ``metric: {threshold, aggregate, method}``.
 
     Percentile aggregation is opt-in only (explicit ``aggregate`` in config).
+    Comparison method defaults to ``relative``; token counts default to ``absolute``.
     """
     if isinstance(value, dict):
         if "threshold" not in value:
             raise ValueError(f"SFT check_metrics[{metric}] dict must include 'threshold'")
         threshold = float(value["threshold"])
         aggregate = value.get("aggregate")
-        return threshold, int(aggregate) if aggregate is not None else None
+        method = str(value.get("method", "relative"))
+        return threshold, int(aggregate) if aggregate is not None else None, method
 
-    return float(value), None
+    threshold = float(value)
+    method = SFT_METRIC_DEFAULT_METHOD.get(metric, "relative")
+    return threshold, None, method
 
 
 def extract_value(file, metrics):
@@ -75,11 +83,39 @@ def extract_rl_value(file, metrics):
     return total_step, metric_all
 
 
+def _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SFT"):
+    """Offline first+resume may append into one tracker; CI uses a snapshot.
+
+    For ``phase=first``, compare only the baseline-length prefix when the
+    current tracker is longer. Shorter current trackers still fail.
+    """
+    if phase == "first" and cur_steps > base_steps:
+        logger.warning(
+            f"phase=first: current {kind} tracker has {cur_steps} steps vs baseline "
+            f"{base_steps}; using first-run prefix (likely merged first+resume offline)."
+        )
+        trimmed = {metric: values[:base_steps] for metric, values in cur_metrics.items()}
+        return base_steps, trimmed
+    return cur_steps, cur_metrics
+
+
 def _step_errors(base_vals: list[float], cur_vals: list[float], method: str) -> list[float]:
+    """Compute per-step quantities compared against ``threshold``.
+
+    - ``absolute`` / ``relative``: drift vs baseline
+    - ``slowdown``: only penalize regressions (``max(0, cur - base)``); faster is OK
+    - ``value``: current metric itself (baseline ignored); used for bounds like
+      ``mismatch_k3_kl < 0.001`` on every step
+    """
     errors: list[float] = []
+    if method == "value":
+        return list(cur_vals)
+
     for base_val, cur_val in zip(base_vals, cur_vals):
         if method == "absolute":
             errors.append(abs(cur_val - base_val))
+        elif method == "slowdown":
+            errors.append(max(0.0, cur_val - base_val))
         elif method == "relative":
             if abs(base_val) < 1e-10:
                 errors.append(float("inf") if abs(cur_val) > 1e-10 else 0.0)
@@ -175,6 +211,34 @@ def detect_memory_upward_gradient(values: list[float]) -> tuple[bool, str]:
     return False, ""
 
 
+def _format_sft_drift_failure(metric: str, idx: int, old: float, cur: float, error: float, method: str, threshold: float) -> str:
+    kind = "absolute error" if method == "absolute" else "relative error"
+    return (
+        f"{metric} {kind} bigger than {threshold} in {idx} steps, "
+        f"baseline: {old:.6f}, now: {cur:.6f}, {kind}: {error:.6f}"
+    )
+
+
+def _check_sft_step_drift(
+    base_vals: list[float],
+    cur_vals: list[float],
+    *,
+    threshold: float,
+    method: str,
+) -> tuple[bool, float, int, float | None]:
+    """Return (passed, max_error, max_error_idx, failing_error)."""
+    max_error = 0.0
+    max_error_idx = 0
+    for idx, (old, cur) in enumerate(zip(base_vals, cur_vals)):
+        error = _step_errors([old], [cur], method)[0]
+        if error > max_error:
+            max_error = error
+            max_error_idx = idx
+        if error > threshold:
+            return False, max_error, idx, error
+    return True, max_error, max_error_idx, None
+
+
 def check_result(case_name, base_path, cur_path, check_metric, phase=None):
     fail_metric = {}
     metric_cfgs = {metric: _normalize_sft_metric_cfg(metric, value) for metric, value in check_metric.items()}
@@ -182,13 +246,14 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
     threshold_dict = {metric: cfg[0] for metric, cfg in metric_cfgs.items()}
     base_steps, base_metrics = extract_value(base_path, metric_list)
     cur_steps, cur_metrics = extract_value(cur_path, metric_list)
+    cur_steps, cur_metrics = _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SFT")
     assert cur_steps == base_steps, (
         f"current steps is not equal to base steps, current steps: {cur_steps}, base steps: {base_steps}"
     )
 
     publish_comparison_report(case_name, threshold_dict, base_metrics, cur_metrics, base_path, cur_path, phase=phase)
 
-    for metric, (threshold, percentile) in metric_cfgs.items():
+    for metric, (threshold, percentile, method) in metric_cfgs.items():
         max_error = 0.0
         max_error_idx = 0
         check_flag = True
@@ -216,21 +281,18 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
                 logger.warning("It's meaningless to compare tgs because of the small steps.")
                 check_flag = False
         elif metric == "memory/max_memory_GB":
-            for idx, (old, cur) in enumerate(zip(base_metrics[metric], cur_metrics[metric])):
-                if abs(old) < 1e-10:
-                    relative_error = float("inf") if abs(cur) > 1e-10 else 0.0
-                else:
-                    relative_error = round(abs(old - cur) / abs(old), 2)
-                if relative_error > max_error:
-                    max_error = relative_error
-                    max_error_idx = idx
-                if relative_error > threshold:
-                    fail_metric[metric] = (
-                        f"{metric} relative error bigger than {threshold} in {idx} steps, "
-                        f"baseline: {old:.6f}, now: {cur:.6f}, relative error: {relative_error}"
-                    )
-                    check_flag = False
-                    break
+            check_flag, max_error, max_error_idx, failing_error = _check_sft_step_drift(
+                base_metrics[metric],
+                cur_metrics[metric],
+                threshold=threshold,
+                method="relative",
+            )
+            if not check_flag:
+                old = base_metrics[metric][max_error_idx]
+                cur = cur_metrics[metric][max_error_idx]
+                fail_metric[metric] = _format_sft_drift_failure(
+                    metric, max_error_idx, old, cur, failing_error, "relative", threshold
+                )
 
             if check_flag:
                 has_gradient, gradient_info = detect_memory_upward_gradient(cur_metrics[metric])
@@ -238,41 +300,40 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
                     fail_metric[metric] = f"{metric} shows sustained upward gradient in current run, {gradient_info}"
                     check_flag = False
         elif percentile is not None:
+            agg_method = method if method in ("absolute", "relative") else "relative"
             check_flag, agg_error, detail = _percentile_error_passes(
                 base_metrics[metric],
                 cur_metrics[metric],
-                method="relative",
+                method=agg_method,
                 threshold=threshold,
                 operator="<",
                 percentile=percentile,
             )
             if not check_flag:
-                fail_metric[metric] = (
-                    f"{metric} relative error bigger than {threshold} ({detail})"
-                )
+                fail_metric[metric] = f"{metric} {agg_method} error bigger than {threshold} ({detail})"
             else:
                 logger.info(f"✓ {metric} check pass，{detail}, threshold={threshold}")
             continue
         else:
-            for idx, (old, cur) in enumerate(zip(base_metrics[metric], cur_metrics[metric])):
-                if abs(old) < 1e-10:
-                    relative_error = float("inf") if abs(cur) > 1e-10 else 0.0
-                else:
-                    relative_error = round(abs(old - cur) / abs(old), 2)
-                if relative_error > max_error:
-                    max_error = relative_error
-                    max_error_idx = idx
-                if relative_error > threshold:
-                    baseline_old = f"{old:.6f}"
-                    baseline_cur = f"{cur:.6f}"
-
-                    fail_metric[metric] = (
-                        f"{metric} relative error bigger than {threshold} in {idx} steps, baseline: {baseline_old}, now: {baseline_cur}, relative error: {relative_error}"
-                    )
-                    check_flag = False
-                    break
+            check_flag, max_error, max_error_idx, failing_error = _check_sft_step_drift(
+                base_metrics[metric],
+                cur_metrics[metric],
+                threshold=threshold,
+                method=method,
+            )
+            if not check_flag:
+                old = base_metrics[metric][max_error_idx]
+                cur = cur_metrics[metric][max_error_idx]
+                fail_metric[metric] = _format_sft_drift_failure(
+                    metric, max_error_idx, old, cur, failing_error, method, threshold
+                )
         if check_flag:
-            logger.info(f"✓ {metric} check pass，the most relative error is {max_error:.2%} in {max_error_idx} step.")
+            if method == "absolute":
+                logger.info(
+                    f"✓ {metric} check pass，the most absolute error is {max_error:.6f} in {max_error_idx} step."
+                )
+            else:
+                logger.info(f"✓ {metric} check pass，the most relative error is {max_error:.2%} in {max_error_idx} step.")
     result = not fail_metric
     if result:
         return result, "All metrics check passed."
@@ -287,6 +348,7 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
 
     base_steps, base_metrics = extract_rl_value(base_path, metric_list)
     cur_steps, cur_metrics = extract_rl_value(cur_path, metric_list)
+    cur_steps, cur_metrics = _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="RL")
 
     assert cur_steps == base_steps, (
         f"current RL steps is not equal to base RL steps, current steps: {cur_steps}, base steps: {base_steps}"
@@ -355,31 +417,37 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
                 max_error_idx = idx
 
             if operator == "<":
-                if not (error < threshold):
+                passed = error < threshold
+            elif operator == "<=":
+                passed = error <= threshold
+            else:
+                raise ValueError(f"Unknown operator: {operator}")
+
+            if not passed:
+                if method == "value":
+                    fail_metric[metric] = (
+                        f"{metric} value {cur_val:.6f} does not satisfy {operator} {threshold} at step {idx}"
+                    )
+                else:
                     fail_metric[metric] = (
                         f"{metric} error {error:.6f} not less than threshold {threshold} "
                         f"(method: {method}, operator: {operator}) at step {idx}, "
                         f"baseline: {base_val:.6f}, current: {cur_val:.6f}"
                     )
-                    check_flag = False
-                    break
-            elif operator == "<=":
-                if not (error <= threshold):
-                    fail_metric[metric] = (
-                        f"{metric} error {error:.6f} not less than or equal to threshold {threshold} "
-                        f"(method: {method}, operator: {operator}) at step {idx}, "
-                        f"baseline: {base_val:.6f}, current: {cur_val:.6f}"
-                    )
-                    check_flag = False
-                    break
-            else:
-                raise ValueError(f"Unknown operator: {operator}")
+                check_flag = False
+                break
 
         if check_flag:
-            logger.info(
-                f"✓ {metric} check passed, max error is {max_error:.6f} at step {max_error_idx} "
-                f"(method: {method}, operator: {operator})"
-            )
+            if method == "value":
+                logger.info(
+                    f"✓ {metric} check passed, max value is {max_error:.6f} at step {max_error_idx} "
+                    f"(operator: {operator}, threshold: {threshold})"
+                )
+            else:
+                logger.info(
+                    f"✓ {metric} check passed, max error is {max_error:.6f} at step {max_error_idx} "
+                    f"(method: {method}, operator: {operator})"
+                )
 
     result = not bool(fail_metric)
     if result:
