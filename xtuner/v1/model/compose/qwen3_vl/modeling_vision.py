@@ -24,9 +24,8 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from torch.distributed.device_mesh import init_device_mesh
 import torch.distributed as dist
 from xtuner.v1.utils.compile import maybe_compile
-from xtuner.v1.model.utils.checkpointing import checkpoint_wrapper
+from xtuner.v1.model.utils.checkpointing import apply_activation_checkpointing
 from xtuner.v1.module import AttnOutputs
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.device_mesh import DeviceMesh
 from tqdm import tqdm
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
@@ -343,11 +342,14 @@ class Qwen3VLVisionModel(BaseModel):
             layer = self.blocks[layer_idx]
 
             if layer_idx < num_recompute_layers:
-                layer = checkpoint_wrapper(layer,
-                                           preserve_rng_state=checkpoint_preserve_rng_state,
-                                           checkpoint_impl=CheckpointImpl.REENTRANT)
+                layer = apply_activation_checkpointing(
+                    layer,
+                    preserve_rng_state=checkpoint_preserve_rng_state,
+                )
                 if self.compile_cfg:
-                    layer.forward = torch.compile(layer.forward, fullgraph=True)
+                    # Compile the class function, then restore descriptor binding on this instance.
+                    compiled_forward = torch.compile(type(layer).forward, fullgraph=True)
+                    layer.forward = compiled_forward.__get__(layer, type(layer))
 
             self.blocks[layer_idx] = layer
 
