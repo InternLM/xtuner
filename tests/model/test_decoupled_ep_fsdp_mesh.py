@@ -11,8 +11,8 @@ from contextlib import contextmanager
 
 import pytest
 import torch
-from pydantic import ValidationError
 import torch.distributed as dist
+from pydantic import ValidationError
 from torch.distributed.device_mesh import DeviceMesh, _mesh_resources
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
@@ -221,7 +221,9 @@ class TestLegacyMoEMeshLayout:
             assert tuple(model.hsdp_mesh.shape) == (world_size // shard_size, shard_size)
             assert model.hsdp_mesh.mesh_dim_names == (f"{PREFIX}.hsdp_replicate", f"{PREFIX}.hsdp_shard")
             assert model.fsdp_mesh is not None
-            assert _ranks(model.fsdp_mesh) == list(range((rank // shard_size) * shard_size, (rank // shard_size + 1) * shard_size))
+            assert _ranks(model.fsdp_mesh) == list(
+                range((rank // shard_size) * shard_size, (rank // shard_size + 1) * shard_size)
+            )
             for name in DENSE_PARAMS + EXPERT_PARAMS:
                 param = params[name]
                 _assert_placements(param, model.hsdp_mesh.mesh_dim_names, (Replicate(), Shard(0)))
@@ -231,3 +233,151 @@ class TestLegacyMoEMeshLayout:
         with pytest.raises(ValidationError, match="HSDP requires expert parallel size to be 1"):
             FSDPConfig(ep_size=8, hsdp_sharding_size=8)
 
+
+def _decoupled_ranks(world_size: int, ep_size: int, dp_shard: int, rank: int) -> dict[str, list]:
+    replicate = world_size // dp_shard
+    efsdp = dp_shard // ep_size
+    block_start = (rank // dp_shard) * dp_shard
+    ep_start = (rank // ep_size) * ep_size
+    efsdp_in_block = [(rank % ep_size) + k * ep_size for k in range(efsdp)]
+    return {
+        "ep": list(range(ep_start, ep_start + ep_size)),
+        "efsdp": [block_start + r for r in efsdp_in_block],
+        "dp_shard": list(range(block_start, block_start + dp_shard)),
+        "hsdp": [[r * dp_shard + j for j in range(dp_shard)] for r in range(replicate)],
+        "expert_hsdp": [[r * dp_shard + j for j in efsdp_in_block] for r in range(replicate)],
+    }
+
+
+class TestDecoupledMoEMeshShapes:
+    """Mesh bookkeeping of the decoupled (dp2ep) path: ``root = (replicate, efsdp, ep)``."""
+
+    @pytest.mark.parametrize(
+        "world_size,ep_size,rank",
+        [(8, 8, 5), (8, 4, 6), (16, 8, 9), (64, 8, 37), (64, 32, 50)],
+    )
+    def test_mesh_without_hsdp(self, world_size: int, ep_size: int, rank: int) -> None:
+        expected = _decoupled_ranks(world_size, ep_size, world_size, rank)
+        with _fake_world(world_size, rank):
+            model = _build_model(ep_size)
+            model._init_device_mesh(FSDPConfig(ep_size=ep_size, torch_compile=False, decouple_ep_fsdp=True))
+
+            root = model._world_mesh
+            assert root is not None
+            assert tuple(root.shape) == (1, world_size // ep_size, ep_size)
+            assert root.mesh_dim_names == (f"{PREFIX}.replicate", f"{PREFIX}.efsdp", f"{PREFIX}.ep")
+            assert _mesh_resources.get_root_mesh(model.ep_mesh) is root
+            assert _mesh_resources.get_root_mesh(model.fsdp_mesh) is root
+            assert _mesh_resources.get_root_mesh(model.expert_fsdp_mesh) is root
+
+            assert model.hsdp_mesh is None
+            assert model.ep_mesh.mesh_dim_names == (f"{PREFIX}.ep",)
+            assert _ranks(model.ep_mesh) == expected["ep"]
+            assert dist.get_process_group_ranks(model.ep_mesh.get_group()) == expected["ep"]
+            assert model.expert_fsdp_mesh.mesh_dim_names == (f"{PREFIX}.efsdp",)
+            assert _ranks(model.expert_fsdp_mesh) == expected["efsdp"]
+            assert model.fsdp_mesh.mesh_dim_names == (f"{PREFIX}.dp_shard",)
+            assert _ranks(model.fsdp_mesh) == expected["dp_shard"]
+            assert dist.get_process_group_ranks(model.fsdp_mesh.get_group()) == expected["dp_shard"]
+
+    @pytest.mark.parametrize(
+        "world_size,ep_size,dp_shard,rank",
+        [(16, 8, 8, 11), (64, 8, 32, 37), (64, 8, 8, 3)],
+    )
+    def test_mesh_with_hsdp(self, world_size: int, ep_size: int, dp_shard: int, rank: int) -> None:
+        expected = _decoupled_ranks(world_size, ep_size, dp_shard, rank)
+        replicate = world_size // dp_shard
+        with _fake_world(world_size, rank):
+            model = _build_model(ep_size)
+            model._init_device_mesh(
+                FSDPConfig(ep_size=ep_size, torch_compile=False, decouple_ep_fsdp=True, hsdp_sharding_size=dp_shard)
+            )
+
+            root = model._world_mesh
+            assert root is not None
+            assert tuple(root.shape) == (replicate, dp_shard // ep_size, ep_size)
+            assert _ranks(model.ep_mesh) == expected["ep"]
+            assert _ranks(model.fsdp_mesh) == expected["dp_shard"]
+
+            assert model.hsdp_mesh is not None
+            assert model.hsdp_mesh.mesh_dim_names == (f"{PREFIX}.replicate", f"{PREFIX}.dp_shard")
+            assert _ranks(model.hsdp_mesh) == expected["hsdp"]
+            assert model.expert_fsdp_mesh.mesh_dim_names == (f"{PREFIX}.replicate", f"{PREFIX}.efsdp")
+            assert _ranks(model.expert_fsdp_mesh) == expected["expert_hsdp"]
+            assert _mesh_resources.get_root_mesh(model.hsdp_mesh) is root
+            assert _mesh_resources.get_root_mesh(model.expert_fsdp_mesh) is root
+
+    def test_config_requires_ep_to_divide_shard_size(self) -> None:
+        FSDPConfig(ep_size=8, hsdp_sharding_size=8, decouple_ep_fsdp=True)
+        FSDPConfig(ep_size=4, hsdp_sharding_size=8, decouple_ep_fsdp=True)
+        with pytest.raises(ValidationError, match="divisible by `ep_size`"):
+            FSDPConfig(ep_size=8, hsdp_sharding_size=4, decouple_ep_fsdp=True)
+        with pytest.raises(ValidationError, match="divisible by `ep_size`"):
+            FSDPConfig(ep_size=3, hsdp_sharding_size=8, decouple_ep_fsdp=True)
+
+
+class TestDecoupledMoEParamPlacements:
+    """DTensor placements after the two-level ``fully_shard`` of the decoupled path."""
+
+    @pytest.mark.parametrize("world_size,ep_size,rank", [(8, 8, 0), (16, 8, 9), (64, 8, 37)])
+    def test_param_placements(self, world_size: int, ep_size: int, rank: int) -> None:
+        efsdp = world_size // ep_size
+        with _fake_world(world_size, rank):
+            model = _shard_model(ep_size, decouple_ep_fsdp=True)
+            params = _named_params(model)
+
+            for name in DENSE_PARAMS:
+                param = params[name]
+                # Dense params: plain FSDP over the full dp_shard mesh, no EP replication.
+                _assert_placements(param, (f"{PREFIX}.dp_shard",), (Shard(0),))
+                assert param.to_local().shape[0] == param.shape[0] // world_size, name
+
+            for name in EXPERT_PARAMS:
+                param = params[name]
+                _assert_placements(
+                    param,
+                    (f"{PREFIX}.efsdp", f"{PREFIX}.ep"),
+                    (_StridedShard(0, split_factor=ep_size), Shard(0)),
+                )
+                assert param.device_mesh.size(0) == efsdp
+                assert param.to_local().shape[0] == param.shape[0] // world_size, name
+
+            from torch.distributed.fsdp import FSDPModule
+
+            layer = model.layers["1"]
+            assert isinstance(layer.experts, FSDPModule)
+            assert isinstance(layer, FSDPModule)
+            assert not isinstance(model.layers["0"].mlp, FSDPModule)
+
+    @pytest.mark.parametrize("world_size,ep_size,dp_shard,rank", [(16, 8, 8, 11), (64, 8, 32, 37)])
+    def test_param_placements_with_hsdp(self, world_size: int, ep_size: int, dp_shard: int, rank: int) -> None:
+        efsdp = dp_shard // ep_size
+        with _fake_world(world_size, rank):
+            model = _shard_model(ep_size, decouple_ep_fsdp=True, hsdp_sharding_size=dp_shard)
+            params = _named_params(model)
+
+            for name in DENSE_PARAMS:
+                param = params[name]
+                _assert_placements(param, (f"{PREFIX}.replicate", f"{PREFIX}.dp_shard"), (Replicate(), Shard(0)))
+                assert param.to_local().shape[0] == param.shape[0] // dp_shard, name
+
+            for name in EXPERT_PARAMS:
+                param = params[name]
+                _assert_placements(
+                    param,
+                    (f"{PREFIX}.replicate", f"{PREFIX}.efsdp", f"{PREFIX}.ep"),
+                    (Replicate(), _StridedShard(0, split_factor=ep_size), Shard(0)),
+                )
+                assert param.device_mesh.size(1) == efsdp
+                assert param.to_local().shape[0] == param.shape[0] // dp_shard, name
+
+    def test_legacy_layout_is_untouched_by_default(self) -> None:
+        # Same construction as the decoupled tests, but with the flag left at its default.
+        world_size, ep_size, rank = 16, 8, 9
+        with _fake_world(world_size, rank):
+            model = _shard_model(ep_size)
+            params = _named_params(model)
+            assert model.expert_fsdp_mesh is None
+            _assert_placements(
+                params["layers.1.self_attn.q_proj.weight"], (f"{PREFIX}.fsdp", f"{PREFIX}.ep"), (Shard(0), Replicate())
+            )

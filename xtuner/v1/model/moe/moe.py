@@ -201,6 +201,9 @@ class MoE(BaseModel):
     ep_mesh: DeviceMesh | None = None
     expert_tp_mesh: DeviceMesh | None = None
     ep_tp_mesh: DeviceMesh | None = None
+    # Only set on the decoupled EP/FSDP path: mesh used to `fully_shard` routed experts,
+    # i.e. `(efsdp,)` or `(replicate, efsdp)` with `efsdp = dp_shard / ep_size`.
+    expert_fsdp_mesh: DeviceMesh | None = None
     dense_decoder_layer_cls = DenseDecoderLayer
     moe_decoder_layer_cls = MoEDecoderLayer
     mtp_layer_cls = MTPLayer
@@ -1276,6 +1279,10 @@ class MoE(BaseModel):
         self._init_device_mesh(fsdp_config)
 
         if self.config.float8_cfg is not None:
+            if self.fsdp_config.decouple_ep_fsdp:
+                # Experts and dense params are sharded on meshes of different sizes; the fp8
+                # padding / tile-wise reduce meshes need per-class shard sizes (PR-3).
+                raise NotImplementedError("float8 training with `decouple_ep_fsdp` is not supported yet")
             # As we modify the shape of the model's parameters,
             # we need to reinitialize the load spec mapping.
             Float8Handler.pad_for_fsdp(self, cast(DeviceMesh, self.fsdp_mesh), callback_after_pad=self._init_load_spec)
@@ -1296,9 +1303,13 @@ class MoE(BaseModel):
                 param.requires_grad = False
 
         tp_enabled = self.expert_tp_mesh is not None and self.expert_tp_mesh.size() > 1
-        if self.ep_mesh.size() > 1 or tp_enabled:
+        decoupled = self.fsdp_config.decouple_ep_fsdp
+        if not decoupled and (self.ep_mesh.size() > 1 or tp_enabled):
             # 中文注释：不开 EP 但开启 expert TP 时，非 expert 参数仍是 TP rank 间的逻辑副本，
             # 需要显式放到 Replicate DTensor 上，后续梯度才会跨 expert TP 平均。
+            #
+            # On the decoupled path dense params are NOT replicated over EP: they stay plain
+            # tensors and get sharded over the full `dp_shard` mesh by FSDP below.
             self._replicate_other_params(self)
 
         # Although rotary_emb was already constructed in __init__, it was built on the meta device.
@@ -1313,6 +1324,18 @@ class MoE(BaseModel):
 
         for layer_idx, layer in tqdm(self.layers.items(), desc="[FSDP Sharding]"):
             layer_idx = int(layer_idx)
+            if decoupled:
+                # Routed experts get their own FSDP group on `expert_fsdp_mesh` (efsdp) before the
+                # layer is wrapped on the dense mesh; FSDP then excludes them from the layer group.
+                self._fully_shard_expert_blocks(
+                    layer,
+                    mp_policy=mp_policy,
+                    reshard_after_forward=(
+                        False
+                        if layer_idx >= len(self.layers) - 1 and self.mtp_block is None
+                        else self.fsdp_config.reshard_after_forward
+                    ),
+                )
             if self._should_recompute(
                 layer_idx=layer_idx,
                 mtp_idx=None,
@@ -1340,7 +1363,17 @@ class MoE(BaseModel):
             list(self.layers.values())[:-1],
             list(self.layers.values())[1:],
         ):
-            layer_cur.set_modules_to_forward_prefetch([layer_next])  # type: ignore
+            if decoupled:
+                # Issue the expert all-gather of the current layer together with the next layer's
+                # dense all-gather so it overlaps with attention instead of stalling the MoE block.
+                layer_cur.set_modules_to_forward_prefetch(  # type: ignore
+                    [*self._expert_blocks(layer_cur), layer_next]
+                )
+            else:
+                layer_cur.set_modules_to_forward_prefetch([layer_next])  # type: ignore
+        if decoupled:
+            last_layer = list(self.layers.values())[-1]
+            last_layer.set_modules_to_forward_prefetch(self._expert_blocks(last_layer))  # type: ignore
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
@@ -1379,6 +1412,10 @@ class MoE(BaseModel):
                 self.mtp_block.layers[mtp_idx] = mtp_layer
 
                 reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1
+                if decoupled:
+                    self._fully_shard_expert_blocks(
+                        mtp_layer, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward
+                    )
                 self._fully_shard(
                     mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                     mp_policy=mp_policy,
@@ -1387,14 +1424,27 @@ class MoE(BaseModel):
                     module=mtp_layer,
                 )
                 if mtp_idx == 0:
-                    layer_next.set_modules_to_forward_prefetch([mtp_layer])  # type: ignore
+                    if decoupled:
+                        layer_next.set_modules_to_forward_prefetch(  # type: ignore
+                            [*self._expert_blocks(layer_next), mtp_layer]
+                        )
+                    else:
+                        layer_next.set_modules_to_forward_prefetch([mtp_layer])  # type: ignore
 
             if self.config.mtp_config is not None and self.config.mtp_config.num_layers > 0:
                 for prev_mtp_layer, next_mtp_layer in zip(
                     list(self.mtp_block.layers)[:-1],
                     list(self.mtp_block.layers)[1:],
                 ):
-                    prev_mtp_layer.set_modules_to_forward_prefetch([next_mtp_layer])  # type: ignore
+                    if decoupled:
+                        prev_mtp_layer.set_modules_to_forward_prefetch(  # type: ignore
+                            [*self._expert_blocks(prev_mtp_layer), next_mtp_layer]
+                        )
+                    else:
+                        prev_mtp_layer.set_modules_to_forward_prefetch([next_mtp_layer])  # type: ignore
+                if decoupled:
+                    last_mtp_layer = list(self.mtp_block.layers)[-1]
+                    last_mtp_layer.set_modules_to_forward_prefetch(self._expert_blocks(last_mtp_layer))  # type: ignore
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
@@ -1426,6 +1476,10 @@ class MoE(BaseModel):
 
     @torch.no_grad  # type: ignore
     def scale_and_reduce_grad(self):
+        if self.fsdp_config is not None and self.fsdp_config.decouple_ep_fsdp:
+            self._scale_and_reduce_grad_decoupled()
+            return
+
         # Bucket gradients that need a cross-rank reduction by their target process
         # group. Each bucket is reduced with a single coalesced NCCL all_reduce
         # instead of one launch per parameter, which used to dominate latency for
@@ -1518,6 +1572,10 @@ class MoE(BaseModel):
     def _init_device_mesh(self, fsdp_config: FSDPConfig):
         self.fsdp_config = fsdp_config
 
+        if self.fsdp_config.decouple_ep_fsdp:
+            self._init_decoupled_device_mesh(fsdp_config)
+            return
+
         device = DEVICE
         world_size = dist.get_world_size()
         expert_tp_size = self.config.expert_tp_size if self.config.expert_tp_size > 1 else 1
@@ -1607,6 +1665,140 @@ class MoE(BaseModel):
                 ),
             )
             self.fsdp_mesh = self.hsdp_mesh[f"{self.config.mesh_prefix}.hsdp_shard"]
+
+    def _scale_and_reduce_grad_decoupled(self) -> None:
+        # Invariant (DESIGN §4.4): every gradient ends up as the mean over the full data-parallel
+        # world, independent of ep / efsdp.
+        #   * dense params are FSDP-sharded over `dp_shard` (+ `replicate` with HSDP); FSDP's
+        #     reduce-scatter / all-reduce already average them -> nothing to do;
+        #   * routed experts are reduce-scattered over `efsdp = dp_shard / ep` only, while each
+        #     expert already saw the tokens of its whole EP group -> divide by `ep`;
+        #   * DTensors replicated on every mesh dim (fp32 params kept out of FSDP via
+        #     `fp32_keys_pattern`) are averaged manually, as on the legacy path.
+        ep_size = self.ep_mesh.size() if self.ep_mesh is not None else 1
+        grads_by_group: dict[dist.ProcessGroup, list[torch.Tensor]] = {}
+
+        for name, param in self.trainable_parameters():
+            if param.grad is None:
+                continue
+
+            if ep_size > 1 and ".experts" in name:
+                param.grad.div_(ep_size)  # type: ignore
+                continue
+
+            if not isinstance(param, DTensor):
+                continue
+
+            if any(isinstance(placement, Shard) for placement in param.placements):
+                # FSDP-managed (`_StridedShard` is a `Shard` subclass).
+                continue
+
+            replicate_dim_names = tuple(
+                param.device_mesh.mesh_dim_names[i] for i, p in enumerate(param.placements) if isinstance(p, Replicate)
+            )
+            if not replicate_dim_names:
+                continue
+
+            if len(replicate_dim_names) > 1:
+                flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
+            else:
+                flat_mesh = param.device_mesh[replicate_dim_names[0]]
+
+            grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+            grad.div_(flat_mesh.size())  # type: ignore
+            grads_by_group.setdefault(flat_mesh.get_group(), []).append(grad)  # type: ignore
+
+        for group, grads in grads_by_group.items():
+            with dist._coalescing_manager(group=group):
+                for grad in grads:
+                    dist.all_reduce(grad, ReduceOp.SUM, group=group)
+
+    @staticmethod
+    def _expert_blocks(module: nn.Module) -> list[nn.Module]:
+        return [submodule for submodule in module.modules() if isinstance(submodule, MoEBlock)]
+
+    def _fully_shard_expert_blocks(
+        self,
+        module: nn.Module,
+        mp_policy: MixedPrecisionPolicy,
+        reshard_after_forward: bool,
+    ) -> None:
+        assert self.expert_fsdp_mesh is not None
+        assert self.fsdp_config is not None
+        for expert_block in self._expert_blocks(module):
+            self._fully_shard(
+                mesh=self.expert_fsdp_mesh,
+                mp_policy=mp_policy,
+                reshard_after_forward=reshard_after_forward,
+                offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+                module=expert_block,
+            )
+
+    def _init_decoupled_device_mesh(self, fsdp_config: FSDPConfig) -> None:
+        # Decoupled ("dp2ep") layout: EP is a sub-dimension of the FSDP shard dimension.
+        #
+        #   root = (replicate, efsdp, ep)      replicate = world / dp_shard (1 without HSDP)
+        #                                      efsdp     = dp_shard / ep
+        #   dense  params: FSDP over flatten(efsdp, ep) = dp_shard   (+ replicate for HSDP)
+        #   expert params: Shard(0) over ep (built in GroupedLinear) + FSDP over efsdp
+        #                                                            (+ replicate for HSDP)
+        #
+        # `ep` stays the innermost dimension so the EP group is still made of contiguous
+        # (intra-node) ranks, exactly like the legacy `(fsdp, ep)` root mesh. Every sub-mesh is
+        # derived from this single root so FSDP accepts the EP-sharded DTensor expert params.
+        # The `efsdp` dimension is kept even when its size is 1: the FSDP wrapping of the
+        # experts is what applies the mixed-precision policy to them.
+        if self.config.expert_tp_size > 1:
+            raise NotImplementedError("`decouple_ep_fsdp` with ExpertTP is not supported")
+
+        device = DEVICE
+        world_size = dist.get_world_size()
+        ep_size = fsdp_config.ep_size
+        dp_shard = fsdp_config.hsdp_sharding_size if fsdp_config.hsdp_sharding_size is not None else world_size
+        assert world_size % dp_shard == 0, (
+            f"world_size ({world_size}) must be divisible by hsdp_sharding_size ({dp_shard})"
+        )
+        assert dp_shard % ep_size == 0, (
+            f"`decouple_ep_fsdp` requires the FSDP shard size ({dp_shard}) to be divisible by ep_size ({ep_size})"
+        )
+        replicate_size = world_size // dp_shard
+        efsdp_size = dp_shard // ep_size
+
+        prefix = self.config.mesh_prefix
+        replicate_name = f"{prefix}.replicate"
+        efsdp_name = f"{prefix}.efsdp"
+        ep_name = f"{prefix}.ep"
+        dp_shard_name = f"{prefix}.dp_shard"
+
+        root_mesh = init_device_mesh(
+            device,
+            (replicate_size, efsdp_size, ep_size),
+            mesh_dim_names=(replicate_name, efsdp_name, ep_name),
+        )
+        self._world_mesh = root_mesh
+
+        # Same requirement as the legacy path: the `ep_mesh` created in `__init__` must map to the
+        # `ep` dimension of this root mesh (see the comment in `_init_device_mesh`).
+        new_ep_mesh = root_mesh[ep_name]
+        if self.ep_mesh is not None:
+            assert new_ep_mesh.mesh_dim_names == self.ep_mesh.mesh_dim_names, (
+                f"FSDP enabled, it requires the name of new created `ep_mesh`: {new_ep_mesh.mesh_dim_names}"
+                f"equals to the origin one: {self.ep_mesh.mesh_dim_names}"
+            )
+            assert torch.equal(self.ep_mesh.mesh, new_ep_mesh.mesh), (
+                "FSDP enabled, it requires the `ep_size` of model config equals to the `ep_size` of FSDPConfig."
+            )
+        else:
+            self.ep_mesh = new_ep_mesh
+
+        # `fsdp_mesh` keeps its meaning of "the 1D shard group of dense parameters".
+        self.fsdp_mesh = root_mesh[efsdp_name, ep_name]._flatten(dp_shard_name)
+        if replicate_size > 1:
+            self.hsdp_mesh = root_mesh[replicate_name, dp_shard_name]
+            self.expert_fsdp_mesh = root_mesh[replicate_name, efsdp_name]
+        else:
+            self.hsdp_mesh = None
+            self.expert_fsdp_mesh = root_mesh[efsdp_name]
 
     def _replicate_other_params(self, model: nn.Module):
         def traverse(module: nn.Module) -> None:

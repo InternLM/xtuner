@@ -41,10 +41,24 @@ class FSDPConfig(BaseModel):
     hsdp_sharding_size: Annotated[
         Optional[int], Parameter(help="Sharding size for HSDP (Hybrid Sharding Data Parallel)")
     ] = None
+    # Decoupled EP/FSDP ("dp2ep") layout. When enabled, `ep_size` is a sub-dimension of the
+    # FSDP shard dimension instead of being orthogonal to it: routed experts are sharded
+    # `dp_shard / ep_size` ways on top of EP, while every other parameter is sharded over the
+    # full `dp_shard` (= `hsdp_sharding_size` or world size) without being replicated across EP
+    # ranks. Requires `dp_shard % ep_size == 0`. When disabled, the legacy layout is untouched.
+    decouple_ep_fsdp: Annotated[
+        bool, Parameter(help="Decouple expert parallel from FSDP: shard dense params over the full FSDP mesh")
+    ] = False
 
     def model_post_init(self, __context: Any) -> None:
         if self.hsdp_sharding_size is not None:
-            assert self.ep_size == 1, "Currently, HSDP requires expert parallel size to be 1"
+            if self.decouple_ep_fsdp:
+                assert self.hsdp_sharding_size % self.ep_size == 0, (
+                    "`decouple_ep_fsdp` requires `hsdp_sharding_size` to be divisible by `ep_size`, "
+                    f"got hsdp_sharding_size={self.hsdp_sharding_size}, ep_size={self.ep_size}"
+                )
+            else:
+                assert self.ep_size == 1, "Currently, HSDP requires expert parallel size to be 1"
 
     @field_serializer("param_dtype", "reduce_dtype")
     def serialize_param_dtype(self, value: torch.dtype) -> str:
