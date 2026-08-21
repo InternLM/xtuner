@@ -70,7 +70,7 @@ jobs:
           CI_E2E_DEBUG: ${{ github.event.inputs.CI_E2E_DEBUG || 'false' }}
         run: |
           source /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/miniconda3/bin/activate
-          source activate npuci
+          source activate new_npuci
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
           CASE_INPUT="${{ github.event.inputs.run_case || 'all' }}"
           if [ "$CASE_INPUT" = "all" ]; then
