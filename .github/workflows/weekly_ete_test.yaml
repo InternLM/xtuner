@@ -67,6 +67,8 @@ on:
           If true, keep the cluster job alive after install for interactive debug.
         type: boolean
         default: false
+  schedule:
+    - cron: '0 9 * * 5'  # Friday 17:00 UTC+8
 
 env:
   CI_GPU_IMAGE_REGISTRY: ${{ secrets.CI_GPU_IMAGE_REGISTRY }}
