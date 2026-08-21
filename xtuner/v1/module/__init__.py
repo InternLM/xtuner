@@ -1,7 +1,5 @@
 from .attention import (
     AttnOutputs,
-    DSAMLAConfig,
-    DSAMultiLatentAttention,
     GatedDeltaNet,
     GatedDeltaNetConfig,
     MHAConfig,
@@ -28,10 +26,8 @@ __all__ = [
     "RMSNorm",
     "MultiHeadAttention",
     "MultiLatentAttention",
-    "DSAMultiLatentAttention",
     "MHAConfig",
     "MLAConfig",
-    "DSAMLAConfig",
     "GatedDeltaNetConfig",
     "GatedDeltaNet",
     "AttnOutputs",

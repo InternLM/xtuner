@@ -113,7 +113,6 @@ class DenseDecoderLayer(nn.Module):
                 Rotary position embeddings ``(cos, sin)``, aligned with ``hidden_states``.
             seq_ctx (SequenceContext | list[SequenceContext]): Sequence context, aligned with
                 ``hidden_states``.
-
         Returns:
             DenseDecoderLayerOutput | DenseDecoderLayerMicroBatchOutput: Output hidden states. A
             single tensor for a single ``hidden_states`` tensor, a per-micro-batch list for a list
