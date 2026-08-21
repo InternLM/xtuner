@@ -1,4 +1,4 @@
-"""GLM-5.2 MTP reentrant checkpoint 的真实训练回归测试。
+"""GLM-5.2 MTP checkpoint 的真实训练回归测试。
 
 TestGlm52CompiledMTPCheckpoint
     test_shared_mtp_depths_train_with_compile_and_topk_offload: 全 detach 的共享 MTP 可在 compile/offload 下训练。
@@ -125,7 +125,7 @@ def _model_item(engine: TrainEngine, start: int) -> ModelItem:
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class TestGlm52CompiledMTPCheckpoint(DeterministicDDPTestCase):
     def test_shared_mtp_depths_train_with_compile_and_topk_offload(self):
-        # 验证全 detach 输入仍会触发默认 reentrant replay，并为共享 MTP 参数生成梯度。
+        # 验证全 detach 输入仍会触发 checkpoint replay，并为共享 MTP 参数生成梯度。
         self.create_pg("cuda")
         engine = _build_engine(
             intra_layer_micro_batch=1,

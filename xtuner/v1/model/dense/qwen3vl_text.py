@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model.base import ModelOutputs
+from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayerOutput
 
 from .qwen3 import Qwen3Dense, Qwen3Dense4BConfig, Qwen3Dense8BConfig
 
@@ -64,11 +65,12 @@ class Qwen3VLTextDense(Qwen3Dense):
         # =====================================================
 
         for idx, decoder_layer in self.layers.items():
-            hidden_states = decoder_layer(
+            layer_results: DenseDecoderLayerOutput = decoder_layer(
                 hidden_states,
                 position_embeddings=position_embeddings,
                 seq_ctx=seq_ctx,
             )
+            hidden_states = layer_results["hidden_states"]
 
             if deepstack_visual_embeds is not None and ((idx := int(idx)) in range(len(deepstack_visual_embeds))):
                 assert visual_pos_masks is not None
