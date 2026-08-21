@@ -287,6 +287,12 @@ class vLLMWorker(RolloutWorker):
         """Offloads the model weights and KV cache."""
         return self.sleep(level=2)
 
+    def flush_cache(self):
+        """Flushes cache through vLLM sleep/wakeup lifecycle."""
+        self.offload()
+        self.onload_weights()
+        return self.onload_kvcache()
+
     def reset_prefix_cache(self, tags: List[str] | None = None):
         raise NotImplementedError("The 'reset_prefix_cache' API is not yet implemented in the vLLM server.")
 
