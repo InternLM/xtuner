@@ -10,7 +10,7 @@ from xtuner.v1.model.base import (
     HFSaveCfg,
     TorchCompileOption,
 )
-from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
+from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig, use_moe_ep_compile_cfg
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig
 from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
@@ -122,46 +122,19 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
         else:
             return [key]
 
-    def safetensors_to_params(
-        self,
-        safetensors: list[torch.Tensor],
-        local_tensor: torch.Tensor,
-        param_name: str,
-        start: int | None,
-        end: int | None,
-        dim: int | None,
-    ):
-        if len(safetensors) > 1:
-            assert dim is not None, "Internal Error dim must not be None when len(safetensors) > 1"
-            loaded_tensor = torch.cat(safetensors, dim=dim)
-        else:
-            loaded_tensor = safetensors[0]
-
-        if "fused_w1w3.weight" in param_name and "mtp" not in param_name:
+    def hf_tensor_to_canonical(self, name: str, loaded_tensor: torch.Tensor) -> torch.Tensor:
+        if "fused_w1w3.weight" in name and "mtp" not in name:
             # hf: num_experts, 2 * expert_dim, hidden_size
             # xtuner: num_experts * 2 * expert_dim, hidden_size
             # num_experts * 2 * expert_dim, hidden_size
             loaded_tensor = loaded_tensor.flatten(0, 1)
 
-        elif "fused_w2.weight" in param_name and "mtp" not in param_name:
+        elif "fused_w2.weight" in name and "mtp" not in name:
             # hf: num_experts, hidden_size, expert_dim
             # xtuner: num_experts * hidden_size, expert_dim
             loaded_tensor = loaded_tensor.flatten(0, 1)
 
-        if start is not None and end is not None:
-            start = min(start, loaded_tensor.shape[self.FSDP_SHARD_DIM])
-            end = min(end, loaded_tensor.shape[self.FSDP_SHARD_DIM])
-            loaded_tensor_slice = loaded_tensor.index_select(
-                dim=self.FSDP_SHARD_DIM, index=torch.arange(start, end, dtype=torch.int64, device=loaded_tensor.device)
-            )
-            non_pad_len = end - start
-            local_tensor[:non_pad_len].copy_(loaded_tensor_slice)
-
-            if non_pad_len < local_tensor.shape[self.FSDP_SHARD_DIM]:
-                assert self.config.float8_cfg is not None
-                local_tensor[non_pad_len:].copy_(0.0)  # type: ignore  # padded part must be set to 0
-        else:
-            local_tensor.copy_(loaded_tensor)
+        return loaded_tensor
 
     def param_to_safetensor(
         self,
@@ -191,7 +164,7 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
     @property
     @override
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
-        if self.config.ep_size > 1:
+        if use_moe_ep_compile_cfg(self.config):
             return MOE_EP_COMPILE_CFG
         else:
             return MOE_NON_EP_COMPILE_CFG

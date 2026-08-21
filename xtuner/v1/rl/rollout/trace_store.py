@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import ray
 from pydantic import BaseModel, ConfigDict, Field
 
+from xtuner.v1.data_proto.rl_data import RolloutState, discard_rollout_state
 from xtuner.v1.utils import get_logger
 
 
@@ -335,11 +336,26 @@ class RolloutTraceStore:
         trie = self.sessions.pop(session_id) if key is None else self.sessions[session_id]
         trie.release(key)
 
+    def release_sessions(self, session_ids: list[str]) -> list[str]:
+        """Release existing trace sessions in one actor call.
+
+        Args:
+            session_ids (list[str]): Session identifiers that no longer own live rollout state.
+
+        Returns:
+            list[str]: Session identifiers that existed and were released.
+        """
+        released_session_ids = []
+        for session_id in dict.fromkeys(session_ids):
+            if session_id not in self.sessions:
+                continue
+            self.release(session_id)
+            released_session_ids.append(session_id)
+        return released_session_ids
+
     def release_all(self):
         """Release all sessions and free associated resources."""
-        for session_id in list(self.sessions):
-            self.release(session_id)
-        self.sessions.clear()
+        self.release_sessions(list(self.sessions))
         self.objects.clear()
         self.updated_at.clear()
 
@@ -460,6 +476,9 @@ def get_store():
 def get_existing_store():
     """Return the existing singleton store actor without creating one."""
     global _handle_cache
+    if not ray.is_initialized():
+        _handle_cache = None
+        return None
     if _handle_cache is not None:
         return _handle_cache
 
@@ -468,6 +487,43 @@ def get_existing_store():
     except ValueError:
         return None
     return _handle_cache
+
+
+async def release_existing_sessions(session_ids: list[str]) -> set[str]:
+    """Release trace sessions that exist without creating the singleton store.
+
+    Args:
+        session_ids (list[str]): Candidate trace session identifiers.
+
+    Returns:
+        set[str]: Session identifiers that existed and were released.
+    """
+    session_ids = list(dict.fromkeys(str(session_id) for session_id in session_ids))
+    if not session_ids:
+        return set()
+
+    store = get_existing_store()
+    if store is None:
+        return set()
+
+    return set(await store.release_sessions.remote(session_ids))
+
+
+async def release_and_discard_rollout_groups(groups: list[list[RolloutState]]) -> None:
+    """Release trace-owned resources before discarding terminal rollouts.
+
+    Sessions released by the trace store have already freed their routed-expert references. Detach those references
+    before the generic rollout-state cleanup so it does not explicitly free them a second time. Rollouts whose sessions
+    are absent from the store retain their references for the generic cleanup path.
+    """
+    released_session_ids = await release_existing_sessions(
+        [str(item.session_id) for group in groups for item in group if item.session_id is not None]
+    )
+    for group in groups:
+        for item in group:
+            if item.session_id is not None and str(item.session_id) in released_session_ids:
+                item.routed_experts = None
+            discard_rollout_state(item)
 
 
 if __name__ == "__main__":

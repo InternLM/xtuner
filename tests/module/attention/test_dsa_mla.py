@@ -236,74 +236,9 @@ class TestDSAAttention:
         assert seq_ctx.dsa_topk_cache.offloaded == {}
 
 
-class TestAcceleratedSparseMLA:
-    @pytest.mark.skipif(
-        not _tilelang_sparse_mla_available(),
-        reason="requires CUDA and importable TileLang runtime",
-    )
-    def test_tilelang_forward_backward_matches_torch(self):
-        # 验证 TileLang SparseMLA 的输出、LSE、dQ 和 dKV 与 PyTorch oracle 一致。
-        q, kv, indices = _tilelang_sparse_mla_inputs()
-        scaling = 1 / math.sqrt(q.shape[-1])
-        q_ref = q.detach().clone().requires_grad_()
-        kv_ref = kv.detach().clone().requires_grad_()
-        q_tilelang = q.detach().clone().requires_grad_()
-        kv_tilelang = kv.detach().clone().requires_grad_()
-
-        expected = sparse_mla(q_ref, kv_ref, indices, scaling=scaling, value_dim=512, backend="torch")
-        actual = sparse_mla(
-            q_tilelang,
-            kv_tilelang,
-            indices.to(torch.int32),
-            scaling=scaling,
-            value_dim=512,
-            backend="tilelang",
-        )
-        grad_output = torch.randn_like(expected.raw_output)
-        expected.raw_output.backward(grad_output)
-        actual.raw_output.backward(grad_output)
-
-        torch.testing.assert_close(actual.raw_output, expected.raw_output, atol=BF16_ATOL, rtol=BF16_RTOL)
-        torch.testing.assert_close(actual.softmax_lse, expected.softmax_lse, atol=BF16_ATOL, rtol=BF16_RTOL)
-        torch.testing.assert_close(q_tilelang.grad, q_ref.grad, atol=BF16_ATOL, rtol=BF16_RTOL)
-        torch.testing.assert_close(kv_tilelang.grad, kv_ref.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
-
-    @pytest.mark.skipif(
-        not (_tilelang_sparse_mla_available() and _cudnn_dsa_sparse_mla_available()),
-        reason="requires CUDA, TileLang, and cuDNN DSA sparse attention backward",
-    )
-    def test_compiled_cudnn_backward_matches_tilelang(self):
-        # 验证 torch.compile 下 cuDNN DSA 的输出与梯度仍和 TileLang oracle 一致。
-        q, kv, indices = _cudnn_dsa_sparse_mla_inputs()
-        scaling = 1 / math.sqrt(q.shape[-1])
-
-        def compiled_sparse_mla(q: torch.Tensor, kv: torch.Tensor, backend: str) -> torch.Tensor:
-            return sparse_mla(
-                q,
-                kv,
-                indices,
-                scaling=scaling,
-                value_dim=512,
-                backend=backend,
-            ).raw_output
-
-        compiled_sparse_mla = torch.compile(compiled_sparse_mla, fullgraph=False)
-        q_tilelang = q.detach().clone().requires_grad_()
-        kv_tilelang = kv.detach().clone().requires_grad_()
-        q_cudnn = q.detach().clone().requires_grad_()
-        kv_cudnn = kv.detach().clone().requires_grad_()
-
-        expected = compiled_sparse_mla(q_tilelang, kv_tilelang, "tilelang")
-        actual = compiled_sparse_mla(q_cudnn, kv_cudnn, "cudnn_dsa")
-        grad_output = torch.randn_like(expected)
-        expected.backward(grad_output)
-        actual.backward(grad_output)
-
-        torch.testing.assert_close(actual, expected, atol=BF16_ATOL, rtol=BF16_RTOL)
-        torch.testing.assert_close(q_cudnn.grad, q_tilelang.grad, atol=CUDNN_DQ_ATOL, rtol=CUDNN_DQ_RTOL)
-        torch.testing.assert_close(kv_cudnn.grad, kv_tilelang.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
-
-
+# The multiprocess cases must run before TileLang JIT is initialized in the
+# pytest parent. With TileLang 0.1.11, spawning them afterwards crashes rank 0
+# during child-process bootstrap, before the indexer kernel is invoked.
 class TestDSASequenceParallel(DeterministicDDPTestCase):
     def test_packed_attention_matches_full_sequence(self):
         # 验证 SP2 packed attention 的输出、top-k 与输入梯度拼回后等同完整序列。
@@ -446,3 +381,71 @@ class TestDSASequenceParallel(DeterministicDDPTestCase):
     @property
     def world_size(self) -> int:
         return 2
+
+
+class TestAcceleratedSparseMLA:
+    @pytest.mark.skipif(
+        not _tilelang_sparse_mla_available(),
+        reason="requires CUDA and importable TileLang runtime",
+    )
+    def test_tilelang_forward_backward_matches_torch(self):
+        # 验证 TileLang SparseMLA 的输出、LSE、dQ 和 dKV 与 PyTorch oracle 一致。
+        q, kv, indices = _tilelang_sparse_mla_inputs()
+        scaling = 1 / math.sqrt(q.shape[-1])
+        q_ref = q.detach().clone().requires_grad_()
+        kv_ref = kv.detach().clone().requires_grad_()
+        q_tilelang = q.detach().clone().requires_grad_()
+        kv_tilelang = kv.detach().clone().requires_grad_()
+
+        expected = sparse_mla(q_ref, kv_ref, indices, scaling=scaling, value_dim=512, backend="torch")
+        actual = sparse_mla(
+            q_tilelang,
+            kv_tilelang,
+            indices.to(torch.int32),
+            scaling=scaling,
+            value_dim=512,
+            backend="tilelang",
+        )
+        grad_output = torch.randn_like(expected.raw_output)
+        expected.raw_output.backward(grad_output)
+        actual.raw_output.backward(grad_output)
+
+        torch.testing.assert_close(actual.raw_output, expected.raw_output, atol=BF16_ATOL, rtol=BF16_RTOL)
+        torch.testing.assert_close(actual.softmax_lse, expected.softmax_lse, atol=BF16_ATOL, rtol=BF16_RTOL)
+        torch.testing.assert_close(q_tilelang.grad, q_ref.grad, atol=BF16_ATOL, rtol=BF16_RTOL)
+        torch.testing.assert_close(kv_tilelang.grad, kv_ref.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
+
+    @pytest.mark.skipif(
+        not (_tilelang_sparse_mla_available() and _cudnn_dsa_sparse_mla_available()),
+        reason="requires CUDA, TileLang, and cuDNN DSA sparse attention backward",
+    )
+    def test_compiled_cudnn_backward_matches_tilelang(self):
+        # 验证 torch.compile 下 cuDNN DSA 的输出与梯度仍和 TileLang oracle 一致。
+        q, kv, indices = _cudnn_dsa_sparse_mla_inputs()
+        scaling = 1 / math.sqrt(q.shape[-1])
+
+        def compiled_sparse_mla(q: torch.Tensor, kv: torch.Tensor, backend: str) -> torch.Tensor:
+            return sparse_mla(
+                q,
+                kv,
+                indices,
+                scaling=scaling,
+                value_dim=512,
+                backend=backend,
+            ).raw_output
+
+        compiled_sparse_mla = torch.compile(compiled_sparse_mla, fullgraph=False)
+        q_tilelang = q.detach().clone().requires_grad_()
+        kv_tilelang = kv.detach().clone().requires_grad_()
+        q_cudnn = q.detach().clone().requires_grad_()
+        kv_cudnn = kv.detach().clone().requires_grad_()
+
+        expected = compiled_sparse_mla(q_tilelang, kv_tilelang, "tilelang")
+        actual = compiled_sparse_mla(q_cudnn, kv_cudnn, "cudnn_dsa")
+        grad_output = torch.randn_like(expected)
+        expected.backward(grad_output)
+        actual.backward(grad_output)
+
+        torch.testing.assert_close(actual, expected, atol=BF16_ATOL, rtol=BF16_RTOL)
+        torch.testing.assert_close(q_cudnn.grad, q_tilelang.grad, atol=CUDNN_DQ_ATOL, rtol=CUDNN_DQ_RTOL)
+        torch.testing.assert_close(kv_cudnn.grad, kv_tilelang.grad, atol=DKV_ATOL, rtol=DKV_RTOL)

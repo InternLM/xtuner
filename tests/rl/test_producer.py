@@ -20,7 +20,7 @@ Bad Tests:
 
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, discard_rollout_state
 from xtuner.v1.rl.agent_loop_manager import (
@@ -382,6 +382,36 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.failed_samples, 1)
         self.assertEqual(result.filtered_samples, 1)
+
+    async def test_put_generated_group_releases_non_retryable_trace_sessions(self):
+        # FAILED / FILTERED 不进入 replay buffer，必须在丢弃 RolloutState 前释放对应 trace session。
+        cases = (
+            (Status.FAILED, True, 101),
+            (Status.COMPLETED, False, 102),
+        )
+        for status, is_valid, session_id in cases:
+            with self.subTest(status=status):
+                strategy = SyncProduceStrategyConfig(is_valid_sample_fn=lambda _samples: is_valid).build()
+                ctx = self._build_context(
+                    strategy,
+                    f"non_retryable_{status.name.lower()}",
+                    self._build_agent_loop(),
+                    self._build_sampler(),
+                    batch_size=1,
+                )
+                item = make_rollout_state(session_id, status=status, reward_score=1.0)
+                item.session_id = session_id
+                item.routed_experts = MagicMock()
+
+                with patch(
+                    "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
+                    new=AsyncMock(return_value={str(session_id)}),
+                ) as release_sessions:
+                    self.assertFalse(await ctx.put_generated_group([item]))
+
+                release_sessions.assert_awaited_once_with([str(session_id)])
+                self.assertIsNone(item.session_id)
+                self.assertIsNone(item.routed_experts)
 
     async def test_put_generated_group_records_raw_rewards_before_filtering(self):
         # 验证 raw reward 在过滤前统计，filtered group 仍能贡献生成侧 reward 指标。
