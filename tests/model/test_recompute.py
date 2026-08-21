@@ -5,7 +5,7 @@ import torch
 from torch import nn
 from torch.autograd.graph import saved_tensors_hooks
 
-from xtuner.v1.model.utils import apply_activation_checkpointing
+from xtuner.v1.model.utils import apply_activation_checkpointing, reuse_during_recompute
 from xtuner.v1.utils import clean_param_name
 
 
@@ -76,6 +76,27 @@ class _ChangingOutputBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor] | list[torch.Tensor]:
         output = x.square()
         return [output] if torch.is_grad_enabled() else {"out": output}
+
+
+class _ReusableMetadata(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[tuple[float, int]] = []
+
+    def forward(self, x: torch.Tensor, *, offset: int) -> dict[str, torch.Tensor]:
+        self.calls.append((x.item(), offset))
+        return {"ids": (x.detach() * 10 + offset).to(torch.int64)}
+
+
+class _ReuseTwiceBlock(nn.Module):
+    def __init__(self, metadata: _ReusableMetadata) -> None:
+        super().__init__()
+        self.metadata = metadata
+
+    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        first = reuse_during_recompute(self.metadata, x, offset=1)["ids"]
+        second = reuse_during_recompute(self.metadata, x, offset=2)["ids"]
+        return {"out": x * (first + 2 * second)}
 
 
 class TestCheckpointWrapper:
@@ -194,3 +215,36 @@ class TestCheckpointWrapper:
             make_call(wrapped, x)["out"].square().sum().backward()
 
         assert x.data_ptr() in packed
+
+
+class TestReuseDuringRecompute:
+    def test_outside_checkpoint_calls_the_callable_each_time(self):
+        metadata = _ReusableMetadata()
+        x = torch.tensor(1.0)
+
+        reuse_during_recompute(metadata, x, offset=1)
+        reuse_during_recompute(metadata, x, offset=2)
+
+        assert metadata.calls == [(1.0, 1), (1.0, 2)]
+
+    def test_fifo_calls_are_isolated_between_checkpoint_invocations(self):
+        # The two graphs replay in reverse forward order. Each graph must retain
+        # its own FIFO even though both use the same callable object twice.
+        metadata = _ReusableMetadata()
+        block = apply_activation_checkpointing(_ReuseTwiceBlock(metadata))
+        first = torch.tensor(1.0, requires_grad=True)
+        second = torch.tensor(2.0, requires_grad=True)
+
+        first_output = block(first)["out"]
+        second_output = block(second)["out"]
+        second_output.backward()
+        first_output.backward()
+
+        assert metadata.calls == [
+            (1.0, 1),
+            (1.0, 2),
+            (2.0, 1),
+            (2.0, 2),
+        ]
+        assert first.grad.item() == 35.0
+        assert second.grad.item() == 65.0
