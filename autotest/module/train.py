@@ -50,7 +50,7 @@ class Train:
 
             if train_type == "sft":
                 command = (
-                    f"cd {current_dir}; pwd; {pip_package}; {image_version_check}"
+                    f"cd {current_dir}; pwd; {pip_package}; {image_version_check} "
                     f"export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + cudnn_patch
                     + debug_keepalive
