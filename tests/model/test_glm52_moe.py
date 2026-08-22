@@ -62,6 +62,7 @@ def _tiny_glm52_config() -> Glm52MoEConfig:
             index_head_dim=4,
             index_n_heads=2,
             indexer_types=["full", "shared", "shared", "full"],
+            indexer_backend="torch",
             sparse_mla_backend="torch",
         ),
         hf_head_dim=4,

@@ -49,6 +49,7 @@ def _tiny_mtp_config(ep_size: int, mtp_num_layers: int, compile_model: bool) -> 
             index_head_dim=4,
             index_n_heads=2,
             indexer_types=["full", "shared", "full"],
+            indexer_backend="torch",
         ),
         hf_head_dim=4,
         qk_head_dim=8,
