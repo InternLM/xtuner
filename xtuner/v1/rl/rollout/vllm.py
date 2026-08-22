@@ -16,7 +16,7 @@ from vllm.utils import FlexibleArgumentParser
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_status_from_finish_reason
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
-from .rollout_topology import RolloutTopology
+from .rollout_topology import RolloutEngine, RolloutServerProcess, RolloutTopology
 from .worker import RolloutConfig, RolloutWorker
 
 
@@ -139,7 +139,39 @@ class vLLMWorker(RolloutWorker):
         rank_bundle_idx_list: list[tuple[int, int]],
         rank_to_dist_init_addr: Mapping[int, str],
     ) -> RolloutTopology:
-        raise NotImplementedError("vLLM rollout topology has not been verified after topology refactor.")
+        """Build one vLLM API server per logical inference engine.
+
+        The API server owns every placement-group bundle in its engine; vLLM's Ray executor uses those bundles to
+        launch the internal DP/TP workers.
+        """
+        num_gpus_per_engine = config.num_gpus_per_engine
+        num_workers = len(rank_bundle_idx_list)
+        if num_workers % num_gpus_per_engine != 0:
+            raise ValueError(
+                f"num_rollout_workers={num_workers} must be divisible by num_gpus_per_engine={num_gpus_per_engine}."
+            )
+
+        engines = []
+        for engine_start in range(0, num_workers, num_gpus_per_engine):
+            engine_meta = rank_bundle_idx_list[engine_start : engine_start + num_gpus_per_engine]
+            engine_ranks = tuple(rank for rank, _ in engine_meta)
+            engine_bundle_idxs = tuple(bundle_idx for _, bundle_idx in engine_meta)
+            server_rank = engine_ranks[0]
+            engines.append(
+                RolloutEngine(
+                    engine_ranks=engine_ranks,
+                    dist_init_addr=rank_to_dist_init_addr[server_rank],
+                    server_processes=(
+                        RolloutServerProcess(
+                            worker_rank=server_rank,
+                            placement_group_bundle_idxs=engine_bundle_idxs,
+                            weight_update_ranks=engine_ranks,
+                        ),
+                    ),
+                )
+            )
+
+        return RolloutTopology(engines=tuple(engines))
 
     def __init__(
         self,
