@@ -1,120 +1,140 @@
-import inspect
-from types import UnionType
-from typing import Any, Callable, Union, get_args, get_origin
+"""Activation checkpointing entry points."""
+
+from collections import deque
+from contextvars import ContextVar
+from typing import Any, Callable
 
 import torch
 import torch.nn as nn
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    checkpoint_wrapper as ptd_checkpoint_wrapper,
-)
-from torch.utils._pytree import tree_flatten, tree_unflatten
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl, checkpoint_wrapper
+from torch.utils._pytree import TreeSpec, tree_flatten, tree_unflatten
 from torch.utils.checkpoint import checkpoint
 
-from xtuner.v1.utils import copy_signature
+
+__all__ = ["apply_activation_checkpointing", "reuse_during_recompute"]
 
 
-# TODO: Currently xtuner uses the internal, outdated `torch.distributed.algorithms._checkpoint.checkpoint_wrapper` interface
-# We should look for opportunities to use the public, updated interface in the future
+class _ActivationCheckpointFrame:
+    """Reusable outputs owned by one checkpoint invocation."""
 
-# NOTE:
-# PyTorch's `torch.distributed.algorithms._checkpoint.checkpoint_wrapper` has some limitations. Modules decorated with `checkpoint_wrapper`
-# must have forward interfaces that conform to the specifications of `torch.autograd.function.Function`.
-# Specifically, for input parameters, the `forward` interface must explicitly accept parameters of type `torch.Tensor` to ensure proper gradient backpropagation.
-# For return values, the `forward` interface must return either `torch.Tensor` or tuple[torch.Tensor, ...].
-# For example If the forward interface is declared as:
-# def forward(self, x: tuple[torch.Tensor], y: list[torch.Tensor]) -> torch.Tensor | tuple[torch.Tensor, ...]:
-# This interface will break the gradient graph because the inputs don't meet the requirements. For instance, x and y are not of type `torch.Tensor`
-# `_check_signature_of_forward` will check (not exhaustively) whether the signature of the `forward` interface meets the requirements to identify issues early.
+    def __init__(self) -> None:
+        self.outputs: dict[Callable[..., Any], deque[Any]] = {}
+
+    def save(self, function: Callable[..., Any], output: Any) -> None:
+        self.outputs.setdefault(function, deque()).append(output)
+
+    def replay(self, function: Callable[..., Any]) -> Any:
+        queue = self.outputs.get(function)
+        if not queue:
+            raise RuntimeError("Checkpoint replay has no matching reusable output from the original forward")
+        return queue.popleft()
+
+    def assert_consumed(self) -> None:
+        if any(self.outputs.values()):
+            raise RuntimeError("Checkpoint replay did not consume every reusable output from the original forward")
 
 
-def _check_signature_of_forward(module: nn.Module):
-    def _is_tensor_or_tuple_tensor(arg_type: type):
-        if arg_type is torch.Tensor:
-            return True
+# The bool is true only while a reentrant checkpoint invocation is replaying.
+_CURRENT_ACTIVATION_CHECKPOINT: ContextVar[tuple[_ActivationCheckpointFrame, bool] | None] = ContextVar(
+    "xtuner_current_activation_checkpoint",
+    default=None,
+)
 
-        origin_type = get_origin(arg_type)
 
-        if not origin_type or origin_type not in (tuple, UnionType, Union):
-            return False
+@torch.compiler.disable(recursive=False)
+def reuse_during_recompute(function: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Run a no-grad callable once and reuse its output during checkpoint
+    replay.
 
-        if origin_type in [UnionType, Union]:
-            type_list = get_args(arg_type)
-            return any(_is_tensor_or_tuple_tensor(t) for t in type_list)
+    Outside :func:`apply_activation_checkpointing`, this is a direct call. Inside a
+    checkpoint invocation, calls to the same stable callable are matched in FIFO order.
+    """
+    state = _CURRENT_ACTIVATION_CHECKPOINT.get()
+    if state is None:
+        return function(*args, **kwargs)
 
-        else:
-            type_list = get_args(arg_type)
-            return any(t is torch.Tensor for t in type_list)
+    frame, is_replay = state
+    if is_replay:
+        return frame.replay(function)
 
-    def _has_missing_type(arg_type: type):
-        if arg_type is inspect._empty:
-            return True
-        origin_arg = get_origin(arg_type)
-        return any(_has_missing_type(t) for t in get_args(origin_arg))
+    output = function(*args, **kwargs)
+    flat_output, _ = tree_flatten(output)
+    if any(isinstance(leaf, torch.Tensor) and leaf.requires_grad for leaf in flat_output):
+        raise RuntimeError("reuse_during_recompute only supports Tensor outputs that do not require gradients")
+    frame.save(function, output)
+    return output
 
-    input_type = inspect.signature(module.forward).parameters
-    ret_type = inspect.signature(module.forward).return_annotation
 
-    for name, arg_type in input_type.items():
-        if _has_missing_type(arg_type.annotation):
-            raise TypeError(
-                f"The type of argument '{name}' of {module.__class__.__name__}.forward must be annotated, but got "
-                f"{name} unannotated."
-            )
+def apply_activation_checkpointing(
+    module: nn.Module,
+    *,
+    preserve_rng_state: bool = True,
+) -> nn.Module:
+    """Wrap ``module`` in fixed reentrant activation checkpointing.
 
-    if _has_missing_type(ret_type):
-        raise TypeError(
-            f"The return type of {module.__class__.__name__}.forward must be annotated, but got {ret_type}"
+    The PyTree bridge keeps nested positional and keyword inputs visible to autograd and saved-tensor hooks, and
+    restores structured model outputs.
+    """
+
+    def checkpoint_fn(function: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        return _checkpoint_pytree(
+            function,
+            call_args=args,
+            call_kwargs=kwargs,
+            preserve_rng_state=preserve_rng_state,
         )
 
-    for arg_type in input_type.values():
-        origin_arg = get_origin(arg_type.annotation)
-        # Union[Tensor, None] or Optional[Tensor] is legal
-        if origin_arg:
-            if torch.Tensor in origin_arg:
-                break
-        else:
-            if arg_type.annotation is torch.Tensor:
-                break
-    else:
-        raise TypeError(
-            f"The type of all arguments of the {module.__class__.__name__}.forward must be torch.Tensor, but got "
-            f"{input_type}"
-        )
-
-    if not _is_tensor_or_tuple_tensor(ret_type):
-        raise TypeError(
-            f"The return type of {module.__class__.__name__}.forward must be torch.Tensor or tuple of torch.Tensor, "
-            f"but got {ret_type}"
-        )
+    # FSDP must wrap this checkpoint boundary. Its output hook then unshards
+    # parameters before replay; wrapping FSDP itself would replay an FSDP forward.
+    return checkpoint_wrapper(
+        module,
+        checkpoint_impl=CheckpointImpl.REENTRANT,
+        checkpoint_fn=checkpoint_fn,
+    )
 
 
-@copy_signature(ptd_checkpoint_wrapper)
-def checkpoint_wrapper(module: nn.Module, *args, **kwargs):
-    _check_signature_of_forward(module)
-    return ptd_checkpoint_wrapper(module, *args, **kwargs)
+@torch.compiler.disable(recursive=False)
+def _checkpoint_pytree(
+    function: Callable[..., Any],
+    /,
+    *,
+    call_args: tuple[Any, ...],
+    call_kwargs: dict[str, Any],
+    preserve_rng_state: bool,
+) -> Any:
+    """Adapt a structured module call to reentrant checkpoint's flat
+    boundary."""
+    flat_inputs, input_spec = tree_flatten((call_args, call_kwargs))
+    output_spec: TreeSpec | None = None
+    frame = _ActivationCheckpointFrame()
 
+    @torch.compiler.disable(recursive=False)
+    def call_with_original_signature(*replayed_inputs: Any) -> tuple[Any, ...]:
+        nonlocal output_spec
+        replayed_args, replayed_kwargs = tree_unflatten(list(replayed_inputs), input_spec)
+        is_replay = torch.is_grad_enabled()
+        token = _CURRENT_ACTIVATION_CHECKPOINT.set((frame, is_replay))
+        try:
+            output = function(*replayed_args, **replayed_kwargs)
+        finally:
+            _CURRENT_ACTIVATION_CHECKPOINT.reset(token)
 
-def pytree_reentrant_checkpoint(
-    function: Callable[..., torch.Tensor | tuple[torch.Tensor, ...]],
-    *args: Any,
-    **kwargs: Any,
-) -> torch.Tensor | tuple[torch.Tensor, ...]:
-    """让嵌套 Tensor 也成为 reentrant checkpoint 的 autograd 输入。"""
-    # CheckpointWrapper 只打包一层。例如：
-    #   future_embeddings=[embedding_0, embedding_1]
-    # 对原生 CheckpointFunction 来说只是“一个 list 参数”，它看不到 list 里的
-    # 两个 Tensor，也就不会 detach 它们。这可能会造成反向传播的错误，因为这两个
-    # Tensor 的梯度应该交由 CheckpointFunction.backward 的返回值交回原始 Tensor，
-    # 而不是由他们自己来传递梯度。
-    # tree_flatten 会把输入变成近似：
-    #   hidden, embedding_0, embedding_1
-    # 这样 checkpoint 能逐个 detach；tree_unflatten 再在 replay 前把 list 还原。
-    flat_inputs, input_spec = tree_flatten((args, kwargs))
+        flat_outputs, current_output_spec = tree_flatten(output)
+        if output_spec is None:
+            output_spec = current_output_spec
+        elif current_output_spec != output_spec:
+            raise RuntimeError("Checkpoint replay returned a different output PyTree structure")
+        if is_replay:
+            frame.assert_consumed()
+        return tuple(flat_outputs)
 
-    def run_function(*replayed_flat_inputs: Any) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        # 这里只还原参数结构，不会把 detached Tensor 重新连接到旧 graph；梯度由
-        # CheckpointFunction.backward 的返回值交回原始 Tensor。
-        replayed_args, replayed_kwargs = tree_unflatten(list(replayed_flat_inputs), input_spec)
-        return function(*replayed_args, **replayed_kwargs)
-
-    return checkpoint(run_function, *flat_inputs, use_reentrant=True)
+    flat_outputs = checkpoint(
+        call_with_original_signature,
+        *flat_inputs,
+        use_reentrant=True,
+        preserve_rng_state=preserve_rng_state,
+    )
+    assert output_spec is not None, "XTuner internal error: checkpoint did not run the function"
+    if not isinstance(flat_outputs, tuple):
+        flat_outputs = (flat_outputs,)
+    return tree_unflatten(list(flat_outputs), output_spec)

@@ -1,6 +1,6 @@
-"""DenseDecoderLayer 多 micro-batch 行为测试。
+"""GLM52DenseDecoderLayer 多 micro-batch 行为测试。
 
-TestDenseDecoderLayerMicroBatch
+TestGLM52DenseDecoderLayerMicroBatch
     test_batched_inputs_match_independent_forwards: 等长 micro-batch 的输出与梯度等价于独立调用。
 """
 
@@ -9,12 +9,12 @@ from copy import deepcopy
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.module.attention import DSAMLAConfig
-from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
+from xtuner.v1.model.moe.glm52 import DSAMLAConfig
+from xtuner.v1.model.moe.glm52.decoder_layer import GLM52DenseDecoderLayer
 
 
-def _build_dense_dsa_layer() -> DenseDecoderLayer:
-    return DenseDecoderLayer(
+def _build_dense_dsa_layer() -> GLM52DenseDecoderLayer:
+    return GLM52DenseDecoderLayer(
         hidden_size=4,
         intermediate_size=8,
         hidden_act="silu",
@@ -55,7 +55,7 @@ def _build_inputs() -> tuple[
     return hidden_states, position_embeddings, seq_ctx
 
 
-class TestDenseDecoderLayerMicroBatch:
+class TestGLM52DenseDecoderLayerMicroBatch:
     def test_batched_inputs_match_independent_forwards(self):
         # 验证一次多输入调用与逐 micro-batch 调用产生相同输出、输入梯度和参数梯度。
         torch.manual_seed(0)
@@ -69,11 +69,11 @@ class TestDenseDecoderLayerMicroBatch:
         ]
 
         outputs = layer(
-            *hidden_states,
+            hidden_states,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
         )
-        reference_outputs = tuple(
+        reference_outputs = [
             reference_layer(
                 hidden,
                 position_embeddings=position_embedding,
@@ -84,14 +84,20 @@ class TestDenseDecoderLayerMicroBatch:
                 position_embeddings,
                 reference_seq_ctx,
             )
-        )
+        ]
 
-        assert isinstance(outputs, tuple)
-        for output, reference_output in zip(outputs, reference_outputs):
+        output_hidden = outputs["hidden_states"]
+        output_ids = outputs["dsa_topk_ids"]
+        reference_hidden = tuple(result["hidden_states"] for result in reference_outputs)
+        reference_ids = tuple(result["dsa_topk_ids"] for result in reference_outputs)
+        for output, reference_output in zip(output_hidden, reference_hidden):
             torch.testing.assert_close(output, reference_output)
+        for dsa_topk_ids, reference_dsa_topk_ids in zip(output_ids, reference_ids):
+            torch.testing.assert_close(dsa_topk_ids, reference_dsa_topk_ids)
+            assert dsa_topk_ids.dtype == torch.int32
 
-        sum(output.sum() for output in outputs).backward()
-        sum(output.sum() for output in reference_outputs).backward()
+        sum(output.sum() for output in output_hidden).backward()
+        sum(output.sum() for output in reference_hidden).backward()
 
         for hidden, reference_hidden in zip(hidden_states, reference_hidden_states):
             torch.testing.assert_close(hidden.grad, reference_hidden.grad)
