@@ -515,11 +515,22 @@ class TrainEngine:
         weights_dir: Path,
         load_states: bool = True,
         load_args: bool = True,
+        strict: bool | None = None,
     ) -> None:
         """Load a DCP checkpoint saved in the merged weights format.
 
         If the checkpoint does not contain optimizer states, only model weights will be loaded regardless of
         load_states/load_args settings.
+
+        Args:
+            weights_dir (Path): Directory holding the DCP checkpoint.
+            load_states (bool): Whether to restore optimizer states.
+            load_args (bool): Whether to restore optimizer arg defaults.
+            strict (bool | None): Whether every model key must be present. When
+                ``None`` (default) it follows the legacy behavior of relaxing
+                strictness only for models that hold frozen parameters. Pass
+                ``True`` to require an exact match, e.g. for an RL critic whose
+                checkpoint must never silently miss its value head.
         """
         # Float8Handler.__init__ calls torch.serialization.add_safe_globals for
         # WeightWithDynamic*Float8CastTensor, but the handler is lazily initialized
@@ -532,10 +543,9 @@ class TrainEngine:
         load_optimizer = load_states or load_args
         state_dict = self._get_dcp_state_dict(cpu_offload=True, save_optimizer=load_optimizer)
 
-        if self.has_freeze_params:
-            set_options = StateDictOptions(cpu_offload=True, strict=False)
-        else:
-            set_options = StateDictOptions(cpu_offload=True, strict=True)
+        if strict is None:
+            strict = not self.has_freeze_params
+        set_options = StateDictOptions(cpu_offload=True, strict=strict)
 
         with profile_time_and_memory(f"[Load DCP from {weights_dir}]"):
             dcp.load(
