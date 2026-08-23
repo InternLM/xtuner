@@ -1,3 +1,4 @@
+import math
 from abc import abstractmethod
 from typing import Literal, Optional, Tuple
 
@@ -5,6 +6,7 @@ import torch
 import torch.distributed as dist
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
+from torch.optim.lr_scheduler import LambdaLR
 from typing_extensions import Annotated
 
 from xtuner.v1.optim import Muon, SwapAdamW
@@ -213,6 +215,23 @@ class MuonConfig(OptimConfig):
         return optimizer
 
 
+class _ResumableLambdaLR(LambdaLR):
+    """A ``LambdaLR`` that reapplies its learning rate when state is loaded.
+
+    ``LRScheduler.load_state_dict`` only refreshes the scheduler's own counters;
+    it never writes the restored learning rate back to the optimizer. The next
+    ``optimizer.step()`` therefore runs at whatever rate the freshly constructed
+    scheduler happened to set -- 0.0 while warmup is configured -- and only the
+    following ``scheduler.step()`` corrects it. Reapplying on load keeps a
+    resumed run continuous.
+    """
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        super().load_state_dict(state_dict)
+        for param_group, lr in zip(self.optimizer.param_groups, self.get_last_lr()):
+            param_group["lr"] = lr
+
+
 class LRConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     lr_type: Annotated[Literal["cosine", "linear", "constant"], Parameter(help="Type of learning rate schedule")] = (
@@ -220,3 +239,60 @@ class LRConfig(BaseModel):
     )
     warmup_ratio: Annotated[float, Parameter(help="Ratio of warmup steps to total training steps")] = 0.03
     lr_min: Annotated[float, Parameter(help="Minimum learning rate for optimization")] = 1e-6
+
+    def build(
+        self,
+        optimizer: torch.optim.Optimizer,
+        total_steps: int,
+    ) -> torch.optim.lr_scheduler.LRScheduler:
+        """Build the learning rate scheduler for ``optimizer``.
+
+        Warmup is always applied first, then the configured decay. When
+        ``warmup_ratio`` is below 1 it is a fraction of ``total_steps``,
+        otherwise it is an absolute step count.
+
+        Implemented as a single ``LambdaLR`` rather than a ``SequentialLR`` of
+        warmup and decay phases: ``SequentialLR.load_state_dict`` restores its
+        internal counters without pushing the learning rate back onto the
+        optimizer, so a resumed run continues from the wrong point in the
+        schedule. One stateless closure over ``last_epoch`` has no such issue.
+
+        Args:
+            optimizer (torch.optim.Optimizer): Optimizer to schedule.
+            total_steps (int): Total number of scheduler steps.
+
+        Returns:
+            torch.optim.lr_scheduler.LRScheduler: Configured scheduler.
+        """
+        if total_steps <= 0:
+            raise ValueError(f"total_steps must be positive, got {total_steps}")
+
+        if self.warmup_ratio < 1:
+            warmup_steps = int(self.warmup_ratio * total_steps)
+        else:
+            warmup_steps = int(self.warmup_ratio)
+        warmup_steps = min(warmup_steps, total_steps)
+
+        base_lr = float(optimizer.defaults["lr"])
+        min_factor = self.lr_min / base_lr if base_lr > 0 else 1.0
+        decay_steps = max(total_steps - warmup_steps, 1)
+        lr_type = self.lr_type
+
+        def lr_factor(step: int) -> float:
+            if warmup_steps > 0 and step < warmup_steps:
+                return step / warmup_steps
+            if lr_type == "constant":
+                return 1.0
+            # Clamped so the schedule holds at lr_min past total_steps rather
+            # than continuing past the end of the curve.
+            progress = min(max((step - warmup_steps) / decay_steps, 0.0), 1.0)
+            if lr_type == "linear":
+                return 1.0 - progress * (1.0 - min_factor)
+            if lr_type == "cosine":
+                return min_factor + 0.5 * (1.0 - min_factor) * (1.0 + math.cos(math.pi * progress))
+            raise ValueError(f"Unsupported lr type: {lr_type}")
+
+        if lr_type not in ("constant", "linear", "cosine"):
+            raise ValueError(f"Unsupported lr type: {lr_type}")
+
+        return _ResumableLambdaLR(optimizer, lr_factor)

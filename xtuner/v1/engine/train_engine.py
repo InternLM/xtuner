@@ -307,6 +307,24 @@ class TrainEngine:
                 for grad in device_grads:
                     grad.mul_(device_clip_coef)
 
+    def optimizer_step_will_apply(self, grad_norm: torch.Tensor) -> bool:
+        """Whether :meth:`step_optimizer` will apply the update.
+
+        Lets callers keep a learning-rate scheduler in sync with the optimizer:
+        a skipped step must not advance the schedule.
+
+        Args:
+            grad_norm (torch.Tensor): The gradient norm for this step.
+
+        Returns:
+            bool: ``False`` when the step will be skipped for a non-finite or
+                over-threshold gradient norm.
+        """
+        if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+            return False
+        threshold = self.optim_cfg.skip_grad_norm_threshold
+        return threshold is None or bool(grad_norm <= threshold)
+
     def step_optimizer(self, grad_norm):
         """Step the optimizer to update the model parameters."""
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):

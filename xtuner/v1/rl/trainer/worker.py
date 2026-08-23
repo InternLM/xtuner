@@ -142,6 +142,11 @@ class WorkerConfig(BaseModel):
     fsdp_cfg: FSDPConfig
     load_from: str | Path  # TODO: 把 actor 和 ref 配置分离
     optimizer_steps: int = 1
+    # Total learning-rate scheduler steps. One step happens per applied
+    # optimizer update, i.e. roughly `total_train_steps * optimizer_steps`.
+    # Defaults high enough that a `constant` schedule (the common RL choice)
+    # never runs off the end of a decay curve.
+    scheduler_steps: int = 1_000_000
     sp_size: int = 1
     pack_max_length: int
     ref_load_from: str | Path | None = None
@@ -195,6 +200,7 @@ class WorkerTrainLogItem(TypedDict, total=False):
     grad_norm: float
     max_memory: float
     reserved_memory: float
+    lr: float
 
 
 class WorkerLogItem(TypedDict):
@@ -208,6 +214,7 @@ class WorkerLogItem(TypedDict):
 
 class TrainingWorker(SingleAcceleratorWorker):
     _SAVE_WEIGHTS_DIR = "weights"
+    _SAVE_SCHEDULER_PATH = "lr_scheduler.pt"
     _SAVE_SFT_DATALOADER_DIR = "sft_dataloader"
     _SAVE_SFT_TRAIN_STATE_PATH = "sft_train_state.json"
 
@@ -225,7 +232,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
         self.rank = rank
 
-        # TODO: add lr scheduler
         log_dir = worker_cfg.log_dir
         self.log_dir = None
         if log_dir is not None:
@@ -256,6 +262,8 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
 
         self._optimizer_steps = worker_cfg.optimizer_steps
+        self._lr_scheduler = worker_cfg.lr_cfg.build(self._engine.optimizer, worker_cfg.scheduler_steps)
+        self._optimizer_updates = 0
         profile_step = worker_cfg.profile_step
         if isinstance(profile_step, int):
             profile_step = [profile_step]
@@ -442,6 +450,31 @@ class TrainingWorker(SingleAcceleratorWorker):
             mesh_dim_names=("dp", "sp"),
         )
         return data_mesh
+
+    def _step_optimizer_and_scheduler(self, grad_norm: torch.Tensor) -> bool:
+        """Step the optimizer, advancing the LR schedule only if it applied.
+
+        A step skipped for a non-finite or over-threshold gradient norm must not
+        consume a scheduler step, otherwise the learning rate would decay on
+        updates that never happened.
+
+        Args:
+            grad_norm (torch.Tensor): The gradient norm for this step.
+
+        Returns:
+            bool: Whether the optimizer update was applied.
+        """
+        applied = self._engine.optimizer_step_will_apply(grad_norm)
+        self._engine.step_optimizer(grad_norm)
+        if applied:
+            self._lr_scheduler.step()
+            self._optimizer_updates += 1
+        return applied
+
+    @property
+    def current_lr(self) -> float:
+        """The learning rate currently in effect."""
+        return float(self._engine.optimizer.param_groups[0]["lr"])
 
     def compute_actor_logprobs(
         self,
@@ -830,7 +863,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f"train_step[{i}].engine_train_step elapsed={time.perf_counter() - train_step_begin:.4f}s"
             )
             grad_norm = self._engine.clip_grad_norm()
-            self._engine.step_optimizer(grad_norm)
+            self._step_optimizer_and_scheduler(grad_norm)
 
             engine_logs_info = cast(dict[str, float], train_step_info.pop("logs_info"))  # type: ignore[misc]
             engine_extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]
@@ -857,6 +890,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 grad_norm=grad_norm.item(),
                 max_memory=max_memory,
                 reserved_memory=reserved_memory,
+                lr=self.current_lr,
             )
             worker_log_item["train_metrics"].append(train_log_item)
 
@@ -950,7 +984,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         train_step_info = self._engine.train_step(engine_input)
         grad_norm = self._engine.clip_grad_norm()
-        self._engine.step_optimizer(grad_norm)
+        self._step_optimizer_and_scheduler(grad_norm)
         return train_step_info, grad_norm
 
     def _sft_log_step(
@@ -1086,6 +1120,16 @@ class TrainingWorker(SingleAcceleratorWorker):
             save_optimizer=not no_save_optimizer,
         )
 
+        # The scheduler state is replicated across ranks, so rank 0 owns it.
+        if self.rank == 0:
+            torch.save(
+                {
+                    "lr_scheduler": self._lr_scheduler.state_dict(),
+                    "optimizer_updates": self._optimizer_updates,
+                },
+                checkpoint_path / self._SAVE_SCHEDULER_PATH,
+            )
+
         # Save sft dataloader
         if self._sft_dataloader is not None:
             sft_dataloader_path = checkpoint_path / self._SAVE_SFT_DATALOADER_DIR
@@ -1131,6 +1175,18 @@ class TrainingWorker(SingleAcceleratorWorker):
             load_states=load_checkpoint_cfg.load_optimizer_states,
             load_args=load_checkpoint_cfg.load_optimizer_args,
         )
+
+        if load_checkpoint_cfg.load_scheduler:
+            scheduler_path = resume_from / self._SAVE_SCHEDULER_PATH
+            if scheduler_path.exists():
+                scheduler_state = torch.load(scheduler_path, map_location="cpu", weights_only=False)
+                self._lr_scheduler.load_state_dict(scheduler_state["lr_scheduler"])
+                self._optimizer_updates = int(scheduler_state["optimizer_updates"])
+                self.logger.info(f"Resumed LR scheduler at {self._optimizer_updates} optimizer updates")
+            else:
+                # Checkpoints written before the RL scheduler existed have no
+                # such file; keeping the fresh schedule is the safe fallback.
+                self.logger.warning(f"No LR scheduler state at {scheduler_path}; starting the schedule from step 0.")
 
         # Resume sft dataloader
         if self._sft_dataloader is not None:

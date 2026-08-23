@@ -34,7 +34,6 @@ from mmengine.runner import set_random_seed
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, model_serializer, model_validator
 from torch.distributed import init_process_group
 from torch.distributed.device_mesh import init_device_mesh
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
 from typing_extensions import NotRequired, Self, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -1184,42 +1183,12 @@ class Trainer:
 
         Args:
             lr_cfg (LRConfig): Configuration for the learning rate scheduler.
+            scheduler_step (int): Total number of scheduler steps.
 
         Returns:
             torch.optim.lr_scheduler.LRScheduler: Configured learning rate scheduler.
         """
-        if lr_cfg.warmup_ratio < 1:
-            warmup_steps = int(lr_cfg.warmup_ratio * scheduler_step)
-        else:
-            warmup_steps = int(lr_cfg.warmup_ratio)
-
-        def warmup_fn(x):
-            return x / warmup_steps if x < warmup_steps else 1
-
-        warmup_scheduler = LambdaLR(self._engine.optimizer, warmup_fn)
-
-        scheduler: torch.optim.lr_scheduler.LRScheduler
-        if lr_cfg.lr_type == "linear":
-            scheduler = LinearLR(
-                self._engine.optimizer,
-                start_factor=1.0,
-                end_factor=lr_cfg.lr_min / self._engine.optimizer.defaults["lr"],
-                total_iters=scheduler_step - warmup_steps,
-            )
-        elif lr_cfg.lr_type == "cosine":
-            scheduler = CosineAnnealingLR(
-                self._engine.optimizer, T_max=scheduler_step - warmup_steps, eta_min=lr_cfg.lr_min
-            )
-        elif lr_cfg.lr_type == "constant":
-            scheduler = LambdaLR(self._engine.optimizer, lambda x: 1.0)
-        else:
-            raise ValueError(f"Unsupported lr type: {lr_cfg.lr_type}")
-        lr_scheduler = SequentialLR(
-            optimizer=self._engine.optimizer,
-            schedulers=[warmup_scheduler, scheduler],
-            milestones=[warmup_steps],
-        )
-        return lr_scheduler
+        return lr_cfg.build(self._engine.optimizer, scheduler_step)
 
     def _maybe_check_health(self):
         if self._check_health_interval is None:
