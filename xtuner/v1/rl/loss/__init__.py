@@ -6,7 +6,15 @@ from .base_loss import (
     finalize_train_policy_metrics,
 )
 from .grpo_loss import GRPOLossConfig, GRPOLossContext, GRPOLossKwargs
-from .loss_fn import check_config, get_policy_loss_fn, kl_penalty, pg_loss_fn, register_policy_loss, sft_loss_fn
+from .loss_fn import (
+    check_config,
+    get_policy_loss_fn,
+    kl_divergence_per_token,
+    kl_penalty,
+    pg_loss_fn,
+    register_policy_loss,
+    sft_loss_fn,
+)
 from .oreal_loss import OrealLossConfig, OrealLossContext, OrealLossKwargs
 from .value_loss import (
     ValueLossConfig,
