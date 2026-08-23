@@ -793,6 +793,62 @@ class TrainingWorker(SingleAcceleratorWorker):
             avg_kl_div = kl_div_sum / global_grad_tokens if global_grad_tokens > 0 else 0
             self.logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
 
+        worker_log_item["train_metrics"].extend(
+            self._train_actor(
+                seq_ctx_list,
+                loss_ctx_list,
+                mtp_loss_ctx_list,
+                rollout_idx=rollout_idx,
+                iters_per_step=iters_per_step,
+            )
+        )
+
+        self._rollout_step += 1
+        if self._sft_dataloader is not None and self._rollout_step % self._rollout_steps_per_sft == 0:
+            train_step_info = self._fit_sft()
+            engine_logs_info = train_step_info["logs_info"]
+            worker_log_item["sft_train_metrics"] = {
+                **engine_logs_info,
+                **train_step_info["extra_info"].get(),
+                "efficient_attn_ratio": train_step_info["efficient_attn_ratio"],
+            }
+
+        return worker_log_item
+
+    def _train_actor(
+        self,
+        seq_ctx_list: list[SequenceContext],
+        loss_ctx_list: list[BaseRLLossContext],
+        mtp_loss_ctx_list: list[list[MTPLossContext]],
+        *,
+        rollout_idx: int,
+        iters_per_step: int,
+    ) -> list[WorkerTrainLogItem]:
+        """Run the actor's optimizer steps over prepared loss contexts.
+
+        Splits the batch into `iters_per_step`-sized chunks, calibrates each
+        chunk's loss globally, then runs forward, backward and one optimizer
+        update per chunk.
+
+        Shared by the group-baseline path and the PPO path, which differ only in
+        how advantages reach `loss_ctx_list`.
+
+        Args:
+            seq_ctx_list (list[SequenceContext]): Per-pack sequence contexts.
+            loss_ctx_list (list[BaseRLLossContext]): Per-pack policy loss
+                contexts, with `old_logprobs` already attached.
+            mtp_loss_ctx_list (list[list[MTPLossContext]]): Per-pack MTP loss
+                contexts, outer index batch and inner index depth. Empty when
+                MTP is disabled.
+            rollout_idx (int): Current rollout index, for logging.
+            iters_per_step (int): Micro-batches per optimizer update.
+
+        Returns:
+            list[WorkerTrainLogItem]: One log item per optimizer step.
+        """
+        loss_cfg: BaseRLLossConfig = self.config.loss_cfg
+        train_metrics: list[WorkerTrainLogItem] = []
+
         # compute batched loss context
         batched_loss_ctx_list: list[BaseRLLossContext] = []
         batched_mtp_loss_ctx_list: list[list[MTPLossContext]] = []
@@ -895,7 +951,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 reserved_memory=reserved_memory,
                 lr=self.current_lr,
             )
-            worker_log_item["train_metrics"].append(train_log_item)
+            train_metrics.append(train_log_item)
 
             # Extract logs_info for logging
             log_str = ", ".join(
@@ -906,18 +962,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             log_str = f"Rank{self.rank} Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)
             self._global_train_step = global_train_step
-
-        self._rollout_step += 1
-        if self._sft_dataloader is not None and self._rollout_step % self._rollout_steps_per_sft == 0:
-            train_step_info = self._fit_sft()
-            engine_logs_info = train_step_info["logs_info"]
-            worker_log_item["sft_train_metrics"] = {
-                **engine_logs_info,
-                **train_step_info["extra_info"].get(),
-                "efficient_attn_ratio": train_step_info["efficient_attn_ratio"],
-            }
-
-        return worker_log_item
+        return train_metrics
 
     def _fit_sft(self):
         self.logger.info(f"Train SFT after {self._rollout_step} RL steps")
