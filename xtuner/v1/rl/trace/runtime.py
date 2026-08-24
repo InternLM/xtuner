@@ -472,11 +472,12 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
     run_id = f"{timestamp}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     run_dir = output_dir / run_id
     external_endpoint = config.external_otlp_endpoint
-    external_collector = external_endpoint is not None
+    endpoint: str
     trace_jsonl_path: Path | None
     port: int | None
-    if external_collector:
+    if external_endpoint is not None:
         endpoint = external_endpoint
+        start_local_collector = False
         trace_jsonl_path = (
             Path(config.external_trace_jsonl_path).expanduser()
             if config.external_trace_jsonl_path is not None
@@ -496,9 +497,10 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
         except RuntimeError:
             port = find_free_ports(nums=1, host="127.0.0.1")[0]
         endpoint = f"http://127.0.0.1:{port}"
+        start_local_collector = True
     protocol = "grpc"
 
-    env_vars = {
+    env_vars: dict[str, str] = {
         "XTUNER_OTEL_ENABLED": "1",
         "XTUNER_OTEL_OUTPUT_DIR": os.fspath(output_dir),
         "XTUNER_OTEL_RUN_ID": run_id,
@@ -526,7 +528,7 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
         endpoint=endpoint,
         env_vars=env_vars,
         collector_port=port,
-        start_local_collector=not external_collector,
+        start_local_collector=start_local_collector,
         xtuner_viewer_host=config.xtuner_viewer_host if config.xtuner_viewer_enabled else None,
         xtuner_viewer_port=config.xtuner_viewer_port,
         xtuner_viewer_jaeger_query_url=config.xtuner_viewer_jaeger_query_url,
