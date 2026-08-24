@@ -265,6 +265,9 @@ trainer = RLColocateTrainerConfig(
     ),
     enable_evaluate=enable_evaluate,
     enable_initial_evaluate=False,
+    # "jsonl" makes the metrics machine-readable, which a smoke run needs to
+    # assert on programmatically.
+    exp_tracker=os.environ.get("EXP_TRACKER", "tensorboard"),
     evaluate_step=evaluate_step,
     work_dir=work_dir,
     seed=123,
