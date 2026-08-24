@@ -40,7 +40,7 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BaseLossContext, CELossConfig, LogProbConfig
 from xtuner.v1.loss.ce_loss import CELossContext, LMHeadLossContext
 from xtuner.v1.loss.mtp_loss import MTPLossConfig, MTPLossContext
-from xtuner.v1.loss.utils import sp_gather
+from xtuner.v1.loss.utils import sp_gather, sp_split
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
@@ -51,6 +51,7 @@ from xtuner.v1.rl.loss import (
     BaseRLLossContext,
     explained_variance,
     finalize_train_policy_metrics,
+    kl_divergence_per_token,
     kl_penalty,
 )
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
@@ -71,7 +72,7 @@ from xtuner.v1.utils.nccl_process_group import resume_nccl_process_groups, suspe
 
 from ..advantage import BaseTokenLevelAdvantageConfig, TokenLevelAdvantageEstimator, normalize_advantages
 from ..rollout_is import merge_rollout_is_metrics
-from .critic_config import CriticWorkerConfig
+from .critic_config import CriticWorkerConfig, KLRewardConfig
 
 
 DEVICE = get_device()
@@ -174,6 +175,7 @@ class WorkerConfig(BaseModel):
     # original actor-only behavior.
     critic_cfg: CriticWorkerConfig | None = None
     advantage_cfg: BaseTokenLevelAdvantageConfig | None = None
+    kl_reward_cfg: KLRewardConfig | None = None
 
     # sft config
     sft_dataloader_cfg: DataloaderConfig | None = None
@@ -230,6 +232,7 @@ class WorkerLogItem(TypedDict):
     sft_train_metrics: NotRequired[dict[str, float]]
     critic_train_metrics: NotRequired[List[WorkerTrainLogItem]]
     critic_metrics: NotRequired[dict[str, float]]
+    kl_reward_mean: NotRequired[float]
 
 
 class PPOPhase(str, Enum):
@@ -300,7 +303,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             self._init_ppo(worker_cfg)
 
         self._has_ref = False
-        if worker_cfg.loss_cfg.use_kl_loss:
+        if worker_cfg.loss_cfg.use_kl_loss or worker_cfg.kl_reward_cfg is not None:
             self._has_ref = True
             if worker_cfg.ref_load_from is None:
                 worker_cfg.ref_load_from = worker_cfg.load_from
@@ -448,9 +451,13 @@ class TrainingWorker(SingleAcceleratorWorker):
         if worker_cfg.advantage_cfg is None:
             raise ValueError("advantage_cfg is required when critic_cfg is configured.")
         if worker_cfg.loss_cfg.use_kl_loss:
-            # A loss-side KL needs a third resident model; the phase machine
-            # only sequences actor and critic today.
-            raise NotImplementedError("KL loss is not supported with a PPO critic yet.")
+            # PPO folds the KL penalty into the token reward instead, so it
+            # reaches the value targets through GAE. Allowing both would
+            # penalize divergence twice.
+            raise ValueError(
+                "Loss-side KL is not supported with a PPO critic; use kl_reward_cfg instead, "
+                "which lets the penalty flow through GAE into the value targets."
+            )
         if self._sft_dataloader is not None:
             raise NotImplementedError("SFT interleaving is not supported with a PPO critic yet.")
         if worker_cfg.pack_max_length % worker_cfg.sp_size != 0:
@@ -464,6 +471,8 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         self._advantage_estimator = worker_cfg.advantage_cfg.build()
         self._normalize_advantage = getattr(worker_cfg.advantage_cfg, "normalize_advantage", False)
+        self._kl_reward_cfg = worker_cfg.kl_reward_cfg
+        self._critic_warmup_steps = critic_cfg.warmup_steps
 
         # DCP must round-trip frozen params too, so a resumed critic keeps a
         # bit-exact backbone rather than silently re-initializing part of it.
@@ -1168,6 +1177,19 @@ class TrainingWorker(SingleAcceleratorWorker):
             "sft_train_metrics": {},
         }
 
+        in_warmup = self._rollout_step < self._critic_warmup_steps
+        if in_warmup:
+            self.logger.info(
+                f"Critic warmup {self._rollout_step + 1}/{self._critic_warmup_steps}: "
+                "training the critic only, the actor is frozen this step."
+            )
+
+        # --- KL reward phase ----------------------------------------------
+        # The penalty must be folded into the reward before GAE runs, so that
+        # it reaches the value targets rather than only the policy gradient.
+        if self._kl_reward_cfg is not None:
+            self._apply_kl_reward(prepared, worker_log_item)
+
         # --- Critic phase -------------------------------------------------
         self._onload_critic()
         # The critic routes independently, so it must not consume the actor's
@@ -1208,21 +1230,122 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._onload_actor()
 
         # --- Actor phase --------------------------------------------------
-        actor_logs = self._train_actor_on_advantages(
-            prepared["seq_ctx_list"],
-            prepared["shifted_labels_list"],
-            advantages_list,
-            prepared["rollout_logprobs_list"],
-            rollout_idx=rollout_idx,
-            worker_log_item=worker_log_item,
-        )
-        worker_log_item["train_metrics"] = actor_logs
+        if in_warmup:
+            # Skip the policy update entirely: no forward, no optimizer step,
+            # and no scheduler step, so the actor's schedule stays aligned with
+            # the updates it actually receives.
+            self.logger.info("Critic warmup: skipping the actor update.")
+        else:
+            worker_log_item["train_metrics"] = self._train_actor_on_advantages(
+                prepared["seq_ctx_list"],
+                prepared["shifted_labels_list"],
+                advantages_list,
+                prepared["rollout_logprobs_list"],
+                rollout_idx=rollout_idx,
+                worker_log_item=worker_log_item,
+            )
 
         self._engine.put_optimizer_to_device("cpu")
         DEVICE_MODULE.empty_cache()
         self._set_ppo_phase(PPOPhase.ACTOR_READY)
         self._rollout_step += 1
         return worker_log_item
+
+    def _apply_kl_reward(self, prepared: dict[str, list], worker_log_item: WorkerLogItem) -> None:
+        """Subtract a per-token KL penalty from the token rewards, in place.
+
+        Runs before GAE so the penalty is discounted and bootstrapped like any
+        other reward, and so the critic learns to predict it. Adding KL to the
+        loss instead would leave the value function unaware of it.
+
+        Both the actor and the reference model are transient here: each is
+        faulted in, used for one forward pass, and evicted before the critic
+        phase needs the accelerator.
+        """
+        kl_cfg = self._kl_reward_cfg
+        assert kl_cfg is not None
+
+        action_mask_list = prepared["action_mask_list"]
+        token_rewards_list = prepared["token_rewards_list"]
+        shifted_labels_list = prepared["shifted_labels_list"]
+
+        if kl_cfg.coef == 0.0:
+            return
+
+        # Behavior log probabilities: either recomputed by the current policy
+        # or reused from the inference engine.
+        if kl_cfg.behavior_logprobs == "old":
+            self._onload_actor()
+            behavior_list = self._compute_full_logprobs(
+                self._actor_forward_logprobs, prepared["seq_ctx_list"], shifted_labels_list
+            )
+            self._engine.put_model_to_device("cpu")
+            DEVICE_MODULE.empty_cache()
+            self._set_ppo_phase(PPOPhase.ALL_OFFLOADED)
+        else:
+            behavior_list = []
+            for rollout_logprobs, labels in zip(prepared["rollout_logprobs_list"], shifted_labels_list):
+                if rollout_logprobs is None:
+                    raise ValueError(
+                        "kl_reward_cfg.behavior_logprobs='rollout' needs rollout logprobs, but the "
+                        "rollout engine did not return them."
+                    )
+                behavior_list.append(rollout_logprobs.reshape(labels.shape))
+
+        ref_list = self._compute_full_logprobs(
+            self._ref_forward_logprobs, prepared["seq_ctx_list"], shifted_labels_list
+        )
+
+        kl_sum = torch.zeros((), dtype=torch.float64, device=DEVICE)
+        token_count = torch.zeros((), dtype=torch.float64, device=DEVICE)
+        for index, (behavior, ref, action_mask) in enumerate(zip(behavior_list, ref_list, action_mask_list)):
+            kl = kl_divergence_per_token(behavior, ref, kl_cfg.kl_type)
+            kl = torch.where(action_mask, kl, torch.zeros_like(kl))
+            token_rewards_list[index] = token_rewards_list[index] - kl_cfg.coef * kl
+            kl_sum += kl.sum().double()
+            token_count += action_mask.sum().double()
+
+        stats = torch.stack((kl_sum, token_count))
+        if dist.is_initialized():
+            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        if stats[1].item() > 0:
+            worker_log_item["kl_reward_mean"] = float((stats[0] / stats[1]).item())
+
+    def _compute_full_logprobs(
+        self,
+        forward_fn,
+        seq_ctx_list: list[SequenceContext],
+        shifted_labels_list: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
+        """Run a log-probability forward, returning full-sequence results.
+
+        Under sequence parallelism the model consumes shards, so the labels are
+        split for the forward and the outputs gathered back: the KL penalty is
+        applied to unsplit token rewards.
+        """
+        if self.sp_mesh.size() == 1:
+            return forward_fn(seq_ctx_list, shifted_labels_list)
+
+        split_seq_ctx_list = [seq_ctx.split(self.sp_mesh) for seq_ctx in seq_ctx_list]
+        split_labels_list = [
+            sp_split(labels, sp_mesh=self.sp_mesh, split_dim=1, padding_value=self.config.loss_cfg.ignore_idx)
+            for labels in shifted_labels_list
+        ]
+        sharded = forward_fn(split_seq_ctx_list, split_labels_list)
+        return [
+            sp_gather(logprobs, self.sp_mesh, dim=1).reshape(labels.shape)
+            for logprobs, labels in zip(sharded, shifted_labels_list)
+        ]
+
+    def _actor_forward_logprobs(
+        self, seq_ctx_list: list[SequenceContext], shifted_labels_list: list[torch.Tensor]
+    ) -> list[torch.Tensor]:
+        return self.compute_actor_logprobs(seq_ctx_list, shifted_labels_list)
+
+    def _ref_forward_logprobs(
+        self, seq_ctx_list: list[SequenceContext], shifted_labels_list: list[torch.Tensor]
+    ) -> list[torch.Tensor]:
+        return self.compute_ref_logprobs(seq_ctx_list, shifted_labels_list)
 
     def _prepare_ppo_inputs(self, data_batches: list[WorkerInputItem]) -> dict[str, list]:
         """Materialize packed inputs and split the per-token PPO tensors.

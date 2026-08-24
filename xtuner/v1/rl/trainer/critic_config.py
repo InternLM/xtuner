@@ -13,6 +13,41 @@ from xtuner.v1.model.value import wants_scalar_value_head
 from xtuner.v1.rl.loss.value_loss import ValueLossConfig
 
 
+class KLRewardConfig(BaseModel):
+    """Per-token KL penalty folded into the reward.
+
+    Classic PPO for RLHF subtracts ``beta * KL(policy || reference)`` from the
+    token reward, so the penalty flows through the GAE recursion and shapes the
+    value targets. That is not equivalent to the loss-side KL used by the
+    group-baseline algorithms here, which leaves the critic unaware of it.
+
+    Args:
+        coef (float): The KL coefficient ``beta``.
+        kl_type (str): KL estimator; see
+            :func:`~xtuner.v1.rl.loss.kl_divergence_per_token`. ``low_var_kl``
+            is clamped and non-negative, which keeps a single token from
+            dominating the return.
+        behavior_logprobs (Literal["old", "rollout"]): Which log probabilities
+            to measure divergence from. ``old`` recomputes them with the current
+            policy, matching the loss-side convention and costing one extra
+            actor forward. ``rollout`` reuses the inference engine's values,
+            which is free but reflects the sampling policy, including any
+            numerical mismatch between the training and inference stacks.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    coef: float = 0.001
+    kl_type: Literal["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"] = "low_var_kl"
+    behavior_logprobs: Literal["old", "rollout"] = "old"
+
+    @model_validator(mode="after")
+    def _validate(self) -> "KLRewardConfig":
+        if self.coef < 0:
+            raise ValueError(f"coef must be non-negative, got {self.coef}")
+        return self
+
+
 class CriticWorkerConfig(BaseModel):
     """Configuration for the PPO value model.
 
@@ -40,6 +75,10 @@ class CriticWorkerConfig(BaseModel):
             region to violate.
         optimizer_steps_per_pass (int): Optimizer updates per pass.
         scheduler_steps (int): Total learning-rate scheduler steps.
+        warmup_steps (int): Training steps during which only the critic is
+            updated. A freshly initialized value head predicts noise, so early
+            advantages are noise too; letting the critic catch up first avoids
+            driving the policy with them.
     """
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
@@ -54,6 +93,7 @@ class CriticWorkerConfig(BaseModel):
     num_passes: int = 1
     optimizer_steps_per_pass: int = 1
     scheduler_steps: int = 1_000_000
+    warmup_steps: int = 0
 
     @model_validator(mode="after")
     def _validate(self) -> "CriticWorkerConfig":
@@ -63,6 +103,8 @@ class CriticWorkerConfig(BaseModel):
             raise ValueError(f"optimizer_steps_per_pass must be positive, got {self.optimizer_steps_per_pass}")
         if self.scheduler_steps <= 0:
             raise ValueError(f"scheduler_steps must be positive, got {self.scheduler_steps}")
+        if self.warmup_steps < 0:
+            raise ValueError(f"warmup_steps must be non-negative, got {self.warmup_steps}")
         if self.load_mode == "load_weights" and self.load_from is None:
             raise ValueError("critic load_from is required when load_mode='load_weights'.")
 

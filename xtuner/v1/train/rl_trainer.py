@@ -437,6 +437,11 @@ class BaseRLTrainerConfig(BaseModel):
                 f"{type(self.advantage_estimator_config).__name__} needs a value function; set "
                 "train_worker_cfg.critic_cfg."
             )
+        if self.train_worker_cfg.kl_reward_cfg is not None and not wants_critic:
+            raise ValueError(
+                "kl_reward_cfg folds the KL penalty into the token reward, which only has an effect "
+                "with a critic. Group-baseline algorithms should use loss_cfg.use_kl_loss instead."
+            )
         if wants_critic:
             # The worker owns the estimator, since advantages are derived from
             # the critic forward. Push the trainer-level config down so there is
@@ -1469,6 +1474,8 @@ class BaseRLTrainer:
             all_scalars.update({"entropy/rollout": rank0_rollout_entropy})
             all_scalars.update({"entropy/train": rank0_log_item["train_entropy"]})
             all_scalars.update(rank0_log_item.get("critic_metrics", {}))
+            if (kl_reward_mean := rank0_log_item.get("kl_reward_mean")) is not None:
+                all_scalars["kl_reward/mean_kl"] = kl_reward_mean
             for worker_idx, log_item in enumerate(train_info["workers_log_item"]):
                 if not self._display_all_workers_log and worker_idx > 0:
                     break
