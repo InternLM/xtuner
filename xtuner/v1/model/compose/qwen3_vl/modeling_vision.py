@@ -1,5 +1,5 @@
 import os
-from typing import List, Callable
+from typing import List, Callable, cast
 from xtuner.v1.ops.act_fn import get_act_fn
 import torch.nn as nn
 import torch
@@ -131,6 +131,10 @@ class Qwen3VLVisionAttention(nn.Module):
         self.config = config
         self.attention_dropout = 0.0
         self.attn_impl_func: Callable[..., AttnOpOutputs] = get_attn_impl_fn(config.attn_impl)  # type: ignore[assignment]
+
+    def get_muon_split_sizes(self) -> dict[nn.Parameter, tuple[int, ...]]:
+        """Return the logical Q, K, and V row blocks for MuonSplit."""
+        return {cast(nn.Parameter, self.qkv.weight): (self.dim, self.dim, self.dim)}
 
     def forward(
         self,
