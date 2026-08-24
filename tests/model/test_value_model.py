@@ -1,5 +1,6 @@
 """Tests for the generic scalar value-model wrapper used by RL critics."""
 
+from functools import partial
 from itertools import chain
 
 import pytest
@@ -16,6 +17,7 @@ from xtuner.v1.model.value import (
     wants_scalar_value_head,
 )
 from xtuner.v1.module.attention import MHAConfig
+from xtuner.v1.utils import init_params
 
 
 def _tiny_dense_config(**overrides) -> Qwen3DenseConfig:
@@ -115,6 +117,66 @@ class TestValueModelHead:
         _, (values, _) = critic.lm_head(hidden_states, None)
 
         assert values.shape == (1, 8, 1)
+
+
+class TestValueHeadInitialization:
+    """`ValueModelMixin.from_hf` initializes a missing value head in place.
+
+    `init_params` reaches `param.copy_(...)` only for a sharded (DTensor)
+    parameter, and autograd rejects an in-place write to a leaf that requires
+    grad -- which is exactly what a freshly built, trainable critic head is.
+    A plain CPU tensor takes the other branch and hides the problem, so this
+    exercises the DTensor path directly.
+    """
+
+    @staticmethod
+    def _init_head(head: torch.Tensor, hidden_size: int) -> None:
+        """Replicate what the mixin does for an absent value head."""
+        with torch.no_grad():
+            init_params(head, partial(torch.nn.init.normal_, mean=0.0, std=1.0 / (hidden_size + 1)))
+
+    def test_head_is_a_trainable_leaf(self) -> None:
+        # The precondition that makes the in-place write illegal.
+        critic = as_value_config(_tiny_dense_config()).build()
+        head = critic.lm_head.weight
+        assert head.requires_grad
+        assert head.is_leaf
+
+    def test_in_place_init_needs_no_grad_for_sharded_params(self) -> None:
+        import torch.distributed as dist
+
+        if not dist.is_available():
+            pytest.skip("torch.distributed unavailable")
+        if not dist.is_initialized():
+            dist.init_process_group(backend="gloo", store=dist.HashStore(), rank=0, world_size=1)
+        try:
+            from torch.distributed.device_mesh import init_device_mesh
+            from torch.distributed.tensor import distribute_tensor
+
+            mesh = init_device_mesh("cpu", (1,))
+            cfg = _tiny_dense_config()
+            head = torch.nn.Parameter(distribute_tensor(torch.zeros(1, cfg.hidden_size), mesh))
+            assert head.requires_grad
+
+            with pytest.raises(RuntimeError, match="leaf Variable that requires grad"):
+                init_params(head, partial(torch.nn.init.normal_, mean=0.0, std=0.01))
+
+            # Under no_grad the same call succeeds, which is what the mixin does.
+            self._init_head(head, cfg.hidden_size)
+            assert bool(torch.isfinite(head.to_local()).all())
+        finally:
+            if dist.is_initialized():
+                dist.destroy_process_group()
+
+    def test_init_uses_small_variance(self) -> None:
+        # A default 0.02-std head emits large arbitrary values on step 0, which
+        # GAE would then propagate into every advantage.
+        cfg = _tiny_dense_config()
+        critic = as_value_config(cfg).build()
+        expected_std = 1.0 / (cfg.hidden_size + 1)
+        self._init_head(critic.lm_head.weight, cfg.hidden_size)
+        # Loose bound: a 16-wide head is a small sample.
+        assert critic.lm_head.weight.std().item() < 5 * expected_std
 
 
 class TestValueModelCheckpointKeys:

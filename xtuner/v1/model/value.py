@@ -123,10 +123,14 @@ class ValueModelMixin:
             # A default 0.02-std head emits large arbitrary values on step 0,
             # which GAE then propagates into every advantage.
             value_head_std = 1.0 / (hidden_size + 1)
-            init_params(
-                self.lm_head.weight,  # type: ignore[attr-defined]
-                partial(torch.nn.init.normal_, mean=0.0, std=value_head_std),
-            )
+            # `init_params` writes in place, which autograd forbids on a leaf
+            # that requires grad. Every other initializer in the codebase runs
+            # under no_grad for the same reason.
+            with torch.no_grad():
+                init_params(
+                    self.lm_head.weight,  # type: ignore[attr-defined]
+                    partial(torch.nn.init.normal_, mean=0.0, std=value_head_std),
+                )
             unloaded_keys.discard(LOCAL_VALUE_HEAD_KEY)
             missing_keys.discard(HF_VALUE_HEAD_KEY)
             log_rank0.info(f"Initialized missing critic value head with Normal(mean=0, std={value_head_std:.6g})")
