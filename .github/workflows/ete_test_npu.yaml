@@ -58,7 +58,7 @@ jobs:
           CI_REPORTS_RAW_URL_BASE: ${{ env.CI_REPORTS_RAW_URL_BASE }}
         run: |
           source /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/miniconda3/bin/activate
-          source activate new_npuci
+          source activate npuci
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
           CASE_NAME="${{ github.event.inputs.run_case || 'all' }}"
           if [ "$CASE_NAME" = "all" ]; then
