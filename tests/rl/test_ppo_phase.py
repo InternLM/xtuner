@@ -133,6 +133,23 @@ class TestPhaseTransitions(unittest.TestCase):
         worker._onload_critic()
         self.assertEqual(worker._ppo_phase, PPOPhase.CRITIC_TRAIN)
 
+    def test_onload_actor_allowed_from_actor_ready(self):
+        """The KL reward phase re-enters the actor after a warmup step.
+
+        A warmup step leaves the actor resident and the phase at ACTOR_READY;
+        the next rollout's KL phase needs a behavior forward and must not be
+        rejected, nor should it redundantly transfer the model again.
+        """
+        worker, log = _worker(with_critic=True)
+        worker._ppo_phase = PPOPhase.ACTOR_READY
+        worker._engine.model_device = "cuda"
+
+        worker._onload_actor()
+
+        self.assertEqual(worker._ppo_phase, PPOPhase.ACTOR_TRAIN)
+        # No redundant H2D: the model was already resident.
+        self.assertNotIn(("actor", "model", "cuda"), log)
+
 
 class TestExternalLifecycleGuards(unittest.TestCase):
     """The trainer drives offload/onload; it must not fault in the wrong model."""

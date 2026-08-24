@@ -627,9 +627,17 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._set_ppo_phase(PPOPhase.ALL_OFFLOADED)
 
     def _onload_actor(self) -> None:
-        if self._ppo_phase != PPOPhase.ALL_OFFLOADED:
+        """Fault the actor in for training.
+
+        `ACTOR_READY` means the actor is already resident from a previous
+        phase (a warmup step skips the actor update, or the KL phase re-enters
+        the actor on the next rollout), so it does not need another device
+        transfer -- only a phase stamp. `ALL_OFFLOADED` does the transfer.
+        """
+        if self._ppo_phase not in (PPOPhase.ALL_OFFLOADED, PPOPhase.ACTOR_READY):
             raise RuntimeError(f"Cannot onload the actor from phase {self._ppo_phase.value}.")
-        self._engine.put_model_to_device(DEVICE)
+        if self._ppo_phase == PPOPhase.ALL_OFFLOADED:
+            self._engine.put_model_to_device(DEVICE)
         self._set_ppo_phase(PPOPhase.ACTOR_TRAIN)
 
     def _step_critic_optimizer_and_scheduler(self, grad_norm: torch.Tensor) -> bool:
