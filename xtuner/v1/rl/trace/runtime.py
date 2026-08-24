@@ -157,8 +157,7 @@ class TraceConfig(BaseModel):
         if self.xtuner_viewer_enabled and self.external_otlp_endpoint is not None:
             if self.external_trace_jsonl_path is None:
                 raise ValueError(
-                    "xtuner_viewer_enabled with an external OTLP collector requires "
-                    "external_trace_jsonl_path"
+                    "xtuner_viewer_enabled with an external OTLP collector requires external_trace_jsonl_path"
                 )
         return self
 
@@ -472,12 +471,17 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
     timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
     run_id = f"{timestamp}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     run_dir = output_dir / run_id
-    external_collector = config.external_otlp_endpoint is not None
+    external_endpoint = config.external_otlp_endpoint
+    external_collector = external_endpoint is not None
     trace_jsonl_path: Path | None
     port: int | None
     if external_collector:
-        endpoint = config.external_otlp_endpoint
-        trace_jsonl_path = config.external_trace_jsonl_path
+        endpoint = external_endpoint
+        trace_jsonl_path = (
+            Path(config.external_trace_jsonl_path).expanduser()
+            if config.external_trace_jsonl_path is not None
+            else None
+        )
         port = None
         if trace_jsonl_path is not None and config.xtuner_viewer_enabled:
             trace_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
