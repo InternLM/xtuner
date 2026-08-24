@@ -1,6 +1,5 @@
 import json
 import threading
-import time
 import weakref
 from pathlib import Path
 from queue import Empty, Queue
@@ -68,6 +67,7 @@ class JsonlWriter:
 
     def _write(self, item: str):
         self._file_writer.write(item + "\n")
+        self._file_writer.flush()
 
     def close(self):
         with self._lock:
@@ -105,8 +105,6 @@ class _AsyncWriter:
         if writer is None:
             return
 
-        last_flush = time.monotonic()
-        flush_interval = 30.0  # seconds
         while True:
             try:
                 item = writer._queue.get(timeout=1.0)
@@ -131,14 +129,6 @@ class _AsyncWriter:
                     logger.warning(f"Exception occurred during writing data to {writer.log_file}")
                 finally:
                     writer._queue.task_done()
-
-            now = time.monotonic()
-            if now - last_flush >= flush_interval:
-                try:
-                    writer._file_writer.flush()
-                except Exception:
-                    logger.warning(f"Exception occurred during flushing {writer.log_file}")
-                last_flush = now
 
     def run(self):
         with self._lock:
