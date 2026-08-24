@@ -59,18 +59,20 @@ NNODE = int(os.environ.get("WORLD_SIZE", "8"))
 
 # basic settings
 experimental_name = "ppo_gsm8k_qwen3p5"
-total_train_steps = 200
-evaluate_step = 50
-train_optimizer_steps = 4
+# Overridable so a short smoke run can reuse this config unchanged.
+total_train_steps = int(os.environ.get("TOTAL_TRAIN_STEPS", "200"))
+evaluate_step = int(os.environ.get("EVALUATE_STEP", "50"))
+train_optimizer_steps = int(os.environ.get("TRAIN_OPTIMIZER_STEPS", "4"))
 train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", 64 * train_optimizer_steps))
+enable_evaluate = os.environ.get("ENABLE_EVALUATE", "1") == "1"
 # PPO learns a per-token baseline, so it does not need several samples per
 # prompt to form one. A small k still helps rollout throughput and keeps the
 # reward distribution observable.
-prompt_repeat_k = 2
-rollout_tp_size = 2
+prompt_repeat_k = int(os.environ.get("PROMPT_REPEAT_K", "2"))
+rollout_tp_size = int(os.environ.get("ROLLOUT_TP_SIZE", "2"))
 rollout_ep_size = 1
-max_prompt_length = 512
-max_response_length = 1024
+max_prompt_length = int(os.environ.get("MAX_PROMPT_LENGTH", "512"))
+max_response_length = int(os.environ.get("MAX_RESPONSE_LENGTH", "1024"))
 sp_size = int(os.environ.get("SP_SIZE", "1"))
 # Must be divisible by sp_size: GAE runs on the gathered full sequence, so the
 # gather has to return exactly pack_max_length.
@@ -261,7 +263,7 @@ trainer = RLColocateTrainerConfig(
         gae_lambda=0.95,
         normalize_advantage=True,
     ),
-    enable_evaluate=True,
+    enable_evaluate=enable_evaluate,
     enable_initial_evaluate=False,
     evaluate_step=evaluate_step,
     work_dir=work_dir,
