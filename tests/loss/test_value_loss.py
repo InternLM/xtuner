@@ -12,6 +12,12 @@ from xtuner.v1.rl.loss import (
     explained_variance,
     value_loss,
 )
+from xtuner.v1.utils.device import get_device
+
+
+# `ValueLossConfig.build` materializes its kwargs on the accelerator, so
+# reference tensors must be created there too rather than on the CPU.
+DEVICE = get_device()
 
 
 class TestValueLossFunction(TestCase):
@@ -150,7 +156,7 @@ class TestValueLossContext(TestCase):
         weight = ctx.loss_kwargs.loss_weight
         assert weight is not None
         # Two valid tokens -> weight 1/2 on them, 0 elsewhere.
-        torch.testing.assert_close(weight, torch.tensor([[0.5, 0.5, 0.0, 0.0]]))
+        torch.testing.assert_close(weight, torch.tensor([[0.5, 0.5, 0.0, 0.0]], device=weight.device))
 
     def test_build_batches_shares_one_denominator_across_micro_batches(self) -> None:
         """Gradient accumulation must not change the effective loss scale."""
@@ -163,7 +169,7 @@ class TestValueLossContext(TestCase):
         for ctx in (first, second):
             weight = ctx.loss_kwargs.loss_weight
             assert weight is not None
-            torch.testing.assert_close(weight, torch.full((1, 4), 0.125))
+            torch.testing.assert_close(weight, torch.full((1, 4), 0.125, device=weight.device))
 
     def test_build_batches_handles_all_masked(self) -> None:
         ctx = self._context(torch.zeros(1, 4), torch.zeros(1, 4, dtype=torch.bool))
@@ -181,7 +187,7 @@ class TestValueLossContext(TestCase):
     def test_forward_before_build_batches_raises(self) -> None:
         ctx = self._context(torch.zeros(1, 4), torch.ones(1, 4, dtype=torch.bool))
         with self.assertRaisesRegex(RuntimeError, "build_batches must be called"):
-            ctx.loss_fn(torch.randn(1, 4, 8), torch.randn(1, 8), None, ctx.loss_kwargs)
+            ctx.loss_fn(torch.randn(1, 4, 8, device=DEVICE), torch.randn(1, 8, device=DEVICE), None, ctx.loss_kwargs)
 
     def test_loss_fn_averages_over_valid_tokens(self) -> None:
         """A calibrated loss equals the mean over valid tokens."""
@@ -191,12 +197,12 @@ class TestValueLossContext(TestCase):
         ValueLossContext.build_batches([ctx])
 
         # Force every predicted value to exactly 1.0.
-        hidden_states = torch.ones(1, 4, 2)
-        head_weight = torch.tensor([[0.5, 0.5]])
+        hidden_states = torch.ones(1, 4, 2, device=DEVICE)
+        head_weight = torch.tensor([[0.5, 0.5]], device=DEVICE)
 
         loss, (values, _) = ctx.loss_fn(hidden_states, head_weight, None, ctx.loss_kwargs)
 
-        torch.testing.assert_close(values, torch.ones(1, 4))
+        torch.testing.assert_close(values, torch.ones(1, 4, device=values.device))
         # Mean of 0.5 * (1 - 0)^2 over 4 tokens.
         self.assertAlmostEqual(loss.item(), 0.5, places=6)
 
@@ -205,13 +211,15 @@ class TestValueLossContext(TestCase):
         ValueLossContext.build_batches([ctx])
         # A vocabulary-shaped head would silently broadcast; catch it instead.
         with self.assertRaisesRegex(ValueError, "one scalar per token"):
-            ctx.loss_fn(torch.randn(1, 4, 2), torch.randn(3, 2), None, ctx.loss_kwargs)
+            ctx.loss_fn(torch.randn(1, 4, 2, device=DEVICE), torch.randn(3, 2, device=DEVICE), None, ctx.loss_kwargs)
 
     def test_metrics_report_reducible_sums(self) -> None:
         ctx = self._context(torch.zeros(1, 4), torch.ones(1, 4, dtype=torch.bool))
         ValueLossContext.build_batches([ctx])
 
-        _, (_, metrics) = ctx.loss_fn(torch.ones(1, 4, 2), torch.tensor([[0.5, 0.5]]), None, ctx.loss_kwargs)
+        _, (_, metrics) = ctx.loss_fn(
+            torch.ones(1, 4, 2, device=DEVICE), torch.tensor([[0.5, 0.5]], device=DEVICE), None, ctx.loss_kwargs
+        )
 
         self.assertEqual(float(metrics["reduced_critic_valid_count"]), 4.0)
         self.assertAlmostEqual(float(metrics["reduced_critic_value_sum"]), 4.0, places=5)
@@ -304,10 +312,10 @@ class TestValueLossDistributed(DistributedTestBase):
             for ctx in contexts:
                 weight = ctx.loss_kwargs.loss_weight
                 assert weight is not None
-                torch.testing.assert_close(weight, torch.full((1, tokens), 1.0 / total_tokens))
+                torch.testing.assert_close(weight, torch.full((1, tokens), 1.0 / total_tokens, device=weight.device))
 
             # Sum this rank's accumulated loss, then reduce over ranks.
-            local_loss = torch.zeros(())
+            local_loss = torch.zeros((), device=DEVICE)
             for step, ctx in enumerate(contexts):
                 local_loss = local_loss + value_loss(
                     all_values[self.rank, step],
@@ -315,17 +323,20 @@ class TestValueLossDistributed(DistributedTestBase):
                     ctx.loss_kwargs.loss_weight,
                     loss_type="mse",
                 )
+            # The process group is gloo, so reduce on the CPU regardless of
+            # where the loss was computed.
+            local_loss = local_loss.cpu()
             dist.all_reduce(local_loss, op=dist.ReduceOp.SUM)
 
             # Reference: one rank, no accumulation, over all the data.
-            flat_values = all_values.reshape(1, -1)
-            flat_returns = all_returns.reshape(1, -1)
+            flat_values = all_values.reshape(1, -1).to(DEVICE)
+            flat_returns = all_returns.reshape(1, -1).to(DEVICE)
             expected = value_loss(
                 flat_values,
                 flat_returns,
                 torch.full_like(flat_values, 1.0 / total_tokens),
                 loss_type="mse",
-            )
+            ).cpu()
 
             torch.testing.assert_close(local_loss, expected, atol=1e-5, rtol=1e-5)
         finally:
@@ -380,13 +391,21 @@ class TestValueLossSequenceParallel(DistributedTestBase):
 
             ValueLossContext.build_batches([ctx])
             shard = tokens // self.world_size
-            local_values = values[:, self.rank * shard : (self.rank + 1) * shard]
+            local_values = values[:, self.rank * shard : (self.rank + 1) * shard].to(DEVICE)
             local_loss = value_loss(
                 local_values, ctx.loss_kwargs.returns, ctx.loss_kwargs.loss_weight, loss_type="mse"
             )
+            # The process group is gloo, so reduce on the CPU regardless of
+            # where the loss was computed.
+            local_loss = local_loss.cpu()
             dist.all_reduce(local_loss, op=dist.ReduceOp.SUM)
 
-            expected = value_loss(values, returns, torch.full_like(values, 1.0 / tokens), loss_type="mse")
+            expected = value_loss(
+                values.to(DEVICE),
+                returns.to(DEVICE),
+                torch.full_like(values, 1.0 / tokens).to(DEVICE),
+                loss_type="mse",
+            ).cpu()
             torch.testing.assert_close(local_loss, expected, atol=1e-5, rtol=1e-5)
         finally:
             dist.destroy_process_group()
