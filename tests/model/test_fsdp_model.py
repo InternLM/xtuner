@@ -1,3 +1,4 @@
+import json
 import tempfile
 from pathlib import Path
 
@@ -131,10 +132,9 @@ class TestFSDPModel(DeterministicDDPTestCase):
         for name, ref_param in ref_model.state_dict().items():
             torch.testing.assert_close(_full_tensor(model.state_dict()[name]), ref_param)
 
-    def test_save_hf_respects_global_bucket_size(self):
+    def _save_hf_with_bucket(self, tmpdir: str, bucket_size: int) -> tuple[ToyModel, Path]:
         self.create_pg("cuda")
 
-        bucket_size = 1100
         config = ToyModelConfig(
             compile_cfg=False,
             hf_save_cfg=HFSaveCfg(bucket_size=bucket_size, worker_per_rank=1),
@@ -148,26 +148,43 @@ class TestFSDPModel(DeterministicDDPTestCase):
             )
         )
 
+        shared_tmpdir = [tmpdir]
+        dist.broadcast_object_list(shared_tmpdir, src=0)
+        source_dir = Path(shared_tmpdir[0]) / "source"
+        saved_dir = Path(shared_tmpdir[0]) / "saved"
+        if dist.get_rank() == 0:
+            source_dir.mkdir()
+            (source_dir / "config.json").write_text("{}")
+        dist.barrier()
+
+        model.set_hf(source_dir)
+        model.save_hf(saved_dir)
+        return model, saved_dir
+
+    def test_save_hf_respects_global_bucket_size(self):
+        bucket_size = 1100
         with tempfile.TemporaryDirectory() as tmpdir:
-            shared_tmpdir = [tmpdir]
-            dist.broadcast_object_list(shared_tmpdir, src=0)
-            source_dir = Path(shared_tmpdir[0]) / "source"
-            saved_dir = Path(shared_tmpdir[0]) / "saved"
+            model, saved_dir = self._save_hf_with_bucket(tmpdir, bucket_size)
             if dist.get_rank() == 0:
-                source_dir.mkdir()
-                (source_dir / "config.json").write_text("{}")
-            dist.barrier()
+                safetensor_paths = list(saved_dir.glob("*.safetensors"))
+                assert safetensor_paths
 
-            model.set_hf(source_dir)
-            model.save_hf(saved_dir)
-
-            if dist.get_rank() == 0:
-                # bucket_size bounds reconstructed checkpoint tensors, not each
-                # rank's local FSDP shards. A tensor larger than the bucket is
-                # valid, but it must occupy its shard alone.
-                for safetensor_path in saved_dir.glob("*.safetensors"):
+                # Check the reconstruction bucket bound.
+                for safetensor_path in safetensor_paths:
                     with safe_open(safetensor_path, framework="pt") as reader:
                         tensors = [reader.get_tensor(key) for key in reader.keys()]
                     shard_size = sum(tensor.numel() * tensor.element_size() for tensor in tensors)
                     assert shard_size <= bucket_size or len(tensors) == 1
+
+                # Independently check that save_hf produced a complete checkpoint.
+                expected_keys = set(model.state_dict())
+                index = json.loads((saved_dir / "model.safetensors.index.json").read_text())
+                assert set(index["weight_map"]) == expected_keys
+                assert {path.name for path in safetensor_paths} == set(index["weight_map"].values())
+
+                saved_keys = set()
+                for safetensor_path in safetensor_paths:
+                    with safe_open(safetensor_path, framework="pt") as reader:
+                        saved_keys.update(reader.keys())
+                assert saved_keys == expected_keys
             dist.barrier()
