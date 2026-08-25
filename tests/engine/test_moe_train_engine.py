@@ -3,6 +3,8 @@ from pathlib import Path
 import tempfile
 import shutil
 import time
+from unittest.mock import patch
+
 from torch.distributed.device_mesh import init_device_mesh
 import parametrize
 import torch
@@ -13,7 +15,7 @@ from transformers import AutoTokenizer
 from collections import defaultdict
 
 from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.model.base import ModelItem
+from xtuner.v1.model.base import HFSaveCfg, ModelItem
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig
 from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig
@@ -49,6 +51,10 @@ class TestMoEEngine(DeterministicDDPTestCase):
             balancing_loss_cfg=BalancingLossConfig(),
             z_loss_cfg=ZLossConfig(),
             compile_cfg=False,
+            # The 8-rank test uses an 8 GiB bucket to reproduce the 16-rank
+            # default-4-GiB failure: local-shard accounting batches the whole
+            # model, while global accounting still bounds reconstruction.
+            hf_save_cfg=HFSaveCfg(bucket_size=8 * 1024**3),
         )
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
@@ -108,6 +114,18 @@ class TestMoEEngine(DeterministicDDPTestCase):
         losses_ref = torch.tensor([2.44, 2.44, 2.42, 2.41, 2.34, 2.33, 2.16, 2.13, 1.71, 1.55])
         losses = torch.tensor(losses)
         self._check_loss_curve(losses, losses_ref)
+
+        # HF reconstruction is independent of EP/SP here, so exercise it once
+        # instead of adding about 100 seconds to both parameterizations.
+        if ep_size == 1:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                save_dir = [tmpdir]
+                dist.broadcast_object_list(save_dir, src=0)
+                # Safetensors writing is external to the CUDA reconstruction
+                # under test and would otherwise write roughly 60 GB.
+                with patch("xtuner.v1.model.base.save_file"):
+                    engine.save_hf(save_dir[0])
+                dist.barrier()
 
         torch.cuda.empty_cache()
         try:

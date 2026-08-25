@@ -1383,7 +1383,10 @@ class BaseModel(nn.Module):
                 target_fused_key_partition=target_fused_key_partition,
             ),
             runtime_is_float8=is_float8_weight(runtime_tensor),
-            byte_size=self._get_tensor_size(runtime_tensor, checkpoint_dtype),
+            # Buckets bound the tensors reconstructed by HF save. DTensor.numel()
+            # is the logical/global size; using the local shard here makes the
+            # effective bucket grow with the FSDP world size.
+            byte_size=self._get_tensor_size(param, checkpoint_dtype),
         )
 
     def _load_spec_params(self) -> list[tuple[torch.Tensor, LoadSpec]]:
