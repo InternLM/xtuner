@@ -1,7 +1,11 @@
 """Tests for the generic scalar value-model wrapper used by RL critics."""
 
+from datetime import timedelta
 from functools import partial
 from itertools import chain
+from pathlib import Path
+from time import monotonic
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -18,6 +22,58 @@ from xtuner.v1.model.value import (
 )
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.utils import init_params
+
+
+class _RankLocalMissingCheckpointModel:
+    """Minimal base model that reproduces rank-local missing-key reports."""
+
+    def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple[set[str], set[str], set[str]]:
+        del hf_path, strict
+        if self.lm_head.weight.to_local().shape[0]:
+            return set(), {LOCAL_VALUE_HEAD_KEY}, {HF_VALUE_HEAD_KEY}
+        return set(), set(), set()
+
+
+class _DistributedValueModel(ValueModelMixin, _RankLocalMissingCheckpointModel):
+    pass
+
+
+def _run_distributed_missing_value_head_init(
+    rank: int, world_size: int, rendezvous_path: str, checkpoint_path: str, hidden_size: int
+) -> None:
+    """Initialize a dim-0-sharded scalar head in a spawned worker."""
+    import torch.distributed as dist
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.tensor import Shard, distribute_tensor
+
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"file://{rendezvous_path}",
+        rank=rank,
+        world_size=world_size,
+        timeout=timedelta(seconds=20),
+    )
+    try:
+        mesh = init_device_mesh("cpu", (world_size,))
+        torch.manual_seed(0)
+        head = torch.nn.Parameter(distribute_tensor(torch.zeros(1, hidden_size), mesh, placements=[Shard(0)]))
+        # With one output row and two ranks, only rank 0 owns head storage.
+        assert head.to_local().shape[0] == (1 if rank == 0 else 0)
+
+        model = _DistributedValueModel()
+        model.config = SimpleNamespace(hidden_size=hidden_size)
+        model.lm_head = SimpleNamespace(weight=head)
+        _, unloaded_keys, missing_keys = model.from_hf(checkpoint_path)
+
+        assert unloaded_keys == set()
+        assert missing_keys == set()
+        # This is a collective too, so it also verifies that both ranks left
+        # `from_hf` and still agree on the complete initialized parameter.
+        full_head = head.full_tensor()
+        assert bool(torch.isfinite(full_head).all())
+        assert bool(torch.count_nonzero(full_head))
+    finally:
+        dist.destroy_process_group()
 
 
 def _tiny_dense_config(**overrides) -> Qwen3DenseConfig:
@@ -141,6 +197,48 @@ class TestValueHeadInitialization:
         head = critic.lm_head.weight
         assert head.requires_grad
         assert head.is_leaf
+
+    def test_missing_sharded_head_initializes_on_every_rank(self, tmp_path: Path) -> None:
+        """All ranks enter initialization even when only rank 0 owns a row."""
+        import torch.distributed as dist
+        from safetensors.torch import save_file
+        from torch.multiprocessing import spawn
+
+        if not dist.is_available() or not dist.is_gloo_available():
+            pytest.skip("Gloo distributed backend unavailable")
+
+        checkpoint_path = tmp_path / "actor-checkpoint"
+        checkpoint_path.mkdir()
+        save_file({"backbone.weight": torch.ones(1)}, checkpoint_path / "model.safetensors")
+
+        world_size = 2
+        context = spawn(
+            _run_distributed_missing_value_head_init,
+            args=(
+                world_size,
+                str(tmp_path / "distributed-init"),
+                str(checkpoint_path),
+                _tiny_dense_config().hidden_size,
+            ),
+            nprocs=world_size,
+            join=False,
+        )
+        deadline = monotonic() + 30
+        completed = False
+        try:
+            while not completed and (remaining := deadline - monotonic()) > 0:
+                completed = context.join(timeout=remaining)
+        finally:
+            for process in context.processes:
+                if process.is_alive():
+                    process.terminate()
+            for process in context.processes:
+                process.join(timeout=5)
+                if process.is_alive():
+                    process.kill()
+                    process.join()
+
+        assert completed, "distributed value-head initialization deadlocked"
 
     def test_in_place_init_needs_no_grad_for_sharded_params(self) -> None:
         import torch.distributed as dist

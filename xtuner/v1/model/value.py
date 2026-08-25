@@ -26,7 +26,7 @@ import torch
 from pydantic import create_model
 
 from xtuner.v1.module import LMHead
-from xtuner.v1.utils import init_params, log_rank0
+from xtuner.v1.utils import HFCheckpointLoader, init_params, log_rank0
 
 
 # The scalar head reuses the ``lm_head`` attribute so the whole forward path
@@ -114,11 +114,18 @@ class ValueModelMixin:
         Returns:
             tuple[set[str], set[str], set[str]]: Loaded, unloaded and missing keys.
         """
+        # Missing keys are reported from each rank's local load plan. A value
+        # head sharded on dim 0 can have no local rows on some ranks, so those
+        # ranks do not report the absent checkpoint key. Use the checkpoint's
+        # global key map instead: every rank must take the same branch because
+        # `init_params` reconstructs a regular DTensor with collectives.
+        checkpoint_has_value_head = HFCheckpointLoader(str(hf_path)).is_key_exist(HF_VALUE_HEAD_KEY)
+
         # Load non-strict so an absent value head does not abort the backbone
         # load; strictness is re-applied below once that key is accounted for.
         loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict=False)  # type: ignore[misc]
 
-        if HF_VALUE_HEAD_KEY in missing_keys:
+        if not checkpoint_has_value_head:
             hidden_size = self.config.hidden_size  # type: ignore[attr-defined]
             # A default 0.02-std head emits large arbitrary values on step 0,
             # which GAE then propagates into every advantage.
