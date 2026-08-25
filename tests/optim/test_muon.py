@@ -12,7 +12,7 @@
 
 import copy
 import math
-from typing import Callable, overload
+from typing import Callable, Literal, overload
 
 import parametrize
 import torch
@@ -329,6 +329,10 @@ class ReferenceMuon(torch.optim.Optimizer):
 # ─── Test: single-GPU correctness ───────────────────────────────────────────
 
 
+def test_muon_clip_grad_mode_defaults_to_adamw_only():
+    assert MuonConfig().clip_grad_mode == "adamw_only"
+
+
 class TestMuonSingleGPU(DeterministicDDPTestCase):
     @property
     def world_size(self) -> int:
@@ -391,7 +395,8 @@ class TestMuonSingleGPU(DeterministicDDPTestCase):
                 msg=f"mismatch on '{name}': max_abs={abs_diff.max().item():.2e}, max_rel={rel_diff.max().item():.2e}",
             )
 
-    def test_clip_grad_norm_only_clips_adamw(self):
+    @parametrize.parametrize("clip_grad_mode", ["all", "adamw_only"])
+    def test_clip_grad_norm_respects_config(self, clip_grad_mode: Literal["all", "adamw_only"]):
         self.create_pg("cuda")
         device = "cuda"
         model = ToyMoEModelConfig(compile_cfg=False).build().to(device)
@@ -403,19 +408,22 @@ class TestMuonSingleGPU(DeterministicDDPTestCase):
             )
         )
 
-        optim_config = MuonConfig(max_grad_norm=1.0)
+        optim_config = MuonConfig(max_grad_norm=1.0, clip_grad_mode=clip_grad_mode)
         optimizer = optim_config.build(model)
         total_squared = 0
-        adamw_squared = 0
+        clipped_squared = 0
+        initial_grad_values = {}
         for group in optimizer.param_groups:
             is_muon = group["algorithm"] == "muon"
-            assert group["clip_grad"] is not is_muon
+            expected_clip_grad = clip_grad_mode == "all" or not is_muon
+            assert group["clip_grad"] is expected_clip_grad
             grad_value = 2.0 if is_muon else 1.0
             for param in group["params"]:
                 param.grad = torch.full_like(param, grad_value)
+                initial_grad_values[id(param)] = grad_value
                 total_squared += param.numel() * grad_value**2
-                if not is_muon:
-                    adamw_squared += param.numel()
+                if expected_clip_grad:
+                    clipped_squared += param.numel() * grad_value**2
             # The engine must consume only the generic policy, not optimizer-specific metadata.
             group["algorithm"] = "test"
 
@@ -426,31 +434,35 @@ class TestMuonSingleGPU(DeterministicDDPTestCase):
         grad_norm = engine.clip_grad_norm()
 
         torch.testing.assert_close(grad_norm, torch.tensor(math.sqrt(total_squared), device=device))
-        clip_coef = min(1.0, optim_config.max_grad_norm / (math.sqrt(adamw_squared) + 1e-6))
+        clip_coef = min(1.0, optim_config.max_grad_norm / (math.sqrt(clipped_squared) + 1e-6))
         for group in optimizer.param_groups:
-            expected = clip_coef if group["clip_grad"] else 2.0
             for param in group["params"]:
+                grad_value = initial_grad_values[id(param)]
+                expected = grad_value * clip_coef if group["clip_grad"] else grad_value
                 torch.testing.assert_close(param.grad.to_local(), torch.full_like(param.grad.to_local(), expected))
 
-    def test_clip_grad_policy_is_preserved_on_load(self):
+    @parametrize.parametrize("muon_clip_grad", [True, False])
+    def test_clip_grad_policy_is_preserved_on_load(self, muon_clip_grad: bool):
         muon_param = nn.Parameter(torch.empty(4, 4))
         adamw_param = nn.Parameter(torch.empty(4))
         optimizer = Muon(
             [
-                {"params": [muon_param]},
+                {"params": [muon_param], "clip_grad": muon_clip_grad},
                 {"params": [adamw_param], "algorithm": "adamw"},
             ]
         )
-        assert [group["clip_grad"] for group in optimizer.param_groups] == [False, True]
+        expected_policy = [muon_clip_grad, True]
+        assert [group["clip_grad"] for group in optimizer.param_groups] == expected_policy
 
         state_dict = optimizer.state_dict()
         assert all("clip_grad" not in group for group in state_dict["param_groups"])
 
-        state_dict["param_groups"][0]["clip_grad"] = True
+        loaded_muon_clip_grad = not muon_clip_grad
+        state_dict["param_groups"][0]["clip_grad"] = loaded_muon_clip_grad
         state_dict["param_groups"][1]["clip_grad"] = False
         optimizer.load_state_dict(state_dict)
-        assert [group["clip_grad"] for group in optimizer.param_groups] == [False, True]
-        assert [group["clip_grad"] for group in state_dict["param_groups"]] == [True, False]
+        assert [group["clip_grad"] for group in optimizer.param_groups] == expected_policy
+        assert [group["clip_grad"] for group in state_dict["param_groups"]] == [loaded_muon_clip_grad, False]
 
         optimizer.add_param_group({"params": [nn.Parameter(torch.empty(4, 4))]})
         assert optimizer.param_groups[-1]["clip_grad"] is False
