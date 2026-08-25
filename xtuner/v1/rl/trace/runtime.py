@@ -31,7 +31,6 @@ TRACE_ENV_KEYS = (
     "XTUNER_OTEL_OUTPUT_DIR",
     "XTUNER_OTEL_RUN_ID",
     "XTUNER_OTEL_RUN_DIR",
-    "XTUNER_OTEL_JSONL_PATH",
     "XTUNER_TRACE_ENABLE_ROLLOUT",
     "OTEL_TRACES_EXPORTER",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -478,15 +477,8 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
     if external_endpoint is not None:
         endpoint = external_endpoint
         start_local_collector = False
-        trace_jsonl_path = (
-            Path(config.external_trace_jsonl_path).expanduser()
-            if config.external_trace_jsonl_path is not None
-            else None
-        )
+        trace_jsonl_path = config.external_trace_jsonl_path
         port = None
-        if trace_jsonl_path is not None and config.xtuner_viewer_enabled:
-            trace_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-            trace_jsonl_path.touch(exist_ok=True)
     else:
         traces_dir = run_dir / "traces"
         traces_dir.mkdir(parents=True, exist_ok=True)
@@ -512,8 +504,6 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
         "OTEL_EXPORTER_OTLP_PROTOCOL": protocol,
         "OTEL_SERVICE_NAME": config.service_name,
     }
-    if trace_jsonl_path is not None:
-        env_vars["XTUNER_OTEL_JSONL_PATH"] = os.fspath(trace_jsonl_path)
     return _TraceRuntimeHandle(
         runtime=TraceRuntime(
             enabled=True,
@@ -579,15 +569,13 @@ def ensure_trace_runtime_from_env() -> bool:
     env_vars.setdefault("OTEL_TRACES_EXPORTER", "otlp")
 
     run_dir = Path(env_vars.get("XTUNER_OTEL_RUN_DIR") or Path.cwd()).expanduser()
-    trace_jsonl_value = env_vars.get("XTUNER_OTEL_JSONL_PATH")
-    trace_jsonl_path = Path(trace_jsonl_value).expanduser() if trace_jsonl_value else None
     runtime_handle = _TraceRuntimeHandle(
         runtime=TraceRuntime(
             enabled=True,
             mode="inherited",
             run_id=env_vars.get("XTUNER_OTEL_RUN_ID", ""),
             run_dir=run_dir,
-            trace_jsonl_path=trace_jsonl_path,
+            trace_jsonl_path=None,
             service_name=env_vars.get("OTEL_SERVICE_NAME", "xtuner-rollout"),
             trace_viewer_url=None,
             trace_viewer_port=None,
