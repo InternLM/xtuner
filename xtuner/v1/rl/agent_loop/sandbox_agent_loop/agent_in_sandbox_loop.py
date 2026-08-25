@@ -292,7 +292,6 @@ class AgentInSandboxLoop(AgentLoop):
         if selected_agent is not None:
             rollout_state.extra_fields["agent_name"] = selected_agent.get("name")
             rollout_state.extra_fields["agent_selected"] = _to_json_safe(selected_agent)
-        rollout_state.extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
         rollout_state.extra_fields["agent_judgers"] = {
             name: record.model_dump(mode="json") for name, record in item.judgers.items()
         }
@@ -302,6 +301,7 @@ class AgentInSandboxLoop(AgentLoop):
         if item.error is not None:
             rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
         if item.status != RolloutStatus.COMPLETED:
+            rollout_state.extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
             return [rollout_state]
 
         segments = _load_train_trace_segments(item.artifacts)
@@ -350,6 +350,7 @@ class AgentInSandboxLoop(AgentLoop):
                 segment_state.response = _response_text(response_message)
             rollout_states.append(segment_state)
 
+        rollout_states[0].extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
         return rollout_states
 
     def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
