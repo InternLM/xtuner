@@ -89,7 +89,9 @@ resources = AcceleratorResourcesConfig(
     # 13 GiB of state per worker before pinned staging buffers and the Ray
     # object store, which is why the GRPO default of 16 GiB is not enough.
     cpu_memory_per_worker=48 * 1024**3,  # 48 GB
-    num_cpus_per_worker=12,
+    # `num_cpu_per_worker * num_workers + 10` must stay below what Ray sees in
+    # the pod (the rjob --cpu request), or the trainer aborts before starting.
+    num_cpus_per_worker=int(os.environ.get("CPUS_PER_WORKER", "12")),
 )
 
 # 2. rollout
