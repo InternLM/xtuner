@@ -52,6 +52,7 @@ class _FakeRolloutState:
         self.extra_fields = {}
         self.response_model_steps = []
 
+
 class _FakeSampler:
     def __init__(self):
         self._next_id = 0
@@ -141,7 +142,8 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer._benchmark_training_samples = 0
         trainer._benchmark_training_tokens = 0
         trainer._save_trajectories = MagicMock()
-        trainer._release_trace_store = MagicMock()
+        trainer._release_trace_sessions = MagicMock(return_value=set())
+        trainer._release_all_trace_sessions = MagicMock()
         trainer._sync_weights_and_save = MagicMock(
             side_effect=lambda train_step, step_timer_dict: train_step % trainer._sync_weights_interval == 0
         )
@@ -163,7 +165,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer.train_controller = SimpleNamespace(
             onload=MagicMock(return_value="train_onloaded"),
             offload=MagicMock(return_value="train_offloaded"),
-            update_weights=MagicMock(return_value="weights_updated"),
+            weight_update=MagicMock(return_value="weights_updated"),
             fit=MagicMock(
                 return_value=[
                     {
@@ -207,6 +209,8 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer.rollout_controller.offload.remote.assert_called_once_with()
         trainer.train_controller.onload.assert_called_once_with(target="all")
         trainer.train_controller.fit.assert_called_once()
+        trainer._release_all_trace_sessions.assert_called_once_with()
+        trainer._release_trace_sessions.assert_not_called()
         self.assertEqual(trainer._cur_step, 1)
 
     def test_fit_requires_non_empty_batch_from_manager(self):

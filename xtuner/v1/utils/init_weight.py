@@ -24,9 +24,16 @@ def init_params(param: torch.Tensor, init_fn: Callable[[torch.Tensor], torch.Ten
     device = param.device
 
     if isinstance(param, DTensor):
-        full_param = torch.empty_like(param.full_tensor(), device=device)
-        init_fn(full_param)
-        param.copy_(distribute_tensor(full_param, param.device_mesh, param.placements))
+        # InterleavedShard cannot go through full_tensor/distribute_tensor because PyTorch has no
+        # redistribute path for that placement chain. Initialize the values owned by this rank directly.
+        from .interleaved_shard import RuntimeLayout
+
+        if RuntimeLayout.from_dtensor(param).is_interleaved:
+            init_fn(param._local_tensor)
+        else:
+            full_param = torch.empty_like(param.full_tensor(), device=device)
+            init_fn(full_param)
+            param.copy_(distribute_tensor(full_param, param.device_mesh, param.placements))
     else:
         init_fn(param)
 

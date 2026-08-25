@@ -1,5 +1,7 @@
 import os
 import unittest
+from unittest.mock import patch
+
 import parametrize
 import torch
 from packaging.version import Version
@@ -31,10 +33,41 @@ VIDEO_ROOT = os.environ["VIDEO_ROOT"]
     f"transformers >= 5.2.0 is required, but got {transformers_version}"
 )
 class TestQwen3_5_VL(DeterministicDDPTestCase):
+    @staticmethod
+    def _patch_hf_router_keep_fp32_topk_weights():
+        from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTopKRouter
+
+        def _forward(router, hidden_states):
+            hidden_states = hidden_states.reshape(-1, router.hidden_dim)
+            router_logits = torch.nn.functional.linear(hidden_states, router.weight)
+            router_probs = torch.nn.functional.softmax(router_logits, dtype=torch.float, dim=-1)
+            router_top_value, router_indices = torch.topk(router_probs, router.top_k, dim=-1)
+            router_top_value /= router_top_value.sum(dim=-1, keepdim=True)
+
+            # Transformers 5.2 overwrote router_logits with the fp32 softmax result,
+            # so this dtype conversion was effectively a no-op. Keep the 5.14 logits
+            # semantics while restoring the fp32 top-k weights used by XTuner's
+            # historical HF-parity baseline.
+            return router_logits, router_top_value, router_indices
+
+        return patch.object(Qwen3_5MoeTopKRouter, "forward", _forward)
+
     def _patch_xtuner_fast_pos_embed_interpolate(self) -> None:
+        from transformers.vision_utils import get_vision_bilinear_indices_and_weights
+
         from xtuner.v1.model.compose.qwen3_vl.modeling_vision import Qwen3VLVisionModel
-        from transformers.models.qwen3_5_moe import Qwen3_5MoeVisionModel
-        Qwen3VLVisionModel.fast_pos_embed_interpolate = Qwen3_5MoeVisionModel.fast_pos_embed_interpolate
+
+        def _fast_pos_embed_interpolate(self, grid_thw):
+            # Transformers 5.14 accumulates interpolation in fp32 and casts in its
+            # forward; XTuner's older forward expects this helper to keep the model dtype.
+            indices, weights = get_vision_bilinear_indices_and_weights(
+                grid_thw,
+                num_grid_per_side=self.num_grid_per_side,
+                spatial_merge_size=self.config.spatial_merge_size,
+            )
+            return (self.pos_embed(indices) * weights[:, :, None]).sum(0).to(self.pos_embed.weight.dtype)
+
+        Qwen3VLVisionModel.fast_pos_embed_interpolate = _fast_pos_embed_interpolate
 
     def _forward(self, model, type, device, sp_size):
         QWEN3_VL_MOE_PATH = os.environ["QWEN3_5_MOE_PATH"]
@@ -183,19 +216,20 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         from transformers import Qwen3_5MoeForConditionalGeneration
         QWEN3_VL_MOE_PATH = os.environ["QWEN3_5_MOE_PATH"]
 
-        hf_model = Qwen3_5MoeForConditionalGeneration.from_pretrained(
-                    QWEN3_VL_MOE_PATH,
-                    dtype=torch.bfloat16,
-                    attn_implementation="flash_attention_2",
-                    device_map="cuda",
-                    trust_remote_code=True
-                ).eval()
-        # Cannot understand, but must accept. Once there is no this code, it will appear cuda access illegal memory error in multi-GPU
-        torch.distributed.barrier()
+        with self._patch_hf_router_keep_fp32_topk_weights():
+            hf_model = Qwen3_5MoeForConditionalGeneration.from_pretrained(
+                        QWEN3_VL_MOE_PATH,
+                        dtype=torch.bfloat16,
+                        attn_implementation="flash_attention_2",
+                        device_map="cuda",
+                        trust_remote_code=True
+                    ).eval()
+            # Cannot understand, but must accept. Once there is no this code, it will appear cuda access illegal memory error in multi-GPU
+            torch.distributed.barrier()
 
-        loss_hf_text = self._forward(hf_model, type='text', device=device, sp_size=sp_size)
-        loss_hf_image = self._forward(hf_model, type='image', device=device, sp_size=sp_size)
-        # loss_hf_video = self._forward(hf_model, type='video', device=device, sp_size=sp_size)
+            loss_hf_text = self._forward(hf_model, type='text', device=device, sp_size=sp_size)
+            loss_hf_image = self._forward(hf_model, type='image', device=device, sp_size=sp_size)
+            # loss_hf_video = self._forward(hf_model, type='video', device=device, sp_size=sp_size)
 
         del hf_model
         torch.cuda.empty_cache()
@@ -214,8 +248,14 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         loss_xtuner_image = self._forward(qwen3vl_model, type='image',device=device, sp_size=sp_size)
         loss_xtuner_video = self._forward(qwen3vl_model, type='video',device=device, sp_size=sp_size)
         
-        self.assertTrue(torch.allclose(loss_xtuner_text, loss_hf_text.to(loss_xtuner_text.dtype), atol=tol, rtol=tol))
-        self.assertTrue(torch.allclose(loss_xtuner_image, loss_hf_image.to(loss_xtuner_image.dtype), atol=tol, rtol=tol))
+        self.assertTrue(
+            torch.allclose(loss_xtuner_text, loss_hf_text.to(loss_xtuner_text.dtype), atol=tol, rtol=tol),
+            f"Text loss mismatch: XTuner={loss_xtuner_text.item()}, HF={loss_hf_text.item()}",
+        )
+        self.assertTrue(
+            torch.allclose(loss_xtuner_image, loss_hf_image.to(loss_xtuner_image.dtype), atol=tol, rtol=tol),
+            f"Image loss mismatch: XTuner={loss_xtuner_image.item()}, HF={loss_hf_image.item()}",
+        )
         # self.assertTrue(torch.allclose(loss_xtuner_video, loss_hf_video.to(loss_xtuner_video.dtype), atol=tol, rtol=tol))
         
         del qwen3vl_model
@@ -255,12 +295,12 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         self.create_pg(device)
         self._patch_xtuner_fast_pos_embed_interpolate()
 
-        # pt29 + transformers 5.2.0 with XTUNER_DETERMINISTIC=true, which pins Triton autotune.
+        # pt29 + transformers 5.14.1 with XTUNER_DETERMINISTIC=true, which pins Triton autotune.
         # The 11.5k-token video has a stable SP-specific LM-loss baseline on this path.
         loss_reference = {
             "text": 1.4981,
             "image": 3.6109,
-            "video": {1: 9.3212, 4: 8.6532}[sp_size],
+            "video": {1: 8.5521, 4: 8.1323}[sp_size],
         }
 
         QWEN3_VL_MOE_PATH = os.environ["QWEN3_5_MOE_PATH"]
@@ -301,7 +341,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
                     atol=tol,
                     rtol=tol
                 ),
-                f"Expected text loss around {key}, but got {loss.item()}"
+                f"Expected {key} loss around {loss_reference[key]}, but got {loss.item()}"
             )
 
 

@@ -116,16 +116,23 @@ def patch_dcp_save_with_cache_storage():
         planner = kwargs.get("planner", None)
         storage_writer = kwargs.get("storage_writer", None)
 
-        if storage_writer is None and planner is None:
-            from xtuner.v1.patch.xtuner_cache_planner import XtunerCacheSavePlanner
+        if storage_writer is None:
+            from xtuner.v1.patch.dcp_interleaved_planner import InterleavedShardSavePlanner
             from xtuner.v1.patch.xtuner_storage import XtunerCacheWriter
 
-            planner = XtunerCacheSavePlanner(enable_plan_caching=True, cache_key_prefix=checkpoint_id.stem)
-            storage_writer = XtunerCacheWriter(
-                checkpoint_id, enable_write_result_caching=True, cache_key_prefix=checkpoint_id.stem
-            )
-            kwargs["planner"] = planner
-            kwargs["storage_writer"] = storage_writer
+            if planner is None:
+                # Use the interleaved-aware planner on the torch 2.7 incremental-save path too.
+                planner = InterleavedShardSavePlanner(
+                    enable_plan_caching=True,
+                    cache_key_prefix=checkpoint_id.stem,
+                )
+                kwargs["planner"] = planner
+            if isinstance(planner, InterleavedShardSavePlanner):
+                kwargs["storage_writer"] = XtunerCacheWriter(
+                    checkpoint_id,
+                    enable_write_result_caching=True,
+                    cache_key_prefix=checkpoint_id.stem,
+                )
 
         return original_dcp_save(state_dict, **kwargs)
 

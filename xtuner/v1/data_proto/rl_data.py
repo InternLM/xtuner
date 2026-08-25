@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
@@ -246,7 +246,7 @@ def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
     rollout_state.logprobs = []
     rollout_state.routed_experts = None
     rollout_state.finish_reason = None
-    rollout_state.response_mask = []
+    rollout_state.response_mask = None
     rollout_state.response_model_steps = []
     rollout_state.reward = None
     rollout_state.error_msg = None
@@ -301,7 +301,7 @@ def update_sample_version(rollout_state: RolloutState, model_step: int) -> Rollo
     """Append token source model version for newly generated response
     tokens."""
     response_len = len(rollout_state.response_ids or [])
-    response_model_steps = list(getattr(rollout_state, "response_model_steps", None) or [])
+    response_model_steps = list(rollout_state.response_model_steps or [])
     missing_response_steps = max(0, response_len - len(response_model_steps))
     if missing_response_steps:
         response_model_steps.extend([model_step] * missing_response_steps)
@@ -313,7 +313,7 @@ def refresh_seq_staleness(group: list[RolloutState], current_train_step: int) ->
     for rollout_state in group:
         # response_model_steps 记录每个 response token 的模型版本；
         # 最早版本决定整条样本的滞后程度。
-        response_model_steps = getattr(rollout_state, "response_model_steps", None) or []
+        response_model_steps = rollout_state.response_model_steps or []
         if response_model_steps:
             rollout_state.seq_staleness = calculate_seq_staleness(min(response_model_steps), current_train_step)
         else:
@@ -321,25 +321,67 @@ def refresh_seq_staleness(group: list[RolloutState], current_train_step: int) ->
     return group
 
 
-def update_expired_status(samples: list[RolloutState], stale_threshold: int) -> list[RolloutState]:
-    if stale_threshold <= 0:
-        raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
-    is_group_expired = False
+def _calculate_effective_response_mask(
+    rollout_state: RolloutState,
+    *,
+    current_train_step: int,
+    token_stale_threshold: int,
+) -> list[int]:
+    """Calculate the response mask after applying token staleness.
 
-    # 1. 检查组内是否存过期的样本
-    for sample in samples:
-        if sample.status == Status.ABORTED and sample.seq_staleness >= stale_threshold:
-            logger.debug(
-                f"Sample {sample.rollout_id} (seq_staleness: {sample.seq_staleness}) exceeded threshold ({stale_threshold}). Triggering group expiration."
+    Args:
+        rollout_state (RolloutState): Rollout sample whose response token provenance is evaluated.
+        current_train_step (int): Trainer step that will consume the sample.
+        token_stale_threshold (int): Maximum token staleness, measured in trainer steps, allowed for training.
+
+    Returns:
+        list[int]: The semantic response mask intersected with the token-staleness mask.
+    """
+    response_ids = cast(list[int], rollout_state.response_ids)
+    response_model_steps = cast(list[int], rollout_state.response_model_steps)
+
+    # semantic mask: 在 agent_loop 中根据是否是 LLM 产生的 token 来 mask 的结果
+    semantic_mask = rollout_state.response_mask
+    if semantic_mask is None:
+        semantic_mask = [1] * len(response_ids)
+
+    # token_staleness_mask: 根据 token 的新鲜程度来 mask
+    token_staleness_mask = [
+        int(calculate_seq_staleness(response_model_step, current_train_step) < token_stale_threshold)
+        for response_model_step in response_model_steps
+    ]
+    effective_mask = [
+        semantic_mask_value * token_staleness_mask_value
+        for semantic_mask_value, token_staleness_mask_value in zip(semantic_mask, token_staleness_mask)
+    ]
+    return effective_mask
+
+
+def calculate_group_effective_response_masks(
+    group: list[RolloutState],
+    *,
+    current_train_step: int,
+    token_stale_threshold: int | None,
+) -> list[list[int] | None]:
+    """Calculate token-staleness masks for the applicable states in a group.
+
+    Each ``None`` means that token staleness is disabled or does not apply to
+    that state. Agentic groups currently return one ``None`` per state.
+    """
+    if token_stale_threshold is None:
+        return [None] * len(group)
+    if any(item.input_ids is not None or item.labels is not None for item in group):
+        return [None] * len(group)
+
+    return [
+        (
+            None
+            if not item.response_ids or (item.response_mask is not None and not any(item.response_mask))
+            else _calculate_effective_response_mask(
+                item,
+                current_train_step=current_train_step,
+                token_stale_threshold=token_stale_threshold,
             )
-            is_group_expired = True
-            break  # 一旦发现过期，直接跳出，无需检查剩余样本
-
-    # 2. 如果存在过期样本，将组内所有样本置为过期
-    if is_group_expired:
-        # NOTE: 当一组数据中有一个样本被标记为过期后，这组数据中就可能出现未超过过期阈值但状态是 aborted 的样本。
-        # 这些样本在后续的生成过程中也不应该被继续生成了，所以直接把它们都标记为过期, 才能在preprocess中将之前的response清掉。
-        for sample in samples:
-            sample.status = Status.EXPIRED
-
-    return samples
+        )
+        for item in group
+    ]

@@ -140,7 +140,7 @@ Parameter meanings:
 | `over_sample_threshold` | The ratio of extra samples that may be generated. A larger value makes the rollout side easier to keep fully loaded, but may produce more samples that are not from the current step. |
 | `enable_partial_rollout` | Whether rollouts paused before weight synchronization may continue after synchronization. Before using this for tool calling or multi-turn tasks, confirm that the AgentLoop supports continuation. |
 | `max_staleness` | The number of synchronization cycles by which samples may lag behind the current training progress. A larger value gives more throughput flexibility but weakens the on-policy property. |
-| `tail_batch_trigger_size` | When expired samples accumulate to this number, tail batch mode is entered and these samples are retried first. |
+| `tail_batch_trigger_size` | Expired-sample retry policy: `-1` disables rerollout, `0` retries immediately without entering tail batch mode, and a positive value enters tail batch mode after that many expired groups accumulate. |
 
 `max_staleness` is counted in "weight synchronization cycles". The actual expiration threshold used in code is:
 
@@ -161,12 +161,11 @@ Both oversampling and partial rollout are affected by `max_staleness`:
   by the earliest model version in the response, so continuation across synchronization cycles also needs room from
   `max_staleness`.
 
-Tail batch is used to handle samples that have expired during asynchronous production. When the number of `expired`
-samples reaches `tail_batch_trigger_size`, `AsyncProduceStrategy` enters tail batch mode: this round no longer
-oversamples according to `over_sample_threshold`, only fills the required target, and retries samples from the
-expired sample pool first. You can understand it as a non-oversampling synchronous fill-up production. Its goal is
-not to improve throughput, but to collect long-tail expired samples again and avoid leaving them in the buffer for
-too long.
+Expired samples can be rerolled out according to `tail_batch_trigger_size`. `-1` disables rerollout. `0` retries
+expired groups as soon as they appear while retaining the normal asynchronous production and oversampling policy.
+For a positive value, `AsyncProduceStrategy` waits until the expired pool reaches the configured size, then enters
+tail batch mode: this round no longer oversamples according to `over_sample_threshold`, only fills the required
+target, and retries samples from the expired sample pool first.
 
 Note: it is not recommended to set `max_staleness>0` and `enable_partial_rollout=False` at the same time. With this
 combination, long-tail oversampled samples may be reset after weight synchronization because partial rollout is not

@@ -75,6 +75,7 @@ class TestMoETorchAll2AllDispatcher(DistributedTestBase):
         pre_dispatched = dispatcher.dispatch_preprocess(
             hidden_states=hidden_states,
             topk_ids=topk_ids,
+            topk_weights=topk_weights,
             async_op=async_op,
         )
         dispatched = dispatcher.dispatch(

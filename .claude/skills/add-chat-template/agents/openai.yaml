@@ -1,0 +1,4 @@
+interface:
+  display_name: "Add Chat Template"
+  short_description: "Add and verify XTuner chat templates"
+  default_prompt: "Use $add-chat-template to add or audit XTuner chat-template rendering, loss masks, and stop-token behavior for this official Hugging Face model."

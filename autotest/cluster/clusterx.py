@@ -1,3 +1,4 @@
+import hashlib
 import re
 import time
 import traceback
@@ -10,6 +11,41 @@ from clusterx.launcher.base import JobSchema, JobStatus
 
 JOB_LOOKUP_RETRY_INTERVAL_S = 5
 JOB_LOOKUP_RETRY_TIMES = 6
+# rjob appends a suffix such as "-7b6a1" (6 chars); keep the final name <= 50.
+MAX_RJOB_FINAL_NAME_LEN = 50
+RJOB_GENERATED_SUFFIX_LEN = 6
+MAX_RJOB_SUBMITTED_NAME_LEN = MAX_RJOB_FINAL_NAME_LEN - RJOB_GENERATED_SUFFIX_LEN
+
+
+def build_rjob_name(
+    task_type: str,
+    case_name: str,
+    run_id: str,
+    max_len: int = MAX_RJOB_SUBMITTED_NAME_LEN,
+) -> str:
+    """Build a submitted rjob name while reserving room for its generated suffix.
+
+    Format: ``{type}-{case}-{run_id}``. When too long, truncate ``case`` and append a
+    short hash so different long case names do not collide after truncation. By
+    default, this returns at most 44 chars; rjob then appends its 6-char suffix.
+    """
+    task_type = str(task_type)
+    case_name = str(case_name)
+    run_id = str(run_id)
+    prefix = f"{task_type}-"
+    suffix = f"-{run_id}"
+    budget = max_len - len(prefix) - len(suffix)
+    if budget <= 0:
+        digest = hashlib.md5(f"{task_type}:{case_name}:{run_id}".encode()).hexdigest()
+        return digest[:max_len]
+    if len(case_name) <= budget:
+        return f"{prefix}{case_name}{suffix}"
+
+    digest = hashlib.md5(case_name.encode()).hexdigest()[:6]
+    keep = budget - len(digest) - 1  # casehead-digest
+    if keep < 1:
+        return f"{prefix}{digest}{suffix}"[:max_len]
+    return f"{prefix}{case_name[:keep]}-{digest}{suffix}"
 
 
 class ClusterTaskExecutor:
@@ -41,7 +77,8 @@ class ClusterTaskExecutor:
 
         all_command.append(command)
         run_command = "; ".join(all_command)
-        job_name = "-".join([task_config["type"], task_config["case_name"], task_config["run_id"]])
+        job_name = build_rjob_name(task_config["type"], task_config["case_name"], task_config["run_id"])
+        print(f"rjob name ({len(job_name)} chars): {job_name}")
 
         try:
             params = self.params_cls(
@@ -72,7 +109,7 @@ class ClusterTaskExecutor:
                 f"job_id={job_schema.job_id}, status={job_schema.status}, original exception: {e}"
             )
 
-        start_time = time.time()
+        poll_start_time = time.time()
         run_start_time = None
 
         while True:
@@ -80,7 +117,9 @@ class ClusterTaskExecutor:
             if status in [JobStatus.RUNNING] and run_start_time is None:
                 run_start_time = time.time()
             if status in [JobStatus.SUCCEEDED]:
-                run_time = time.time() - run_start_time
+                # May miss RUNNING if the job finishes between polls or status jumps.
+                effective_start = run_start_time if run_start_time is not None else poll_start_time
+                run_time = time.time() - effective_start
                 if run_time >= timeout:
                     return False, f"Task succeeded, but run time is {run_time}, exceeding then {timeout}"
                 else:
@@ -95,13 +134,13 @@ class ClusterTaskExecutor:
                     except Exception as e:
                         print(f"Get log failed: {e}")
                 return False, "Task failed or stopped"
-            else:
-                start_time = time.time()
-            elapsed_time = time.time() - start_time
-            if elapsed_time >= timeout:
+            # Only enforce execution timeout after the job has started running.
+            # Queuing / waiting time is not limited by config timeout.
+            if run_start_time is not None and time.time() - run_start_time >= timeout:
                 self.stop_task(job_schema.job_id)
                 raise Exception(
-                    f"Pool timeout: jobname {job_name}, {timeout} seconds, task {job_schema.job_id} status is {status}"
+                    f"Execution timeout: jobname {job_name}, {timeout} seconds, "
+                    f"task {job_schema.job_id} status is {status}"
                 )
             time.sleep(10)
 

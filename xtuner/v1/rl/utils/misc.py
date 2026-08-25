@@ -256,7 +256,7 @@ def register_to_routedapiproxy(admin_url: str, model_name: str, api_server_url: 
         "accept": "application/json",
         "Content-Type": "application/json",
     }
-    resp = requests.post(url, json=payload, headers=headers, timeout=30)
+    resp = requests.post(url, json=payload, headers=headers, timeout=180)
     resp.raise_for_status()
     return resp.json()
 

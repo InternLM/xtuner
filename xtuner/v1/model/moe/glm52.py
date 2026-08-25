@@ -157,40 +157,10 @@ class Glm52MoE(MoE):
         else:
             return [key]
 
-    def safetensors_to_params(
-        self,
-        safetensors: list[torch.Tensor],
-        local_tensor: torch.Tensor,
-        param_name: str,
-        start: int | None,
-        end: int | None,
-        dim: int | None,
-    ):
-        if len(safetensors) > 1:
-            assert dim is not None, "Internal Error dim must not be None when len(safetensors) > 1"
-            loaded_tensor = torch.cat(safetensors, dim=dim)
-        else:
-            loaded_tensor = safetensors[0]
-
-        if (
-            "fused_w1w3.weight" in param_name or "fused_w2.weight" in param_name
-        ) and loaded_tensor.ndim == local_tensor.ndim + 1:
+    def hf_tensor_to_canonical(self, name: str, loaded_tensor: torch.Tensor) -> torch.Tensor:
+        if ("fused_w1w3.weight" in name or "fused_w2.weight" in name) and loaded_tensor.ndim == 3:
             loaded_tensor = loaded_tensor.flatten(0, 1)
-
-        if start is not None and end is not None:
-            start = min(start, loaded_tensor.shape[self.FSDP_SHARD_DIM])
-            end = min(end, loaded_tensor.shape[self.FSDP_SHARD_DIM])
-            loaded_tensor_slice = loaded_tensor.index_select(
-                dim=self.FSDP_SHARD_DIM, index=torch.arange(start, end, dtype=torch.int64, device=loaded_tensor.device)
-            )
-            non_pad_len = end - start
-            local_tensor[:non_pad_len].copy_(loaded_tensor_slice)
-
-            if non_pad_len < local_tensor.shape[self.FSDP_SHARD_DIM]:
-                assert self.config.float8_cfg is not None
-                local_tensor[non_pad_len:].zero_()
-        else:
-            local_tensor.copy_(loaded_tensor)
+        return loaded_tensor
 
     def param_to_safetensor(
         self,
@@ -383,6 +353,14 @@ class Glm52MoEConfig(MoEConfig):
         """HuggingFace configuration."""
         assert isinstance(self.router, NoAuxRouterConfig), "Only support saving NoAuxRouter to HF GLM-5.2 format."
         attention = self.attention
+        # The unified XTuner config covers every RoPE variant. Export only values
+        # that differ from its defaults, plus the two keys required by HF.
+        rope_parameters = self.rope_parameters_cfg.model_dump(exclude_none=True, exclude_defaults=True)
+        rope_parameters.update(
+            rope_theta=self.rope_parameters_cfg.rope_theta,
+            rope_type=self.rope_parameters_cfg.rope_type,
+        )
+
         return HFGlmMoeDsaConfig(
             architectures=["GlmMoeDsaForCausalLM"],
             vocab_size=self.vocab_size,
@@ -391,15 +369,19 @@ class Glm52MoEConfig(MoEConfig):
             eos_token_id=self.hf_eos_token_id,
             num_hidden_layers=self.num_hidden_layers,
             first_k_dense_replace=self.first_k_dense_replace,
+            moe_layer_freq=1,
             mlp_layer_types=self.mlp_layer_types,
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size,
             moe_intermediate_size=self.moe_intermediate_size,
             rms_norm_eps=self.rms_norm_eps,
-            rope_parameters=self.rope_parameters,
+            rope_parameters=rope_parameters,
+            rope_interleave=True,
             hidden_act=self.hidden_act,
             num_attention_heads=attention.num_attention_heads,
             num_key_value_heads=attention.num_attention_heads,
+            # Transformers 5.14 normalizes this to qk_rope_head_dim in
+            # GlmMoeDsaConfig.__post_init__; keep that upstream behavior.
             head_dim=self.hf_head_dim,
             kv_lora_rank=attention.kv_lora_rank,
             q_lora_rank=attention.q_lora_rank,
@@ -417,11 +399,17 @@ class Glm52MoEConfig(MoEConfig):
             scoring_func=self.router.scoring_func,
             norm_topk_prob=self.router.norm_topk_prob,
             routed_scaling_factor=self.router.router_scaling_factor,
+            # vLLM 0.26 only registers gate.e_score_correction_bias for
+            # noaux_tc. Omitting this field makes loading that checkpoint fail.
+            topk_method="noaux_tc",
             tie_word_embeddings=self.tie_word_embeddings,
+            ep_size=1,
+            pretraining_tp=1,
             index_topk=attention.index_topk,
             index_head_dim=attention.index_head_dim,
             index_n_heads=attention.index_n_heads,
             index_topk_freq=attention.index_topk_freq,
+            index_topk_pattern=None,
             index_skip_topk_offset=attention.index_skip_topk_offset,
             index_share_for_mtp_iteration=self.index_share_for_mtp_iteration,
             indexer_rope_interleave=attention.indexer_rope_interleave,

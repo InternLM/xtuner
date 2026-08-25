@@ -243,12 +243,41 @@ class DisaggProduceStrategyConfig(ABC, BaseModel):
 
 
 class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
-    """非共卡异步生产配置。"""
+    """Configuration for disaggregated asynchronous rollout production.
+
+    Args:
+        is_valid_sample_fn (IsValidSampleFn): Function used to decide whether a
+            generated rollout group is trainable. Defaults to
+            ``default_is_valid_sample_fn``.
+        should_continue_fn (ShouldContinueFn): Function used to decide whether
+            production should continue after a group is processed. Defaults to
+            ``default_should_continue_fn``.
+        over_sample_threshold (float): Extra completed-sample ratio allowed
+            before the producer stops. Defaults to 0.0.
+        enable_partial_rollout (bool): Whether unfinished rollouts can be
+            continued after a weight sync. Defaults to False.
+        max_staleness (int): Maximum allowed model-step staleness for replayed
+            samples. Defaults to 0.
+        max_token_staleness (int | None): Maximum extra weight-sync periods a
+            response token may lag behind before it is masked out of the loss.
+            ``None`` disables token-level masking, ``0`` accepts only tokens
+            produced within the current sync period, and ``N`` allows ``N``
+            extra periods. Partially stale responses have their
+            ``response_mask`` reduced before training. If a state has no
+            trainable response token left, the state expires and its group
+            enters the expired-group lifecycle. Defaults to None.
+        tail_batch_trigger_size (int): Expired-group rerollout policy. ``-1``
+            disables rerollout and terminally discards expired groups, ``0``
+            rerolls out immediately without entering tail-batch mode, and
+            ``N > 0`` waits until the expired pool contains at least ``N``
+            groups before entering tail-batch mode.
+    """
 
     over_sample_threshold: float = 0.0
     enable_partial_rollout: bool = False
     max_staleness: int = Field(default=0, ge=0)
-    tail_batch_trigger_size: int = 0
+    max_token_staleness: int | None = Field(default=None, ge=0)
+    tail_batch_trigger_size: int = Field(default=-1, ge=-1)
 
     def build(
         self,
@@ -256,6 +285,17 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
         sync_weights_interval: int = 1,
         rollout_controller: "Optional[RolloutControllerProxy]" = None,
     ) -> "DisaggAsyncProduceStrategy":
+        if self.max_token_staleness is not None:
+            if self.max_token_staleness > self.max_staleness:
+                logger.warning(
+                    "max_token_staleness is greater than max_staleness; token-level masking will not take effect "
+                    "before the group expires."
+                )
+            if self.tail_batch_trigger_size == -1:
+                logger.warning(
+                    "Token-expired groups will be terminally discarded because tail_batch_trigger_size=-1 disables "
+                    "rerollout."
+                )
         if rollout_controller is not None:
             import ray
 
@@ -264,6 +304,7 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
             over_sample_threshold=self.over_sample_threshold,
             enable_partial_rollout=self.enable_partial_rollout,
             max_staleness=self.max_staleness,
+            max_token_staleness=self.max_token_staleness,
             sync_weights_interval=sync_weights_interval,
             tail_batch_trigger_size=self.tail_batch_trigger_size,
             is_valid_sample_fn=self.is_valid_sample_fn,
@@ -304,6 +345,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         enable_partial_rollout: bool,
         tail_batch_trigger_size: int,
         max_staleness: int,
+        max_token_staleness: int | None,
         sync_weights_interval: int,
         is_valid_sample_fn: IsValidSampleFn,
         should_continue_fn: ShouldContinueFn,
@@ -318,8 +360,12 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         self.over_sample_threshold = over_sample_threshold
         self.enable_partial_rollout = enable_partial_rollout
         self.max_staleness = max_staleness
-        self.sync_weights_interval = sync_weights_interval
         self.stale_threshold = calculate_stale_threshold(max_staleness, sync_weights_interval)
+        self.token_stale_threshold = (
+            None
+            if max_token_staleness is None
+            else calculate_stale_threshold(max_token_staleness, sync_weights_interval)
+        )
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self._pending_tasks = _PendingTasks()
 
@@ -363,8 +409,11 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
             return ProduceBatchStatus.NORMAL
 
         expired_count = await ctx.expired_count()
-        sample_from_expired = self.tail_batch_trigger_size > 0 and expired_count >= self.tail_batch_trigger_size
-        if sample_from_expired:
+        sample_expired = (
+            self.tail_batch_trigger_size >= 0 and expired_count > 0 and expired_count >= self.tail_batch_trigger_size
+        )
+        tail_batch_triggered = self.tail_batch_trigger_size > 0 and expired_count >= self.tail_batch_trigger_size
+        if tail_batch_triggered:
             logger.info(
                 f"Tail batch trigger condition met: {expired_count} expired samples "
                 f"(threshold: {self.tail_batch_trigger_size}). Enabling tail batch mode."
@@ -372,7 +421,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
 
         # normal 使用固定超发预算；tail-batch 只补必要缺口。
         total_target = ctx.total_target
-        oversample_budget = 0 if sample_from_expired else math.ceil(self.over_sample_threshold * ctx.task_batch_size)
+        oversample_budget = 0 if tail_batch_triggered else math.ceil(self.over_sample_threshold * ctx.task_batch_size)
         scheduled_target = total_target + oversample_budget
         logger.info(
             f"Starting produce_batch for task {ctx.task_name} with total_target={total_target}, "
@@ -380,7 +429,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         )
 
         async def spawn_one() -> asyncio.Task:
-            rollout_state = await ctx.sample_group(from_expired_pool=sample_from_expired)
+            rollout_state = await ctx.sample_group(from_expired_pool=sample_expired)
             return create_task(
                 ctx.generate_group(
                     rollout_state,

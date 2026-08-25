@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from itertools import chain
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -10,9 +10,7 @@ from torch.distributed.tensor import DTensor
 
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
-from xtuner.v1.model.moe.moe import MoE
 from xtuner.v1.utils import get_device, get_torch_device_module
-from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 
 from .data import RolloutWeightUpdateInfo, WeightUpdateBatch
 
@@ -55,123 +53,6 @@ class WeightIterator:
 
         yield self.iter_hf_batches(final_update=True)
 
-    def _get_hf_params(
-        self,
-        model,
-        model_ep_size: int,
-        target_ep_size: int,
-        target_ep_rank: int,
-        fsdp_tensor_list: list[tuple[torch.Tensor, LoadSpec]],
-        should_gather_train_ep_shards: bool,
-    ) -> tuple[list[torch.Tensor], list[str]]:
-        hf_keys_list: list[str] = []
-        hf_tensor_list: list[torch.Tensor] = []
-
-        for fsdp_tensor, load_spec in fsdp_tensor_list:
-            hf_keys = load_spec.hf_keys
-            if model_ep_size > 1 and model.ep_mesh is not None:
-                # Each train EP rank owns only part of the HF key list; gather the global
-                # mapping once so rollout EP ranks can receive the right slice.
-                if load_spec.name not in self._global_hf_keys_mapping_cache:
-                    global_hf_keys: list[list[str] | None] = [None] * model_ep_size
-                    dist.all_gather_object(global_hf_keys, hf_keys, group=model.ep_mesh.get_group())
-                    global_hf_keys_gathered = cast(list[list[str]], global_hf_keys)
-                    self._global_hf_keys_mapping_cache[load_spec.name] = list(
-                        chain.from_iterable(global_hf_keys_gathered)
-                    )
-                hf_keys = self._global_hf_keys_mapping_cache[load_spec.name]
-
-            fused_full_tensor = fsdp_tensor.bfloat16()
-            if isinstance(fused_full_tensor, DTensor):
-                fused_full_tensor = fused_full_tensor.full_tensor()
-            # FUSED load specs pack multiple HF tensors along load_spec.dim; split them
-            # back into HF tensors before selecting the target rollout EP shard.
-            dim = cast(int, load_spec.dim)
-
-            if should_gather_train_ep_shards and model_ep_size > 1:
-                assert model.ep_mesh is not None
-                ep_group = model.ep_mesh.get_group()
-
-                output = torch.empty(
-                    *fused_full_tensor.shape[:dim],
-                    fused_full_tensor.shape[dim] * model_ep_size,
-                    *fused_full_tensor.shape[dim + 1 :],
-                    dtype=fused_full_tensor.dtype,
-                    device=fused_full_tensor.device,
-                )
-                dist.all_gather_into_tensor(output, fused_full_tensor.contiguous(), group=ep_group)
-                fused_full_tensor = output
-
-            num_split = len(hf_keys)
-            hf_tensor_size = fused_full_tensor.shape[dim] / num_split
-            assert hf_tensor_size.is_integer(), "Internal Error, hf_tensor_size is not integer"
-            hf_tensor_size = int(hf_tensor_size)
-
-            hf_tensor = fused_full_tensor.split([hf_tensor_size] * num_split, dim=dim)
-            assert num_split % target_ep_size == 0, (
-                f"len(hf_keys) of '{hf_keys}' is {num_split}, it must be divisible by target_ep_size {target_ep_size}"
-            )
-            start_idx = (num_split // target_ep_size) * target_ep_rank
-            end_idx = (num_split // target_ep_size) * (target_ep_rank + 1)
-
-            hf_keys_list.extend(hf_keys[start_idx:end_idx])
-            hf_tensor_list.extend(hf_tensor[start_idx:end_idx])
-
-        hf_tensor_list = [
-            model.param_to_safetensor(safetensor, name) for safetensor, name in zip(hf_tensor_list, hf_keys_list)
-        ]
-
-        return hf_tensor_list, hf_keys_list
-
-    def _rl_get_fused_ep_hf_param(
-        self,
-        model: MoE,
-        target_ep_rank: int,
-        target_ep_size: int,
-        bucket_size: int,
-        should_gather_train_ep_shards: bool,
-    ):
-        fused_param_groups: list[tuple[torch.Tensor, LoadSpec]] = model._group_param_by_load_spec(LoadEnum.FUSED)
-        model_ep_size = 1 if model.fsdp_config is None else model.fsdp_config.ep_size
-        if not fused_param_groups:
-            return
-
-        safetensor_size = 0
-        dtype = torch.bfloat16
-        tensor_list: list[tuple[torch.Tensor, LoadSpec]] = []
-
-        for param, load_spec in fused_param_groups:
-            tensor_size = dtype.itemsize * param.numel() // target_ep_size
-            if safetensor_size + tensor_size > bucket_size and tensor_list:
-                hf_params, name_list = self._get_hf_params(
-                    model,
-                    model_ep_size=model_ep_size,
-                    target_ep_size=target_ep_size,
-                    target_ep_rank=target_ep_rank,
-                    fsdp_tensor_list=tensor_list,
-                    should_gather_train_ep_shards=should_gather_train_ep_shards,
-                )
-                yield name_list, hf_params
-                safetensor_size = tensor_size
-                # Kept to mirror the legacy generator layout; the next iteration rebuilds
-                # name_list from tensor_list before yielding.
-                name_list = load_spec.hf_keys.copy()
-                tensor_list = [(param, load_spec)]
-                continue
-            safetensor_size += tensor_size
-            tensor_list.append((param, load_spec))
-
-        if tensor_list:
-            hf_params, name_list = self._get_hf_params(
-                model=model,
-                model_ep_size=model_ep_size,
-                target_ep_size=target_ep_size,
-                target_ep_rank=target_ep_rank,
-                fsdp_tensor_list=tensor_list,
-                should_gather_train_ep_shards=should_gather_train_ep_shards,
-            )
-            yield name_list, hf_params
-
     @torch.no_grad()
     def iter_hf_batches(self, submodule=None, final_update=False):
         """Update the model weights."""
@@ -182,66 +63,55 @@ class WeightIterator:
 
         dtype = torch.bfloat16
         bucket_size = int(self.config.update_weight_bucket_size_in_gb * 1024**3)
-        same_gen = model._get_same_hf_param(
-            model._group_param_by_load_spec(LoadEnum.SAME),
-            dtype=dtype,
-            device=DEVICE,
-            bucket_size=bucket_size,
-        )
-
         train_enable_ep = model.fsdp_config is not None and model.fsdp_config.ep_size > 1
-        should_gather_train_ep_shards = self.rollout_info.transport_type == "nccl" and train_enable_ep
+        params = model._load_spec_params()
+        ep_mesh = getattr(model, "ep_mesh", None)
+        ep_group = ep_mesh.get_group() if ep_mesh is not None and ep_mesh.size() > 1 else None
 
-        if train_enable_ep:
-            if self.rollout_info.transport_type == "ipc" and self.rollout_info.ep > 1:
-                target_ep_rank = self.rollout_info.ipc_engine_parallel_rank
-                target_ep_size = self.rollout_info.ipc_engine_parallel_size
-                assert target_ep_rank is not None, "IPC rollout target for current train rank is not resolved."
-                assert target_ep_size is not None, "IPC rollout target size for current train rank is not resolved."
-                # Colocated IPC can send only the expert slice needed by the local rollout
-                # EP rank
-                fused_gen = self._rl_get_fused_ep_hf_param(
-                    model,
-                    target_ep_rank=target_ep_rank,
-                    target_ep_size=target_ep_size,
-                    bucket_size=bucket_size,
-                    should_gather_train_ep_shards=should_gather_train_ep_shards,
-                )
+        fused_params = []
+        other_params = []
+        for param, load_spec in params:
+            (fused_params if load_spec.is_fused else other_params).append((param, load_spec))
+
+        preserved_fused_shard_group = None
+        target_fused_key_partition = None
+        if fused_params and self.rollout_info.transport_type == "ipc" and self.rollout_info.ep > 1:
+            target_rank = self.rollout_info.ipc_engine_parallel_rank
+            target_size = self.rollout_info.ipc_engine_parallel_size
+            assert target_rank is not None, "IPC rollout target for current train rank is not resolved."
+            assert target_size is not None, "IPC rollout target size for current train rank is not resolved."
+
+            # Preserve the train EP shard only when it is exactly the rollout
+            # target shard. Other topologies reconstruct globally, then select
+            # the rollout-owned expert key range in the HF save plan.
+            if ep_group is not None and target_size == ep_mesh.size() and target_rank == dist.get_rank(ep_group):
+                preserved_fused_shard_group = ep_group
             else:
-                # Disaggregated NCCL uses one trainer-side broadcast for all rollout ranks.
-                # Gather train EP shards first, then send the full expert tensor instead of
-                # slicing by rollout EP rank.
-                fused_gen = self._rl_get_fused_ep_hf_param(
-                    model,
-                    target_ep_rank=0,
-                    target_ep_size=1,
-                    bucket_size=bucket_size,
-                    should_gather_train_ep_shards=should_gather_train_ep_shards,
-                )
-        else:
-            fused_gen = model._get_fused_hf_param(
-                model._group_param_by_load_spec(LoadEnum.FUSED),
-                dtype=dtype,
-                device=DEVICE,
-                bucket_size=bucket_size,
-                update_weights_for_rl=True,
-            )
-        shard_gen = model._get_shard_hf_param(
-            model._group_param_by_load_spec(LoadEnum.SHARD),
+                target_fused_key_partition = (target_rank, target_size)
+
+        fused_gen = model._get_hf_param(
+            fused_params,
+            dtype=dtype,
+            device=DEVICE,
+            bucket_size=bucket_size,
+            preserved_fused_shard_group=preserved_fused_shard_group,
+            target_fused_key_partition=target_fused_key_partition,
+        )
+        other_gen = model._get_hf_param(
+            other_params,
             dtype=dtype,
             device=DEVICE,
             bucket_size=bucket_size,
         )
-
-        for name_list, fused_param_list in fused_gen:
-            state_dict = {name: param.detach() for name, param in zip(name_list, fused_param_list)}
-            yield WeightUpdateBatch(state_dict, train_enable_ep=train_enable_ep, finished=False)
-            del state_dict, name_list, fused_param_list
-
-        for name_list, param_list in chain(same_gen, shard_gen):
-            state_dict = {name: param.detach() for name, param in zip(name_list, param_list)}
-            yield WeightUpdateBatch(state_dict, train_enable_ep=train_enable_ep, finished=False)
-            del state_dict, name_list, param_list
+        for name_list, param_list in chain(fused_gen, other_gen):
+            # FlattenedTensorBucket stores one dtype per payload. Qwen3.5 keeps
+            # selected norm and A_log weights in fp32, so split those from the
+            # otherwise bf16 HF-save bucket before handing it to the transport.
+            state_dicts: dict[torch.dtype, dict[str, torch.Tensor]] = {}
+            for name, param in zip(name_list, param_list, strict=True):
+                state_dicts.setdefault(param.dtype, {})[name] = param.detach()
+            for state_dict in state_dicts.values():
+                yield WeightUpdateBatch(state_dict, train_enable_ep=train_enable_ep, finished=False)
 
         # pytorch and vLLM use an empty final update as an end marker; SGLang and
         # turbomind do not consume this marker.
