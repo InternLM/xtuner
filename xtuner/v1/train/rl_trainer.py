@@ -655,6 +655,15 @@ class BaseRLTrainer:
 
         env_path = log_dir / "env.json"
         environment_variables = dict(os.environ)
+        xtuner_environment = {
+            key: value for key, value in sorted(environment_variables.items()) if key.startswith("XTUNER")
+        }
+        log_str = "\n============XTuner RL Training Environment============\n"
+        for key, value in xtuner_environment.items():
+            log_str += f"{key}: {value}\n"
+        log_str += "======================================================"
+        self.logger.info(log_str)
+
         infer_engine_version = get_rollout_engine_version()
         environment_variables.update(infer_engine_version)
         with env_path.open("w") as f:
