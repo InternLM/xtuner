@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import os
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from functools import wraps
 from typing import Any, Protocol, TypeVar
 
@@ -71,15 +71,23 @@ def trace_rollout_endpoint(
 
             with _attach_rollout_call_chain(rollout_state, span_name, parent_carrier) as (
                 call_chain,
-                cleanup_call_chain_on_exit,
+                had_previous_call_chain,
+                previous_call_chain,
             ):
                 attributes["xtuner.span_name_path"] = call_chain
                 with trace_api.trace_span(span_name, attributes=attributes, parent_carrier=parent_carrier):
                     result = await func(*args, **kwargs)
                     result_rollout_state = result if isinstance(result, RolloutState) else rollout_state
                     trace_api.set_trace_attributes(rollout_state_final_attributes(result_rollout_state))
-                    if cleanup_call_chain_on_exit and isinstance(result, RolloutState):
-                        result.extra_fields.pop(TRACE_CALL_CHAIN_EXTRA_FIELD, None)
+                    result_states = (result,) if isinstance(result, RolloutState) else result
+                    if isinstance(result_states, (list, tuple)):
+                        for item in result_states:
+                            if not isinstance(item, RolloutState):
+                                continue
+                            if had_previous_call_chain:
+                                item.extra_fields[TRACE_CALL_CHAIN_EXTRA_FIELD] = previous_call_chain
+                            else:
+                                item.extra_fields.pop(TRACE_CALL_CHAIN_EXTRA_FIELD, None)
                     return result
 
         return wrapper  # type: ignore[return-value]
@@ -90,15 +98,17 @@ def trace_rollout_endpoint(
 def trace_rollout_remote(
     remote_method: _RayRemoteMethod,
     *args: Any,
-    target: RolloutState | None = None,
+    target: RolloutState | list[RolloutState] | tuple[RolloutState, ...] | None = None,
     **kwargs: Any,
 ) -> Any:
     if not is_rollout_trace_enabled():
         return remote_method.remote(*args, **kwargs)
 
-    rollout_state = _resolve_rollout_state_target(args, kwargs, target=target, owner="trace_rollout_remote")
+    rollout_states = _resolve_rollout_state_targets(args, kwargs, target=target, owner="trace_rollout_remote")
     carrier = trace_api.inject_trace_context({})
-    with attach_rollout_trace_carrier(rollout_state, carrier):
+    with ExitStack() as stack:
+        for rollout_state in rollout_states:
+            stack.enter_context(attach_rollout_trace_carrier(rollout_state, carrier))
         return remote_method.remote(*args, **kwargs)
 
 
@@ -172,13 +182,16 @@ def _attach_rollout_call_chain(
     parent_carrier: Mapping[str, str] | None,
 ):
     extra_fields = rollout_state.extra_fields
-    cleanup_call_chain_on_exit = TRACE_CALL_CHAIN_EXTRA_FIELD not in extra_fields
+    had_previous_call_chain = TRACE_CALL_CHAIN_EXTRA_FIELD in extra_fields
+    previous_call_chain = extra_fields.get(TRACE_CALL_CHAIN_EXTRA_FIELD)
     call_chain = (*_rollout_call_chain(rollout_state, parent_carrier), span_name)
     extra_fields[TRACE_CALL_CHAIN_EXTRA_FIELD] = list(call_chain)
     try:
-        yield call_chain, cleanup_call_chain_on_exit
+        yield call_chain, had_previous_call_chain, previous_call_chain
     finally:
-        if cleanup_call_chain_on_exit:
+        if had_previous_call_chain:
+            rollout_state.extra_fields[TRACE_CALL_CHAIN_EXTRA_FIELD] = previous_call_chain
+        else:
             rollout_state.extra_fields.pop(TRACE_CALL_CHAIN_EXTRA_FIELD, None)
 
 
@@ -197,17 +210,19 @@ def _rollout_call_chain(
     return ()
 
 
-def _resolve_rollout_state_target(
+def _resolve_rollout_state_targets(
     args: tuple[Any, ...],
     kwargs: Mapping[str, Any],
     *,
-    target: RolloutState | None = None,
+    target: RolloutState | list[RolloutState] | tuple[RolloutState, ...] | None = None,
     owner: str,
-) -> RolloutState:
+) -> tuple[RolloutState, ...]:
     if target is not None:
-        if not isinstance(target, RolloutState):
-            raise TypeError(f"{owner} target must be a RolloutState")
-        return target
+        if isinstance(target, RolloutState):
+            return (target,)
+        if isinstance(target, (list, tuple)) and all(isinstance(item, RolloutState) for item in target):
+            return tuple(target)
+        raise TypeError(f"{owner} target must be a RolloutState or a RolloutState collection")
 
     rollout_states: list[RolloutState] = []
     for value in (*args, *kwargs.values()):
@@ -220,7 +235,7 @@ def _resolve_rollout_state_target(
 
     if len(rollout_states) != 1:
         raise ValueError(f"{owner} requires exactly one RolloutState argument")
-    return rollout_states[0]
+    return (rollout_states[0],)
 
 
 __all__ = [
