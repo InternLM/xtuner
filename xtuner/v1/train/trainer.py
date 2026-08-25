@@ -849,14 +849,6 @@ class Trainer:
         This method executes the main training loop, iterating through the dataset and performing training steps. It
         handles data loading, forward pass, backward pass, optimization, logging, and checkpointing.
         """
-        try:
-            self._fit()
-        finally:
-            self._exp_tracker.close()
-            if self._metrics_recorder:
-                self._metrics_recorder.close()
-
-    def _fit(self):
         if self._async_hf_export or self._async_checkpoint:
             self._async_save_monitor.start()
 
@@ -941,6 +933,9 @@ class Trainer:
         # TODO: Should use flush rather than close
         if self._async_hf_export or self._async_checkpoint:
             self._async_save_monitor.stop()
+        self._exp_tracker.close()
+        if self._metrics_recorder:
+            self._metrics_recorder.close()
         log_rank0.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
         dist.barrier()
 
