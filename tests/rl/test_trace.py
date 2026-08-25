@@ -3,12 +3,12 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
+import unittest.mock
 from contextlib import contextmanager
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from unittest import mock
 
 
 def _run_trace_utils(repo_root: Path, command: str) -> dict:
@@ -70,8 +70,8 @@ class TestTrace(unittest.TestCase):
                 return "object-ref"
 
         with (
-            mock.patch.object(rollout_api, "is_rollout_trace_enabled", return_value=True),
-            mock.patch.object(
+            unittest.mock.patch.object(rollout_api, "is_rollout_trace_enabled", return_value=True),
+            unittest.mock.patch.object(
                 rollout_api.trace_api,
                 "inject_trace_context",
                 return_value={"traceparent": "00-trace-span-01"},
@@ -108,8 +108,8 @@ class TestTrace(unittest.TestCase):
                 return "object-ref"
 
         with (
-            mock.patch.object(rollout_api, "is_rollout_trace_enabled", return_value=True),
-            mock.patch.object(
+            unittest.mock.patch.object(rollout_api, "is_rollout_trace_enabled", return_value=True),
+            unittest.mock.patch.object(
                 rollout_api.trace_api,
                 "inject_trace_context",
                 return_value={"traceparent": "current"},
@@ -137,8 +137,12 @@ class TestTrace(unittest.TestCase):
                 remote_method = RemoteMethod()
                 states = []
                 with (
-                    mock.patch.object(rollout_api, "is_rollout_trace_enabled", return_value=trace_enabled),
-                    mock.patch.object(rollout_api.trace_api, "inject_trace_context", return_value={}),
+                    unittest.mock.patch.object(
+                        rollout_api, "is_rollout_trace_enabled", return_value=trace_enabled
+                    ),
+                    unittest.mock.patch.object(
+                        rollout_api.trace_api, "inject_trace_context", return_value={}
+                    ),
                 ):
                     result = rollout_api.trace_rollout_remote(remote_method, states, target=states)
 
@@ -267,9 +271,13 @@ class TestRolloutEndpointTrace(unittest.IsolatedAsyncioTestCase):
 
                 state = RolloutState(message=[], rollout_id=1)
                 with (
-                    mock.patch.object(rollout_api, "is_rollout_trace_enabled", return_value=True),
-                    mock.patch.object(rollout_api.trace_api, "trace_span", side_effect=passthrough_span),
-                    mock.patch.object(rollout_api.trace_api, "set_trace_attributes"),
+                    unittest.mock.patch.object(
+                        rollout_api, "is_rollout_trace_enabled", return_value=True
+                    ),
+                    unittest.mock.patch.object(
+                        rollout_api.trace_api, "trace_span", side_effect=passthrough_span
+                    ),
+                    unittest.mock.patch.object(rollout_api.trace_api, "set_trace_attributes"),
                 ):
                     result = await endpoint(state)
 
@@ -300,9 +308,9 @@ class TestRolloutEndpointTrace(unittest.IsolatedAsyncioTestCase):
             yield
 
         with (
-            mock.patch.object(rollout_api, "is_rollout_trace_enabled", return_value=True),
-            mock.patch.object(rollout_api.trace_api, "trace_span", side_effect=capture_span),
-            mock.patch.object(rollout_api.trace_api, "set_trace_attributes"),
+            unittest.mock.patch.object(rollout_api, "is_rollout_trace_enabled", return_value=True),
+            unittest.mock.patch.object(rollout_api.trace_api, "trace_span", side_effect=capture_span),
+            unittest.mock.patch.object(rollout_api.trace_api, "set_trace_attributes"),
         ):
             result = await endpoint(state)
 
@@ -338,12 +346,12 @@ class TestSessionServerTrace(unittest.IsolatedAsyncioTestCase):
             yield
 
         with (
-            mock.patch.object(session_server, "trace_span", side_effect=capture_span),
-            mock.patch.object(session_server, "set_trace_attributes") as set_attributes,
-            mock.patch.object(
+            unittest.mock.patch.object(session_server, "trace_span", side_effect=capture_span),
+            unittest.mock.patch.object(session_server, "set_trace_attributes") as set_attributes,
+            unittest.mock.patch.object(
                 session_server.SessionServer,
                 "_handle_request_impl",
-                new=mock.AsyncMock(return_value=response),
+                new=unittest.mock.AsyncMock(return_value=response),
             ),
         ):
             result = await server._handle_request(request)
@@ -385,9 +393,9 @@ class TestSessionServerTrace(unittest.IsolatedAsyncioTestCase):
 
         headers = {}
         with (
-            mock.patch.object(session_server, "trace_span", side_effect=capture_span),
-            mock.patch.object(session_server, "inject_trace_context", side_effect=inject),
-            mock.patch.object(session_server, "set_trace_attributes") as set_attributes,
+            unittest.mock.patch.object(session_server, "trace_span", side_effect=capture_span),
+            unittest.mock.patch.object(session_server, "inject_trace_context", side_effect=inject),
+            unittest.mock.patch.object(session_server, "set_trace_attributes") as set_attributes,
         ):
             async with server._backend_request(
                 Client(),
@@ -432,12 +440,14 @@ class TestSandboxTraceBridge(unittest.TestCase):
             observed_spans.append((name, dict(attributes or {})))
             yield
 
-        with TemporaryDirectory() as temp_dir, mock.patch.dict(os.environ, {"WORK_DIR": temp_dir}):
+        with tempfile.TemporaryDirectory() as temp_dir, unittest.mock.patch.dict(
+            os.environ, {"WORK_DIR": temp_dir}
+        ):
             sandbox_trace._reset_for_testing()
             sandbox_trace.init_writer(actor_id="test")
             with (
-                mock.patch.object(sandbox_trace, "trace_span", side_effect=capture_span),
-                mock.patch.object(
+                unittest.mock.patch.object(sandbox_trace, "trace_span", side_effect=capture_span),
+                unittest.mock.patch.object(
                     sandbox_trace,
                     "set_trace_attributes",
                     side_effect=lambda attrs: observed_final_attributes.append(dict(attrs)),
