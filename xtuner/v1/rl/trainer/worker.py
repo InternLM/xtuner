@@ -1566,10 +1566,30 @@ class TrainingWorker(SingleAcceleratorWorker):
 
     def _finalize_critic_metrics(self, accumulated: dict[str, float]) -> dict[str, float]:
         """Reduce critic sums across ranks into interpretable metrics."""
-        if not accumulated:
-            return {}
-        keys = sorted(accumulated)
-        totals = torch.tensor([accumulated[key] for key in keys], dtype=torch.float64, device=DEVICE)
+        # ``accumulated`` is rank-local: a rank with no valid value targets has
+        # no entries at all.  Every rank must nevertheless enter the same
+        # collective.  Deriving the payload from the local keys made rank 0
+        # enqueue an all-reduce that empty ranks skipped, deadlocking PPO at the
+        # end of the first critic update.
+        keys = (
+            "reduced_critic_valid_count",
+            "reduced_critic_value_sum",
+            "reduced_critic_value_square_sum",
+            "reduced_critic_return_sum",
+            "reduced_critic_return_square_sum",
+            "reduced_critic_error_square_sum",
+        )
+        critic_cfg = self.config.critic_cfg
+        assert critic_cfg is not None
+        clipped = critic_cfg.loss_cfg.loss_type == "clipped"
+        if clipped:
+            keys += ("reduced_critic_clip_count",)
+
+        totals = torch.tensor(
+            [accumulated.get(key, 0.0) for key in keys],
+            dtype=torch.float64,
+            device=DEVICE,
+        )
         if dist.is_initialized():
             dist.all_reduce(totals, op=dist.ReduceOp.SUM)
         reduced = dict(zip(keys, totals.tolist()))
@@ -1590,7 +1610,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
         if variance is not None:
             metrics["critic/explained_variance"] = variance
-        if "reduced_critic_clip_count" in reduced:
+        if clipped:
             metrics["critic/clip_frac"] = reduced["reduced_critic_clip_count"] / count
         return metrics
 
