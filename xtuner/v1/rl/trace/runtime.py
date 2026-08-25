@@ -477,7 +477,9 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
     if external_endpoint is not None:
         endpoint = external_endpoint
         start_local_collector = False
-        trace_jsonl_path = config.external_trace_jsonl_path
+        trace_jsonl_path = (
+            Path(config.external_trace_jsonl_path) if config.external_trace_jsonl_path is not None else None
+        )
         port = None
     else:
         traces_dir = run_dir / "traces"
