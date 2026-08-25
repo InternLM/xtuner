@@ -181,7 +181,6 @@ def start_rollout_trace_viewer(
         load_base_payload,
         source_signature=current_source_signature,
     )
-    payload_cache.get(train_step)
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
