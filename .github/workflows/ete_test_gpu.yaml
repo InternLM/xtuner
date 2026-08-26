@@ -40,8 +40,7 @@ on:
           Default false.
         type: boolean
         default: false
-  schedule:
-    - cron:  '00 16 * * 0-5'
+
 env:
   CI_GPU_IMAGE_REGISTRY: ${{ secrets.CI_GPU_IMAGE_REGISTRY }}
   # ETE PNG reports: llmcitester/xtuner @ branch reports, under ete/{run_id}/

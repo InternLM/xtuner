@@ -85,22 +85,35 @@ def get_low_latency_buffer(
     if _buffer is None:
         # NOTES: for best performance, the QP number **must** be equal to the number of the local experts
         assert num_experts % group.size() == 0
-        # _buffer = Buffer(group, num_nvl_bytes, num_rdma_bytes)
+        num_qps_per_rank = max(num_experts // group.size(), Buffer.num_sms // 2)
         _buffer = Buffer(
             group,
             num_nvl_bytes,
             num_rdma_bytes,
             low_latency_mode=True,
-            num_qps_per_rank=max(num_experts // group.size(), Buffer.num_sms // 2),
+            num_qps_per_rank=num_qps_per_rank,
         )
         logger.info(
-            f"{num_nvl_bytes}, {_buffer.num_nvl_bytes}, {num_max_dispatch_tokens_per_rank}, {hidden}, {num_experts}, {group.size()}"
+            "[DeepEP low-latency] allocated buffer: "
+            f"num_nvl_bytes={num_nvl_bytes} (allocated={_buffer.num_nvl_bytes}), "
+            f"num_rdma_bytes={num_rdma_bytes} (allocated={_buffer.num_rdma_bytes}), "
+            f"num_max_dispatch_tokens_per_rank={num_max_dispatch_tokens_per_rank}, "
+            f"hidden={hidden}, num_experts={num_experts}, ep_group_size={group.size()}, "
+            f"num_qps_per_rank={num_qps_per_rank}"
         )
     else:
         assert num_nvl_bytes <= _buffer.num_nvl_bytes, (
-            f"{num_nvl_bytes}, {_buffer.num_nvl_bytes}, {num_max_dispatch_tokens_per_rank}, {hidden}, {num_experts}, {group.size()}"
+            "[DeepEP low-latency] NVL buffer too small: "
+            f"required={num_nvl_bytes}, allocated={_buffer.num_nvl_bytes}, "
+            f"num_max_dispatch_tokens_per_rank={num_max_dispatch_tokens_per_rank}, "
+            f"hidden={hidden}, num_experts={num_experts}, ep_group_size={group.size()}"
         )
-        assert num_rdma_bytes <= _buffer.num_rdma_bytes
+        assert num_rdma_bytes <= _buffer.num_rdma_bytes, (
+            "[DeepEP low-latency] RDMA buffer too small: "
+            f"required={num_rdma_bytes}, allocated={_buffer.num_rdma_bytes}, "
+            f"num_max_dispatch_tokens_per_rank={num_max_dispatch_tokens_per_rank}, "
+            f"hidden={hidden}, num_experts={num_experts}, ep_group_size={group.size()}"
+        )
     return _buffer
 
 

@@ -287,6 +287,12 @@ class vLLMWorker(RolloutWorker):
         """Offloads the model weights and KV cache."""
         return self.sleep(level=2)
 
+    def flush_cache(self):
+        """Flushes cache through vLLM sleep/wakeup lifecycle."""
+        self.offload()
+        self.onload_weights()
+        return self.onload_kvcache()
+
     def reset_prefix_cache(self, tags: List[str] | None = None):
         raise NotImplementedError("The 'reset_prefix_cache' API is not yet implemented in the vLLM server.")
 
@@ -318,7 +324,7 @@ class vLLMWorker(RolloutWorker):
         args["enable_sleep_mode"] = True
         args["worker_extension_cls"] = "xtuner.v1.rl.rollout.vllm.WorkerWrap"
         args["trust_remote_code"] = True
-        args["enable_prefix_caching"] = False
+        args["enable_prefix_caching"] = self.config.enable_prefix_caching
         args["allowed_local_media_path"] = "/"
         args["mm_processor_cache_gb"] = 0
         args["max_num_batched_tokens"] = 4096

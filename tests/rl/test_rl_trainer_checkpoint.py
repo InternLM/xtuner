@@ -45,6 +45,7 @@ from xtuner.v1.rl.trainer import WorkerConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig, RLDisaggregatedTrainerConfig
 
+
 QWEN3_4B_PATH = os.environ.get("QWEN3_4B_PATH")
 CHECKPOINT_DIR = "checkpoints"
 TRAIN_STATE_PATH = "train_state.json"
@@ -99,6 +100,7 @@ class _FakeRolloutController:
         self.generate = _RemoteMethod(self._generate, async_result=True)
         self.pause_generation = _RemoteMethod(async_result=True)
         self.continue_generation = _RemoteMethod(async_result=True)
+        self.flush_cache = _RemoteMethod(return_value="cache_flushed")
         self.offload = _RemoteMethod(return_value="rollout_offloaded")
         self.check_and_shutdown_inactive_workers = _RemoteMethod(return_value="rollout_inactive_workers_shutdown")
         self.restart_inactive_workers = _RemoteMethod(return_value="rollout_restarted")
@@ -132,17 +134,11 @@ class _FakeTrainController:
         *,
         targets,
         rollout_config,
-        weight_transport_type,
-        weight_update_host=None,
-        weight_update_port=None,
     ):
         self.rollout_info = {
             "targets": targets,
             "rollout_config": rollout_config,
         }
-        self.weight_transport_type = weight_transport_type
-        self.weight_update_host = weight_update_host
-        self.weight_update_port = weight_update_port
 
     def onload(self, target="all"):
         return f"onload:{target}"
@@ -150,7 +146,7 @@ class _FakeTrainController:
     def offload(self, target="all"):
         return f"offload:{target}"
 
-    def update_weights(self):
+    def weight_update(self):
         self.update_weights_count += 1
         return "updated"
 
@@ -237,7 +233,8 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             patch("xtuner.v1.train.rl_trainer.set_cpu_resource_manager", lambda manager: None),
             patch("xtuner.v1.train.rl_trainer.get_rollout_engine_version", return_value={}),
             patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
-            patch("xtuner.v1.train.rl_trainer.BaseRLTrainer._release_trace_store", return_value=None),
+            patch("xtuner.v1.train.rl_trainer.BaseRLTrainer._release_trace_sessions", return_value=set()),
+            patch("xtuner.v1.train.rl_trainer.BaseRLTrainer._release_all_trace_sessions", return_value=None),
             patch.object(WorkerConfig, "build", autospec=True, side_effect=build_train_controller),
             patch.object(RolloutConfig, "build", autospec=True, side_effect=build_rollout_controller),
         ):
