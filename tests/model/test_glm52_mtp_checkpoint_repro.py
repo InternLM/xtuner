@@ -1,7 +1,7 @@
 """GLM-5.2 MTP reentrant checkpoint 的真实训练回归测试。
 
 TestGlm52CompiledMTPCheckpoint
-    test_shared_mtp_depths_train_with_compile_and_topk_offload: 共享 MTP 深度可在 compile/offload 下训练。
+    test_shared_mtp_depths_train_with_compile_and_topk_offload: 全 detach 的共享 MTP 可在 compile/offload 下训练。
 TestGlm52MicroBatchMTPCheckpoint
     test_nested_micro_batch_inputs_preserve_gradients: EP2 micro2 的嵌套 embedding 梯度可正确反传。
 """
@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 import torch
+from torch.distributed.tensor import DTensor
 
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.config import AdamWConfig, FSDPConfig
@@ -25,7 +26,14 @@ from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 
 
-def _tiny_mtp_config(ep_size: int, mtp_num_layers: int, compile_model: bool) -> Glm52MoEConfig:
+def _tiny_mtp_config(
+    ep_size: int,
+    mtp_num_layers: int,
+    compile_model: bool,
+    *,
+    detach_mtp_inputs: bool = False,
+    detach_mtp_lm_head_weight: bool = False,
+) -> Glm52MoEConfig:
     return Glm52MoEConfig(
         vocab_size=32,
         max_position_embeddings=64,
@@ -63,7 +71,12 @@ def _tiny_mtp_config(ep_size: int, mtp_num_layers: int, compile_model: bool) -> 
             router_scaling_factor=2.5,
         ),
         mlp_layer_types=["sparse", "sparse"],
-        mtp_config=MTPConfig(num_layers=mtp_num_layers, share_weights=True),
+        mtp_config=MTPConfig(
+            num_layers=mtp_num_layers,
+            share_weights=True,
+            detach_mtp_inputs=detach_mtp_inputs,
+            detach_mtp_lm_head_weight=detach_mtp_lm_head_weight,
+        ),
         lm_loss_cfg=CELossConfig(mode="eager"),
         compile_cfg=None if compile_model else False,
         dispatcher="all2all" if ep_size > 1 else None,
@@ -77,9 +90,17 @@ def _build_engine(
     ep_size: int,
     mtp_num_layers: int,
     compile_model: bool,
+    detach_mtp_inputs: bool = False,
+    detach_mtp_lm_head_weight: bool = False,
 ) -> TrainEngine:
     engine = TrainEngine(
-        model_cfg=_tiny_mtp_config(ep_size, mtp_num_layers, compile_model),
+        model_cfg=_tiny_mtp_config(
+            ep_size,
+            mtp_num_layers,
+            compile_model,
+            detach_mtp_inputs=detach_mtp_inputs,
+            detach_mtp_lm_head_weight=detach_mtp_lm_head_weight,
+        ),
         optim_cfg=AdamWConfig(lr=1e-3, foreach=False),
         fsdp_cfg=FSDPConfig(
             ep_size=ep_size,
@@ -104,13 +125,15 @@ def _model_item(engine: TrainEngine, start: int) -> ModelItem:
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class TestGlm52CompiledMTPCheckpoint(DeterministicDDPTestCase):
     def test_shared_mtp_depths_train_with_compile_and_topk_offload(self):
-        # 验证默认 reentrant checkpoint 可训练共享 MTP 深度且 loss 有限。
+        # 验证全 detach 输入仍会触发默认 reentrant replay，并为共享 MTP 参数生成梯度。
         self.create_pg("cuda")
         engine = _build_engine(
             intra_layer_micro_batch=1,
             ep_size=1,
             mtp_num_layers=2,
             compile_model=True,
+            detach_mtp_inputs=True,
+            detach_mtp_lm_head_weight=True,
         )
         try:
             with mock.patch.dict(
@@ -121,6 +144,17 @@ class TestGlm52CompiledMTPCheckpoint(DeterministicDDPTestCase):
 
             assert math.isfinite(step_info["total_loss"])
             assert math.isfinite(step_info["logs_info"]["reduced_mtp_loss"])
+            mtp_projection_grads = [
+                parameter.grad
+                for name, parameter in engine.model.named_parameters()
+                if "mtp_block" in name and name.endswith("eh_proj.weight")
+            ]
+            assert len(mtp_projection_grads) == 1
+            projection_grad = mtp_projection_grads[0]
+            assert projection_grad is not None
+            local_grad = projection_grad.to_local() if isinstance(projection_grad, DTensor) else projection_grad
+            assert torch.isfinite(local_grad).all()
+            assert local_grad.norm() > 0
         finally:
             del engine
             torch.cuda.empty_cache()
