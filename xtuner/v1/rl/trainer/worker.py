@@ -89,8 +89,7 @@ def _as_rollout_routed_experts_tensor(
             max_expert_id = rollout_routed_experts.max()
             if min_expert_id < 0 or max_expert_id >= _UINT16_CAPACITY:
                 raise ValueError(
-                    "Routed-expert IDs cannot be represented as uint16: "
-                    f"min={min_expert_id}, max={max_expert_id}"
+                    f"Routed-expert IDs cannot be represented as uint16: min={min_expert_id}, max={max_expert_id}"
                 )
     return torch.as_tensor(rollout_routed_experts, dtype=storage_dtype)
 
