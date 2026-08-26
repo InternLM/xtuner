@@ -85,7 +85,7 @@ rollout_tp_size = 1
 rollout_ep_size = 1
 gsm8k_max_prompt_length = 512
 dapo_max_prompt_length = 2048
-max_response_length = 1024
+max_response_length = 8192
 max_prompt_length = dapo_max_prompt_length
 pack_max_length = 32 * 1024
 
