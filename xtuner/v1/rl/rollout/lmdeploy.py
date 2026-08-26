@@ -213,6 +213,12 @@ class LMDeployWorker(RolloutWorker):
         """Offloads the model weights and KV cache."""
         return self._sleep(level=2)
 
+    def flush_cache(self):
+        """Flushes cache through LMDeploy sleep/wakeup lifecycle."""
+        self.offload()
+        self.onload_weights()
+        return self.onload_kvcache()
+
     def onload_weights(self):
         """Onloads the model weights by waking up the model."""
         return self._wake_up(tags=["weights"])
