@@ -287,6 +287,13 @@ class Muon(Optimizer):
         use_triton (bool): Whether to use Triton kernel for Newton-Schulz. Ignored if custom function is provided.
         newton_schulz_func (Callable | None): Use a custom Newton-Schulz function for orthogonalization.
             Signature is `func(input: Tensor, epsilon: float, num_experts: int) -> Tensor`.
+        use_gram_newton_schulz (bool): Use the CuTeDSL Gram Newton-Schulz implementation. Square and
+            low-aspect-ratio matrices automatically use its standard Newton-Schulz fallback.
+        gram_ns_epsilon (float): Normalization epsilon for Gram NS and its standard fallback.
+        gram_restart_iterations (tuple[int, ...]): Zero-based iterations before which Gram NS materializes
+            the current update and rebuilds the Gram matrix. ``(2,)`` restarts after two iterations.
+        gram_ns_min_aspect_ratio (float): Gram NS is used only above this matrix aspect ratio.
+        gram_ns_torch_compile (bool): Compile Gram NS closures using fullgraph/reduce-overhead mode.
         enable_all2all (bool): Whether to allow the all-to-all communication strategy. Set to False to
             force the all-gather + reduce-scatter (AGRS) path for all sharded batches. Useful on cluster
             topologies where all-to-all is unreliable.
@@ -313,6 +320,11 @@ class Muon(Optimizer):
         flatten: bool = False,
         use_triton: bool = False,
         newton_schulz_func: Callable | None = None,
+        use_gram_newton_schulz: bool = False,
+        gram_ns_epsilon: float = 1e-7,
+        gram_restart_iterations: tuple[int, ...] = (2,),
+        gram_ns_min_aspect_ratio: float = 2.0,
+        gram_ns_torch_compile: bool = True,
         enable_all2all: bool = True,
         remainder_strategy: Literal["agrs", "pad_all2all"] = "agrs",
         muon_split_sizes: dict[Tensor, tuple[int, ...]] | None = None,
@@ -330,6 +342,8 @@ class Muon(Optimizer):
             raise ValueError(f"Invalid remainder_strategy: {remainder_strategy!r}; expected 'agrs' or 'pad_all2all'.")
         if not enable_all2all and remainder_strategy == "pad_all2all":
             raise ValueError("remainder_strategy='pad_all2all' requires enable_all2all=True.")
+        if use_gram_newton_schulz and (use_triton or newton_schulz_func is not None):
+            raise ValueError("Gram Newton-Schulz cannot be combined with use_triton or newton_schulz_func.")
 
         # Default arguments for each param group
         defaults = dict(
@@ -382,6 +396,17 @@ class Muon(Optimizer):
             if not callable(newton_schulz_func):
                 raise TypeError(f"newton_schulz_func must be a callable function, got {type(newton_schulz_func)}")
             self._newton_schulz_func = newton_schulz_func
+        elif use_gram_newton_schulz:
+            from .gram_newton_schulz import GramNewtonSchulz
+
+            compile_kwargs = {"fullgraph": True, "mode": "reduce-overhead"} if gram_ns_torch_compile else None
+            self._newton_schulz_func = GramNewtonSchulz(
+                epsilon=gram_ns_epsilon,
+                use_kernels=True,
+                restart_iterations=gram_restart_iterations,
+                min_aspect_ratio=gram_ns_min_aspect_ratio,
+                compile_kwargs=compile_kwargs,
+            )
         elif use_triton:
             from .newton_schulz_triton import newton_schulz_triton
 

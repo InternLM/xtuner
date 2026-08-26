@@ -78,6 +78,21 @@ class MuonConfig(OptimConfig):
     enable_all2all: Annotated[
         bool, Parameter(help="Allow all-to-all comm strategy; set False on topologies where all-to-all is unreliable")
     ] = True
+    use_gram_newton_schulz: Annotated[
+        bool, Parameter(help="Enable CuTeDSL Gram Newton-Schulz with automatic standard-NS fallback")
+    ] = False
+    gram_ns_epsilon: Annotated[
+        float, Parameter(help="Normalization epsilon used by Gram NS and its standard fallback")
+    ] = 1e-7
+    gram_restart_iterations: Annotated[
+        Tuple[int, ...], Parameter(help="Zero-based Gram NS iterations before which to restart")
+    ] = (2,)
+    gram_ns_min_aspect_ratio: Annotated[
+        float, Parameter(help="Use Gram NS only when a matrix aspect ratio is greater than this value")
+    ] = 2.0
+    gram_ns_torch_compile: Annotated[
+        bool, Parameter(help="Compile Gram NS with torch.compile fullgraph/reduce-overhead mode")
+    ] = True
 
     def build(self, model):
         trainable_parameters_names = model.trainable_parameters()
@@ -205,6 +220,11 @@ class MuonConfig(OptimConfig):
             flatten=True,
             adjust_lr=self.adjust_lr,
             use_triton=False,
+            use_gram_newton_schulz=self.use_gram_newton_schulz,
+            gram_ns_epsilon=self.gram_ns_epsilon,
+            gram_restart_iterations=self.gram_restart_iterations,
+            gram_ns_min_aspect_ratio=self.gram_ns_min_aspect_ratio,
+            gram_ns_torch_compile=self.gram_ns_torch_compile,
             epsilon=self.eps,
             enable_all2all=self.enable_all2all,
             muon_split_sizes=muon_split_sizes,

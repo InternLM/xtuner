@@ -81,6 +81,11 @@ video = [
   "decord",
   "av",
 ]
+gram-ns = [
+  "torch>=2.7.1",
+  "quack-kernels==0.5.0",
+  "nvidia-cutlass-dsl==4.5.2",
+]
 all = [
   "jsonlines",
   "decord",
