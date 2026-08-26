@@ -100,6 +100,7 @@ class _FakeRolloutController:
         self.generate = _RemoteMethod(self._generate, async_result=True)
         self.pause_generation = _RemoteMethod(async_result=True)
         self.continue_generation = _RemoteMethod(async_result=True)
+        self.flush_cache = _RemoteMethod(return_value="cache_flushed")
         self.offload = _RemoteMethod(return_value="rollout_offloaded")
         self.check_and_shutdown_inactive_workers = _RemoteMethod(return_value="rollout_inactive_workers_shutdown")
         self.restart_inactive_workers = _RemoteMethod(return_value="rollout_restarted")
