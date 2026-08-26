@@ -22,7 +22,7 @@ logger = get_logger()
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
-_RL_FP8_QUANTIZE_WEIGHT_IN_BF16_ENV = "XTUNER_RL_FP8_QUANTIZE_WEIGHT_IN_BF16"
+_RL_FP8_QUANTIZE_IN_BF16_ENV = "XTUNER_RL_FP8_QUANTIZE_IN_BF16"
 
 
 def tensor_to_per_block_fp8_devided_64_scales(
@@ -164,7 +164,7 @@ def precompute_tilewise_float8_scale_for_fsdp(
             )
         weights_same_shape_stack = torch.stack(weights_same_shape, dim=0)  # type: ignore
         # 因为当前RL用bf16参数传输到推理引擎，这里为了训推一致性做类似处理
-        if os.environ.get(_RL_FP8_QUANTIZE_WEIGHT_IN_BF16_ENV, "0") == "1":
+        if os.environ.get(_RL_FP8_QUANTIZE_IN_BF16_ENV, "0") == "1":
             weights_same_shape_stack = weights_same_shape_stack.bfloat16().float()
         if dim >= 128 and dim % 128 == 64:
             assert reduce_mesh_devided_64 is not None, (
@@ -393,7 +393,7 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
         assert self._precomputed_scale is not None
         quant_source = self._tensor
         # 因为当前RL用bf16参数传输到推理引擎，这里为了训推一致性做类似处理
-        if os.environ.get(_RL_FP8_QUANTIZE_WEIGHT_IN_BF16_ENV, "0") == "1":
+        if os.environ.get(_RL_FP8_QUANTIZE_IN_BF16_ENV, "0") == "1":
             quant_source = quant_source.bfloat16().float()
         if self._tensor.shape[0] >= 128 and self._tensor.shape[0] % 128 == 64:
             w_fp8_data = cast_to_per_block_fp8_devided_64_with_scales(
