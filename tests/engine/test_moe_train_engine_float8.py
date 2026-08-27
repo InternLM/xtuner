@@ -20,7 +20,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.loss.ce_loss import CELossConfig
-from xtuner.v1.model.moe.moe import BalancingLossConfig
+from xtuner.v1.model.moe.moe import MOE_BLOCK_FORWARD, BalancingLossConfig
 
 
 
@@ -35,11 +35,9 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         "device,ep_size,hsdp_sharding_size,sim_tol,rtol",
         [
             ("cuda", 1, int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8")), 0.01, 0.01),
-            # ep8 is a smoke/trend coverage for the FSDP shard-mesh-size-1 FP8 path.
-            # It shares the ep1 reference below, but is not expected to align step-by-step
-            # because EP changes routing/collective order and accumulates FP8 numeric drift.
-            # Observed 10-step loss:
-            # [2.4714, 2.4714, 1.8044, 1.5210, 0.9570, 0.6952, 0.4370, 0.3123, 0.1714, 0.1100]
+            # EP8 covers checkpoint replay across layer-varying routed-token shapes while MoEBlock
+            # remains fullgraph-compiled. It shares the EP1 reference below, but EP changes routing
+            # and collective order, so the two loss curves need not align step-by-step.
             ("cuda", 8, int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8")), 0.01, 0.15),
         ],
     )
@@ -66,6 +64,10 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
             optim_cfg=optim_cfg,
             fsdp_cfg=fsdp_cfg,
         )
+        if ep_size > 1:
+            # Regression contract: checkpoint replay must remain correct while the EP expert block
+            # keeps its strict full-graph compile boundary.
+            self.assertEqual(engine.model.compile_cfg.get(MOE_BLOCK_FORWARD), {"fullgraph": True})
         engine.from_hf(hf_path=QWEN3_MOE_PATH)
 
         loss_cfg = CELossConfig()
