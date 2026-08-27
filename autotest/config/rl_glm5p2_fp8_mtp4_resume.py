@@ -44,8 +44,8 @@ train_batch_size = 64 * train_optimizer_steps
 prompt_repeat_k = 5
 rollout_tp_size = 1
 rollout_ep_size = 8
-max_prompt_length = 1024
-max_response_length = 8192
+max_prompt_length = 512
+max_response_length = 4096
 pack_max_length = 16 * 1024
 
 # 1. resources
@@ -64,7 +64,7 @@ rollout_config = RolloutConfig(
     dtype="bfloat16",
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
-    gpu_memory_utilization=0.8,
+    gpu_memory_utilization=0.6,
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=(enable_return_routed_experts == "1"),
     extra_rollout_config=dict(
