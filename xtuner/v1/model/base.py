@@ -1000,6 +1000,29 @@ class BaseModel(nn.Module):
         return _compile_cfg
 
     @property
+    def kept_ops(self) -> frozenset:
+        """Op overloads kept resident wherever they run, as selected by
+        ``config.recompute_cfg``.
+
+        Returns:
+            frozenset: Overloads to keep. Empty means no op-identity unit was selected.
+        """
+        return frozenset()
+
+    @property
+    def keeps_any_recompute_unit(self) -> bool:
+        """Whether any unit at all was selected.
+
+        This is what tells the sharding paths whether to install the per-op policy at all: with
+        nothing selected, torch's own default already recomputes everything, so a policy that
+        reaches the same answer would only put a dispatch mode in the way of every op.
+
+        Returns:
+            bool: True when ``config.recompute_cfg`` selected something, by either resolution.
+        """
+        return False
+
+    @property
     def float8_handler(self):
         if (
             self.config.float8_cfg is not None
