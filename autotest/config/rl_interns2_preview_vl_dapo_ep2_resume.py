@@ -9,6 +9,7 @@ import json
 import os
 
 import ray
+
 from transformers import AutoTokenizer
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
@@ -81,7 +82,7 @@ rollout_config = RolloutConfig(
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
     skip_load_weights=True,
-    gpu_memory_utilization=0.8,
+    gpu_memory_utilization=0.5,
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=True,
     rollout_max_batch_size_per_instance=512,
