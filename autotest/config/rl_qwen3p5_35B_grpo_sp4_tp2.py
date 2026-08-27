@@ -1,12 +1,9 @@
-import json
 import os
-
-from transformers import AutoTokenizer
 
 from xtuner.v1.config import FSDPConfig, LRConfig, MuonConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
-from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
+from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig, RLTextTokenizeFnConfig
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
 from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
@@ -17,60 +14,22 @@ from xtuner.v1.rl.agent_loop_manager import (
     TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.judger import DapoMathJudgerConfig, GSM8KJudgerConfig
+from xtuner.v1.rl.judger import GEO3KJudgerConfig, GSM8KJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig, get_eos_token
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
-
-
-def _as_list(value):
-    return value if isinstance(value, list) else [value]
-
-
-def _math_dapo_annotation(meta_path: str) -> str:
-    with open(meta_path, encoding="utf-8") as f:
-        ds_collections = json.load(f)
-    if "math_dapo" not in ds_collections:
-        raise KeyError(f"math_dapo not found in {meta_path}, keys={list(ds_collections)}")
-    annotations = _as_list(ds_collections["math_dapo"]["annotation"])
-    if not annotations:
-        raise ValueError(f"math_dapo.annotation is empty in {meta_path}")
-    return annotations[0]
-
-
-def _build_sampler(anno_path: str, name: str, tokenize_fn, prompt_repeat_k: int, sample_ratio: float | None = None):
-    dataset_kwargs = {"name": name, "anno_path": anno_path}
-    if sample_ratio is not None:
-        dataset_kwargs["sample_ratio"] = sample_ratio
-    return SamplerConfig(
-        dataloader_cfg=DataloaderConfig(
-            dataset_config_list=[
-                {
-                    "dataset": DatasetConfig(**dataset_kwargs),
-                    "tokenize_fn": tokenize_fn,
-                }
-            ],
-            pack_max_length=pack_max_length,
-            collator="fake_collator",
-            pack_level="none",
-        ),
-        prompt_repeat_k=prompt_repeat_k,
-    )
 
 
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
 gsm8k_data_path = os.environ["DATA_PATH"]
 gsm8k_eval_data_path = os.environ["EVAL_DATA_PATH"]
-dapo_meta_path = os.environ["DAPO_META_PATH"]
-dapo_data_path = os.environ.get("DAPO_DATA_PATH") or _math_dapo_annotation(dapo_meta_path)
-dapo_eval_meta_path = os.environ.get("DAPO_EVAL_META_PATH", "")
-dapo_eval_data_path = os.environ.get("DAPO_EVAL_DATA_PATH", "")
-if not dapo_eval_data_path and dapo_eval_meta_path:
-    dapo_eval_data_path = _math_dapo_annotation(dapo_eval_meta_path)
+geo3k_data_path = os.environ["GEO3K_DATA_PATH"]
+geo3k_eval_data_path = os.environ["GEO3K_EVAL_DATA_PATH"]
+media_root = os.environ["MEDIA_ROOT"]
 enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0")
 NNODE = int(os.environ.get("WORLD_SIZE", "2"))
 
@@ -79,14 +38,13 @@ total_train_steps = 16
 evaluate_step = 16
 train_optimizer_steps = 1
 train_batch_size = 64 * train_optimizer_steps
-gsm8k_prompt_repeat_k = 5
-dapo_prompt_repeat_k = 5
+prompt_repeat_k = 5
 rollout_tp_size = 1
 rollout_ep_size = 1
-gsm8k_max_prompt_length = 512
-dapo_max_prompt_length = 2048
+gsm8k_max_prompt_length = 1024
+geo3k_max_prompt_length = 2048
 max_response_length = 8192
-max_prompt_length = dapo_max_prompt_length
+max_prompt_length = geo3k_max_prompt_length
 pack_max_length = 32 * 1024
 
 resources = AcceleratorResourcesConfig(
@@ -112,27 +70,17 @@ rollout_config = RolloutConfig(
     ),
 )
 
-tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-eos_token_id = get_eos_token(model_path)
-eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
 gsm8k_judger_config = GSM8KJudgerConfig(
     judger_name="openai/gsm8k",
     cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
 )
-dapo_judger_config = DapoMathJudgerConfig(
-    judger_name="dapo_math",
-    eos_token=eos_token_str,
-    enable_overlong_buffer=True,
-    max_response_len=max_response_length,
-    overlong_buffer_len=4096,
-    overlong_penalty_factor=1.0,
-    tokenizer=tokenizer,
+geo3k_judger_config = GEO3KJudgerConfig(
     cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
 )
 
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
 fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1, tp_size=2)
-model_cfg = Qwen3_5_VLMoE35BA3Config()
+model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
 model_cfg.compile_cfg = False
 model_cfg.text_config.balancing_loss_cfg = None
 model_cfg.text_config.z_loss_cfg = None
@@ -166,110 +114,155 @@ train_worker_cfg = WorkerConfig(
 )
 
 gsm8k_tokenize_fn = RLTextTokenizeFnConfig(max_length=gsm8k_max_prompt_length)
-dapo_tokenize_fn = RLTextTokenizeFnConfig(max_length=dapo_max_prompt_length)
-
-gsm8k_train_agent_loop_config = SingleTurnAgentLoopConfig(
-    hf_checkpoint=model_path,
-    sample_params=SampleParams(
-        max_tokens=max_response_length,
-        top_k=0,
-        top_p=1.0,
-        temperature=1.0,
-        min_tokens=0,
-    ),
+geo3k_tokenize_fn = RLQwen3VLTokenizeFnConfig(
+    processor_path=model_path,
+    max_length=geo3k_max_prompt_length,
+    chat_template="qwen3.5-vl",
+    add_generation_prompt=True,
+    enable_thinking=True,
 )
-dapo_train_agent_loop_config = SingleTurnAgentLoopConfig(
-    hf_checkpoint=model_path,
-    sample_params=SampleParams(
-        max_tokens=max_response_length,
-        top_k=0,
-        top_p=1.0,
-        temperature=1.0,
-        min_tokens=0,
+geo3k_eval_tokenize_fn = RLQwen3VLTokenizeFnConfig(
+    processor_path=model_path,
+    max_length=geo3k_max_prompt_length,
+    chat_template="qwen3.5-vl",
+    add_generation_prompt=True,
+    enable_thinking=True,
+    ignore_multimodal_info=True,
+)
+training_sample_params = SampleParams(
+    max_tokens=max_response_length,
+    top_k=0,
+    top_p=1.0,
+    temperature=1.0,
+    min_tokens=0,
+)
+evaluation_sample_params = SampleParams(
+    max_tokens=max_response_length,
+    top_k=1,
+    top_p=1.0,
+    temperature=0.0,
+    min_tokens=0,
+)
+
+gsm8k_train_sampler_config = SamplerConfig(
+    dataloader_cfg=DataloaderConfig(
+        dataset_config_list=[
+            {
+                "dataset": DatasetConfig(name="gsm8k", anno_path=gsm8k_data_path),
+                "tokenize_fn": gsm8k_tokenize_fn,
+            }
+        ],
+        pack_max_length=pack_max_length,
+        collator="fake_collator",
+        pack_level="none",
     ),
+    prompt_repeat_k=prompt_repeat_k,
+)
+geo3k_train_sampler_config = SamplerConfig(
+    dataloader_cfg=DataloaderConfig(
+        dataset_config_list=[
+            {
+                "dataset": DatasetConfig(
+                    name="geo3k",
+                    anno_path=geo3k_data_path,
+                    class_name="VLMJsonlDataset",
+                    media_root=media_root,
+                    sample_ratio=1.0,
+                ),
+                "tokenize_fn": geo3k_tokenize_fn,
+            }
+        ],
+        pack_max_length=pack_max_length,
+        collator="fake_collator",
+        pack_level="none",
+        num_workers=8,
+    ),
+    prompt_repeat_k=prompt_repeat_k,
 )
 
 agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=[
         TaskSpecConfig(
             task_name="train_task:gsm8k",
-            weight=1.0,
-            agent_loop_config=gsm8k_train_agent_loop_config,
+            agent_loop_config=SingleTurnAgentLoopConfig(
+                hf_checkpoint=model_path,
+                sample_params=training_sample_params,
+            ),
             judger_config=gsm8k_judger_config,
             produce_strategy_config=SyncProduceStrategyConfig(),
-            sampler_config=_build_sampler(
-                gsm8k_data_path,
-                "gsm8k",
-                gsm8k_tokenize_fn,
-                gsm8k_prompt_repeat_k,
-            ),
+            sampler_config=gsm8k_train_sampler_config,
         ),
         TaskSpecConfig(
-            task_name="train_task:dapo_math",
-            weight=1.0,
-            agent_loop_config=dapo_train_agent_loop_config,
-            judger_config=dapo_judger_config,
-            produce_strategy_config=SyncProduceStrategyConfig(),
-            sampler_config=_build_sampler(
-                dapo_data_path,
-                "dapo_math",
-                dapo_tokenize_fn,
-                dapo_prompt_repeat_k,
+            task_name="train_task:geo3k",
+            agent_loop_config=SingleTurnAgentLoopConfig(
+                hf_checkpoint=model_path,
+                sample_params=training_sample_params,
             ),
+            judger_config=geo3k_judger_config,
+            produce_strategy_config=SyncProduceStrategyConfig(),
+            sampler_config=geo3k_train_sampler_config,
         ),
     ],
 )
 
-eval_tasks = [
-    TaskSpecConfig(
-        task_name="eval_task:gsm8k",
-        weight=1.0,
-        agent_loop_config=SingleTurnAgentLoopConfig(
-            hf_checkpoint=model_path,
-            sample_params=SampleParams(
-                max_tokens=max_response_length,
-                top_k=1,
-                top_p=1.0,
-                temperature=0.0,
-                min_tokens=0,
-            ),
-        ),
-        judger_config=gsm8k_judger_config,
-        sampler_config=_build_sampler(
-            gsm8k_eval_data_path,
-            "gsm8k_eval",
-            gsm8k_tokenize_fn,
-            prompt_repeat_k=1,
-            sample_ratio=1.0,
-        ),
-    )
-]
-if dapo_eval_data_path:
-    eval_tasks.append(
+gsm8k_eval_sampler_config = SamplerConfig(
+    dataloader_cfg=DataloaderConfig(
+        dataset_config_list=[
+            {
+                "dataset": DatasetConfig(name="gsm8k_eval", anno_path=gsm8k_eval_data_path, sample_ratio=1.0),
+                "tokenize_fn": gsm8k_tokenize_fn,
+            }
+        ],
+        pack_max_length=pack_max_length,
+        collator="fake_collator",
+        pack_level="none",
+    ),
+    prompt_repeat_k=1,
+)
+geo3k_eval_sampler_config = SamplerConfig(
+    dataloader_cfg=DataloaderConfig(
+        dataset_config_list=[
+            {
+                "dataset": DatasetConfig(
+                    name="geo3k_eval",
+                    anno_path=geo3k_eval_data_path,
+                    class_name="VLMJsonlDataset",
+                    media_root=media_root,
+                    sample_ratio=1.0,
+                ),
+                "tokenize_fn": geo3k_eval_tokenize_fn,
+            }
+        ],
+        pack_max_length=pack_max_length,
+        collator="fake_collator",
+        pack_level="none",
+        num_workers=8,
+    ),
+    prompt_repeat_k=1,
+)
+
+eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
+    tasks=[
         TaskSpecConfig(
-            task_name="eval_task:dapo_math",
-            weight=1.0,
+            task_name="eval_task:gsm8k",
             agent_loop_config=SingleTurnAgentLoopConfig(
                 hf_checkpoint=model_path,
-                sample_params=SampleParams(
-                    max_tokens=max_response_length,
-                    top_k=1,
-                    top_p=1.0,
-                    temperature=0.0,
-                    min_tokens=0,
-                ),
+                sample_params=evaluation_sample_params,
             ),
-            judger_config=dapo_judger_config,
-            sampler_config=_build_sampler(
-                dapo_eval_data_path,
-                "dapo_math_eval",
-                dapo_tokenize_fn,
-                prompt_repeat_k=1,
-                sample_ratio=1.0,
+            judger_config=gsm8k_judger_config,
+            sampler_config=gsm8k_eval_sampler_config,
+        ),
+        TaskSpecConfig(
+            task_name="eval_task:geo3k",
+            agent_loop_config=SingleTurnAgentLoopConfig(
+                hf_checkpoint=model_path,
+                sample_params=evaluation_sample_params,
             ),
-        )
-    )
-eval_agent_loop_manager_cfg = AgentLoopManagerConfig(tasks=eval_tasks)
+            judger_config=geo3k_judger_config,
+            sampler_config=geo3k_eval_sampler_config,
+        ),
+    ],
+)
 
 evaluator_config = EvaluatorConfig(compute_metric_func=None)
 

@@ -40,9 +40,8 @@ case:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
-                    - GEO3K_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k/train.jsonl
-                    - GEO3K_EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k/test.jsonl
-                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k
+                    - DAPO_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
+                    - DAPO_EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
