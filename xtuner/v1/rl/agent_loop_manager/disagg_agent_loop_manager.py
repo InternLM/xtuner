@@ -27,6 +27,7 @@ from .produce_utils import (
     _MANAGER_STATE_PATH,
     _STATUS_POLL_INTERVAL_S,
     _TASK_CHECKPOINT_DIR,
+    IsValidSampleFn,
     ProduceBatchResult,
     ProduceBatchStatus,
     _TaskRunner,
@@ -50,6 +51,7 @@ class DisaggTaskSpecConfig(BaseModel):
     weight: float = Field(default=1.0, ge=0.0)
     agent_loop_config: AgentLoopConfig
     judger_config: JudgerConfig | ComposedJudgerConfig | None = None
+    filter_func: IsValidSampleFn | None = None
     produce_strategy_config: DisaggProduceStrategyConfig = DisaggAsyncProduceStrategyConfig()
     sampler_config: SamplerConfig
 
@@ -96,6 +98,7 @@ class DisaggAgentLoopManagerConfig(BaseModel):
                     agent_loop=agent_loop,
                     produce_strategy=produce_strategy,
                     sampler=sampler,
+                    is_valid_sample_fn=task_cfg.filter_func,
                     weight=task_cfg.weight,
                     order=order,
                 )

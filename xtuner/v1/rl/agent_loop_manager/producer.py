@@ -13,12 +13,10 @@ from xtuner.v1.utils import get_logger
 from .produce_utils import (
     PERIODIC_ABORT_INTERVAL_S,
     BaseProduceContext,
-    IsValidSampleFn,
     ShouldContinueFn,
     _ProgressDisplayer,
     _put_claimed_tasks,
     calculate_stale_threshold,
-    default_is_valid_sample_fn,
     default_should_continue_fn,
     pause_pending_tasks,
 )
@@ -127,16 +125,12 @@ class ProduceStrategyConfig(ABC, BaseModel):
     when it should stop producing samples for the current training step.
 
     Args:
-        is_valid_sample_fn (IsValidSampleFn): Function used to decide whether a
-            generated rollout group is trainable. Defaults to
-            ``default_is_valid_sample_fn``.
         should_continue_fn (ShouldContinueFn): Function used to decide whether
             production should continue after a group is processed. Defaults to
             ``default_should_continue_fn``.
     """
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
-    is_valid_sample_fn: IsValidSampleFn = default_is_valid_sample_fn
     should_continue_fn: ShouldContinueFn = default_should_continue_fn
 
     @abstractmethod
@@ -156,9 +150,6 @@ class SyncProduceStrategyConfig(ProduceStrategyConfig):
     in a colocated or tightly synchronized workflow.
 
     Args:
-        is_valid_sample_fn (IsValidSampleFn): Function used to decide whether a
-            generated rollout group is trainable. Defaults to
-            ``default_is_valid_sample_fn``.
         should_continue_fn (ShouldContinueFn): Function used to decide whether
             production should continue after a group is processed. Defaults to
             ``default_should_continue_fn``.
@@ -176,10 +167,7 @@ class SyncProduceStrategyConfig(ProduceStrategyConfig):
         sync_weights_interval: int = 1,
         rollout_controller: "Optional[RolloutControllerProxy]" = None,
     ) -> "SyncProduceStrategy":
-        return SyncProduceStrategy(
-            is_valid_sample_fn=self.is_valid_sample_fn,
-            should_continue_fn=self.should_continue_fn,
-        )
+        return SyncProduceStrategy(should_continue_fn=self.should_continue_fn)
 
 
 class AsyncProduceStrategyConfig(ProduceStrategyConfig):
@@ -191,9 +179,6 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
     discard samples that are too stale relative to the current training step.
 
     Args:
-        is_valid_sample_fn (IsValidSampleFn): Function used to decide whether a
-            generated rollout group is trainable. Defaults to
-            ``default_is_valid_sample_fn``.
         should_continue_fn (ShouldContinueFn): Function used to decide whether
             production should continue after a group is processed. Defaults to
             ``default_should_continue_fn``.
@@ -261,7 +246,6 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
             max_token_staleness=self.max_token_staleness,
             sync_weights_interval=sync_weights_interval,
             tail_batch_trigger_size=self.tail_batch_trigger_size,
-            is_valid_sample_fn=self.is_valid_sample_fn,
             should_continue_fn=self.should_continue_fn,
         )
 
@@ -269,10 +253,8 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
 class ProduceStrategy(ABC):
     def __init__(
         self,
-        is_valid_sample_fn: IsValidSampleFn,
         should_continue_fn: ShouldContinueFn,
     ):
-        self.is_valid_sample_fn = is_valid_sample_fn
         self.should_continue_fn = should_continue_fn
 
     @abstractmethod
@@ -292,7 +274,7 @@ class SyncProduceStrategy(ProduceStrategy):
 
         for _ in range(ctx.task_batch_size):
             rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
-            task = create_task(ctx.generate_group(rollout_state))
+            task = create_task(ctx.collect_rollout_group(rollout_state))
             pending_tasks.add(task)
 
         logger.info(f"[SyncProduceStrategy] Started {len(pending_tasks)} initial tasks.")
@@ -310,7 +292,7 @@ class SyncProduceStrategy(ProduceStrategy):
             done_tasks, pending_tasks = await asyncio.wait(
                 pending_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED
             )
-            # put_generated_group 负责过滤和入库。
+            # AgentLoop 已完成过滤；put_generated_group 只处理状态、数据入库和释放。
             for task in done_tasks:
                 items = task.result()
 
@@ -325,7 +307,7 @@ class SyncProduceStrategy(ProduceStrategy):
                 completed_sample_count, ctx.task_batch_size
             ):
                 rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
-                task = create_task(ctx.generate_group(rollout_state))
+                task = create_task(ctx.collect_rollout_group(rollout_state))
                 pending_tasks.add(task)
         progress_displayer.close()
 
@@ -341,10 +323,9 @@ class AsyncProduceStrategy(ProduceStrategy):
         max_staleness: int,
         max_token_staleness: int | None,
         sync_weights_interval: int,
-        is_valid_sample_fn: IsValidSampleFn,
         should_continue_fn: ShouldContinueFn,
     ):
-        super().__init__(is_valid_sample_fn, should_continue_fn)
+        super().__init__(should_continue_fn)
 
         # TODO: 需要添加 tail_batch_max_tries
         # 作用是：如果一个样本多次重试，则将它置为特殊状态 MAX_TRIES，这类样本和过期样本一起触发tail batch逻辑
@@ -413,7 +394,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         async def spawn_one() -> asyncio.Task:
             rollout_state = await ctx.sample_group(from_expired_pool=sample_expired)
             return create_task(
-                ctx.generate_group(
+                ctx.collect_rollout_group(
                     rollout_state,
                     enable_partial_rollout=self.enable_partial_rollout,
                 )

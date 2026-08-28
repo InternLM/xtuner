@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any, TypeAlias, cast, overload
 
 import ray
@@ -9,7 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.constants import AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
@@ -201,6 +202,21 @@ class AgentLoop(ABC):
                 group_samples = await self.run_judger(group_samples)
         return group_samples
 
+    async def collect_rollout_group(
+        self,
+        rollout_state: list[RolloutState],
+        *,
+        is_valid_sample_fn: Callable[[list[RolloutState]], bool] | None = None,
+        **kwargs,
+    ) -> list[RolloutState]:
+        group = await self.generate_group(rollout_state, **kwargs)
+        if get_group_status(group) != Status.COMPLETED:
+            return group
+        if is_valid_sample_fn is not None and not is_valid_sample_fn(group):
+            for state in group:
+                state.status = Status.FILTERED
+        return group
+
     @overload
     async def run_judger(self, rollout_state: RolloutState) -> RolloutState: ...
 
@@ -287,6 +303,13 @@ class RouterAgentLoop:
         finally:
             await self._release_worker(worker)
 
+    async def collect_rollout_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
+        worker = await self._pick_worker()
+        try:
+            return await worker.collect_rollout_group.remote(rollout_state, **kwargs)
+        finally:
+            await self._release_worker(worker)
+
     def get_worker_status(self) -> dict[str, int]:
         return {str(worker): load for worker, load in self._worker_loads.items()}
 
@@ -328,6 +351,10 @@ class AgentLoopActor:
     @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         return await self.agent_loop.generate_group(rollout_state, **kwargs)
+
+    @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
+    async def collect_rollout_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
+        return await self.agent_loop.collect_rollout_group(rollout_state, **kwargs)
 
     @ray_method
     async def get_rollout_ctl(self):

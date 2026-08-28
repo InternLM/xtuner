@@ -157,13 +157,13 @@ produce_strategy_config = AsyncProduceStrategyConfig(
     enable_partial_rollout=True,
     max_staleness=0,
     tail_batch_trigger_size=256,
-    is_valid_sample_fn=group_samples_filter_func
 )
 agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="train_task",
         agent_loop_config=agent_loop_config,
         judger_config=judger_config,
+        filter_func=group_samples_filter_func,
         produce_strategy_config=produce_strategy_config,
         sampler_config=sampler_config,
     ),
