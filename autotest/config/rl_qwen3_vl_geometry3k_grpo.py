@@ -67,7 +67,7 @@ rollout_config = RolloutConfig(
     dtype="bfloat16",
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
-    gpu_memory_utilization=0.8,
+    gpu_memory_utilization=0.5,
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=(enable_return_routed_experts == "1"),
     extra_rollout_config=dict(

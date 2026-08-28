@@ -2,8 +2,8 @@ import json
 import os
 
 import ray
-from transformers import AutoTokenizer
 
+from transformers import AutoTokenizer
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
@@ -84,7 +84,7 @@ rollout_config = RolloutConfig(
     skip_load_weights=True,
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
-    gpu_memory_utilization=0.6,
+    gpu_memory_utilization=0.5,
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=True,
     rollout_max_batch_size_per_instance=128,
@@ -116,7 +116,7 @@ evaluation_sample_params = SampleParams(
 )
 
 # 3. datasets
-with open(meta_data_path, "r", encoding="utf-8") as f:
+with open(meta_data_path, encoding="utf-8") as f:
     ds_collections = json.load(f)
 
 train_dataset_cfg = []
@@ -145,7 +145,7 @@ for name, data in ds_collections.items():
         )
 
 if enable_evaluate:
-    with open(eval_meta_data_path, "r", encoding="utf-8") as f:
+    with open(eval_meta_data_path, encoding="utf-8") as f:
         eval_ds_collections = json.load(f)
 
     eval_dataset_cfg = []
