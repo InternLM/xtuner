@@ -16,12 +16,12 @@ from xtuner.v1.rl.agent_loop_manager import (
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger import ComposedJudgerConfig, GEO3KJudgerConfig, GSM8KJudgerConfig
-from xtuner.v1.rl.loss import GRPOLossConfig
-from xtuner.v1.rl.on_policy_distillation import (
-    OPDConfig,
-    OPDTeacherConfig,
-    OPDTeacherLaunchConfig,
+from xtuner.v1.rl.distillation import (
+    DistillationConfig,
+    RolloutTeacherConfig,
+    RolloutTeacherLaunchConfig,
 )
+from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import WorkerConfig
@@ -135,7 +135,7 @@ if hasattr(model_cfg, "balancing_loss_cfg"):
 if hasattr(model_cfg, "z_loss_cfg"):
     model_cfg.z_loss_cfg = None
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False, weight_decay=0.1, betas=(0.9, 0.98))
-loss_cfg = GRPOLossConfig(
+loss_cfg = DistillationLossConfig(
     policy_loss_cfg={
         "cliprange_high": 0.2,
         "cliprange_low": 0.2,
@@ -150,6 +150,10 @@ loss_cfg = GRPOLossConfig(
     kl_loss_type="low_var_kl",
     mode="chunk",
     chunk_size=512,
+    loss_mode="k1",
+    use_policy_gradient=True,
+    task_adv_weight=0.0,
+    distillation_loss_weight=1.0,
 )
 train_worker_cfg = WorkerConfig(
     model_cfg=model_cfg,
@@ -331,16 +335,14 @@ if enable_evaluate:
 # Every training record's data_source must have an entry in
 # data_source_teacher_map. Teacher model paths are read from
 # GSM8K_TEACHER_MODEL_PATH and GEO3K_TEACHER_MODEL_PATH.
-opd_config = OPDConfig(
-    mode="pg-opd",
-    task_adv_weight=0.0,
-    opd_adv_weight=1.0,
+distillation_config = DistillationConfig(
+    loss_config=loss_cfg,
     teachers=[
-        OPDTeacherConfig(
+        RolloutTeacherConfig(
             name="gsm8k_teacher",
             num_replicas=teacher_num_replicas,
             enable_prefix_caching=enable_prefix_caching,
-            launch_config=OPDTeacherLaunchConfig(
+            launch_config=RolloutTeacherLaunchConfig(
                 model_path=gsm8k_teacher_model_path,
                 num_workers=teacher_replica_num_workers,
                 server_port=13141,
@@ -351,11 +353,11 @@ opd_config = OPDConfig(
                 gpu_memory_utilization=0.8,
             ),
         ),
-        OPDTeacherConfig(
+        RolloutTeacherConfig(
             name="geo3k_teacher",
             num_replicas=teacher_num_replicas,
             enable_prefix_caching=enable_prefix_caching,
-            launch_config=OPDTeacherLaunchConfig(
+            launch_config=RolloutTeacherLaunchConfig(
                 model_path=geo3k_teacher_model_path,
                 num_workers=teacher_replica_num_workers,
                 server_port=13142,
@@ -385,7 +387,7 @@ trainer = RLColocateTrainerConfig(
     load_from=model_path,
     train_batch_size=train_batch_size,
     advantage_estimator_config=GRPOAdvantageConfig(eps=1e-8),
-    opd_config=opd_config,
+    distillation_config=distillation_config,
     enable_evaluate=enable_evaluate,
     enable_initial_evaluate=enable_evaluate,
     evaluate_step=evaluate_step,

@@ -1,579 +1,334 @@
-import math
-import os
-import signal
-import subprocess
-import time
+import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import torch
 
 from recipe.on_policy_distillation.build_teacher_server_commands import (
-    build_teacher_server_command,
+    build_teacher_launch_server_commands,
 )
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.loss import GRPOLossConfig
-from xtuner.v1.rl.on_policy_distillation import (
-    OPDConfig,
-    OPDTeacherConfig,
-    OPDTeacherLaunchConfig,
-    TeacherLogprobClient,
-    apply_opd_kl_to_advantages,
+from xtuner.v1.data_proto.sequence_context import SequenceContext
+from xtuner.v1.rl.distillation import RolloutTeacherClient, RolloutTeacherConfig
+from xtuner.v1.rl.loss import DistillationLossConfig
+from xtuner.v1.rl.trainer.controller import TrainingController
+
+
+class TestDistillationRecipeConfig(unittest.TestCase):
+    def test_teacher_launcher_reads_distillation_config(self) -> None:
+        config_source = """
+from xtuner.v1.rl.distillation import (
+    DistillationConfig,
+    RolloutTeacherConfig,
+    RolloutTeacherLaunchConfig,
 )
-from xtuner.v1.rl.utils import find_free_ports
+from xtuner.v1.rl.loss import DistillationLossConfig
 
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-BASELINE_PATH = os.getenv("XTUNER_OPD_BASELINE")
-TEACHER_MODEL_PATH = os.getenv("XTUNER_OPD_TEACHER_MODEL")
-STUDENT_MODEL_PATH = os.getenv("XTUNER_OPD_STUDENT_MODEL")
-TEACHER_STARTUP_TIMEOUT_S = float(os.getenv("XTUNER_OPD_TEACHER_STARTUP_TIMEOUT_S", "1200"))
-TRAINER_CONFIG_PATH = (
-    REPO_ROOT / "recipe/on_policy_distillation/config/rl_dapo_math_opd.py"
-)
-
-
-def _wait_for_teacher(process: subprocess.Popen, endpoint: str, backend: str) -> None:
-    deadline = time.monotonic() + TEACHER_STARTUP_TIMEOUT_S
-    health_path = "health_generate" if backend == "sglang" else "health"
-    with httpx.Client(timeout=1.0, trust_env=False) as client:
-        while time.monotonic() < deadline:
-            return_code = process.poll()
-            if return_code is not None:
-                raise RuntimeError(f"Teacher process exited during startup with code {return_code}")
-            try:
-                if client.get(f"{endpoint}/{health_path}").status_code == 200:
-                    return
-            except httpx.RequestError:
-                pass
-            time.sleep(1.0)
-    raise TimeoutError(f"Teacher did not become ready within {TEACHER_STARTUP_TIMEOUT_S} seconds")
-
-
-def _build_debug_rollout_batch(samples: list[dict]) -> list[list[RolloutState]]:
-    train_batch = []
-    for sample in samples:
-        sample_index = int(sample["sample_index"])
-        group_index = sample.get("group_index")
-        prompt_ids = torch.as_tensor(sample["prompt_token_ids"], dtype=torch.long).tolist()
-        response_ids = torch.as_tensor(sample["response_token_ids"], dtype=torch.long).tolist()
-        rollout_logprobs = torch.as_tensor(sample["rollout_log_probs"], dtype=torch.float32).tolist()
-        teacher_logprobs = torch.as_tensor(sample["teacher_log_probs"], dtype=torch.float32).tolist()
-        response_mask = torch.as_tensor(sample["loss_mask"], dtype=torch.bool).int().tolist()
-        response = str(sample["response"])
-
-        train_batch.append(
-            [
-                RolloutState(
-                    rollout_id=sample_index,
-                    group_id=sample_index if group_index is None else int(group_index),
-                    message=[],
-                    prompt_ids=prompt_ids,
-                    tokens=prompt_ids,
-                    response=response,
-                    response_ids=response_ids,
-                    logprobs=rollout_logprobs,
-                    teacher_tokens=response_ids,
-                    teacher_logprobs=teacher_logprobs,
-                    response_mask=response_mask,
-                    reward={"score": 0.0},
-                    finish_reason="stop",
-                    status=Status.COMPLETED,
-                    extra_fields={"origin_data_source": "baseline"},
-                )
-            ]
-        )
-    return train_batch
-
-
-@unittest.skipUnless(BASELINE_PATH, "XTUNER_OPD_BASELINE is required")
-class TestPGOPDAdvantage(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        super().setUpClass()
-        baseline = torch.load(BASELINE_PATH, map_location="cpu", weights_only=False)
-        cls.samples = baseline["samples"]
-
-    def test_compute_advantages_matches_baseline(self) -> None:
-        config = OPDConfig(
-            teachers=[OPDTeacherConfig(name="teacher", endpoint="http://unused")],
-            data_source_teacher_map={"baseline": "teacher"},
-        )
-        loss_cfg = GRPOLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
-
-        for sample in self.samples:
-            with self.subTest(sample_index=sample["sample_index"]):
-                old_logprobs = torch.as_tensor(sample["old_log_probs"], dtype=torch.float32)
-                teacher_logprobs = torch.as_tensor(sample["teacher_log_probs"], dtype=torch.float32)
-                loss_mask = torch.as_tensor(sample["loss_mask"], dtype=torch.float32)
-                shifted_labels = torch.where(
-                    loss_mask.bool(),
-                    torch.zeros_like(loss_mask, dtype=torch.long),
-                    torch.full_like(loss_mask, -100, dtype=torch.long),
-                )
-                loss_ctx = loss_cfg.build(
-                    {
-                        "shifted_labels": shifted_labels,
-                        "advantages": torch.zeros_like(old_logprobs),
-                        "old_logprobs": old_logprobs,
-                        "teacher_logprobs": teacher_logprobs,
-                    }
-                )
-                assert loss_ctx is not None
-                apply_opd_kl_to_advantages(loss_ctx, config=config)
-                actual_advantages = loss_ctx.loss_kwargs.advantages.cpu()
-                expected_advantages = torch.as_tensor(sample["advantages"], dtype=torch.float32) * loss_mask
-                try:
-                    torch.testing.assert_close(
-                        actual_advantages,
-                        expected_advantages,
-                        rtol=1e-5,
-                        atol=1e-5,
-                    )
-                except AssertionError as error:
-                    mismatch_indices = torch.nonzero(
-                        ~torch.isclose(actual_advantages, expected_advantages, rtol=1e-5, atol=1e-5)
-                    ).flatten()
-                    mismatch_values = "\n".join(
-                        (
-                            f"index={index}: "
-                            f"actual={actual_advantages[index].item()!r}, "
-                            f"expected={expected_advantages[index].item()!r}, "
-                            f"abs_diff={abs(actual_advantages[index] - expected_advantages[index]).item()!r}"
-                        )
-                        for index in mismatch_indices.tolist()
-                    )
-                    raise AssertionError(f"{error}\n\nMismatched advantages:\n{mismatch_values}") from None
-
-
-def _load_trainer_samples(capture_dir: Path) -> dict[int, dict]:
-    trainer_samples = {}
-    for capture_file in sorted(capture_dir.glob("rank_*.pt")):
-        for batch in torch.load(capture_file, map_location="cpu", weights_only=True):
-            shifted_labels = torch.as_tensor(batch["shifted_labels"], dtype=torch.long).reshape(-1)
-            old_log_probs = torch.as_tensor(batch["old_log_probs"], dtype=torch.float32).reshape(-1)
-            advantages = torch.as_tensor(batch["advantages"], dtype=torch.float32).reshape(-1)
-            boundaries = torch.as_tensor(batch["cu_seq_lens_q"], dtype=torch.long).tolist()
-            num_padding = int(batch["num_padding"])
-            padding_start = shifted_labels.numel() - num_padding
-
-            assert boundaries[len(batch["rollout_ids"])] == padding_start
-            torch.testing.assert_close(
-                shifted_labels[padding_start:],
-                torch.full_like(shifted_labels[padding_start:], -100),
-                rtol=0,
-                atol=0,
-            )
-
-            for rollout_id, start, end in zip(batch["rollout_ids"], boundaries[:-1], boundaries[1:]):
-                response_mask = shifted_labels[start:end] != -100
-                trainer_samples[int(rollout_id)] = {
-                    "response_token_ids": shifted_labels[start:end][response_mask],
-                    "old_log_probs": old_log_probs[start:end][response_mask],
-                    "advantages": advantages[start:end][response_mask],
-                }
-
-    return trainer_samples
-
-
-def _run_trainer_once(
-    baseline_samples: list[dict],
-    *,
-    baseline_path: Path,
-    student_model_path: Path,
-    debug_rollout_dir: Path,
-    capture_dir: Path,
-    run_dir: Path,
-) -> dict[int, dict]:
-    import ray
-
-    from xtuner.v1.rl.trainer.controller import TrainingController
-    from xtuner.v1.rl.trainer.worker import TrainingWorker, WorkerConfig
-    from xtuner.v1.train.rl_trainer import RLColocateTrainer
-    from xtuner.v1.utils import Config
-
-    max_prompt_length = max(len(sample["prompt_token_ids"]) for sample in baseline_samples)
-    max_response_length = max(len(sample["response_token_ids"]) for sample in baseline_samples)
-    max_input_length = max(len(sample["token_ids"]) - 1 for sample in baseline_samples)
-    pack_max_length = math.ceil(max_input_length / 512) * 512
-    num_workers = 8
-
-    class CapturingRLColocateTrainer(RLColocateTrainer):
-        def _prepare_train_data(
-            self,
-            data_groups,
-            pack_max_length,
-            raw_rewards_sum=0.0,
-            raw_rewards_count=0,
-        ):
-            data_batches, data_info = super()._prepare_train_data(
-                data_groups,
-                pack_max_length,
-                raw_rewards_sum=raw_rewards_sum,
-                raw_rewards_count=raw_rewards_count,
-            )
-            rollout_states = (state for group in data_groups for state in group)
-            for data_batch, rollout_state in zip(data_batches, rollout_states):
-                data_batch["rollout_id"] = rollout_state.rollout_id
-            return data_batches, data_info
-
-    class CapturingTrainingController(TrainingController):
-        def _packing(self, data_batches, pack_max_length, language_cfg):
-            pack_infos = self._get_pack_infos(
-                data_batches,
-                [data["seq_ctx"].input_ids.numel() for data in data_batches],
-                pack_max_length,
-            )
-            packed_data_batches = super()._packing(data_batches, pack_max_length, language_cfg)
-            for packed_data, pack_info in zip(packed_data_batches, pack_infos):
-                packed_data["rollout_ids"] = [data_batches[index]["rollout_id"] for index in pack_info["indices"]]
-            return packed_data_batches
-
-    class CapturingTrainingWorker(TrainingWorker):
-        trainer_capture_dir = capture_dir
-
-        def fit(self, data_batches, rollout_idx):
-            from unittest.mock import patch as mock_patch
-
-            from xtuner.v1.rl.trainer import worker as worker_module
-
-            captured_batches = [
-                {
-                    "rollout_ids": data.get("rollout_ids", []),
-                    "cu_seq_lens_q": data["seq_ctx"].cu_seq_lens_q.detach().cpu(),
-                    "num_padding": data["seq_ctx"].num_padding,
-                    "shifted_labels": data["shifted_labels"].detach().cpu().reshape(-1),
-                }
-                for data in data_batches
-            ]
-            captured_batch_index = 0
-            apply_opd = worker_module.apply_opd_kl_to_advantages
-
-            def capture_opd_result(loss_ctx, *, config):
-                nonlocal captured_batch_index
-                reverse_kl_sum = apply_opd(loss_ctx, config=config)
-                captured_batches[captured_batch_index]["old_log_probs"] = (
-                    loss_ctx.loss_kwargs.old_logprobs.detach().cpu().reshape(-1)
-                )
-                captured_batches[captured_batch_index]["advantages"] = (
-                    loss_ctx.loss_kwargs.advantages.detach().cpu().reshape(-1)
-                )
-                captured_batch_index += 1
-                return reverse_kl_sum
-
-            with mock_patch.object(worker_module, "apply_opd_kl_to_advantages", capture_opd_result):
-                worker_log_item = TrainingWorker.fit(self, data_batches, rollout_idx)
-
-            torch.save(captured_batches, self.trainer_capture_dir / f"rank_{self.rank}.pt")
-            return worker_log_item
-
-    def build_capturing_training_workers(self, placement_group):
-        from xtuner.v1.rl.utils import AutoAcceleratorWorkers
-
-        capturing_worker_cls = ray.remote(
-            runtime_env={
-                "env_vars": {
-                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                    "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                    "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
-                }
-            }
-        )(CapturingTrainingWorker)
-        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(
-            capturing_worker_cls,
-            self,
-            placement_group,
-        )
-        ray.wait([worker.ready.remote() for worker in train_workers])
-        return CapturingTrainingController(workers=train_workers)
-
-    trainer_environment = {
-        "WORK_DIR": str(run_dir / "trainer"),
-        "MODEL_PATH": str(student_model_path),
-        "TEACHER_MODEL_PATH": os.getenv("XTUNER_OPD_TEACHER_MODEL", str(student_model_path)),
-        "DATA_PATH": os.getenv("XTUNER_OPD_DATA_PATH", str(baseline_path)),
-        "WORLD_SIZE": "1",
-        "ONLY_CALC_MISMATCH_RATIO": "1",
-        "XTUNER_DETERMINISTIC": "true",
-        "XTUNER_USE_FA3": os.getenv("XTUNER_OPD_USE_FA3", "1"),
-        "TOKENIZERS_PARALLELISM": "false",
-        "PYTHONUNBUFFERED": "1",
-    }
-
-    with patch.dict(os.environ, trainer_environment, clear=False):
-        try:
-            ray.init(
-                num_cpus=12 * num_workers + 10,
-                num_gpus=num_workers,
-                include_dashboard=False,
-                _temp_dir="/dev/shm/xtuner-opd-old-logprobs",
-            )
-            cfg = Config.fromfile(TRAINER_CONFIG_PATH)
-            cfg.trainer.resources.num_workers = num_workers
-            cfg.trainer.total_train_steps = 1
-            cfg.trainer.train_batch_size = len(baseline_samples)
-            cfg.trainer.train_worker_cfg.optimizer_steps = 1
-            cfg.trainer.train_worker_cfg.pack_max_length = pack_max_length
-            cfg.trainer.debug_train = True
-            cfg.trainer.debug_rollout_dir = debug_rollout_dir
-            with (
-                patch("xtuner.v1.train.rl_trainer.XTUNER_DETERMINISTIC", True),
-                patch(
-                    "xtuner.v1.train.rl_trainer.RLColocateTrainer",
-                    CapturingRLColocateTrainer,
-                ),
-                patch.object(WorkerConfig, "build", build_capturing_training_workers),
-            ):
-                trainer = cfg.trainer.build()
-                trainer.fit()
-        finally:
-            if ray.is_initialized():
-                ray.shutdown()
-
-    return _load_trainer_samples(capture_dir)
-
-
-@unittest.skipUnless(
-    BASELINE_PATH and STUDENT_MODEL_PATH,
-    "XTUNER_OPD_BASELINE and XTUNER_OPD_STUDENT_MODEL are required",
-)
-class TestPGOPDOldLogprobs(unittest.TestCase):
-    def test_trainer_old_logprobs_and_advantage_error_propagation(self) -> None:
-        baseline_path = Path(str(BASELINE_PATH)).expanduser().resolve()
-        student_model_path = Path(str(STUDENT_MODEL_PATH)).expanduser().resolve()
-        baseline = torch.load(baseline_path, map_location="cpu", weights_only=True)
-        baseline_samples = baseline["samples"]
-
-        work_root = Path(
-            os.getenv(
-                "XTUNER_OPD_OLD_LOGPROB_WORK_DIR",
-                str(REPO_ROOT / "work_dirs/test_pg_opd_old_logprobs"),
-            )
-        ).expanduser()
-        run_dir = work_root / f"run_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
-        debug_rollout_dir = run_dir / "debug_rollout"
-        capture_dir = run_dir / "trainer_capture"
-        debug_rollout_dir.mkdir(parents=True)
-        capture_dir.mkdir()
-
-        train_batch = _build_debug_rollout_batch(baseline_samples)
-        torch.save(train_batch, debug_rollout_dir / "debug_rollout_1.pt")
-        trainer_samples_by_rollout_id = _run_trainer_once(
-            baseline_samples,
-            baseline_path=baseline_path,
-            student_model_path=student_model_path,
-            debug_rollout_dir=debug_rollout_dir,
-            capture_dir=capture_dir,
-            run_dir=run_dir,
-        )
-
-        result_path = run_dir / "result.pt"
-        result_samples = []
-
-        for baseline_sample in baseline_samples:
-            rollout_id = int(baseline_sample["sample_index"])
-            trainer_sample = trainer_samples_by_rollout_id[rollout_id]
-            loss_mask = torch.as_tensor(baseline_sample["loss_mask"], dtype=torch.bool)
-            response_token_ids = torch.as_tensor(baseline_sample["response_token_ids"], dtype=torch.long)[loss_mask]
-            torch.testing.assert_close(
-                trainer_sample["response_token_ids"],
-                response_token_ids,
-                rtol=0,
-                atol=0,
-            )
-            baseline_old_log_probs = torch.as_tensor(
-                baseline_sample["old_log_probs"],
-                dtype=torch.float32,
-            )[loss_mask]
-            trainer_old_log_probs = trainer_sample["old_log_probs"]
-            baseline_advantages = torch.as_tensor(
-                baseline_sample["advantages"],
-                dtype=torch.float32,
-            )[loss_mask]
-            trainer_advantages = trainer_sample["advantages"]
-
-            old_logprob_error = trainer_old_log_probs - baseline_old_log_probs
-            advantage_error = trainer_advantages - baseline_advantages
-            propagation_residual = advantage_error + old_logprob_error
-            sample_num_tokens = old_logprob_error.numel()
-            sample_summary = {
-                "num_tokens": sample_num_tokens,
-                "old_logprobs_mean_abs_error": old_logprob_error.abs().mean().item(),
-                "old_logprobs_max_abs_error": old_logprob_error.abs().max().item(),
-                "advantages_mean_abs_error": advantage_error.abs().mean().item(),
-                "advantages_max_abs_error": advantage_error.abs().max().item(),
-                "propagation_mean_abs_error": propagation_residual.abs().mean().item(),
-                "propagation_max_abs_error": propagation_residual.abs().max().item(),
-            }
-            result_samples.append(
-                {
-                    "sample_index": rollout_id,
-                    "response_token_ids": response_token_ids,
-                    "baseline_old_log_probs": baseline_old_log_probs,
-                    "trainer_old_log_probs": trainer_old_log_probs,
-                    "old_logprob_error": old_logprob_error,
-                    "baseline_advantages": baseline_advantages,
-                    "trainer_advantages": trainer_advantages,
-                    "advantage_error": advantage_error,
-                    "propagation_residual": propagation_residual,
-                    "summary": sample_summary,
-                }
-            )
-
-            with self.subTest(sample_index=rollout_id):
-                torch.testing.assert_close(
-                    advantage_error,
-                    -old_logprob_error,
-                    rtol=1e-5,
-                    atol=1e-5,
-                    msg=f"Result: {result_path}",
-                )
-
-        global_result = {
-            "response_token_ids": torch.cat([sample["response_token_ids"] for sample in result_samples]),
-            "baseline_old_log_probs": torch.cat([sample["baseline_old_log_probs"] for sample in result_samples]),
-            "trainer_old_log_probs": torch.cat([sample["trainer_old_log_probs"] for sample in result_samples]),
-            "old_logprob_error": torch.cat([sample["old_logprob_error"] for sample in result_samples]),
-            "baseline_advantages": torch.cat([sample["baseline_advantages"] for sample in result_samples]),
-            "trainer_advantages": torch.cat([sample["trainer_advantages"] for sample in result_samples]),
-            "advantage_error": torch.cat([sample["advantage_error"] for sample in result_samples]),
-            "propagation_residual": torch.cat([sample["propagation_residual"] for sample in result_samples]),
-        }
-        summary = {
-            "num_samples": len(result_samples),
-            "num_tokens": global_result["old_logprob_error"].numel(),
-            "old_logprobs_mean_abs_error": global_result["old_logprob_error"].abs().mean().item(),
-            "old_logprobs_max_abs_error": global_result["old_logprob_error"].abs().max().item(),
-            "advantages_mean_abs_error": global_result["advantage_error"].abs().mean().item(),
-            "advantages_max_abs_error": global_result["advantage_error"].abs().max().item(),
-            "propagation_mean_abs_error": global_result["propagation_residual"].abs().mean().item(),
-            "propagation_max_abs_error": global_result["propagation_residual"].abs().max().item(),
-        }
-        torch.save(
-            {
-                "summary": summary,
-                "global": global_result,
-                "samples": result_samples,
-            },
-            result_path,
-        )
-
-        with self.subTest(scope="global"):
-            torch.testing.assert_close(
-                global_result["advantage_error"],
-                -global_result["old_logprob_error"],
-                rtol=1e-5,
-                atol=1e-5,
-                msg=f"Result: {result_path}",
-            )
-
-        print(
-            f"old_logprobs: mean_abs={summary['old_logprobs_mean_abs_error']}, "
-            f"max_abs={summary['old_logprobs_max_abs_error']}\n"
-            f"advantages: mean_abs={summary['advantages_mean_abs_error']}, "
-            f"max_abs={summary['advantages_max_abs_error']}\n"
-            f"propagation: mean_abs={summary['propagation_mean_abs_error']}, "
-            f"max_abs={summary['propagation_max_abs_error']}\n"
-            f"result: {result_path}"
-        )
-
-
-@unittest.skipUnless(
-    BASELINE_PATH and TEACHER_MODEL_PATH,
-    "XTUNER_OPD_BASELINE and XTUNER_OPD_TEACHER_MODEL are required",
-)
-class TestTeacherLogprobClient(unittest.IsolatedAsyncioTestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        super().setUpClass()
-        baseline = torch.load(BASELINE_PATH, map_location="cpu", weights_only=False)
-        cls.samples = baseline["samples"]
-        port = find_free_ports()[0]
-        cls.teacher_endpoint = f"http://127.0.0.1:{port}"
-        cls.teacher_backend = TeacherLogprobClient._resolve_backend_from_env()
-        teacher_env = os.environ.copy()
-        teacher_command = build_teacher_server_command(
-            OPDTeacherConfig(
-                name="teacher",
-                endpoint=cls.teacher_endpoint,
-                launch_config=OPDTeacherLaunchConfig(
-                    model_path=str(TEACHER_MODEL_PATH),
-                    cuda_visible_devices=teacher_env.get("CUDA_VISIBLE_DEVICES")
-                    or "7",
-                ),
+loss_cfg = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+distillation_config = DistillationConfig(
+    loss_config=loss_cfg,
+    teachers=[
+        RolloutTeacherConfig(
+            name="teacher",
+            launch_config=RolloutTeacherLaunchConfig(
+                model_path="/models/teacher",
+                num_workers=1,
+                server_port=13141,
             ),
-            cls.teacher_backend,
         )
-        if not teacher_command:
-            raise ValueError("Teacher must define launch_config for local startup")
-        cls.teacher_process = subprocess.Popen(
-            teacher_command,
-            cwd=REPO_ROOT,
-            env=teacher_env,
-            start_new_session=True,
+    ],
+    data_source_teacher_map={"math": "teacher"},
+)
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "distillation_config.py"
+            config_path.write_text(config_source)
+            with patch.dict(
+                "os.environ",
+                {
+                    "NODE_COUNT": "1",
+                    "NODE_RANK": "0",
+                    "PROC_PER_NODE": "2",
+                    "WORKER_ALL_SOCKET_ADDRS": "127.0.0.1",
+                },
+            ):
+                endpoint_map, student_num_workers, student_local_num_workers, records = (
+                    build_teacher_launch_server_commands(str(config_path), "lmdeploy")
+                )
+
+        self.assertEqual(endpoint_map, {"teacher": ["http://127.0.0.1:13141"]})
+        self.assertEqual(student_num_workers, 1)
+        self.assertEqual(student_local_num_workers, 1)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0][:4], ["teacher[0]", "0", "1", "http://127.0.0.1:13141"])
+        self.assertIn("lmdeploy", records[0][7:])
+
+
+class TestRolloutTeacherClient(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _response(payload: dict) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", "http://teacher/generate"),
+            json=payload,
         )
-        cls.addClassCleanup(cls._stop_teacher)
-        _wait_for_teacher(cls.teacher_process, cls.teacher_endpoint, cls.teacher_backend)
 
-    @classmethod
-    def _stop_teacher(cls) -> None:
-        if cls.teacher_process.poll() is not None:
-            return
-        os.killpg(cls.teacher_process.pid, signal.SIGTERM)
-        try:
-            cls.teacher_process.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            os.killpg(cls.teacher_process.pid, signal.SIGKILL)
-            cls.teacher_process.wait()
-
-    @unittest.skipUnless(os.getenv("XTUNER_USE_SGLANG", "0") == "1", "XTUNER_USE_SGLANG=1 is required")
-    async def test_compute_logprobs_with_sglang_matches_baseline(self) -> None:
-        self.assertEqual(self.teacher_backend, "sglang")
-        await self._assert_compute_logprobs_matches_baseline()
-
-    @unittest.skipUnless(os.getenv("XTUNER_USE_LMDEPLOY", "0") == "1", "XTUNER_USE_LMDEPLOY=1 is required")
-    async def test_compute_logprobs_with_lmdeploy_matches_baseline(self) -> None:
-        self.assertEqual(self.teacher_backend, "lmdeploy")
-        await self._assert_compute_logprobs_matches_baseline()
-
-    async def _assert_compute_logprobs_matches_baseline(self) -> None:
-        client = TeacherLogprobClient(OPDTeacherConfig(name="teacher", endpoint=self.teacher_endpoint))
+    def _build_topk_client(self, *, max_retry_per_sample: int = 0) -> RolloutTeacherClient:
+        loss_config = DistillationLossConfig(
+            policy_loss_cfg={"loss_type": "vanilla"},
+            loss_mode="forward_kl_topk",
+            use_policy_gradient=False,
+            top_k=2,
+        )
+        with patch.dict(
+            "os.environ",
+            {"XTUNER_USE_LMDEPLOY": "1", "XTUNER_USE_SGLANG": "0", "XTUNER_USE_VLLM": "0"},
+        ):
+            client = RolloutTeacherClient(
+                RolloutTeacherConfig(
+                    name="teacher",
+                    endpoints=["http://teacher"],
+                    max_retry_per_sample=max_retry_per_sample,
+                ),
+                loss_config,
+            )
         self.addAsyncCleanup(client._client.aclose)
+        return client
 
-        for sample in self.samples:
-            with self.subTest(sample_index=sample["sample_index"]):
-                prompt_ids = torch.as_tensor(sample["prompt_token_ids"], dtype=torch.long).tolist()
-                response_ids = torch.as_tensor(sample["response_token_ids"], dtype=torch.long).tolist()
-                expected_logprobs = torch.as_tensor(sample["teacher_log_probs"], dtype=torch.float32)
-                state = RolloutState(
-                    rollout_id=int(sample["sample_index"]),
-                    group_id=int(sample["group_index"]),
-                    message=[],
-                    prompt_ids=prompt_ids,
-                    tokens=prompt_ids,
-                    response="",
-                    response_ids=response_ids,
-                    status=Status.COMPLETED,
-                )
+    @staticmethod
+    def _state() -> RolloutState:
+        return RolloutState(
+            group_id=1,
+            message=[],
+            prompt_ids=[10, 11, 12],
+            response_ids=[13, 14],
+            status=Status.COMPLETED,
+            extra_fields={"origin_data_source": "math"},
+        )
 
-                result = await client.compute_logprobs(state)
+    async def test_compute_sampled_token_logprobs_uses_current_interface(self) -> None:
+        response = httpx.Response(
+            200,
+            request=httpx.Request("POST", "http://teacher/generate"),
+            json={
+                "meta_info": {
+                    "prompt_tokens": 5,
+                    "input_token_logprobs": [
+                        [-0.1, 11],
+                        [-0.2, 12],
+                        [-0.3, 13],
+                        [-0.4, 14],
+                    ],
+                }
+            },
+        )
+        loss_config = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+        with patch.dict(
+            "os.environ",
+            {"XTUNER_USE_LMDEPLOY": "1", "XTUNER_USE_SGLANG": "0", "XTUNER_USE_VLLM": "0"},
+        ):
+            client = RolloutTeacherClient(
+                RolloutTeacherConfig(name="teacher", endpoints=["http://teacher"]),
+                loss_config,
+            )
+        self.addAsyncCleanup(client._client.aclose)
+        client._client.post = AsyncMock(return_value=response)
+        state = RolloutState(
+            group_id=1,
+            message=[],
+            prompt_ids=[10, 11, 12],
+            response_ids=[13, 14],
+            status=Status.COMPLETED,
+            extra_fields={"origin_data_source": "math"},
+        )
 
-                self.assertEqual(result.status, Status.COMPLETED, result.error_msg)
-                self.assertEqual(result.teacher_tokens, response_ids)
-                actual_logprobs = torch.tensor(result.teacher_logprobs, dtype=torch.float32)
-                self.assertEqual(actual_logprobs.shape, expected_logprobs.shape)
-                absolute_errors = torch.abs(actual_logprobs - expected_logprobs)
-                mae = absolute_errors.mean().item()
-                self.assertLessEqual(
-                    mae,
-                    0.05,
-                    (
-                        f"Teacher logprob MAE {mae:.8f} exceeds threshold 0.05; "
-                        f"max_abs_error={absolute_errors.max().item():.8f}"
-                    ),
-                )
+        result = await client.compute_logprobs(state)
+
+        self.assertEqual(result.status, Status.COMPLETED)
+        self.assertEqual(result.teacher_tokens, [13, 14])
+        self.assertEqual(result.teacher_logprobs, [-0.3, -0.4])
+        self.assertIn("teacher_score_time_s", result.extra_fields)
+
+    async def test_malformed_sampled_response_becomes_failed_state(self) -> None:
+        response = self._response(
+            {
+                "meta_info": {
+                    "input_token_logprobs": [
+                        [-0.1, 11],
+                        [-0.2, 12],
+                        [-0.3, 13],
+                        [-0.4, 14],
+                    ]
+                }
+            }
+        )
+        loss_config = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+        with patch.dict(
+            "os.environ",
+            {"XTUNER_USE_LMDEPLOY": "1", "XTUNER_USE_SGLANG": "0", "XTUNER_USE_VLLM": "0"},
+        ):
+            client = RolloutTeacherClient(
+                RolloutTeacherConfig(
+                    name="teacher",
+                    endpoints=["http://teacher"],
+                    max_retry_per_sample=0,
+                ),
+                loss_config,
+            )
+        self.addAsyncCleanup(client._client.aclose)
+        client._client.post = AsyncMock(return_value=response)
+
+        result = await client.compute_logprobs(self._state())
+
+        self.assertEqual(result.status, Status.FAILED)
+        self.assertIn("prompt_tokens", result.error_msg or "")
+
+    async def test_sampled_response_rejects_non_numeric_logprob(self) -> None:
+        response = self._response(
+            {
+                "meta_info": {
+                    "prompt_tokens": 5,
+                    "input_token_logprobs": [
+                        [-0.1, 11],
+                        [-0.2, 12],
+                        [True, 13],
+                        [-0.4, 14],
+                    ],
+                }
+            }
+        )
+        loss_config = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+        with patch.dict(
+            "os.environ",
+            {"XTUNER_USE_LMDEPLOY": "1", "XTUNER_USE_SGLANG": "0", "XTUNER_USE_VLLM": "0"},
+        ):
+            client = RolloutTeacherClient(
+                RolloutTeacherConfig(
+                    name="teacher",
+                    endpoints=["http://teacher"],
+                    max_retry_per_sample=0,
+                ),
+                loss_config,
+            )
+        self.addAsyncCleanup(client._client.aclose)
+        client._client.post = AsyncMock(return_value=response)
+
+        result = await client.compute_logprobs(self._state())
+
+        self.assertEqual(result.status, Status.FAILED)
+        self.assertIn("non-numeric logprob", result.error_msg or "")
+
+    async def test_malformed_topk_responses_become_failed_states(self) -> None:
+        valid_rows = [
+            [[-0.1, 1], [-0.2, 2]],
+            [[-0.3, 3], [-0.4, 4]],
+            [[-0.5, 5], [-0.6, 6]],
+            [[-0.7, 7], [-0.8, 8]],
+        ]
+        malformed_payloads = {
+            "missing_meta_info": {},
+            "missing_topk_field": {"meta_info": {"prompt_tokens": 5}},
+            "wrong_topk_type": {"meta_info": {"prompt_tokens": 5, "input_top_logprobs": "invalid"}},
+            "wrong_row_count": {"meta_info": {"prompt_tokens": 5, "input_top_logprobs": valid_rows[:-1]}},
+            "ragged_k": {"meta_info": {"prompt_tokens": 5, "input_top_logprobs": [*valid_rows[:-1], [[-0.7, 7]]]}},
+            "invalid_token_id": {
+                "meta_info": {
+                    "prompt_tokens": 5,
+                    "input_top_logprobs": [*valid_rows[:-1], [[-0.7, "7"], [-0.8, 8]]],
+                }
+            },
+        }
+
+        for case_name, payload in malformed_payloads.items():
+            with self.subTest(case=case_name):
+                client = self._build_topk_client()
+                client._client.post = AsyncMock(return_value=self._response(payload))
+
+                result = await client.compute_logprobs(self._state())
+
+                self.assertEqual(result.status, Status.FAILED)
+                self.assertIsNone(result.teacher_tokens)
+                self.assertIsNone(result.teacher_logprobs)
+                self.assertIn("last_error=", result.error_msg or "")
+                client._client.post.assert_awaited_once()
+
+        client = self._build_topk_client()
+        non_finite_response = httpx.Response(
+            200,
+            request=httpx.Request("POST", "http://teacher/generate"),
+            headers={"content-type": "application/json"},
+            content=(
+                b'{"meta_info":{"prompt_tokens":5,"input_top_logprobs":'
+                b"[[[-0.1,1],[-0.2,2]],[[-0.3,3],[-0.4,4]],"
+                b"[[0.5,5],[-0.6,6]],[[NaN,7],[-0.8,8]]]}}"
+            ),
+        )
+        client._client.post = AsyncMock(return_value=non_finite_response)
+
+        result = await client.compute_logprobs(self._state())
+
+        self.assertEqual(result.status, Status.FAILED)
+        self.assertIn("NaN or Inf", result.error_msg or "")
+
+    async def test_invalid_topk_response_is_retried_before_success(self) -> None:
+        invalid_response = self._response({"meta_info": {"prompt_tokens": 5}})
+        valid_response = self._response(
+            {
+                "meta_info": {
+                    "prompt_tokens": 5,
+                    "input_top_logprobs": [
+                        [[-0.1, 1], [-0.2, 2]],
+                        [[-0.3, 3], [-0.4, 4]],
+                        [[-0.5, 5], [-0.6, 6]],
+                        [[-0.7, 7], [-0.8, 8]],
+                    ],
+                }
+            }
+        )
+        client = self._build_topk_client(max_retry_per_sample=1)
+        client._client.post = AsyncMock(side_effect=[invalid_response, valid_response])
+
+        with patch("xtuner.v1.rl.distillation.rollout_teacher_client.asyncio.sleep", new=AsyncMock()):
+            result = await client.compute_logprobs(self._state())
+
+        self.assertEqual(result.status, Status.COMPLETED)
+        self.assertEqual(result.teacher_tokens, [[5, 6], [7, 8]])
+        self.assertEqual(result.teacher_logprobs, [[-0.5, -0.6], [-0.7, -0.8]])
+        self.assertEqual(client._client.post.await_count, 2)
+        request_payload = client._client.post.await_args.kwargs["json"]
+        self.assertEqual(request_payload["input_ids"], [10, 11, 12, 13, 14])
+        self.assertEqual(request_payload["top_logprobs_num"], 2)
+
+
+class TestTopKTrainingController(unittest.TestCase):
+    def test_packs_targets_along_sequence_dimension(self) -> None:
+        controller = TrainingController(workers=[])
+        first = {
+            "seq_ctx": SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu"),
+            "shifted_labels": torch.tensor([[-100, 2]]),
+            "advantage": [0.0, 0.0],
+            "rollout_logprobs": torch.zeros(1, 2),
+            "teacher_logprobs": torch.tensor([[[-0.1, -0.2], [-0.3, -0.4]]]),
+            "target_token_ids": torch.tensor([[[1, 2], [3, 4]]]),
+        }
+        second = {
+            "seq_ctx": SequenceContext.from_input_ids((torch.tensor([[3]]),), device="cpu"),
+            "shifted_labels": torch.tensor([[3]]),
+            "advantage": [0.0],
+            "rollout_logprobs": torch.zeros(1, 1),
+            "teacher_logprobs": torch.tensor([[[-0.5, -0.6]]]),
+            "target_token_ids": torch.tensor([[[5, 6]]]),
+        }
+
+        packed = controller._packing([first, second], pack_max_length=4, language_cfg=None)
+
+        self.assertEqual(len(packed), 1)
+        self.assertEqual(packed[0]["teacher_logprobs"].shape, (1, 4, 2))
+        self.assertEqual(packed[0]["target_token_ids"].shape, (1, 4, 2))
+        torch.testing.assert_close(packed[0]["teacher_logprobs"][0, 3], torch.zeros(2))
+        torch.testing.assert_close(packed[0]["target_token_ids"][0, 3], torch.zeros(2, dtype=torch.long))
 
 
 if __name__ == "__main__":

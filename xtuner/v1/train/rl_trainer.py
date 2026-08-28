@@ -4,6 +4,7 @@ import os
 import random
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from shutil import rmtree
@@ -35,6 +36,7 @@ from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continu
 from xtuner.v1.rl.distillation import DistillationConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.health_manager import RLHealthManager, _NoOpRLHealthManager
+from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.rl.replay_buffer import (
     AsyncReplayBufferConfig,
     SyncReplayBufferConfig,
@@ -81,6 +83,66 @@ def _to_cpu_tensor(value: np.ndarray | None, *, dtype: torch.dtype | None = None
         return None
     assert isinstance(value, np.ndarray), f"Expected np.ndarray, got {type(value)}"
     return torch.as_tensor(value, dtype=dtype, device="cpu")
+
+
+def _align_rollout_teacher_targets(
+    state: RolloutState,
+    loss_config: DistillationLossConfig,
+    *,
+    shifted_labels: Sequence[int],
+    target_start: int,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Left-pad rollout Teacher targets to align with one training sequence."""
+
+    sequence_length = len(shifted_labels)
+    context = f"rollout_id={state.rollout_id}, group_id={state.group_id}"
+    if target_start < 0 or target_start > sequence_length:
+        raise ValueError(
+            f"Teacher target_start must be within the shifted sequence: {target_start} vs {sequence_length}; {context}"
+        )
+    if any(label != loss_config.ignore_idx for label in shifted_labels[:target_start]):
+        raise ValueError(f"Teacher target prefix must contain only ignored labels; {context}")
+
+    expected_target_rows = sequence_length - target_start
+    raw_teacher_logprobs = state.teacher_logprobs
+    if raw_teacher_logprobs is None or len(raw_teacher_logprobs) != expected_target_rows:
+        actual_rows = None if raw_teacher_logprobs is None else len(raw_teacher_logprobs)
+        raise ValueError(
+            "Teacher logprobs must align with the target suffix: "
+            f"expected {expected_target_rows} rows, got {actual_rows}; {context}"
+        )
+
+    if loss_config.uses_sampled_token_targets:
+        sampled_logprobs = cast(list[float], raw_teacher_logprobs)
+        teacher_logprobs = torch.tensor(
+            [0.0] * target_start + sampled_logprobs,
+            dtype=torch.float32,
+        ).unsqueeze(0)
+        return teacher_logprobs, None
+
+    top_k = cast(int, loss_config.top_k)
+    raw_teacher_tokens = state.teacher_tokens
+    if raw_teacher_tokens is None or len(raw_teacher_tokens) != expected_target_rows:
+        actual_rows = None if raw_teacher_tokens is None else len(raw_teacher_tokens)
+        raise ValueError(
+            "Teacher token ids must align with the target suffix: "
+            f"expected {expected_target_rows} rows, got {actual_rows}; {context}"
+        )
+
+    topk_tokens = cast(list[list[int]], raw_teacher_tokens)
+    topk_logprobs = cast(list[list[float]], raw_teacher_logprobs)
+
+    prompt_target_tokens = [[0] * top_k for _ in range(target_start)]
+    prompt_teacher_logprobs = [[0.0] * top_k for _ in range(target_start)]
+    teacher_logprobs = torch.tensor(
+        prompt_teacher_logprobs + topk_logprobs,
+        dtype=torch.float32,
+    ).unsqueeze(0)
+    target_token_ids = torch.tensor(
+        prompt_target_tokens + topk_tokens,
+        dtype=torch.int64,
+    ).unsqueeze(0)
+    return teacher_logprobs, target_token_ids
 
 
 def _agent_loop_manager_requires_rollout_proxy(
@@ -1268,30 +1330,22 @@ class BaseRLTrainer:
                     input_ids = raw_input_ids[:-1]
                     shifted_labels = labels[1:]
                     teacher_logprobs = None
+                    target_token_ids = None
                     if (
                         self._distillation_config is not None
                         and self._distillation_loss_cfg is not None
                         and self._distillation_config.rollout_teachers
                     ):
-                        raw_teacher_logprobs = group[i].teacher_logprobs
-                        if raw_teacher_logprobs is None:
-                            raise ValueError(
-                                f"Teacher logprobs cannot be None when distillation is enabled: {group[i]}"
-                            )
                         teacher_response_start = next(
                             (index for index, label in enumerate(shifted_labels) if label != -100),
                             len(shifted_labels),
                         )
-                        teacher_response_length = len(shifted_labels) - teacher_response_start
-                        if len(raw_teacher_logprobs) != teacher_response_length:
-                            raise ValueError(
-                                "Teacher logprobs must align with the trainable suffix of shifted agent labels: "
-                                f"{len(raw_teacher_logprobs)} vs {teacher_response_length}, data: {group[i]}"
-                            )
-                        teacher_logprobs = torch.tensor(
-                            [0.0] * teacher_response_start + raw_teacher_logprobs,
-                            dtype=torch.float32,
-                        ).unsqueeze(0)
+                        teacher_logprobs, target_token_ids = _align_rollout_teacher_targets(
+                            group[i],
+                            self._distillation_loss_cfg,
+                            shifted_labels=shifted_labels,
+                            target_start=teacher_response_start,
+                        )
                     prompt_len = sum(label == -100 for label in shifted_labels)
                     response_len = len(shifted_labels) - prompt_len
                     prompt_len_list.append(prompt_len)
@@ -1324,6 +1378,8 @@ class BaseRLTrainer:
                     }
                     if teacher_logprobs is not None:
                         data_dict["teacher_logprobs"] = teacher_logprobs
+                    if target_token_ids is not None:
+                        data_dict["target_token_ids"] = target_token_ids
                     if teacher_index is not None:
                         data_dict["teacher_indices"] = torch.full_like(
                             shifted_labels_t,
@@ -1411,28 +1467,15 @@ class BaseRLTrainer:
                     and self._distillation_loss_cfg is not None
                     and self._distillation_config.rollout_teachers
                 ):
-                    if self._distillation_loss_cfg.uses_topk_targets:
-                        top_k = cast(int, self._distillation_loss_cfg.top_k)
-                        response_teacher_tokens = cast(list[list[int]], group[i].teacher_tokens)
-                        response_topk_logprobs = cast(list[list[float]], group[i].teacher_logprobs)
-                        assert len(response_teacher_tokens) == len(response_ids)
-                        assert len(response_topk_logprobs) == len(response_ids)
-                        prompt_target_tokens = [[0] * top_k for _ in range(len(prompt_ids) - 1)]
-                        prompt_teacher_logprobs = [[0.0] * top_k for _ in range(len(prompt_ids) - 1)]
-                        data_dict["target_token_ids"] = torch.tensor(
-                            prompt_target_tokens + response_teacher_tokens,
-                            dtype=torch.int64,
-                        ).unsqueeze(0)
-                        data_dict["teacher_logprobs"] = torch.tensor(
-                            prompt_teacher_logprobs + response_topk_logprobs,
-                            dtype=torch.float32,
-                        ).unsqueeze(0)
-                    else:
-                        response_sampled_logprobs = cast(list[float], group[i].teacher_logprobs)
-                        data_dict["teacher_logprobs"] = torch.tensor(
-                            [0.0] * (len(prompt_ids) - 1) + response_sampled_logprobs,
-                            dtype=torch.float32,
-                        ).unsqueeze(0)
+                    teacher_logprobs, target_token_ids = _align_rollout_teacher_targets(
+                        group[i],
+                        self._distillation_loss_cfg,
+                        shifted_labels=shifted_labels,
+                        target_start=len(prompt_ids) - 1,
+                    )
+                    data_dict["teacher_logprobs"] = teacher_logprobs
+                    if target_token_ids is not None:
+                        data_dict["target_token_ids"] = target_token_ids
                 if teacher_index is not None:
                     data_dict["teacher_indices"] = torch.full_like(
                         shifted_labels_t,
