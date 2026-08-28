@@ -51,11 +51,10 @@ class TrainingController:
     def __init__(self, workers: list[TrainingWorker]) -> None:
         self.workers = workers
         refs = [
-            self.workers[0].get_model_cfg.remote(),
             self.workers[0].get_worker_cfg.remote(),
             self.workers[0].get_data_replicate_size.remote(),
         ]
-        self.model_cfg, self.worker_cfg, self.data_replicate_size = ray.get(refs)
+        self.worker_cfg, self.data_replicate_size = ray.get(refs)
         self.worker_dp_ranks = ray.get([worker.get_dp_rank.remote() for worker in self.workers])
         self.pack_max_length = self.worker_cfg.pack_max_length
         self.pack_strategy = self.worker_cfg.pack_strategy
@@ -65,8 +64,6 @@ class TrainingController:
             data_replicate_size=self.data_replicate_size,
             optimizer_steps=self.worker_cfg.optimizer_steps,
             pack_strategy=self.pack_strategy,
-            model_cfg=self.model_cfg,
-            worker_log_dir=self.worker_cfg.log_dir,
         )
         log_dir = self.worker_cfg.log_dir
         self.log_dir = Path(log_dir) if log_dir is not None else None
@@ -87,18 +84,20 @@ class TrainingController:
             )
 
         start_time = time.perf_counter()
-        packed_data_batches, padding_tokens_num = self.data_packer.pack(data_batches)
+        data_lengths = [data["seq_ctx"].input_ids.numel() for data in data_batches]  # type: ignore[union-attr]
+        packed_data_indices, padding_tokens_num = self.data_packer.pack(data_lengths)
         pack_end_time = time.perf_counter()
 
         handles = []
-        data_batch_refs: dict[int, ray.ObjectRef] = {}
+        data_batches_ref = ray.put(data_batches)
         for worker_idx, worker in enumerate(self.workers):
             dp_rank = self.worker_dp_ranks[worker_idx]
-            if dp_rank not in data_batch_refs:
-                data_batch_refs[dp_rank] = ray.put(packed_data_batches[dp_rank])
             handles.append(
                 worker.fit.remote(  # type: ignore[attr-defined]
-                    data_batches=data_batch_refs[dp_rank],
+                    # Keep the ObjectRef nested so Ray does not automatically
+                    # dereference it before entering TrainingWorker.fit.
+                    data_batch_refs=[data_batches_ref],
+                    data_batch_indices=packed_data_indices[dp_rank],
                     rollout_idx=rollout_idx,
                 )
             )
@@ -108,16 +107,14 @@ class TrainingController:
             train_end_time = time.perf_counter()
         finally:
             free_pixel_value_refs: list[ray.ObjectRef] = []
-            for dp_batches in packed_data_batches:
-                for step_batches in dp_batches:
-                    for data in step_batches:
-                        pixel_values = data["seq_ctx"].pixel_values
-                        if isinstance(pixel_values, list):
-                            free_pixel_value_refs.extend(pixel_values)
+            for data in data_batches:
+                pixel_values = data["seq_ctx"].pixel_values
+                if isinstance(pixel_values, list):
+                    free_pixel_value_refs.extend(pixel_values)
             if free_pixel_value_refs:
                 free_object_refs(free_pixel_value_refs)
-            del data_batch_refs
-            del packed_data_batches
+            del data_batches_ref
+            del packed_data_indices
 
         return {
             "worker_log_infos": worker_log_infos,

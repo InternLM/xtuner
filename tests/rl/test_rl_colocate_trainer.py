@@ -167,16 +167,19 @@ class TestRLColocateTrainer(unittest.TestCase):
             offload=MagicMock(return_value="train_offloaded"),
             weight_update=MagicMock(return_value="weights_updated"),
             fit=MagicMock(
-                return_value=[
-                    {
+                return_value={
+                    "worker_log_infos": [{
                         "rollout_is_metrics": {},
                         "mismatch_metrics": {},
                         "rollout_entropy": 0.0,
                         "train_entropy": 0.0,
                         "train_metrics": [],
                         "sft_train_metrics": {},
-                    }
-                ]
+                    }],
+                    "padding_tokens": 0,
+                    "pack_time": 0.0,
+                    "train_time": 0.0,
+                }
             ),
         )
         return trainer

@@ -62,6 +62,7 @@ from xtuner.v1.utils.fsdp import release_deferred_fsdp_all_gathers
 from xtuner.v1.utils.nccl_process_group import resume_nccl_process_groups, suspend_nccl_process_groups
 
 from ..rollout_is import merge_rollout_is_metrics
+from .pack import DPRankPackIndices
 
 
 DEVICE = get_device()
@@ -585,11 +586,139 @@ class TrainingWorker(SingleAcceleratorWorker):
                 stack.enter_context(profiling_memory(memory_dir))
             yield
 
+    def _materialize_packs(
+        self,
+        data_batches: list[WorkerInputItem],
+        data_batch_indices: DPRankPackIndices,
+    ) -> list[list[WorkerInputItem]]:
+        """Select samples by index and materialize this DP rank's packs."""
+        self._set_pack_data_properties(data_batches)
+        return [
+            [self._single_pack([data_batches[index] for index in pack_indices]) for pack_indices in step_indices]
+            for step_indices in data_batch_indices
+        ]
+
+    def _set_pack_data_properties(self, data_batches: list[WorkerInputItem]) -> None:
+        self._pack_is_qwen3_vl = False
+        self._pack_has_rollout_routed_experts = False
+        self._pack_has_rollout_logprobs = False
+        self._pack_n_routed_experts: int | None = None
+        if not data_batches:
+            return
+
+        first_item = data_batches[0]
+        seq_ctx = first_item["seq_ctx"]
+        self._pack_is_qwen3_vl = seq_ctx.position_ids is not None and len(seq_ctx.position_ids.shape) == 3
+        self._pack_has_rollout_logprobs = first_item["rollout_logprobs"] is not None
+        self._pack_has_rollout_routed_experts = seq_ctx.rollout_routed_experts is not None
+
+        if self._pack_has_rollout_routed_experts:
+            language_cfg = self.config.model_cfg
+            if isinstance(language_cfg, BaseComposeConfig):
+                language_cfg = language_cfg.text_config
+            self._pack_n_routed_experts = language_cfg.n_routed_experts
+
+    def _single_pack(self, data_batches: list[WorkerInputItem]) -> WorkerInputItem:
+        pack_max_length = self.config.pack_max_length
+        seq_ctx_list = [item["seq_ctx"] for item in data_batches]
+        label_list = [item["shifted_labels"] for item in data_batches]
+        advantage_list = [item["advantages"].reshape(1, -1) for item in data_batches]
+        rollout_logprobs_list = [
+            item["rollout_logprobs"] if self._pack_has_rollout_logprobs else None for item in data_batches
+        ]
+
+        current_length = sum(item["seq_ctx"].input_ids.numel() for item in data_batches)  # type: ignore[union-attr]
+        padding_len = pack_max_length - current_length
+        padding_item: WorkerInputItem | None = None
+        if padding_len > 0:
+            padding_item = self._create_padding_item(padding_len)
+            seq_ctx_list.append(padding_item["seq_ctx"])
+            label_list.append(padding_item["shifted_labels"])
+            advantage_list.append(padding_item["advantages"])
+            rollout_logprobs_list.append(padding_item["rollout_logprobs"])
+
+        packed_seq_ctx = SequenceContext.cat(seq_ctx_list)
+        packed_shifted_labels = cast(torch.LongTensor, torch.cat(label_list, dim=1))
+        packed_advantages = torch.cat(advantage_list, dim=1)
+        if self._pack_has_rollout_logprobs:
+            packed_rollout_logprobs = torch.cat(
+                [cast(torch.Tensor, item) for item in rollout_logprobs_list],
+                dim=1,
+            )
+        else:
+            packed_rollout_logprobs = None
+
+        packed_input_ids = cast(torch.Tensor, packed_seq_ctx.input_ids)
+        padding_shape = padding_item["seq_ctx"].input_ids.shape if padding_item else 0  # type: ignore[union-attr]
+        assert packed_input_ids.numel() == pack_max_length, (
+            f"Packed seq ctx length {packed_input_ids.numel()} does not match pack_max_length {pack_max_length}; "
+            f"padding input_ids length: {padding_shape}"
+        )
+        assert packed_seq_ctx.num_padding == (packed_advantages == -100).sum().item(), (
+            f"Packed seq ctx num_padding {packed_seq_ctx.num_padding} and packed advantages padding count "
+            f"{(packed_advantages == -100).sum().item()} mismatch after packing."
+        )
+        return {
+            "seq_ctx": packed_seq_ctx,
+            "shifted_labels": packed_shifted_labels,
+            "advantages": packed_advantages,
+            "rollout_logprobs": packed_rollout_logprobs,
+        }
+
+    def _create_padding_item(self, pad_len: int) -> WorkerInputItem:
+        split_size = 1024
+        pad_tokens = tuple(
+            torch.zeros(1, split_size, dtype=torch.long, device="cpu") for _ in range(pad_len // split_size)
+        )
+        if pad_len % split_size > 0:
+            pad_tokens += (torch.zeros(1, pad_len % split_size, dtype=torch.long, device="cpu"),)
+        pad_tokens = cast(tuple[torch.LongTensor, ...], pad_tokens)
+        pad_seq_ctx = SequenceContext.from_input_ids(pad_tokens, device="cpu")
+        pad_seq_ctx.num_padding = pad_len
+
+        if self._pack_is_qwen3_vl:
+            position_ids_list = [
+                torch.arange(pad_token.size(-1)).view(1, 1, -1).expand(3, 1, -1) for pad_token in pad_tokens
+            ]
+            pad_seq_ctx.position_ids = cast(torch.LongTensor, torch.cat(position_ids_list, dim=-1))
+
+        if self._pack_has_rollout_routed_experts:
+            assert self._pack_n_routed_experts is not None
+            if pad_len == self.config.pack_max_length:
+                pad_rand_index = torch.randint(low=0, high=1, size=(1, 1, 1))
+            else:
+                pad_rand_index = torch.randint(low=0, high=self._pack_n_routed_experts, size=(pad_len, 1, 1))
+            pad_seq_ctx.rollout_routed_experts = pad_rand_index
+
+        return {
+            "seq_ctx": pad_seq_ctx,
+            "shifted_labels": cast(
+                torch.LongTensor,
+                torch.full((1, pad_len), -100, dtype=torch.int64, device="cpu"),
+            ),
+            "advantages": torch.full((1, pad_len), -100, dtype=torch.float32, device="cpu"),
+            "rollout_logprobs": (
+                torch.zeros(1, pad_len, dtype=torch.float32, device="cpu")
+                if self._pack_has_rollout_logprobs
+                else None
+            ),
+        }
+
     @ray_method
-    def fit(self, data_batches: list[list[WorkerInputItem]], rollout_idx: int) -> WorkerLogItem:
+    def fit(
+        self,
+        data_batch_refs: list[ray.ObjectRef],
+        data_batch_indices: DPRankPackIndices,
+        rollout_idx: int,
+    ) -> WorkerLogItem:
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
         loss_cfg: BaseRLLossConfig = self.config.loss_cfg
+        raw_data_batches = cast(list[WorkerInputItem], ray.get(data_batch_refs[0]))
+        data_batches = self._materialize_packs(raw_data_batches, data_batch_indices)
+        del raw_data_batches
+        del data_batch_refs
+        del data_batch_indices
         num_optimizer_steps = len(data_batches)
         actual_optimizer_steps = min(num_optimizer_steps, self.config.optimizer_steps)
         assert num_optimizer_steps == actual_optimizer_steps, (
@@ -1029,7 +1158,8 @@ class TrainingWorker(SingleAcceleratorWorker):
     @ray_method
     def get_dp_rank(self) -> int:
         """Get the data parallel rank for this worker."""
-        return self.data_mesh["dp"].get_rank()
+        data_replicate_size = self._engine.data_replicate_size * self.sp_mesh.size()
+        return self.rank // data_replicate_size
 
     @ray_method
     def get_model_cfg(self):
