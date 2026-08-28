@@ -1439,54 +1439,20 @@ class BaseRLTrainer:
 
     def _save_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
         rewards = []
-        trajectory_items = []
+        response_len_list = []
+        valid_groups = []
 
         for group in data_groups:
             if not is_valid_for_training(group, self.logger):
                 continue
+            valid_groups.append(group)
             for data in group:
                 assert data.reward is not None
                 rewards.append(data.reward["score"])
                 response_ids = self._get_trajectory_response_ids(data)
-                response = data.response
-                if response is None and response_ids:
-                    response = self.tokenizer.decode(response_ids)
-                ground_truth = None
-                if data.reward_model is not None:
-                    ground_truth = data.reward_model.get("ground_truth")
-                response_len = len(response_ids)
-                trajectory_items.append(
-                    {
-                        "rollout_id": data.rollout_id,
-                        "group_id": data.group_id,
-                        "task_name": data.task_name,
-                        "data_source": data.data_source,
-                        "status": data.status.value if hasattr(data.status, "value") else str(data.status),
-                        "finish_reason": data.finish_reason,
-                        "error_msg": data.error_msg,
-                        "prompt": data.message,
-                        "label": ground_truth,
-                        "response": response,
-                        "reward": data.reward["score"],
-                        "prompt_len": data.num_tokens,
-                        "response_len": response_len,
-                        "reward_payload": data.reward,
-                        "agent": {
-                            "name": data.extra_fields.get("agent_name"),
-                            "selected": data.extra_fields.get("agent_selected"),
-                            "status": data.extra_fields.get("agent_status", None),
-                            "judgers": data.extra_fields.get("agent_judgers", None),
-                            "finish_info": data.extra_fields.get("agent_finish_info", None),
-                            "tool_turns": data.extra_fields.get("agent_tool_turns", None),
-                            "artifacts": data.extra_fields.get("agent_artifacts"),
-                            "messages": data.extra_fields.get("agent_messages"),
-                            "tools": data.extra_fields.get("agent_tools"),
-                        },
-                    }
-                )
+                response_len_list.append(len(response_ids))
 
         rewards_tensor = torch.tensor(rewards).float() if rewards else torch.tensor([0.0]).float()
-        response_len_list = [item["response_len"] for item in trajectory_items]
         response_lens = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
 
         with open(save_path, "w", encoding="utf-8") as f:
@@ -1503,40 +1469,32 @@ class BaseRLTrainer:
             }
             json.dump(summary, f, ensure_ascii=False, separators=(",", ":"))
             f.write("\n")
-            for item in trajectory_items:
-                json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
-                f.write("\n")
+            for group in valid_groups:
+                for data in group:
+                    assert data.reward is not None
+                    response_ids = self._get_trajectory_response_ids(data)
+                    response = data.response
+                    if response is None and response_ids:
+                        response = self.tokenizer.decode(response_ids)
+                    ground_truth = None
+                    if data.reward_model is not None:
+                        ground_truth = data.reward_model.get("ground_truth")
 
-    def _save_eval_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
-        rewards = []
-        trajectory_items = []
-
-        for group in data_groups:
-            for data in group:
-                reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
-                response = data.response or ""
-                response_ids = self._get_trajectory_response_ids(data)
-                response_len = len(response_ids)
-                rewards.append(reward)
-                ground_truth = None
-                if data.reward_model is not None:
-                    ground_truth = data.reward_model.get("ground_truth")
-                trajectory_items.append(
-                    {
+                    item = {
                         "rollout_id": data.rollout_id,
                         "group_id": data.group_id,
                         "task_name": data.task_name,
                         "data_source": data.data_source,
                         "status": data.status.value if hasattr(data.status, "value") else str(data.status),
-                        "prompt": data.message,
-                        "response": response,
-                        "prompt_len": data.num_tokens,
-                        "response_len": response_len,
-                        "label": ground_truth,
-                        "reward": reward,
-                        "reward_payload": data.reward or {"score": reward},
                         "finish_reason": data.finish_reason,
                         "error_msg": data.error_msg,
+                        "prompt": data.message,
+                        "label": ground_truth,
+                        "response": response,
+                        "reward": data.reward["score"],
+                        "prompt_len": data.num_tokens,
+                        "response_len": len(response_ids),
+                        "reward_payload": data.reward,
                         "agent": {
                             "name": data.extra_fields.get("agent_name"),
                             "selected": data.extra_fields.get("agent_selected"),
@@ -1544,15 +1502,29 @@ class BaseRLTrainer:
                             "judgers": data.extra_fields.get("agent_judgers", None),
                             "finish_info": data.extra_fields.get("agent_finish_info", None),
                             "tool_turns": data.extra_fields.get("agent_tool_turns", None),
+                            "session_id": str(data.session_id) if data.session_id is not None else None,
+                            "segment_index": data.extra_fields.get("agent_trace_segment_index"),
+                            "segment_count": data.extra_fields.get("agent_trace_segment_count"),
                             "artifacts": data.extra_fields.get("agent_artifacts"),
                             "messages": data.extra_fields.get("agent_messages"),
                             "tools": data.extra_fields.get("agent_tools"),
                         },
                     }
-                )
+                    json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
+                    f.write("\n")
+
+    def _save_eval_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
+        rewards = []
+        response_len_list = []
+
+        for group in data_groups:
+            for data in group:
+                reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
+                response_ids = self._get_trajectory_response_ids(data)
+                rewards.append(reward)
+                response_len_list.append(len(response_ids))
 
         rewards_tensor = torch.tensor(rewards).float() if rewards else torch.tensor([0.0]).float()
-        response_len_list = [item["response_len"] for item in trajectory_items]
         response_lens = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
 
         with open(save_path, "w", encoding="utf-8") as f:
@@ -1569,9 +1541,46 @@ class BaseRLTrainer:
             }
             json.dump(summary, f, ensure_ascii=False, separators=(",", ":"))
             f.write("\n")
-            for item in trajectory_items:
-                json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
-                f.write("\n")
+            for group in data_groups:
+                for data in group:
+                    reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
+                    response_ids = self._get_trajectory_response_ids(data)
+                    ground_truth = None
+                    if data.reward_model is not None:
+                        ground_truth = data.reward_model.get("ground_truth")
+
+                    item = {
+                        "rollout_id": data.rollout_id,
+                        "group_id": data.group_id,
+                        "task_name": data.task_name,
+                        "data_source": data.data_source,
+                        "status": data.status.value if hasattr(data.status, "value") else str(data.status),
+                        "prompt": data.message,
+                        "response": data.response or "",
+                        "prompt_len": data.num_tokens,
+                        "response_len": len(response_ids),
+                        "label": ground_truth,
+                        "reward": reward,
+                        "reward_payload": data.reward or {"score": reward},
+                        "finish_reason": data.finish_reason,
+                        "error_msg": data.error_msg,
+                        "agent": {
+                            "name": data.extra_fields.get("agent_name"),
+                            "selected": data.extra_fields.get("agent_selected"),
+                            "status": data.extra_fields.get("agent_status", None),
+                            "judgers": data.extra_fields.get("agent_judgers", None),
+                            "finish_info": data.extra_fields.get("agent_finish_info", None),
+                            "tool_turns": data.extra_fields.get("agent_tool_turns", None),
+                            "session_id": str(data.session_id) if data.session_id is not None else None,
+                            "segment_index": data.extra_fields.get("agent_trace_segment_index"),
+                            "segment_count": data.extra_fields.get("agent_trace_segment_count"),
+                            "artifacts": data.extra_fields.get("agent_artifacts"),
+                            "messages": data.extra_fields.get("agent_messages"),
+                            "tools": data.extra_fields.get("agent_tools"),
+                        },
+                    }
+                    json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
+                    f.write("\n")
 
     def _get_trajectory_response_ids(self, data: RolloutState) -> list[int]:
         if data.response_ids is not None:
