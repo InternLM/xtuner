@@ -103,9 +103,12 @@ class TrainingController:
         )
         packed_data_batches = []
 
-        is_qwen3_vl = False
-        if len(data_batches[0]["seq_ctx"].position_ids.shape) == 3:
-            is_qwen3_vl = True
+        is_qwen3_vl = any(data["seq_ctx"].position_ids.ndim == 3 for data in data_batches)
+        if is_qwen3_vl:
+            for data in data_batches:
+                position_ids = data["seq_ctx"].position_ids
+                if position_ids.ndim == 2:
+                    data["seq_ctx"].position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
         has_rollout_routed_experts = False
         if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:

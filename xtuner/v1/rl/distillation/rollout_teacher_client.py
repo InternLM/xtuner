@@ -84,12 +84,10 @@ class RolloutTeacherClient:
     async def compute_logprobs(self, state: RolloutState) -> RolloutState:
         start = time.perf_counter()
         try:
-            prompt_ids = cast(list[int], state.prompt_ids)
-            response_ids = cast(list[int], state.response_ids)
-            if not prompt_ids or not response_ids:
-                state.status = Status.FAILED
-                state.error_msg = f"Teacher {self.name!r} scoring requires non-empty prompt_ids and response_ids"
+            scoring_input = self._prepare_scoring_input(state)
+            if scoring_input is None:
                 return state
+            prompt_ids, response_ids = scoring_input
             routed_replica_idx = self._replica_router.resolve_replica_idx(
                 teacher_name=self.name,
                 data_source=str(state.extra_fields.get("origin_data_source", "")),
@@ -153,6 +151,38 @@ class RolloutTeacherClient:
                     await asyncio.sleep(0.1)
         finally:
             state.extra_fields["teacher_score_time_s"] = time.perf_counter() - start
+
+    def _prepare_scoring_input(self, state: RolloutState) -> tuple[list[int], list[int]] | None:
+        if state.input_ids is not None:
+            input_ids = state.input_ids
+            labels = state.labels
+            if len(input_ids) < 2:
+                state.status = Status.FAILED
+                state.error_msg = f"Teacher {self.name!r} trace scoring requires at least two input_ids"
+                return None
+            if labels is None or len(labels) != len(input_ids):
+                state.status = Status.FAILED
+                state.error_msg = (
+                    f"Teacher {self.name!r} trace scoring requires input_ids and labels with equal lengths; "
+                    f"got {len(input_ids)} and {None if labels is None else len(labels)}"
+                )
+                return None
+            scoring_start = next((index for index, label in enumerate(labels[1:], start=1) if label != -100), None)
+            if scoring_start is None:
+                state.status = Status.FAILED
+                state.error_msg = f"Teacher {self.name!r} trace scoring requires at least one trainable label"
+                return None
+            # Keep later masked turns in the scored suffix so subsequent
+            # assistant turns retain their complete causal context.
+            return input_ids[:scoring_start], input_ids[scoring_start:]
+
+        prompt_ids = cast(list[int] | None, state.prompt_ids)
+        response_ids = cast(list[int] | None, state.response_ids)
+        if not prompt_ids or not response_ids:
+            state.status = Status.FAILED
+            state.error_msg = f"Teacher {self.name!r} scoring requires non-empty prompt_ids and response_ids"
+            return None
+        return prompt_ids, response_ids
 
     @staticmethod
     def _resolve_backend_from_env() -> Literal["sglang", "lmdeploy"]:
