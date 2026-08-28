@@ -4,6 +4,7 @@
 当前测试点：
 - batch judge 只在整组样本全部 COMPLETED 时触发。
 - batch judge 返回结果必须保持输入顺序。
+- rollout group filter 在 batch judge 之后执行。
 - 组内存在 ABORTED / FAILED 等非 COMPLETED 样本时跳过 judge。
 - pause 发生在 slow judger 期间时，整组样本被标记为 ABORTED。
 """
@@ -13,7 +14,8 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
-from xtuner.v1.rl.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
+from xtuner.v1.rl.agent_loop import AgentLoopActor
+from xtuner.v1.rl.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop, SingleTurnAgentLoopConfig
 
 
 class _RemoteGenerate:
@@ -66,7 +68,7 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
             extra_fields={},
         )
 
-    def _build_loop(self, statuses_by_uid: dict[int, Status], judger=None):
+    def _build_loop(self, statuses_by_uid: dict[int, Status], judger=None, filter_func=None):
         loop = SingleTurnAgentLoop.__new__(SingleTurnAgentLoop)
         rollout_ctl = MagicMock()
         rollout_ctl.generate = _RemoteGenerate(statuses_by_uid)
@@ -75,9 +77,69 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         loop.sample_params = SampleParams(max_tokens=8, temperature=0.7)
         loop.judger = judger
         loop.enable_batch_judge = True
+        loop.filter_func = filter_func
         loop._judger_pause_event = asyncio.Event()
         loop.logger = MagicMock()
         return loop
+
+    def test_config_binds_filter_to_local_agent_loop_once(self):
+        filter_func = MagicMock()
+        local_loop = MagicMock()
+        config = SingleTurnAgentLoopConfig.model_construct(hf_checkpoint="unused", cpu_resources=None)
+
+        with patch.object(SingleTurnAgentLoopConfig, "build_local", return_value=local_loop) as build_local:
+            result = config.build(MagicMock(), filter_func=filter_func)
+
+        self.assertIs(result, local_loop)
+        self.assertIs(local_loop.filter_func, filter_func)
+        build_local.assert_called_once()
+
+    def test_config_forwards_filter_when_building_ray_actor(self):
+        filter_func = MagicMock()
+        ray_agent_loop = MagicMock()
+        cpu_resources = MagicMock()
+        cpu_resources.num_workers = 1
+        config = SingleTurnAgentLoopConfig.model_construct(
+            hf_checkpoint="unused",
+            cpu_resources=cpu_resources,
+        )
+
+        with (
+            patch("xtuner.v1.rl.agent_loop.agent_loop.register_cpu_resources"),
+            patch.object(SingleTurnAgentLoopConfig, "_build_ray_actor", return_value=ray_agent_loop) as build_actor,
+        ):
+            result = config.build(MagicMock(), filter_func=filter_func)
+
+        self.assertIs(result, ray_agent_loop)
+        self.assertIs(build_actor.call_args.kwargs["filter_func"], filter_func)
+
+    def test_actor_binds_filter_during_construction(self):
+        filter_func = MagicMock()
+        local_loop = MagicMock()
+        config = MagicMock()
+        config.build_local.return_value = local_loop
+
+        actor = AgentLoopActor(config, MagicMock(), filter_func=filter_func)
+
+        self.assertIs(actor.agent_loop.filter_func, filter_func)
+
+    async def test_collect_filters_completed_group_after_batch_judge(self):
+        filtered_rewards = []
+
+        def filter_func(samples):
+            filtered_rewards.extend(state.reward for state in samples)
+            return False
+
+        loop = self._build_loop(
+            {1: Status.COMPLETED, 2: Status.COMPLETED},
+            judger=_BatchJudger(),
+            filter_func=filter_func,
+        )
+
+        result = await loop.collect_rollout_group([self._state(1), self._state(2)])
+
+        self.assertEqual(filtered_rewards, [{"score": 1.0}, {"score": 2.0}])
+        self.assertTrue(all(state.status == Status.FILTERED for state in result))
 
     async def test_batch_judge_runs_once_when_all_samples_completed_and_preserves_order(self):
         # 整组样本全部 COMPLETED 时才触发 batch judger；返回顺序必须和输入顺序一致。

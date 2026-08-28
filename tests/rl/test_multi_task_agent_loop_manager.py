@@ -216,6 +216,43 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(manager_config.tasks.task_name, "single_task")
 
+    def test_manager_config_injects_filter_when_building_agent_loop(self):
+        filter_func = MagicMock()
+        built_agent_loop = _fake_agent_loop()
+        agent_loop_config = MagicMock()
+        agent_loop_config.build.return_value = built_agent_loop
+        produce_strategy_config = MagicMock()
+        produce_strategy_config.build.return_value = _FakeProduceStrategy()
+        sampler_config = MagicMock()
+        sampler_config.build.return_value = _FakeSampler()
+        task = TaskSpecConfig.model_construct(
+            task_name="filtered_task",
+            agent_loop_config=agent_loop_config,
+            judger_config=None,
+            filter_func=filter_func,
+            produce_strategy_config=produce_strategy_config,
+            sampler_config=sampler_config,
+            weight=1.0,
+        )
+        rollout_controller = _fake_rollout_controller()
+        tokenizer = MagicMock()
+        replay_buffer = MagicMock()
+
+        manager = AgentLoopManagerConfig(tasks=task).build(
+            rollout_controller=rollout_controller,
+            tokenizer=tokenizer,
+            replay_buffer=replay_buffer,
+        )
+
+        agent_loop_config.build.assert_called_once_with(
+            rollout_controller=rollout_controller,
+            judger=None,
+            logger=None,
+            filter_func=filter_func,
+        )
+        self.assertIs(manager.task_runners[0].agent_loop, built_agent_loop)
+        self.assertFalse(hasattr(manager.task_runners[0], "is_valid_sample_fn"))
+
     async def test_take_train_batch_applies_token_staleness_mask(self):
         # 启用 token staleness 时，公开 produce_batch 路径应返回最终 effective mask。
         state = RolloutState(

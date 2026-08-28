@@ -97,7 +97,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             target_samples={task_name: target},
         )
 
-    def _build_agent_loop(self, sleep_by_id: dict[int, float] | None = None):
+    def _build_agent_loop(self, sleep_by_id: dict[int, float] | None = None, filter_func=None):
         mock_agent_loop = MagicMock()
         mock_agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
         mock_agent_loop.rollout_ctl.pause_generation.remote = AsyncMock(return_value=None)
@@ -118,6 +118,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             return rs
 
         mock_agent_loop.generate_group = mock_gen
+        mock_agent_loop.filter_func = filter_func
         mock_agent_loop.collect_rollout_group = AgentLoop.collect_rollout_group.__get__(mock_agent_loop)
         return mock_agent_loop
 
@@ -132,7 +133,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         train_step: int = 0,
         model_step: int = 0,
         progress: ProduceProgress | None = None,
-        is_valid_sample_fn=None,
     ) -> ProduceContext:
         # 测试只走新的 ProduceContext 入口，不再覆盖旧散装参数兼容逻辑。
         if progress is None:
@@ -146,7 +146,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             train_step=train_step,
             model_step=model_step,
             progress=progress,
-            is_valid_sample_fn=is_valid_sample_fn,
             stale_threshold=getattr(strategy, "stale_threshold", None),
             token_stale_threshold=getattr(strategy, "token_stale_threshold", None),
             expired_groups_retryable=getattr(strategy, "tail_batch_trigger_size", -1) >= 0,
@@ -183,7 +182,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         model_step: int = 0,
         progress: DisaggProduceProgress | None = None,
         update_event: asyncio.Event | None = None,
-        is_valid_sample_fn=None,
     ) -> DisaggProduceContext:
         if progress is None:
             progress = self._build_disagg_progress(task_name, target=batch_size, train_step=train_step)
@@ -199,7 +197,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             update_event=update_event,
             model_step=model_step,
             progress=progress,
-            is_valid_sample_fn=is_valid_sample_fn,
             stale_threshold=getattr(strategy, "stale_threshold", None),
             token_stale_threshold=getattr(strategy, "token_stale_threshold", None),
             expired_groups_retryable=getattr(strategy, "tail_batch_trigger_size", -1) >= 0,
@@ -226,6 +223,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.assertEqual(colocate_ctx.batch_target, 1)
+        self.assertFalse(hasattr(colocate_ctx, "is_valid_sample_fn"))
         for disagg_only_name in ("update_event", "should_abort", "available_count", "total_target"):
             self.assertFalse(hasattr(colocate_ctx, disagg_only_name), disagg_only_name)
 
@@ -243,6 +241,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             update_event=update_event,
         )
         self.assertEqual(disagg_ctx.total_target, 2)
+        self.assertFalse(hasattr(disagg_ctx, "is_valid_sample_fn"))
         self.assertEqual(await disagg_ctx.available_count(), 1)
         self.assertFalse(disagg_ctx.should_abort())
         update_event.set()
@@ -348,10 +347,9 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         ctx = self._build_context(
             strategy,
             task_name,
-            self._build_agent_loop(),
+            self._build_agent_loop(filter_func=is_valid_sample_fn),
             self._build_sampler(),
             batch_size=1,
-            is_valid_sample_fn=is_valid_sample_fn,
         )
 
         completed_group = [make_rollout_state(1, status=Status.COMPLETED)]
@@ -401,10 +399,9 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
                 ctx = self._build_context(
                     strategy,
                     f"non_retryable_{status.name.lower()}",
-                    self._build_agent_loop(),
+                    self._build_agent_loop(filter_func=lambda _samples: is_valid),
                     self._build_sampler(),
                     batch_size=1,
-                    is_valid_sample_fn=lambda _samples: is_valid,
                 )
                 item = make_rollout_state(session_id, status=status, reward_score=1.0)
                 item.session_id = session_id
@@ -434,10 +431,9 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         ctx = self._build_context(
             strategy,
             task_name,
-            self._build_agent_loop(),
+            self._build_agent_loop(filter_func=is_valid_sample_fn),
             self._build_sampler(),
             batch_size=1,
-            is_valid_sample_fn=is_valid_sample_fn,
         )
 
         completed_group = [
@@ -516,7 +512,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
                     r.reward = {"score": 1.0}
             return rs
 
-        mock_agent_loop = self._build_agent_loop()
+        mock_agent_loop = self._build_agent_loop(filter_func=is_valid_sample_fn)
         mock_agent_loop.generate_group = mock_gen
         strategy = SyncProduceStrategyConfig().build()
         sampler = self._build_sampler()
@@ -529,7 +525,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             train_step=4,
             model_step=3,
             progress=self._build_progress(task_name, target=2),
-            is_valid_sample_fn=is_valid_sample_fn,
         )
 
         await strategy.produce_batch(ctx)

@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import Status
-from xtuner.v1.rl.agent_loop import AgentLoopConfig
+from xtuner.v1.rl.agent_loop import AgentLoopConfig, RolloutGroupFilter
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
@@ -18,7 +18,6 @@ from .produce_utils import (
     _MANAGER_STATE_PATH,
     _STATUS_POLL_INTERVAL_S,
     _TASK_CHECKPOINT_DIR,
-    IsValidSampleFn,
     ProduceBatchResult,
     _TaskRunner,
     _TaskSamplerView,
@@ -56,7 +55,7 @@ class TaskSpecConfig(BaseModel):
         judger_config (JudgerConfig | ComposedJudgerConfig | None): Optional
             judger configuration used to score generated samples. Defaults to
             None.
-        filter_func (IsValidSampleFn | None): Optional group filter applied by
+        filter_func (RolloutGroupFilter | None): Optional group filter applied by
             the agent loop after generation. Defaults to None.
         produce_strategy_config (ProduceStrategyConfig): Strategy used to
             produce rollout samples. Defaults to ``SyncProduceStrategyConfig``.
@@ -85,7 +84,7 @@ class TaskSpecConfig(BaseModel):
     weight: float = Field(default=1.0, ge=0.0)
     agent_loop_config: AgentLoopConfig
     judger_config: JudgerConfig | ComposedJudgerConfig | None = None
-    filter_func: IsValidSampleFn | None = None
+    filter_func: RolloutGroupFilter | None = None
     produce_strategy_config: ProduceStrategyConfig = SyncProduceStrategyConfig()
     sampler_config: SamplerConfig
 
@@ -146,6 +145,7 @@ class AgentLoopManagerConfig(BaseModel):
                 rollout_controller=rollout_controller,
                 judger=build_judger(task_cfg.judger_config) if task_cfg.judger_config is not None else None,
                 logger=logger,
+                filter_func=task_cfg.filter_func,
             )
             produce_strategy = task_cfg.produce_strategy_config.build(
                 sync_weights_interval=sync_weights_interval,
@@ -158,7 +158,6 @@ class AgentLoopManagerConfig(BaseModel):
                     agent_loop=agent_loop,
                     produce_strategy=produce_strategy,
                     sampler=sampler,
-                    is_valid_sample_fn=task_cfg.filter_func,
                     weight=task_cfg.weight,
                     order=order,
                 )
@@ -255,7 +254,6 @@ class AgentLoopManager:
                         train_step=train_step,
                         model_step=model_step,
                         progress=local_progress,
-                        is_valid_sample_fn=task.is_valid_sample_fn,
                         stale_threshold=task.stale_threshold,
                         token_stale_threshold=task.token_stale_threshold,
                         expired_groups_retryable=task.expired_groups_retryable,
@@ -281,7 +279,6 @@ class AgentLoopManager:
                     train_step=train_step,
                     model_step=model_step,
                     progress=local_progress,
-                    is_valid_sample_fn=task.is_valid_sample_fn,
                     stale_threshold=task.stale_threshold,
                     token_stale_threshold=task.token_stale_threshold,
                     expired_groups_retryable=task.expired_groups_retryable,

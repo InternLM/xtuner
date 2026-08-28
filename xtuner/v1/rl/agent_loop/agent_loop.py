@@ -30,6 +30,7 @@ from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 
 
 AGENT_LOOP_CONCURRENCY_GROUP_GENERATE = "generate"
+RolloutGroupFilter: TypeAlias = Callable[[list[RolloutState]], bool]
 
 
 class AgentLoopConfig(ABC, BaseModel):
@@ -40,13 +41,22 @@ class AgentLoopConfig(ABC, BaseModel):
     enable_batch_judge: bool = False
     requires_rollout_proxy: bool = False
 
-    def build(self, rollout_controller, judger: Judger | None = None, logger=None) -> AgentLoopSpec:
+    def build(
+        self,
+        rollout_controller,
+        judger: Judger | None = None,
+        logger=None,
+        *,
+        filter_func: RolloutGroupFilter | None = None,
+    ) -> AgentLoopSpec:
         if self.cpu_resources is None:
-            return self.build_local(
+            agent_loop = self.build_local(
                 rollout_controller=rollout_controller,
                 judger=judger,
                 logger=logger,
             )
+            agent_loop.filter_func = filter_func
+            return agent_loop
 
         concurrency = AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
 
@@ -62,6 +72,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 concurrency=concurrency,
                 judger=judger,
                 logger=logger,
+                filter_func=filter_func,
             )
         return self._build_ray_actor(
             rollout_controller=rollout_controller,
@@ -69,6 +80,7 @@ class AgentLoopConfig(ABC, BaseModel):
             concurrency=concurrency,
             judger=judger,
             logger=logger,
+            filter_func=filter_func,
         )
 
     @abstractmethod
@@ -87,6 +99,7 @@ class AgentLoopConfig(ABC, BaseModel):
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
+        filter_func: RolloutGroupFilter | None = None,
     ) -> RayAgentLoopProxy:
         ray_agent_loop = ray.remote(
             concurrency_groups={
@@ -105,6 +118,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 actor_num_cpus=cpu_resources.num_cpus_per_worker,
                 actor_memory=cpu_resources.cpu_memory_per_worker,
                 capture_child_tasks=True,
+                filter_func=filter_func,
             ),
         )
 
@@ -117,6 +131,7 @@ class AgentLoopConfig(ABC, BaseModel):
         judger: Judger | None = None,
         logger=None,
         start_bundle_idx: int = 0,
+        filter_func: RolloutGroupFilter | None = None,
     ) -> list[RayAgentLoopProxy]:
         ray_agent_loop = ray.remote(
             concurrency_groups={
@@ -136,6 +151,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 actor_num_cpus_per_worker=cpu_resources.num_cpus_per_worker,
                 actor_memory_per_worker=cpu_resources.cpu_memory_per_worker,
                 capture_child_tasks=True,
+                filter_func=filter_func,
             ),
         )
 
@@ -148,6 +164,7 @@ class AgentLoopConfig(ABC, BaseModel):
         judger: Judger | None = None,
         logger=None,
         start_bundle_idx: int = 0,
+        filter_func: RolloutGroupFilter | None = None,
     ) -> RouterAgentLoop:
         return RouterAgentLoop(
             workers=self._build_ray_actors(
@@ -158,6 +175,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 judger=judger,
                 logger=logger,
                 start_bundle_idx=start_bundle_idx,
+                filter_func=filter_func,
             ),
             rollout_ctl=rollout_controller,
         )
@@ -180,6 +198,7 @@ class AgentLoop(ABC):
         self.sample_params: SampleParams = sample_params if sample_params is not None else SampleParams()
         self.judger = judger
         self.enable_batch_judge = enable_batch_judge
+        self.filter_func: RolloutGroupFilter | None = None
         if logger is None:
             self.logger = get_logger()
         else:
@@ -205,14 +224,12 @@ class AgentLoop(ABC):
     async def collect_rollout_group(
         self,
         rollout_state: list[RolloutState],
-        *,
-        is_valid_sample_fn: Callable[[list[RolloutState]], bool] | None = None,
         **kwargs,
     ) -> list[RolloutState]:
         group = await self.generate_group(rollout_state, **kwargs)
         if get_group_status(group) != Status.COMPLETED:
             return group
-        if is_valid_sample_fn is not None and not is_valid_sample_fn(group):
+        if self.filter_func is not None and not self.filter_func(group):
             for state in group:
                 state.status = Status.FILTERED
         return group
@@ -337,12 +354,14 @@ class AgentLoopActor:
         rollout_controller: RolloutController,
         judger: Judger | None = None,
         logger=None,
+        filter_func: RolloutGroupFilter | None = None,
     ):
         self.agent_loop = agent_loop_config.build_local(
             rollout_controller=rollout_controller,
             judger=judger,
             logger=logger,
         )
+        self.agent_loop.filter_func = filter_func
 
     @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:

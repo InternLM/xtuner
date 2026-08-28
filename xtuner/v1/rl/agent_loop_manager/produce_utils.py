@@ -96,11 +96,6 @@ def calculate_stale_threshold(max_staleness: int, sync_weights_interval: int) ->
 
 
 @runtime_checkable
-class IsValidSampleFn(Protocol):
-    def __call__(self, samples: list[RolloutState]) -> bool: ...
-
-
-@runtime_checkable
 class ShouldContinueFn(Protocol):
     def __call__(self, completed_count: int, batch_size: int, **kwargs) -> bool: ...
 
@@ -117,7 +112,6 @@ class BaseProduceContext:
     train_step: int
     model_step: int
     progress: ProduceProgress | DisaggProduceProgress
-    is_valid_sample_fn: IsValidSampleFn | None = None
     stale_threshold: int | None = None
     expired_groups_retryable: bool = True
     token_stale_threshold: int | None = None
@@ -149,13 +143,11 @@ class BaseProduceContext:
         if isinstance(self.agent_loop, ray.actor.ActorHandle):
             result = await self.agent_loop.collect_rollout_group.remote(
                 rollout_state,
-                is_valid_sample_fn=self.is_valid_sample_fn,
                 enable_partial_rollout=enable_partial_rollout,
             )
         else:
             result = await self.agent_loop.collect_rollout_group(
                 rollout_state,
-                is_valid_sample_fn=self.is_valid_sample_fn,
                 enable_partial_rollout=enable_partial_rollout,
             )
         elapsed = time.perf_counter() - start
@@ -265,7 +257,6 @@ class _TaskRunner:
     agent_loop: AgentLoopSpec
     produce_strategy: Any
     sampler: Sampler
-    is_valid_sample_fn: IsValidSampleFn | None = None
     weight: float = 1.0
     order: int = 0
 

@@ -5,6 +5,7 @@ from .agent_loop import (
     AgentLoopSpec,
     RayAgentLoop,
     RayAgentLoopProxy,
+    RolloutGroupFilter,
     RouterAgentLoop,
     get_agent_loop_rollout_ctl,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "RouterAgentLoop",
     "RayAgentLoop",
     "RayAgentLoopProxy",
+    "RolloutGroupFilter",
     "SingleTurnAgentLoop",
     "get_agent_loop_rollout_ctl",
 ]
