@@ -38,7 +38,18 @@ def maybe_filter_invalid_sample(
     is_valid_sample_fn: IsValidSampleFn | None,
     logger,
 ) -> list[RolloutState]:
-    """Mark a completed rollout group as filtered when it is invalid."""
+    """Finalize rollout-group validity after all generation post-processing.
+
+    Every custom ``AgentLoop.generate_group`` implementation must return through
+    this helper after generation, judging, flattening, and failure cleanup::
+
+        # Keep sample validation as the final group-generation step.
+        return maybe_filter_invalid_sample(
+            samples,
+            self.is_valid_sample_fn,
+            self.logger,
+        )
+    """
     if get_group_status(group) != Status.COMPLETED:
         return group
     if is_valid_sample_fn is None or is_valid_sample_fn(group):
@@ -228,6 +239,13 @@ class AgentLoop(ABC):
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
+        """Generate one rollout group.
+
+        Warning:
+            Subclasses overriding this method MUST call
+            ``maybe_filter_invalid_sample`` as the final step before returning.
+            Otherwise ``TaskSpecConfig.is_valid_sample_fn`` will be silently ignored.
+        """
         pending_tasks = []
         for state in rollout_state:
             state.sample_params = self.sample_params
@@ -238,6 +256,7 @@ class AgentLoop(ABC):
         if self.judger is not None and self.enable_batch_judge:
             if all(sample.status == Status.COMPLETED for sample in group_samples):
                 group_samples = await self.run_judger(group_samples)
+        # Keep sample validation as the final group-generation step.
         return maybe_filter_invalid_sample(group_samples, self.is_valid_sample_fn, self.logger)
 
     @overload

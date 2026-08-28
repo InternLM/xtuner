@@ -244,6 +244,7 @@ class AgentInSandboxLoop(AgentLoop):
         sample_groups = await generated_samples
         samples = [sample for sample_group in sample_groups for sample in sample_group]
         samples = _drop_failed_train_samples(samples, self.mode)
+        # Keep sample validation as the final group-generation step.
         return maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
 
     # NOTE: A single sandbox session may yield multiple trainable segments, so this returns a list
