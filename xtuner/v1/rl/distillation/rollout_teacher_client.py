@@ -10,6 +10,7 @@ from typing import Any, Literal, cast
 import httpx
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.utils import get_logger
 
 from .config import RolloutTeacherConfig
@@ -64,10 +65,13 @@ class RolloutTeacherReplicaRouter:
 class RolloutTeacherClient:
     """Asynchronous teacher client scoped to one AgentLoop."""
 
-    def __init__(self, config: RolloutTeacherConfig) -> None:
+    def __init__(self, config: RolloutTeacherConfig, loss_config: DistillationLossConfig) -> None:
         self.config = config
+        self.loss_config = loss_config
         self.name = config.name
         self.backend = self._resolve_backend_from_env()
+        if self.loss_config.uses_topk_targets and self.backend != "lmdeploy":
+            raise RuntimeError("Rollout Teacher Top-K targets currently require LMDeploy")
         self.urls = [f"{endpoint.rstrip('/')}/generate" for endpoint in config.endpoints]
         self._semaphores = [asyncio.Semaphore(config.max_concurrency) for _ in self.urls]
         self._replica_router = RolloutTeacherReplicaRouter(len(self.urls))
@@ -117,12 +121,21 @@ class RolloutTeacherClient:
                     async with self._semaphores[replica_idx]:
                         response = await self._client.post(url, json=payload)
                         response.raise_for_status()
-                    teacher_tokens, teacher_logprobs = self._parse_response(
-                        response,
-                        response_ids,
-                        logprob_start_len=logprob_start_len,
-                        expanded_prompt_len=expanded_prompt_len,
-                    )
+                    teacher_tokens: list[int] | list[list[int]]
+                    teacher_logprobs: list[float] | list[list[float]]
+                    if self.loss_config.uses_topk_targets:
+                        teacher_tokens, teacher_logprobs = self._parse_topk_response(
+                            response,
+                            response_ids,
+                            expanded_prompt_len=expanded_prompt_len,
+                        )
+                    else:
+                        teacher_tokens, teacher_logprobs = self._parse_response(
+                            response,
+                            response_ids,
+                            logprob_start_len=logprob_start_len,
+                            expanded_prompt_len=expanded_prompt_len,
+                        )
                     state.teacher_tokens = teacher_tokens
                     state.teacher_logprobs = teacher_logprobs
                     return state
@@ -177,6 +190,8 @@ class RolloutTeacherClient:
             raise RuntimeError(f"Unsupported teacher backend: {self.backend}")
         if image_data:
             payload["image_data"] = image_data
+        if self.loss_config.uses_topk_targets:
+            payload["top_logprobs_num"] = cast(int, self.loss_config.top_k)
         return payload
 
     @staticmethod
@@ -237,6 +252,32 @@ class RolloutTeacherClient:
                 expanded_prompt_len=expanded_prompt_len,
             )
         return self._validate_response_logprobs(response_logprobs, response_ids)
+
+    def _parse_topk_response(
+        self,
+        response: httpx.Response,
+        response_ids: list[int],
+        *,
+        expanded_prompt_len: int | None = None,
+    ) -> tuple[list[list[int]], list[list[float]]]:
+        meta_info = response.json()["meta_info"]
+        prompt_token_count = meta_info["prompt_tokens"]
+        if expanded_prompt_len is not None:
+            expected_prompt_token_count = expanded_prompt_len + len(response_ids)
+            if prompt_token_count != expected_prompt_token_count:
+                raise ValueError(
+                    "LMDeploy expanded prompt length mismatch: "
+                    f"expected {expected_prompt_token_count} total input tokens "
+                    f"({expanded_prompt_len} prompt + {len(response_ids)} response), "
+                    f"got {prompt_token_count}"
+                )
+
+        response_topk = meta_info["input_top_logprobs"][-len(response_ids) :]
+        teacher_tokens = [[int(token_id) for _, token_id in row] for row in response_topk]
+        teacher_logprobs = [[float(logprob) for logprob, _ in row] for row in response_topk]
+        if not all(math.isfinite(logprob) for row in teacher_logprobs for logprob in row):
+            raise ValueError("Teacher Top-K logprobs contain NaN or Inf")
+        return teacher_tokens, teacher_logprobs
 
     @staticmethod
     def _parse_sglang_response(

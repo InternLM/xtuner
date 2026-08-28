@@ -24,6 +24,7 @@ class ColateItem(TypedDict):
     advantage: float
     rollout_logprobs: torch.Tensor | None
     teacher_logprobs: NotRequired[torch.Tensor | None]
+    target_token_ids: NotRequired[torch.Tensor | None]
     teacher_indices: NotRequired[torch.Tensor]
 
 
@@ -128,6 +129,10 @@ class TrainingController:
             if "teacher_logprobs" in data_batches[0] and data_batches[0]["teacher_logprobs"] is not None:
                 teacher_logprobs_list = [data_batches[i]["teacher_logprobs"] for i in indices]
 
+            target_token_ids_list = None
+            if "target_token_ids" in data_batches[0] and data_batches[0]["target_token_ids"] is not None:
+                target_token_ids_list = [data_batches[i]["target_token_ids"] for i in indices]
+
             teacher_indices_list = None
             if "teacher_indices" in data_batches[0] and data_batches[0]["teacher_indices"] is not None:
                 teacher_indices_list = [data_batches[i]["teacher_indices"] for i in indices]
@@ -174,13 +179,21 @@ class TrainingController:
                     )
                     rollout_logprobs_list.append(pad_rollout_logprobs)
                 if teacher_logprobs_list is not None:
+                    teacher_logprobs_shape = data_batches[0]["teacher_logprobs"].shape[2:]
                     pad_teacher_logprobs = torch.zeros(
-                        1,
-                        pad_len,
+                        (1, pad_len, *teacher_logprobs_shape),
                         dtype=data_batches[0]["teacher_logprobs"].dtype,
                         device=data_batches[0]["shifted_labels"].device,
                     )
                     teacher_logprobs_list.append(pad_teacher_logprobs)
+                if target_token_ids_list is not None:
+                    target_token_ids_shape = data_batches[0]["target_token_ids"].shape[2:]
+                    pad_target_token_ids = torch.zeros(
+                        (1, pad_len, *target_token_ids_shape),
+                        dtype=data_batches[0]["target_token_ids"].dtype,
+                        device=data_batches[0]["shifted_labels"].device,
+                    )
+                    target_token_ids_list.append(pad_target_token_ids)
                 if teacher_indices_list is not None:
                     pad_teacher_indices = torch.full(
                         (1, pad_len),
@@ -203,6 +216,10 @@ class TrainingController:
             if teacher_logprobs_list is not None:
                 teacher_logprobs = torch.cat(teacher_logprobs_list, dim=1)  # (1, max_len)
 
+            target_token_ids = None
+            if target_token_ids_list is not None:
+                target_token_ids = torch.cat(target_token_ids_list, dim=1)
+
             teacher_indices = None
             if teacher_indices_list is not None:
                 teacher_indices = torch.cat(teacher_indices_list, dim=1)  # (1, max_len)
@@ -214,6 +231,7 @@ class TrainingController:
                     "advantages": advantages,
                     "rollout_logprobs": rollout_logprobs,
                     "teacher_logprobs": teacher_logprobs,
+                    "target_token_ids": target_token_ids,
                     "teacher_indices": teacher_indices,
                 }
             )
@@ -299,8 +317,19 @@ class TrainingController:
                 )
             pad_teacher_logprobs = None
             if "teacher_logprobs" in packed_data_batches[0] and packed_data_batches[0]["teacher_logprobs"] is not None:
+                teacher_logprobs_shape = packed_data_batches[0]["teacher_logprobs"].shape[2:]
                 pad_teacher_logprobs = torch.zeros(
-                    1, pack_max_length, dtype=packed_data_batches[0]["teacher_logprobs"].dtype, device="cpu"
+                    (1, pack_max_length, *teacher_logprobs_shape),
+                    dtype=packed_data_batches[0]["teacher_logprobs"].dtype,
+                    device="cpu",
+                )
+            pad_target_token_ids = None
+            if "target_token_ids" in packed_data_batches[0] and packed_data_batches[0]["target_token_ids"] is not None:
+                target_token_ids_shape = packed_data_batches[0]["target_token_ids"].shape[2:]
+                pad_target_token_ids = torch.zeros(
+                    (1, pack_max_length, *target_token_ids_shape),
+                    dtype=packed_data_batches[0]["target_token_ids"].dtype,
+                    device="cpu",
                 )
             pad_teacher_indices = None
             if "teacher_indices" in packed_data_batches[0] and packed_data_batches[0]["teacher_indices"] is not None:
@@ -316,6 +345,7 @@ class TrainingController:
                 "advantages": pad_advantages,
                 "rollout_logprobs": pad_rollout_logprobs,
                 "teacher_logprobs": pad_teacher_logprobs,
+                "target_token_ids": pad_target_token_ids,
                 "teacher_indices": pad_teacher_indices,
             }
             pad_data_samples = [pad_data for _ in range(pad_num)]

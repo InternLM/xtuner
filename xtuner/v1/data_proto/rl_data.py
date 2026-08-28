@@ -109,8 +109,10 @@ class RolloutState(BaseModel):
     tool_calls: list[RolloutToolCall] | None = None
     response_ids: list[int] | None = None
     logprobs: list[float] | None = None
-    teacher_tokens: list[int] | None = None
-    teacher_logprobs: list[float] | None = None
+    # Sampled-token teachers store one value per response token. Top-K
+    # teachers store one K-wide row per response token.
+    teacher_tokens: list[int] | list[list[int]] | None = None
+    teacher_logprobs: list[float] | list[list[float]] | None = None
     routed_experts: np.ndarray | RayObjectRef | list[RayObjectRef] | None = None
     finish_reason: str | None = None
     # response_mask: 记录response_ids中哪个token算loss, 与response_ids长度相同，每轮rollout在 agent_loop.generate 中覆盖写

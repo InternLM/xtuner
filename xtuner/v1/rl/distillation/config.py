@@ -77,22 +77,12 @@ class DistillationConfig(BaseModel):
         if unknown_teachers:
             raise ValueError(f"data_source_teacher_map references unknown teachers: {sorted(unknown_teachers)}")
 
-        if self.loss_config.uses_sampled_token_targets:
-            teacher_types = {type(teacher) for teacher in self.teachers}
-            if len(teacher_types) != 1:
-                raise ValueError(
-                    "Sampled-token distillation requires all teachers to use the same runtime type; "
-                    "mixing RolloutTeacherConfig and TrainTeacherConfig is not supported"
-                )
-        else:
-            incompatible_teachers = [
-                teacher.name for teacher in self.teachers if not isinstance(teacher, TrainTeacherConfig)
-            ]
-            if incompatible_teachers:
-                raise ValueError(
-                    f"loss_mode={self.loss_config.loss_mode!r} requires "
-                    f"TrainTeacherConfig, got incompatible teachers: {incompatible_teachers}"
-                )
+        teacher_types = {type(teacher) for teacher in self.teachers}
+        if len(teacher_types) != 1:
+            raise ValueError(
+                "Distillation requires all teachers to use the same runtime type; "
+                "mixing RolloutTeacherConfig and TrainTeacherConfig is not supported"
+            )
         teacher_index_by_name = {teacher.name: index for index, teacher in enumerate(self.teachers)}
         self._teacher_index_by_data_source = {
             data_source: teacher_index_by_name[teacher_name]

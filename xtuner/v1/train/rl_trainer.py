@@ -1384,11 +1384,28 @@ class BaseRLTrainer:
                     and self._distillation_loss_cfg is not None
                     and self._distillation_config.rollout_teachers
                 ):
-                    response_teacher_logprobs = cast(list[float], group[i].teacher_logprobs)
-                    data_dict["teacher_logprobs"] = torch.tensor(
-                        [0.0] * (len(prompt_ids) - 1) + response_teacher_logprobs,
-                        dtype=torch.float32,
-                    ).unsqueeze(0)
+                    if self._distillation_loss_cfg.uses_topk_targets:
+                        top_k = cast(int, self._distillation_loss_cfg.top_k)
+                        response_teacher_tokens = cast(list[list[int]], group[i].teacher_tokens)
+                        response_topk_logprobs = cast(list[list[float]], group[i].teacher_logprobs)
+                        assert len(response_teacher_tokens) == len(response_ids)
+                        assert len(response_topk_logprobs) == len(response_ids)
+                        prompt_target_tokens = [[0] * top_k for _ in range(len(prompt_ids) - 1)]
+                        prompt_teacher_logprobs = [[0.0] * top_k for _ in range(len(prompt_ids) - 1)]
+                        data_dict["target_token_ids"] = torch.tensor(
+                            prompt_target_tokens + response_teacher_tokens,
+                            dtype=torch.int64,
+                        ).unsqueeze(0)
+                        data_dict["teacher_logprobs"] = torch.tensor(
+                            prompt_teacher_logprobs + response_topk_logprobs,
+                            dtype=torch.float32,
+                        ).unsqueeze(0)
+                    else:
+                        response_sampled_logprobs = cast(list[float], group[i].teacher_logprobs)
+                        data_dict["teacher_logprobs"] = torch.tensor(
+                            [0.0] * (len(prompt_ids) - 1) + response_sampled_logprobs,
+                            dtype=torch.float32,
+                        ).unsqueeze(0)
                 if teacher_index is not None:
                     data_dict["teacher_indices"] = torch.full_like(
                         shifted_labels_t,
@@ -1875,7 +1892,7 @@ class RLColocateTrainer(BaseRLTrainer):
             self._exp_tracker.close()
             close_trace()
 
-    def _fit(self):
+    def _fit(self) -> None:
         self.logger.info("Start RL training")
         if self._cur_step >= self._total_train_steps:
             self.logger.info(f"Train steps {self._total_train_steps} reached, stop training")
@@ -1901,7 +1918,7 @@ class RLColocateTrainer(BaseRLTrainer):
         model_step = self._get_colocate_rollout_model_step(init_train_step)
         for train_step in range(init_train_step, self._total_train_steps + 1):
             self.logger.info(f"Train step {train_step}/{self._total_train_steps} start")
-            step_timer_dict = {}
+            step_timer_dict: dict[str, float] = {}
             with timer("step", step_timer_dict):
                 # 共卡一次调用内完成生产和消费。
                 self.rl_health_manager.set_rollout_resources_available(True)

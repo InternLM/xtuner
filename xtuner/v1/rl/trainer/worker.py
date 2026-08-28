@@ -197,6 +197,7 @@ class WorkerInputItem(TypedDict):
     advantages: torch.Tensor
     rollout_logprobs: torch.Tensor | None
     teacher_logprobs: NotRequired[torch.Tensor | None]
+    target_token_ids: NotRequired[torch.Tensor | None]
     teacher_indices: NotRequired[torch.Tensor]
 
 
@@ -676,6 +677,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     "advantages": advantages,
                     "rollout_logprobs": rollout_logprobs,
                     "teacher_logprobs": data.get("teacher_logprobs", None),
+                    "target_token_ids": data.get("target_token_ids", None),
                 },
                 sp_mesh=self.sp_mesh,
             )
