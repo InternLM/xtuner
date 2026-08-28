@@ -53,7 +53,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 10800
 
-    npu-qwen3-sft-ep8:
+    qwen3-ep8:
         -
             type: sft
             phase: first
@@ -107,7 +107,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 10800
 
-    npu-qwen3-sft-tp2:
+    qwen3-tp2:
         -
             type: sft
             parameters:
@@ -133,7 +133,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 10800
 
-    npu-qwen3-sft-recompute:
+    qwen3-recompute:
         -
             type: sft
             parameters:
@@ -161,7 +161,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 10800
 
-    npu-qwen3-sft-16nums:
+    qwen3-16nums:
         -
             type: sft
             parameters:
@@ -184,7 +184,7 @@ case:
                     lr: 0
             timeout: 10800
 
-    npu-qwen3-sft-celoss-vs-gpu:
+    qwen3-celoss:
         -
             type: sft
             parameters:
@@ -207,7 +207,7 @@ case:
                     lr: 0.01
             timeout: 10800
 
-    npu-qwen3-rl-vllm:
+    qwen3-vllm:
         -
             type: rl
             parameters:
