@@ -259,7 +259,8 @@ class AgentLoop(ABC):
 
         validate_opd_sample_params(self.sample_params)
         self.teacher_clients = {
-            teacher.name: RolloutTeacherClient(teacher) for teacher in distillation_config.rollout_teachers
+            teacher.name: RolloutTeacherClient(teacher, distillation_config.loss_config)
+            for teacher in distillation_config.rollout_teachers
         }
         self.data_source_teacher_map = dict(distillation_config.data_source_teacher_map)
 
