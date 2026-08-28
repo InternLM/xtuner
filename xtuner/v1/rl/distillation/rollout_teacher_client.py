@@ -125,6 +125,7 @@ class RolloutTeacherClient:
                         teacher_tokens, teacher_logprobs = self._parse_topk_response(
                             response,
                             response_ids,
+                            logprob_start_len=logprob_start_len,
                             expanded_prompt_len=expanded_prompt_len,
                         )
                     else:
@@ -288,10 +289,11 @@ class RolloutTeacherClient:
         response: httpx.Response,
         response_ids: list[int],
         *,
+        logprob_start_len: int,
         expanded_prompt_len: int | None = None,
     ) -> tuple[list[list[int]], list[list[float]]]:
-        meta_info = response.json()["meta_info"]
-        prompt_token_count = meta_info["prompt_tokens"]
+        meta_info = self._get_response_meta_info(response)
+        prompt_token_count = self._get_prompt_token_count(meta_info)
         if expanded_prompt_len is not None:
             expected_prompt_token_count = expanded_prompt_len + len(response_ids)
             if prompt_token_count != expected_prompt_token_count:
@@ -302,11 +304,47 @@ class RolloutTeacherClient:
                     f"got {prompt_token_count}"
                 )
 
-        response_topk = meta_info["input_top_logprobs"][-len(response_ids) :]
-        teacher_tokens = [[int(token_id) for _, token_id in row] for row in response_topk]
-        teacher_logprobs = [[float(logprob) for logprob, _ in row] for row in response_topk]
-        if not all(math.isfinite(logprob) for row in teacher_logprobs for logprob in row):
-            raise ValueError("Teacher Top-K logprobs contain NaN or Inf")
+        raw_topk = self._get_meta_list(meta_info, "input_top_logprobs")
+        expected_rows = prompt_token_count - logprob_start_len - 1
+        if len(raw_topk) != expected_rows:
+            raise ValueError(
+                "LMDeploy teacher Top-K length mismatch: "
+                f"expected {expected_rows} rows for logprob_start_len={logprob_start_len}, got {len(raw_topk)}"
+            )
+        if len(raw_topk) < len(response_ids):
+            raise ValueError(
+                "LMDeploy teacher Top-K response is shorter than the scored response: "
+                f"{len(raw_topk)} vs {len(response_ids)}"
+            )
+
+        top_k = cast(int, self.loss_config.top_k)
+        teacher_tokens: list[list[int]] = []
+        teacher_logprobs: list[list[float]] = []
+        for row_idx, row in enumerate(raw_topk[-len(response_ids) :]):
+            if not isinstance(row, list) or len(row) != top_k:
+                raise ValueError(f"Teacher Top-K row {row_idx} must contain exactly {top_k} entries")
+
+            token_row: list[int] = []
+            logprob_row: list[float] = []
+            for entry_idx, entry in enumerate(row):
+                if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                    raise ValueError(f"Teacher Top-K row {row_idx} entry {entry_idx} must be [logprob, token_id]")
+                raw_logprob, raw_token_id = entry
+                if isinstance(raw_logprob, bool) or not isinstance(raw_logprob, (int, float)):
+                    raise ValueError(f"Teacher Top-K row {row_idx} entry {entry_idx} has a non-numeric logprob")
+                if isinstance(raw_token_id, bool) or not isinstance(raw_token_id, int) or raw_token_id < 0:
+                    raise ValueError(
+                        f"Teacher Top-K row {row_idx} entry {entry_idx} has an invalid non-negative token id"
+                    )
+                logprob = float(raw_logprob)
+                if not math.isfinite(logprob):
+                    raise ValueError("Teacher Top-K logprobs contain NaN or Inf")
+                logprob_row.append(logprob)
+                token_row.append(raw_token_id)
+            if len(token_row) != len(set(token_row)):
+                raise ValueError(f"Teacher Top-K row {row_idx} contains duplicate token ids")
+            teacher_tokens.append(token_row)
+            teacher_logprobs.append(logprob_row)
         return teacher_tokens, teacher_logprobs
 
     @staticmethod
@@ -317,8 +355,9 @@ class RolloutTeacherClient:
         logprob_start_len: int,
         expanded_prompt_len: int | None = None,
     ) -> list[Any]:
-        raw_logprobs = RolloutTeacherClient._get_input_token_logprobs(response)
-        prompt_token_count = response.json()["meta_info"]["prompt_tokens"]
+        meta_info = RolloutTeacherClient._get_response_meta_info(response)
+        raw_logprobs = RolloutTeacherClient._get_meta_list(meta_info, "input_token_logprobs")
+        prompt_token_count = RolloutTeacherClient._get_prompt_token_count(meta_info)
         if expanded_prompt_len is not None:
             expected_prompt_token_count = expanded_prompt_len + len(response_ids)
             if prompt_token_count != expected_prompt_token_count:
@@ -347,8 +386,9 @@ class RolloutTeacherClient:
         logprob_start_len: int,
         expanded_prompt_len: int | None = None,
     ) -> list[Any]:
-        raw_logprobs = RolloutTeacherClient._get_input_token_logprobs(response)
-        prompt_token_count = response.json()["meta_info"]["prompt_tokens"]
+        meta_info = RolloutTeacherClient._get_response_meta_info(response)
+        raw_logprobs = RolloutTeacherClient._get_meta_list(meta_info, "input_token_logprobs")
+        prompt_token_count = RolloutTeacherClient._get_prompt_token_count(meta_info)
         if expanded_prompt_len is not None:
             expected_prompt_token_count = expanded_prompt_len + len(response_ids)
             if prompt_token_count != expected_prompt_token_count:
@@ -370,25 +410,46 @@ class RolloutTeacherClient:
         return raw_logprobs[-len(response_ids) :]
 
     @staticmethod
-    def _get_input_token_logprobs(response: httpx.Response) -> list[Any]:
+    def _get_response_meta_info(response: httpx.Response) -> dict[str, Any]:
         try:
-            raw_logprobs = response.json()["meta_info"]["input_token_logprobs"]
-        except (KeyError, TypeError, ValueError) as exc:
+            payload = response.json()
+        except (TypeError, ValueError) as exc:
             raise ValueError("Invalid teacher response") from exc
-        if not isinstance(raw_logprobs, list):
+        if not isinstance(payload, dict) or not isinstance(payload.get("meta_info"), dict):
             raise ValueError("Invalid teacher response")
-        return raw_logprobs
+        return cast(dict[str, Any], payload["meta_info"])
+
+    @staticmethod
+    def _get_prompt_token_count(meta_info: dict[str, Any]) -> int:
+        prompt_token_count = meta_info.get("prompt_tokens")
+        if isinstance(prompt_token_count, bool) or not isinstance(prompt_token_count, int) or prompt_token_count < 1:
+            raise ValueError("Invalid teacher response prompt_tokens")
+        return prompt_token_count
+
+    @staticmethod
+    def _get_meta_list(meta_info: dict[str, Any], field_name: str) -> list[Any]:
+        value = meta_info.get(field_name)
+        if not isinstance(value, list):
+            raise ValueError(f"Invalid teacher response {field_name}")
+        return value
 
     @staticmethod
     def _validate_response_logprobs(
         response_logprobs: list[Any],
         response_ids: list[int],
     ) -> tuple[list[int], list[float]]:
-        try:
-            teacher_tokens = [item[1] for item in response_logprobs]
-            teacher_logprobs = [float(item[0]) for item in response_logprobs]
-        except (TypeError, IndexError, ValueError) as exc:
-            raise ValueError("Invalid teacher response") from exc
+        teacher_tokens: list[int] = []
+        teacher_logprobs: list[float] = []
+        for row_idx, item in enumerate(response_logprobs):
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                raise ValueError(f"Teacher logprob row {row_idx} must be [logprob, token_id]")
+            raw_logprob, raw_token_id = item
+            if isinstance(raw_logprob, bool) or not isinstance(raw_logprob, (int, float)):
+                raise ValueError(f"Teacher logprob row {row_idx} has a non-numeric logprob")
+            if isinstance(raw_token_id, bool) or not isinstance(raw_token_id, int) or raw_token_id < 0:
+                raise ValueError(f"Teacher logprob row {row_idx} has an invalid non-negative token id")
+            teacher_tokens.append(raw_token_id)
+            teacher_logprobs.append(float(raw_logprob))
 
         if len(teacher_logprobs) != len(response_ids):
             raise ValueError("Teacher logprob length mismatch")

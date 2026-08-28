@@ -20,13 +20,13 @@ from urllib.parse import urlparse
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from xtuner.v1.rl.on_policy_distillation import OPDTeacherConfig  # noqa: E402
+from xtuner.v1.rl.distillation import RolloutTeacherConfig  # noqa: E402
 from xtuner.v1.utils.config import Config  # noqa: E402
 
 
 @dataclass(frozen=True)
 class TeacherReplicaRequest:
-    teacher: OPDTeacherConfig
+    teacher: RolloutTeacherConfig
     replica_index: int
 
     @property
@@ -46,7 +46,7 @@ def build_teacher_launch_server_commands(
 
     Args:
         config_path (str): Path to the XTuner Python config containing
-            ``opd_config``.
+            ``distillation_config``.
         backend (Literal["sglang", "lmdeploy"]): Teacher serving backend.
 
     Returns:
@@ -77,7 +77,7 @@ def build_teacher_launch_server_commands(
     assert len(node_addresses) == node_count
     assert all(node_addresses)
 
-    teachers = config.opd_config.teachers
+    teachers = config.distillation_config.rollout_teachers
     replica_requests = _expand_teacher_replicas(teachers)
     health_path, model_info_path = _get_teacher_server_paths(backend)
     teacher_placements, student_local_num_workers = _allocate_teacher_devices(
@@ -138,7 +138,7 @@ def build_teacher_launch_server_commands(
 
 
 def _expand_teacher_replicas(
-    teachers: list[OPDTeacherConfig],
+    teachers: list[RolloutTeacherConfig],
 ) -> list[TeacherReplicaRequest]:
     return [
         TeacherReplicaRequest(
@@ -280,7 +280,7 @@ def _get_teacher_server_paths(
 
 
 def _build_sglang_command(
-    teacher: OPDTeacherConfig,
+    teacher: RolloutTeacherConfig,
     *,
     server_port: int,
 ) -> list[str]:
@@ -321,7 +321,7 @@ def _build_sglang_command(
 
 
 def _build_lmdeploy_command(
-    teacher: OPDTeacherConfig,
+    teacher: RolloutTeacherConfig,
     *,
     server_port: int,
 ) -> list[str]:
