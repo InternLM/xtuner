@@ -304,7 +304,7 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
             sample_params=training_sample_params,
         ),
         judger_config=judger_config,
-        filter_func=group_sample_filter_func,
+        is_valid_sample_fn=group_sample_filter_func,
         produce_strategy_config=produce_strategy_config,
         sampler_config=SamplerConfig(dataloader_cfg=dataloader_cfg, prompt_repeat_k=prompt_repeat_k),
     ),

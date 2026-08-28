@@ -100,7 +100,6 @@ def _build_fake_agent_loop():
         return rollout_states
 
     agent_loop.generate_group = generate_group
-    agent_loop.collect_rollout_group = generate_group
     return agent_loop
 
 

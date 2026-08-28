@@ -20,7 +20,7 @@ from xtuner.v1.rl.rollout.chat_template import canonicalize_messages_for_chat_te
 from xtuner.v1.rl.rollout.trace_store import get_store
 from xtuner.v1.rl.utils import create_task
 
-from ..agent_loop import AgentLoop, AgentLoopConfig
+from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
 
 
 def _import_from_path(path: str) -> Any:
@@ -147,7 +147,8 @@ class AgentInLocalhostLoop(AgentLoop):
             tasks.append(task)
 
         samples = await asyncio.gather(*tasks)
-        return _drop_failed_train_samples(samples, self.mode)
+        samples = _drop_failed_train_samples(samples, self.mode)
+        return maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         try:

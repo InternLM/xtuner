@@ -127,7 +127,7 @@ class BaseProduceContext:
         group_status = [Status.EXPIRED, Status.ABORTED] if from_expired_pool else [Status.ABORTED]
         return await self.sampler.sample(task_name=self.task_name, group_status=group_status)
 
-    async def collect_rollout_group(
+    async def generate_group(
         self,
         rollout_state: list[RolloutState],
         *,
@@ -141,12 +141,12 @@ class BaseProduceContext:
 
         start = time.perf_counter()
         if isinstance(self.agent_loop, ray.actor.ActorHandle):
-            result = await self.agent_loop.collect_rollout_group.remote(
+            result = await self.agent_loop.generate_group.remote(
                 rollout_state,
                 enable_partial_rollout=enable_partial_rollout,
             )
         else:
-            result = await self.agent_loop.collect_rollout_group(
+            result = await self.agent_loop.generate_group(
                 rollout_state,
                 enable_partial_rollout=enable_partial_rollout,
             )

@@ -104,6 +104,60 @@ def _agent_loop_manager_uses_trace_store(
     return _agent_loop_manager_requires_rollout_proxy(cfg)
 
 
+def _migrate_manager_is_valid_sample_fn(
+    manager_cfg: AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None,
+    logger,
+) -> AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None:
+    """Move the legacy produce-strategy validity check to its task config."""
+    if manager_cfg is None:
+        return None
+
+    tasks = manager_cfg.tasks if isinstance(manager_cfg.tasks, list) else [manager_cfg.tasks]
+    migrated_tasks = []
+    changed = False
+    for task in tasks:
+        strategy_cfg = task.produce_strategy_config
+        legacy_fn = strategy_cfg.is_valid_sample_fn
+        if legacy_fn is None:
+            migrated_tasks.append(task)
+            continue
+        if task.is_valid_sample_fn is not None and task.is_valid_sample_fn is not legacy_fn:
+            raise ValueError(
+                f"Task {task.task_name!r} configures is_valid_sample_fn in both the task and its "
+                "produce strategy. Remove the deprecated produce-strategy value."
+            )
+
+        logger.warning(
+            f"Task {task.task_name!r} uses deprecated produce_strategy_config.is_valid_sample_fn; "
+            "move it to TaskSpecConfig.is_valid_sample_fn."
+        )
+        migrated_tasks.append(
+            task.model_copy(
+                update={
+                    "is_valid_sample_fn": legacy_fn,
+                    "produce_strategy_config": strategy_cfg.model_copy(update={"is_valid_sample_fn": None}),
+                }
+            )
+        )
+        changed = True
+
+    if not changed:
+        return manager_cfg
+    migrated_value = migrated_tasks if isinstance(manager_cfg.tasks, list) else migrated_tasks[0]
+    return manager_cfg.model_copy(update={"tasks": migrated_value})
+
+
+def _migrate_legacy_is_valid_sample_fn(cfg: "BaseRLTrainerConfig", logger) -> None:
+    cfg.agent_loop_manager_cfg = cast(
+        AgentLoopManagerConfig | DisaggAgentLoopManagerConfig,
+        _migrate_manager_is_valid_sample_fn(cfg.agent_loop_manager_cfg, logger),
+    )
+    cfg.eval_agent_loop_manager_cfg = cast(
+        AgentLoopManagerConfig | None,
+        _migrate_manager_is_valid_sample_fn(cfg.eval_agent_loop_manager_cfg, logger),
+    )
+
+
 def _trace_session_ids(rollout_batches: list[list[RolloutState]]) -> list[str]:
     """Return stable, unique trace session ids owned by rollout batches."""
     return list(
@@ -592,6 +646,7 @@ class BaseRLTrainer:
         self._init_load_source(cfg)
         self._init_save_config(cfg)
         log_dir = self._init_logger(cfg, logger_tag)
+        _migrate_legacy_is_valid_sample_fn(cfg, self.logger)
         self._init_trace(cfg)
         self._save_runtime_environment(log_dir)
         self._init_train_state(cfg)

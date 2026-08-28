@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.data_proto.rl_data import Status
+from xtuner.v1.rl.agent_loop import IsValidSampleFn
 from xtuner.v1.rl.utils import create_task
 from xtuner.v1.utils import get_logger
 
@@ -125,12 +126,15 @@ class ProduceStrategyConfig(ABC, BaseModel):
     when it should stop producing samples for the current training step.
 
     Args:
+        is_valid_sample_fn (IsValidSampleFn | None): Deprecated compatibility
+            field. RLTrainer moves it to the task's agent loop configuration.
         should_continue_fn (ShouldContinueFn): Function used to decide whether
             production should continue after a group is processed. Defaults to
             ``default_should_continue_fn``.
     """
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+    is_valid_sample_fn: IsValidSampleFn | None = None
     should_continue_fn: ShouldContinueFn = default_should_continue_fn
 
     @abstractmethod
@@ -274,7 +278,7 @@ class SyncProduceStrategy(ProduceStrategy):
 
         for _ in range(ctx.task_batch_size):
             rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
-            task = create_task(ctx.collect_rollout_group(rollout_state))
+            task = create_task(ctx.generate_group(rollout_state))
             pending_tasks.add(task)
 
         logger.info(f"[SyncProduceStrategy] Started {len(pending_tasks)} initial tasks.")
@@ -307,7 +311,7 @@ class SyncProduceStrategy(ProduceStrategy):
                 completed_sample_count, ctx.task_batch_size
             ):
                 rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
-                task = create_task(ctx.collect_rollout_group(rollout_state))
+                task = create_task(ctx.generate_group(rollout_state))
                 pending_tasks.add(task)
         progress_displayer.close()
 
@@ -394,7 +398,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         async def spawn_one() -> asyncio.Task:
             rollout_state = await ctx.sample_group(from_expired_pool=sample_expired)
             return create_task(
-                ctx.collect_rollout_group(
+                ctx.generate_group(
                     rollout_state,
                     enable_partial_rollout=self.enable_partial_rollout,
                 )

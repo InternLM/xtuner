@@ -163,7 +163,7 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
         task_name="train_task",
         agent_loop_config=agent_loop_config,
         judger_config=judger_config,
-        filter_func=group_samples_filter_func,
+        is_valid_sample_fn=group_samples_filter_func,
         produce_strategy_config=produce_strategy_config,
         sampler_config=sampler_config,
     ),

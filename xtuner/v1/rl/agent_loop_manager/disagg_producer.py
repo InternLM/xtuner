@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.data_proto.rl_data import Status
+from xtuner.v1.rl.agent_loop import IsValidSampleFn
 from xtuner.v1.rl.utils import calculate_seq_staleness, create_task
 from xtuner.v1.utils import get_logger
 
@@ -228,6 +229,8 @@ class DisaggProduceStrategyConfig(ABC, BaseModel):
     """非共卡后台 producer strategy 配置。"""
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+    # Deprecated compatibility field; RLTrainer moves it to DisaggTaskSpecConfig.
+    is_valid_sample_fn: IsValidSampleFn | None = None
     should_continue_fn: ShouldContinueFn = default_should_continue_fn
 
     @abstractmethod
@@ -421,7 +424,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         async def spawn_one() -> asyncio.Task:
             rollout_state = await ctx.sample_group(from_expired_pool=sample_expired)
             return create_task(
-                ctx.collect_rollout_group(
+                ctx.generate_group(
                     rollout_state,
                     enable_partial_rollout=self.enable_partial_rollout,
                 )

@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import Status
-from xtuner.v1.rl.agent_loop import AgentLoopConfig, RolloutGroupFilter
+from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
@@ -50,7 +50,7 @@ class DisaggTaskSpecConfig(BaseModel):
     weight: float = Field(default=1.0, ge=0.0)
     agent_loop_config: AgentLoopConfig
     judger_config: JudgerConfig | ComposedJudgerConfig | None = None
-    filter_func: RolloutGroupFilter | None = None
+    is_valid_sample_fn: IsValidSampleFn | None = None
     produce_strategy_config: DisaggProduceStrategyConfig = DisaggAsyncProduceStrategyConfig()
     sampler_config: SamplerConfig
 
@@ -85,7 +85,7 @@ class DisaggAgentLoopManagerConfig(BaseModel):
                 rollout_controller=rollout_controller,
                 judger=build_judger(task_cfg.judger_config) if task_cfg.judger_config is not None else None,
                 logger=logger,
-                filter_func=task_cfg.filter_func,
+                is_valid_sample_fn=task_cfg.is_valid_sample_fn,
             )
             produce_strategy = task_cfg.produce_strategy_config.build(
                 sync_weights_interval=sync_weights_interval,

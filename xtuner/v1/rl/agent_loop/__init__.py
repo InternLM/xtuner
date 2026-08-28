@@ -3,11 +3,12 @@ from .agent_loop import (
     AgentLoopActor,
     AgentLoopConfig,
     AgentLoopSpec,
+    IsValidSampleFn,
     RayAgentLoop,
     RayAgentLoopProxy,
-    RolloutGroupFilter,
     RouterAgentLoop,
     get_agent_loop_rollout_ctl,
+    maybe_filter_invalid_sample,
 )
 from .single_turn_agent_loop import SingleTurnAgentLoop, SingleTurnAgentLoopConfig
 
@@ -17,11 +18,12 @@ __all__ = [
     "SingleTurnAgentLoopConfig",
     "AgentLoop",
     "AgentLoopSpec",
+    "IsValidSampleFn",
     "AgentLoopActor",
     "RouterAgentLoop",
     "RayAgentLoop",
     "RayAgentLoopProxy",
-    "RolloutGroupFilter",
+    "maybe_filter_invalid_sample",
     "SingleTurnAgentLoop",
     "get_agent_loop_rollout_ctl",
 ]
