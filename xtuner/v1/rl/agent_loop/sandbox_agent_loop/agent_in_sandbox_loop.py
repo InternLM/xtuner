@@ -6,11 +6,13 @@ import importlib
 import json
 import traceback
 import uuid
+from collections.abc import Callable
 from typing import Any, Literal
 
 from lagent.utils import create_object
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
+from xtuner.v1.rl.distillation import route_rollout_teacher_client
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import create_task
@@ -228,6 +230,34 @@ class AgentInSandboxLoop(AgentLoop):
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
         self.mode = mode
 
+    async def collect_rollout_group(
+        self,
+        rollout_state: list[RolloutState],
+        *,
+        is_valid_sample_func: Callable[[list[RolloutState]], bool] | None = None,
+        **kwargs,
+    ) -> list[RolloutState]:
+        """Generate agent traces and score every completed segment."""
+        group = await self.generate_group(rollout_state, **kwargs)
+        if get_group_status(group) != Status.COMPLETED:
+            return group
+        if is_valid_sample_func is not None and not is_valid_sample_func(group):
+            for state in group:
+                state.status = Status.FILTERED
+            return group
+        if not self.teacher_clients:
+            return group
+
+        async def score_trace(state: RolloutState) -> RolloutState:
+            teacher = route_rollout_teacher_client(
+                state,
+                data_source_teacher_map=self.data_source_teacher_map,
+                teacher_clients=self.teacher_clients,
+            )
+            return await teacher.compute_logprobs(state)
+
+        return list(await asyncio.gather(*(create_task(score_trace(state)) for state in group)))
+
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> list[RolloutState]:
             if self._sample_semaphore is None:
@@ -289,6 +319,7 @@ class AgentInSandboxLoop(AgentLoop):
             response_message.get("finish_reason") or ("stop" if item.status == RolloutStatus.COMPLETED else "error")
         )
         rollout_state.reward = _extract_reward_payload(item)
+        rollout_state.extra_fields["origin_data_source"] = item.data_source
         rollout_state.extra_fields["agent_status"] = item.status.value
         selected_agent = _selected_agent(item)
         if selected_agent is not None:
@@ -368,6 +399,7 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.routed_experts = None
         rollout_state.response_mask = None
         rollout_state.response_model_steps = None
+        rollout_state.extra_fields["origin_data_source"] = item.data_source
         rollout_state.extra_fields["agent_status"] = item.status.value
         selected_agent = _selected_agent(item)
         if selected_agent is not None:

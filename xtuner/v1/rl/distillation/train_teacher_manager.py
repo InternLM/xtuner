@@ -57,16 +57,24 @@ class TrainTeacherManager:
                 mode=mode,
             )
 
-        self._teachers: list[FrozenModel] = [
-            build_frozen_model(teacher.model_cfg, teacher.model_path, teacher.fsdp_cfg)
-            for teacher in distillation_config.train_teachers
-        ]
+        # Build every frozen Teacher before the Actor so checkpoint/config
+        # errors fail during worker initialization. Each Teacher is offloaded
+        # immediately, preventing multiple full models from co-residing on GPU.
+        self._teachers: list[FrozenModel] = []
+        for teacher_config in distillation_config.train_teachers:
+            teacher = build_frozen_model(
+                teacher_config.model_cfg,
+                teacher_config.model_path,
+                teacher_config.fsdp_cfg,
+            )
+            self._teachers.append(teacher)
+
         self._teacher_is_composed = [
             isinstance(teacher.model_cfg, BaseComposeConfig) for teacher in distillation_config.train_teachers
         ]
-        self._teachers_by_name = {
-            teacher_config.name: teacher
-            for teacher_config, teacher in zip(distillation_config.train_teachers, self._teachers)
+        self._teacher_index_by_name = {
+            teacher_config.name: teacher_index
+            for teacher_index, teacher_config in enumerate(distillation_config.train_teachers)
         }
 
     def compute_logprobs(
@@ -105,7 +113,7 @@ class TrainTeacherManager:
 
     def offload_to_disk(self, teacher_name: str) -> None:
         """Reserve the disk-offload lifecycle boundary for a later backend."""
-        if teacher_name not in self._teachers_by_name:
+        if teacher_name not in self._teacher_index_by_name:
             raise KeyError(f"Unknown training Teacher: {teacher_name!r}")
         raise NotImplementedError("Train Teacher disk offload is not implemented")
 

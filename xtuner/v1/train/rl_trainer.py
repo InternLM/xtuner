@@ -1267,6 +1267,31 @@ class BaseRLTrainer:
 
                     input_ids = raw_input_ids[:-1]
                     shifted_labels = labels[1:]
+                    teacher_logprobs = None
+                    if (
+                        self._distillation_config is not None
+                        and self._distillation_loss_cfg is not None
+                        and self._distillation_config.rollout_teachers
+                    ):
+                        raw_teacher_logprobs = group[i].teacher_logprobs
+                        if raw_teacher_logprobs is None:
+                            raise ValueError(
+                                f"Teacher logprobs cannot be None when distillation is enabled: {group[i]}"
+                            )
+                        teacher_response_start = next(
+                            (index for index, label in enumerate(shifted_labels) if label != -100),
+                            len(shifted_labels),
+                        )
+                        teacher_response_length = len(shifted_labels) - teacher_response_start
+                        if len(raw_teacher_logprobs) != teacher_response_length:
+                            raise ValueError(
+                                "Teacher logprobs must align with the trainable suffix of shifted agent labels: "
+                                f"{len(raw_teacher_logprobs)} vs {teacher_response_length}, data: {group[i]}"
+                            )
+                        teacher_logprobs = torch.tensor(
+                            [0.0] * teacher_response_start + raw_teacher_logprobs,
+                            dtype=torch.float32,
+                        ).unsqueeze(0)
                     prompt_len = sum(label == -100 for label in shifted_labels)
                     response_len = len(shifted_labels) - prompt_len
                     prompt_len_list.append(prompt_len)
@@ -1297,6 +1322,8 @@ class BaseRLTrainer:
                         "advantage": actual_advantages,
                         "rollout_logprobs": rollout_logprobs,
                     }
+                    if teacher_logprobs is not None:
+                        data_dict["teacher_logprobs"] = teacher_logprobs
                     if teacher_index is not None:
                         data_dict["teacher_indices"] = torch.full_like(
                             shifted_labels_t,
