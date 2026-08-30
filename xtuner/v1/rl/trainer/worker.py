@@ -662,7 +662,8 @@ class TrainingWorker(SingleAcceleratorWorker):
             rollout_logprobs = data.get("rollout_logprobs", None)
             rollout_logprobs = rollout_logprobs.to(DEVICE) if rollout_logprobs is not None else None
             if teacher_indices is not None:
-                teacher_indices = teacher_indices.to(DEVICE)
+                # Keep the full indices on the host until each SP rank selects
+                # its local slice.
                 if self.sp_mesh.size() > 1:
                     teacher_indices = sp_split(
                         teacher_indices,
@@ -670,6 +671,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                         split_dim=1,
                         padding_value=-1,
                     )
+                teacher_indices = teacher_indices.to(DEVICE)
                 teacher_indices_list.append(teacher_indices)
             loss_ctx = loss_cfg.build(
                 data={

@@ -10,3 +10,4 @@
    rl_trainer.md
    judger.md
    loss.md
+   on_policy_distillation.md

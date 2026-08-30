@@ -8,3 +8,4 @@ Reinforcement Learning
    dataset.md
    rl_trainer.md
    loss.md
+   on_policy_distillation.md

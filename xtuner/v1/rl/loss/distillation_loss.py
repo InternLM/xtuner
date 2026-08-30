@@ -26,7 +26,7 @@ DEVICE = get_device()
 logger = get_logger()
 
 TopKDistillationMode = Literal["forward", "reverse", "forward_kl_topk"]
-DistillationLossMode = Literal["k1", "k3", "forward", "reverse", "forward_kl_topk"]
+DistillationLossMode = Literal["k1", "forward", "reverse", "forward_kl_topk"]
 
 
 def compute_topk_distillation_kl(
@@ -94,7 +94,7 @@ class DistillationLossConfig(BaseRLLossConfig):
 
     @property
     def uses_sampled_token_targets(self) -> bool:
-        return self.loss_mode in ("k1", "k3")
+        return self.loss_mode == "k1"
 
     @property
     def uses_topk_targets(self) -> bool:
@@ -125,9 +125,12 @@ class DistillationLossConfig(BaseRLLossConfig):
             is_weights=data.get("rollout_is_weights"),
             teacher_logprobs=data.get("teacher_logprobs"),
             target_token_ids=data.get("target_token_ids"),
-        ).to(DEVICE)
+        )
+        # Rollout teacher targets can be large, so shard them before moving the
+        # local slice to the accelerator.
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
+        loss_kwargs = loss_kwargs.to(DEVICE)
         return self.loss_ctx_cls(self, loss_kwargs)
 
 
@@ -229,11 +232,7 @@ class DistillationLossContext(BaseRLLossContext):
         student_logprobs: torch.Tensor,
         teacher_logprobs: torch.Tensor,
     ) -> torch.Tensor:
-        if self.loss_cfg.loss_mode == "k1":
-            loss = student_logprobs - teacher_logprobs
-        else:
-            log_ratio = (teacher_logprobs - student_logprobs).clamp(min=-20.0, max=20.0)
-            loss = torch.exp(log_ratio) - log_ratio - 1.0
+        loss = student_logprobs - teacher_logprobs
         if self.loss_cfg.loss_max_clamp is not None:
             loss = loss.clamp(
                 min=-self.loss_cfg.loss_max_clamp,
