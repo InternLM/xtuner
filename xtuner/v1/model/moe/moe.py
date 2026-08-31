@@ -196,8 +196,7 @@ class MoEConfig(TransformerConfig):
             raise ValueError("The initial SonicMoE integration requires ep_size=1; EP support is not implemented yet.")
         if self.expert_tp_size != 1:
             raise ValueError(
-                "The initial SonicMoE integration requires expert_tp_size=1; "
-                "ExpertTP support is not implemented yet."
+                "The initial SonicMoE integration requires expert_tp_size=1; ExpertTP support is not implemented yet."
             )
         if self.dispatcher is not None:
             raise ValueError("SonicMoE owns token dispatch internally, so dispatcher must be None.")

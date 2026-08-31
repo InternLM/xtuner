@@ -98,8 +98,7 @@ class SonicMoEBackend(nn.Module):
                 )
             if fused_w2_bias.shape != (num_experts, hidden_size):
                 raise ValueError(
-                    f"fused_w2_bias must have shape {(num_experts, hidden_size)}, "
-                    f"got {tuple(fused_w2_bias.shape)}."
+                    f"fused_w2_bias must have shape {(num_experts, hidden_size)}, got {tuple(fused_w2_bias.shape)}."
                 )
             if fused_w1w3_bias.device != hidden_states.device or fused_w2_bias.device != hidden_states.device:
                 raise ValueError("SonicMoE expert biases must be on the same CUDA device as hidden_states.")
