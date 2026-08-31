@@ -33,7 +33,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     ProduceBatchStatus,
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
-from xtuner.v1.rl.distillation import DistillationConfig
+from xtuner.v1.rl.distillation import DistillationConfig, validate_opd_sample_params
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.health_manager import RLHealthManager, _NoOpRLHealthManager
 from xtuner.v1.rl.loss import DistillationLossConfig
@@ -69,13 +69,6 @@ PG_READY_TIMEOUT = 30
 RL_TRAINER_RAY_GET_TIMEOUT = 3600
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
-
-_DISTILLATION_METRIC_PREFIXES = (
-    "reduced_distillation_",
-    "reduced_topk_opd_",
-    "opd_",
-    "topk_opd_",
-)
 
 
 def _to_cpu_tensor(value: np.ndarray | None, *, dtype: torch.dtype | None = None) -> torch.Tensor | None:
@@ -524,6 +517,19 @@ class BaseRLTrainerConfig(BaseModel):
             if self.train_worker_cfg.loss_cfg != self.distillation_config.loss_config:
                 raise ValueError("train_worker_cfg.loss_cfg must be distillation_config.loss_config")
             self.distillation_config.validate_student_model(self.train_worker_cfg.model_cfg)
+            if self.distillation_config.loss_config.uses_sampled_token_targets:
+                tasks = self.agent_loop_manager_cfg.tasks
+                tasks = tasks if isinstance(tasks, list) else [tasks]
+                for task in tasks:
+                    sample_params = task.agent_loop_config.sample_params
+                    if sample_params is None:
+                        raise ValueError(
+                            f"Task {task.task_name!r} must configure sample_params for sampled-token distillation"
+                        )
+                    try:
+                        validate_opd_sample_params(sample_params)
+                    except ValueError as exc:
+                        raise ValueError(f"Invalid sample_params for task {task.task_name!r}: {exc}") from exc
         _validate_sync_intervals(
             sync_weights_interval=self.sync_weights_interval,
             checkpoint_interval=self.checkpoint_interval,
@@ -877,18 +883,13 @@ class BaseRLTrainer:
 
     def _build_agent_loop_components(self, cfg: BaseRLTrainerConfig, replay_buffer) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
-        # Sampled-token objectives require identity Student sampling even when
-        # Teacher logprobs are produced later by the training workers.
-        agent_loop_distillation_config = self._rollout_teacher_config
-        if self._distillation_loss_cfg is not None and self._distillation_loss_cfg.uses_sampled_token_targets:
-            agent_loop_distillation_config = self._distillation_config
         agent_loop_manager = cfg.agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
             logger=self.logger,
             sync_weights_interval=cfg.sync_weights_interval,
-            distillation_config=agent_loop_distillation_config,
+            distillation_config=self._rollout_teacher_config,
         )
         self.agent_loop_manager = cast(AgentLoopManager | DisaggAgentLoopManager, agent_loop_manager)
 
@@ -1217,6 +1218,14 @@ class BaseRLTrainer:
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ):
+        has_agentic_data = any(state.input_ids is not None for group in data_groups for state in group)
+        has_3d_reasoning_data = any(
+            state.input_ids is None and state.position_ids is not None and state.position_ids.ndim == 3
+            for group in data_groups
+            for state in group
+        )
+        use_3d_agentic_position_ids = has_agentic_data and has_3d_reasoning_data
+
         # Per-session rewards for distribution metrics. Agentic sessions may split into several
         # trainable segments that share one reward; counting that reward once per session keeps
         # rewards/* from being weighted by segment count.
@@ -1366,6 +1375,13 @@ class BaseRLTrainer:
                         )
 
                     position_ids = group[i].position_ids
+                    if use_3d_agentic_position_ids:
+                        seq_len = input_ids_t.size(-1)
+                        text_position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, 1, -1)
+                        # Mixed agentic/VLM batches use three-axis MRoPE position IDs. Repeat the
+                        # normal text positions on every axis so agentic samples have the same rank
+                        # as the VLM samples when their sequence contexts are packed together.
+                        position_ids = np.broadcast_to(text_position_ids, (3, 1, seq_len)).copy()
                     multimodal_train_info = group[i].mm_info
                     multi_info_cast = cast(dict | None, multimodal_train_info)
                     seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multi_info_cast)
@@ -1632,7 +1648,8 @@ class BaseRLTrainer:
                 )
             trajectory_str = f"\nTrain step {train_step} data statistics:\n"
             trajectory_str += "\n".join([f"- {k:<25}: {v:.4f}" for k, v in response_data_info.items()])
-            rank0_log_item = train_info["workers_log_item"][0]
+            worker_log_items = train_info["workers_log_item"]
+            rank0_log_item = worker_log_items[0]
             rank0_rollout_is_metrics = rank0_log_item.get("rollout_is_metrics", {})
             rank0_mismatch_metrics = rank0_log_item.get("mismatch_metrics", {})
             rank0_rollout_entropy = rank0_log_item.get("rollout_entropy", 0.0)
@@ -1640,13 +1657,57 @@ class BaseRLTrainer:
             all_scalars.update({f"{k}": v for k, v in rank0_mismatch_metrics.items()})
             all_scalars.update({"entropy/rollout": rank0_rollout_entropy})
             all_scalars.update({"entropy/train": rank0_log_item["train_entropy"]})
-            if "teacher_compute_time" in rank0_log_item:
-                all_scalars["time/train_teacher_compute"] = rank0_log_item["teacher_compute_time"]
-            if "teacher_onload_time" in rank0_log_item:
-                all_scalars["time/train_teacher_onload"] = rank0_log_item["teacher_onload_time"]
-            if "teacher_offload_time" in rank0_log_item:
-                all_scalars["time/train_teacher_offload"] = rank0_log_item["teacher_offload_time"]
-            for worker_idx, log_item in enumerate(train_info["workers_log_item"]):
+
+            teacher_timing_phases = ("compute", "onload", "offload")
+            teacher_timings_by_worker = [log_item.get("teacher_timings", {}) for log_item in worker_log_items]
+            teacher_names = sorted(
+                {teacher_name for teacher_timings in teacher_timings_by_worker for teacher_name in teacher_timings}
+            )
+            for teacher_name in teacher_names:
+                for phase in teacher_timing_phases:
+                    phase_values = [
+                        float(teacher_timings[teacher_name][phase])
+                        for teacher_timings in teacher_timings_by_worker
+                        if teacher_name in teacher_timings
+                    ]
+                    all_scalars[f"time/train_teacher/{teacher_name}/{phase}"] = max(phase_values)
+
+            # Training waits for the slowest worker, so report per-worker Teacher totals and then
+            # take the maximum as the step-level critical-path time.
+            for phase in teacher_timing_phases:
+                worker_totals = [
+                    sum(float(teacher_timing[phase]) for teacher_timing in teacher_timings.values())
+                    for teacher_timings in teacher_timings_by_worker
+                ]
+                if teacher_names:
+                    total = max(worker_totals)
+                else:
+                    legacy_values: list[float] = []
+                    if phase == "compute":
+                        legacy_values = [
+                            float(legacy_time)
+                            for log_item in worker_log_items
+                            if (legacy_time := log_item.get("teacher_compute_time")) is not None
+                        ]
+                    elif phase == "onload":
+                        legacy_values = [
+                            float(legacy_time)
+                            for log_item in worker_log_items
+                            if (legacy_time := log_item.get("teacher_onload_time")) is not None
+                        ]
+                    else:
+                        legacy_values = [
+                            float(legacy_time)
+                            for log_item in worker_log_items
+                            if (legacy_time := log_item.get("teacher_offload_time")) is not None
+                        ]
+                    if not legacy_values:
+                        continue
+                    total = max(legacy_values)
+                all_scalars[f"time/train_teacher/total/{phase}"] = total
+                all_scalars[f"time/train_teacher_{phase}"] = total
+
+            for worker_idx, log_item in enumerate(worker_log_items):
                 if not self._display_all_workers_log and worker_idx > 0:
                     break
                 mini_batch_metrics: dict[str, List[float]] = {}
@@ -1657,7 +1718,7 @@ class BaseRLTrainer:
                 for key, value in mini_batch_metrics.items():
                     avg_value = sum(value) / len(value)
                     all_scalars.update({f"train_metrics/worker_{worker_idx}/step_avg_{key}": avg_value})
-                    if worker_idx == 0 and key.startswith(_DISTILLATION_METRIC_PREFIXES):
+                    if worker_idx == 0 and ("opd" in key or "distillation" in key):
                         all_scalars[f"distillation/{key}"] = avg_value
                         if key in ("opd_reverse_kl", "opd_abs_logprob_loss"):
                             all_scalars[key] = avg_value

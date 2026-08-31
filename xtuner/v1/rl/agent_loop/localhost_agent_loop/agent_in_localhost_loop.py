@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from lagent.utils import create_object, ctx_session_id
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
     RolloutStatus,
@@ -134,11 +134,18 @@ class AgentInLocalhostLoop(AgentLoop):
         self.mode = mode
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
+        filter_before_teacher = self.is_valid_sample_fn is not None
+
         async def generate_one(state: RolloutState) -> RolloutState:
             if self._sample_semaphore is None:
-                return await self.generate_sample(state, **kwargs)
-            async with self._sample_semaphore:
-                return await self.generate_sample(state, **kwargs)
+                state = await self.generate_sample(state, **kwargs)
+            else:
+                async with self._sample_semaphore:
+                    state = await self.generate_sample(state, **kwargs)
+            # Fast path: release the sample slot, then score immediately.
+            if not filter_before_teacher:
+                state = await self.maybe_compute_teacher_logprob(state)
+            return state
 
         tasks: list[asyncio.Task[RolloutState]] = []
         for state in rollout_state:
@@ -148,8 +155,11 @@ class AgentInLocalhostLoop(AgentLoop):
 
         samples = await asyncio.gather(*tasks)
         samples = _drop_failed_train_samples(samples, self.mode)
-        # Keep sample validation as the final group-generation step.
-        return maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
+        samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
+        # Filter path: score only the completed group that survived filtering.
+        if filter_before_teacher and get_group_status(samples) == Status.COMPLETED:
+            samples = await self.maybe_compute_teacher_logprobs(samples)
+        return samples
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         try:

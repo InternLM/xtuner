@@ -190,6 +190,33 @@ class TestPrepareTrainData(unittest.TestCase):
         self.assertEqual(seq_ctx.image_grid_thw.dtype, torch.long)
         self.assertEqual(seq_ctx.image_grid_thw.tolist(), [[1, 2, 3]])
 
+    def test_mixed_agentic_and_vlm_reasoning_use_3d_position_ids(self):
+        trainer = self._build_trainer([0.5])
+        reasoning_state = self._state(
+            uid=1,
+            group_id=1,
+            prompt_ids=[10, 11, 12],
+            response_ids=[20, 21, 22],
+            position_ids=np.arange(3, dtype=np.int64).reshape(1, 1, -1).repeat(3, axis=0),
+        )
+        agentic_state = self._state(
+            uid=2,
+            group_id=2,
+            input_ids=[30, 31, 40, 41, 42],
+            labels=[-100, -100, 40, 41, 42],
+            logprobs=[0.0, -0.1, -0.2, -0.3, -0.4],
+        )
+
+        data_batches, _ = self._prepare(trainer, [[reasoning_state], [agentic_state]])
+
+        self.assertEqual(tuple(data_batches[0]["seq_ctx"].position_ids.shape), (3, 1, 5))
+        agentic_position_ids = data_batches[1]["seq_ctx"].position_ids
+        self.assertEqual(tuple(agentic_position_ids.shape), (3, 1, 4))
+        torch.testing.assert_close(
+            agentic_position_ids,
+            torch.arange(4, dtype=torch.long).reshape(1, 1, -1).expand(3, -1, -1),
+        )
+
     def test_agentic_topk_targets_include_token_ids_and_logprobs(self):
         loss_config = DistillationLossConfig(
             policy_loss_cfg={

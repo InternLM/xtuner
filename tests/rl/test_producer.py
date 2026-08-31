@@ -120,7 +120,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         mock_agent_loop.generate_group = mock_gen
         mock_agent_loop.is_valid_sample_fn = is_valid_sample_fn
         mock_agent_loop.teacher_clients = {}
-        mock_agent_loop.collect_rollout_group = AgentLoop.collect_rollout_group.__get__(mock_agent_loop)
         return mock_agent_loop
 
     def _build_context(
@@ -560,7 +559,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
                 r.status = Status.COMPLETED
             return rs
 
-        mock_agent_loop.collect_rollout_group = mock_gen
+        mock_agent_loop.generate_group = mock_gen
 
         sampler_cfg = SamplerConfig.model_construct(dataloader_cfg=self.mock_dataloader_cfg)
         produce_strategy_cfg = AsyncProduceStrategyConfig(over_sample_threshold=1)

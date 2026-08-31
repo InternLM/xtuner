@@ -212,6 +212,7 @@ class WorkerTrainLogItem(TypedDict, total=False):
 
 class WorkerLogItem(TypedDict):
     train_entropy: float
+    teacher_timings: NotRequired[dict[str, dict[str, float]]]
     teacher_compute_time: NotRequired[float]
     teacher_onload_time: NotRequired[float]
     teacher_offload_time: NotRequired[float]
@@ -727,6 +728,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 teacher_indices_list,
                 loss_ctx_list,
             )
+            worker_log_item["teacher_timings"] = teacher_timings.to_dict()
             worker_log_item["teacher_compute_time"] = teacher_timings.compute
             worker_log_item["teacher_onload_time"] = teacher_timings.onload
             worker_log_item["teacher_offload_time"] = teacher_timings.offload

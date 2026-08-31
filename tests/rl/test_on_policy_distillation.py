@@ -1,7 +1,8 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import torch
@@ -9,11 +10,18 @@ import torch
 from recipe.on_policy_distillation.build_teacher_server_commands import (
     build_teacher_launch_server_commands,
 )
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.rl.distillation import RolloutTeacherClient, RolloutTeacherConfig
+from xtuner.v1.rl.distillation import (
+    DistillationConfig,
+    RolloutTeacherClient,
+    RolloutTeacherConfig,
+    TrainTeacherManager,
+    TrainTeacherTimings,
+)
 from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
+from xtuner.v1.train.rl_trainer import BaseRLTrainer, BaseRLTrainerConfig
 
 
 class TestDistillationRecipeConfig(unittest.TestCase):
@@ -64,6 +72,80 @@ distillation_config = DistillationConfig(
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0][:4], ["teacher[0]", "0", "1", "http://127.0.0.1:13141"])
         self.assertIn("lmdeploy", records[0][7:])
+
+    def test_sampled_token_sampling_is_validated_by_trainer_config(self) -> None:
+        loss_config = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+        distillation_config = DistillationConfig(
+            loss_config=loss_config,
+            teachers=[RolloutTeacherConfig(name="teacher", endpoints=["http://teacher"])],
+            data_source_teacher_map={"math": "teacher"},
+        )
+        config = BaseRLTrainerConfig.model_construct(
+            train_worker_cfg=SimpleNamespace(loss_cfg=loss_config, model_cfg=MagicMock()),
+            agent_loop_manager_cfg=SimpleNamespace(
+                tasks=SimpleNamespace(
+                    task_name="math",
+                    agent_loop_config=SimpleNamespace(sample_params=SampleParams(temperature=0.7)),
+                )
+            ),
+            distillation_config=distillation_config,
+            total_train_steps=1,
+        )
+
+        with self.assertRaisesRegex(ValueError, "Invalid sample_params for task 'math'.*temperature"):
+            config._validate_sync_intervals()
+
+    def test_train_teacher_config_is_not_forwarded_to_agent_loop_manager(self) -> None:
+        trainer = BaseRLTrainer.__new__(BaseRLTrainer)
+        trainer._rollout_teacher_config = None
+        trainer._enable_evaluate = False
+        trainer._resolve_total_train_steps = MagicMock()
+        trainer.rollout_controller = MagicMock()
+        trainer.logger = MagicMock()
+        built_manager = MagicMock()
+        manager_config = MagicMock()
+        manager_config.build.return_value = built_manager
+        config = SimpleNamespace(
+            tokenizer_path="student",
+            agent_loop_manager_cfg=manager_config,
+            sync_weights_interval=1,
+        )
+
+        with patch("xtuner.v1.train.rl_trainer.AutoTokenizer.from_pretrained", return_value=MagicMock()):
+            trainer._build_agent_loop_components(config, replay_buffer=MagicMock())
+
+        self.assertIs(trainer.agent_loop_manager, built_manager)
+        self.assertIsNone(manager_config.build.call_args.kwargs["distillation_config"])
+
+
+class TestTrainTeacherTimings(unittest.TestCase):
+    def test_lifecycle_timings_are_recorded_for_every_teacher(self) -> None:
+        manager = TrainTeacherManager.__new__(TrainTeacherManager)
+        first_teacher = MagicMock()
+        second_teacher = MagicMock()
+        timings = TrainTeacherTimings()
+
+        with (
+            patch(
+                "xtuner.v1.rl.distillation.train_teacher_manager.time.perf_counter",
+                side_effect=[1.0, 2.0, 3.0, 5.0, 6.0, 9.0, 10.0, 14.0, 15.0, 20.0, 21.0, 27.0],
+            ),
+            patch.object(manager, "_synchronize_device"),
+            patch.object(manager, "_offload_to_cpu"),
+        ):
+            with manager._teacher_on_device(first_teacher, timings, "teacher_a"):
+                pass
+            with manager._teacher_on_device(second_teacher, timings, "teacher_b"):
+                pass
+
+        self.assertEqual(
+            timings.to_dict(),
+            {
+                "teacher_a": {"compute": 2.0, "onload": 1.0, "offload": 3.0},
+                "teacher_b": {"compute": 5.0, "onload": 4.0, "offload": 6.0},
+            },
+        )
+        self.assertEqual((timings.compute, timings.onload, timings.offload), (7.0, 5.0, 9.0))
 
 
 class TestRolloutTeacherClient(unittest.IsolatedAsyncioTestCase):
