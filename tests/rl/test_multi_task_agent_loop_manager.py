@@ -11,6 +11,7 @@
 
 import asyncio
 import unittest
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -22,12 +23,17 @@ from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop_manager.disagg_agent_loop_manager import (
     DisaggAgentLoopManager,
+    DisaggAgentLoopManagerConfig,
+    DisaggTaskSpecConfig,
 )
+from xtuner.v1.rl.agent_loop_manager.disagg_producer import DisaggAsyncProduceStrategyConfig
 from xtuner.v1.rl.agent_loop_manager.produce_utils import (
     GROUP_GENERATE_TIME_KEY,
     ProduceBatchStatus,
     _TaskRunner,
 )
+from xtuner.v1.rl.agent_loop_manager.producer import SyncProduceStrategyConfig
+from xtuner.v1.train.rl_trainer import _migrate_legacy_is_valid_sample_fn
 
 
 class _FakeSampler:
@@ -215,6 +221,94 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         manager_config = AgentLoopManagerConfig(tasks=task)
 
         self.assertEqual(manager_config.tasks.task_name, "single_task")
+
+    def test_manager_config_injects_validity_check_when_building_agent_loop(self):
+        is_valid_sample_fn = MagicMock()
+        built_agent_loop = _fake_agent_loop()
+        agent_loop_config = MagicMock()
+        agent_loop_config.build.return_value = built_agent_loop
+        produce_strategy_config = MagicMock()
+        produce_strategy_config.build.return_value = _FakeProduceStrategy()
+        sampler_config = MagicMock()
+        sampler_config.build.return_value = _FakeSampler()
+        task = TaskSpecConfig.model_construct(
+            task_name="filtered_task",
+            agent_loop_config=agent_loop_config,
+            judger_config=None,
+            is_valid_sample_fn=is_valid_sample_fn,
+            produce_strategy_config=produce_strategy_config,
+            sampler_config=sampler_config,
+            weight=1.0,
+        )
+        rollout_controller = _fake_rollout_controller()
+        tokenizer = MagicMock()
+        replay_buffer = MagicMock()
+
+        manager = AgentLoopManagerConfig(tasks=task).build(
+            rollout_controller=rollout_controller,
+            tokenizer=tokenizer,
+            replay_buffer=replay_buffer,
+        )
+
+        agent_loop_config.build.assert_called_once_with(
+            rollout_controller=rollout_controller,
+            judger=None,
+            logger=None,
+            is_valid_sample_fn=is_valid_sample_fn,
+        )
+        self.assertIs(manager.task_runners[0].agent_loop, built_agent_loop)
+
+    def test_trainer_migrates_legacy_validity_check_from_produce_strategy(self):
+        is_valid_sample_fn = MagicMock()
+        colocate_task = TaskSpecConfig.model_construct(
+            task_name="colocate",
+            agent_loop_config=MagicMock(),
+            judger_config=None,
+            is_valid_sample_fn=None,
+            produce_strategy_config=SyncProduceStrategyConfig(is_valid_sample_fn=is_valid_sample_fn),
+            sampler_config=MagicMock(),
+            weight=1.0,
+        )
+        disagg_task = DisaggTaskSpecConfig.model_construct(
+            task_name="disagg",
+            agent_loop_config=MagicMock(),
+            judger_config=None,
+            is_valid_sample_fn=None,
+            produce_strategy_config=DisaggAsyncProduceStrategyConfig(is_valid_sample_fn=is_valid_sample_fn),
+            sampler_config=MagicMock(),
+            weight=1.0,
+        )
+        cfg = SimpleNamespace(
+            agent_loop_manager_cfg=DisaggAgentLoopManagerConfig(tasks=disagg_task),
+            eval_agent_loop_manager_cfg=AgentLoopManagerConfig(tasks=colocate_task),
+        )
+        logger = MagicMock()
+
+        _migrate_legacy_is_valid_sample_fn(cfg, logger)
+
+        self.assertIs(cfg.agent_loop_manager_cfg.tasks.is_valid_sample_fn, is_valid_sample_fn)
+        self.assertIsNone(cfg.agent_loop_manager_cfg.tasks.produce_strategy_config.is_valid_sample_fn)
+        self.assertIs(cfg.eval_agent_loop_manager_cfg.tasks.is_valid_sample_fn, is_valid_sample_fn)
+        self.assertIsNone(cfg.eval_agent_loop_manager_cfg.tasks.produce_strategy_config.is_valid_sample_fn)
+        self.assertEqual(logger.warning.call_count, 2)
+
+    def test_trainer_rejects_conflicting_legacy_and_task_validity_checks(self):
+        task = TaskSpecConfig.model_construct(
+            task_name="conflict",
+            agent_loop_config=MagicMock(),
+            judger_config=None,
+            is_valid_sample_fn=MagicMock(),
+            produce_strategy_config=SyncProduceStrategyConfig(is_valid_sample_fn=MagicMock()),
+            sampler_config=MagicMock(),
+            weight=1.0,
+        )
+        cfg = SimpleNamespace(
+            agent_loop_manager_cfg=AgentLoopManagerConfig(tasks=task),
+            eval_agent_loop_manager_cfg=None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "configures is_valid_sample_fn in both"):
+            _migrate_legacy_is_valid_sample_fn(cfg, MagicMock())
 
     async def test_take_train_batch_applies_token_staleness_mask(self):
         # 启用 token staleness 时，公开 produce_batch 路径应返回最终 effective mask。
