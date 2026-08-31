@@ -3,7 +3,7 @@ import os
 from xtuner.v1.config import FSDPConfig, LRConfig, MuonConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
-from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig, RLTextTokenizeFnConfig
+from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
 from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
@@ -113,7 +113,21 @@ train_worker_cfg = WorkerConfig(
     pack_max_length=pack_max_length,
 )
 
-gsm8k_tokenize_fn = RLTextTokenizeFnConfig(max_length=gsm8k_max_prompt_length)
+gsm8k_tokenize_fn = RLQwen3VLTokenizeFnConfig(
+    processor_path=model_path,
+    max_length=gsm8k_max_prompt_length,
+    chat_template="qwen3.5-vl",
+    add_generation_prompt=True,
+    enable_thinking=True,
+)
+gsm8k_eval_tokenize_fn = RLQwen3VLTokenizeFnConfig(
+    processor_path=model_path,
+    max_length=gsm8k_max_prompt_length,
+    chat_template="qwen3.5-vl",
+    add_generation_prompt=True,
+    enable_thinking=True,
+    ignore_multimodal_info=True,
+)
 geo3k_tokenize_fn = RLQwen3VLTokenizeFnConfig(
     processor_path=model_path,
     max_length=geo3k_max_prompt_length,
@@ -148,7 +162,13 @@ gsm8k_train_sampler_config = SamplerConfig(
     dataloader_cfg=DataloaderConfig(
         dataset_config_list=[
             {
-                "dataset": DatasetConfig(name="gsm8k", anno_path=gsm8k_data_path),
+                "dataset": DatasetConfig(
+                    name="gsm8k",
+                    anno_path=gsm8k_data_path,
+                    class_name="VLMJsonlDataset",
+                    media_root="",
+                    sample_ratio=1.0,
+                ),
                 "tokenize_fn": gsm8k_tokenize_fn,
             }
         ],
@@ -209,8 +229,14 @@ gsm8k_eval_sampler_config = SamplerConfig(
     dataloader_cfg=DataloaderConfig(
         dataset_config_list=[
             {
-                "dataset": DatasetConfig(name="gsm8k_eval", anno_path=gsm8k_eval_data_path, sample_ratio=1.0),
-                "tokenize_fn": gsm8k_tokenize_fn,
+                "dataset": DatasetConfig(
+                    name="gsm8k_eval",
+                    anno_path=gsm8k_eval_data_path,
+                    class_name="VLMJsonlDataset",
+                    media_root="",
+                    sample_ratio=1.0,
+                ),
+                "tokenize_fn": gsm8k_eval_tokenize_fn,
             }
         ],
         pack_max_length=pack_max_length,
