@@ -472,6 +472,55 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertAlmostEqual(scalars["throughput/rollout_sgs"], 0.5)
         self.assertAlmostEqual(scalars["throughput/rollout_tgs"], 15.0)
 
+    def test_log_step_records_every_teacher_timing_and_distillation_metric(self):
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer._log_step = RLDisaggregatedTrainer._log_step.__get__(trainer, RLDisaggregatedTrainer)
+        train_info = self._minimal_train_info(training_samples=2, training_tokens=8)
+        train_info["workers_log_item"] = [
+            {
+                "rollout_is_metrics": {},
+                "mismatch_metrics": {},
+                "rollout_entropy": 0.0,
+                "train_entropy": 0.0,
+                "teacher_timings": {
+                    "teacher_a": {"compute": 1.0, "onload": 2.0, "offload": 3.0},
+                    "teacher_b": {"compute": 3.0, "onload": 4.0, "offload": 5.0},
+                },
+                "train_metrics": [
+                    {"actor_distillation_kl": 0.5, "sampled_opd_loss": 0.25, "policy_loss": 1.0}
+                ],
+                "sft_train_metrics": {},
+            },
+            {
+                "teacher_timings": {
+                    "teacher_a": {"compute": 4.0, "onload": 1.0, "offload": 2.0},
+                    "teacher_b": {"compute": 2.0, "onload": 3.0, "offload": 4.0},
+                },
+                "train_entropy": 0.0,
+                "train_metrics": [],
+                "sft_train_metrics": {},
+            },
+        ]
+
+        trainer._log_step(
+            train_step=1,
+            step_timer_dict={},
+            produce_result=ProduceBatchResult(rollout_states=[]),
+            train_info=train_info,
+            eval_info={},
+        )
+
+        scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
+        self.assertEqual(scalars["time/train_teacher/teacher_a/compute"], 4.0)
+        self.assertEqual(scalars["time/train_teacher/teacher_a/onload"], 2.0)
+        self.assertEqual(scalars["time/train_teacher/teacher_a/offload"], 3.0)
+        self.assertEqual(scalars["time/train_teacher/teacher_b/compute"], 3.0)
+        self.assertEqual(scalars["time/train_teacher/total/compute"], 6.0)
+        self.assertEqual(scalars["time/train_teacher_compute"], 6.0)
+        self.assertEqual(scalars["distillation/actor_distillation_kl"], 0.5)
+        self.assertEqual(scalars["distillation/sampled_opd_loss"], 0.25)
+        self.assertNotIn("distillation/policy_loss", scalars)
+
     def test_update_weights_pauses_generation_without_onloading_rollout(self):
         manager = _FakeManager([])
         trainer = self._make_trainer(manager)

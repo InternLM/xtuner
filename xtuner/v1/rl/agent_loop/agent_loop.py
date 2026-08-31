@@ -15,7 +15,6 @@ from xtuner.v1.rl.distillation import (
     DistillationConfig,
     RolloutTeacherClient,
     route_rollout_teacher_client,
-    validate_opd_sample_params,
 )
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
@@ -44,17 +43,10 @@ def maybe_filter_invalid_sample(
     is_valid_sample_fn: IsValidSampleFn | None,
     logger,
 ) -> list[RolloutState]:
-    """Finalize rollout-group validity after all generation post-processing.
+    """Apply task-specific group validation after generation and judging.
 
-    Every custom ``AgentLoop.generate_group`` implementation must return through
-    this helper after generation, judging, flattening, and failure cleanup::
-
-        # Keep sample validation as the final group-generation step.
-        return maybe_filter_invalid_sample(
-            samples,
-            self.is_valid_sample_fn,
-            self.logger,
-        )
+    Teacher scoring may run before this helper when no validity check is configured. When a validity check is
+    configured, call this helper before sending the completed group to the Teacher.
     """
     if get_group_status(group) != Status.COMPLETED:
         return group
@@ -257,7 +249,6 @@ class AgentLoop(ABC):
         if distillation_config is None:
             return
 
-        validate_opd_sample_params(self.sample_params)
         self.teacher_clients = {
             teacher.name: RolloutTeacherClient(teacher, distillation_config.loss_config)
             for teacher in distillation_config.rollout_teachers
@@ -265,69 +256,53 @@ class AgentLoop(ABC):
         self.data_source_teacher_map = dict(distillation_config.data_source_teacher_map)
 
     @abstractmethod
-    async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
+    async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
+        """Generate one rollout sample without group-level post-processing."""
+
+        ...
+
+    async def maybe_compute_teacher_logprob(self, state: RolloutState) -> RolloutState:
+        if state.status != Status.COMPLETED or not self.teacher_clients:
+            return state
+        teacher = route_rollout_teacher_client(
+            state,
+            data_source_teacher_map=self.data_source_teacher_map,
+            teacher_clients=self.teacher_clients,
+        )
+        return await teacher.compute_logprobs(state)
+
+    async def maybe_compute_teacher_logprobs(self, group: list[RolloutState]) -> list[RolloutState]:
+        return list(await asyncio.gather(*(create_task(self.maybe_compute_teacher_logprob(state)) for state in group)))
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         """Generate one rollout group.
 
         Warning:
-            Subclasses overriding this method MUST call
-            ``maybe_filter_invalid_sample`` as the final step before returning.
-            Otherwise ``TaskSpecConfig.is_valid_sample_fn`` will be silently ignored.
+            Subclasses overriding this method must preserve the Teacher/Judger/filter
+            ordering described here. Without a validity check, Teacher scoring should
+            start as soon as each sample finishes generation. With a validity check,
+            only a completed group that passes filtering should be sent to the Teacher.
         """
-        pending_tasks = []
-        for state in rollout_state:
+        filter_before_teacher = self.is_valid_sample_fn is not None
+
+        async def generate_one(state: RolloutState) -> RolloutState:
             state.sample_params = self.sample_params
-            task = create_task(self.generate_sample(state, **kwargs))
-            pending_tasks.append(task)
-        generated_samples = asyncio.gather(*pending_tasks)
-        group_samples = await generated_samples
-        if self.judger is not None and self.enable_batch_judge:
-            if all(sample.status == Status.COMPLETED for sample in group_samples):
-                group_samples = await self.run_judger(group_samples)
-        # Keep sample validation as the final group-generation step.
-        return maybe_filter_invalid_sample(group_samples, self.is_valid_sample_fn, self.logger)
+            state = await self.generate_sample(state, **kwargs)
+            # Fast path: overlap Teacher scoring with the remaining generations.
+            if not filter_before_teacher:
+                state = await self.maybe_compute_teacher_logprob(state)
+            if state.status == Status.COMPLETED and self.judger is not None and not self.enable_batch_judge:
+                state = await self.run_judger(state)
+            return state
 
-    async def collect_rollout_group(
-        self,
-        rollout_state: list[RolloutState],
-        *,
-        is_valid_sample_func: Callable[[list[RolloutState]], bool] | None = None,
-        **kwargs,
-    ) -> list[RolloutState]:
-        if is_valid_sample_func is None and self.teacher_clients:
-            teacher = route_rollout_teacher_client(
-                rollout_state[0],
-                data_source_teacher_map=self.data_source_teacher_map,
-                teacher_clients=self.teacher_clients,
-            )
+        group = list(await asyncio.gather(*(create_task(generate_one(state)) for state in rollout_state)))
+        if self.judger is not None and self.enable_batch_judge and get_group_status(group) == Status.COMPLETED:
+            group = await self.run_judger(group)
 
-            async def generate_and_score(state: RolloutState) -> RolloutState:
-                state.sample_params = self.sample_params
-                state = await self.generate_sample(state, **kwargs)
-                if state.status == Status.COMPLETED:
-                    state = await teacher.compute_logprobs(state)
-                return state
-
-            group = list(await asyncio.gather(*(create_task(generate_and_score(state)) for state in rollout_state)))
-            if self.judger is not None and self.enable_batch_judge and get_group_status(group) == Status.COMPLETED:
-                group = await self.run_judger(group)
-            return group
-
-        group = await self.generate_group(rollout_state, **kwargs)
-        if get_group_status(group) != Status.COMPLETED:
-            return group
-        if is_valid_sample_func is not None and not is_valid_sample_func(group):
-            for state in group:
-                state.status = Status.FILTERED
-            return group
-        if self.teacher_clients:
-            teacher = route_rollout_teacher_client(
-                group[0],
-                data_source_teacher_map=self.data_source_teacher_map,
-                teacher_clients=self.teacher_clients,
-            )
-            group = list(await asyncio.gather(*(create_task(teacher.compute_logprobs(state)) for state in group)))
+        group = maybe_filter_invalid_sample(group, self.is_valid_sample_fn, self.logger)
+        # Filter path: avoid Teacher work for a group that will be discarded.
+        if filter_before_teacher and get_group_status(group) == Status.COMPLETED:
+            group = await self.maybe_compute_teacher_logprobs(group)
         return group
 
     @overload
@@ -416,13 +391,6 @@ class RouterAgentLoop:
         finally:
             await self._release_worker(worker)
 
-    async def collect_rollout_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
-        worker = await self._pick_worker()
-        try:
-            return await worker.collect_rollout_group.remote(rollout_state, **kwargs)
-        finally:
-            await self._release_worker(worker)
-
     def get_worker_status(self) -> dict[str, int]:
         return {str(worker): load for worker, load in self._worker_loads.items()}
 
@@ -469,10 +437,6 @@ class AgentLoopActor:
     @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         return await self.agent_loop.generate_group(rollout_state, **kwargs)
-
-    @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
-    async def collect_rollout_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
-        return await self.agent_loop.collect_rollout_group(rollout_state, **kwargs)
 
     @ray_method
     async def get_rollout_ctl(self):

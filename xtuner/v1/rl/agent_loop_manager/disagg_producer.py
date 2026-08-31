@@ -424,7 +424,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         async def spawn_one() -> asyncio.Task:
             rollout_state = await ctx.sample_group(from_expired_pool=sample_expired)
             return create_task(
-                ctx.collect_rollout_group(
+                ctx.generate_group(
                     rollout_state,
                     enable_partial_rollout=self.enable_partial_rollout,
                 )

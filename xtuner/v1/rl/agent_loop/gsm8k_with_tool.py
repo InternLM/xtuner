@@ -159,6 +159,4 @@ class GSM8KToolAgentLoop(AgentLoop):
         assert len(rollout_state.response_ids) == len(rollout_state.response_mask) == len(rollout_state.logprobs), (
             f"{len(rollout_state.response_ids)} vs {len(rollout_state.response_mask)} vs {len(rollout_state.logprobs)}"
         )
-        if self.judger is not None and not self.enable_batch_judge:
-            rollout_state = await self.run_judger(rollout_state)
         return rollout_state

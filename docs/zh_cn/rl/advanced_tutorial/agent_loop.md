@@ -58,7 +58,7 @@ async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> l
     ...
 ```
 
-`generate_sample()` 处理单条样本；默认 `generate_group()` 会并发调用多次 `generate_sample()`，并在调用前把 `self.sample_params` 写到组内每条样本上。若配置了 `enable_batch_judge=True`，默认 `generate_group()` 会在组内样本生成完成后调用一次 `self.run_judger(group_samples)`。需要其他组级逻辑时，例如组内共享环境、组内排序过滤，可以覆盖 `generate_group()`。
+`generate_sample()` 只负责生成单条样本；默认 `generate_group()` 会并发调用多次 `generate_sample()`，并负责 Teacher scoring、逐条或批量 Judger 以及组级过滤的执行顺序。调用前，`generate_group()` 会把 `self.sample_params` 写到组内每条样本上。需要其他组级逻辑时，例如组内共享环境、组内排序过滤，可以覆盖 `generate_group()`，但需要同时明确 Teacher、Judger 和过滤的先后关系。
 
 ## 输入输出约定
 
@@ -139,18 +139,18 @@ agent_loop_config = SingleTurnAgentLoopConfig(
 )
 ```
 
-开启后，`generate_sample()` 不会逐条调用 Judger；`generate_group()` 会在组内样本全部生成完成后调用一次 `self.run_judger(group_samples)`，内部会转到 `judger.batch_judge(group_samples)`。只有当前 Judger 明确实现 `batch_judge()` 时才应开启。
+开启后，`generate_group()` 会在组内样本全部完成 generation 和必要的 Teacher scoring 后调用一次 `self.run_judger(group_samples)`，内部会转到 `judger.batch_judge(group_samples)`。关闭时，`generate_group()` 会对每条完成的样本调用 `self.run_judger(sample)`。只有当前 Judger 明确实现 `batch_judge()` 时才应开启。
 
 ## 自定义 AgentLoop
 
 自定义 AgentLoop 通常需要做四件事：
 
 1. 继承 `AgentLoop`，实现 `generate_sample()`。
-2. 在 `generate_sample()` 中维护 `tokens`、`sample_params`、`response_ids`、`response`、`logprobs`、`response_mask`、`status`。
-3. 需要打分时，在 response 可用后调用 `self.run_judger(...)`。
+2. 在 `generate_sample()` 中维护 `tokens`、`sample_params`、`response_ids`、`response`、`logprobs`、`response_mask`、`status`，不要在这里调用外部 Judger。
+3. 若覆盖 `generate_group()`，在其中显式编排 Teacher、Judger 和组级过滤；没有 validity check 时应让完成的样本尽早进入 Teacher，有 validity check 时应只把过滤通过的完整组发送给 Teacher。
 4. 继承 `AgentLoopConfig`，实现 `build_local()`，这样才能接入 `TaskSpecConfig.agent_loop_config`，并复用 Ray actor 构建逻辑。
 
-`self.run_judger(...)` 会根据输入形态调用 `judger.judge()` 或 `judger.batch_judge()`，并统一处理 pause/cancel。若自定义 AgentLoop 支持 `enable_batch_judge=True`，`generate_sample()` 中的单条打分需要用 `not self.enable_batch_judge` 保护，避免默认 `generate_group()` 再次批量打分。若自定义 AgentLoop 需要覆盖 `pause()`，应在实现中调用 `await super().pause()`，否则正在执行的 Judger 任务无法复用基类的中断逻辑。
+`self.run_judger(...)` 会根据输入形态调用 `judger.judge()` 或 `judger.batch_judge()`，并统一处理 pause/cancel。默认 `generate_group()` 已经根据 `enable_batch_judge` 选择逐条或批量打分，自定义实现不应再把外部 Judger 塞回 `generate_sample()`。若自定义 AgentLoop 需要覆盖 `pause()`，应在实现中调用 `await super().pause()`，否则正在执行的 Judger 任务无法复用基类的中断逻辑。
 
 ### 最小单轮实现
 
@@ -169,11 +169,6 @@ class CustomAgentLoop(AgentLoop):
         rollout_state.sample_params = rollout_state.sample_params or self.sample_params
         rollout_state = await self.rollout_ctl.generate.remote(rollout_state)
 
-        if rollout_state.status != Status.COMPLETED:
-            return rollout_state
-
-        if self.judger is not None and not self.enable_batch_judge:
-            rollout_state = await self.run_judger(rollout_state)
         return rollout_state
 
 
@@ -244,8 +239,6 @@ class ToolAgentLoop(AgentLoop):
         assert len(rollout_state.response_ids) == len(rollout_state.logprobs)
         assert len(rollout_state.response_ids) == len(rollout_state.response_mask)
 
-        if rollout_state.status == Status.COMPLETED and self.judger is not None and not self.enable_batch_judge:
-            rollout_state = await self.run_judger(rollout_state)
         return rollout_state
 ```
 

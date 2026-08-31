@@ -22,12 +22,34 @@ DEVICE_MODULE = get_torch_device_module()
 
 
 @dataclass
-class TrainTeacherTimings:
-    """Wall-clock seconds spent in the frozen Teacher lifecycle."""
+class TeacherTiming:
+    """Wall-clock seconds spent in one frozen Teacher lifecycle."""
 
     compute: float = 0.0
     onload: float = 0.0
     offload: float = 0.0
+
+
+@dataclass
+class TrainTeacherTimings(TeacherTiming):
+    """Wall-clock seconds spent in each frozen Teacher lifecycle."""
+
+    by_teacher: dict[str, TeacherTiming] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, dict[str, float]]:
+        """Return per-Teacher lifecycle timings.
+
+        Returns:
+            dict[str, dict[str, float]]: Teacher names mapped to compute, onload, and offload seconds.
+        """
+        return {
+            teacher_name: {
+                "compute": timing.compute,
+                "onload": timing.onload,
+                "offload": timing.offload,
+            }
+            for teacher_name, timing in self.by_teacher.items()
+        }
 
 
 @dataclass
@@ -76,6 +98,7 @@ class TrainTeacherManager:
             teacher_config.name: teacher_index
             for teacher_index, teacher_config in enumerate(distillation_config.train_teachers)
         }
+        self._teacher_names = [teacher_config.name for teacher_config in distillation_config.train_teachers]
 
     def compute_logprobs(
         self,
@@ -133,20 +156,34 @@ class TrainTeacherManager:
         self,
         teacher: FrozenModel,
         timings: TrainTeacherTimings,
+        teacher_name: str | None = None,
     ) -> Iterator[None]:
+        teacher_timing = (
+            timings.by_teacher.setdefault(teacher_name, TeacherTiming()) if teacher_name is not None else None
+        )
+
         onload_begin = time.perf_counter()
         teacher.to_device(DEVICE)
-        timings.onload += time.perf_counter() - onload_begin
+        onload_elapsed = time.perf_counter() - onload_begin
+        timings.onload += onload_elapsed
+        if teacher_timing is not None:
+            teacher_timing.onload += onload_elapsed
 
         compute_begin = time.perf_counter()
         try:
             yield
             self._synchronize_device()
         finally:
-            timings.compute += time.perf_counter() - compute_begin
+            compute_elapsed = time.perf_counter() - compute_begin
+            timings.compute += compute_elapsed
+            if teacher_timing is not None:
+                teacher_timing.compute += compute_elapsed
             offload_begin = time.perf_counter()
             self._offload_to_cpu(teacher)
-            timings.offload += time.perf_counter() - offload_begin
+            offload_elapsed = time.perf_counter() - offload_begin
+            timings.offload += offload_elapsed
+            if teacher_timing is not None:
+                teacher_timing.offload += offload_elapsed
 
     @staticmethod
     def _teacher_seq_ctx(seq_ctx: SequenceContext, *, is_composed: bool) -> SequenceContext:
@@ -193,8 +230,8 @@ class TrainTeacherManager:
         # All ranks iterate Teachers and local packs in the same order so every
         # FSDP rank enters the same collective sequence, even when a rank has no
         # tokens routed to a particular Teacher.
-        for teacher_index, teacher in enumerate(self._teachers):
-            with self._teacher_on_device(teacher, timings):
+        for teacher_index, (teacher_name, teacher) in enumerate(zip(self._teacher_names, self._teachers)):
+            with self._teacher_on_device(teacher, timings, teacher_name):
                 # Every rank forwards every local pack before selecting routed
                 # tokens so all ranks enter the same FSDP collective sequence.
                 for batch_index, (seq_ctx, teacher_indices) in enumerate(zip(seq_ctx_list, teacher_indices_list)):
@@ -225,8 +262,8 @@ class TrainTeacherManager:
         ]
 
         # Keep the Teacher-major schedule identical across ranks for FSDP.
-        for teacher_index, teacher in enumerate(self._teachers):
-            with self._teacher_on_device(teacher, timings):
+        for teacher_index, (teacher_name, teacher) in enumerate(zip(self._teacher_names, self._teachers)):
+            with self._teacher_on_device(teacher, timings, teacher_name):
                 for batch_index, (seq_ctx, shifted_labels, teacher_indices) in enumerate(
                     zip(seq_ctx_list, shifted_labels_list, teacher_indices_list)
                 ):
