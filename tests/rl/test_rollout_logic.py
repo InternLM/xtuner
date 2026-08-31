@@ -21,6 +21,7 @@ import httpx
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.agent_loop import AgentLoopConfig
+from xtuner.v1.rl.health_manager import RLHealthManager
 from xtuner.v1.rl.rollout.controller import RolloutController
 from xtuner.v1.rl.rollout.health_manager import RolloutHealthManager
 from xtuner.v1.rl.rollout.lmdeploy import LMDeployWorker
@@ -201,7 +202,8 @@ class TestRolloutTopologyAPI(unittest.TestCase):
                 for spec in topology.server_launch_specs()
             ),
         )
-        return registry.weight_update_targets()
+        targets, _ = registry.weight_update_targets()
+        return targets
 
     def _rollout_info(self, *, config, targets, train_rank: int):
         return RolloutWeightUpdateInfo.from_targets(
@@ -430,6 +432,51 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
 
         controller.proxy_manager.validate_registered_session_urls.assert_called_once_with()
 
+    def test_pause_generation_waits_for_worker_recovery(self):
+        controller = RolloutController.__new__(RolloutController)
+        controller.health_manager = MagicMock()
+        controller.health_manager.wait_recovery_done.return_value = True
+        controller.registry = MagicMock()
+        controller.registry.active_workers.return_value = ()
+        controller.logger = MagicMock()
+
+        with patch("xtuner.v1.rl.rollout.controller.ray.get", return_value=[]):
+            controller.pause_generation()
+
+        controller.health_manager.pause.assert_called_once_with()
+        controller.health_manager.wait_recovery_done.assert_called_once_with(timeout=600.0)
+        controller.health_manager.shutdown_inactive_workers.assert_not_called()
+
+    def test_pause_generation_fails_when_worker_recovery_times_out(self):
+        controller = RolloutController.__new__(RolloutController)
+        controller.health_manager = MagicMock()
+        controller.health_manager.wait_recovery_done.return_value = False
+
+        with self.assertRaisesRegex(TimeoutError, "rollout worker recovery"):
+            controller.pause_generation()
+
+    def test_mark_worker_groups_lifecycle_state_defaults_to_all_source_groups(self):
+        controller = RolloutController.__new__(RolloutController)
+        controller.registry = self._build_registry((0, 1))
+        _register_started_servers(
+            controller.registry,
+            (
+                (0, object(), "http://worker-0", "http://session-0"),
+                (1, object(), "http://worker-1", "http://session-1"),
+            ),
+        )
+        controller.registry.mark_unhealthy_ranks({0, 1})
+        controller.health_manager = MagicMock()
+
+        controller.mark_worker_groups_lifecycle_state(
+            source_state=WorkerLifecycleState.INACTIVE,
+            target_state=WorkerLifecycleState.ACTIVE,
+        )
+
+        self.assertTrue(all(worker.is_active() for worker in controller.registry.all_workers()))
+        recovered_groups = controller.health_manager.notify_worker_group_recovered.call_args.args[0]
+        self.assertEqual([group.ranks for group in recovered_groups], [(0,), (1,)])
+
 
 class TestRolloutProxyManager(unittest.TestCase):
     _ROUTED_PROXY_URL = "http://routed-proxy"
@@ -645,10 +692,10 @@ class TestRolloutWorkerRegistry(unittest.TestCase):
         inactive_groups = registry.inactive_worker_groups()
         self.assertEqual(inactive_groups[0].ranks, (0, 1))
         self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.INACTIVE)
-        claimed_groups = registry.claim_inactive_groups_for_recovery()
-        self.assertEqual(claimed_groups[0].ranks, (0, 1))
-        self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.RECOVERING)
-        registry.set_group_recovery_result(claimed_groups[0], recovered=False)
+        recovery_groups = registry.get_inactive_groups_for_recovery()
+        self.assertEqual(recovery_groups[0].ranks, (0, 1))
+        self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.INACTIVE)
+        registry.set_group_recovery_result(recovery_groups[0], recovered=False)
         self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.INACTIVE)
 
     def test_registry_sets_groups_state_with_source_filter(self):
@@ -682,9 +729,10 @@ class TestRolloutWorkerRegistry(unittest.TestCase):
             ((0, object(), "http://worker-0", "http://session-0"),),
         )
 
-        targets = registry.weight_update_targets()
+        targets, group_ranks = registry.weight_update_targets()
 
         self.assertEqual(len(targets), 1)
+        self.assertEqual(group_ranks, ((0,),))
         target = targets[0]
         self.assertEqual(target.endpoint_rank, 0)
         self.assertEqual(target.update_ranks, (0, 1))
@@ -1131,6 +1179,131 @@ class TestRolloutHealthManager(unittest.TestCase):
             registry,
         )
 
+    def test_pending_weight_recovery_is_disabled_for_ipc_and_nccl(self):
+        for transport_type in ("ipc", "nccl"):
+            with self.subTest(transport_type=transport_type):
+                manager = RLHealthManager(
+                    train_controller=MagicMock(),
+                    rollout_controller=MagicMock(),
+                    rollout_config=SimpleNamespace(weight_transport_type=transport_type),
+                )
+
+                manager.start()
+                manager.set_rollout_resources_available(True)
+                manager.stop()
+
+                self.assertFalse(manager.enable_pending_weight_recovery)
+                self.assertIsNone(manager._pending_rollout_weight_update_thread)
+
+    def test_disabling_rollout_resources_waits_for_pending_weight_update(self):
+        manager = RLHealthManager(
+            train_controller=MagicMock(),
+            rollout_controller=MagicMock(),
+            rollout_config=SimpleNamespace(weight_transport_type="checkpoint_engine"),
+        )
+        manager._rollout_resources_available.set()
+
+        class _DrainLock:
+            def __init__(self):
+                self.released = False
+
+            def acquire(self, *, timeout):
+                self.timeout = timeout
+                self.event_was_cleared = not manager._rollout_resources_available.is_set()
+                return True
+
+            def release(self):
+                self.released = True
+
+        drain_lock = _DrainLock()
+        manager._rollout_weight_update_lock = drain_lock
+
+        with patch("xtuner.v1.rl.health_manager.ray.get", side_effect=lambda value, timeout=None: value):
+            manager.set_rollout_resources_available(False)
+
+        self.assertTrue(drain_lock.event_was_cleared)
+        self.assertEqual(drain_lock.timeout, 600.0)
+        self.assertTrue(drain_lock.released)
+
+    def test_disabling_rollout_resources_times_out_waiting_for_weight_update(self):
+        manager = RLHealthManager(
+            train_controller=MagicMock(),
+            rollout_controller=MagicMock(),
+            rollout_config=SimpleNamespace(weight_transport_type="checkpoint_engine"),
+        )
+        manager._rollout_resources_available.set()
+        manager._rollout_weight_update_lock = SimpleNamespace(
+            acquire=MagicMock(return_value=False),
+            release=MagicMock(),
+        )
+
+        with patch("xtuner.v1.rl.health_manager.ray.get", side_effect=lambda value, timeout=None: value):
+            with self.assertRaisesRegex(TimeoutError, "pending rollout weight update"):
+                manager.set_rollout_resources_available(False)
+
+        self.assertFalse(manager._rollout_resources_available.is_set())
+        manager._rollout_weight_update_lock.acquire.assert_called_once_with(timeout=600.0)
+        manager._rollout_weight_update_lock.release.assert_not_called()
+
+    def test_pending_weight_update_rechecks_rollout_phase_after_lock_acquire(self):
+        manager = RLHealthManager(
+            train_controller=MagicMock(),
+            rollout_controller=MagicMock(),
+            rollout_config=SimpleNamespace(weight_transport_type="checkpoint_engine"),
+        )
+        manager._pending_rollout_weight_update_stop_event = SimpleNamespace(
+            wait=MagicMock(side_effect=(False, True))
+        )
+        manager._rollout_resources_available = SimpleNamespace(
+            is_set=MagicMock(side_effect=(True, False))
+        )
+        manager._rollout_weight_update_lock = SimpleNamespace(
+            acquire=MagicMock(return_value=True),
+            release=MagicMock(),
+        )
+        manager._update_pending_rollout_weights_from_checkpoint_engine = MagicMock()
+
+        manager._pending_rollout_worker_weight_update_loop()
+
+        manager._rollout_weight_update_lock.acquire.assert_called_once_with(blocking=False)
+        manager._rollout_weight_update_lock.release.assert_called_once_with()
+        manager._update_pending_rollout_weights_from_checkpoint_engine.assert_not_called()
+
+    def test_rl_health_manager_updates_pending_checkpoint_engine_workers(self):
+        pending_target = SimpleNamespace(endpoint_rank=0)
+        rollout_controller = SimpleNamespace(
+            get_weight_update_targets=SimpleNamespace(remote=MagicMock(return_value=((pending_target,), ((0,),)))),
+            onload_weights=SimpleNamespace(remote=MagicMock(return_value=None)),
+            onload_kvcache=SimpleNamespace(remote=MagicMock(return_value=None)),
+            mark_worker_groups_lifecycle_state=SimpleNamespace(remote=MagicMock(return_value=None)),
+        )
+        train_controller = SimpleNamespace(
+            has_registered_weight_checkpoint=MagicMock(return_value=True),
+            bind_rollout_weight_update=MagicMock(),
+            weight_update=MagicMock(),
+        )
+        rollout_config = SimpleNamespace(weight_transport_type="checkpoint_engine")
+        manager = RLHealthManager(
+            train_controller=train_controller,
+            rollout_controller=rollout_controller,
+            rollout_config=rollout_config,
+        )
+
+        with patch("xtuner.v1.rl.health_manager.ray.get", side_effect=lambda value, timeout=None: value):
+            updated_groups = manager._update_pending_rollout_weights_from_checkpoint_engine()
+
+        self.assertEqual(updated_groups, ((0,),))
+        train_controller.bind_rollout_weight_update.assert_called_once_with(
+            targets=(pending_target,),
+            rollout_config=rollout_config,
+        )
+        train_controller.weight_update.assert_called_once_with(need_register=False, need_update=True)
+        rollout_controller.mark_worker_groups_lifecycle_state.remote.assert_called_once_with(
+            group_ranks=[(0,)],
+            source_state=WorkerLifecycleState.PENDING_WEIGHTS,
+            target_state=WorkerLifecycleState.ACTIVE,
+        )
+
     def test_marks_worker_inactive_after_consecutive_health_failures(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(False))
         worker_info = WorkerSnapshot(rank=0, actor=actor, url="http://worker-0")
@@ -1145,6 +1318,7 @@ class TestRolloutHealthManager(unittest.TestCase):
             failure_threshold=2,
             worker_lifecycle_listeners=[listener],
         )
+        manager.resume()
 
         manager.run_once()
 
@@ -1178,6 +1352,7 @@ class TestRolloutHealthManager(unittest.TestCase):
             ),
         )
 
+        manager.resume()
         manager.run_once()
 
         self.assertEqual(lock_acquired_by_listener, [True])
@@ -1246,6 +1421,7 @@ class TestRolloutHealthManager(unittest.TestCase):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(False))
         worker_info = WorkerSnapshot(rank=0, actor=actor, url="http://worker-0")
         manager, registry = self._build_manager({0: worker_info}, failure_threshold=1)
+        manager.resume()
 
         with patch("xtuner.v1.rl.rollout.health_manager.logger.error") as log_error:
             manager.run_once()
@@ -1257,16 +1433,21 @@ class TestRolloutHealthManager(unittest.TestCase):
         self.assertFalse(self._worker_by_rank(registry, 0).is_active())
         self.assertEqual(actor.check_health.calls, [()])
 
-    def test_fail_fast_health_check_still_runs_when_periodic_health_check_is_disabled(self):
+    def test_shutdown_inactive_workers_shuts_already_inactive_groups_when_periodic_check_is_disabled(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(False))
-        worker_info = WorkerSnapshot(rank=0, actor=actor, url="http://worker-0")
+        worker_info = WorkerSnapshot(
+            rank=0,
+            actor=actor,
+            url="http://worker-0",
+            lifecycle_state=WorkerLifecycleState.INACTIVE,
+        )
         manager, registry = self._build_manager({0: worker_info}, failure_threshold=0)
 
         with patch.object(manager, "_shutdown_worker_group", return_value=True):
-            manager.check_and_shutdown_inactive_workers()
+            manager.shutdown_inactive_workers()
 
         self.assertFalse(self._worker_by_rank(registry, 0).is_active())
-        self.assertEqual(actor.check_health.calls, [()])
+        self.assertEqual(actor.check_health.calls, [])
 
     def test_health_check_uses_configured_timeout(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
@@ -1278,10 +1459,28 @@ class TestRolloutHealthManager(unittest.TestCase):
             observed_timeouts.append(timeout)
             return await awaitable
 
+        manager.resume()
         with patch("xtuner.v1.rl.rollout.health_manager.asyncio.wait_for", side_effect=fake_wait_for):
             manager.run_once()
 
         self.assertEqual(observed_timeouts, [2.5])
+
+    def test_background_health_check_respects_pause(self):
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
+        worker_info = WorkerSnapshot(rank=0, actor=actor, url="http://worker-0")
+        manager, _ = self._build_manager({0: worker_info})
+
+        manager.run_once()
+
+        self.assertEqual(actor.check_health.calls, [])
+
+    def test_wait_recovery_done_times_out_while_recovery_is_pending(self):
+        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
+        worker_info = WorkerSnapshot(rank=0, actor=actor, url="http://worker-0")
+        manager, _ = self._build_manager({0: worker_info})
+        manager._recovery_done.clear()
+
+        self.assertFalse(manager.wait_recovery_done(timeout=0.0))
 
     def test_wait_until_next_check_waits_for_resume_when_paused_during_interval(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
@@ -1324,7 +1523,7 @@ class TestRolloutHealthManager(unittest.TestCase):
         manager, registry = self._build_manager({0: worker_info})
 
         with patch.object(manager, "_shutdown_worker_group", return_value=False):
-            manager.check_and_shutdown_inactive_workers()
+            manager.shutdown_inactive_workers()
 
         self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.INACTIVE)
 
@@ -1418,7 +1617,7 @@ class TestRolloutHealthManager(unittest.TestCase):
             lifecycle_state=WorkerLifecycleState.INACTIVE,
         )
         manager, registry = self._build_manager({0: worker_info})
-        group = registry.claim_inactive_groups_for_recovery()[0]
+        group = registry.get_inactive_groups_for_recovery()[0]
 
         def fake_ray_get(ref, timeout=None):
             del timeout
@@ -1452,7 +1651,7 @@ class TestRolloutHealthManager(unittest.TestCase):
             lifecycle_state=WorkerLifecycleState.INACTIVE,
         )
         manager, registry = self._build_manager({0: worker_info})
-        group = registry.claim_inactive_groups_for_recovery()[0]
+        group = registry.get_inactive_groups_for_recovery()[0]
 
         def fake_ray_get(refs, timeout=None):
             del timeout

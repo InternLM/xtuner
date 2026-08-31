@@ -19,7 +19,6 @@ Bad Tests:
 """
 
 import asyncio
-import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,6 +32,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, ProduceBatchResult
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import AgentLoopManager
 from xtuner.v1.rl.agent_loop_manager.produce_utils import _TaskRunner
+from xtuner.v1.rl.health_manager import RLHealthManager
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SerializedRayObjectRef
 from xtuner.v1.train.rl_trainer import RLColocateTrainer, RLThroughputBenchmark
 
@@ -113,10 +113,6 @@ class TestRLColocateTrainer(unittest.TestCase):
 
     def _make_trainer(self, agent_loop_manager, *, total_train_steps: int = 1, sync_weights_interval: int = 1):
         trainer = RLColocateTrainer.__new__(RLColocateTrainer)
-        trainer._rollout_resources_available = threading.Event()
-        trainer._rollout_weight_update_lock = threading.Lock()
-        trainer._pending_rollout_weight_update_stop_event = threading.Event()
-        trainer._pending_rollout_weight_update_thread: threading.Thread | None = None
         trainer._rollout_config = SimpleNamespace(weight_transport_type='ipc')
         trainer.logger = MagicMock()
         trainer._total_train_steps = total_train_steps
@@ -159,13 +155,13 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
 
         trainer.rollout_controller = SimpleNamespace(
-            check_and_shutdown_inactive_workers=SimpleNamespace(
-                remote=MagicMock(return_value="rollout_inactive_workers_shutdown")
+            shutdown_inactive_workers=SimpleNamespace(
+                remote=MagicMock(side_effect=_ray_get_none_ref)
             ),
-            offload=SimpleNamespace(remote=MagicMock(return_value="rollout_offloaded")),
-            restart_inactive_workers=SimpleNamespace(remote=MagicMock(return_value="rollout_restarted")),
-            onload_weights=SimpleNamespace(remote=MagicMock(return_value="weights_loaded")),
-            onload_kvcache=SimpleNamespace(remote=MagicMock(return_value="kvcache_loaded")),
+            offload=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
+            restart_inactive_workers=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
+            onload_weights=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
+            onload_kvcache=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
             validate_registered_workers_to_proxy=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
         )
         trainer.train_controller = SimpleNamespace(
@@ -184,6 +180,11 @@ class TestRLColocateTrainer(unittest.TestCase):
                     }
                 ]
             ),
+        )
+        trainer.rl_health_manager = RLHealthManager(
+            train_controller=trainer.train_controller,
+            rollout_controller=trainer.rollout_controller,
+            rollout_config=trainer._rollout_config,
         )
         return trainer
 
@@ -246,7 +247,7 @@ class TestRLColocateTrainer(unittest.TestCase):
             return ProduceBatchResult(rollout_states=[[_FakeRolloutState(train_step)]])
 
         trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch))
-        trainer.rollout_controller.check_and_shutdown_inactive_workers.remote.side_effect = RuntimeError(
+        trainer.rollout_controller.shutdown_inactive_workers.remote.side_effect = RuntimeError(
             "inactive rollout workers after recovery"
         )
 
@@ -257,7 +258,7 @@ class TestRLColocateTrainer(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "inactive rollout workers"):
                 trainer.fit()
 
-        trainer.rollout_controller.check_and_shutdown_inactive_workers.remote.assert_called_once_with()
+        trainer.rollout_controller.shutdown_inactive_workers.remote.assert_called_once_with()
         trainer.rollout_controller.offload.remote.assert_not_called()
         trainer.train_controller.onload.assert_not_called()
         trainer.train_controller.fit.assert_not_called()

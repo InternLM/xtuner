@@ -50,8 +50,8 @@ class _HealthManagerStopping(InterruptedError):
 class _WorkerHealthFailureTracker:
     """Track per-rank health-check failures and decide when a rank fails.
 
-    Periodic checks call update_failed_ranks() to apply the configured threshold. Explicit shutdown barriers call
-    mark_failed_ranks() to fail unhealthy ranks immediately while still keeping failure-count bookkeeping in one place.
+    Periodic checks call update_failed_ranks() and report workers whose consecutive failures reach the configured
+    threshold.
     """
 
     threshold: int
@@ -86,22 +86,6 @@ class _WorkerHealthFailureTracker:
 
         return failed_ranks
 
-    def mark_failed_ranks(self, worker_health_results: dict[int, bool]) -> set[int]:
-        failed_ranks: set[int] = set()
-        for rank, is_healthy in worker_health_results.items():
-            if is_healthy:
-                self.failure_counts.pop(rank, None)
-                continue
-
-            failure_count = self._record_failure(rank)
-            logger.warning(
-                f"Worker {rank} failed explicit health check and will be marked inactive "
-                f"immediately: failure_count={failure_count}."
-            )
-            failed_ranks.add(rank)
-
-        return failed_ranks
-
 
 class RolloutHealthManager:
     """Own worker health state and recovery after controller startup.
@@ -126,6 +110,9 @@ class RolloutHealthManager:
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()
+        # 恢复是否已经完成
+        self._recovery_done = threading.Event()
+        self._recovery_done.set()
         self._thread: threading.Thread | None = None
         self._lifecycle_operation_lock = threading.Lock()
         self._worker_health_failure_tracker = _WorkerHealthFailureTracker(threshold=self._check_failure_threshold)
@@ -177,6 +164,15 @@ class RolloutHealthManager:
         self._pause_event.clear()
         logger.info("RolloutHealthManager resumed.")
 
+    def wait_recovery_done(self, timeout: float) -> bool:
+        """Wait for ongoing worker health and worker recovery."""
+        deadline = time.monotonic() + timeout
+        if not self._lifecycle_operation_lock.acquire(timeout=timeout):
+            return False
+        self._lifecycle_operation_lock.release()
+        # 等待 recovery 完成，最多等待剩余的 timeout 时间
+        return self._recovery_done.wait(timeout=max(0.0, deadline - time.monotonic()))
+
     # ------------------------------------------------------------------
     # Public health and lifecycle workflows
     # ------------------------------------------------------------------
@@ -193,6 +189,8 @@ class RolloutHealthManager:
         failed_groups: tuple[WorkerGroup, ...] = ()
         logger.debug("RolloutHealthManager running health checks for active workers.")
         try:
+            if self._pause_event.is_set():
+                return
             worker_health_results = self._check_active_workers_health()
             failed_ranks = self._worker_health_failure_tracker.update_failed_ranks(worker_health_results)
             if not failed_ranks:
@@ -202,6 +200,8 @@ class RolloutHealthManager:
             except _HealthManagerStopping:
                 return
             failed_groups = self._registry.mark_unhealthy_ranks(failed_ranks)
+            # 标记有重启中的worker，正在等待完成
+            self._recovery_done.clear()
         finally:
             self._lifecycle_operation_lock.release()
 
@@ -214,25 +214,28 @@ class RolloutHealthManager:
         )
         # TODO: Recovery runs synchronously on the health-check thread, so the next
         # periodic health check waits until this restart finishes. Move restart to another thread.
-        self._restart_inactive_workers()
+        try:
+            self._restart_inactive_workers()
+        finally:
+            # 标记恢复已完成
+            self._recovery_done.set()
 
     def restart_inactive_workers(self) -> tuple[WorkerGroup, ...]:
         """Synchronously restart inactive groups before the next sync-step
         weight update."""
-        return self._restart_inactive_workers()
+        self._recovery_done.clear()
+        try:
+            return self._restart_inactive_workers()
+        finally:
+            self._recovery_done.set()
 
-    def check_and_shutdown_inactive_workers(self) -> None:
-        """Fail-fast health-check active workers, mark failures inactive, and
-        shut down every non-active group so shared resources can be reused by
-        training."""
+    def shutdown_inactive_workers(self) -> None:
+        """Shut down every non-active group so shared resources can be reused
+        by training."""
         groups_to_shutdown: tuple[WorkerGroup, ...] = ()
 
         try:
             with self._paused_lifecycle_operation():
-                worker_health_results = self._check_active_workers_health()
-                self._checkpoint_not_stopping()
-                self._mark_unhealthy_worker_groups_inactive(worker_health_results)
-                self._checkpoint_not_stopping()
                 groups_to_shutdown = self._registry.inactive_worker_groups()
                 for group in groups_to_shutdown:
                     self._shutdown_worker_group(group)
@@ -356,15 +359,6 @@ class RolloutHealthManager:
             worker_health_results[worker.rank] = bool(result)
 
         return worker_health_results
-
-    def _mark_unhealthy_worker_groups_inactive(self, worker_health_results: dict[int, bool]) -> None:
-        failed_ranks = self._worker_health_failure_tracker.mark_failed_ranks(worker_health_results)
-        if not failed_ranks:
-            return
-
-        inactive_groups = self._registry.mark_unhealthy_ranks(failed_ranks)
-        for group in inactive_groups:
-            logger.warning(f"Rollout worker group ranks={group.ranks} failed health check. Marking as inactive.")
 
     # ------------------------------------------------------------------
     # Worker group recovery state
@@ -635,7 +629,7 @@ class RolloutHealthManager:
 
         try:
             with self._paused_lifecycle_operation():
-                groups_to_recover = self._registry.claim_inactive_groups_for_recovery()
+                groups_to_recover = self._registry.get_inactive_groups_for_recovery()
                 if groups_to_recover:
                     pending_weights_groups = tuple(self._restart_claimed_recovery_groups(groups_to_recover))
         except _HealthManagerStopping:

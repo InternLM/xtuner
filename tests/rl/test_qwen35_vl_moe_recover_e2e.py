@@ -130,7 +130,6 @@ class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
 
         unavailable_states = {
             WorkerLifecycleState.INACTIVE.value,
-            WorkerLifecycleState.RECOVERING.value,
             WorkerLifecycleState.PENDING_WEIGHTS.value,
         }
         self.assertTrue(unavailable_states.intersection(self._rank_0_lifecycle_states))
@@ -360,6 +359,7 @@ class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
             skip_load_weights=True,
             checkpoint_name_prefix=EXPERIMENT_NAME,
             checkpoint_engine_timeout=RECOVERY_TIMEOUT_S,
+            # 更快的发现错误并且重启
             health_check_interval_seconds=5.0,
             health_check_failure_threshold=1,
             extra_rollout_config={

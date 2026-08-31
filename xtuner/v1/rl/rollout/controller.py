@@ -66,17 +66,38 @@ class RolloutController:
         )
         self.health_manager.start()
 
-    def get_weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
-        """Return rollout endpoints that can receive weight update requests."""
-        return self.registry.weight_update_targets()
+    def get_weight_update_targets(
+        self, target_state: WorkerLifecycleState | None = None, return_group_ranks: bool = False
+    ) -> (
+        list[RolloutWeightUpdateTarget]
+        | tuple[
+            list[RolloutWeightUpdateTarget],
+            list[tuple[int, ...]],
+        ]
+    ):
+        """Return rollout weight-update targets and their lifecycle groups."""
 
-    def get_pending_weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
-        """Return recovered rollout endpoints waiting for weights."""
-        return tuple(
-            target
-            for target in self.registry.weight_update_targets()
-            if target.lifecycle_state == WorkerLifecycleState.PENDING_WEIGHTS
-        )
+        target_states: tuple[WorkerLifecycleState, ...]
+        if target_state is None:
+            target_states = (
+                WorkerLifecycleState.PENDING_WEIGHTS,
+                WorkerLifecycleState.ACTIVE,
+                WorkerLifecycleState.INACTIVE,
+            )
+        else:
+            target_states = (target_state,)
+        target_state_values = {state.value for state in target_states}
+        targets, group_ranks = self.registry.weight_update_targets()
+
+        filtered_targets = [target for target in targets if target.lifecycle_state in target_state_values]
+
+        if not return_group_ranks:
+            return filtered_targets
+
+        endpoint_ranks = {target.endpoint_rank for target in filtered_targets}
+        filtered_group_ranks = [ranks for ranks in group_ranks if endpoint_ranks.intersection(ranks)]
+
+        return filtered_targets, filtered_group_ranks
 
     def inject_backend_crash_for_test(self, *, rank: int = 0) -> None:
         """Crash one active rollout backend for the immediate-recovery test."""
@@ -160,6 +181,9 @@ class RolloutController:
 
     def pause_generation(self):
         self.health_manager.pause()
+        # Wait for the health manager to finish recovery before pausing generation.
+        if not self.health_manager.wait_recovery_done(timeout=600.0):
+            raise TimeoutError("Timed out waiting for rollout worker recovery before training.")
         active_workers = self.registry.active_workers()
         futures = [
             worker.actor.pause_generation.remote()  # type: ignore[attr-defined]
@@ -179,10 +203,10 @@ class RolloutController:
         if failed_worker_urls:
             self.logger.warning(f"Abort request failed: worker_urls={failed_worker_urls}")
 
-    async def check_and_shutdown_inactive_workers(self):
-        """Run a fail-fast health barrier and shut down failed groups so
-        training can reuse shared rollout resources."""
-        await asyncio.to_thread(self.health_manager.check_and_shutdown_inactive_workers)
+    async def shutdown_inactive_workers(self):
+        """Shut down failed groups so training can reuse shared rollout
+        resources."""
+        await asyncio.to_thread(self.health_manager.shutdown_inactive_workers)
 
     async def restart_inactive_workers(self):
         """Restart inactive groups before a sync-step weight update."""
@@ -191,17 +215,24 @@ class RolloutController:
 
     def mark_worker_groups_lifecycle_state(
         self,
-        group_ranks: list[tuple[int, ...]],
+        group_ranks: list[tuple[int, ...]] | None = None,
+        *,
         source_state: WorkerLifecycleState,
         target_state: WorkerLifecycleState,
     ) -> None:
         """Move selected worker groups from source_state to target_state.
 
-        Only groups whose current lifecycle state matches source_state are considered. When groups are moved to ACTIVE
-        or INACTIVE, the health manager is notified so routing and lifecycle listeners stay in sync.
+        When group_ranks is omitted, every complete worker group currently in source_state is moved. When it is
+        provided, only exact matching groups are considered. Transitions to ACTIVE or INACTIVE notify the health
+        manager so routing and lifecycle listeners stay in sync.
         """
-        groups_by_ranks = {group.ranks: group for group in self.registry.get_target_state_worker_groups(source_state)}
-        groups = tuple(groups_by_ranks[ranks] for ranks in group_ranks if ranks in groups_by_ranks)
+        source_groups = self.registry.get_target_state_worker_groups(source_state)
+        # 只对目标group中命中状态的worker进行状态更新，若不提供目标group，则对所有source_state状态的worker进行状态更新
+        if group_ranks is None:
+            groups = source_groups
+        else:
+            groups_by_ranks = {group.ranks: group for group in source_groups}
+            groups = tuple(groups_by_ranks[ranks] for ranks in group_ranks if ranks in groups_by_ranks)
         updated_groups = self.registry.set_groups_state(
             groups,
             target_state,

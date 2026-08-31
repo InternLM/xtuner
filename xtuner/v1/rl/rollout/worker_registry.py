@@ -30,8 +30,6 @@ class WorkerLifecycleState(str, Enum):
     ACTIVE = "active"
     # Not serving rollout requests; the rollout server may still hold resources.
     INACTIVE = "inactive"
-    # Temporarily owned by recovery shutdown/init/check_health.
-    RECOVERING = "recovering"
     # Server is healthy after recovery, but waiting for trainer-side weights..
     PENDING_WEIGHTS = "pending_weights"
 
@@ -189,12 +187,8 @@ class RolloutWorkerRegistry:
             ]
             return tuple(sorted(inactive_groups, key=lambda group: group.ranks))
 
-    def pending_weights_worker_groups(self) -> tuple[WorkerGroup, ...]:
-        """Return lifecycle groups waiting for a rollout weight update."""
-        return self.get_target_state_worker_groups(WorkerLifecycleState.PENDING_WEIGHTS)
-
-    def claim_inactive_groups_for_recovery(self) -> tuple[WorkerGroup, ...]:
-        """Claim inactive worker groups by moving them to RECOVERING state."""
+    def get_inactive_groups_for_recovery(self) -> tuple[WorkerGroup, ...]:
+        """Return inactive worker groups selected for recovery."""
         with self._lock:
             worker_groups = self._build_worker_groups()
             inactive_groups = [
@@ -208,13 +202,9 @@ class RolloutWorkerRegistry:
                     worker.rank for worker in group.workers if worker.lifecycle_state is WorkerLifecycleState.INACTIVE
                 )
                 logger.warning(
-                    f"Claimed inactive rollout worker ranks={inactive_ranks} "
+                    f"Selected inactive rollout worker ranks={inactive_ranks} "
                     f"in worker_group_ranks={group.ranks} for recovery."
                 )
-                for rank in group.ranks:
-                    worker = self._workers.get(rank)
-                    if worker is not None:
-                        self._workers[rank] = replace(worker, lifecycle_state=WorkerLifecycleState.RECOVERING)
             return sorted_groups
 
     def mark_unhealthy_ranks(self, ranks: set[int]) -> tuple[WorkerGroup, ...]:
@@ -285,8 +275,14 @@ class RolloutWorkerRegistry:
                 recorded_groups.append(recorded_group)
             return tuple(recorded_groups)
 
-    def weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
-        """Return weight-update targets resolved with current runtime state."""
+    def weight_update_targets(
+        self,
+    ) -> tuple[
+        tuple[RolloutWeightUpdateTarget, ...],
+        tuple[tuple[int, ...], ...],
+    ]:
+        """Return weight-update targets resolved with current runtime state and
+        their lifecycle group ranks."""
         from xtuner.v1.rl.weight_update.data import RolloutWeightUpdateTarget
 
         with self._lock:
@@ -305,4 +301,17 @@ class RolloutWorkerRegistry:
                         lifecycle_state=worker.lifecycle_state.value,
                     )
                 )
-            return tuple(sorted(targets, key=lambda target: target.endpoint_rank))
+            sorted_targets = tuple(
+                sorted(
+                    targets,
+                    key=lambda target: target.endpoint_rank,
+                )
+            )
+            group_ranks = tuple(
+                dict.fromkeys(
+                    self._rollout_topology.lifecycle_group_for_server_rank(target.endpoint_rank)
+                    for target in sorted_targets
+                )
+            )
+
+            return sorted_targets, group_ranks
