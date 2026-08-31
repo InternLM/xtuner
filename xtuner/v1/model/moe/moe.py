@@ -9,7 +9,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from cyclopts import Parameter
-from pydantic import ConfigDict
+from pydantic import ConfigDict, model_validator
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -73,6 +73,7 @@ from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
     MoEDecoderLayerOutput,
     MoEGate,
 )
+from xtuner.v1.module.moe_backend import SonicMoEBackendConfig
 from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
 from xtuner.v1.utils import (
     get_device,
@@ -110,6 +111,12 @@ MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
 
 MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
 MOE_EP_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward")
+
+SONICMOE_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
+SONICMOE_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward")
+SONICMOE_COMPILE_CFG["xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward"] = TorchCompileOption(
+    fullgraph=False
+)
 
 
 class MoEModelOutputs(ModelOutputs):
@@ -168,6 +175,8 @@ class MoEConfig(TransformerConfig):
     router_compute_dtype: Literal["float32", "native"] = "float32"
     moe_bias: bool = False
     moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig()
+    expert_backend: Annotated[Literal["grouped_gemm", "sonicmoe"], Parameter(group="moe")] = "grouped_gemm"
+    sonicmoe_cfg: SonicMoEBackendConfig = SonicMoEBackendConfig()
     mtp_config: MTPConfig | None = None
     freeze_routers: bool = False
     router_async_offload: bool = False
@@ -177,6 +186,37 @@ class MoEConfig(TransformerConfig):
     # Compose models call `self.embed_tokens` multiple times per step, so default to
     # keeping it unsharded after forward to avoid repeated all-gathers.
     embed_reshard_after_forward: bool = True
+
+    @model_validator(mode="after")
+    def _validate_expert_backend(self) -> Self:
+        if self.expert_backend != "sonicmoe":
+            return self
+
+        if self.ep_size != 1:
+            raise ValueError("The initial SonicMoE integration requires ep_size=1; EP support is not implemented yet.")
+        if self.expert_tp_size != 1:
+            raise ValueError(
+                "The initial SonicMoE integration requires expert_tp_size=1; "
+                "ExpertTP support is not implemented yet."
+            )
+        if self.dispatcher is not None:
+            raise ValueError("SonicMoE owns token dispatch internally, so dispatcher must be None.")
+        if self.float8_cfg is not None:
+            raise ValueError("The initial SonicMoE integration supports BF16 only; float8_cfg must be None.")
+        if self.moe_act_fn_cfg.act_type != "swiglu":
+            raise ValueError("The initial SonicMoE integration supports the SwiGLU expert activation only.")
+        if self.sonicmoe_cfg.routing_mode == "token_rounding":
+            if not isinstance(self.router, GreedyRouterConfig):
+                raise ValueError("SonicMoE token rounding requires GreedyRouterConfig.")
+            if self.router.scoring_func != "softmax":
+                raise ValueError("SonicMoE token rounding requires softmax router scores.")
+            if self.router.use_grouped_router:
+                raise ValueError("SonicMoE token rounding does not support grouped expert selection.")
+            if not self.router.norm_topk_prob:
+                raise ValueError("SonicMoE token rounding requires norm_topk_prob=True.")
+            if self.router.router_scaling_factor != 1.0:
+                raise ValueError("SonicMoE token rounding requires router_scaling_factor=1.0.")
+        return self
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
@@ -1150,6 +1190,8 @@ class MoE(BaseModel):
                     router_config=config.router,
                     router_compute_dtype=config.router_compute_dtype,
                     moe_act_fn_cfg=config.moe_act_fn_cfg,
+                    expert_backend=config.expert_backend,
+                    sonicmoe_cfg=config.sonicmoe_cfg,
                     float8_cfg=config.float8_cfg,
                     layer_idx=layer_idx,
                     dispatcher=config.dispatcher,
@@ -1217,6 +1259,8 @@ class MoE(BaseModel):
                 router_config=config.router,
                 router_compute_dtype=config.router_compute_dtype,
                 moe_act_fn_cfg=config.moe_act_fn_cfg,
+                expert_backend=config.expert_backend,
+                sonicmoe_cfg=config.sonicmoe_cfg,
                 float8_cfg=config.float8_cfg,
                 layer_idx=config.num_hidden_layers + i,
                 dispatcher=config.dispatcher,
@@ -1415,6 +1459,8 @@ class MoE(BaseModel):
     @property
     @override
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
+        if self.config.expert_backend == "sonicmoe":
+            return SONICMOE_COMPILE_CFG
         if use_moe_ep_compile_cfg(self.config):
             return MOE_EP_COMPILE_CFG
         return MOE_NON_EP_COMPILE_CFG
