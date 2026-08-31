@@ -106,6 +106,60 @@ def _agent_loop_manager_uses_trace_store(
     return _agent_loop_manager_requires_rollout_proxy(cfg)
 
 
+def _migrate_manager_is_valid_sample_fn(
+    manager_cfg: AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None,
+    logger,
+) -> AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None:
+    """Move the legacy produce-strategy validity check to its task config."""
+    if manager_cfg is None:
+        return None
+
+    tasks = manager_cfg.tasks if isinstance(manager_cfg.tasks, list) else [manager_cfg.tasks]
+    migrated_tasks = []
+    changed = False
+    for task in tasks:
+        strategy_cfg = task.produce_strategy_config
+        legacy_fn = strategy_cfg.is_valid_sample_fn
+        if legacy_fn is None:
+            migrated_tasks.append(task)
+            continue
+        if task.is_valid_sample_fn is not None and task.is_valid_sample_fn is not legacy_fn:
+            raise ValueError(
+                f"Task {task.task_name!r} configures is_valid_sample_fn in both the task and its "
+                "produce strategy. Remove the deprecated produce-strategy value."
+            )
+
+        logger.warning(
+            f"Task {task.task_name!r} uses deprecated produce_strategy_config.is_valid_sample_fn; "
+            "move it to TaskSpecConfig.is_valid_sample_fn."
+        )
+        migrated_tasks.append(
+            task.model_copy(
+                update={
+                    "is_valid_sample_fn": legacy_fn,
+                    "produce_strategy_config": strategy_cfg.model_copy(update={"is_valid_sample_fn": None}),
+                }
+            )
+        )
+        changed = True
+
+    if not changed:
+        return manager_cfg
+    migrated_value = migrated_tasks if isinstance(manager_cfg.tasks, list) else migrated_tasks[0]
+    return manager_cfg.model_copy(update={"tasks": migrated_value})
+
+
+def _migrate_legacy_is_valid_sample_fn(cfg: "BaseRLTrainerConfig", logger) -> None:
+    cfg.agent_loop_manager_cfg = cast(
+        AgentLoopManagerConfig | DisaggAgentLoopManagerConfig,
+        _migrate_manager_is_valid_sample_fn(cfg.agent_loop_manager_cfg, logger),
+    )
+    cfg.eval_agent_loop_manager_cfg = cast(
+        AgentLoopManagerConfig | None,
+        _migrate_manager_is_valid_sample_fn(cfg.eval_agent_loop_manager_cfg, logger),
+    )
+
+
 def _trace_session_ids(rollout_batches: list[list[RolloutState]]) -> list[str]:
     """Return stable, unique trace session ids owned by rollout batches."""
     return list(
@@ -603,6 +657,7 @@ class BaseRLTrainer:
         self._init_load_source(cfg)
         self._init_save_config(cfg)
         log_dir = self._init_logger(cfg, logger_tag)
+        _migrate_legacy_is_valid_sample_fn(cfg, self.logger)
         self._init_trace(cfg)
         self._save_runtime_environment(log_dir)
         self._init_train_state(cfg)
@@ -666,6 +721,15 @@ class BaseRLTrainer:
 
         env_path = log_dir / "env.json"
         environment_variables = dict(os.environ)
+        xtuner_environment = {
+            key: value for key, value in sorted(environment_variables.items()) if key.startswith("XTUNER")
+        }
+        log_str = "\n============XTuner RL Training Environment============\n"
+        for key, value in xtuner_environment.items():
+            log_str += f"{key}: {value}\n"
+        log_str += "======================================================"
+        self.logger.info(log_str)
+
         infer_engine_version = get_rollout_engine_version()
         environment_variables.update(infer_engine_version)
         with env_path.open("w") as f:
@@ -1437,54 +1501,20 @@ class BaseRLTrainer:
 
     def _save_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
         rewards = []
-        trajectory_items = []
+        response_len_list = []
+        valid_groups = []
 
         for group in data_groups:
             if not is_valid_for_training(group, self.logger):
                 continue
+            valid_groups.append(group)
             for data in group:
                 assert data.reward is not None
                 rewards.append(data.reward["score"])
                 response_ids = self._get_trajectory_response_ids(data)
-                response = data.response
-                if response is None and response_ids:
-                    response = self.tokenizer.decode(response_ids)
-                ground_truth = None
-                if data.reward_model is not None:
-                    ground_truth = data.reward_model.get("ground_truth")
-                response_len = len(response_ids)
-                trajectory_items.append(
-                    {
-                        "rollout_id": data.rollout_id,
-                        "group_id": data.group_id,
-                        "task_name": data.task_name,
-                        "data_source": data.data_source,
-                        "status": data.status.value if hasattr(data.status, "value") else str(data.status),
-                        "finish_reason": data.finish_reason,
-                        "error_msg": data.error_msg,
-                        "prompt": data.message,
-                        "label": ground_truth,
-                        "response": response,
-                        "reward": data.reward["score"],
-                        "prompt_len": data.num_tokens,
-                        "response_len": response_len,
-                        "reward_payload": data.reward,
-                        "agent": {
-                            "name": data.extra_fields.get("agent_name"),
-                            "selected": data.extra_fields.get("agent_selected"),
-                            "status": data.extra_fields.get("agent_status", None),
-                            "judgers": data.extra_fields.get("agent_judgers", None),
-                            "finish_info": data.extra_fields.get("agent_finish_info", None),
-                            "tool_turns": data.extra_fields.get("agent_tool_turns", None),
-                            "artifacts": data.extra_fields.get("agent_artifacts"),
-                            "messages": data.extra_fields.get("agent_messages"),
-                            "tools": data.extra_fields.get("agent_tools"),
-                        },
-                    }
-                )
+                response_len_list.append(len(response_ids))
 
         rewards_tensor = torch.tensor(rewards).float() if rewards else torch.tensor([0.0]).float()
-        response_len_list = [item["response_len"] for item in trajectory_items]
         response_lens = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
 
         with open(save_path, "w", encoding="utf-8") as f:
@@ -1501,40 +1531,32 @@ class BaseRLTrainer:
             }
             json.dump(summary, f, ensure_ascii=False, separators=(",", ":"))
             f.write("\n")
-            for item in trajectory_items:
-                json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
-                f.write("\n")
+            for group in valid_groups:
+                for data in group:
+                    assert data.reward is not None
+                    response_ids = self._get_trajectory_response_ids(data)
+                    response = data.response
+                    if response is None and response_ids:
+                        response = self.tokenizer.decode(response_ids)
+                    ground_truth = None
+                    if data.reward_model is not None:
+                        ground_truth = data.reward_model.get("ground_truth")
 
-    def _save_eval_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
-        rewards = []
-        trajectory_items = []
-
-        for group in data_groups:
-            for data in group:
-                reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
-                response = data.response or ""
-                response_ids = self._get_trajectory_response_ids(data)
-                response_len = len(response_ids)
-                rewards.append(reward)
-                ground_truth = None
-                if data.reward_model is not None:
-                    ground_truth = data.reward_model.get("ground_truth")
-                trajectory_items.append(
-                    {
+                    item = {
                         "rollout_id": data.rollout_id,
                         "group_id": data.group_id,
                         "task_name": data.task_name,
                         "data_source": data.data_source,
                         "status": data.status.value if hasattr(data.status, "value") else str(data.status),
-                        "prompt": data.message,
-                        "response": response,
-                        "prompt_len": data.num_tokens,
-                        "response_len": response_len,
-                        "label": ground_truth,
-                        "reward": reward,
-                        "reward_payload": data.reward or {"score": reward},
                         "finish_reason": data.finish_reason,
                         "error_msg": data.error_msg,
+                        "prompt": data.message,
+                        "label": ground_truth,
+                        "response": response,
+                        "reward": data.reward["score"],
+                        "prompt_len": data.num_tokens,
+                        "response_len": len(response_ids),
+                        "reward_payload": data.reward,
                         "agent": {
                             "name": data.extra_fields.get("agent_name"),
                             "selected": data.extra_fields.get("agent_selected"),
@@ -1542,15 +1564,29 @@ class BaseRLTrainer:
                             "judgers": data.extra_fields.get("agent_judgers", None),
                             "finish_info": data.extra_fields.get("agent_finish_info", None),
                             "tool_turns": data.extra_fields.get("agent_tool_turns", None),
+                            "session_id": str(data.session_id) if data.session_id is not None else None,
+                            "segment_index": data.extra_fields.get("agent_trace_segment_index"),
+                            "segment_count": data.extra_fields.get("agent_trace_segment_count"),
                             "artifacts": data.extra_fields.get("agent_artifacts"),
                             "messages": data.extra_fields.get("agent_messages"),
                             "tools": data.extra_fields.get("agent_tools"),
                         },
                     }
-                )
+                    json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
+                    f.write("\n")
+
+    def _save_eval_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
+        rewards = []
+        response_len_list = []
+
+        for group in data_groups:
+            for data in group:
+                reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
+                response_ids = self._get_trajectory_response_ids(data)
+                rewards.append(reward)
+                response_len_list.append(len(response_ids))
 
         rewards_tensor = torch.tensor(rewards).float() if rewards else torch.tensor([0.0]).float()
-        response_len_list = [item["response_len"] for item in trajectory_items]
         response_lens = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
 
         with open(save_path, "w", encoding="utf-8") as f:
@@ -1567,9 +1603,46 @@ class BaseRLTrainer:
             }
             json.dump(summary, f, ensure_ascii=False, separators=(",", ":"))
             f.write("\n")
-            for item in trajectory_items:
-                json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
-                f.write("\n")
+            for group in data_groups:
+                for data in group:
+                    reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
+                    response_ids = self._get_trajectory_response_ids(data)
+                    ground_truth = None
+                    if data.reward_model is not None:
+                        ground_truth = data.reward_model.get("ground_truth")
+
+                    item = {
+                        "rollout_id": data.rollout_id,
+                        "group_id": data.group_id,
+                        "task_name": data.task_name,
+                        "data_source": data.data_source,
+                        "status": data.status.value if hasattr(data.status, "value") else str(data.status),
+                        "prompt": data.message,
+                        "response": data.response or "",
+                        "prompt_len": data.num_tokens,
+                        "response_len": len(response_ids),
+                        "label": ground_truth,
+                        "reward": reward,
+                        "reward_payload": data.reward or {"score": reward},
+                        "finish_reason": data.finish_reason,
+                        "error_msg": data.error_msg,
+                        "agent": {
+                            "name": data.extra_fields.get("agent_name"),
+                            "selected": data.extra_fields.get("agent_selected"),
+                            "status": data.extra_fields.get("agent_status", None),
+                            "judgers": data.extra_fields.get("agent_judgers", None),
+                            "finish_info": data.extra_fields.get("agent_finish_info", None),
+                            "tool_turns": data.extra_fields.get("agent_tool_turns", None),
+                            "session_id": str(data.session_id) if data.session_id is not None else None,
+                            "segment_index": data.extra_fields.get("agent_trace_segment_index"),
+                            "segment_count": data.extra_fields.get("agent_trace_segment_count"),
+                            "artifacts": data.extra_fields.get("agent_artifacts"),
+                            "messages": data.extra_fields.get("agent_messages"),
+                            "tools": data.extra_fields.get("agent_tools"),
+                        },
+                    }
+                    json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
+                    f.write("\n")
 
     def _get_trajectory_response_ids(self, data: RolloutState) -> list[int]:
         if data.response_ids is not None:
@@ -2107,6 +2180,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         # TODO: 非共卡需要额外加健康检查恢复worker的逻辑，共卡是在训练之前恢复，但是非共卡不需要在训练之前恢复,挂掉就恢复或者更新权重前恢复，需要评估一下哪种方式更合理。
         with timer("sync_weight", step_timer_dict):
+            ray.get(
+                self.rollout_controller.flush_cache.remote(),
+                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+            )
             bind_train_rollout(
                 train_controller=self.train_controller,
                 rollout_controller=self.rollout_controller,

@@ -1,16 +1,11 @@
-"""RL Colocate Trainer 示例配置（GRPO + GSM8K）。
-
-用法：通过环境变量传入路径后，由 CLI 加载本配置并 trainer_cfg.build().fit()。 需设置: WORK_DIR, MODEL_PATH, DATA_PATH, EVAL_DATA_PATH 可选:
-WORLD_SIZE, ENABLE_RETURN_ROUTED_EXPERTS, LOSS_TYPE, LOSS_MODE, SP_SIZE
-"""
-
 import os
+from pathlib import Path
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
-from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig
-from xtuner.v1.model.compose.qwen3_vl import Qwen3VLDense8BConfig
+from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
+from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import (
@@ -20,7 +15,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.judger import GEO3KJudgerConfig
+from xtuner.v1.rl.judger import GSM8KJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
@@ -34,22 +29,21 @@ work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
 data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
-enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0")
+enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "1")
 NNODE = int(os.environ.get("WORLD_SIZE", "1"))
-media_root = os.environ["MEDIA_ROOT"]
 
 # basic settings
-experimental_name = "grpo_geo3k"
-total_train_steps = 15  # TODO: total_epoch
+experimental_name = "glm5p2_dapo_gsm8k"
+total_train_steps = 15
 evaluate_step = 15
-train_optimizer_steps = 4
-train_batch_size = 1024
+train_optimizer_steps = 1
+train_batch_size = 64 * train_optimizer_steps
 prompt_repeat_k = 5
 rollout_tp_size = 1
-rollout_ep_size = 1
-max_prompt_length = 1024
-max_response_length = 2048
-pack_max_length = 32 * 1024
+rollout_ep_size = 8
+max_prompt_length = 512
+max_response_length = 1024
+pack_max_length = 16 * 1024
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
@@ -71,27 +65,30 @@ rollout_config = RolloutConfig(
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=(enable_return_routed_experts == "1"),
     extra_rollout_config=dict(
+        lmdeploy_trust_remote_code=True,
         lmdeploy_log_level="INFO",
         lmdeploy_uvicorn_log_level="INFO",
     ),
 )
 
 # 3. judger
-judger_config = GEO3KJudgerConfig(
+judger_config = GSM8KJudgerConfig(
+    judger_name="openai/gsm8k",
     cpu_resources=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
 )
 
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
 fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
-
-# TODO: support get_model_config_from_hf
-model_cfg = Qwen3VLDense8BConfig(freeze_vision=True, freeze_projector=True)
-
-if hasattr(model_cfg.text_config, "balancing_loss_cfg"):
-    model_cfg.text_config.balancing_loss_cfg = None
-if hasattr(model_cfg.text_config, "z_loss_cfg"):
-    model_cfg.text_config.z_loss_cfg = None
+model_cfg = get_model_config_from_hf(Path(model_path))
+model_cfg.dispatcher = "deepep"
+model_cfg.compile_cfg = False
+if hasattr(model_cfg, "balancing_loss_cfg"):
+    model_cfg.balancing_loss_cfg = None
+if hasattr(model_cfg, "z_loss_cfg"):
+    model_cfg.z_loss_cfg = None
+if hasattr(model_cfg, "attention") and hasattr(model_cfg.attention, "sparse_mla_backend"):
+    model_cfg.attention.sparse_mla_backend = "tilelang"
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False, weight_decay=0.1)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(
@@ -116,27 +113,20 @@ train_worker_cfg = WorkerConfig(
     loss_cfg=loss_cfg,
     lr_cfg=lr_cfg,
     fsdp_cfg=fsdp_cfg,
-    sp_size=int(os.environ.get("SP_SIZE", "1")),
+    sp_size=4,
     optimizer_steps=train_optimizer_steps,
     pack_max_length=pack_max_length,
 )
 
 # 5. train agent loop manager
-train_dataset_cfg = [
-    {
-        "dataset": DatasetConfig(
-            name="geo3k", anno_path=data_path, class_name="VLMJsonlDataset", media_root=media_root, sample_ratio=1.0
-        ),
-        "tokenize_fn": RLQwen3VLTokenizeFnConfig(processor_path=model_path, max_length=max_prompt_length),
-    }
-]
-
+train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
+tokenizer_config = RLTextTokenizeFnConfig(max_length=max_prompt_length)
+train_dataset_cfg = [{"dataset": train_dataset, "tokenize_fn": tokenizer_config}]
 dataloader_cfg = DataloaderConfig(
     dataset_config_list=train_dataset_cfg,
     pack_max_length=pack_max_length,
     collator="fake_collator",
     pack_level="none",
-    num_workers=8,
 )
 sampler_config = SamplerConfig(
     dataloader_cfg=dataloader_cfg,
@@ -165,27 +155,13 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
 )
 
 # 6. eval agent loop manager
-eval_dataset_cfg = [
-    {
-        "dataset": DatasetConfig(
-            name="geo3k",
-            anno_path=eval_data_path,
-            class_name="VLMJsonlDataset",
-            media_root=media_root,
-            sample_ratio=1.0,
-        ),
-        "tokenize_fn": RLQwen3VLTokenizeFnConfig(
-            processor_path=model_path, max_length=max_prompt_length, ignore_multimodal_info=True
-        ),
-    }
-]
-
+eval_dataset = DatasetConfig(name=experimental_name, anno_path=eval_data_path, sample_ratio=1.0)
+eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}]
 eval_dataloader_cfg = DataloaderConfig(
     dataset_config_list=eval_dataset_cfg,
     pack_max_length=pack_max_length,
     collator="fake_collator",
     pack_level="none",
-    num_workers=8,
 )
 eval_sampler_config = SamplerConfig(
     dataloader_cfg=eval_dataloader_cfg,
@@ -214,10 +190,10 @@ eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
 # 7. evaluator
 evaluator_config = EvaluatorConfig(compute_metric_func=None)
 
-# 8. RL Colocate Trainer Config（CLI 通过 config["trainer"].build() 得到 Trainer）
+# 8. RL Colocate Trainer Config
 trainer = RLColocateTrainerConfig(
     resources=resources,
-    train_worker_cfg=train_worker_cfg,  # TODO: uniform naming of cfg and config
+    train_worker_cfg=train_worker_cfg,
     rollout_config=rollout_config,
     tokenizer_path=model_path,
     replay_buffer_config=SyncReplayBufferConfig(),

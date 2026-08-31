@@ -250,6 +250,9 @@ class RolloutController:
     def offload(self):
         self._broadcast_to_workers("offload", WorkerLifecycleState.ACTIVE)
 
+    def flush_cache(self):
+        self._broadcast_to_active_workers("flush_cache")
+
     def onload(self):
         self._broadcast_to_workers("onload_weights", WorkerLifecycleState.ACTIVE)
         self._broadcast_to_workers("onload_kvcache", WorkerLifecycleState.ACTIVE)

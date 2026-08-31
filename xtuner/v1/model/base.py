@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from functools import reduce
 from importlib import import_module
 from itertools import chain
+from math import prod
 from pathlib import Path
 from shutil import copy, copytree, rmtree
 from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, NamedTuple, Sequence, cast
@@ -111,8 +112,16 @@ class HFSaveCfg(PydanticBaseModel):
     model_config = ConfigDict(extra="forbid")
     worker_per_rank: Annotated[int, Parameter(group="model")] = 16
     max_save_rank: Annotated[int, Parameter(group="model")] = 16
-    # Max bytes per generated safetensors shard.
-    bucket_size: Annotated[int, Parameter(group="model")] = 1024**3 * 4
+    bucket_size: Annotated[
+        int,
+        Parameter(
+            group="model",
+            help=(
+                "Approximate maximum reconstruction bytes per HF save bucket. "
+                "A single tensor item may exceed this limit."
+            ),
+        ),
+    ] = 1024**3 * 4
     # TODO: `XTunerBaseModel` should also be able to specify which parameters to be trained in fp32,
     # currently it could only be specified in HFSaveCfg
     # Each entry is a **regex** pattern (passed to `re.search`) matched against the HF parameter name.
@@ -534,7 +543,7 @@ class _HFSaveBucketItem(NamedTuple):
     tensor: torch.Tensor
     save_plan: HFSavePlan
     runtime_is_float8: bool
-    byte_size: int
+    reconstruction_bytes: int
 
 
 class BaseModel(nn.Module):
@@ -1295,7 +1304,8 @@ class BaseModel(nn.Module):
             params (list[tuple[torch.Tensor, LoadSpec]]): Runtime tensors and their new-schema LoadSpecs.
             dtype (torch.dtype): Target checkpoint dtype, currently bfloat16 or float8_e4m3fn.
             device (torch.device | str): Device to move yielded tensors to.
-            bucket_size (int | None): Approximate bucket size in bytes.
+            bucket_size (int | None): Approximate maximum reconstruction bytes per bucket. A single tensor item may
+                exceed this limit.
             distributed_save (bool): Whether to apply the HF save write policy. When enabled, non-fused tensors are
                 yielded only on rank0 and fused HF keys are divided across save ranks.
             preserved_fused_shard_group (dist.ProcessGroup | None): Communication group whose fused-dim shard should
@@ -1319,7 +1329,7 @@ class BaseModel(nn.Module):
         if bucket_size is None:
             bucket_size = self.config.hf_save_cfg.bucket_size
 
-        bucket_bytes = 0
+        bucket_reconstruction_bytes = 0
         bucket: list[_HFSaveBucketItem] = []
         buffer_names = {self._clean_param_name(name) for name, _ in self.named_buffers()}
 
@@ -1327,22 +1337,21 @@ class BaseModel(nn.Module):
             save_item = self._make_hf_save_item(
                 param,
                 load_spec,
-                checkpoint_dtype=dtype,
                 is_buffer=load_spec.name in buffer_names,
                 distributed_save=distributed_save,
                 preserved_fused_shard_group=preserved_fused_shard_group,
                 target_fused_key_partition=target_fused_key_partition,
             )
-            if bucket_bytes + save_item.byte_size > bucket_size and bucket:
+            if bucket_reconstruction_bytes + save_item.reconstruction_bytes > bucket_size and bucket:
                 yield self._build_hf_param_bucket(
                     bucket,
                     dtype=dtype,
                     device=device,
                 )
-                bucket_bytes = 0
+                bucket_reconstruction_bytes = 0
                 bucket = []
 
-            bucket_bytes += save_item.byte_size
+            bucket_reconstruction_bytes += save_item.reconstruction_bytes
             bucket.append(save_item)
 
         if bucket:
@@ -1357,7 +1366,6 @@ class BaseModel(nn.Module):
         param: torch.Tensor,
         load_spec: LoadSpec,
         *,
-        checkpoint_dtype: torch.dtype,
         is_buffer: bool,
         distributed_save: bool,
         preserved_fused_shard_group: dist.ProcessGroup | None,
@@ -1375,15 +1383,21 @@ class BaseModel(nn.Module):
             # Persistent buffers, e.g. FoPE rotary coefficients, keep their runtime dtype.
             checkpoint_tensor = runtime_tensor
 
+        save_plan = load_spec.plan_hf_save(
+            distributed_save=distributed_save,
+            preserve_process_group=preserved_fused_shard_group,
+            target_fused_key_partition=target_fused_key_partition,
+        )
+        # Account for the tensor materialized by unshard, before FP8 conversion
+        # or checkpoint-visible padding trim. The save plan owns policy-specific
+        # shape semantics, including preserved EP shards.
+        reconstruction_bytes = prod(save_plan.runtime_output_shape) * checkpoint_tensor.element_size()
+
         return _HFSaveBucketItem(
             tensor=checkpoint_tensor,
-            save_plan=load_spec.plan_hf_save(
-                distributed_save=distributed_save,
-                preserve_process_group=preserved_fused_shard_group,
-                target_fused_key_partition=target_fused_key_partition,
-            ),
+            save_plan=save_plan,
             runtime_is_float8=is_float8_weight(runtime_tensor),
-            byte_size=self._get_tensor_size(runtime_tensor, checkpoint_dtype),
+            reconstruction_bytes=reconstruction_bytes,
         )
 
     def _load_spec_params(self) -> list[tuple[torch.Tensor, LoadSpec]]:
@@ -1509,11 +1523,6 @@ class BaseModel(nn.Module):
         if "_orig_mod." in name:
             name = name.replace("_orig_mod.", "")
         return name
-
-    def _get_tensor_size(self, tensor: torch.Tensor, dtype: torch.dtype) -> int:
-        """Get the size of the tensor in bytes."""
-        # return tensor.element_size() * tensor.numel()
-        return dtype.itemsize * tensor.numel()
 
     def _iter_hf_save_chunks(
         self,

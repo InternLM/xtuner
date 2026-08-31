@@ -154,6 +154,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             restart_inactive_workers=SimpleNamespace(remote=MagicMock(return_value="rollout_restarted")),
             pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause")),
             continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue")),
+            flush_cache=SimpleNamespace(remote=MagicMock(return_value="flush_cache")),
             onload_weights=SimpleNamespace(remote=MagicMock(return_value="onload_weights")),
             onload_kvcache=SimpleNamespace(remote=MagicMock(return_value="onload_kvcache")),
             validate_registered_workers_to_proxy=SimpleNamespace(remote=AsyncMock(return_value=None)),
@@ -266,6 +267,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
         with (
             patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
             patch("xtuner.v1.train.rl_trainer.bind_train_rollout") as bind_train_rollout_mock,
         ):
             trainer.fit()

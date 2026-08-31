@@ -193,6 +193,7 @@ class WorkerTrainLogItem(TypedDict, total=False):
     step_consumed_tokens: int
     efficient_attn_ratio: float
     grad_norm: float
+    mtp_grad_parameter_coverage: float
     max_memory: float
     reserved_memory: float
 
@@ -276,6 +277,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         elif hasattr(worker_cfg.model_cfg, "mtp_config"):
             # 非 compose 模型的 mtp_config 直接放在了 model_cfg 中
             self.mtp_config = worker_cfg.model_cfg.mtp_config
+        self._mtp_trainable_parameters = (
+            [parameter for name, parameter in self._engine.model.trainable_parameters() if "mtp_block" in name]
+            if self.mtp_config is not None
+            else []
+        )
 
         self.update_weighter = WeightUpdater(
             rank=self.rank,
@@ -833,6 +839,14 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f"Rank{self.rank} Rollout {rollout_idx} GlobalStep {global_train_step} "
                 f"train_step[{i}].engine_train_step elapsed={time.perf_counter() - train_step_begin:.4f}s"
             )
+            mtp_grad_metrics: dict[str, float] = {}
+            if self._mtp_trainable_parameters:
+                # `grad is None` is a structural signal: unlike a zero-valued grad,
+                # it means the MTP loss never reached that trainable parameter.
+                present_grad_count = sum(parameter.grad is not None for parameter in self._mtp_trainable_parameters)
+                mtp_grad_metrics = {
+                    "mtp_grad_parameter_coverage": present_grad_count / len(self._mtp_trainable_parameters),
+                }
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
 
@@ -858,6 +872,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 **engine_logs_info,  # type: ignore[typeddict-item]
                 **train_step_info,
                 **extra_info_dict,
+                **mtp_grad_metrics,  # type: ignore[typeddict-item]
                 grad_norm=grad_norm.item(),
                 max_memory=max_memory,
                 reserved_memory=reserved_memory,
