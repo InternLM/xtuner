@@ -87,14 +87,14 @@ class GreedyRouter(nn.Module, RouterProtocol):
 
         # moe forward
         # (e, )
-        tokens_per_expert = torch.histc(topk_ids, bins=self.n_routed_experts, min=0, max=self.n_routed_experts)
+        tokens_per_expert = torch.bincount(topk_ids.flatten(), minlength=self.n_routed_experts)
 
         return {
             "logits": logits,
             "router_weights": routing_weights,
             "topk_weights": topk_weights,
             "topk_ids": topk_ids,
-            "topkens_per_expert": tokens_per_expert,
+            "tokens_per_expert": tokens_per_expert,
         }
 
 
@@ -163,12 +163,12 @@ class GreedyGroupedRouter(GreedyRouter):
 
         # moe forward
         # (e, )
-        tokens_per_expert = torch.histc(topk_ids, bins=self.n_routed_experts, min=0, max=self.n_routed_experts)
+        tokens_per_expert = torch.bincount(topk_ids.flatten(), minlength=self.n_routed_experts)
 
         return {
             "logits": logits,
             "router_weights": routing_weights,
             "topk_weights": topk_weights,
             "topk_ids": topk_ids,
-            "topkens_per_expert": tokens_per_expert,
+            "tokens_per_expert": tokens_per_expert,
         }

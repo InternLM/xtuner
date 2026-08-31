@@ -133,20 +133,14 @@ class NoAuxRouter(nn.Module, RouterProtocol):
             topk_weight = topk_weight / denominator
         topk_weight = topk_weight * self.router_scaling_factor  # must multiply the scaling factor
 
-        # TODO: (yehaochen) `Dispatcher` calculate the distribution duplicatedly
-        tokens_per_expert = torch.histc(
-            topk_ids.float(),
-            bins=self.n_routed_experts,
-            min=0,
-            max=self.n_routed_experts,
-        )  # .view(self.ep_mesh.size(), -1)
+        tokens_per_expert = torch.bincount(topk_ids.flatten(), minlength=self.n_routed_experts)
 
         return {
             "logits": logits,
             "router_weights": scores_for_choice,
             "topk_weights": topk_weight,
             "topk_ids": topk_ids,
-            "topkens_per_expert": tokens_per_expert,
+            "tokens_per_expert": tokens_per_expert,
         }
 
 
@@ -225,17 +219,12 @@ class NoAuxGroupedRouter(NoAuxRouter):
             topk_weight = topk_weight / denominator
         topk_weight = topk_weight * self.router_scaling_factor  # must multiply the scaling factor
 
-        tokens_per_expert = torch.histc(
-            topk_ids.float(),
-            bins=self.n_routed_experts,
-            min=0,
-            max=self.n_routed_experts,
-        )  # .view(self.ep_mesh.size(), -1)
+        tokens_per_expert = torch.bincount(topk_ids.flatten(), minlength=self.n_routed_experts)
 
         return {
             "logits": logits,
             "router_weights": scores_for_choice,
             "topk_weights": topk_weight,
             "topk_ids": topk_ids,
-            "topkens_per_expert": tokens_per_expert,
+            "tokens_per_expert": tokens_per_expert,
         }

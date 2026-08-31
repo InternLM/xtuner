@@ -1,4 +1,4 @@
-from typing import Literal, TypeAlias, cast
+from typing import TypeAlias, cast
 
 import torch
 import torch.distributed as dist
@@ -19,6 +19,7 @@ from . import XTUNER_DISPATCHER_DEBUG
 from .base import (
     CombineResult,
     DispatchResult,
+    ExpertWeightLayout,
     GenericDispatcher,
     PostCombineResult,
     PostDispatchResult,
@@ -235,14 +236,10 @@ class MoEAGRSDispatcher(
         *,
         n_routed_experts: int,
         process_group: torch.distributed.ProcessGroup,
-        training_dtype: Literal["fp8", "bf16"] = "bf16",
-        generate_dtype: Literal["fp8", "bf16"] = "bf16",
     ):
         super().__init__(
             n_routed_experts=n_routed_experts,
             process_group=process_group,
-            training_dtype=training_dtype,
-            generate_dtype=generate_dtype,
         )
         assert self._process_group is not None, (
             "Process group must be provided for `DeepEPDispatcher`. "
@@ -259,8 +256,10 @@ class MoEAGRSDispatcher(
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,  # noqa: ARG002 — kept for interface compatibility; not used here
+        tokens_per_expert: torch.Tensor,
         async_op: bool = False,
     ) -> MoEAGRSPreDispatchResult:
+        del tokens_per_expert
         if async_op:
             forward_finished_event = cast(torch.cuda.Event, torch.cuda.Event())
             forward_finished_event.record()
@@ -396,6 +395,7 @@ class MoEAGRSDispatcher(
             hidden_states=permuted_hidden_states,
             row_ids_map=row_ids_map,
             tokens_per_expert=tokens_per_expert,
+            expert_weight_layout=ExpertWeightLayout(),
         )
 
     @override

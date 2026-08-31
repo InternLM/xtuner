@@ -70,6 +70,7 @@ class TestDeepEPExpertTPDispatcher(DeterministicDDPTestCase):
             hidden_states=hidden_leaf,
             topk_ids=local_topk_ids,
             topk_weights=topk_weights_leaf,
+            tokens_per_expert=torch.bincount(local_topk_ids.flatten(), minlength=4),
         )
         expected_virtual_ids = torch.tensor(
             [0, 2, 1, 3, 4, 6, 5, 7],
@@ -265,6 +266,7 @@ class TestDeepEPExpertTPDispatcher(DeterministicDDPTestCase):
             hidden_states=hidden_states,
             topk_ids=topk_ids,
             topk_weights=topk_weights,
+            tokens_per_expert=torch.bincount(topk_ids.flatten(), minlength=4),
             async_op=async_op,
         )
         dispatched = dispatcher.dispatch(

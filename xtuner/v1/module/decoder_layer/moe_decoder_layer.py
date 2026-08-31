@@ -28,6 +28,7 @@ from xtuner.v1.module import (
 from xtuner.v1.module.dispatcher import (
     CombineResult,
     DispatchResult,
+    ExpertWeightLayout,
     PostDispatchResult,
     PreCombineResult,
     PreDispatchResult,
@@ -193,10 +194,34 @@ class MoEBlock(nn.Module):
         )
         self.moe_act = moe_act_fn_cfg.build()
 
-    def forward(self, x, tokens_per_expert, decoding):
-        gate_up_out = self.fused_w1w3(x, tokens_per_expert, decoding)
+    def forward(
+        self,
+        x: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        *,
+        weight_layout: ExpertWeightLayout,
+    ) -> torch.Tensor:
+        trainable = weight_layout.trainable_weights or (None, None)
+        trainable_wgrad_outs = weight_layout.trainable_wgrad_outs or (None, None)
+        external = weight_layout.external_weights or (None, None)
+        external_wgrad_outs = weight_layout.external_wgrad_outs or (None, None)
+        gate_up_out = self.fused_w1w3(
+            x,
+            tokens_per_expert,
+            trainable_weight=trainable[0],
+            trainable_wgrad_out=trainable_wgrad_outs[0],
+            external_weight=external[0],
+            external_wgrad_out=external_wgrad_outs[0],
+        )
         out = self.moe_act(gate_up_out, split_dim=-1)
-        res = self.fused_w2(out, tokens_per_expert, decoding)
+        res = self.fused_w2(
+            out,
+            tokens_per_expert,
+            trainable_weight=trainable[1],
+            trainable_wgrad_out=trainable_wgrad_outs[1],
+            external_weight=external[1],
+            external_wgrad_out=external_wgrad_outs[1],
+        )
         return res
 
 
@@ -229,10 +254,12 @@ class MoEDecoderLayer(nn.Module):
         moe_act_fn_cfg: MoEActFnConfig,
         float8_cfg: Float8Config | None = None,
         layer_idx: int = 0,
-        dispatcher: Literal["deepep", "all2all", "agrs"] | None,
+        dispatcher: Literal["deepep", "all2all", "agrs", "moonep"] | None,
         ep_mesh: DeviceMesh | None = None,
         expert_tp_mesh: DeviceMesh | None = None,
         ep_tp_mesh: DeviceMesh | None = None,
+        moonep_runtime=None,
+        layer_fqn: str | None = None,
     ):
         super().__init__()
         self.ep_mesh = ep_mesh
@@ -297,14 +324,21 @@ class MoEDecoderLayer(nn.Module):
         process_group = ep_mesh.get_group() if ep_mesh is not None else None
         tp_group = expert_tp_mesh.get_group() if expert_tp_mesh is not None else None
         ep_tp_group = ep_tp_mesh._flatten().get_group() if ep_tp_mesh is not None else None
+        # EP membership is static for the layer. Keep the decision outside the
+        # compiled forward; Naive EP=1 execution retains its synchronous API.
+        self._async_combine = process_group is not None and process_group.size() > 1
         self.dispatcher = build_dispatcher(
             dispatcher=dispatcher,
             n_routed_experts=n_routed_experts,
             ep_group=process_group,
             tp_group=tp_group,
             ep_tp_group=ep_tp_group,
-            training_dtype="fp8" if float8_cfg is not None else "bf16",
-            generate_dtype=generate_config.dtype if generate_config is not None else "bf16",
+            # Expert compute may be FP8; activation and MoonEP weight transport
+            # stay BF16 and are configured independently.
+            transport_dtype="bf16",
+            moonep_runtime=moonep_runtime,
+            layer_fqn=layer_fqn,
+            projections=(self.experts.fused_w1w3, self.experts.fused_w2),
         )
 
     def forward(
@@ -412,6 +446,7 @@ class MoEDecoderLayer(nn.Module):
             hidden_states=hidden_states.view(-1, hidden_states.shape[-1]),
             topk_ids=router_results["topk_ids"],
             topk_weights=router_results["topk_weights"],
+            tokens_per_expert=router_results["tokens_per_expert"],
         )
         dispatched = self.dispatcher.dispatch(
             pre_dispatched=pre_dispatched,
@@ -432,7 +467,7 @@ class MoEDecoderLayer(nn.Module):
         experts_out = self.experts(
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
-            decoding=False,
+            weight_layout=post_dispatched["expert_weight_layout"],
         )
         # ProberList.before_combine(
         #     self.layer_idx,
@@ -445,6 +480,7 @@ class MoEDecoderLayer(nn.Module):
             pre_dispatched=pre_dispatched,
             dispatched=dispatched,
             post_dispatched=post_dispatched,
+            async_op=self._async_combine,
             decoding=False,
         )
 
@@ -453,14 +489,24 @@ class MoEDecoderLayer(nn.Module):
             dispatched=dispatched,
             post_dispatched=post_dispatched,
             pre_combined=pre_combined,
+            async_op=self._async_combine,
             decoding=False,
         )
+
+        # EP combine 已经在通信流上异步启动；共享专家在默认流计算，只在
+        # routed + shared 相加前建立设备侧依赖，不引入 host sync。
+        if self.n_shared_experts > 0:
+            shared_experts_out = self._shared_experts_forward(hidden_states=hidden_states)
+        else:
+            shared_experts_out = None
+
         post_combined = self.dispatcher.combine_postprocess(
             pre_dispatched=pre_dispatched,
             dispatched=dispatched,
             post_dispatched=post_dispatched,
             pre_combined=pre_combined,
             combined=combined,
+            async_op=self._async_combine,
         )
         combined_hidden_states = post_combined["hidden_states"]
         combined_hidden_states = combined_hidden_states.view(*origin_shape)
@@ -469,11 +515,6 @@ class MoEDecoderLayer(nn.Module):
         # combined_hidden_states = self._hf_expert_forward_for_debug(hidden_states, router_results, origin_shape)
 
         # ProberList.after_combine(self.layer_idx, combined_hidden_states)
-
-        if self.n_shared_experts > 0:
-            shared_experts_out = self._shared_experts_forward(hidden_states=hidden_states)
-        else:
-            shared_experts_out = None
 
         hidden_states = self._post_moe_forward(
             combined_hidden_states=combined_hidden_states,
@@ -527,6 +568,7 @@ class MoEDecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 topk_ids=router_results["topk_ids"],
                 topk_weights=router_results["topk_weights"],
+                tokens_per_expert=router_results["tokens_per_expert"],
                 async_op=True,
             )
             pre_dispatched_list.append(pre_dispatched)
@@ -557,7 +599,7 @@ class MoEDecoderLayer(nn.Module):
             experts_out = self.experts(
                 post_dispatched["hidden_states"],
                 post_dispatched["tokens_per_expert"],
-                decoding=False,
+                weight_layout=post_dispatched["expert_weight_layout"],
             )
 
             pre_combined = self.dispatcher.combine_preprocess(
