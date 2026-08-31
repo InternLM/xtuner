@@ -148,7 +148,18 @@ class MoEConfig(TransformerConfig):
     moe_intermediate_size: Annotated[int, Parameter(group="moe")]
     ep_size: Annotated[int, Parameter(group="moe")] = 1
     expert_tp_size: Annotated[int, Parameter(group="moe")] = 1
-    dispatcher: Annotated[Literal["deepep", "all2all", "agrs"] | None, Parameter(group="moe")] = None
+    dispatcher: Annotated[Literal["deepep", "all2all", "agrs", "moonep"] | None, Parameter(group="moe")] = None
+    # Staging keeps the native FSDP unsharded tensor and copies its BF16 home
+    # experts into MoonEP VMM after AllGather. It is an explicit bring-up path;
+    # production direct landing is installed by the later FSDP adapter.
+    moonep_staging_reference: bool = False
+    # MoonEP reserves this many SMs for its communication kernels.  The
+    # H200 acceptance workload is measurably faster at 64 than its upstream
+    # default of 32; keep it model-scoped so other deployments can tune it.
+    moonep_num_sms: int = 64
+    # TrainEngine resolves this scalar before model build. MoonEP uses it to
+    # size per-invocation resources without depending on TrainerConfig.
+    intra_layer_micro_batch: int = 1
     router: GreedyRouterConfig | NoAuxRouterConfig
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: ZLossConfig | None = None
@@ -238,6 +249,25 @@ class MoE(BaseModel):
             self.ep_mesh = None
             self.expert_tp_mesh = None
             self.ep_tp_mesh = None
+
+        self._moonep_runtime = None
+        if config.dispatcher == "moonep":
+            if self.ep_mesh is None:
+                raise ValueError("MoonEP requires expert parallelism")
+            if config.moe_bias:
+                raise ValueError("MoonEP does not support routed-expert linear bias")
+            from xtuner.v1.module.dispatcher.moonep import MoonEPRuntime
+
+            self._moonep_runtime = MoonEPRuntime(
+                ep_group=self.ep_mesh.get_group(),
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_tok,
+                intra_layer_micro_batch=config.intra_layer_micro_batch,
+                staging_reference=config.moonep_staging_reference,
+                num_sms=config.moonep_num_sms,
+            )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, type=config.rms_norm_type)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
@@ -483,6 +513,11 @@ class MoE(BaseModel):
             assert isinstance(loss_ctx, list) and len(loss_ctx) == len(seq_ctx), (
                 "seq_ctx_list and loss_ctx_list must be lists of the same length"
             )
+            if self._moonep_runtime is not None and len(seq_ctx) > self.config.intra_layer_micro_batch:
+                raise ValueError(
+                    f"MoonEP Domino width {len(seq_ctx)} exceeds configured capacity "
+                    f"{self.config.intra_layer_micro_batch}"
+                )
             if loss_ctx is None:
                 raise NotImplementedError("loss_ctx must be provided for intra-layer bsz > 1")
 
@@ -607,8 +642,9 @@ class MoE(BaseModel):
                         d2h_stream=self.offload_stream,
                         block_idx=layer_idx - self.config.first_k_dense_replace,
                         group="text",
-                        custom_check_fn=lambda x: x.data_ptr()
-                        in [hidden_states.data_ptr() for hidden_states in hidden_states_list],
+                        custom_check_fn=lambda x: (
+                            x.data_ptr() in [hidden_states.data_ptr() for hidden_states in hidden_states_list]
+                        ),
                         prefetch=True,
                         reserve_pin_memory=True,
                     ):
@@ -1040,6 +1076,8 @@ class MoE(BaseModel):
                     ep_mesh=self.ep_mesh,
                     expert_tp_mesh=self.expert_tp_mesh,
                     ep_tp_mesh=self.ep_tp_mesh,
+                    moonep_runtime=self._moonep_runtime,
+                    layer_fqn=f"layers.{layer_idx}.experts",
                 )
                 if self.config.freeze_routers:
                     layers[str(layer_idx)].gate.requires_grad_(False)
@@ -1107,6 +1145,8 @@ class MoE(BaseModel):
                 ep_mesh=self.ep_mesh,
                 expert_tp_mesh=self.expert_tp_mesh,
                 ep_tp_mesh=self.ep_tp_mesh,
+                moonep_runtime=self._moonep_runtime,
+                layer_fqn=f"mtp_block.layers.{i}.decoder_layer.experts",
             )
 
             # Wrap decoder layer in MTPLayer
@@ -1147,6 +1187,8 @@ class MoE(BaseModel):
     ) -> Self:
         if fsdp_config.hsdp_sharding_size is not None and self.config.expert_tp_size > 1:
             raise NotImplementedError("HSDP with ExpertTP is not supported")
+        if self._moonep_runtime is not None:
+            self._moonep_runtime.validate_before_fsdp(fsdp_config)
 
         self.fsdp_config = fsdp_config
         assert self.fsdp_config.ep_size == self.config.ep_size
@@ -1319,6 +1361,8 @@ class MoE(BaseModel):
 
         self._init_load_spec()
         self._to_empty_meta()
+        if self._moonep_runtime is not None:
+            self._moonep_runtime.install_after_fsdp(fsdp_root=self)
         return self
 
     @property
@@ -1328,6 +1372,11 @@ class MoE(BaseModel):
             return MOE_EP_COMPILE_CFG
         else:
             return MOE_NON_EP_COMPILE_CFG
+
+    def close_ep_runtime(self) -> None:
+        """Release optional dynamic-EP resources before PG teardown."""
+        if self._moonep_runtime is not None:
+            self._moonep_runtime.close()
 
     @property
     def need_update_bias(self) -> bool:
