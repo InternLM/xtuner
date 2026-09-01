@@ -33,12 +33,8 @@ def get_config():
         env_config = yaml.load(f.read(), Loader=yaml.SafeLoader)
 
     default_config = env_config["default_config"]
-    registry = (
-        os.environ.get("CI_NPU_IMAGE_REGISTRY")
-        if device == "npu"
-        else os.environ.get("CI_GPU_IMAGE_REGISTRY")
-    )
-    train_image_override = os.environ.get("CI_ETE_TRAIN_IMAGE")
+    registry = os.environ.get("CI_NPU_IMAGE_REGISTRY") if device == "npu" else os.environ.get("CI_GPU_IMAGE_REGISTRY")
+    train_image_override = os.environ.get("CI_ETE_TRAIN_IMAGE", "").strip()
     case_config = env_config["case"]
 
     for case, steps in case_config.items():
@@ -52,9 +48,8 @@ def get_config():
             merged = dict_merge(default_step_config, step)
             r = merged.get("resource")
             if train_image_override and step_type == "train":
-                r["image"] = train_image_override
-            else:
-                r["image"] = f"{registry}/{r['image']}"
+                r["image"] = train_image_override.lstrip("/")
+            r["image"] = f"{registry}/{r['image']}"
             steps_config.append(merged)
         case_config[case] = steps_config
 

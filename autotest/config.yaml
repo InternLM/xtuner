@@ -3,6 +3,7 @@ base_path:
     base_baseline_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner-baselines/latest
 
 default_config:
+    # Override via workflow train_image / CI_ETE_TRAIN_IMAGE (tag only).
     train: 
         resource:
             gpus_per_task: 8

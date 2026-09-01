@@ -153,12 +153,11 @@ jobs:
         ${{
           inputs.skip_build
           && format(
-            '{0}/ailab-llmrazor/{1}:{2}',
-            secrets.CI_GPU_IMAGE_REGISTRY,
+            'ailab-llmrazor/{0}:{1}',
             inputs.image_repo_short || 'xtuner',
             inputs.image_tag
           )
-          || needs.build_image.outputs.docker_tag
+          || needs.build_image.outputs.short_docker_tag
         }}
     steps:
       - name: Validate inputs
