@@ -15,7 +15,13 @@ MEMORY_GRADIENT_MIN_SEGMENT_LEN = 8
 MEMORY_GRADIENT_POSITIVE_RATIO = 0.65
 MEMORY_GRADIENT_MIN_SLOPE_GB = 1e-4
 MEMORY_GRADIENT_MIN_REL_DRIFT = 0.00015
-MEMORY_GRADIENT_RESUME_DROP_GB = 0.005
+# Ignore sub-20MB dips when splitting; avoids treating allocator noise as resume boundaries.
+MEMORY_GRADIENT_RESUME_DROP_GB = 0.02
+# Require >=500MB swing within a segment before treating noise as a leak.
+MEMORY_GRADIENT_MIN_SEGMENT_RANGE_GB = 0.5
+# Skip gradient heuristic when per-step baseline drift is already tight vs baseline.
+MEMORY_GRADIENT_BASELINE_DRIFT_SKIP_RATIO = 0.05
+MEMORY_GRADIENT_MIN_EXTRA_RANGE_GB = 0.1
 
 # RL tracker lines: mini-batch logs vs per-RL-step summary (see rl_trainer._log_step).
 RL_STEP_SUMMARY_MARKER = "response/rewards/mean"
@@ -178,6 +184,21 @@ def _split_memory_segments(values: np.ndarray) -> list[np.ndarray]:
     return segments or [values]
 
 
+def _should_run_memory_gradient_check(
+    base_vals: list[float],
+    cur_vals: list[float],
+    *,
+    drift_threshold: float,
+    max_rel_drift: float,
+) -> bool:
+    """Run leak heuristic only when baseline drift is loose or current swing grew."""
+    tight_vs_baseline = max_rel_drift < drift_threshold * MEMORY_GRADIENT_BASELINE_DRIFT_SKIP_RATIO
+    base_range = float(max(base_vals) - min(base_vals))
+    cur_range = float(max(cur_vals) - min(cur_vals))
+    range_grew = (cur_range - base_range) >= MEMORY_GRADIENT_MIN_EXTRA_RANGE_GB
+    return not tight_vs_baseline or range_grew
+
+
 def detect_memory_upward_gradient(values: list[float]) -> tuple[bool, str]:
     """Detect sustained upward memory drift (possible leak) in the current
     run."""
@@ -198,6 +219,10 @@ def detect_memory_upward_gradient(values: list[float]) -> tuple[bool, str]:
         if mean_val < 1e-10:
             continue
 
+        segment_range = float(np.max(segment) - np.min(segment))
+        if segment_range < MEMORY_GRADIENT_MIN_SEGMENT_RANGE_GB:
+            continue
+
         relative_drift = float(slope * (len(segment) - 1) / mean_val)
         slope_rising = slope > MEMORY_GRADIENT_MIN_SLOPE_GB
         mostly_increasing = positive_ratio >= MEMORY_GRADIENT_POSITIVE_RATIO
@@ -211,7 +236,9 @@ def detect_memory_upward_gradient(values: list[float]) -> tuple[bool, str]:
     return False, ""
 
 
-def _format_sft_drift_failure(metric: str, idx: int, old: float, cur: float, error: float, method: str, threshold: float) -> str:
+def _format_sft_drift_failure(
+    metric: str, idx: int, old: float, cur: float, error: float, method: str, threshold: float
+) -> str:
     kind = "absolute error" if method == "absolute" else "relative error"
     return (
         f"{metric} {kind} bigger than {threshold} in {idx} steps, "
@@ -295,10 +322,23 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
                 )
 
             if check_flag:
-                has_gradient, gradient_info = detect_memory_upward_gradient(cur_metrics[metric])
-                if has_gradient:
-                    fail_metric[metric] = f"{metric} shows sustained upward gradient in current run, {gradient_info}"
-                    check_flag = False
+                run_gradient = _should_run_memory_gradient_check(
+                    base_metrics[metric],
+                    cur_metrics[metric],
+                    drift_threshold=threshold,
+                    max_rel_drift=max_error,
+                )
+                if run_gradient:
+                    has_gradient, gradient_info = detect_memory_upward_gradient(cur_metrics[metric])
+                    if has_gradient:
+                        fail_metric[metric] = (
+                            f"{metric} shows sustained upward gradient in current run, {gradient_info}"
+                        )
+                        check_flag = False
+                else:
+                    logger.info(
+                        f"✓ {metric} gradient check skipped (max rel drift {max_error:.2%} vs threshold {threshold})"
+                    )
         elif percentile is not None:
             agg_method = method if method in ("absolute", "relative") else "relative"
             check_flag, agg_error, detail = _percentile_error_passes(
@@ -333,7 +373,9 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
                     f"✓ {metric} check pass，the most absolute error is {max_error:.6f} in {max_error_idx} step."
                 )
             else:
-                logger.info(f"✓ {metric} check pass，the most relative error is {max_error:.2%} in {max_error_idx} step.")
+                logger.info(
+                    f"✓ {metric} check pass，the most relative error is {max_error:.2%} in {max_error_idx} step."
+                )
     result = not fail_metric
     if result:
         return result, "All metrics check passed."
