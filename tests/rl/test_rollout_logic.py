@@ -474,8 +474,8 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(all(worker.is_active() for worker in controller.registry.all_workers()))
-        recovered_groups = controller.health_manager.notify_worker_group_recovered.call_args.args[0]
-        self.assertEqual([group.ranks for group in recovered_groups], [(0,), (1,)])
+        active_groups = controller.health_manager.notify_worker_group_active.call_args.args[0]
+        self.assertEqual([group.ranks for group in active_groups], [(0,), (1,)])
 
 
 class TestRolloutProxyManager(unittest.TestCase):
@@ -584,7 +584,7 @@ class TestRolloutProxyManager(unittest.TestCase):
         manager._delete_session_url.assert_called_once_with("http://session-0")
         manager._register_session_url.assert_not_called()
 
-    def test_recovered_lifecycle_listener_registers_entrypoint_session_urls_without_validation(self):
+    def test_active_lifecycle_listener_registers_entrypoint_session_urls_without_validation(self):
         manager = self._build_manager()
         manager._register_session_url = MagicMock()
         worker_group = SimpleNamespace(
@@ -599,7 +599,7 @@ class TestRolloutProxyManager(unittest.TestCase):
             )
         )
 
-        manager.on_worker_group_recovered(worker_group)
+        manager.on_worker_group_active(worker_group)
 
         manager._register_session_url.assert_called_once_with("http://session-0")
 
@@ -1311,7 +1311,7 @@ class TestRolloutHealthManager(unittest.TestCase):
         inactive_groups = []
         listener = SimpleNamespace(
             on_worker_group_inactive=inactive_groups.append,
-            on_worker_group_recovered=MagicMock(),
+            on_worker_group_active=MagicMock(),
         )
         manager, registry = self._build_manager(
             workers_info,
@@ -1348,7 +1348,7 @@ class TestRolloutHealthManager(unittest.TestCase):
         manager._worker_lifecycle_listeners = (
             SimpleNamespace(
                 on_worker_group_inactive=on_worker_group_inactive,
-                on_worker_group_recovered=MagicMock(),
+                on_worker_group_active=MagicMock(),
             ),
         )
 
@@ -1371,7 +1371,7 @@ class TestRolloutHealthManager(unittest.TestCase):
         inactive_groups = []
         listener = SimpleNamespace(
             on_worker_group_inactive=inactive_groups.append,
-            on_worker_group_recovered=MagicMock(),
+            on_worker_group_active=MagicMock(),
         )
         manager, _ = self._build_manager(workers_info, worker_lifecycle_listeners=[listener])
 
@@ -1549,37 +1549,6 @@ class TestRolloutHealthManager(unittest.TestCase):
             f"Expected restart failure log to explain why it is non-fatal, got: {log_error.call_args_list}",
         )
 
-    def test_restart_barrier_marks_recovered_group_pending_weights_after_success(self):
-        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
-        worker_info = WorkerSnapshot(
-            rank=0,
-            actor=actor,
-            url="http://worker-0",
-            session_url="http://session-0",
-            lifecycle_state=WorkerLifecycleState.INACTIVE,
-        )
-        pending_weights_groups = []
-        listener = SimpleNamespace(
-            on_worker_group_inactive=MagicMock(),
-            on_worker_group_pending_weights=pending_weights_groups.append,
-        )
-        manager, registry = self._build_manager(
-            {0: worker_info},
-            worker_lifecycle_listeners=[listener],
-        )
-
-        with patch.object(manager, "_restart_worker_group", return_value=True):
-            manager.restart_inactive_workers()
-
-        self.assertEqual(self._worker_by_rank(registry, 0).lifecycle_state, WorkerLifecycleState.PENDING_WEIGHTS)
-        self.assertEqual([group.ranks for group in pending_weights_groups], [(0,)])
-        self.assertTrue(
-            all(
-                worker.lifecycle_state is WorkerLifecycleState.PENDING_WEIGHTS
-                for worker in pending_weights_groups[0].workers
-            )
-        )
-
     def test_restart_barrier_cleans_claimed_groups_when_stopping(self):
         actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
         worker_info = WorkerSnapshot(
@@ -1670,36 +1639,6 @@ class TestRolloutHealthManager(unittest.TestCase):
         self.assertEqual(actor.check_health.calls, [()])
         self.assertEqual(actor.offload.calls, [()])
         self.assertEqual(actor.restore_skip_load_weights.calls, [()])
-
-    def test_pending_weights_listener_runs_outside_lifecycle_operation_lock(self):
-        actor = SimpleNamespace(check_health=_FakeAsyncRemoteMethod(True))
-        worker_info = WorkerSnapshot(
-            rank=0,
-            actor=actor,
-            url="http://worker-0",
-            lifecycle_state=WorkerLifecycleState.INACTIVE,
-        )
-        lock_acquired_by_listener = []
-        manager, _ = self._build_manager({0: worker_info})
-
-        def on_worker_group_pending_weights(group):
-            acquired = manager._lifecycle_operation_lock.acquire(blocking=False)
-            lock_acquired_by_listener.append(acquired)
-            if acquired:
-                manager._lifecycle_operation_lock.release()
-
-        manager._worker_lifecycle_listeners = (
-            SimpleNamespace(
-                on_worker_group_inactive=MagicMock(),
-                on_worker_group_pending_weights=on_worker_group_pending_weights,
-            ),
-        )
-
-        with patch.object(manager, "_restart_worker_group", return_value=True):
-            manager.restart_inactive_workers()
-
-        self.assertEqual(lock_acquired_by_listener, [True])
-
 
 class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
     async def test_preprocess_and_postprocess_preserve_response_prefix(self):

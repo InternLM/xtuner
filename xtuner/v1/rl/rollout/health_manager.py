@@ -37,9 +37,7 @@ __all__ = [
 class RolloutWorkerLifecycleListener(Protocol):
     def on_worker_group_inactive(self, group: WorkerGroup) -> None: ...
 
-    def on_worker_group_pending_weights(self, group: WorkerGroup) -> None: ...
-
-    def on_worker_group_recovered(self, group: WorkerGroup) -> None: ...
+    def on_worker_group_active(self, group: WorkerGroup) -> None: ...
 
 
 class _HealthManagerStopping(InterruptedError):
@@ -609,11 +607,11 @@ class RolloutHealthManager:
 
         return False
 
-    def notify_worker_group_recovered(self, groups: Iterable[WorkerGroup]) -> None:
+    def notify_worker_group_active(self, groups: Iterable[WorkerGroup]) -> None:
         self._notify_worker_lifecycle_listeners(
             groups,
-            event_name="recovered",
-            notify_listener=lambda listener, group: listener.on_worker_group_recovered(group),
+            event_name="active",
+            notify_listener=lambda listener, group: listener.on_worker_group_active(group),
         )
 
     def notify_worker_group_inactive(self, groups: Iterable[WorkerGroup]) -> None:
@@ -637,12 +635,6 @@ class RolloutHealthManager:
 
         if not groups_to_recover:
             return ()
-
-        self._notify_worker_lifecycle_listeners(
-            pending_weights_groups,
-            event_name="pending_weights",
-            notify_listener=lambda listener, group: listener.on_worker_group_pending_weights(group),
-        )
 
         inactive_workers = [
             f"rank={worker.rank}, url={worker.url}"

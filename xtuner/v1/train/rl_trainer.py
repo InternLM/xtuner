@@ -33,7 +33,7 @@ from xtuner.v1.rl.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.health_manager import RLHealthManager
+from xtuner.v1.rl.health_manager import RLHealthManager, _NoOpRLHealthManager
 from xtuner.v1.rl.replay_buffer import (
     AsyncReplayBufferConfig,
     SyncReplayBufferConfig,
@@ -1675,6 +1675,7 @@ class BaseRLTrainer:
 class RLColocateTrainer(BaseRLTrainer):
     _META_PATH = ".xtuner_rl_colocate_trainer"
     agent_loop_manager: AgentLoopManager
+    rl_health_manager: RLHealthManager | _NoOpRLHealthManager
 
     # 共卡保留资源切换和权重同步流程；通用保存、日志在 BaseRLTrainer。
     def __init__(self, cfg: RLColocateTrainerConfig):
@@ -1688,6 +1689,7 @@ class RLColocateTrainer(BaseRLTrainer):
         set_cpu_resource_manager(self._cpu_resource_manager)
 
         if self._debug_rollout:
+            self.rl_health_manager = _NoOpRLHealthManager()
             if self._rollout_config.skip_load_weights:
                 self.logger.info(
                     "debug_rollout cannot be used with rollout_config.skip_load_weights=True. force set skip_load_weights to False"
@@ -1709,6 +1711,7 @@ class RLColocateTrainer(BaseRLTrainer):
             checkpoint_path = self._resume_train_controller_and_state(checkpoint_path)
 
         if self._debug_train:
+            self.rl_health_manager = _NoOpRLHealthManager()
             assert self._debug_rollout_dir is not None
             self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
             self._debug_train_files = self._list_debug_rollout_files(self._debug_rollout_dir)

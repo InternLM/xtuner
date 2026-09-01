@@ -1027,7 +1027,7 @@ class CheckpointEngineWeightTransport:
             if self._sync_after_register:
                 DEVICE_MODULE.synchronize()
         except Exception:
-            self.logger.error("[checkpoint_engine] register_checkpoint failed rank={self.rank} name={name}")
+            self.logger.error(f"[checkpoint_engine] register_checkpoint failed rank={self.rank} name={name}")
         self._checkpoint_name = name
 
     def _make_req_func(self, targets: Sequence[RolloutWeightUpdateTarget]):

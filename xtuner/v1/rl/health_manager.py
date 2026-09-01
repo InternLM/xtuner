@@ -22,6 +22,28 @@ PENDING_ROLLOUT_WORKER_CHECK_INTERVAL = 1.0
 ROLLOUT_WEIGHT_UPDATE_DRAIN_TIMEOUT = 600.0
 
 
+class _NoOpRLHealthManager:
+    """No-op implementation for RLTrainer without rollout health management.
+
+    Debug rollout and debug train modes do not initialize a real
+    ``RLHealthManager``. This implementation preserves the same interface so
+    callers can use the health manager without conditional checks.
+    """
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def set_rollout_resources_available(self, available: bool):
+        pass
+
+    @contextmanager
+    def weight_update_guard(self):
+        yield
+
+
 class RLHealthManager:
     """Coordinate driver-side recovery of colocated rollout workers.
 

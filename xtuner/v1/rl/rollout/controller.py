@@ -163,11 +163,6 @@ class RolloutController:
                 f"Rollout request timed out after {self.config.rollout_timeout * self.timeout_multiplier} seconds."
             )
             return rollout_state
-        except Exception as e:
-            self.logger.exception(f"RolloutController.generate failed: session_id={session_id}")
-            rollout_state.status = Status.FAILED
-            rollout_state.error_msg = f"Rollout request failed: {type(e).__name__}: {str(e)[:1024]}"
-            return rollout_state
 
     def set_enable_partial_rollout(self, enable: bool) -> None:
         """Propagate enable_partial_rollout flag to all active workers."""
@@ -239,7 +234,7 @@ class RolloutController:
             source_state=source_state,
         )
         if target_state is WorkerLifecycleState.ACTIVE:
-            self.health_manager.notify_worker_group_recovered(updated_groups)
+            self.health_manager.notify_worker_group_active(updated_groups)
         elif target_state is WorkerLifecycleState.INACTIVE:
             self.health_manager.notify_worker_group_inactive(updated_groups)
 
