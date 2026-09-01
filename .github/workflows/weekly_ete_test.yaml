@@ -71,16 +71,16 @@ on:
         required: false
         description: >-
           clusterx partition (yidian group), e.g. llmrazor_gpu.
-          Empty uses config.yaml default.
+          Empty uses llmrazor_gpu.
         type: string
-        default: ''
+        default: 'llmrazor_gpu'
       clusterx_project_name:
         required: false
         description: >-
           clusterx project namespace, e.g. ailab-llmrazor.
-          Empty uses config.yaml default.
+          Empty uses ailab-llmrazor.
         type: string
-        default: ''
+        default: 'ailab-llmrazor'
       skip_xtuner_install:
         required: false
         description: >-
@@ -180,8 +180,8 @@ jobs:
           )
           || needs.build_image.outputs.short_docker_tag
         }}
-      CI_ETE_CLUSTERX_PARTITION: ${{ github.event.inputs.clusterx_partition }}
-      CI_ETE_CLUSTERX_PROJECT_NAME: ${{ github.event.inputs.clusterx_project_name }}
+      CI_ETE_CLUSTERX_PARTITION: ${{ github.event.inputs.clusterx_partition || 'llmrazor_gpu' }}
+      CI_ETE_CLUSTERX_PROJECT_NAME: ${{ github.event.inputs.clusterx_project_name || 'ailab-llmrazor' }}
       CI_ETE_SKIP_XTUNER_INSTALL: ${{ github.event.inputs.skip_xtuner_install }}
     steps:
       - name: Validate inputs
@@ -208,8 +208,8 @@ jobs:
             echo ""
             echo "- Workflow run: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
             echo "- Train image: \`${{ env.CI_ETE_TRAIN_IMAGE }}\`"
-            echo "- clusterx partition: \`${{ env.CI_ETE_CLUSTERX_PARTITION || 'llmrazor_gpu (config default)' }}\`"
-            echo "- clusterx project: \`${{ env.CI_ETE_CLUSTERX_PROJECT_NAME || 'ailab-llmrazor (config default)' }}\`"
+            echo "- clusterx partition: \`${{ env.CI_ETE_CLUSTERX_PARTITION }}\`"
+            echo "- clusterx project: \`${{ env.CI_ETE_CLUSTERX_PROJECT_NAME }}\`"
             echo "- skip xtuner install: \`${{ env.CI_ETE_SKIP_XTUNER_INSTALL }}\`"
             echo "- Reports: [ete/${{ github.run_id }}](${{ env.CI_REPORTS_BROWSE_URL_BASE }}/${{ github.run_id }})"
             echo ""
@@ -230,8 +230,8 @@ jobs:
           conda env list
           unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
           echo "Using train image: ${CI_ETE_TRAIN_IMAGE}"
-          echo "clusterx partition: ${CI_ETE_CLUSTERX_PARTITION:-llmrazor_gpu (config default)}"
-          echo "clusterx project: ${CI_ETE_CLUSTERX_PROJECT_NAME:-ailab-llmrazor (config default)}"
+          echo "clusterx partition: ${CI_ETE_CLUSTERX_PARTITION}"
+          echo "clusterx project: ${CI_ETE_CLUSTERX_PROJECT_NAME}"
           echo "skip xtuner install: ${CI_ETE_SKIP_XTUNER_INSTALL:-false}"
           CASE_INPUT="${{ github.event.inputs.run_case || 'all' }}"
           PARALLEL_INPUT="${{ github.event.inputs.parallel || '4' }}"
