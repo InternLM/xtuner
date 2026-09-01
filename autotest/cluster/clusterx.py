@@ -48,6 +48,19 @@ def build_rjob_name(
     return f"{prefix}{case_name[:keep]}-{digest}{suffix}"
 
 
+def _clusterx_submit_kwargs(task_config: Dict[str, Any]) -> dict[str, str]:
+    """Extract clusterx partition/project_name for job submission."""
+    clusterx_cfg = task_config.get("clusterx") or {}
+    submit_kwargs: dict[str, str] = {}
+    partition = clusterx_cfg.get("partition")
+    project_name = clusterx_cfg.get("project_name")
+    if partition:
+        submit_kwargs["partition"] = str(partition)
+    if project_name:
+        submit_kwargs["project_name"] = str(project_name)
+    return submit_kwargs
+
+
 class ClusterTaskExecutor:
     def __init__(self):
         cluster_spec = CLUSTER_MAPPING[CLUSTER]
@@ -78,7 +91,10 @@ class ClusterTaskExecutor:
         all_command.append(command)
         run_command = "; ".join(all_command)
         job_name = build_rjob_name(task_config["type"], task_config["case_name"], task_config["run_id"])
+        clusterx_submit = _clusterx_submit_kwargs(task_config)
         print(f"rjob name ({len(job_name)} chars): {job_name}")
+        if clusterx_submit:
+            print(f"clusterx submit target: {clusterx_submit}")
 
         try:
             params = self.params_cls(
@@ -93,6 +109,7 @@ class ClusterTaskExecutor:
                 image=resource.get("image", None),
                 no_env=resource.get("no_env", True),
                 image_pull_policy=resource.get("image_pull_policy", "Always"),
+                **clusterx_submit,
             )
 
             job_schema = self.cluster.run(params)

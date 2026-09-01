@@ -2,6 +2,11 @@ base_path:
     base_output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
     base_baseline_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner-baselines/latest
 
+# clusterx submit target (yidian/brainpp). Override via CI_ETE_CLUSTERX_* env or workflow inputs.
+clusterx:
+    partition: llmrazor_gpu
+    project_name: ailab-llmrazor
+
 default_config:
     # Override via workflow train_image / CI_ETE_TRAIN_IMAGE (tag only).
     train: 

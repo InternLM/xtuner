@@ -5,6 +5,9 @@ import yaml
 
 CONFIG_FILE = "autotest/config.yaml"
 
+DEFAULT_CLUSTERX_PARTITION = "llmrazor_gpu"
+DEFAULT_CLUSTERX_PROJECT_NAME = "ailab-llmrazor"
+
 
 def dict_merge(default, override):
     if not isinstance(default, dict) or not isinstance(override, dict):
@@ -15,6 +18,35 @@ def dict_merge(default, override):
     for key in set(default.keys() | override.keys()):
         merge_result[key] = dict_merge(default.get(key, None), override.get(key, None))
     return merge_result
+
+
+def _resolve_clusterx_config(env_config: dict) -> dict:
+    """Resolve clusterx partition/project_name from config and env overrides."""
+    clusterx_cfg = dict(env_config.get("clusterx") or {})
+    clusterx_cfg.setdefault("partition", DEFAULT_CLUSTERX_PARTITION)
+    clusterx_cfg.setdefault("project_name", DEFAULT_CLUSTERX_PROJECT_NAME)
+
+    partition_override = os.environ.get("CI_ETE_CLUSTERX_PARTITION", "").strip()
+    project_override = os.environ.get("CI_ETE_CLUSTERX_PROJECT_NAME", "").strip()
+    if partition_override:
+        clusterx_cfg["partition"] = partition_override
+    if project_override:
+        clusterx_cfg["project_name"] = project_override
+    return clusterx_cfg
+
+
+def _merge_step_clusterx(step: dict, clusterx_cfg: dict) -> dict:
+    """Merge global/per-step/per-resource clusterx submit options."""
+    merged = dict(clusterx_cfg)
+    merged.update(step.get("clusterx") or {})
+
+    resource = step.get("resource") or {}
+    if isinstance(resource.get("clusterx"), dict):
+        merged.update(resource["clusterx"])
+    for key in ("partition", "project_name"):
+        if resource.get(key):
+            merged[key] = resource[key]
+    return merged
 
 
 def get_config():
@@ -35,6 +67,7 @@ def get_config():
     default_config = env_config["default_config"]
     registry = os.environ.get("CI_NPU_IMAGE_REGISTRY") if device == "npu" else os.environ.get("CI_GPU_IMAGE_REGISTRY")
     train_image_override = os.environ.get("CI_ETE_TRAIN_IMAGE", "").strip()
+    clusterx_cfg = _resolve_clusterx_config(env_config)
     case_config = env_config["case"]
 
     for case, steps in case_config.items():
@@ -50,9 +83,11 @@ def get_config():
             if train_image_override and step_type == "train":
                 r["image"] = train_image_override.lstrip("/")
             r["image"] = f"{registry}/{r['image']}"
+            merged["clusterx"] = _merge_step_clusterx(merged, clusterx_cfg)
             steps_config.append(merged)
         case_config[case] = steps_config
 
+    env_config["clusterx"] = clusterx_cfg
     return env_config
 
 

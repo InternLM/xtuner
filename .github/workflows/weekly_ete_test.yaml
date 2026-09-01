@@ -67,6 +67,20 @@ on:
           If true, keep the cluster job alive after install for interactive debug.
         type: boolean
         default: false
+      clusterx_partition:
+        required: false
+        description: >-
+          clusterx partition (yidian group), e.g. llmrazor_gpu.
+          Empty uses config.yaml default.
+        type: string
+        default: ''
+      clusterx_project_name:
+        required: false
+        description: >-
+          clusterx project namespace, e.g. ailab-llmrazor.
+          Empty uses config.yaml default.
+        type: string
+        default: ''
   schedule:
     - cron: '0 9 * * 5'  # Friday 17:00 UTC+8
 
@@ -159,6 +173,8 @@ jobs:
           )
           || needs.build_image.outputs.short_docker_tag
         }}
+      CI_ETE_CLUSTERX_PARTITION: ${{ github.event.inputs.clusterx_partition }}
+      CI_ETE_CLUSTERX_PROJECT_NAME: ${{ github.event.inputs.clusterx_project_name }}
     steps:
       - name: Validate inputs
         if: ${{ inputs.skip_build }}
@@ -184,6 +200,8 @@ jobs:
             echo ""
             echo "- Workflow run: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
             echo "- Train image: \`${{ env.CI_ETE_TRAIN_IMAGE }}\`"
+            echo "- clusterx partition: \`${{ env.CI_ETE_CLUSTERX_PARTITION || 'llmrazor_gpu (config default)' }}\`"
+            echo "- clusterx project: \`${{ env.CI_ETE_CLUSTERX_PROJECT_NAME || 'ailab-llmrazor (config default)' }}\`"
             echo "- Reports: [ete/${{ github.run_id }}](${{ env.CI_REPORTS_BROWSE_URL_BASE }}/${{ github.run_id }})"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
@@ -194,12 +212,16 @@ jobs:
           CI_REPORTS_RAW_URL_BASE: ${{ env.CI_REPORTS_RAW_URL_BASE }}
           CI_E2E_DEBUG: ${{ github.event.inputs.CI_E2E_DEBUG || 'false' }}
           CI_ETE_TRAIN_IMAGE: ${{ env.CI_ETE_TRAIN_IMAGE }}
+          CI_ETE_CLUSTERX_PARTITION: ${{ env.CI_ETE_CLUSTERX_PARTITION }}
+          CI_ETE_CLUSTERX_PROJECT_NAME: ${{ env.CI_ETE_CLUSTERX_PROJECT_NAME }}
         run: |
           source /mnt/shared-storage-user/opencompass-shared/qa-llm-cicd/miniconda3/bin/activate
           conda activate clusterx
           conda env list
           unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
           echo "Using train image: ${CI_ETE_TRAIN_IMAGE}"
+          echo "clusterx partition: ${CI_ETE_CLUSTERX_PARTITION:-llmrazor_gpu (config default)}"
+          echo "clusterx project: ${CI_ETE_CLUSTERX_PROJECT_NAME:-ailab-llmrazor (config default)}"
           CASE_INPUT="${{ github.event.inputs.run_case || 'all' }}"
           PARALLEL_INPUT="${{ github.event.inputs.parallel || '4' }}"
           PYTEST_NODES=()
