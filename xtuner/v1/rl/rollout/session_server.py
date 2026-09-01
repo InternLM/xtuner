@@ -1,3 +1,4 @@
+import contextvars
 import copy
 import json
 from contextlib import asynccontextmanager
@@ -29,9 +30,35 @@ FMT_ANTHROPIC = "anthropic"
 # Fields the SessionServer consumes locally and never forwards upstream.
 _SESSION_SERVER_ONLY_KEYS = {"session_id"}
 
+_ENDPOINT_ANTHROPIC_MESSAGES = "anthropic_messages"
+_ENDPOINT_OPENAI_CHAT_COMPLETIONS = "openai_chat_completions"
+_generation_endpoint_request: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "generation_endpoint_request", default=True
+)
+
+
+def _normalize_path(req_path: str) -> str:
+    """Return a leading-slash path without a query string."""
+    return "/" + req_path.split("?", 1)[0].lstrip("/")
+
+
+def _classify_generation_endpoint(method: str, req_path: str) -> Optional[str]:
+    """Classify endpoints whose requests and responses participate in tracing."""
+    path = _normalize_path(req_path)
+    method = method.upper()
+
+    if method != "POST":
+        return None
+    if path.endswith("/v1/messages"):
+        return _ENDPOINT_ANTHROPIC_MESSAGES
+    if path.endswith("/v1/chat/completions"):
+        return _ENDPOINT_OPENAI_CHAT_COMPLETIONS
+    return None
+
 
 def _detect_format(req_path: str) -> str:
-    if req_path.endswith("/messages") or "/v1/messages" in req_path:
+    path = _normalize_path(req_path)
+    if path.endswith("/v1/messages") or path.endswith("/v1/messages/count_tokens"):
         return FMT_ANTHROPIC
     return FMT_OPENAI
 
@@ -77,6 +104,8 @@ def _request_uses_trace_store(req_body: dict) -> bool:
     hygiene (``logprobs`` → ``return_logprob``) and the upstream worker handles
     its own tokenization.
     """
+    if not _generation_endpoint_request.get():
+        return False
     if req_body.get("session_id") is None or "messages" not in req_body:
         return False
     return _bool_request_value(req_body.get("return_token_ids"), True)
@@ -545,7 +574,7 @@ class SessionServer:
             return
 
         self._app = web.Application()
-        self._app.router.add_route("*", "/{path:.*}", self._handle_request)
+        self._app.router.add_route("*", "/{path:.*}", self._handle_request_with_endpoint_trace_policy)
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -561,6 +590,16 @@ class SessionServer:
         self._runner = None
         self._app = None
         get_logger().info("SessionServer stopped.")
+
+    async def _handle_request_with_endpoint_trace_policy(self, request: web.Request) -> web.Response:
+        """Apply the endpoint trace policy around the existing proxy handler."""
+        req_path = request.match_info["path"]
+        is_generation = _classify_generation_endpoint(request.method, req_path) is not None
+        token = _generation_endpoint_request.set(is_generation)
+        try:
+            return await self._handle_request(request)
+        finally:
+            _generation_endpoint_request.reset(token)
 
     async def _handle_request(self, request: web.Request) -> web.Response:
         req_path = request.match_info["path"]
