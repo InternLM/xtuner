@@ -1,4 +1,5 @@
 import os
+import re
 
 import yaml
 
@@ -49,6 +50,28 @@ def _merge_step_clusterx(step: dict, clusterx_cfg: dict) -> dict:
     return merged
 
 
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
+
+
+def strip_xtuner_editable_install(pip_package: str) -> str:
+    """Remove editable xtuner installs; keep other pip commands in the chain."""
+    segments = [seg.strip() for seg in pip_package.split(";") if seg.strip()]
+    kept = [seg for seg in segments if not re.match(r"^pip\s+install\s+-e\s+\.", seg, re.IGNORECASE)]
+    return "; ".join(kept) if kept else "true"
+
+
+def _resolve_skip_xtuner_install(env_config: dict, step: dict) -> bool:
+    if _env_flag("CI_ETE_SKIP_XTUNER_INSTALL"):
+        return True
+    resource = step.get("resource") or {}
+    if "skip_xtuner_install" in resource:
+        return bool(resource["skip_xtuner_install"])
+    if "skip_xtuner_install" in step:
+        return bool(step["skip_xtuner_install"])
+    return bool(env_config.get("skip_xtuner_install"))
+
+
 def get_config():
     # Use device-specific config file if DEVICE environment variable is set
     device = os.environ.get("DEVICE", "")
@@ -83,6 +106,10 @@ def get_config():
             if train_image_override and step_type == "train":
                 r["image"] = train_image_override.lstrip("/")
             r["image"] = f"{registry}/{r['image']}"
+            if step_type == "train" and _resolve_skip_xtuner_install(env_config, merged):
+                pip_package = r.get("pip_package")
+                if pip_package:
+                    r["pip_package"] = strip_xtuner_editable_install(str(pip_package))
             merged["clusterx"] = _merge_step_clusterx(merged, clusterx_cfg)
             steps_config.append(merged)
         case_config[case] = steps_config

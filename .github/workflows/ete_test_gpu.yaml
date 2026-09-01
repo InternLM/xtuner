@@ -61,12 +61,20 @@ on:
           Empty uses config.yaml default.
         type: string
         default: ''
+      skip_xtuner_install:
+        required: false
+        description: >-
+          If true, skip ``pip install -e .`` in train jobs (use when the image
+          already contains a preinstalled xtuner).
+        type: boolean
+        default: false
 
 env:
   CI_GPU_IMAGE_REGISTRY: ${{ secrets.CI_GPU_IMAGE_REGISTRY }}
   CI_ETE_TRAIN_IMAGE: ${{ github.event.inputs.train_image }}
   CI_ETE_CLUSTERX_PARTITION: ${{ github.event.inputs.clusterx_partition }}
   CI_ETE_CLUSTERX_PROJECT_NAME: ${{ github.event.inputs.clusterx_project_name }}
+  CI_ETE_SKIP_XTUNER_INSTALL: ${{ github.event.inputs.skip_xtuner_install }}
   # ETE PNG reports: llmcitester/xtuner @ branch reports, under ete/{run_id}/
   CI_REPORTS_REPOSITORY: ${{ vars.CI_REPORTS_REPOSITORY || 'llmcitester/xtuner' }}
   CI_REPORTS_BRANCH: ${{ vars.CI_REPORTS_BRANCH || 'reports' }}
@@ -97,6 +105,7 @@ jobs:
             echo "- Train image: \`${{ env.CI_ETE_TRAIN_IMAGE || 'ailab-llmrazor/xtuner:pt29_latest (config default)' }}\`"
             echo "- clusterx partition: \`${{ env.CI_ETE_CLUSTERX_PARTITION || 'llmrazor_gpu (config default)' }}\`"
             echo "- clusterx project: \`${{ env.CI_ETE_CLUSTERX_PROJECT_NAME || 'ailab-llmrazor (config default)' }}\`"
+            echo "- skip xtuner install: \`${{ env.CI_ETE_SKIP_XTUNER_INSTALL }}\`"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
       - name: run-test
@@ -107,6 +116,7 @@ jobs:
           CI_ETE_TRAIN_IMAGE: ${{ env.CI_ETE_TRAIN_IMAGE }}
           CI_ETE_CLUSTERX_PARTITION: ${{ env.CI_ETE_CLUSTERX_PARTITION }}
           CI_ETE_CLUSTERX_PROJECT_NAME: ${{ env.CI_ETE_CLUSTERX_PROJECT_NAME }}
+          CI_ETE_SKIP_XTUNER_INSTALL: ${{ env.CI_ETE_SKIP_XTUNER_INSTALL }}
         run: |
           source /mnt/shared-storage-user/opencompass-shared/qa-llm-cicd/miniconda3/bin/activate
           conda activate clusterx 
@@ -115,6 +125,7 @@ jobs:
           echo "Train image: ${CI_ETE_TRAIN_IMAGE:-ailab-llmrazor/xtuner:pt29_latest (config default)}"
           echo "clusterx partition: ${CI_ETE_CLUSTERX_PARTITION:-llmrazor_gpu (config default)}"
           echo "clusterx project: ${CI_ETE_CLUSTERX_PROJECT_NAME:-ailab-llmrazor (config default)}"
+          echo "skip xtuner install: ${CI_ETE_SKIP_XTUNER_INSTALL:-false}"
           CASE_INPUT="${{ github.event.inputs.run_case || 'all' }}"
           PARALLEL_INPUT="${{ github.event.inputs.parallel || '4' }}"
           PYTEST_NODES=()

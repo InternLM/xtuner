@@ -7,6 +7,10 @@ clusterx:
     partition: llmrazor_gpu
     project_name: ailab-llmrazor
 
+# When true, strip ``pip install -e .`` from train pip_package (image already contains xtuner).
+# Override via CI_ETE_SKIP_XTUNER_INSTALL env or workflow input.
+skip_xtuner_install: false
+
 default_config:
     # Override via workflow train_image / CI_ETE_TRAIN_IMAGE (tag only).
     train: 
@@ -15,7 +19,7 @@ default_config:
             cpus_per_task: 120
             memory_per_task: 512
             image: ailab-llmrazor/xtuner:pt29_latest
-            pip_package: pip install -e .[all]; pip install more-itertools pytest-xdist
+            pip_package: pip install -e .[all]; pip install more-itertools
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
     eval:
