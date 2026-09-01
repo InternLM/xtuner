@@ -225,7 +225,7 @@ jobs:
           CI_ETE_CLUSTERX_PROJECT_NAME: ${{ env.CI_ETE_CLUSTERX_PROJECT_NAME }}
           CI_ETE_SKIP_XTUNER_INSTALL: ${{ env.CI_ETE_SKIP_XTUNER_INSTALL }}
         run: |
-          source /mnt/shared-storage-user/opencompass-shared/qa-llm-cicd/miniconda3/bin/activate
+          source /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/miniconda3/bin/activate
           conda activate clusterx
           conda env list
           unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
