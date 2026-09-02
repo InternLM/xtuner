@@ -7,20 +7,19 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.data_proto.rl_data import Status
+from xtuner.v1.rl.agent_loop import IsValidSampleFn
 from xtuner.v1.rl.utils import calculate_seq_staleness, create_task
 from xtuner.v1.utils import get_logger
 
 from .produce_utils import (
     PERIODIC_ABORT_INTERVAL_S,
     BaseProduceContext,
-    IsValidSampleFn,
     ProduceBatchStatus,
     ShouldContinueFn,
     _PendingTasks,
     _ProgressDisplayer,
     _put_claimed_tasks,
     calculate_stale_threshold,
-    default_is_valid_sample_fn,
     default_should_continue_fn,
     pause_pending_tasks,
 )
@@ -230,7 +229,8 @@ class DisaggProduceStrategyConfig(ABC, BaseModel):
     """非共卡后台 producer strategy 配置。"""
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
-    is_valid_sample_fn: IsValidSampleFn = default_is_valid_sample_fn
+    # Deprecated compatibility field; RLTrainer moves it to DisaggTaskSpecConfig.
+    is_valid_sample_fn: IsValidSampleFn | None = None
     should_continue_fn: ShouldContinueFn = default_should_continue_fn
 
     @abstractmethod
@@ -246,9 +246,6 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
     """Configuration for disaggregated asynchronous rollout production.
 
     Args:
-        is_valid_sample_fn (IsValidSampleFn): Function used to decide whether a
-            generated rollout group is trainable. Defaults to
-            ``default_is_valid_sample_fn``.
         should_continue_fn (ShouldContinueFn): Function used to decide whether
             production should continue after a group is processed. Defaults to
             ``default_should_continue_fn``.
@@ -307,7 +304,6 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
             max_token_staleness=self.max_token_staleness,
             sync_weights_interval=sync_weights_interval,
             tail_batch_trigger_size=self.tail_batch_trigger_size,
-            is_valid_sample_fn=self.is_valid_sample_fn,
             should_continue_fn=self.should_continue_fn,
         )
 
@@ -315,10 +311,8 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
 class DisaggProduceStrategy(ABC):
     def __init__(
         self,
-        is_valid_sample_fn: IsValidSampleFn,
         should_continue_fn: ShouldContinueFn,
     ):
-        self.is_valid_sample_fn = is_valid_sample_fn
         self.should_continue_fn = should_continue_fn
 
     @abstractmethod
@@ -347,10 +341,9 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         max_staleness: int,
         max_token_staleness: int | None,
         sync_weights_interval: int,
-        is_valid_sample_fn: IsValidSampleFn,
         should_continue_fn: ShouldContinueFn,
     ):
-        super().__init__(is_valid_sample_fn, should_continue_fn)
+        super().__init__(should_continue_fn)
 
         if not enable_partial_rollout and max_staleness > 0:
             logger.warning(

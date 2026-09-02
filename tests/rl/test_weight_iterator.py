@@ -6,6 +6,9 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
+from xtuner.v1.float8 import Float8Config, ScalingGranularity
+from xtuner.v1.float8.fsdp_utils import WeightWithDynamicTilewiseFloat8CastTensor
+from xtuner.v1.float8.triton_kernels.per_block_quant_gemm import per_block_quant_torch
 from xtuner.v1.model.base import BaseModel, HFSaveCfg, XTunerBaseModelConfig
 from xtuner.v1.rl.weight_update.data import RolloutWeightUpdateInfo, RolloutWeightUpdateTarget
 from xtuner.v1.rl.weight_update.weight_iterator import WeightIterator
@@ -51,6 +54,29 @@ class ExpertShardModel(BaseModel):
         return [f"expert_{index}" for index in range(8)]
 
 
+class DirectFloat8WeightModel(BaseModel):
+    def __init__(self, master: torch.Tensor) -> None:
+        super().__init__(
+            XTunerBaseModelConfig(
+                float8_cfg=Float8Config(scaling_granularity_gemm=ScalingGranularity.TILEWISE),
+            )
+        )
+        layer = nn.Module()
+        layer.weight = nn.Parameter(
+            WeightWithDynamicTilewiseFloat8CastTensor(
+                master,
+                torch.float8_e4m3fn,
+                tuple(master.shape),
+            )
+        )
+        self.layers = nn.ModuleDict({"0": layer})
+        self.fsdp_config = SimpleNamespace(ep_size=1)
+        self._init_load_spec()
+
+    def to_hf_key_list(self, key: str) -> list[str]:
+        return [key]
+
+
 def test_hf_weight_update_batches_have_one_dtype() -> None:
     model = MixedDtypeModel()
     rollout_info = RolloutWeightUpdateInfo(
@@ -74,6 +100,59 @@ def test_hf_weight_update_batches_have_one_dtype() -> None:
     assert set(state_dict) == {"bf16_weight", "fp32_weight"}
     assert state_dict["bf16_weight"].dtype == torch.bfloat16
     assert state_dict["fp32_weight"].dtype == torch.float32
+
+
+def test_fp8_hf_weight_update_uses_bfloat16() -> None:
+    model = MixedDtypeModel()
+    model.config.float8_cfg = Float8Config(scaling_granularity_gemm=ScalingGranularity.TILEWISE)
+    model.fsdp_config = SimpleNamespace(ep_size=1)
+    rollout_info = RolloutWeightUpdateInfo(
+        rollout_config=cast(Any, SimpleNamespace()),
+        weight_update_targets=(),
+        train_rank=0,
+        transport_type="ipc",
+        backend="pytorch",
+    )
+    iterator = WeightIterator(
+        config=SimpleNamespace(update_weight_bucket_size_in_gb=1, model_cfg=None),
+        engine=SimpleNamespace(model=model),
+        rollout_info=rollout_info,
+        global_hf_keys_mapping_cache={},
+    )
+
+    state_dict = {name: tensor for batch in iterator.iter_hf_batches() for name, tensor in batch.state_dict.items()}
+
+    assert state_dict["bf16_weight"].dtype == torch.bfloat16
+    assert state_dict["fp32_weight"].dtype == torch.float32
+
+
+def test_direct_fp8_weight_update_quantizes_bfloat16() -> None:
+    generator = torch.Generator().manual_seed(11)
+    checkpoint = torch.randn(128, 128, generator=generator).to(torch.bfloat16)
+    master = checkpoint.to(torch.float32) + torch.randn(128, 128, generator=generator) * 1e-3
+    expected_data, expected_scale = per_block_quant_torch(master.to(torch.bfloat16))
+    fp16_data, fp16_scale = per_block_quant_torch(master.to(torch.float16))
+    assert not (torch.equal(fp16_data, expected_data) and torch.equal(fp16_scale, expected_scale))
+
+    model = DirectFloat8WeightModel(master)
+    rollout_info = RolloutWeightUpdateInfo(
+        rollout_config=cast(Any, SimpleNamespace()),
+        weight_update_targets=(),
+        train_rank=0,
+        transport_type="ipc",
+        backend="turbomind",
+    )
+    iterator = WeightIterator(
+        config=SimpleNamespace(model_cfg=model.config),
+        engine=SimpleNamespace(model=model),
+        rollout_info=rollout_info,
+        global_hf_keys_mapping_cache={},
+    )
+
+    (batch,) = list(iterator.iter_layer_batches())
+
+    assert torch.equal(batch.state_dict["model.layers.0.weight"], expected_data)
+    assert torch.equal(batch.state_dict["model.layers.0.weight_scale_inv"], expected_scale)
 
 
 @pytest.mark.parametrize(
