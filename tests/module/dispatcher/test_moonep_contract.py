@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.model.moe.moe import MoEConfig
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.dispatcher import NaiveDispatcher
@@ -104,6 +105,22 @@ def test_router_owns_logical_tokens_per_expert() -> None:
         result["tokens_per_expert"],
         torch.bincount(result["topk_ids"].flatten(), minlength=4),
     )
+
+
+@pytest.mark.parametrize("width", [1, 2, 4])
+def test_moe_list_forward_rejects_a_different_width(width: int) -> None:
+    model = _moe_config(intra_layer_micro_batch=width).build()
+    input_ids = torch.tensor([[2, 3, 4]])
+    contexts = [
+        SequenceContext.from_input_ids((input_ids.clone(),), device="cpu")
+        for _ in range(width + 1)
+    ]
+
+    with pytest.raises(ValueError, match=f"width {width + 1} does not match configured width {width}"):
+        model(
+            seq_ctx=contexts,
+            loss_ctx=[{} for _ in contexts],
+        )
 
 
 def test_runtime_meta_build_does_not_require_or_allocate_a_backend_workspace(monkeypatch) -> None:

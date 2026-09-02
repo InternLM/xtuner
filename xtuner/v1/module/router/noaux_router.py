@@ -133,7 +133,15 @@ class NoAuxRouter(nn.Module, RouterProtocol):
             topk_weight = topk_weight / denominator
         topk_weight = topk_weight * self.router_scaling_factor  # must multiply the scaling factor
 
-        tokens_per_expert = torch.bincount(topk_ids.flatten(), minlength=self.n_routed_experts)
+        # An explicit histogram range avoids bincount's output-size readback
+        # while preserving the integer count contract consumed by dispatchers.
+        histogram_ids = topk_ids if topk_ids.device.type == "cuda" else topk_ids.float()
+        tokens_per_expert = torch.histc(
+            histogram_ids,
+            bins=self.n_routed_experts,
+            min=0,
+            max=self.n_routed_experts,
+        ).to(torch.int64)
 
         return {
             "logits": logits,
@@ -219,7 +227,13 @@ class NoAuxGroupedRouter(NoAuxRouter):
             topk_weight = topk_weight / denominator
         topk_weight = topk_weight * self.router_scaling_factor  # must multiply the scaling factor
 
-        tokens_per_expert = torch.bincount(topk_ids.flatten(), minlength=self.n_routed_experts)
+        histogram_ids = topk_ids if topk_ids.device.type == "cuda" else topk_ids.float()
+        tokens_per_expert = torch.histc(
+            histogram_ids,
+            bins=self.n_routed_experts,
+            min=0,
+            max=self.n_routed_experts,
+        ).to(torch.int64)
 
         return {
             "logits": logits,

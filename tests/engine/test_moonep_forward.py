@@ -550,7 +550,7 @@ class TestMoonEPStagingForward(DeterministicDDPTestCase):
     def test_qwen_shared_mtp_reentrant_micro2_matches_deepep(self) -> None:
         self._assert_mtp_micro2_matches_deepep(share_weights=True)
 
-    def test_qwen_rejects_domino_width_above_the_gradient_ring_capacity(self) -> None:
+    def test_qwen_requires_the_configured_domino_width(self) -> None:
         self.create_pg("cuda")
         torch.manual_seed(20260805)
         engine = TrainEngine(
@@ -562,11 +562,16 @@ class TestMoonEPStagingForward(DeterministicDDPTestCase):
         engine.init_model_weights()
         items = [self._model_training_item(engine, offset=idx * 16) for idx in range(3)]
         try:
-            with torch.no_grad(), self.assertRaisesRegex(ValueError, "width 3 exceeds configured capacity 2"):
-                engine.model(
-                    seq_ctx=[item["seq_ctx"] for item in items],
-                    loss_ctx=[item["loss_ctx"] for item in items],
-                )
+            for actual_width in (1, 3):
+                with (
+                    self.subTest(actual_width=actual_width),
+                    torch.no_grad(),
+                    self.assertRaisesRegex(ValueError, f"width {actual_width} does not match configured width 2"),
+                ):
+                    engine.model(
+                        seq_ctx=[item["seq_ctx"] for item in items[:actual_width]],
+                        loss_ctx=[item["loss_ctx"] for item in items[:actual_width]],
+                    )
         finally:
             torch.cuda.synchronize()
             engine.model.destroy_moonep()
@@ -660,6 +665,17 @@ class TestMoonEPStagingForward(DeterministicDDPTestCase):
             max_error = (actual_gradients[name].float() - 2 * expected_gradients[name].float()).abs().max()
             dist.all_reduce(max_error, op=dist.ReduceOp.MAX)
             assert max_error <= 1e-3, f"{name}: max_abs={max_error.item()}"
+
+    def test_qwen_micro4_trains_with_the_configured_width(self) -> None:
+        self.create_pg("cuda")
+        loss, grad_norm, gradients = self._train_microbatches_without_mtp(
+            "moonep",
+            recompute_ratio=0.0,
+            offsets=(0, 16, 32, 48),
+        )
+        assert torch.isfinite(torch.tensor(loss, device="cuda"))
+        assert torch.isfinite(grad_norm)
+        assert gradients and all(torch.isfinite(gradient).all() for gradient in gradients.values())
 
     def test_qwen_shared_expert_variants_train(self) -> None:
         self.create_pg("cuda")

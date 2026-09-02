@@ -87,7 +87,15 @@ class GreedyRouter(nn.Module, RouterProtocol):
 
         # moe forward
         # (e, )
-        tokens_per_expert = torch.bincount(topk_ids.flatten(), minlength=self.n_routed_experts)
+        # bincount determines its output size through a scalar readback.  The
+        # explicit histogram range keeps routing counts entirely on device.
+        histogram_ids = topk_ids if topk_ids.device.type == "cuda" else topk_ids.float()
+        tokens_per_expert = torch.histc(
+            histogram_ids,
+            bins=self.n_routed_experts,
+            min=0,
+            max=self.n_routed_experts,
+        ).to(torch.int64)
 
         return {
             "logits": logits,
@@ -163,7 +171,13 @@ class GreedyGroupedRouter(GreedyRouter):
 
         # moe forward
         # (e, )
-        tokens_per_expert = torch.bincount(topk_ids.flatten(), minlength=self.n_routed_experts)
+        histogram_ids = topk_ids if topk_ids.device.type == "cuda" else topk_ids.float()
+        tokens_per_expert = torch.histc(
+            histogram_ids,
+            bins=self.n_routed_experts,
+            min=0,
+            max=self.n_routed_experts,
+        ).to(torch.int64)
 
         return {
             "logits": logits,

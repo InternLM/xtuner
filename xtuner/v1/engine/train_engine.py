@@ -155,9 +155,9 @@ class TrainEngine:
             raise ValueError("intra_layer_micro_batch must be positive")
         self.intra_layer_micro_batch = intra_layer_micro_batch
         execution_cfg = getattr(model_cfg, "text_config", model_cfg)
-        if getattr(execution_cfg, "dispatcher", None) == "moonep":
-            # Resolve the one execution-width scalar before meta model build;
-            # model code never receives TrainerConfig or a duplicate width.
+        if hasattr(execution_cfg, "intra_layer_micro_batch"):
+            # This is the number of forwards issued consecutively inside one
+            # layer call; it is independent of EP size and MTP depth.
             setattr(execution_cfg, "intra_layer_micro_batch", intra_layer_micro_batch)
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
