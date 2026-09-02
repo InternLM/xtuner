@@ -88,10 +88,6 @@ class ProduceBatchStatus(Enum):
     EXPIRED_BATCH = auto()
 
 
-def default_is_valid_sample_fn(samples: list[RolloutState]) -> bool:
-    return True
-
-
 def default_should_continue_fn(completed_count: int, batch_size: int, **kwargs) -> bool:
     return completed_count < batch_size
 
@@ -99,11 +95,6 @@ def default_should_continue_fn(completed_count: int, batch_size: int, **kwargs) 
 def calculate_stale_threshold(max_staleness: int, sync_weights_interval: int) -> int:
     # max_staleness 按同步周期计数；+1 表示训练天然必须接受的当前同步周期滞后。
     return (max_staleness + 1) * sync_weights_interval
-
-
-@runtime_checkable
-class IsValidSampleFn(Protocol):
-    def __call__(self, samples: list[RolloutState]) -> bool: ...
 
 
 @runtime_checkable
@@ -123,7 +114,6 @@ class BaseProduceContext:
     train_step: int
     model_step: int
     progress: ProduceProgress | DisaggProduceProgress
-    is_valid_sample_fn: IsValidSampleFn = default_is_valid_sample_fn
     stale_threshold: int | None = None
     expired_groups_retryable: bool = True
     token_stale_threshold: int | None = None
@@ -185,31 +175,25 @@ class BaseProduceContext:
     async def put_generated_group(self, group: list[RolloutState]) -> bool:
         produced_tokens = sum(len(item.response_ids or []) - len(item.response_model_steps or []) for item in group)
         initial_status = get_group_status(group)
-        discard_status: Status | None = None
 
-        if initial_status == Status.COMPLETED:
+        if initial_status in (Status.COMPLETED, Status.FILTERED):
             rewards_sum = 0.0
             rewards_count = 0
             for item in group:
                 if item.reward is None or "score" not in item.reward:
                     logger.warning(
-                        f"Missing reward score in item (rollout_id: {item.rollout_id}) of completed group for task {self.task_name}. This item will be skipped in reward statistics."
+                        f"Missing reward score in item (rollout_id: {item.rollout_id}) of generated group for task {self.task_name}. This item will be skipped in reward statistics."
                     )
                     continue
                 # TODO: 在 agent 存在一拆多的情况下，这个 raw reward 统计会不准，但是考虑到在这区分有点 hard code，应该暂时不处理
-                rewards_sum += float(item.reward["score"])  # type: ignore[index]
+                rewards_sum += float(item.reward["score"])
                 rewards_count += 1
             self.progress.add_raw_rewards(self.task_name, rewards_sum, rewards_count)
 
-            if not self.is_valid_sample_fn(group):
-                discard_status = Status.FILTERED
-        elif initial_status == Status.FAILED:
-            discard_status = Status.FAILED
-
-        if discard_status is not None:
+        if initial_status in (Status.FAILED, Status.FILTERED):
             # 失败样本和业务过滤样本都不进入 replay buffer。
             self.progress.add_produced(self.task_name, samples=len(group), tokens=produced_tokens)
-            self.progress.add_discarded(self.task_name, discard_status, samples=len(group))
+            self.progress.add_discarded(self.task_name, initial_status, samples=len(group))
             await release_and_discard_rollout_groups([group])
             return False
 
@@ -288,10 +272,6 @@ class _TaskRunner:
     sampler: Sampler
     weight: float = 1.0
     order: int = 0
-
-    @property
-    def is_valid_sample_fn(self) -> IsValidSampleFn:
-        return getattr(self.produce_strategy, "is_valid_sample_fn", default_is_valid_sample_fn)
 
     @property
     def stale_threshold(self) -> int | None:
