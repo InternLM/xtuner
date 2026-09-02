@@ -28,6 +28,7 @@ class DSATopKCacheState:
     offload_slot: int  # Stable offload slot among concurrently active microbatches.
     mtp_forward_uses_remaining: dict[int, int]  # Original-forward MTP uses left per shared source.
     mtp_replays_remaining: dict[int, int]  # Backward MTP replays left per shared source.
+    indexer_losses: list[torch.Tensor]  # Source-layer sparse KL terms owned by this microbatch.
 
     def __init__(
         self,
@@ -39,6 +40,7 @@ class DSATopKCacheState:
         offload_slot: int = 0,
         mtp_forward_uses_remaining: dict[int, int] | None = None,
         mtp_replays_remaining: dict[int, int] | None = None,
+        indexer_losses: list[torch.Tensor] | None = None,
     ) -> None:
         # topk_indices format: {source_layer_idx: [seq_len, kv_group, topk]}.
         # Invalid/padded sparse slots are represented by -1.
@@ -49,6 +51,7 @@ class DSATopKCacheState:
         self.offload_slot = offload_slot
         self.mtp_forward_uses_remaining = {} if mtp_forward_uses_remaining is None else mtp_forward_uses_remaining
         self.mtp_replays_remaining = {} if mtp_replays_remaining is None else mtp_replays_remaining
+        self.indexer_losses = [] if indexer_losses is None else indexer_losses
 
 
 # Avoid using dataclass decorator here to get rid of extra ops called in pytorch 2.8 and above

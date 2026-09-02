@@ -108,6 +108,7 @@ class MoEModelOutputs(ModelOutputs):
     z_loss: torch.Tensor | None = None
     tokens_per_expert_global: torch.Tensor
     mtp_loss: torch.Tensor | None = None
+    indexer_loss: torch.Tensor | None = None
 
     def free_nongrad_feature(self):
         """Release large intermediate tensors not needed for backward or
@@ -521,6 +522,17 @@ class MoE(BaseModel):
         for offload_slot, seq_ctx in enumerate(seq_ctx_list):
             seq_ctx.dsa_topk_cache.offload_slot = offload_slot
 
+    @staticmethod
+    def _consume_indexer_losses(seq_ctx_list: Sequence[SequenceContext]) -> torch.Tensor | None:
+        """Average source-layer indexer losses and release their Python owners."""
+
+        losses = [loss for seq_ctx in seq_ctx_list for loss in seq_ctx.dsa_topk_cache.indexer_losses]
+        for seq_ctx in seq_ctx_list:
+            seq_ctx.dsa_topk_cache.indexer_losses.clear()
+        if not losses:
+            return None
+        return torch.stack(losses).mean()
+
     def _micro_batch_forward(
         self,
         seq_ctx_list: list[SequenceContext],
@@ -655,6 +667,10 @@ class MoE(BaseModel):
                 )
 
         assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
+
+        indexer_loss = self._consume_indexer_losses(seq_ctx_list)
+        if indexer_loss is not None:
+            output["indexer_loss"] = indexer_loss
 
         if self.mtp_block is not None:
             assert self.config.mtp_config is not None
@@ -883,6 +899,10 @@ class MoE(BaseModel):
 
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
+
+        indexer_loss = self._consume_indexer_losses([seq_ctx])
+        if indexer_loss is not None:
+            output["indexer_loss"] = indexer_loss
 
         layer_hidden_states = hidden_states
         hidden_states = self.norm(hidden_states)

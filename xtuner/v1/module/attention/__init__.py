@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from .attn_outputs import AttnOutputs
-from .dsa_mla import DSAMLAConfig, DSAMultiLatentAttention
+from .dsa_mla import DSAIndexerTrainingConfig, DSAMLAConfig, DSAMultiLatentAttention
 from .gated_deltanet import GatedDeltaNet, GatedDeltaNetConfig
 from .mha import MHAConfig, MultiHeadAttention
 from .mla import MLAConfig, MultiLatentAttention
@@ -13,6 +13,7 @@ __all__ = [
     "MHAConfig",
     "MLAConfig",
     "DSAMLAConfig",
+    "DSAIndexerTrainingConfig",
     "AttnOutputs",
     "GatedDeltaNet",
     "GatedDeltaNetConfig",

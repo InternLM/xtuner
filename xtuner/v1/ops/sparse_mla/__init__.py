@@ -7,6 +7,36 @@ from .protocol import DSATopKIndicesProtocol, SparseMLABackend, SparseMLAOutputs
 from .pytorch import torch_dsa_topk_indices, torch_sparse_mla
 
 
+def dsa_indexer_kl_from_distribution(*args, **kwargs):
+    from .cudnn_dsa_indexer_loss import dsa_indexer_kl_from_distribution as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def dsa_indexer_kl_loss(*args, **kwargs):
+    from .cudnn_dsa_indexer_loss import dsa_indexer_kl_loss as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def sparse_attention_target(*args, **kwargs):
+    from .cudnn_dsa_indexer_loss import sparse_attention_target as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def sparse_indexer_predict(*args, **kwargs):
+    from .cudnn_dsa_indexer_loss import sparse_indexer_predict as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def ensure_cudnn_dsa_indexer_training_available() -> None:
+    from .cudnn_dsa_indexer_loss import ensure_cudnn_dsa_indexer_training_available as _impl
+
+    return _impl()
+
+
 def get_sparse_mla(backend: SparseMLABackend) -> SparseMLAProtocol:
     if backend == "torch":
         return torch_sparse_mla
@@ -97,7 +127,10 @@ __all__ = [
     "SparseMLABackend",
     "SparseMLAOutputs",
     "SparseMLAProtocol",
+    "dsa_indexer_kl_from_distribution",
+    "dsa_indexer_kl_loss",
     "dsa_topk_indices",
+    "ensure_cudnn_dsa_indexer_training_available",
     "ensure_cudnn_dsa_runtime_available",
     "ensure_tilelang_runtime_available",
     "get_dsa_topk_indices",
@@ -106,6 +139,8 @@ __all__ = [
     "sparse_mla",
     "sparse_mla_bwd",
     "sparse_mla_fwd_interface",
+    "sparse_attention_target",
+    "sparse_indexer_predict",
     "torch_dsa_topk_indices",
     "torch_sparse_mla",
 ]

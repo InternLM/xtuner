@@ -6,6 +6,7 @@ from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model import get_model_config_from_hf
+from xtuner.v1.module.attention import DSAIndexerTrainingConfig
 from xtuner.v1.train import TrainerConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 
@@ -36,6 +37,7 @@ work_dir = os.environ.get("WORK_DIR", "work_dirs/glm52_sft")
 # On single-node 8-GPU SFT, EP=8 leaves FSDP size at 1 and replicates non-expert params.
 ep_size = int(os.environ.get("EP_SIZE", "1"))
 intra_layer_micro_batch = int(os.environ.get("INTRA_LAYER_MICRO_BATCH", "1"))
+sp_size = int(os.environ.get("SP_SIZE", "1"))
 global_batch_size = int(os.environ.get("GLOBAL_BATCH_SIZE", os.environ.get("WORLD_SIZE", "8")))
 sample_max_length = int(os.environ.get("SAMPLE_MAX_LENGTH", "4096"))
 pack_max_length = int(os.environ.get("PACK_MAX_LENGTH", "16384"))
@@ -54,6 +56,15 @@ model_cfg.float8_cfg = _get_float8_config()
 model_cfg.lm_loss_cfg = loss_cfg
 if hasattr(model_cfg.attention, "sparse_mla_backend"):
     model_cfg.attention.sparse_mla_backend = os.environ.get("SPARSE_MLA_BACKEND", "tilelang")
+train_dsa_indexer = _get_bool_env("TRAIN_DSA_INDEXER", False)
+if train_dsa_indexer:
+    if model_cfg.attention.sparse_mla_backend != "cudnn_dsa":
+        raise ValueError("DSA indexer training requires SPARSE_MLA_BACKEND=cudnn_dsa.")
+    model_cfg.attention.indexer_training = DSAIndexerTrainingConfig(
+        loss_coeff=float(os.environ.get("INDEXER_LOSS_COEFF", "1.0")),
+        indexer_only=_get_bool_env("INDEXER_ONLY", False),
+        debug_interval=int(os.environ.get("INDEXER_DEBUG_INTERVAL", "0")),
+    )
 
 cache_dir = os.path.join(work_dir, "jsonl_cache")
 cache_tag = os.environ.get("CACHE_TAG", f"glm52_{sample_max_length}")
@@ -98,16 +109,30 @@ if optimizer == "muon":
 elif optimizer == "adamw":
     optim_cfg = AdamWConfig(
         lr=lr,
+        weight_decay=float(os.environ.get("WEIGHT_DECAY", "0.01")),
         foreach=_get_bool_env("ADAMW_FOREACH", False),
         swap_optimizer=_get_bool_env("SWAP_OPTIMIZER", False),
     )
 else:
     raise ValueError(f"Unsupported OPTIMIZER={optimizer!r}. Use adamw or muon.")
 lr_cfg = LRConfig(lr_type=os.environ.get("LR_TYPE", "cosine"), warmup_ratio=float(os.environ.get("WARMUP_RATIO", "0")))
+recompute_ratio = float(os.environ.get("RECOMPUTE_RATIO", "1.0"))
+torch_compile = _get_bool_env("TORCH_COMPILE", False)
+if train_dsa_indexer:
+    if sp_size != 1:
+        raise ValueError("DSA indexer training requires SP_SIZE=1.")
+    if intra_layer_micro_batch != 1:
+        raise ValueError("DSA indexer training requires INTRA_LAYER_MICRO_BATCH=1.")
+    if model_cfg.compile_cfg or torch_compile:
+        raise ValueError("DSA indexer training requires MODEL_COMPILE=0 and TORCH_COMPILE=0.")
+    if recompute_ratio != 0:
+        raise ValueError("DSA indexer training requires RECOMPUTE_RATIO=0 (no activation checkpointing).")
+
 fsdp_cfg = FSDPConfig(
     cpu_offload=_get_bool_env("CPU_OFFLOAD", False),
     ep_size=ep_size,
-    torch_compile=_get_bool_env("TORCH_COMPILE", False),
+    torch_compile=torch_compile,
+    recompute_ratio=recompute_ratio,
 )
 
 trainer = TrainerConfig(
@@ -123,7 +148,7 @@ trainer = TrainerConfig(
     global_batch_size=global_batch_size,
     total_step=total_step,
     intra_layer_micro_batch=intra_layer_micro_batch,
-    sp_size=int(os.environ.get("SP_SIZE", "1")),
+    sp_size=sp_size,
     load_checkpoint_cfg=LoadCheckpointConfig(checkpoint_path=os.environ.get("LOAD_CHECKPOINT_PATH")),
     checkpoint_interval=int(os.environ.get("CHECKPOINT_INTERVAL", "200")),
     checkpoint_maxkeep=int(os.environ.get("CHECKPOINT_MAX_KEEP", "3")),
@@ -134,4 +159,5 @@ trainer = TrainerConfig(
     profile_time=_get_bool_env("PROFILE_TIME", False),
     profile_step=[int(x) for x in os.environ.get("PROFILE_STEP", "2,3").split(",") if x],
     debug_skip_save=_get_bool_env("DEBUG_SKIP_SAVE", False),
+    do_clip=_get_bool_env("DO_CLIP", True),
 )
