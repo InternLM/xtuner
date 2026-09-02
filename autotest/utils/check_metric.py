@@ -105,6 +105,23 @@ def _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SF
     return cur_steps, cur_metrics
 
 
+def _align_resume_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SFT"):
+    """Resume CI runs often append into the same exp tracker as the first phase.
+
+    RL ``tracker-resume.jsonl`` baselines usually contain only the resume segment
+    (e.g. steps 11-15). When the live tracker still includes the first segment,
+    compare only the trailing ``base_steps`` records.
+    """
+    if phase == "resume" and cur_steps > base_steps:
+        logger.warning(
+            f"phase=resume: current {kind} tracker has {cur_steps} steps vs baseline "
+            f"{base_steps}; using resume suffix (merged first+resume in one exp dir)."
+        )
+        trimmed = {metric: values[-base_steps:] for metric, values in cur_metrics.items()}
+        return base_steps, trimmed
+    return cur_steps, cur_metrics
+
+
 def _step_errors(base_vals: list[float], cur_vals: list[float], method: str) -> list[float]:
     """Compute per-step quantities compared against ``threshold``.
 
@@ -274,6 +291,7 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
     base_steps, base_metrics = extract_value(base_path, metric_list)
     cur_steps, cur_metrics = extract_value(cur_path, metric_list)
     cur_steps, cur_metrics = _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SFT")
+    cur_steps, cur_metrics = _align_resume_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SFT")
     assert cur_steps == base_steps, (
         f"current steps is not equal to base steps, current steps: {cur_steps}, base steps: {base_steps}"
     )
@@ -391,6 +409,7 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
     base_steps, base_metrics = extract_rl_value(base_path, metric_list)
     cur_steps, cur_metrics = extract_rl_value(cur_path, metric_list)
     cur_steps, cur_metrics = _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="RL")
+    cur_steps, cur_metrics = _align_resume_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="RL")
 
     assert cur_steps == base_steps, (
         f"current RL steps is not equal to base RL steps, current steps: {cur_steps}, base steps: {base_steps}"
