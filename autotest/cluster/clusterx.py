@@ -26,7 +26,8 @@ def build_rjob_name(
     run_id: str,
     max_len: int = MAX_RJOB_SUBMITTED_NAME_LEN,
 ) -> str:
-    """Build a submitted rjob name while reserving room for its generated suffix.
+    """Build a submitted rjob name while reserving room for its generated
+    suffix.
 
     Format: ``{type}-{case}-{run_id}``. When too long, truncate ``case`` and append a
     short hash so different long case names do not collide after truncation. By
@@ -158,7 +159,7 @@ class ClusterTaskExecutor:
 
         while True:
             status = self.get_task_status(job_schema.job_id)
-            if status == JobStatus.UNRECOGNIZED:
+            if status == JobStatus.UNRECORGNIZED:
                 unrecognized_polls += 1
                 if unrecognized_polls >= MAX_UNRECOGNIZED_STATUS_POLLS:
                     raise RuntimeError(
