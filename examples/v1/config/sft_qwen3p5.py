@@ -102,6 +102,7 @@ dataloader_config = DataloaderConfig(
 optim_cfg = MuonConfig(
     lr=float(os.environ.get("LR", "2e-5")),
     weight_decay=float(os.environ.get("WEIGHT_DECAY", "0.05")),
+    use_gram_newton_schulz=_get_bool_env("USE_GRAM_NEWTON_SCHULZ", False),
 )
 lr_cfg = LRConfig(
     lr_type="cosine",
