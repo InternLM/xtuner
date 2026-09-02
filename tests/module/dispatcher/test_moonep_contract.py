@@ -106,30 +106,20 @@ def test_router_owns_logical_tokens_per_expert() -> None:
     )
 
 
-def test_runtime_meta_build_only_validates_the_optional_backend(monkeypatch) -> None:
+def test_runtime_meta_build_does_not_require_or_allocate_a_backend_workspace(monkeypatch) -> None:
     from xtuner.v1.module.dispatcher.moonep import MoonEPRuntime
 
-    calls = []
-
-    class FakeWorkspace:
-        @classmethod
-        def validate(cls, **kwargs) -> None:
-            calls.append(kwargs)
-
-        @classmethod
-        def allocate(cls, **kwargs):
-            raise AssertionError("meta build must not allocate VMM resources")
-
+    # Workspace policy belongs to XTuner and allocation happens only after
+    # FSDP installation, so the optional backend needs no workspace interface.
     backend = SimpleNamespace(
         __file__="/tmp/MoonEP-mod/moonep/__init__.py",
-        XTUNER_INTEGRATION_API_VERSION=2,
+        XTUNER_INTEGRATION_API_VERSION=3,
         Buffer=object,
-        ExpertVMMWorkspace=FakeWorkspace,
     )
     monkeypatch.setitem(sys.modules, "moonep", backend)
     ep_group = SimpleNamespace(size=lambda: 4)
 
-    MoonEPRuntime(
+    runtime = MoonEPRuntime(
         ep_group=ep_group,
         hidden_size=128,
         intermediate_size=128,
@@ -139,17 +129,8 @@ def test_runtime_meta_build_only_validates_the_optional_backend(monkeypatch) -> 
         staging_reference=False,
     )
 
-    assert calls == [
-        {
-            "projection_shapes": ((256, 128), (128, 128)),
-            "num_experts": 8,
-            "ep_size": 4,
-            "top_k": 2,
-            "dtype": torch.bfloat16,
-            "home_generations": 2,
-            "gradient_slots": 2,
-        }
-    ]
+    assert not hasattr(backend, "ExpertVMMWorkspace")
+    assert isinstance(runtime, MoonEPRuntime)
 
 
 def test_runtime_reports_optional_backend_source_on_capability_mismatch(monkeypatch) -> None:

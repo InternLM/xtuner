@@ -81,10 +81,6 @@ class _Workspace:
     allocated = []
 
     @classmethod
-    def validate(cls, **kwargs) -> None:
-        return None
-
-    @classmethod
     def allocate(
         cls,
         *,
@@ -134,11 +130,14 @@ def backend(monkeypatch):
     _Workspace.allocated.clear()
     module = SimpleNamespace(
         __file__="/tmp/MoonEP-mod/moonep/__init__.py",
-        XTUNER_INTEGRATION_API_VERSION=2,
+        XTUNER_INTEGRATION_API_VERSION=3,
         Buffer=_Buffer,
-        ExpertVMMWorkspace=_Workspace,
     )
     monkeypatch.setitem(sys.modules, "moonep", module)
+    monkeypatch.setattr(
+        "xtuner.v1.module.dispatcher.moonep._ExpertVMMWorkspace",
+        _Workspace,
+    )
     return module
 
 

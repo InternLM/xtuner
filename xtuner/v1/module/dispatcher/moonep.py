@@ -28,9 +28,10 @@ from .fsdp_vmm_landing import (
     install_fsdp_vmm_landing,
     uninstall_fsdp_vmm_landing,
 )
+from .moonep_workspace import _ExpertVMMWorkspace
 
 
-_INTEGRATION_API_VERSION = 2
+_INTEGRATION_API_VERSION = 3
 _TARGET_TORCH_VERSION = "2.12.1+cu132"
 
 
@@ -47,13 +48,7 @@ def require_moonep_backend() -> Any:
             f"incompatible MoonEP integration API; expected {_INTEGRATION_API_VERSION}; loaded module: {source}"
         )
 
-    workspace = getattr(backend, "ExpertVMMWorkspace", None)
-    if (
-        not hasattr(backend, "Buffer")
-        or workspace is None
-        or not hasattr(workspace, "validate")
-        or not hasattr(workspace, "allocate")
-    ):
+    if not hasattr(backend, "Buffer"):
         raise RuntimeError(f"MoonEP-mod XTuner capabilities are missing: {source}")
     if torch.__version__ != _TARGET_TORCH_VERSION:
         raise RuntimeError(
@@ -91,24 +86,8 @@ class MoonEPRuntime:
         self._staging_reference = staging_reference
         self._num_sms = num_sms
 
-        # This is deliberately the complete meta-build action.  The backend
-        # validates kernel metadata here but cannot create CUDA/VMM/socket
-        # resources until native FSDP has finished mutating parameters.
-        self._backend.ExpertVMMWorkspace.validate(
-            projection_shapes=(
-                (2 * intermediate_size, hidden_size),
-                (hidden_size, intermediate_size),
-            ),
-            num_experts=num_experts,
-            ep_size=ep_group.size(),
-            top_k=top_k,
-            dtype=torch.bfloat16,
-            home_generations=2,
-            gradient_slots=intra_layer_micro_batch,
-        )
-
         self._buffer: Any | None = None
-        self._workspace: Any | None = None
+        self._workspace: _ExpertVMMWorkspace | None = None
         self._fsdp_params: tuple[Any, ...] = ()
         self._layers: list[tuple[str, tuple[nn.Module, nn.Module]]] = []
         self._fixed_tokens_per_rank: int | None = None
@@ -151,16 +130,13 @@ class MoonEPRuntime:
                 "weights after every FSDP AllGather; it is a numerical reference, "
                 "not the production performance path."
             )
-        workspace = self._backend.ExpertVMMWorkspace.allocate(
+        workspace = _ExpertVMMWorkspace.allocate(
             projection_shapes=(
                 (2 * self._intermediate_size, self._hidden_size),
                 (self._hidden_size, self._intermediate_size),
             ),
             num_experts=self._num_experts,
             ep_group=self._ep_group,
-            top_k=self._top_k,
-            dtype=torch.bfloat16,
-            home_generations=2,
             gradient_slots=self._intra_layer_micro_batch,
         )
         if not self._staging_reference:
