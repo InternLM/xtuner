@@ -69,10 +69,6 @@ class RolloutWeightUpdateTarget:
     lifecycle_state: str
 
     @property
-    def is_active(self) -> bool:
-        return self.lifecycle_state == "active"
-
-    @property
     def engine_size(self) -> int:
         return len(self.update_ranks)
 
@@ -144,7 +140,7 @@ class RolloutWeightUpdateInfo:
     @property
     def rollout_url(self) -> str | None:
         target = self.local_update_target
-        if target is None or not target.is_active:
+        if target is None:
             return None
         return target.server_url
 
@@ -174,14 +170,25 @@ class RolloutWeightUpdateInfo:
         return target.engine_size
 
     @property
-    def active_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
-        return tuple(target for target in self.weight_update_targets if target.is_active)
+    def update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
+        return tuple(target for target in self.weight_update_targets)
+
+    @property
+    def update_target_infos(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "endpoint_rank": target.endpoint_rank,
+                "server_url": target.server_url,
+                "lifecycle_state": target.lifecycle_state,
+                "update_ranks": target.update_ranks,
+                "engine_size": target.engine_size,
+            }
+            for target in self.update_targets
+        ]
 
     @property
     def nccl_engine_infos(self) -> tuple[tuple[int, str, int], ...]:
-        return tuple(
-            (target.endpoint_rank, target.server_url, target.engine_size) for target in self.active_update_targets
-        )
+        return tuple((target.endpoint_rank, target.server_url, target.engine_size) for target in self.update_targets)
 
     @property
     def transport_signature(self) -> tuple[Any, ...]:

@@ -338,6 +338,10 @@ class TrainingController:
         ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
 
+    def has_registered_weight_checkpoint(self) -> bool:
+        handles = [worker.has_registered_weight_checkpoint.remote() for worker in self.workers]
+        return all(ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT))
+
     def suspend_train_nccl_process_groups(self):
         """Suspend train-side NCCL process groups after weight sync."""
         handles = [

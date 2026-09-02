@@ -22,7 +22,7 @@ from .worker import (
     RolloutConfig,
     get_rollout_worker_base_cls,
 )
-from .worker_registry import RolloutWorkerRegistry
+from .worker_registry import RolloutWorkerRegistry, WorkerLifecycleState
 
 
 # Keep this as a Ray actor because Ray AgentLoop actors need a shared, cross-process handle to the same controller
@@ -66,9 +66,52 @@ class RolloutController:
         )
         self.health_manager.start()
 
-    def get_weight_update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
-        """Return rollout endpoints that can receive weight update requests."""
-        return self.registry.weight_update_targets()
+    def get_weight_update_targets(
+        self, target_state: WorkerLifecycleState | None = None, return_group_ranks: bool = False
+    ) -> (
+        list[RolloutWeightUpdateTarget]
+        | tuple[
+            list[RolloutWeightUpdateTarget],
+            list[tuple[int, ...]],
+        ]
+    ):
+        """Return rollout weight-update targets and their lifecycle groups."""
+
+        target_states: tuple[WorkerLifecycleState, ...]
+        if target_state is None:
+            target_states = (
+                WorkerLifecycleState.PENDING_WEIGHTS,
+                WorkerLifecycleState.ACTIVE,
+                WorkerLifecycleState.INACTIVE,
+            )
+        else:
+            target_states = (target_state,)
+        target_state_values = {state.value for state in target_states}
+        targets, group_ranks = self.registry.weight_update_targets()
+
+        filtered_targets = [target for target in targets if target.lifecycle_state in target_state_values]
+
+        if not return_group_ranks:
+            return filtered_targets
+
+        endpoint_ranks = {target.endpoint_rank for target in filtered_targets}
+        filtered_group_ranks = [ranks for ranks in group_ranks if endpoint_ranks.intersection(ranks)]
+
+        return filtered_targets, filtered_group_ranks
+
+    def inject_backend_crash_for_test(self, *, rank: int = 0) -> None:
+        """Crash one active rollout backend for the immediate-recovery test."""
+        worker = self.registry.active_entrypoint_by_rank(rank)
+        if worker is None:
+            raise RuntimeError(f"No active rollout request entrypoint found for test fault injection: rank={rank}.")
+
+        accepted = ray.get(
+            worker.actor.inject_backend_crash_for_test.remote(),  # type: ignore[attr-defined]
+            timeout=ROLLOUT_RAY_GET_TIMEOUT,
+        )
+        if not accepted:
+            raise RuntimeError(f"Rollout worker rejected test fault injection: rank={rank}, url={worker.url}.")
+        self.logger.warning(f"[ImmediateRecoveryExperiment] backend_crash_injected rank={rank} url={worker.url}")
 
     def register_active_workers_to_proxy(self) -> None:
         if self.proxy_manager is None:
@@ -133,6 +176,9 @@ class RolloutController:
 
     def pause_generation(self):
         self.health_manager.pause()
+        # Wait for the health manager to finish recovery before pausing generation.
+        if not self.health_manager.wait_recovery_done(timeout=600.0):
+            raise TimeoutError("Timed out waiting for rollout worker recovery before training.")
         active_workers = self.registry.active_workers()
         futures = [
             worker.actor.pause_generation.remote()  # type: ignore[attr-defined]
@@ -152,34 +198,65 @@ class RolloutController:
         if failed_worker_urls:
             self.logger.warning(f"Abort request failed: worker_urls={failed_worker_urls}")
 
-    async def check_and_shutdown_inactive_workers(self):
-        """Run a fail-fast health barrier and shut down failed groups so
-        training can reuse shared rollout resources."""
-        await asyncio.to_thread(self.health_manager.check_and_shutdown_inactive_workers)
+    async def shutdown_inactive_workers(self):
+        """Shut down failed groups so training can reuse shared rollout
+        resources."""
+        await asyncio.to_thread(self.health_manager.shutdown_inactive_workers)
 
     async def restart_inactive_workers(self):
         """Restart inactive groups before a sync-step weight update."""
-        await asyncio.to_thread(self.health_manager.restart_inactive_workers)
+        groups = await asyncio.to_thread(self.health_manager.restart_inactive_workers)
+        return tuple(group.ranks for group in groups)
+
+    def mark_worker_groups_lifecycle_state(
+        self,
+        group_ranks: list[tuple[int, ...]] | None = None,
+        *,
+        source_state: WorkerLifecycleState,
+        target_state: WorkerLifecycleState,
+    ) -> None:
+        """Move selected worker groups from source_state to target_state.
+
+        When group_ranks is omitted, every complete worker group currently in source_state is moved. When it is
+        provided, only exact matching groups are considered. Transitions to ACTIVE or INACTIVE notify the health
+        manager so routing and lifecycle listeners stay in sync.
+        """
+        source_groups = self.registry.get_target_state_worker_groups(source_state)
+        # 只对目标group中命中状态的worker进行状态更新，若不提供目标group，则对所有source_state状态的worker进行状态更新
+        if group_ranks is None:
+            groups = source_groups
+        else:
+            groups_by_ranks = {group.ranks: group for group in source_groups}
+            groups = tuple(groups_by_ranks[ranks] for ranks in group_ranks if ranks in groups_by_ranks)
+        updated_groups = self.registry.set_groups_state(
+            groups,
+            target_state,
+            source_state=source_state,
+        )
+        if target_state is WorkerLifecycleState.ACTIVE:
+            self.health_manager.notify_worker_group_active(updated_groups)
+        elif target_state is WorkerLifecycleState.INACTIVE:
+            self.health_manager.notify_worker_group_inactive(updated_groups)
 
     def continue_generation(self):
-        self._broadcast_to_active_workers("continue_generation")
+        self._broadcast_to_workers("continue_generation", WorkerLifecycleState.ACTIVE)
         self.health_manager.resume()
 
     def offload(self):
-        self._broadcast_to_active_workers("offload")
+        self._broadcast_to_workers("offload", WorkerLifecycleState.ACTIVE)
 
     def flush_cache(self):
         self._broadcast_to_active_workers("flush_cache")
 
     def onload(self):
-        self._broadcast_to_active_workers("onload_weights")
-        self._broadcast_to_active_workers("onload_kvcache")
+        self._broadcast_to_workers("onload_weights", WorkerLifecycleState.ACTIVE)
+        self._broadcast_to_workers("onload_kvcache", WorkerLifecycleState.ACTIVE)
 
-    def onload_weights(self):
-        self._broadcast_to_active_workers("onload_weights")
+    def onload_weights(self, target_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE):
+        self._broadcast_to_workers("onload_weights", target_state)
 
-    def onload_kvcache(self):
-        self._broadcast_to_active_workers("onload_kvcache")
+    def onload_kvcache(self, target_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE):
+        self._broadcast_to_workers("onload_kvcache", target_state)
 
     def shutdown(self):
         """Shut down all rollout workers tracked by the controller."""
@@ -190,8 +267,8 @@ class RolloutController:
             timeout=ROLLOUT_RAY_GET_TIMEOUT,
         )
 
-    def _broadcast_to_active_workers(self, method_name: str, **kwargs):
-        workers = self.registry.active_workers()
+    def _broadcast_to_workers(self, method_name: str, target_state: WorkerLifecycleState, **kwargs):
+        workers = self.registry.get_target_state_workers(target_state)
         futures = [getattr(worker.actor, method_name).remote(**kwargs) for worker in workers]
         return ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
 

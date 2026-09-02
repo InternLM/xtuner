@@ -102,11 +102,12 @@ class _FakeRolloutController:
         self.continue_generation = _RemoteMethod(async_result=True)
         self.flush_cache = _RemoteMethod(return_value="cache_flushed")
         self.offload = _RemoteMethod(return_value="rollout_offloaded")
-        self.check_and_shutdown_inactive_workers = _RemoteMethod(return_value="rollout_inactive_workers_shutdown")
+        self.shutdown_inactive_workers = _RemoteMethod(return_value="rollout_inactive_workers_shutdown")
         self.restart_inactive_workers = _RemoteMethod(return_value="rollout_restarted")
         self.onload_weights = _RemoteMethod(return_value="weights_loaded")
         self.onload_kvcache = _RemoteMethod(return_value="kvcache_loaded")
         self.get_weight_update_targets = _RemoteMethod(return_value=())
+        self.mark_worker_groups_lifecycle_state = _RemoteMethod(return_value=None)
         self.set_enable_partial_rollout = _RemoteMethod(return_value=None)
         self.validate_registered_workers_to_proxy = _RemoteMethod(return_value=_AwaitableValue(None))
 

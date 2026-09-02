@@ -33,6 +33,7 @@ from xtuner.v1.rl.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
 from xtuner.v1.rl.evaluator import EvaluatorConfig
+from xtuner.v1.rl.health_manager import RLHealthManager, _NoOpRLHealthManager
 from xtuner.v1.rl.replay_buffer import (
     AsyncReplayBufferConfig,
     SyncReplayBufferConfig,
@@ -41,6 +42,7 @@ from xtuner.v1.rl.replay_buffer import (
 )
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.rollout.worker_registry import WorkerLifecycleState
 from xtuner.v1.rl.trace import TraceConfig, close_trace, configure_trace
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
@@ -188,8 +190,17 @@ def bind_train_rollout(
     rollout_config: RolloutConfig,
 ) -> None:
     """Bind the training and rollout workers for update weights."""
+    # Promote pending workers to active before the regular weight update so
+    # subsequent lifecycle operations can handle them together.
+    ray.get(
+        rollout_controller.mark_worker_groups_lifecycle_state.remote(
+            source_state=WorkerLifecycleState.PENDING_WEIGHTS,
+            target_state=WorkerLifecycleState.ACTIVE,
+        ),
+        timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+    )
     targets = ray.get(
-        rollout_controller.get_weight_update_targets.remote(),  # type: ignore[attr-defined]
+        rollout_controller.get_weight_update_targets.remote(target_state=WorkerLifecycleState.ACTIVE),
         timeout=RL_TRAINER_RAY_GET_TIMEOUT,
     )
     train_controller.bind_rollout_weight_update(
@@ -1011,10 +1022,6 @@ class BaseRLTrainer:
 
         # 共卡训练前切换资源：检查 rollout -> offload rollout -> onload train。
         if offload_rollout_before_train:
-            ray.get(
-                self.rollout_controller.check_and_shutdown_inactive_workers.remote(),
-                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
-            )
             ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         if onload_train_before_train:
             if getattr(self, "_train_nccl_suspended", False):
@@ -1668,6 +1675,7 @@ class BaseRLTrainer:
 class RLColocateTrainer(BaseRLTrainer):
     _META_PATH = ".xtuner_rl_colocate_trainer"
     agent_loop_manager: AgentLoopManager
+    rl_health_manager: RLHealthManager | _NoOpRLHealthManager
 
     # 共卡保留资源切换和权重同步流程；通用保存、日志在 BaseRLTrainer。
     def __init__(self, cfg: RLColocateTrainerConfig):
@@ -1681,6 +1689,7 @@ class RLColocateTrainer(BaseRLTrainer):
         set_cpu_resource_manager(self._cpu_resource_manager)
 
         if self._debug_rollout:
+            self.rl_health_manager = _NoOpRLHealthManager()
             if self._rollout_config.skip_load_weights:
                 self.logger.info(
                     "debug_rollout cannot be used with rollout_config.skip_load_weights=True. force set skip_load_weights to False"
@@ -1702,6 +1711,7 @@ class RLColocateTrainer(BaseRLTrainer):
             checkpoint_path = self._resume_train_controller_and_state(checkpoint_path)
 
         if self._debug_train:
+            self.rl_health_manager = _NoOpRLHealthManager()
             assert self._debug_rollout_dir is not None
             self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
             self._debug_train_files = self._list_debug_rollout_files(self._debug_rollout_dir)
@@ -1718,6 +1728,12 @@ class RLColocateTrainer(BaseRLTrainer):
         self.rollout_controller = self._rollout_config.build(self._pg)
         if self._rollout_config.weight_transport_type is None:
             self._rollout_config.weight_transport_type = "ipc"
+
+        self.rl_health_manager = RLHealthManager(
+            train_controller=self.train_controller,
+            rollout_controller=self.rollout_controller,
+            rollout_config=self._rollout_config,
+        )
 
         bind_train_rollout(
             train_controller=self.train_controller,
@@ -1757,9 +1773,11 @@ class RLColocateTrainer(BaseRLTrainer):
             self.logger.info("Rollout workers updated weights from train workers.")
 
     def fit(self):
+        self.rl_health_manager.start()
         try:
             self._fit()
         finally:
+            self.rl_health_manager.stop()
             self._exp_tracker.close()
             close_trace()
 
@@ -1792,17 +1810,22 @@ class RLColocateTrainer(BaseRLTrainer):
             step_timer_dict = {}
             with timer("step", step_timer_dict):
                 # 共卡一次调用内完成生产和消费。
+                self.rl_health_manager.set_rollout_resources_available(True)
                 self.logger.info(
                     f"[Step {train_step}] start to generate rollout experience for train step {train_step} with model step {model_step}"
                 )
-                with timer("produce_batch", step_timer_dict):
-                    produce_result: ProduceBatchResult = asyncio_run(
-                        self.agent_loop_manager.produce_batch(
-                            self.train_batch_size,
-                            train_step=train_step,
-                            model_step=model_step,
+                try:
+                    with timer("produce_batch", step_timer_dict):
+                        produce_result: ProduceBatchResult = asyncio_run(
+                            self.agent_loop_manager.produce_batch(
+                                self.train_batch_size,
+                                train_step=train_step,
+                                model_step=model_step,
+                            )
                         )
-                    )
+                finally:
+                    self.rl_health_manager.set_rollout_resources_available(False)
+
                 if XTUNER_DETERMINISTIC:
                     produce_result.rollout_states = sort_rollout_state_for_deterministic(produce_result.rollout_states)
                 train_batch = produce_result.rollout_states
@@ -1887,33 +1910,29 @@ class RLColocateTrainer(BaseRLTrainer):
         timer_name = "sync_weight" if should_sync_weights else "switch_to_rollout"
         with timer(timer_name, step_timer_dict):
             if should_sync_weights:
-                ray.get(
-                    self.rollout_controller.restart_inactive_workers.remote(),
-                    timeout=RL_TRAINER_RAY_GET_TIMEOUT,
-                )
-                bind_train_rollout(
-                    train_controller=self.train_controller,
-                    rollout_controller=self.rollout_controller,
-                    rollout_config=self._rollout_config,
-                )
-
-                if self._rollout_config.weight_transport_type == "checkpoint_engine":
-                    self.train_controller.weight_update(need_register=True, need_update=False)
-                    self.train_controller.offload(target="model")
-                    ray.get(
-                        self.rollout_controller.onload_weights.remote(),
-                        timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+                with self.rl_health_manager.weight_update_guard():
+                    bind_train_rollout(
+                        train_controller=self.train_controller,
+                        rollout_controller=self.rollout_controller,
+                        rollout_config=self._rollout_config,
                     )
-                    self.train_controller.weight_update(need_register=False, need_update=True)
+                    if self._rollout_config.weight_transport_type == "checkpoint_engine":
+                        self.train_controller.weight_update(need_register=True, need_update=False)
+                        self.train_controller.offload(target="model")
+                        ray.get(
+                            self.rollout_controller.onload_weights.remote(),
+                            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+                        )
+                        self.train_controller.weight_update(need_register=False, need_update=True)
+                    else:
+                        ray.get(
+                            self.rollout_controller.onload_weights.remote(),
+                            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+                        )
+                        self.train_controller.weight_update()
+                        self.train_controller.offload(target="model")
+                    self.logger.info("Rollout workers update weights successfully in colocate mode")
 
-                else:
-                    ray.get(
-                        self.rollout_controller.onload_weights.remote(),
-                        timeout=RL_TRAINER_RAY_GET_TIMEOUT,
-                    )
-                    self.train_controller.weight_update()
-                    self.train_controller.offload(target="model")
-                self.logger.info("Rollout workers update weights successfully in colocate mode")
                 suspend_train_nccl = (
                     os.getenv(
                         "XTUNER_SUSPEND_TRAIN_NCCL_AFTER_SYNC",
