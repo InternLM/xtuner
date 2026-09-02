@@ -8,6 +8,7 @@ import torch.distributed as dist
 import tqdm
 from torch.distributed.tensor import DTensor
 
+from xtuner.v1.model.base import is_float8_weight
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.utils import get_device, get_torch_device_module
@@ -140,8 +141,12 @@ class WeightIterator:
             _tensor_list, _spec_list = list(zip(*tensor_list))
             fsdp_unshard_tensor_list = model._fsdp_foreach_allgather(_tensor_list, _spec_list)
             if save_dtype == torch.float8_e4m3fn:
+                runtime_is_float8_list = [is_float8_weight(tensor) for tensor in _tensor_list]
                 fsdp_unshard_tensor_list, name_list = model._to_float8(
-                    fsdp_unshard_tensor_list, name_list, _tensor_list, save_dtype
+                    fsdp_unshard_tensor_list,
+                    name_list,
+                    runtime_is_float8_list,
+                    save_dtype,
                 )
             return fsdp_unshard_tensor_list, name_list
 
