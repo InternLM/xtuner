@@ -54,6 +54,10 @@ def _is_error_payload(payload: dict) -> bool:
     return payload.get("error") is not None or payload.get("type") == "error" or payload.get("object") == "error"
 
 
+class _UpstreamResponseError(RuntimeError):
+    """Internal marker for an error explicitly returned by the upstream."""
+
+
 def _error_payload(fmt: str, message: str, status: int = 500, error_type: str = "internal_server_error") -> dict:
     """Error body in the caller's native shape.
 
@@ -729,6 +733,9 @@ class SessionServer:
                 data=request_body,
                 trace_session_id=session_id,
             ) as resp:
+                upstream_status = resp.status
+                is_success_response = HTTPStatus.OK <= upstream_status < HTTPStatus.MULTIPLE_CHOICES
+                trace_response = trace_active and is_success_response
                 if is_stream:
                     response_chunks: list[bytes] = []
                     response = web.StreamResponse(
@@ -739,22 +746,28 @@ class SessionServer:
                             if k.lower() not in ("transfer-encoding", "content-length", "content-encoding")
                         },
                     )
-                    await response.prepare(request)
                     # If the downstream client closes the socket mid-stream
                     # (e.g. AsyncAPIClient bails out on a finish_reason=='error'
                     # chunk after the prompt overflowed the session window),
                     # keep draining the upstream so the trace is still recorded
                     # in full but stop attempting to write to the closed socket.
-                    client_alive = True
+                    try:
+                        await response.prepare(request)
+                    except (ConnectionError, ClientConnectionResetError):
+                        client_alive = False
+                    else:
+                        client_alive = True
+                    skip_blank_after_done = False
                     async for line in resp.content:
                         # Only retain chunks when we'll actually need to parse
                         # them for tracing; evaluate-mode requests skip this
                         # so memory does not grow with stream length.
-                        if trace_active:
+                        if trace_response:
                             response_chunks.append(line)
 
                         if (
-                            clean_data is not None
+                            is_success_response
+                            and clean_data is not None
                             and request_data is not None
                             and line.startswith(b"data: ")
                             and line.strip() != b"data: [DONE]"
@@ -762,27 +775,35 @@ class SessionServer:
                             try:
                                 text = line.decode("utf-8")
                                 data = json.loads(text[6:])
-                                if isinstance(data, dict) and clean_data(data):
+                                if isinstance(data, dict) and not _is_error_payload(data) and clean_data(data):
                                     line = ("data: " + json.dumps(data) + "\n").encode("utf-8")
                             except Exception:
                                 pass
 
                         # Delay [DONE] only while a training trace still needs to be exported.
-                        if client_alive and (not trace_active or line.strip() != b"data: [DONE]"):
+                        if trace_response and skip_blank_after_done:
+                            if not line.strip():
+                                continue
+                            skip_blank_after_done = False
+                        if line.strip() == b"data: [DONE]":
+                            if trace_response:
+                                skip_blank_after_done = True
+                                continue
+                        if client_alive:
                             try:
                                 await response.write(line)
                             except (ConnectionError, ClientConnectionResetError):
                                 client_alive = False
 
-                    raw_response = b"".join(response_chunks) if trace_active else b""
+                    raw_response = b"".join(response_chunks) if trace_response else b""
                 else:
                     raw_response = await resp.read()
                     final_raw_response = raw_response
 
-                    if clean_data is not None and request_data is not None:
+                    if is_success_response and clean_data is not None and request_data is not None:
                         try:
                             parsed = json.loads(raw_response)
-                            if isinstance(parsed, dict) and clean_data(parsed):
+                            if isinstance(parsed, dict) and not _is_error_payload(parsed) and clean_data(parsed):
                                 final_raw_response = json.dumps(parsed).encode("utf-8")
                         except Exception:
                             pass
@@ -799,27 +820,33 @@ class SessionServer:
 
         # Apply abstract on_response processing
         response_data: Optional[dict] = None
-        skip_done = bool(is_stream and not trace_active)
+        skip_done = bool(is_stream and not trace_response)
         session_error_msg: Optional[str] = None
-        if trace_active and request_data and orig_req_body is not None:
+        if trace_response and request_data and orig_req_body is not None:
             if is_stream:
                 try:
                     response_data = self._parse_stream_response(raw_response, fmt)
                     if response_data is None:
-                        # Upstream emitted no traceable content — suppress the
-                        # synthetic [DONE] line we usually append; the real
-                        # stream content has already been forwarded as-is.
-                        skip_done = True
+                        raise RuntimeError("Upstream SSE stream ended without a complete response.")
+                except _UpstreamResponseError:
+                    # An explicit upstream error is already part of the wire
+                    # response. Do not wrap it in a second SessionServer error.
+                    skip_done = b"data: [DONE]" not in raw_response
                 except Exception as exc:
                     session_error_msg = f"SessionServer stream trace failed: {type(exc).__name__}: {exc}"
                     skip_done = True
             else:
                 try:
-                    response_data = json.loads(raw_response)
-                except json.JSONDecodeError:
-                    pass
-                if isinstance(response_data, dict) and _is_error_payload(response_data):
-                    response_data = None
+                    parsed_response = json.loads(raw_response)
+                    if not isinstance(parsed_response, dict):
+                        raise TypeError(
+                            f"generation response body must be a JSON object; got {type(parsed_response).__name__}"
+                        )
+                except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
+                    session_error_msg = f"SessionServer response trace failed: {type(exc).__name__}: {exc}"
+                else:
+                    if not _is_error_payload(parsed_response):
+                        response_data = parsed_response
 
             if response_data is not None:
                 set_trace_attributes(_response_usage_attributes(response_data))
@@ -834,18 +861,19 @@ class SessionServer:
 
         if is_stream:
             try:
-                if session_error_msg:
-                    error_payload = _error_payload(fmt, session_error_msg)
-                    error_line = "data: " + json.dumps(error_payload, ensure_ascii=False) + "\n\n"
-                    # Anthropic SSE carries a named ``event: error`` line; the recorder keys on the ``data:`` JSON
-                    # either way, but a real Anthropic SDK consumer needs the event name.
-                    if fmt == FMT_ANTHROPIC:
-                        error_line = "event: error\n" + error_line
-                    await response.write(error_line.encode("utf-8"))
-                    skip_done = True
-                if not skip_done:
-                    await response.write(b"data: [DONE]\n\n")
-                await response.write_eof()
+                if client_alive:
+                    if session_error_msg:
+                        error_payload = _error_payload(fmt, session_error_msg)
+                        error_line = "data: " + json.dumps(error_payload, ensure_ascii=False) + "\n\n"
+                        # Anthropic SSE carries a named ``event: error`` line; the recorder keys on the ``data:`` JSON
+                        # either way, but a real Anthropic SDK consumer needs the event name.
+                        if fmt == FMT_ANTHROPIC:
+                            error_line = "event: error\n" + error_line
+                        await response.write(error_line.encode("utf-8"))
+                        skip_done = True
+                    elif trace_response and not skip_done:
+                        await response.write(b"data: [DONE]\n\n")
+                    await response.write_eof()
             except (ConnectionError, ClientConnectionResetError):
                 pass
         elif session_error_msg:
@@ -961,8 +989,8 @@ class SessionServer:
     def _parse_stream_response(raw: bytes, fmt: str) -> Optional[dict]:
         """Parse an SSE stream and reconstruct the final response object.
 
-        Returns ``None`` when the stream carried no traceable content (so the
-        caller skips the trace hook entirely instead of recording garbage).
+        Returns ``None`` when no complete response can be reconstructed. The
+        caller treats that as a local trace failure for trace-enabled requests.
         """
         text = raw.decode("utf-8", errors="replace")
         events: list[dict] = []
@@ -975,7 +1003,9 @@ class SessionServer:
             if line.startswith("data: "):
                 event = json.loads(line[6:])
                 if _is_error_payload(event):
-                    raise RuntimeError(f"Upstream SSE stream returned error: {json.dumps(event, ensure_ascii=False)}")
+                    raise _UpstreamResponseError(
+                        f"Upstream SSE stream returned error: {json.dumps(event, ensure_ascii=False)}"
+                    )
                 events.append(event)
 
         if not events:
@@ -1003,7 +1033,7 @@ class SessionServer:
 
             for choice in event.get("choices", []):
                 if choice.get("finish_reason") == "error":
-                    raise RuntimeError(
+                    raise _UpstreamResponseError(
                         f"Upstream SSE choice finished with error: {json.dumps(event, ensure_ascii=False)}"
                     )
                 delta = choice.get("delta", {})
