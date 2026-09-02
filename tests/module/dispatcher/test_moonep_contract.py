@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.model.moe.moe import MoEConfig
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.dispatcher import NaiveDispatcher
@@ -53,6 +54,16 @@ def test_moonep_is_a_standard_model_config_choice() -> None:
     assert config.intra_layer_micro_batch == 1
 
 
+def test_moonep_rejects_fp8_at_model_construction() -> None:
+    config = _moe_config(
+        dispatcher="moonep",
+        float8_cfg=Float8Config(scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE),
+    )
+
+    with pytest.raises(ValueError, match="requires BF16 expert compute; FP8 is not supported"):
+        config.build()
+
+
 def test_non_moonep_build_does_not_import_optional_backend() -> None:
     # A fresh interpreter with an explicit missing-module sentinel models an
     # XTuner installation that does not have MoonEP installed.
@@ -62,6 +73,42 @@ sys.modules[\"moonep\"] = None
 from xtuner.v1.module.dispatcher import NaiveDispatcher, build_dispatcher
 dispatcher = build_dispatcher(None, n_routed_experts=4)
 assert isinstance(dispatcher, NaiveDispatcher)
+"""
+    subprocess.run([sys.executable, "-c", source], check=True, capture_output=True, text=True)
+
+
+def test_selecting_moonep_reports_the_missing_optional_backend() -> None:
+    source = """
+import sys
+sys.modules["moonep"] = None
+from types import SimpleNamespace
+from xtuner.v1.module.dispatcher.moonep import MoonEPRuntime
+try:
+    MoonEPRuntime(
+        ep_group=SimpleNamespace(size=lambda: 4),
+        hidden_size=128,
+        intermediate_size=128,
+        num_experts=8,
+        top_k=2,
+        intra_layer_micro_batch=1,
+        staging_reference=False,
+    )
+except RuntimeError as exc:
+    assert "requires the MoonEP-mod integration package" in str(exc)
+else:
+    raise AssertionError("selecting MoonEP unexpectedly succeeded")
+"""
+    subprocess.run([sys.executable, "-c", source], check=True, capture_output=True, text=True)
+
+
+def test_missing_grouped_gemm_does_not_disable_triton_backend() -> None:
+    source = """
+import sys
+sys.modules["grouped_gemm"] = None
+sys.modules["grouped_gemm_backend"] = None
+from xtuner.v1.ops.moe.cuda import cutlass_group_gemm, triton_group_gemm
+assert cutlass_group_gemm is None
+assert callable(triton_group_gemm)
 """
     subprocess.run([sys.executable, "-c", source], check=True, capture_output=True, text=True)
 
@@ -124,7 +171,10 @@ def test_moe_list_forward_rejects_a_different_width(width: int) -> None:
 
 
 def test_runtime_meta_build_does_not_require_or_allocate_a_backend_workspace(monkeypatch) -> None:
+    from xtuner.v1.module.dispatcher import moonep as moonep_integration
     from xtuner.v1.module.dispatcher.moonep import MoonEPRuntime
+    from xtuner.v1.module.grouped_linear import moe_group_linear
+    from xtuner.v1.ops.moe.cuda.group_gemm import triton_group_gemm
 
     # Workspace policy belongs to XTuner and allocation happens only after
     # FSDP installation, so the optional backend needs no workspace interface.
@@ -133,7 +183,9 @@ def test_runtime_meta_build_does_not_require_or_allocate_a_backend_workspace(mon
         XTUNER_INTEGRATION_API_VERSION=3,
         Buffer=object,
     )
-    monkeypatch.setitem(sys.modules, "moonep", backend)
+    monkeypatch.setattr(moonep_integration, "_moonep_backend", backend)
+    monkeypatch.setattr(moonep_integration, "_MOONEP_IMPORT_ERROR", None)
+    monkeypatch.setattr(moe_group_linear, "group_gemm", triton_group_gemm)
     ep_group = SimpleNamespace(size=lambda: 4)
 
     runtime = MoonEPRuntime(
@@ -150,14 +202,94 @@ def test_runtime_meta_build_does_not_require_or_allocate_a_backend_workspace(mon
     assert isinstance(runtime, MoonEPRuntime)
 
 
+def test_runtime_allows_triton_grouped_gemm(monkeypatch) -> None:
+    from xtuner.v1.module.dispatcher import moonep as moonep_integration
+    from xtuner.v1.module.dispatcher.moonep import MoonEPRuntime
+    from xtuner.v1.module.grouped_linear import moe_group_linear
+    from xtuner.v1.ops.moe.cuda.group_gemm import triton_group_gemm
+
+    monkeypatch.setattr(
+        moonep_integration,
+        "_moonep_backend",
+        SimpleNamespace(
+            __file__="/tmp/MoonEP-mod/moonep/__init__.py", XTUNER_INTEGRATION_API_VERSION=3, Buffer=object
+        ),
+    )
+    monkeypatch.setattr(moonep_integration, "_MOONEP_IMPORT_ERROR", None)
+    monkeypatch.setattr(moe_group_linear, "group_gemm", triton_group_gemm)
+
+    runtime = MoonEPRuntime(
+        ep_group=SimpleNamespace(size=lambda: 4),
+        hidden_size=128,
+        intermediate_size=128,
+        num_experts=8,
+        top_k=2,
+        intra_layer_micro_batch=1,
+        staging_reference=False,
+    )
+
+    assert isinstance(runtime, MoonEPRuntime)
+
+
+@pytest.mark.parametrize(
+    ("environment_value", "effective_cutlass", "valid"),
+    [(None, True, False), ("1", False, False), ("1", True, True)],
+)
+def test_runtime_requires_grouped_gemm_cutlass_backend(
+    monkeypatch, environment_value: str | None, effective_cutlass: bool, valid: bool
+) -> None:
+    pytest.importorskip("grouped_gemm")
+    from grouped_gemm import backend as grouped_gemm_backend
+
+    from xtuner.v1.module.dispatcher import moonep as moonep_integration
+    from xtuner.v1.module.dispatcher.moonep import MoonEPRuntime
+    from xtuner.v1.module.grouped_linear import moe_group_linear
+    from xtuner.v1.ops.moe.cuda import cutlass_group_gemm
+
+    assert cutlass_group_gemm is not None
+    monkeypatch.setattr(
+        moonep_integration,
+        "_moonep_backend",
+        SimpleNamespace(
+            __file__="/tmp/MoonEP-mod/moonep/__init__.py",
+            XTUNER_INTEGRATION_API_VERSION=3,
+            Buffer=object,
+        ),
+    )
+    monkeypatch.setattr(moonep_integration, "_MOONEP_IMPORT_ERROR", None)
+    monkeypatch.setattr(moe_group_linear, "group_gemm", cutlass_group_gemm)
+    monkeypatch.setattr(grouped_gemm_backend, "use_cutlass", effective_cutlass)
+    if environment_value is None:
+        monkeypatch.delenv("GROUPED_GEMM_USE_CUTLASS", raising=False)
+    else:
+        monkeypatch.setenv("GROUPED_GEMM_USE_CUTLASS", environment_value)
+
+    kwargs = dict(
+        ep_group=SimpleNamespace(size=lambda: 4),
+        hidden_size=128,
+        intermediate_size=128,
+        num_experts=8,
+        top_k=2,
+        intra_layer_micro_batch=1,
+        staging_reference=False,
+    )
+    if valid:
+        assert isinstance(MoonEPRuntime(**kwargs), MoonEPRuntime)
+    else:
+        with pytest.raises(RuntimeError, match="grouped_gemm requires GROUPED_GEMM_USE_CUTLASS=1"):
+            MoonEPRuntime(**kwargs)
+
+
 def test_runtime_reports_optional_backend_source_on_capability_mismatch(monkeypatch) -> None:
+    from xtuner.v1.module.dispatcher import moonep as moonep_integration
     from xtuner.v1.module.dispatcher.moonep import MoonEPRuntime
 
     backend = SimpleNamespace(
         __file__="/wrong/worktree/moonep/__init__.py",
         XTUNER_INTEGRATION_API_VERSION=0,
     )
-    monkeypatch.setitem(sys.modules, "moonep", backend)
+    monkeypatch.setattr(moonep_integration, "_moonep_backend", backend)
+    monkeypatch.setattr(moonep_integration, "_MOONEP_IMPORT_ERROR", None)
 
     with pytest.raises(RuntimeError, match="/wrong/worktree/moonep/__init__.py"):
         MoonEPRuntime(

@@ -9,7 +9,7 @@ model resources, ``_MoonEPInvocation`` owns one dispatch/combine pairing, and
 
 from __future__ import annotations
 
-import importlib
+import os
 from typing import Any, cast
 
 import torch
@@ -32,30 +32,28 @@ from .moonep_workspace import _ExpertVMMWorkspace
 
 
 _INTEGRATION_API_VERSION = 3
-_TARGET_TORCH_VERSION = "2.12.1+cu132"
+_MOONEP_IMPORT_ERROR: ImportError | None
+
+try:
+    import moonep as _moonep_backend
+except ImportError as exc:
+    _moonep_backend = None
+    _MOONEP_IMPORT_ERROR = exc
+else:
+    _MOONEP_IMPORT_ERROR = None
 
 
 def require_moonep_backend() -> Any:
-    """Load and validate the optional MoonEP-mod package on first selection."""
-    try:
-        backend = importlib.import_module("moonep")
-    except ImportError as exc:
-        raise RuntimeError("dispatcher='moonep' requires the MoonEP-mod integration package") from exc
+    """Validate the optional MoonEP-mod package when MoonEP is selected."""
+    if _moonep_backend is None:
+        raise RuntimeError("dispatcher='moonep' requires the MoonEP-mod integration package") from _MOONEP_IMPORT_ERROR
 
-    source = getattr(backend, "__file__", "<unknown>")
-    if getattr(backend, "XTUNER_INTEGRATION_API_VERSION", None) != _INTEGRATION_API_VERSION:
+    source = getattr(_moonep_backend, "__file__", "<unknown>")
+    if getattr(_moonep_backend, "XTUNER_INTEGRATION_API_VERSION", None) != _INTEGRATION_API_VERSION:
         raise RuntimeError(
             f"incompatible MoonEP integration API; expected {_INTEGRATION_API_VERSION}; loaded module: {source}"
         )
-
-    if not hasattr(backend, "Buffer"):
-        raise RuntimeError(f"MoonEP-mod XTuner capabilities are missing: {source}")
-    if torch.__version__ != _TARGET_TORCH_VERSION:
-        raise RuntimeError(
-            f"MoonEP integration requires torch {_TARGET_TORCH_VERSION}, "
-            f"got {torch.__version__}; loaded module: {source}"
-        )
-    return backend
+    return _moonep_backend
 
 
 class MoonEPRuntime:
@@ -73,9 +71,23 @@ class MoonEPRuntime:
         staging_reference: bool,
         num_sms: int = 64,
     ) -> None:
-        self._backend = require_moonep_backend()
+        require_moonep_backend()
         if intra_layer_micro_batch < 1:
             raise ValueError("intra_layer_micro_batch must be positive")
+
+        # MoonEP keeps token counts device-resident. Triton already satisfies
+        # that contract; grouped_gemm does so only with its CUTLASS backend.
+        # Validate this once here instead of branching in every GMM call.
+        from xtuner.v1.module.grouped_linear import moe_group_linear
+        from xtuner.v1.ops.moe.cuda import cutlass_group_gemm
+
+        if cutlass_group_gemm is not None and moe_group_linear.group_gemm is cutlass_group_gemm:
+            from grouped_gemm import backend as grouped_gemm_backend
+
+            if os.environ.get("GROUPED_GEMM_USE_CUTLASS") != "1" or not grouped_gemm_backend.use_cutlass:
+                raise RuntimeError(
+                    "MoonEP with grouped_gemm requires GROUPED_GEMM_USE_CUTLASS=1 before importing grouped_gemm"
+                )
 
         self._ep_group = ep_group
         self._hidden_size = hidden_size
@@ -170,7 +182,8 @@ class MoonEPRuntime:
         if self._workspace is None:
             raise RuntimeError("MoonEP FSDP resources must be installed before forward")
         if self._buffer is None:
-            self._buffer = self._backend.Buffer(
+            assert _moonep_backend is not None
+            self._buffer = _moonep_backend.Buffer(
                 S=tokens_per_rank,
                 H=self._hidden_size,
                 K=self._top_k,

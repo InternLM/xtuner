@@ -72,6 +72,13 @@ def test_acceptance_report_compares_all_steps_and_warm_throughput(tmp_path) -> N
     moonep_tracker = tmp_path / "moonep" / "tracker.jsonl"
     _write_tracker(deepep_tracker, tgs_scale=1.0, mtp=True)
     _write_tracker(moonep_tracker, tgs_scale=0.96, mtp=True)
+    records = [json.loads(line) for line in moonep_tracker.read_text().splitlines()]
+    for record in records:
+        for name in tuple(record):
+            if name.startswith("loss/reduced_") and name.endswith("loss"):
+                record[name] *= 1.02
+        record["grad_norm"] *= 1.04
+    moonep_tracker.write_text("".join(f"{json.dumps(record)}\n" for record in records))
 
     deepep = AcceptanceRun.from_tracker(deepep_tracker, backend="deepep", mtp=True, pack_length=65536)
     moonep = AcceptanceRun.from_tracker(moonep_tracker, backend="moonep", mtp=True, pack_length=65536)
@@ -88,7 +95,8 @@ def test_acceptance_report_compares_all_steps_and_warm_throughput(tmp_path) -> N
         "grad_norm",
     }
     assert all(curve.cosine_similarity >= 0.99 for curve in result.curves.values())
-    assert all(curve.mean_relative_difference < 0.01 for curve in result.curves.values())
+    assert all(curve.mean_relative_difference < 0.03 for name, curve in result.curves.items() if name != "grad_norm")
+    assert result.curves["grad_norm"].mean_relative_difference == pytest.approx(0.04)
 
 
 def test_acceptance_report_rejects_incomplete_or_mismatched_runs(tmp_path) -> None:

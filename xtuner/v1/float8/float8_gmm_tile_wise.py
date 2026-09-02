@@ -352,11 +352,14 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
         tokens_per_expert: torch.Tensor,
         *,
         trainable_weight: torch.Tensor | None = None,
+        trainable_wgrad_out: torch.Tensor | None = None,
         external_weight: torch.Tensor | None = None,
         external_wgrad_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if trainable_weight is not None:
             raise NotImplementedError("FP8 grouped linear does not support a trainable weight override yet")
+        if trainable_wgrad_out is not None:
+            raise NotImplementedError("FP8 grouped linear does not support a preallocated trainable WGrad")
         if external_weight is not None or external_wgrad_out is not None:
             raise NotImplementedError("FP8 two-segment grouped linear is not implemented")
 

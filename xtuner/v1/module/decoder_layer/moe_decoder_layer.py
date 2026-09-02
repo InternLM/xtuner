@@ -333,9 +333,6 @@ class MoEDecoderLayer(nn.Module):
             ep_group=process_group,
             tp_group=tp_group,
             ep_tp_group=ep_tp_group,
-            # Expert compute may be FP8; activation and MoonEP weight transport
-            # stay BF16 and are configured independently.
-            transport_dtype="bf16",
             moonep_runtime=moonep_runtime,
             layer_fqn=layer_fqn,
             projections=(self.experts.fused_w1w3, self.experts.fused_w2),

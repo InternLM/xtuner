@@ -3,8 +3,8 @@
 https://github.com/fanshiqing/grouped_gemm/blob/v1.1.4/grouped_gemm/ops.py
 Support torch compile."""
 
-import grouped_gemm_backend as backend
 import torch
+from grouped_gemm import backend
 from torch import Tensor
 
 
@@ -25,10 +25,15 @@ def moe_grouped_gemm(
         output_shape = (a.shape[0], b.shape[1] if trans_b else b.shape[2])
     output = torch.empty(output_shape, device=a.device, dtype=a.dtype)
 
-    # The pinned GroupedGEMM extension exposes its device-only CUTLASS
-    # problem builder through the raw binding. Calling it directly avoids the
-    # package wrapper's process-global backend switch and counts D2H copy.
-    backend.gmm(a, b, output, batch_sizes, trans_a, trans_b, -1, True)
+    backend.gmm(
+        a,
+        b,
+        batch_sizes,
+        trans_a=trans_a,
+        trans_b=trans_b,
+        c=output,
+        num_sm=-1,
+    )
     return output
 
 
@@ -95,7 +100,15 @@ def moe_grouped_gemm_out(
     trans_a: bool = False,
     trans_b: bool = True,
 ) -> None:
-    backend.gmm(a, b, out, batch_sizes, trans_a, trans_b, -1, True)
+    backend.gmm(
+        a,
+        b,
+        batch_sizes,
+        trans_a=trans_a,
+        trans_b=trans_b,
+        c=out,
+        num_sm=-1,
+    )
 
 
 @moe_grouped_gemm_out.register_fake

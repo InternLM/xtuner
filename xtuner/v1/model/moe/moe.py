@@ -205,6 +205,8 @@ class MoE(BaseModel):
     def __init__(self, config: MoEConfig):
         # Concrete MoE configs override build(), so validate dispatcher support
         # at the shared model-construction boundary.
+        if config.dispatcher == "moonep" and config.float8_cfg is not None and config.float8_cfg.enable_float8:
+            raise ValueError("MoonEP currently requires BF16 expert compute; FP8 is not supported")
         if config.dispatcher == "agrs":
             if config.expert_tp_size > 1:
                 raise NotImplementedError("AGRS with ExpertTP is not supported")

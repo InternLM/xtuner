@@ -1,4 +1,3 @@
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -127,17 +126,23 @@ class _Experts(nn.Module):
 
 @pytest.fixture
 def backend(monkeypatch):
+    from xtuner.v1.module.dispatcher import moonep as moonep_integration
+    from xtuner.v1.module.grouped_linear import moe_group_linear
+    from xtuner.v1.ops.moe.cuda.group_gemm import triton_group_gemm
+
     _Workspace.allocated.clear()
     module = SimpleNamespace(
         __file__="/tmp/MoonEP-mod/moonep/__init__.py",
         XTUNER_INTEGRATION_API_VERSION=3,
         Buffer=_Buffer,
     )
-    monkeypatch.setitem(sys.modules, "moonep", module)
+    monkeypatch.setattr(moonep_integration, "_moonep_backend", module)
+    monkeypatch.setattr(moonep_integration, "_MOONEP_IMPORT_ERROR", None)
     monkeypatch.setattr(
         "xtuner.v1.module.dispatcher.moonep._ExpertVMMWorkspace",
         _Workspace,
     )
+    monkeypatch.setattr(moe_group_linear, "group_gemm", triton_group_gemm)
     return module
 
 
@@ -157,7 +162,6 @@ def test_staging_dispatcher_runs_the_public_six_stage_forward_seam(backend) -> N
         dispatcher="moonep",
         n_routed_experts=4,
         ep_group=ep_group,
-        transport_dtype="bf16",
         moonep_runtime=runtime,
         layer_fqn="layers.0.experts",
         projections=(experts.fused_w1w3, experts.fused_w2),
@@ -243,7 +247,6 @@ def test_direct_install_failure_is_explicit_and_never_falls_back_to_staging(back
         dispatcher="moonep",
         n_routed_experts=4,
         ep_group=ep_group,
-        transport_dtype="bf16",
         moonep_runtime=runtime,
         layer_fqn="layers.0.experts",
         projections=(experts.fused_w1w3, experts.fused_w2),

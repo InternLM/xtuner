@@ -7,6 +7,18 @@ from xtuner.v1.ops.moe.cuda.group_gemm import triton_group_gemm
 from xtuner.v1.ops.moe.cuda.route_weight import route_weight_rows_backward
 
 
+@pytest.fixture(params=[triton_group_gemm, cutlass_group_gemm], ids=["triton", "cutlass"])
+def grouped_gemm(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    implementation = request.param
+    if implementation is None:
+        pytest.skip("requires grouped_gemm")
+    if implementation is cutlass_group_gemm:
+        from grouped_gemm import backend
+
+        monkeypatch.setattr(backend, "use_cutlass", True)
+    return implementation
+
+
 @pytest.mark.parametrize("compile", [False, True])
 def test_grouped_gemm_backward_returns_natural_bf16_weight_gradient(compile: bool) -> None:
     if not torch.cuda.is_available():
@@ -42,13 +54,6 @@ def test_grouped_gemm_backward_returns_natural_bf16_weight_gradient(compile: boo
 
 
 @pytest.mark.parametrize("compile", [False, True])
-@pytest.mark.parametrize(
-    "grouped_gemm",
-    [
-        pytest.param(triton_group_gemm, id="triton"),
-        pytest.param(cutlass_group_gemm, id="cutlass", marks=pytest.mark.skipif(cutlass_group_gemm is None, reason="requires grouped_gemm")),
-    ],
-)
 def test_parameter_owns_preallocated_grouped_gemm_gradient_without_copy(grouped_gemm, compile: bool) -> None:
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")
@@ -79,17 +84,6 @@ def test_parameter_owns_preallocated_grouped_gemm_gradient_without_copy(grouped_
 
 
 @pytest.mark.parametrize("compile", [False, True])
-@pytest.mark.parametrize(
-    "grouped_gemm",
-    [
-        pytest.param(triton_group_gemm, id="triton"),
-        pytest.param(
-            cutlass_group_gemm,
-            id="cutlass",
-            marks=pytest.mark.skipif(cutlass_group_gemm is None, reason="requires grouped_gemm"),
-        ),
-    ],
-)
 def test_retained_gradient_target_uses_parameter_copy_path(grouped_gemm, compile: bool) -> None:
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")
@@ -110,17 +104,6 @@ def test_retained_gradient_target_uses_parameter_copy_path(grouped_gemm, compile
 
 
 @pytest.mark.parametrize("compile", [False, True])
-@pytest.mark.parametrize(
-    "grouped_gemm",
-    [
-        pytest.param(triton_group_gemm, id="triton"),
-        pytest.param(
-            cutlass_group_gemm,
-            id="cutlass",
-            marks=pytest.mark.skipif(cutlass_group_gemm is None, reason="requires grouped_gemm"),
-        ),
-    ],
-)
 def test_preallocated_grouped_gemm_gradient_covers_zero_token_batch(grouped_gemm, compile: bool) -> None:
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")

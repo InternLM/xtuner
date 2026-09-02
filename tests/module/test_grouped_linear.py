@@ -71,3 +71,22 @@ def test_grouped_linear_returns_natural_gradient_for_call_local_weight() -> None
     torch.testing.assert_close(output, expected, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(hidden_states.grad, hidden_states_ref.grad, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(override.grad, override_ref.grad, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or not ADAPTIVEGEMM_INSTALLED, reason="requires CUDA AdaptiveGEMM")
+def test_non_moonep_fp8_accepts_the_uniform_grouped_linear_interface() -> None:
+    layer = build_grouped_linear(
+        in_features=128,
+        out_features=128,
+        num_routed_experts=2,
+        float8_cfg=Float8Config(scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE),
+    ).cuda().bfloat16()
+    hidden_states = torch.randn(4, 128, device="cuda", dtype=torch.bfloat16)
+    counts = torch.tensor([2, 2], device="cuda", dtype=torch.int64)
+
+    output = layer(hidden_states, counts, trainable_wgrad_out=None)
+
+    assert output.shape == (4, 128)
+    assert torch.isfinite(output).all()
+    with pytest.raises(NotImplementedError, match="preallocated trainable WGrad"):
+        layer(hidden_states, counts, trainable_wgrad_out=torch.empty_like(layer.weight))

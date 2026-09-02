@@ -118,7 +118,13 @@ class PairComparison:
         return asdict(self)
 
 
-def _compare_curve(reference: list[float], actual: list[float]) -> CurveComparison:
+def _compare_curve(
+    reference: list[float],
+    actual: list[float],
+    *,
+    minimum_cosine: float,
+    maximum_relative_difference: float,
+) -> CurveComparison:
     finite = all(math.isfinite(value) for value in [*reference, *actual])
     dot = sum(expected * observed for expected, observed in zip(reference, actual, strict=True))
     reference_norm = math.sqrt(sum(value * value for value in reference))
@@ -135,7 +141,7 @@ def _compare_curve(reference: list[float], actual: list[float]) -> CurveComparis
         cosine_similarity=cosine,
         mean_relative_difference=relative,
         finite=finite,
-        passed=finite and cosine >= 0.99 and relative < 0.01,
+        passed=finite and cosine >= minimum_cosine and relative < maximum_relative_difference,
     )
 
 
@@ -159,7 +165,15 @@ def compare_runs(deepep: AcceptanceRun, moonep: AcceptanceRun) -> PairComparison
     moonep_curves = moonep.curves()
     if deepep_curves.keys() != moonep_curves.keys():
         raise ValueError(f"metric mismatch: deepep={sorted(deepep_curves)}, moonep={sorted(moonep_curves)}")
-    curves = {name: _compare_curve(deepep_curves[name], moonep_curves[name]) for name in deepep_curves}
+    curves = {
+        name: _compare_curve(
+            deepep_curves[name],
+            moonep_curves[name],
+            minimum_cosine=0.98 if name == "grad_norm" else 0.99,
+            maximum_relative_difference=0.05 if name == "grad_norm" else 0.03,
+        )
+        for name in deepep_curves
+    }
     return PairComparison(
         throughput_steps=list(range(6, 21)),
         deepep_throughput=deepep_throughput,

@@ -35,7 +35,6 @@ def build_dispatcher(
     ep_group: dist.ProcessGroup | None = None,
     tp_group: dist.ProcessGroup | None = None,
     ep_tp_group: dist.ProcessGroup | None = None,
-    transport_dtype: Literal["bf16", "fp8"] = "bf16",
     *,
     moonep_runtime=None,
     layer_fqn: str | None = None,
@@ -46,8 +45,6 @@ def build_dispatcher(
             raise ValueError("MoonEP requires ep_size in {2, 4, 8}")
         if n_routed_experts % ep_group.size():
             raise ValueError("MoonEP requires n_routed_experts divisible by ep_size")
-        if transport_dtype != "bf16":
-            raise ValueError("MoonEP activation and weight transport requires BF16")
         if moonep_runtime is None or layer_fqn is None or projections is None:
             raise ValueError("MoonEP runtime, layer_fqn, and expert projections are required")
         return moonep_runtime.bind_dispatcher(
