@@ -38,9 +38,7 @@ def _normalize_path(req_path: str) -> str:
 def _is_generation_endpoint(method: str, req_path: str) -> bool:
     """Whether this request uses the SessionServer generation hooks."""
     path = _normalize_path(req_path)
-    return method.upper() == "POST" and (
-        path.endswith("/v1/messages") or path.endswith("/v1/chat/completions")
-    )
+    return method.upper() == "POST" and (path.endswith("/v1/messages") or path.endswith("/v1/chat/completions"))
 
 
 def _detect_format(req_path: str) -> str:

@@ -211,9 +211,7 @@ class TestSessionServerEndpointHandling(unittest.IsolatedAsyncioTestCase):
     async def test_non_generation_non_object_body_is_forwarded_unchanged(self):
         body = b'[{"session_id":"should-stay-in-array"}]'
 
-        response = await self.proxy_client.post(
-            "/future", data=body, headers={"Content-Type": "application/json"}
-        )
+        response = await self.proxy_client.post("/future", data=body, headers={"Content-Type": "application/json"})
 
         self.assertEqual(response.status, 200)
         self.assertEqual(self.upstream_calls[0]["body"], body)
@@ -223,9 +221,7 @@ class TestSessionServerEndpointHandling(unittest.IsolatedAsyncioTestCase):
     async def test_non_generation_object_without_session_id_preserves_body_bytes(self):
         body = b' { "stream": false, "value": [1, 2] } '
 
-        response = await self.proxy_client.post(
-            "/future", data=body, headers={"Content-Type": "application/json"}
-        )
+        response = await self.proxy_client.post("/future", data=body, headers={"Content-Type": "application/json"})
 
         self.assertEqual(response.status, 200)
         self.assertEqual(self.upstream_calls[0]["body"], body)

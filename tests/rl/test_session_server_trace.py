@@ -92,9 +92,7 @@ class TestSessionServerTraceHandling(unittest.IsolatedAsyncioTestCase):
         self.upstream_content_type = "text/event-stream"
         self.upstream_body = self._openai_stream()
 
-        response = await self.proxy_client.post(
-            "/v1/chat/completions", json=self._request_payload(stream=True)
-        )
+        response = await self.proxy_client.post("/v1/chat/completions", json=self._request_payload(stream=True))
 
         self.assertEqual(response.status, 200)
         body = await response.read()
@@ -113,14 +111,9 @@ class TestSessionServerTraceHandling(unittest.IsolatedAsyncioTestCase):
 
     async def test_upstream_error_stream_is_not_wrapped_again(self):
         self.upstream_content_type = "text/event-stream"
-        self.upstream_body = (
-            b'data: {"error":{"type":"server_error","message":"upstream failed"}}\n\n'
-            b"data: [DONE]\n\n"
-        )
+        self.upstream_body = b'data: {"error":{"type":"server_error","message":"upstream failed"}}\n\ndata: [DONE]\n\n'
 
-        response = await self.proxy_client.post(
-            "/v1/chat/completions", json=self._request_payload(stream=True)
-        )
+        response = await self.proxy_client.post("/v1/chat/completions", json=self._request_payload(stream=True))
         body = await response.read()
 
         self.assertEqual(response.status, 200)
@@ -132,9 +125,7 @@ class TestSessionServerTraceHandling(unittest.IsolatedAsyncioTestCase):
         self.upstream_status = 400
         self.upstream_body = json.dumps(
             {
-                "choices": [
-                    {"message": {"role": "assistant", "content": "bad<eos>"}, "output_ids": [1]}
-                ],
+                "choices": [{"message": {"role": "assistant", "content": "bad<eos>"}, "output_ids": [1]}],
                 "routed_experts": [[0]],
             }
         ).encode()
@@ -150,13 +141,10 @@ class TestSessionServerTraceHandling(unittest.IsolatedAsyncioTestCase):
         self.upstream_status = 500
         self.upstream_content_type = "text/event-stream"
         self.upstream_body = (
-            b'data: {"choices":[{"delta":{"content":"bad<eos>"},"output_ids":[1]}]}\n\n'
-            b"data: [DONE]\n\n"
+            b'data: {"choices":[{"delta":{"content":"bad<eos>"},"output_ids":[1]}]}\n\ndata: [DONE]\n\n'
         )
 
-        response = await self.proxy_client.post(
-            "/v1/chat/completions", json=self._request_payload(stream=True)
-        )
+        response = await self.proxy_client.post("/v1/chat/completions", json=self._request_payload(stream=True))
 
         self.assertEqual(response.status, 500)
         self.assertEqual(await response.read(), self.upstream_body)
@@ -193,9 +181,7 @@ class TestSessionServerTraceHandling(unittest.IsolatedAsyncioTestCase):
         self.upstream_body = self._openai_stream()
         self.session_server.on_response = AsyncMock(side_effect=RuntimeError("trace write failed"))
 
-        response = await self.proxy_client.post(
-            "/v1/chat/completions", json=self._request_payload(stream=True)
-        )
+        response = await self.proxy_client.post("/v1/chat/completions", json=self._request_payload(stream=True))
         body = await response.read()
 
         self.assertEqual(response.status, 200)
@@ -207,9 +193,7 @@ class TestSessionServerTraceHandling(unittest.IsolatedAsyncioTestCase):
         self.upstream_content_type = "text/event-stream"
         self.upstream_body = self._openai_stream(include_done=False)
 
-        response = await self.proxy_client.post(
-            "/v1/chat/completions", json=self._request_payload(stream=True)
-        )
+        response = await self.proxy_client.post("/v1/chat/completions", json=self._request_payload(stream=True))
         body = await response.read()
 
         self.assertEqual(response.status, 200)
