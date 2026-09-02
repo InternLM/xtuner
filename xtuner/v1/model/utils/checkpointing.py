@@ -111,10 +111,21 @@ def pytree_reentrant_checkpoint(
     # 这样 checkpoint 能逐个 detach；tree_unflatten 再在 replay 前把 list 还原。
     flat_inputs, input_spec = tree_flatten((args, kwargs))
 
+    has_grad_input = any(isinstance(value, torch.Tensor) and value.requires_grad for value in flat_inputs)
+    checkpoint_inputs = flat_inputs
+    if not has_grad_input:
+        # Reentrant checkpoint 没有 grad 输入时不会重算。这个零元素 leaf 只负责
+        # 保留 backward 入口，不参与模块计算，也不会把梯度接回已 detach 的原图。
+        first_tensor = next(value for value in flat_inputs if isinstance(value, torch.Tensor))
+        checkpoint_entry = torch.empty(0, device=first_tensor.device, requires_grad=True)
+        checkpoint_inputs = [checkpoint_entry, *flat_inputs]
+
     def run_function(*replayed_flat_inputs: Any) -> torch.Tensor | tuple[torch.Tensor, ...]:
         # 这里只还原参数结构，不会把 detached Tensor 重新连接到旧 graph；梯度由
         # CheckpointFunction.backward 的返回值交回原始 Tensor。
+        if not has_grad_input:
+            replayed_flat_inputs = replayed_flat_inputs[1:]
         replayed_args, replayed_kwargs = tree_unflatten(list(replayed_flat_inputs), input_spec)
         return function(*replayed_args, **replayed_kwargs)
 
-    return checkpoint(run_function, *flat_inputs, use_reentrant=True)
+    return checkpoint(run_function, *checkpoint_inputs, use_reentrant=True)
