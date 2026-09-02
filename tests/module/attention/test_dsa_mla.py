@@ -3,6 +3,7 @@
 TestTorchSparseMLA
     test_padded_indices_support_int32_and_backward: PyTorch 后端处理 padding、int32 和反向传播。
 TestDSAAttention
+    test_indexer_backend_is_independent_from_sparse_mla_backend: indexer backend 独立配置且默认 TileLang。
     test_packed_inputs_respect_causal_boundaries_and_backward: packed attention 遵守分段因果边界并可反传。
     test_shared_layers_reuse_topk_without_cross_context_leak: shared layer 复用当前样本 top-k 且不跨样本泄漏。
     test_reentrant_checkpoint_reuses_and_releases_topk: checkpoint 重算复用并最终释放 top-k。
@@ -115,6 +116,7 @@ def _tiny_dsa_attention(
         index_head_dim=4,
         index_n_heads=2,
         indexer_types=indexer_types,
+        indexer_backend="torch",
         sparse_mla_backend="torch",
     ).build(hidden_size=4, layer_idx=layer_idx)
 
@@ -167,6 +169,29 @@ class TestTorchSparseMLA:
 
 
 class TestDSAAttention:
+    def test_indexer_backend_is_independent_from_sparse_mla_backend(self):
+        config = DSAMLAConfig(
+            num_attention_heads=2,
+            head_dim=2,
+            kv_lora_rank=3,
+            q_lora_rank=4,
+            qk_nope_head_dim=2,
+            qk_rope_head_dim=2,
+            v_head_dim=3,
+            index_topk=4,
+            index_head_dim=4,
+            index_n_heads=2,
+            sparse_mla_backend="tilelang",
+        )
+        assert config.indexer_backend == "tilelang"
+
+        config.indexer_backend = "torch"
+        attention = config.build(hidden_size=4)
+
+        assert attention.indexer_backend == "torch"
+        assert attention.sparse_mla_backend == "tilelang"
+        assert attention.indexer.indexer_backend == "torch"
+
     def test_packed_inputs_respect_causal_boundaries_and_backward(self):
         # 验证 packed attention 不跨子序列取 key，并能对真实输入完成有限反向传播。
         torch.manual_seed(0)

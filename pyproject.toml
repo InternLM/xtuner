@@ -68,6 +68,9 @@ path = "xtuner/version.py"
 allow-direct-references = true
 
 [project.optional-dependencies]
+cute = [
+  "nvidia-cutlass-dsl==4.5.2",
+]
 rl = [
   "ray[default]",
   "httpx",
