@@ -52,22 +52,11 @@ def _keep_direct_all_gather_storage(fsdp_param: FSDPParam) -> None:
     del fsdp_param
 
 
-def install_fsdp_vmm_landing(
-    *,
+def _resolve_and_validate_targets(
     fsdp_root: nn.Module,
     targets: Sequence[tuple[str, tuple[nn.Module, nn.Module], tuple[torch.Tensor, torch.Tensor]]],
-) -> tuple[FSDPParam, ...]:
-    """Bind routed expert FSDPParams to their two-generation VMM landings.
-
-    Each target is ``(layer_fqn, projections, landings)``.
-    Matching uses the original module and parameter-name identities recorded
-    by FSDP, never an FQN guess.
-    """
-    if torch.__version__ != _TARGET_TORCH_VERSION:
-        raise RuntimeError(
-            f"MoonEP direct FSDP landing requires torch {_TARGET_TORCH_VERSION}, got {torch.__version__}"
-        )
-
+) -> list[tuple[FSDPParam, nn.Module, nn.Module, torch.Tensor]]:
+    """Resolve every target and validate the landing ABI before mutation."""
     by_identity: dict[tuple[int, str], tuple[FSDPParam, nn.Module]] = {}
     for fsdp_owner in fsdp_root.modules():
         state = _get_module_fsdp_state(fsdp_owner)
@@ -122,6 +111,26 @@ def install_fsdp_vmm_landing(
 
     if len({id(item[0]) for item in selected}) != len(selected):
         raise RuntimeError("MoonEP routed expert targets must map to distinct FSDPParams")
+    return selected
+
+
+def install_fsdp_vmm_landing(
+    *,
+    fsdp_root: nn.Module,
+    targets: Sequence[tuple[str, tuple[nn.Module, nn.Module], tuple[torch.Tensor, torch.Tensor]]],
+) -> tuple[FSDPParam, ...]:
+    """Bind routed expert FSDPParams to their two-generation VMM landings.
+
+    Each target is ``(layer_fqn, projections, landings)``.
+    Matching uses the original module and parameter-name identities recorded
+    by FSDP, never an FQN guess.
+    """
+    if torch.__version__ != _TARGET_TORCH_VERSION:
+        raise RuntimeError(
+            f"MoonEP direct FSDP landing requires torch {_TARGET_TORCH_VERSION}, got {torch.__version__}"
+        )
+
+    selected = _resolve_and_validate_targets(fsdp_root, targets)
 
     for fsdp_param, fsdp_owner, projection, landing in selected:
         setattr(projection, _FSDP_PARAM_ATTR, fsdp_param)
