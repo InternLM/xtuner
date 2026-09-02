@@ -47,7 +47,7 @@ def build_dispatcher(
             raise ValueError("MoonEP requires n_routed_experts divisible by ep_size")
         if moonep_runtime is None or layer_fqn is None or projections is None:
             raise ValueError("MoonEP runtime, layer_fqn, and expert projections are required")
-        return moonep_runtime.bind_dispatcher(
+        return moonep_runtime.build_dispatcher(
             layer_fqn=layer_fqn,
             projections=projections,
         )  # type: ignore[return-value]

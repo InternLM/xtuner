@@ -60,20 +60,18 @@ class TestMoonEPOneSegmentWorkspace(DeterministicDDPTestCase):
                     tokens_per_expert=tokens_per_expert,
                 )
 
-                local_weights, gradients_0, ready = workspace.materialize(
+                local_weights, gradients_0 = workspace.prefetch_weights(
                     buffer=buffer,
                     plan=plan,
                     generation=0,
                     grad_slot=0,
                 )
-                _, gradients_1, second_ready = workspace.materialize(
+                _, gradients_1 = workspace.prefetch_weights(
                     buffer=buffer,
                     plan=plan,
                     generation=0,
                     grad_slot=1,
                 )
-                ready.wait()
-                second_ready.wait()
 
                 # One grouped GEMM receives exactly one contiguous [B+B]
                 # segment.  Its home prefix aliases the current FSDP landing.
@@ -93,13 +91,12 @@ class TestMoonEPOneSegmentWorkspace(DeterministicDDPTestCase):
                     gradient[experts_per_rank:].fill_(1)
                 for gradient in gradients_1:
                     gradient.fill_(7)
-                home_grads, reduced = workspace.complete_gradients(
+                home_grads = workspace.complete_gradients(
                     buffer=buffer,
                     plan=plan,
                     local_grads=gradients_0,
                     grad_slot=0,
                 )
-                reduced.wait()
                 assert all(torch.count_nonzero(gradient[experts_per_rank:]) == 0 for gradient in gradients_0)
                 assert all(torch.all(gradient == 7) for gradient in gradients_1)
 

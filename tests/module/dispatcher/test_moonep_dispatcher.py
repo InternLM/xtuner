@@ -13,6 +13,17 @@ class _Event:
         return None
 
 
+class _Stream:
+    def record_event(self):
+        return _Event()
+
+    def wait_event(self, event) -> None:
+        del event
+
+    def synchronize(self) -> None:
+        return None
+
+
 class _Buffer:
     def __init__(
         self,
@@ -24,16 +35,15 @@ class _Buffer:
         num_ep_ranks,
         group,
         explicitly_destroy,
-        use_caller_stream,
         num_sms,
     ):
         self.S = S
         self.K = K
         self.E = E
         self.B = E // num_ep_ranks
-        self.use_caller_stream = use_caller_stream
         self.num_sms = num_sms
         self.destroyed = False
+        self.prefetch_calls = 0
 
     def dispatch(
         self,
@@ -54,7 +64,9 @@ class _Buffer:
         return (*result, _Event()) if async_finish else result
 
     def prefetch_weight(self, **kwargs):
-        return _Event()
+        assert kwargs["async_finish"] is False
+        self.prefetch_calls += 1
+        return None
 
     def combine(
         self,
@@ -105,10 +117,11 @@ class _Workspace:
     def landing(self, generation):
         return self._landings[generation]
 
-    def materialize(self, *, buffer, plan, generation, grad_slot):
+    def prefetch_weights(self, *, buffer, plan, generation, grad_slot):
         landings = self.landing(generation)
         local_weights = tuple(torch.cat((weight, torch.zeros_like(weight))) for weight in landings)
-        return local_weights, self._slots[grad_slot], _Event()
+        buffer.prefetch_weight(plan=plan, projections=landings, async_finish=False)
+        return local_weights, self._slots[grad_slot]
 
     def local_token_counts(self, cu_seqlens):
         return torch.tensor([cu_seqlens[-1], 0, 0, 0], dtype=torch.int32)
@@ -138,6 +151,15 @@ def backend(monkeypatch):
     )
     monkeypatch.setattr(moonep_integration, "_moonep_backend", module)
     monkeypatch.setattr(moonep_integration, "_MOONEP_IMPORT_ERROR", None)
+    stream = _Stream()
+    monkeypatch.setattr(moonep_integration.torch.cuda, "Stream", lambda **kwargs: stream)
+    monkeypatch.setattr(moonep_integration.torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(moonep_integration.torch.cuda, "current_stream", lambda: stream)
+    monkeypatch.setattr(
+        MoonEPRuntime,
+        "_enqueue",
+        lambda self, operation, inputs=(): (operation(), _Event()),
+    )
     monkeypatch.setattr(
         "xtuner.v1.module.dispatcher.moonep._ExpertVMMWorkspace",
         _Workspace,
@@ -190,6 +212,7 @@ def test_staging_dispatcher_runs_the_public_six_stage_forward_seam(backend) -> N
             tokens_per_expert=source_counts,
         )
         dispatched = dispatcher.dispatch(pre_dispatched=pre, topk_weights=route_weights)
+        assert runtime._buffer.prefetch_calls == 1
         post = dispatcher.dispatch_postprocess(pre_dispatched=pre, dispatched=dispatched)
         pre_combined = dispatcher.combine_preprocess(
             hidden_states=post["hidden_states"],
@@ -219,7 +242,6 @@ def test_staging_dispatcher_runs_the_public_six_stage_forward_seam(backend) -> N
     assert post["expert_weight_layout"].trainable_weights is not None
     assert post["expert_weight_layout"].trainable_weights[0].shape == (4, 256, 128)
     assert torch.equal(result["hidden_states"], hidden_states * 0.5)
-    assert runtime._buffer.use_caller_stream is True
     assert runtime._buffer.num_sms == 64
 
     with pytest.raises(RuntimeError, match="fixed S changed"):

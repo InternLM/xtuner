@@ -292,18 +292,18 @@ class _ExpertVMMWorkspace:
             )
         )
 
-    def materialize(self, *, buffer, plan, generation: int, grad_slot: int):
-        """Prefetch weights and expose the invocation's one-segment aliases."""
+    def prefetch_weights(self, *, buffer, plan, generation: int, grad_slot: int):
+        """Start prefetch and expose one invocation's fixed VMM aliases."""
         if self._destroyed:
             raise RuntimeError("MoonEP workspace has been destroyed")
         if generation not in (0, 1):
             raise ValueError(f"generation must be 0 or 1, got {generation}")
         if not 0 <= grad_slot < self._gradient_slots:
             raise ValueError(f"gradient slot out of range: {grad_slot}")
-        done = buffer.prefetch_weight(
+        buffer.prefetch_weight(
             plan=plan,
             projections=self._global_weights[generation],
-            async_finish=True,
+            async_finish=False,
         )
         # A slot is reused sequentially across physical layers.  Each
         # invocation receives a fresh TensorImpl/version counter over the same
@@ -317,7 +317,7 @@ class _ExpertVMMWorkspace:
             )
             for target in self._local_grad_outputs[grad_slot]
         )
-        return self._local_weights[generation], grad_outputs, done
+        return self._local_weights[generation], grad_outputs
 
     def complete_gradients(self, *, buffer, plan, local_grads, grad_slot: int):
         """Return duplicate BF16 partials into the local home gradients."""
@@ -337,15 +337,14 @@ class _ExpertVMMWorkspace:
             ):
                 raise ValueError("local_grads must be the selected workspace gradient slot")
 
-        done = buffer.reduce_grad(
+        buffer.reduce_grad_bf16(
             plan=plan,
             local_grads=local_grads,
             distributed_duplicate_grads=self._distributed_duplicate_grads[grad_slot],
-            accumulation_dtype=torch.float32,
-            async_finish=True,
+            async_finish=False,
         )
         b = self._experts_per_rank
-        return (local_grads[0][:b], local_grads[1][:b]), done
+        return local_grads[0][:b], local_grads[1][:b]
 
     def destroy(self) -> None:
         """Release mappings at an explicit, rank-coordinated boundary."""

@@ -179,7 +179,7 @@ class TestMoonEPStagingForward(DeterministicDDPTestCase):
             # complete queued output copies. This is lifecycle-only, not a hot-path sync.
             torch.cuda.synchronize()
             if dispatcher == "moonep":
-                engine.model.destroy_moonep()
+                engine.model.close_ep_runtime()
             del engine
             # DeepEP owns a process-scoped C++ Buffer. Forcing cyclic GC here
             # can destruct it on only a subset of ranks; leave that resource
@@ -241,7 +241,7 @@ class TestMoonEPStagingForward(DeterministicDDPTestCase):
         finally:
             torch.cuda.synchronize()
             if dispatcher == "moonep":
-                engine.model.destroy_moonep()
+                engine.model.close_ep_runtime()
             del engine
             torch.cuda.empty_cache()
             dist.barrier()
@@ -315,7 +315,7 @@ class TestMoonEPStagingForward(DeterministicDDPTestCase):
             assert any(not torch.equal(before[name], parameter.to_local()) for name, parameter in routed.items())
         finally:
             torch.cuda.synchronize()
-            engine.model.destroy_moonep()
+            engine.model.close_ep_runtime()
             del engine
             torch.cuda.empty_cache()
             dist.barrier()
@@ -379,8 +379,7 @@ class TestMoonEPStagingForward(DeterministicDDPTestCase):
                 # Compile/autotune before profiling so their setup-only CUDA
                 # synchronization cannot be confused with the steady hot path.
                 engine.train_step(train_items)
-                grad_norm = engine.clip_grad_norm(do_clip=False)
-                engine.step_optimizer(grad_norm)
+                engine.optimizer.zero_grad()
 
                 with torch.profiler.profile(
                     activities=(torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA),
@@ -432,7 +431,7 @@ class TestMoonEPStagingForward(DeterministicDDPTestCase):
                 )
             finally:
                 torch.cuda.synchronize()
-                engine.model.destroy_moonep()
+                engine.model.close_ep_runtime()
                 del engine
                 torch.cuda.empty_cache()
                 dist.barrier()
@@ -511,7 +510,7 @@ class TestMoonEPStagingForward(DeterministicDDPTestCase):
         finally:
             torch.cuda.synchronize()
             if dispatcher == "moonep":
-                engine.model.destroy_moonep()
+                engine.model.close_ep_runtime()
             del engine
             torch.cuda.empty_cache()
             dist.barrier()
@@ -550,6 +549,71 @@ class TestMoonEPStagingForward(DeterministicDDPTestCase):
     def test_qwen_shared_mtp_reentrant_micro2_matches_deepep(self) -> None:
         self._assert_mtp_micro2_matches_deepep(share_weights=True)
 
+    def test_qwen_mtp_reentrant_micro2_completes_forward_and_backward(self) -> None:
+        self.create_pg("cuda")
+        torch.manual_seed(20260805)
+        engine = TrainEngine(
+            model_cfg=_tiny_config(
+                "qwen",
+                "moonep",
+                compile=True,
+                mtp_config=MTPConfig(num_layers=2, share_weights=True),
+            ),
+            optim_cfg=AdamWConfig(foreach=False),
+            fsdp_cfg=FSDPConfig(
+                ep_size=4,
+                recompute_ratio=1.0,
+                torch_compile=True,
+                mtp_checkpoint_use_reentrant=True,
+            ),
+            intra_layer_micro_batch=2,
+        )
+        engine.init_model_weights()
+        try:
+            result = engine.train_step(
+                [
+                    self._model_training_item(engine, offset=0),
+                    self._model_training_item(engine, offset=16),
+                ]
+            )
+            gradients = self._selected_training_tensors(engine, gradients=True)
+            assert torch.isfinite(torch.tensor(result["total_loss"], device="cuda"))
+            assert gradients and all(torch.isfinite(gradient).all() for gradient in gradients.values())
+            assert any(torch.count_nonzero(gradient) > 0 for gradient in gradients.values())
+        finally:
+            torch.cuda.synchronize()
+            engine.model.close_ep_runtime()
+            del engine
+            torch.cuda.empty_cache()
+            dist.barrier()
+
+    def test_qwen_two_live_forwards_support_reverse_backward(self) -> None:
+        self.create_pg("cuda")
+        torch.manual_seed(20260805)
+        engine = TrainEngine(
+            model_cfg=_tiny_config("qwen", "moonep", compile=True),
+            optim_cfg=AdamWConfig(foreach=False),
+            fsdp_cfg=FSDPConfig(ep_size=4, recompute_ratio=0.0, torch_compile=True),
+            intra_layer_micro_batch=2,
+        )
+        engine.init_model_weights()
+        try:
+            items = [self._model_training_item(engine, offset=offset) for offset in (0, 16)]
+            outputs = [engine.model(seq_ctx=item["seq_ctx"], loss_ctx=item["loss_ctx"]) for item in items]
+            for output in reversed(outputs):
+                assert output.loss is not None
+                output.loss.backward()
+
+            gradients = self._selected_training_tensors(engine, gradients=True)
+            assert gradients and all(torch.isfinite(gradient).all() for gradient in gradients.values())
+            assert any(torch.count_nonzero(gradient) > 0 for gradient in gradients.values())
+        finally:
+            torch.cuda.synchronize()
+            engine.model.close_ep_runtime()
+            del engine
+            torch.cuda.empty_cache()
+            dist.barrier()
+
     def test_qwen_requires_the_configured_domino_width(self) -> None:
         self.create_pg("cuda")
         torch.manual_seed(20260805)
@@ -574,7 +638,7 @@ class TestMoonEPStagingForward(DeterministicDDPTestCase):
                     )
         finally:
             torch.cuda.synchronize()
-            engine.model.destroy_moonep()
+            engine.model.close_ep_runtime()
             del engine
             torch.cuda.empty_cache()
             dist.barrier()
@@ -620,7 +684,7 @@ class TestMoonEPStagingForward(DeterministicDDPTestCase):
         finally:
             torch.cuda.synchronize()
             if dispatcher == "moonep":
-                engine.model.destroy_moonep()
+                engine.model.close_ep_runtime()
             del engine
             torch.cuda.empty_cache()
             dist.barrier()
@@ -736,7 +800,7 @@ class TestMoonEPStagingForward(DeterministicDDPTestCase):
             )
         finally:
             torch.cuda.synchronize()
-            engine.model.destroy_moonep()
+            engine.model.close_ep_runtime()
             del engine
             torch.cuda.empty_cache()
             dist.barrier()
@@ -772,7 +836,7 @@ class TestMoonEPStagingForward(DeterministicDDPTestCase):
         finally:
             torch.cuda.synchronize()
             if dispatcher == "moonep":
-                engine.model.destroy_moonep()
+                engine.model.close_ep_runtime()
             del engine
             torch.cuda.empty_cache()
             dist.barrier()
