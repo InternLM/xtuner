@@ -79,7 +79,7 @@ geo3k_judger_config = GEO3KJudgerConfig(
 )
 
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
-fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1, tp_size=2)
+fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
 model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
 model_cfg.compile_cfg = False
 model_cfg.text_config.balancing_loss_cfg = None
@@ -308,7 +308,6 @@ trainer = RLColocateTrainerConfig(
     enable_evaluate=True,
     enable_initial_evaluate=False,
     evaluate_step=evaluate_step,
-    sync_weights_interval=2,
     work_dir=work_dir,
     seed=123,
     debug_rollout=False,
