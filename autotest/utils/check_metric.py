@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 
 import numpy as np
 from utils.metric_report import publish_comparison_report
@@ -105,17 +106,52 @@ def _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SF
     return cur_steps, cur_metrics
 
 
-def _align_resume_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SFT"):
-    """Resume CI runs often append into the same exp tracker as the first phase.
+def _resolve_first_phase_baseline_steps(resume_base_path: str) -> int | None:
+    """Return step count of companion ``tracker.jsonl`` for a resume baseline."""
+    if not resume_base_path.endswith("tracker-resume.jsonl"):
+        return None
+    first_path = resume_base_path[: -len("tracker-resume.jsonl")] + "tracker.jsonl"
+    if not os.path.isfile(first_path):
+        return None
+    with open(first_path, encoding="utf-8") as f:
+        return sum(1 for line in f if line.strip())
 
-    RL ``tracker-resume.jsonl`` baselines usually contain only the resume segment
-    (e.g. steps 11-15). When the live tracker still includes the first segment,
-    compare only the trailing ``base_steps`` records.
+
+def _align_resume_phase_steps(
+    phase,
+    base_steps,
+    cur_steps,
+    cur_metrics,
+    kind="SFT",
+    *,
+    first_base_steps: int | None = None,
+    resume_base_path: str | None = None,
+):
+    """Resume CI runs append into the same exp tracker as the first phase.
+
+    Compare ``cur_metrics[first_base_steps:]`` against ``tracker-resume.jsonl``,
+    not the trailing ``base_steps`` rows (which can include first-phase tail).
     """
-    if phase == "resume" and cur_steps > base_steps:
+    if phase != "resume" or cur_steps <= base_steps:
+        return cur_steps, cur_metrics
+
+    if first_base_steps is None and resume_base_path:
+        first_base_steps = _resolve_first_phase_baseline_steps(resume_base_path)
+
+    if first_base_steps is not None and cur_steps > first_base_steps:
+        resume_steps = cur_steps - first_base_steps
+        logger.warning(
+            f"phase=resume: current {kind} tracker has {cur_steps} steps "
+            f"(first baseline {first_base_steps} + resume {resume_steps}) vs resume baseline "
+            f"{base_steps}; using post-checkpoint suffix from index {first_base_steps}."
+        )
+        trimmed = {metric: values[first_base_steps:] for metric, values in cur_metrics.items()}
+        return resume_steps, trimmed
+
+    if cur_steps > base_steps:
         logger.warning(
             f"phase=resume: current {kind} tracker has {cur_steps} steps vs baseline "
-            f"{base_steps}; using resume suffix (merged first+resume in one exp dir)."
+            f"{base_steps}; first-phase baseline length unknown, using trailing {base_steps} rows."
         )
         trimmed = {metric: values[-base_steps:] for metric, values in cur_metrics.items()}
         return base_steps, trimmed
@@ -291,7 +327,14 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
     base_steps, base_metrics = extract_value(base_path, metric_list)
     cur_steps, cur_metrics = extract_value(cur_path, metric_list)
     cur_steps, cur_metrics = _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SFT")
-    cur_steps, cur_metrics = _align_resume_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SFT")
+    cur_steps, cur_metrics = _align_resume_phase_steps(
+        phase,
+        base_steps,
+        cur_steps,
+        cur_metrics,
+        kind="SFT",
+        resume_base_path=base_path if phase == "resume" else None,
+    )
     assert cur_steps == base_steps, (
         f"current steps is not equal to base steps, current steps: {cur_steps}, base steps: {base_steps}"
     )
@@ -409,7 +452,20 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
     base_steps, base_metrics = extract_rl_value(base_path, metric_list)
     cur_steps, cur_metrics = extract_rl_value(cur_path, metric_list)
     cur_steps, cur_metrics = _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="RL")
-    cur_steps, cur_metrics = _align_resume_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="RL")
+    first_base_steps = None
+    if phase == "resume":
+        first_path = base_path.replace("tracker-resume.jsonl", "tracker.jsonl")
+        if os.path.isfile(first_path):
+            first_base_steps, _ = extract_rl_value(first_path, metric_list[:1])
+    cur_steps, cur_metrics = _align_resume_phase_steps(
+        phase,
+        base_steps,
+        cur_steps,
+        cur_metrics,
+        kind="RL",
+        first_base_steps=first_base_steps,
+        resume_base_path=base_path if phase == "resume" else None,
+    )
 
     assert cur_steps == base_steps, (
         f"current RL steps is not equal to base RL steps, current steps: {cur_steps}, base steps: {base_steps}"
