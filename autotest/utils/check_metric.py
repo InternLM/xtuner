@@ -185,6 +185,26 @@ def _step_errors(base_vals: list[float], cur_vals: list[float], method: str) -> 
     return errors
 
 
+def _apply_rl_skip_steps(
+    base_vals: list[float],
+    cur_vals: list[float],
+    *,
+    metric: str,
+    skip_steps: int,
+) -> tuple[list[float], list[float]] | None:
+    """Drop the first ``skip_steps`` RL step summaries (cold-start warmup)."""
+    if skip_steps <= 0:
+        return base_vals, cur_vals
+    if len(base_vals) <= skip_steps or len(cur_vals) <= skip_steps:
+        logger.warning(
+            f"Skip {metric}: only {len(cur_vals)} RL step summaries after extraction, "
+            f"cannot skip first {skip_steps} steps."
+        )
+        return None
+    logger.info(f"Skip first {skip_steps} RL step summaries for {metric} (cold-start warmup).")
+    return base_vals[skip_steps:], cur_vals[skip_steps:]
+
+
 def _percentile_error_passes(
     base_vals: list[float],
     cur_vals: list[float],
@@ -497,6 +517,12 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
             )
             continue
 
+        skip_steps = int(config.get("skip_steps") or 0)
+        sliced = _apply_rl_skip_steps(base_vals, cur_vals, metric=metric, skip_steps=skip_steps)
+        if sliced is None:
+            continue
+        base_vals, cur_vals = sliced
+
         max_error = 0.0
         max_error_idx = 0
         check_flag = True
@@ -528,10 +554,11 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
         for idx, (base_val, cur_val) in enumerate(zip(base_vals, cur_vals)):
             errors = _step_errors([base_val], [cur_val], method)
             error = round(errors[0], 5)
+            report_idx = idx + skip_steps
 
             if error > max_error:
                 max_error = error
-                max_error_idx = idx
+                max_error_idx = report_idx
 
             if operator == "<":
                 passed = error < threshold
@@ -543,12 +570,13 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
             if not passed:
                 if method == "value":
                     fail_metric[metric] = (
-                        f"{metric} value {cur_val:.6f} does not satisfy {operator} {threshold} at step {idx}"
+                        f"{metric} value {cur_val:.6f} does not satisfy {operator} {threshold} "
+                        f"at step {report_idx}"
                     )
                 else:
                     fail_metric[metric] = (
                         f"{metric} error {error:.6f} not less than threshold {threshold} "
-                        f"(method: {method}, operator: {operator}) at step {idx}, "
+                        f"(method: {method}, operator: {operator}) at step {report_idx}, "
                         f"baseline: {base_val:.6f}, current: {cur_val:.6f}"
                     )
                 check_flag = False
