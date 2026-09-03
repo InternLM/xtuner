@@ -14,32 +14,68 @@ _STORE_NAMESPACE = "xtuner_rollout"
 _handle_cache: Any = None
 
 
-def _free_ray_refs(obj: Any):
+def _ray_ref_key(ref: ray.ObjectRef) -> str:
+    """Return a stable key for de-duplicating one Ray object reference."""
+    return ref.hex()
+
+
+def _collect_ray_ref_keys(obj: Any, keys: set[str] | None = None) -> set[str]:
+    """Collect all Ray object-reference keys recursively from ``obj``."""
+    keys = set() if keys is None else keys
+    if isinstance(obj, ray.ObjectRef):
+        keys.add(_ray_ref_key(obj))
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            _collect_ray_ref_keys(value, keys)
+    elif isinstance(obj, (list, tuple, set)):
+        for value in obj:
+            _collect_ray_ref_keys(value, keys)
+    elif hasattr(obj, "model_dump") and callable(getattr(obj, "model_dump")):
+        _collect_ray_ref_keys(obj.model_dump(), keys)
+    elif hasattr(obj, "dict") and callable(getattr(obj, "dict")):
+        _collect_ray_ref_keys(obj.dict(), keys)
+    elif hasattr(obj, "__dict__"):
+        _collect_ray_ref_keys(vars(obj), keys)
+    return keys
+
+
+def _free_ray_refs(
+    obj: Any,
+    *,
+    _seen: set[str] | None = None,
+    _exclude: set[str] | None = None,
+):
     """Recursively free ray.ObjectRef instances trapped inside an object.
 
     Args:
         obj (Any): The object that may contain ray.ObjectRef references (e.g., dict, list, tuple).
     """
+    seen = set() if _seen is None else _seen
+    exclude = _exclude or set()
     if isinstance(obj, ray.ObjectRef):
+        ref_key = _ray_ref_key(obj)
+        if ref_key in seen or ref_key in exclude:
+            return
+        seen.add(ref_key)
         try:
             ray.internal.free([obj], local_only=False)
         except Exception as e:
             get_logger().error(f"Failed to free Ray ObjectRef {obj}: {e}")
     elif isinstance(obj, dict):
         for v in obj.values():
-            _free_ray_refs(v)
+            _free_ray_refs(v, _seen=seen, _exclude=exclude)
     elif isinstance(obj, (list, tuple)):
         for v in obj:
-            _free_ray_refs(v)
+            _free_ray_refs(v, _seen=seen, _exclude=exclude)
     elif hasattr(obj, "model_dump"):  # Pydantic v2
         for v in obj.model_dump().values() if hasattr(obj.model_dump, "__call__") else {}.values():
-            _free_ray_refs(v)
+            _free_ray_refs(v, _seen=seen, _exclude=exclude)
     elif hasattr(obj, "dict") and callable(getattr(obj, "dict")):  # Pydantic v1
         for v in obj.dict().values():
-            _free_ray_refs(v)
+            _free_ray_refs(v, _seen=seen, _exclude=exclude)
     elif hasattr(obj, "__dict__"):
         for v in vars(obj).values():
-            _free_ray_refs(v)
+            _free_ray_refs(v, _seen=seen, _exclude=exclude)
 
 
 def _common_prefix_len(left: str, right: str) -> int:
@@ -173,6 +209,24 @@ class Trie:
                 node = node.children[key]
                 break
 
+        old_value = node.value
+        if old_value is not None and old_value is not value:
+            # A rerolled turn may overwrite an existing key.  Release refs
+            # that are no longer reachable, while preserving refs shared by
+            # another trie value or by the replacement value itself.
+            retained_refs = _collect_ray_ref_keys(value)
+
+            def collect_other_values(current: TreeNode) -> None:
+                if current is not node and current.value is not None:
+                    _collect_ray_ref_keys(current.value, retained_refs)
+                for child in current.children.values():
+                    collect_other_values(child)
+
+            collect_other_values(self.root)
+            if retained_refs:
+                _free_ray_refs(old_value, _exclude=retained_refs)
+            else:
+                _free_ray_refs(old_value)
         node.value = value
 
     def search(self, text: str, filter_none: bool = False) -> Tuple[str, List["TreeNode"]]:
@@ -220,16 +274,16 @@ class Trie:
                 If None, releases the entire tree.
         """
 
-        def _free_subtree(node: TreeNode):
+        def _free_subtree(node: TreeNode, seen: set[str]):
             for child in node.children.values():
-                _free_subtree(child)
+                _free_subtree(child, seen)
             if node.value is not None:
-                _free_ray_refs(node.value)
+                _free_ray_refs(node.value, _seen=seen)
                 node.value = None
             node.children.clear()
 
         if key is None:
-            _free_subtree(self.root)
+            _free_subtree(self.root, set())
             return
 
         node = self.root
@@ -523,7 +577,8 @@ async def release_and_discard_rollout_groups(groups: list[list[RolloutState]]) -
         for item in group:
             if item.session_id is not None and str(item.session_id) in released_session_ids:
                 item.routed_experts = None
-            discard_rollout_state(item)
+                item.routed_experts_owner = None
+            discard_rollout_state(item, release_refs=True)
 
 
 if __name__ == "__main__":

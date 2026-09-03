@@ -16,6 +16,7 @@ from xtuner.v1.data_proto.rl_data import (
     calculate_group_effective_response_masks,
     get_group_status,
     refresh_seq_staleness,
+    release_owned_routed_experts,
     reset_rollout_response,
     update_sample_version,
 )
@@ -485,6 +486,11 @@ class ReplayBuffer:
             for item, expired in zip(group, expired_mask):
                 if expired:
                     item.status = Status.EXPIRED
+                    # Direct rollout refs belong to this state/rollout path;
+                    # TraceStore refs remain borrowed until the session is
+                    # released by TraceStore.
+                    if item.routed_experts_owner == "rollout":
+                        release_owned_routed_experts(item)
                     reset_rollout_response(item)
         else:
             for item in group:
