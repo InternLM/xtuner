@@ -1,5 +1,5 @@
 import os
-from typing import List, Callable, cast
+from typing import Callable, cast
 from xtuner.v1.ops.act_fn import get_act_fn
 import torch.nn as nn
 import torch
@@ -143,6 +143,7 @@ class Qwen3VLVisionAttention(nn.Module):
         max_seqlen: int,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         sequence_parallel_mesh: DeviceMesh | None = None,
+        cu_seqlens_list: list[int] | None = None,
     ):
         seq_length = hidden_states.shape[0]  # s, d
         query_states, key_states, value_states = (
@@ -188,6 +189,8 @@ class Qwen3VLVisionAttention(nn.Module):
             value_states,
             cu_seqlens_q=cu_seqlens,
             cu_seqlens_k=cu_seqlens,
+            cu_seqlens_q_list=cu_seqlens_list,
+            cu_seqlens_k_list=cu_seqlens_list,
             max_seqlen_q=max_seqlen,
             max_seqlen_k=max_seqlen,
             dropout_p=0.0 if not self.training else self.attention_dropout,
@@ -229,6 +232,7 @@ class Qwen3VLVisionLayer(nn.Module):
         max_seqlen: int,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         sequence_parallel_mesh: DeviceMesh | None = None,
+        cu_seqlens_list: list[int] | None = None,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
@@ -236,6 +240,7 @@ class Qwen3VLVisionLayer(nn.Module):
             max_seqlen=max_seqlen,
             position_embeddings=position_embeddings,
             sequence_parallel_mesh=sequence_parallel_mesh,
+            cu_seqlens_list=cu_seqlens_list,
         )["projected_output"]
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
@@ -507,6 +512,7 @@ class Qwen3VLVisionModel(BaseModel):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        cu_seqlens_list: list[int] | None = cu_seqlens.tolist() if DEVICE == "npu" else None
 
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
             div_num = sequence_parallel_mesh.size() * 4
@@ -540,6 +546,7 @@ class Qwen3VLVisionModel(BaseModel):
                         max_seqlen,
                         position_embeddings,
                         sequence_parallel_mesh,
+                        cu_seqlens_list=cu_seqlens_list,
                     )
             else:
                 hidden_states = blk(
@@ -548,6 +555,7 @@ class Qwen3VLVisionModel(BaseModel):
                     max_seqlen,
                     position_embeddings,
                     sequence_parallel_mesh,
+                    cu_seqlens_list=cu_seqlens_list,
                 )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_feature = hidden_states

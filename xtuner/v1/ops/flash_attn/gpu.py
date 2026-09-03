@@ -262,6 +262,8 @@ try:
         deterministic=False,
         return_attn_probs=False,
         block_table=None,
+        cu_seqlens_q_list: list[int] | None = None,
+        cu_seqlens_k_list: list[int] | None = None,
     ):
         assert alibi_slopes is None, "Alibi is not supported yet."
         assert block_table is None, "block_table is not supported yet."
@@ -306,6 +308,8 @@ try:
         deterministic=False,
         return_attn_probs=False,
         block_table=None,
+        cu_seqlens_q_list: list[int] | None = None,
+        cu_seqlens_k_list: list[int] | None = None,
     ):
         """dropout_p should be set to 0.0 during evaluation Supports multi-
         query and grouped-query attention (MQA/GQA) by passing in K, V with

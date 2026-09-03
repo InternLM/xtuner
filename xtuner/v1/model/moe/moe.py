@@ -161,6 +161,7 @@ class MoEConfig(TransformerConfig):
     freeze_routers: bool = False
     router_async_offload: bool = False
     aux_loss_cfg: AuxLossConfig = AuxLossConfig()
+    skip_dispatch_pad_tokens: Annotated[bool, Parameter(group="moe")] = False
     # TODO: `FSDPConfig` should be model-specific; temporarily keep
     # `embed_reshard_after_forward` here until per-submodule FSDP config is supported.
     # Compose models call `self.embed_tokens` multiple times per step, so default to
@@ -468,6 +469,8 @@ class MoE(BaseModel):
         loss_ctx: list[MoELossContextDict] | MoELossContextDict | None,
         return_router_logits: bool = False,
     ):
+        self._prepare_gated_deltanet_metadata(seq_ctx)
+
         # TODO: caoweihan: Recover this assertion after the refactor of LossContext
         if isinstance(seq_ctx, SequenceContext):
             # assert isinstance(loss_ctx, (CELossContext, LossContext)) or loss_ctx is None, (
@@ -833,9 +836,9 @@ class MoE(BaseModel):
         self._mark_dynamic(seq_ctx)
         balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
         # Hoisted out of the per-layer accumulate path: mask is constant across layers.
-        nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
+        nonpad_indices = seq_ctx.nonpad_indices
         non_pad_token = nonpad_indices.numel()
-        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
+        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, nonpad_indices.device)
 
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
@@ -885,14 +888,6 @@ class MoE(BaseModel):
                 output["hidden_states"].append(hidden_states)
 
         layer_hidden_states = hidden_states
-        hidden_states = self.norm(hidden_states)
-
-        # Get LM loss context from dict
-        lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
-        loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
-        output["loss"] = loss
-        output["logits"] = logits
-        output["extra_info"] = extra_info
 
         # MTP forward pass and loss computation
         if (
@@ -909,10 +904,10 @@ class MoE(BaseModel):
                 ),
             )
             # MTP uses its own mask; main mask's non-pad indices do not apply.
-            mtp_nonpad_indices = torch.nonzero(mtp_seq_ctx.mask, as_tuple=True)[1]
+            mtp_nonpad_indices = mtp_seq_ctx.nonpad_indices
             mtp_non_pad_token = mtp_nonpad_indices.numel()
             mtp_num_tokens_global, mtp_z_world_size = self._z_loss_dist_token_count(
-                z_ctx, mtp_non_pad_token, mtp_seq_ctx.mask.device
+                z_ctx, mtp_non_pad_token, mtp_nonpad_indices.device
             )
 
             # Forward through MTP block
@@ -953,8 +948,18 @@ class MoE(BaseModel):
             mtp_losses = mtp_losses / len(mtp_loss_ctx_list)
             scaled_mtp_loss = mtp_losses * self.config.mtp_config.loss_scaling_factor  # type: ignore
 
-            # Add to total loss
             output["mtp_loss"] = scaled_mtp_loss
+
+        # Keep the main LM branch after MTP so the final normalized states, logits,
+        # and unsharded LM-head parameters are not resident across the whole MTP forward.
+        hidden_states = self.norm(layer_hidden_states)
+
+        # Get LM loss context from dict
+        lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
+        loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
+        output["loss"] = loss
+        output["logits"] = logits
+        output["extra_info"] = extra_info
 
         split_aux_output = self.aux_loss.finalize(
             balancing_ctx=balancing_ctx,
@@ -1040,6 +1045,7 @@ class MoE(BaseModel):
                     ep_mesh=self.ep_mesh,
                     expert_tp_mesh=self.expert_tp_mesh,
                     ep_tp_mesh=self.ep_tp_mesh,
+                    skip_dispatch_pad_tokens=config.skip_dispatch_pad_tokens,
                 )
                 if self.config.freeze_routers:
                     layers[str(layer_idx)].gate.requires_grad_(False)
@@ -1107,6 +1113,7 @@ class MoE(BaseModel):
                 ep_mesh=self.ep_mesh,
                 expert_tp_mesh=self.expert_tp_mesh,
                 ep_tp_mesh=self.ep_tp_mesh,
+                skip_dispatch_pad_tokens=config.skip_dispatch_pad_tokens,
             )
 
             # Wrap decoder layer in MTPLayer
@@ -1245,13 +1252,14 @@ class MoE(BaseModel):
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.lm_head,
         )
-
         # Shard MTP block if it exists
         if self.mtp_block is not None:
+            assert self.config.mtp_config is not None
+            mtp_config = self.config.mtp_config
             for mtp_idx, mtp_layer in enumerate(self.mtp_block.layers):
-                if self._should_recompute(None, mtp_idx=mtp_idx) or (
-                    self.config.mtp_config is not None and self.config.mtp_config.share_weights
-                ):  # share mtp head must recompute
+                # One shared physical layer serves every logical MTP depth. Always
+                # checkpoint it to avoid retaining activations from all depths.
+                if self._should_recompute(None, mtp_idx=mtp_idx) or mtp_config.share_weights:
                     # MTP 默认使用 reentrant 的原因：
                     #   Case 1：最小触发条件是 compile, topk offload, MTP share weights and depth > 1.
                     #   多个 logical depth 共用 top-k cache。reentrant 的 original
@@ -1287,23 +1295,39 @@ class MoE(BaseModel):
                         )
                 self.mtp_block.layers[mtp_idx] = mtp_layer
 
-                reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1
                 self._fully_shard(
                     mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                     mp_policy=mp_policy,
-                    reshard_after_forward=reshard_after_forward,
+                    # Reuse the unsharded shared layer across logical depths. Explicit
+                    # resharding at the end of MTPBlock.forward is currently disabled and
+                    # can be enabled if keeping the shared layer unsharded causes excessive
+                    # peak memory usage.
+                    reshard_after_forward=not mtp_config.share_weights,
                     offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
                     module=mtp_layer,
                 )
-                if mtp_idx == 0:
-                    layer_next.set_modules_to_forward_prefetch([mtp_layer])  # type: ignore
-
-            if self.config.mtp_config is not None and self.config.mtp_config.num_layers > 0:
+            if mtp_config.num_layers > 0:
                 for prev_mtp_layer, next_mtp_layer in zip(
                     list(self.mtp_block.layers)[:-1],
                     list(self.mtp_block.layers)[1:],
                 ):
                     prev_mtp_layer.set_modules_to_forward_prefetch([next_mtp_layer])  # type: ignore
+
+            first_mtp_layer = self.mtp_block.layers[0]
+            last_decoder_layer = list(self.layers.values())[-1]
+            last_decoder_layer.set_modules_to_forward_prefetch([first_mtp_layer])  # type: ignore
+
+            # Non-shared MTP prefetches the LM head from its distinct final physical layer and
+            # overlaps the all-gather with the final logical depth. Shared-weight MTP has only
+            # one physical layer, so the same static hook fires at the first logical depth and
+            # keeps the full LM-head weight resident throughout the remaining MTP forward. Set
+            # disable_lm_head_prefetch=True to trade the overlap for lower memory residency in
+            # either mode and let the first MTP LM-head call unshard on demand.
+            if not mtp_config.disable_lm_head_prefetch:
+                self.mtp_block.layers[-1].set_modules_to_forward_prefetch([self.lm_head])  # type: ignore
+        else:
+            last_decoder_layer = list(self.layers.values())[-1]
+            last_decoder_layer.set_modules_to_forward_prefetch([self.norm, self.lm_head])  # type: ignore
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,

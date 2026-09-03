@@ -1419,7 +1419,18 @@ def adamw_update_foreach_async(
     epsilon: float,
 ) -> Generator[None, None, None]:
     """Async wrapper around foreach AdamW update."""
-    adamw_update_foreach(X, G, M, V, lr, beta1, beta2, weight_decay, step, epsilon)
+    adamw_update_foreach(
+        X,
+        G,
+        M,
+        V,
+        lr.to(X[0].device),
+        beta1.to(X[0].device),
+        beta2.to(X[0].device),
+        weight_decay.to(X[0].device),
+        step,
+        epsilon,
+    )
     yield
 
 

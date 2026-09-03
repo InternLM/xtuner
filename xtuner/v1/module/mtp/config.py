@@ -30,6 +30,8 @@ class MTPConfig(BaseModel):
         loss_scaling_factor (float): Scaling factor for MTP loss. The total MTP loss
             is computed as the average of losses across all depths, multiplied by
             this factor. Default: 0.1.
+        disable_lm_head_prefetch (bool): Whether to disable prefetching of the LM head.
+            This would save memory in mtp forward in some case. Default is False.
 
     Example:
         >>> # In model config
@@ -50,3 +52,4 @@ class MTPConfig(BaseModel):
     detach_mtp_lm_head_weight: Annotated[bool, Parameter(group="model")] = False
     detach_mtp_inputs: Annotated[bool, Parameter(group="model")] = False
     loss_scaling_factor: Annotated[float, Parameter(group="model")] = 0.1
+    disable_lm_head_prefetch: Annotated[bool, Parameter(group="model")] = False

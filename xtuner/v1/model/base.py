@@ -6,7 +6,7 @@ import pydoc
 import re
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from functools import reduce
+from functools import cached_property, reduce
 from importlib import import_module
 from itertools import chain
 from math import prod
@@ -580,6 +580,64 @@ class BaseModel(nn.Module):
 
         self._compile_cfg = self._resolve_compile_cfg(self.config)
         self._float8_handler: Float8Handler | None = None
+
+    @cached_property
+    def _has_gated_deltanet(self) -> bool:
+        """Return whether this model contains a GatedDeltaNet layer.
+
+        The layer structure and MTP configuration do not change during training, so this model-level decision only
+        needs to be made once. Actual sequence metadata is still prepared separately for every SequenceContext.
+        """
+        if not isinstance(self.config, TransformerConfig):
+            return False
+
+        linear_attention = self.config.linear_attention
+        if linear_attention is None:
+            return False
+
+        layer_types = self.config.layers_type
+        layers = getattr(self, "layers", None)
+        has_main_gdn = layers is not None and any(
+            layer_types[int(layer_idx)] == "linear_attention" for layer_idx in layers
+        )
+        has_mtp_gdn = (
+            getattr(self, "mtp_block", None) is not None
+            and bool(layer_types)
+            and layer_types[-1] == "linear_attention"
+        )
+        return has_main_gdn or has_mtp_gdn
+
+    def _prepare_gated_deltanet_metadata(
+        self,
+        seq_ctx: SequenceContext | list[SequenceContext],
+    ) -> None:
+        """Prepare per-sequence GDN metadata for this model when needed."""
+        if not self._has_gated_deltanet:
+            return
+
+        from xtuner.v1.ops.gated_deltanet import prepare_gated_deltanet_metadata
+
+        linear_attention = self.config.linear_attention
+        assert linear_attention is not None
+        contexts = [seq_ctx] if isinstance(seq_ctx, SequenceContext) else seq_ctx
+        for ctx in contexts:
+            metadata_num_heads = linear_attention.num_value_heads
+            if ctx.sequence_parallel_mesh is not None and ctx.sequence_parallel_mesh.size() > 1:
+                sp_size = ctx.sequence_parallel_mesh.size()
+                assert metadata_num_heads % sp_size == 0, (
+                    "GatedDeltaNet requires num_value_heads to be divisible by the sequence parallel size, "
+                    f"got num_value_heads={metadata_num_heads}, sp_size={sp_size}"
+                )
+                # GDN restores the full packed sequence before its kernels, but
+                # scatters heads across SP ranks. Sequence boundaries therefore
+                # stay global while NPU block-size selection uses local value heads.
+                metadata_num_heads //= sp_size
+
+            ctx.gdn_metadata = prepare_gated_deltanet_metadata(
+                cu_seqlens=ctx.cu_seq_lens_q,
+                cu_seqlens_list=ctx.cu_seq_lens_q_list,
+                num_heads=metadata_num_heads,
+            )
 
     def set_hf(self, hf_path: str | Path):
         self._hf_path = Path(hf_path)

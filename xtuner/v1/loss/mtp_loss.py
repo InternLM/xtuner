@@ -95,13 +95,13 @@ class MTPLossConfig(CELossConfig):
             return None
 
         shifted_labels = data["shifted_labels"]
-        cu_seq_lens = data["seq_ctx"].cu_seq_lens_k
+        cu_seq_lens_list = data["seq_ctx"].cu_seq_lens_k_list
 
-        # cu_seq_lens[-1] may be larger than shifted_labels.shape[-1] when seq_ctx
+        # cu_seq_lens_list[-1] may be larger than shifted_labels.shape[-1] when seq_ctx
         # was split for sequence parallelism (padding is added to make the sequence
         # length a multiple of sp_size). Pad with -100 so roll_packed_tensor does
         # not go out of bounds.
-        padded_len = int(cu_seq_lens[-1].item())
+        padded_len = cu_seq_lens_list[-1]
         seq_len = shifted_labels.shape[-1]
         if padded_len > seq_len:
             pad = torch.full(
@@ -112,7 +112,13 @@ class MTPLossConfig(CELossConfig):
             )
             shifted_labels = torch.cat([shifted_labels, pad], dim=-1)
 
-        rolled = roll_packed_tensor(shifted_labels, cu_seq_lens, shifts=-self.mtp_depth, dim=-1, fill_value=-100)
+        rolled = roll_packed_tensor(
+            shifted_labels,
+            cu_seq_lens_list,
+            shifts=-self.mtp_depth,
+            dim=-1,
+            fill_value=-100,
+        )
 
         # Roll logprobs by the same amount as shifted_labels
         logprobs = data.get("logprobs", None)
@@ -126,7 +132,13 @@ class MTPLossConfig(CELossConfig):
                     device=logprobs.device,
                 )
                 logprobs = torch.cat([logprobs, rp_pad], dim=-1)
-            rolled_logprobs = roll_packed_tensor(logprobs, cu_seq_lens, shifts=-self.mtp_depth, dim=-1, fill_value=0)
+            rolled_logprobs = roll_packed_tensor(
+                logprobs,
+                cu_seq_lens_list,
+                shifts=-self.mtp_depth,
+                dim=-1,
+                fill_value=0,
+            )
 
         loss_kwargs = MTPLossKwargs(
             shifted_labels=rolled,

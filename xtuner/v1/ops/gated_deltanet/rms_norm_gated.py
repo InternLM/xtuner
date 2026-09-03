@@ -1,6 +1,7 @@
 # modified from https://github.com/fla-org/flash-linear-attention/tree/v0.4.1/fla/modules/fused_norm_gate.py to support torch.compile
 
 import torch
+from fla.modules import FusedRMSNormGated as FLA_FusedRMSNormGated
 from fla.modules.fused_norm_gate import (
     layer_norm_gated_bwd as origin_layer_norm_gated_bwd,
 )
@@ -8,6 +9,7 @@ from fla.modules.fused_norm_gate import (
     layer_norm_gated_fwd as origin_layer_norm_gated_fwd,
 )
 from fla.utils import get_multiprocessor_count, input_guard
+from torch.distributed.tensor import DTensor
 
 
 @torch.library.custom_op(
@@ -254,3 +256,31 @@ def rms_norm_gated(
         residual_in_fp32,
         True,
     )
+
+
+class FusedRMSNormGated(FLA_FusedRMSNormGated):
+    """FLA module using XTuner's compile-friendly custom autograd function."""
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        g: torch.Tensor,
+        residual: torch.Tensor | None = None,
+        prenorm: bool = False,
+        residual_in_fp32: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        weight = self.weight
+        if isinstance(weight, DTensor):
+            weight = weight.to_local()
+
+        return rms_norm_gated(
+            x,
+            g,
+            weight,
+            self.bias,
+            self.activation,
+            residual=residual,
+            eps=self.eps,
+            prenorm=prenorm,
+            residual_in_fp32=residual_in_fp32,
+        )
