@@ -21,6 +21,10 @@ from utils.common_utils import _resolve_train_image, strip_xtuner_editable_insta
         ("pip install -e '.[all]'", "true"),
         ("pip install --editable .[all]", "true"),
         ("pip install -e ./", "true"),
+        (
+            "pip install -e ./some_other_pkg; pip install more-itertools",
+            "pip install -e ./some_other_pkg; pip install more-itertools",
+        ),
     ],
 )
 def test_strip_xtuner_editable_install(pip_package, expected):
@@ -38,6 +42,11 @@ def test_strip_xtuner_editable_install(pip_package, expected):
         ),
         ("ailab-llmrazor/xtuner:pt29_latest", None, "ailab-llmrazor/xtuner:pt29_latest"),
         ("localhost/xtuner:tag", "registry.example.com", "localhost/xtuner:tag"),
+        (
+            "registry:5000/ailab-llmrazor/xtuner:tag",
+            "other.registry.com",
+            "registry:5000/ailab-llmrazor/xtuner:tag",
+        ),
     ],
 )
 def test_resolve_train_image(image, registry, expected):

@@ -58,14 +58,21 @@ def _env_flag(name: str) -> bool:
 
 
 def _is_local_repo_editable_target(path: str) -> bool:
-    """Editable install of the current repo root (``.``, ``.[extra]``,
-    ``./``)."""
+    """Editable install of the current repo root (``.``, ``./``,
+    ``.[extra]``)."""
     path = path.strip().strip("'\"")
     if path in (".", "./"):
         return True
-    if path.startswith("./"):
-        return True
     return path.startswith(".[") and path.endswith("]")
+
+
+def _looks_like_registry_host(host: str) -> bool:
+    """True when the first path component is already a registry host."""
+    if host == "localhost":
+        return True
+    if ":" in host:
+        return True
+    return "." in host
 
 
 def _segment_is_xtuner_editable_install(segment: str) -> bool:
@@ -96,7 +103,7 @@ def _resolve_train_image(image: str, registry: Optional[str]) -> str:
     if not registry:
         return image
     host = image.split("/", 1)[0]
-    if "." in host or host == "localhost":
+    if _looks_like_registry_host(host):
         return image
     return f"{registry}/{image}"
 
