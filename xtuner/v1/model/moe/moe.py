@@ -258,9 +258,9 @@ class MoE(BaseModel):
                 raise ValueError("MoonEP requires expert parallelism")
             if config.moe_bias:
                 raise ValueError("MoonEP does not support routed-expert linear bias")
-            from xtuner.v1.module.dispatcher.moonep import MoonEPRuntime
+            from xtuner.v1.module.dispatcher.moonep import MoonEPModelRuntime
 
-            self._moonep_runtime = MoonEPRuntime(
+            self._moonep_runtime = MoonEPModelRuntime(
                 ep_group=self.ep_mesh.get_group(),
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,

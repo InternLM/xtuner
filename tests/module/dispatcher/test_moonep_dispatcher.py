@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 from xtuner.v1.module.dispatcher import build_dispatcher
-from xtuner.v1.module.dispatcher.moonep import MoonEPDispatcher, MoonEPRuntime
+from xtuner.v1.module.dispatcher.moonep import MoonEPDispatcher, MoonEPModelRuntime
 
 
 class _Event:
@@ -156,7 +156,7 @@ def backend(monkeypatch):
     monkeypatch.setattr(moonep_integration.torch.cuda, "current_device", lambda: 0)
     monkeypatch.setattr(moonep_integration.torch.cuda, "current_stream", lambda: stream)
     monkeypatch.setattr(
-        MoonEPRuntime,
+        MoonEPModelRuntime,
         "_enqueue",
         lambda self, operation, inputs=(): (operation(), _Event()),
     )
@@ -170,7 +170,7 @@ def backend(monkeypatch):
 
 def test_staging_dispatcher_runs_the_public_six_stage_forward_seam(backend) -> None:
     ep_group = SimpleNamespace(size=lambda: 2)
-    runtime = MoonEPRuntime(
+    runtime = MoonEPModelRuntime(
         ep_group=ep_group,
         hidden_size=128,
         intermediate_size=128,
@@ -255,7 +255,7 @@ def test_staging_dispatcher_runs_the_public_six_stage_forward_seam(backend) -> N
 
 def test_direct_install_failure_is_explicit_and_never_falls_back_to_staging(backend) -> None:
     ep_group = SimpleNamespace(size=lambda: 2)
-    runtime = MoonEPRuntime(
+    runtime = MoonEPModelRuntime(
         ep_group=ep_group,
         hidden_size=128,
         intermediate_size=128,

@@ -82,9 +82,9 @@ def test_selecting_moonep_reports_the_missing_optional_backend() -> None:
 import sys
 sys.modules["moonep"] = None
 from types import SimpleNamespace
-from xtuner.v1.module.dispatcher.moonep import MoonEPRuntime
+from xtuner.v1.module.dispatcher.moonep import MoonEPModelRuntime
 try:
-    MoonEPRuntime(
+    MoonEPModelRuntime(
         ep_group=SimpleNamespace(size=lambda: 4),
         hidden_size=128,
         intermediate_size=128,
@@ -172,7 +172,7 @@ def test_moe_list_forward_rejects_a_different_width(width: int) -> None:
 
 def test_runtime_meta_build_does_not_require_or_allocate_a_backend_workspace(monkeypatch) -> None:
     from xtuner.v1.module.dispatcher import moonep as moonep_integration
-    from xtuner.v1.module.dispatcher.moonep import MoonEPRuntime
+    from xtuner.v1.module.dispatcher.moonep import MoonEPModelRuntime
     from xtuner.v1.module.grouped_linear import moe_group_linear
     from xtuner.v1.ops.moe.cuda.group_gemm import triton_group_gemm
 
@@ -188,7 +188,7 @@ def test_runtime_meta_build_does_not_require_or_allocate_a_backend_workspace(mon
     monkeypatch.setattr(moe_group_linear, "group_gemm", triton_group_gemm)
     ep_group = SimpleNamespace(size=lambda: 4)
 
-    runtime = MoonEPRuntime(
+    runtime = MoonEPModelRuntime(
         ep_group=ep_group,
         hidden_size=128,
         intermediate_size=128,
@@ -199,12 +199,12 @@ def test_runtime_meta_build_does_not_require_or_allocate_a_backend_workspace(mon
     )
 
     assert not hasattr(backend, "ExpertVMMWorkspace")
-    assert isinstance(runtime, MoonEPRuntime)
+    assert isinstance(runtime, MoonEPModelRuntime)
 
 
 def test_runtime_allows_triton_grouped_gemm(monkeypatch) -> None:
     from xtuner.v1.module.dispatcher import moonep as moonep_integration
-    from xtuner.v1.module.dispatcher.moonep import MoonEPRuntime
+    from xtuner.v1.module.dispatcher.moonep import MoonEPModelRuntime
     from xtuner.v1.module.grouped_linear import moe_group_linear
     from xtuner.v1.ops.moe.cuda.group_gemm import triton_group_gemm
 
@@ -218,7 +218,7 @@ def test_runtime_allows_triton_grouped_gemm(monkeypatch) -> None:
     monkeypatch.setattr(moonep_integration, "_MOONEP_IMPORT_ERROR", None)
     monkeypatch.setattr(moe_group_linear, "group_gemm", triton_group_gemm)
 
-    runtime = MoonEPRuntime(
+    runtime = MoonEPModelRuntime(
         ep_group=SimpleNamespace(size=lambda: 4),
         hidden_size=128,
         intermediate_size=128,
@@ -228,7 +228,7 @@ def test_runtime_allows_triton_grouped_gemm(monkeypatch) -> None:
         staging_reference=False,
     )
 
-    assert isinstance(runtime, MoonEPRuntime)
+    assert isinstance(runtime, MoonEPModelRuntime)
 
 
 @pytest.mark.parametrize(
@@ -242,7 +242,7 @@ def test_runtime_requires_grouped_gemm_cutlass_backend(
     from grouped_gemm import backend as grouped_gemm_backend
 
     from xtuner.v1.module.dispatcher import moonep as moonep_integration
-    from xtuner.v1.module.dispatcher.moonep import MoonEPRuntime
+    from xtuner.v1.module.dispatcher.moonep import MoonEPModelRuntime
     from xtuner.v1.module.grouped_linear import moe_group_linear
     from xtuner.v1.ops.moe.cuda import cutlass_group_gemm
 
@@ -274,15 +274,15 @@ def test_runtime_requires_grouped_gemm_cutlass_backend(
         staging_reference=False,
     )
     if valid:
-        assert isinstance(MoonEPRuntime(**kwargs), MoonEPRuntime)
+        assert isinstance(MoonEPModelRuntime(**kwargs), MoonEPModelRuntime)
     else:
         with pytest.raises(RuntimeError, match="grouped_gemm requires GROUPED_GEMM_USE_CUTLASS=1"):
-            MoonEPRuntime(**kwargs)
+            MoonEPModelRuntime(**kwargs)
 
 
 def test_runtime_reports_optional_backend_source_on_capability_mismatch(monkeypatch) -> None:
     from xtuner.v1.module.dispatcher import moonep as moonep_integration
-    from xtuner.v1.module.dispatcher.moonep import MoonEPRuntime
+    from xtuner.v1.module.dispatcher.moonep import MoonEPModelRuntime
 
     backend = SimpleNamespace(
         __file__="/wrong/worktree/moonep/__init__.py",
@@ -292,7 +292,7 @@ def test_runtime_reports_optional_backend_source_on_capability_mismatch(monkeypa
     monkeypatch.setattr(moonep_integration, "_MOONEP_IMPORT_ERROR", None)
 
     with pytest.raises(RuntimeError, match="/wrong/worktree/moonep/__init__.py"):
-        MoonEPRuntime(
+        MoonEPModelRuntime(
             ep_group=SimpleNamespace(size=lambda: 4),
             hidden_size=128,
             intermediate_size=128,
