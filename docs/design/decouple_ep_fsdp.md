@@ -50,33 +50,149 @@ expert    : Shard(0) over ep  +  FSDP over efsdp             (+ replicate 上 HS
 
 ## 3. 实现
 
+行号对应分支 `feat/decouple-ep-fsdp` 的代码提交 `5923dc1d`（2026-09-03）。改动的文件与位置：
+
+| 文件 | 行号 | 内容 |
+|---|---|---|
+| [`xtuner/v1/config/fsdp.py`](../../xtuner/v1/config/fsdp.py#L48-L65) | 48–65 | `decouple_ep_fsdp` 开关与校验 |
+| [`xtuner/v1/model/moe/moe.py`](../../xtuner/v1/model/moe/moe.py#L1651-L1716) | 1651–1716 | `_init_decoupled_device_mesh`：root mesh 与子 mesh |
+| | [1486–1492](../../xtuner/v1/model/moe/moe.py#L1486-L1492) | `_init_device_mesh` 分流到新路径 |
+| | [1194–1201](../../xtuner/v1/model/moe/moe.py#L1194-L1201) | 解耦路径跳过 `_replicate_other_params` |
+| | [1214–1225](../../xtuner/v1/model/moe/moe.py#L1214-L1225)、[1250–1260](../../xtuner/v1/model/moe/moe.py#L1250-L1260) | decoder layer 两级 `fully_shard` 与 forward prefetch |
+| | [1328–1360](../../xtuner/v1/model/moe/moe.py#L1328-L1360) | MTP layer 的同样处理 |
+| | [1631–1649](../../xtuner/v1/model/moe/moe.py#L1631-L1649) | `_expert_blocks` / `_fully_shard_expert_blocks` |
+| | [1392–1396](../../xtuner/v1/model/moe/moe.py#L1392-L1396)、[1583–1629](../../xtuner/v1/model/moe/moe.py#L1583-L1629) | `scale_and_reduce_grad` 分流与 `_scale_and_reduce_grad_decoupled` |
+| | [1165–1176](../../xtuner/v1/model/moe/moe.py#L1165-L1176) | FP8 padding 传入 `expert_fsdp_mesh` |
+| [`xtuner/v1/model/base.py`](../../xtuner/v1/model/base.py#L567-L569) | 567–569 | 新增 `expert_fsdp_mesh` 属性（dense 模型恒为 `None`） |
+| | [1015](../../xtuner/v1/model/base.py#L1015) | float8 handler 建 reduce mesh 时传入 expert mesh |
+| | [1916–1947](../../xtuner/v1/model/base.py#L1916-L1947) | `_fsdp_foreach_allgather` / `_fsdp_gather_group`：RL 按 spec 选 gather group |
+| [`xtuner/v1/float8/float8_handler.py`](../../xtuner/v1/float8/float8_handler.py#L121-L161) | 45–49、121–161 | `pad_for_fsdp` / `build_reduce_mesh` 的 expert 分支 |
+| | [166–239](../../xtuner/v1/float8/float8_handler.py#L166-L239) | `_build_decoupled_reduce_meshes` 与 strided reduce mesh helper |
+| | [316–335](../../xtuner/v1/float8/float8_handler.py#L316-L335) | tile-wise scale 预计算按类各执行一次 |
+| [`xtuner/v1/float8/fsdp_utils.py`](../../xtuner/v1/float8/fsdp_utils.py#L127-L137) | 127–137 | `precompute_tilewise_float8_scale_for_fsdp` 增加 `module_types` |
+| [`xtuner/v1/rl/weight_update/weight_iterator.py`](../../xtuner/v1/rl/weight_update/weight_iterator.py#L140-L149) | 140–149、196–208、228、236–247 | layer-wise 权重同步按参数 owner gather |
+| [`examples/v1/config/sft_glm5p2.py`](../../examples/v1/config/sft_glm5p2.py#L107-L115) | 107–115 | `DECOUPLE_EP_FSDP` / `HSDP_SHARDING_SIZE` 环境变量 |
+| [`tests/model/test_decoupled_ep_fsdp_mesh.py`](../../tests/model/test_decoupled_ep_fsdp_mesh.py) | 全文 | L0 fake-PG placement 测试（29 例） |
+| [`tests/rl/test_weight_iterator.py`](../../tests/rl/test_weight_iterator.py#L234-L418) | 234–418 | compose owner 回归测试 |
+| [`tests/model/run_decoupled_ep_fsdp_numerics.py`](../../tests/model/run_decoupled_ep_fsdp_numerics.py)、[`run_decoupled_ep_fsdp_ckpt.py`](../../tests/model/run_decoupled_ep_fsdp_ckpt.py)、[`summarize_decoupled_ep_fsdp_numerics.py`](../../tests/model/summarize_decoupled_ep_fsdp_numerics.py) | 全文 | L1–L3 实验脚本 |
+
+相关但**未改动**的文件：[`xtuner/v1/utils/load_spec.py`](../../xtuner/v1/utils/load_spec.py)（`LoadSpec.from_tensor`、`plan_hf_save`、`_preserved_shard_indices`，已能表达新 placement）、[`xtuner/v1/module/decoder_layer/moe_decoder_layer.py`](../../xtuner/v1/module/decoder_layer/moe_decoder_layer.py)（`MoEBlock` 定义，是 expert FSDP 的包装单元）、`xtuner/v1/module/grouped_linear/moe_group_linear.py`（expert 仍在 `ep_mesh` 上 `Shard(0)`）。
+
 ### 3.1 配置与校验
 
-`FSDPConfig.decouple_ep_fsdp: bool = False`。旧断言"HSDP 要求 `ep_size == 1`"只在开关关闭时保留；开关打开时改为要求 `hsdp_sharding_size % ep_size == 0`，即必须存在整数 `efsdp`。`MoE._init_decoupled_device_mesh` 再次校验 `world_size % dp_shard == 0` 与 `dp_shard % ep_size == 0`。ExpertTP（`expert_tp_size > 1`）与解耦同时开启时抛 `NotImplementedError`，ETP 的 `(Shard, InterleavedShard)` 二维 placement 需要单独设计 mesh 维。
+位置：`xtuner/v1/config/fsdp.py` 48–65，`xtuner/v1/model/moe/moe.py` 1665–1678。
+
+```python
+# xtuner/v1/config/fsdp.py
+decouple_ep_fsdp: bool = False          # 默认关闭，旧路径不受影响
+
+def model_post_init(self, __context):
+    if self.hsdp_sharding_size is not None:
+        if self.decouple_ep_fsdp:
+            assert self.hsdp_sharding_size % self.ep_size == 0   # 必须存在整数 efsdp
+        else:
+            assert self.ep_size == 1                             # 旧断言只在旧路径保留
+```
+
+`MoE._init_decoupled_device_mesh` 再次校验 `world_size % dp_shard == 0` 与 `dp_shard % ep_size == 0`。ExpertTP（`expert_tp_size > 1`）与解耦同时开启时抛 `NotImplementedError`，ETP 的 `(Shard, InterleavedShard)` 二维 placement 需要单独设计 mesh 维。
 
 ### 3.2 单一 root mesh
 
-`MoE._init_decoupled_device_mesh` 一次性建立 `(replicate, efsdp, ep)` root，所有子 mesh 从它派生：
+位置：`xtuner/v1/model/moe/moe.py` 1651–1716（`_init_decoupled_device_mesh`），1486–1492（分流）。
 
-- `ep_mesh = root[ep]`：dispatcher / DeepEP 拿到的 EP group 不变，仍是节点内连续 rank；
+```python
+# xtuner/v1/model/moe/moe.py::_init_decoupled_device_mesh（节选）
+world_size = dist.get_world_size()
+dp_shard = fsdp_config.hsdp_sharding_size or world_size
+replicate_size = world_size // dp_shard
+efsdp_size = dp_shard // ep_size
+
+root_mesh = init_device_mesh(
+    device, (replicate_size, efsdp_size, ep_size),
+    mesh_dim_names=(f"{prefix}.replicate", f"{prefix}.efsdp", f"{prefix}.ep"),
+)
+self._world_mesh = root_mesh
+self.ep_mesh = root_mesh[ep_name]                                          # dispatcher 用，接口不变
+self.fsdp_mesh = root_mesh[efsdp_name, ep_name]._flatten(dp_shard_name)    # dense 的一维 dp_shard
+if replicate_size > 1:                                                     # HSDP
+    self.hsdp_mesh = root_mesh[replicate_name, dp_shard_name]
+    self.expert_fsdp_mesh = root_mesh[replicate_name, efsdp_name]
+else:
+    self.hsdp_mesh = None
+    self.expert_fsdp_mesh = root_mesh[efsdp_name]
+```
+
+所有子 mesh 从同一个 root 派生：
+
+- `ep_mesh = root[ep]`：dispatcher / DeepEP 拿到的 EP group 不变，仍是节点内连续 rank。`MoE.__init__` 里先建的 `ep_mesh` 通过 PyTorch 的 mesh 相等性 hash 被重新挂到这个 root 上，因此 `ep` 维必须沿用旧名字 `{prefix}.ep`；
 - `fsdp_mesh = root[efsdp, ep]._flatten("dp_shard")`：语义仍是"dense 参数的一维 shard group"，`_fsdp_foreach_allgather`、`Float8Handler.build_reduce_mesh` 等既有消费者无需改动；
 - `hsdp_mesh = root[replicate, dp_shard]`（仅 `replicate > 1`）：dense 的 HSDP mesh，与旧路径契约一致；
 - `expert_fsdp_mesh = root[efsdp]` 或 `root[replicate, efsdp]`：新增属性，只在解耦路径上非空，dense 模型恒为 `None`。
 
-所有子 mesh 同源很重要：FSDP2 要求已是 DTensor 的参数与 FSDP mesh 共享同一个 root，expert 参数最终要同时带 EP shard 和 `efsdp` 上的 `_StridedShard`。`efsdp = 1` 时该维保留而不是省略——对 expert 做的那次 `fully_shard` 是 mixed precision policy 生效的地方（torchtitan #1324 的同一注释）。
+同源很重要：FSDP2 要求已是 DTensor 的参数与 FSDP mesh 共享同一个 root，expert 参数最终要同时带 EP shard 和 `efsdp` 上的 `_StridedShard`。`efsdp = 1` 时该维保留而不是省略——对 expert 做的那次 `fully_shard` 是 mixed precision policy 生效的地方（torchtitan #1324 的同一注释）。
 
 ### 3.3 两级 `fully_shard`
 
-解耦路径跳过 `_replicate_other_params`：dense 参数进入 `fully_shard` 时是普通 tensor，由 FSDP 在完整 `dp_shard` 上分片。每个 decoder layer 的包装顺序变为：
+位置：`xtuner/v1/model/moe/moe.py` 1194–1225（decoder layer），1250–1260（prefetch），1328–1360（MTP），1631–1649（helper）。
 
-1. `_fully_shard_expert_blocks`：找出该层的所有 `MoEBlock`（只含 routed expert 的 grouped linear 与激活），在 `expert_fsdp_mesh` 上先做一次 `fully_shard`；
-2. 再在 dense 的 `fsdp_mesh` / `hsdp_mesh` 上包装整个 layer。FSDP2 会保留内层的 expert wrapper，把 expert 参数从外层 param group 中排除。
+```python
+# xtuner/v1/model/moe/moe.py::fully_shard（节选）
+decoupled = self.fsdp_config.decouple_ep_fsdp
+if not decoupled and (self.ep_mesh.size() > 1 or tp_enabled):
+    self._replicate_other_params(self)        # 旧路径：dense 在 ep 维 Replicate；解耦路径跳过
 
-MTP layer 使用同样的两级包装。forward prefetch 列表同时包含下一层与其 expert block，让 expert 的 all-gather 与 attention 重叠，而不是串行等在 MoE block 前。
+for layer_idx, layer in self.layers.items():
+    if decoupled:                             # 1) 先包 MoEBlock -> expert_fsdp_mesh
+        self._fully_shard_expert_blocks(layer, mp_policy=mp_policy, reshard_after_forward=...)
+    ...
+    self._fully_shard(                        # 2) 再包整层 -> dense 的 fsdp_mesh / hsdp_mesh
+        mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh, module=layer, ...
+    )
+
+for layer_cur, layer_next in zip(layers[:-1], layers[1:]):
+    if decoupled:                             # expert 的 all-gather 与下一层 dense 一起预取
+        layer_cur.set_modules_to_forward_prefetch([*self._expert_blocks(layer_cur), layer_next])
+
+@staticmethod
+def _expert_blocks(module):
+    return [m for m in module.modules() if isinstance(m, MoEBlock)]
+
+def _fully_shard_expert_blocks(self, module, mp_policy, reshard_after_forward):
+    for expert_block in self._expert_blocks(module):
+        self._fully_shard(mesh=self.expert_fsdp_mesh, module=expert_block, mp_policy=mp_policy, ...)
+```
+
+解耦路径跳过 `_replicate_other_params`：dense 参数进入 `fully_shard` 时是普通 tensor，由 FSDP 在完整 `dp_shard` 上分片。每个 decoder layer 先把所有 `MoEBlock`（只含 routed expert 的 grouped linear 与激活）在 `expert_fsdp_mesh` 上 `fully_shard`，再在 dense mesh 上包装整层；FSDP2 会保留内层的 expert wrapper，把 expert 参数从外层 param group 中排除。MTP layer 使用同样的两级包装。forward prefetch 列表同时包含下一层与其 expert block，让 expert 的 all-gather 与 attention 重叠，而不是串行等在 MoE block 前。
 
 ### 3.4 梯度归约
 
-不变式：每个参数的最终梯度等于全 data-parallel world 上的均值，与 `ep` / `efsdp` 取值无关。`MoE._scale_and_reduce_grad_decoupled` 只做三件事：
+位置：`xtuner/v1/model/moe/moe.py` 1392–1396（分流），1583–1629（`_scale_and_reduce_grad_decoupled`）。
+
+不变式：每个参数的最终梯度等于全 data-parallel world 上的均值，与 `ep` / `efsdp` 取值无关。
+
+```python
+# xtuner/v1/model/moe/moe.py::_scale_and_reduce_grad_decoupled（节选）
+for name, param in self.trainable_parameters():
+    if param.grad is None:
+        continue
+    if ep_size > 1 and ".experts" in name:
+        param.grad.div_(ep_size)              # expert：FSDP 已在 efsdp 上求均值，剩余因子是 ep
+        continue
+    if not isinstance(param, DTensor):
+        continue
+    if any(isinstance(p, Shard) for p in param.placements):
+        continue                              # FSDP 管理的参数（含 _StridedShard）：FSDP 已归约
+    replicate_dims = [names[i] for i, p in enumerate(param.placements) if isinstance(p, Replicate)]
+    flat_mesh = param.device_mesh[replicate_dims]._flatten() if len(replicate_dims) > 1 else param.device_mesh[replicate_dims[0]]
+    grad = param.grad.to_local()
+    grad.div_(flat_mesh.size())               # 全 Replicate 的 ignored fp32 参数：手工求均值
+    grads_by_group.setdefault(flat_mesh.get_group(), []).append(grad)
+
+for group, grads in grads_by_group.items():   # 每个 group 一次 coalesced all-reduce
+    with dist._coalescing_manager(group=group):
+        for grad in grads:
+            dist.all_reduce(grad, ReduceOp.SUM, group=group)
+```
 
 | 参数类 | 谁完成归约 | 解耦路径的额外动作 |
 |---|---|---|
@@ -88,23 +204,79 @@ MTP layer 使用同样的两级包装。forward prefetch 列表同时包含下�
 
 ### 3.5 FP8
 
+位置：`xtuner/v1/float8/float8_handler.py` 121–161、166–239、316–335；`xtuner/v1/float8/fsdp_utils.py` 127–137；`xtuner/v1/model/moe/moe.py` 1165–1176；`xtuner/v1/model/base.py` 1015。
+
 tile-wise FP8 需要知道每个本地权重会被多少个 FSDP rank 切分（决定 padding），以及 scale 的 reduce-max 应跨哪些 rank。解耦后 dense 与 expert 的答案不同：
+
+```python
+# xtuner/v1/float8/float8_handler.py::pad_for_fsdp（节选）
+num_fsdp_chunks = fsdp_mesh.size(-1)                                  # dense：dp_shard 份
+if expert_fsdp_mesh is not None and isinstance(module, TileWiseFloat8GroupedLinear):
+    num_fsdp_chunks = expert_fsdp_mesh.size(-1)                       # routed expert：efsdp 份
+padded_out_features = Float8Handler.get_num_features_after_pad(tensor_size, 0, num_fsdp_chunks)
+
+# ::_build_decoupled_reduce_meshes（节选）
+dense_shard_size = fsdp_mesh.size(-1)                                 # 连续 rank，stride 1
+expert_shard_size = expert_fsdp_mesh.size(-1)
+expert_stride = world_size // expert_fsdp_mesh.size()                 # == ep_size
+self.tilewise_reduce_mesh_mapping = self._build_strided_reduce_mesh_mapping(
+    model, (TileWiseFloat8Linear,), dense_shard_size, 1)
+self.expert_tilewise_reduce_mesh_mapping = self._build_strided_reduce_mesh_mapping(
+    model, (TileWiseFloat8GroupedLinear,), expert_shard_size, expert_stride)
+```
 
 - dense linear 按 `dp_shard` 的 chunk 数 padding，reduce mesh 的 rank stride 为 1；
 - grouped-expert linear 按 `efsdp` 的 chunk 数 padding，reduce mesh 的 rank stride 为 `ep`；
-- `Float8Handler.pad_for_fsdp` 接受可选的 `expert_fsdp_mesh`，`build_reduce_mesh` 为两类参数各建一套 tile-wise reduce mesh，scale 预计算按类各执行一次。
+- scale 预计算（`precompute_tilewise_float8_scale_for_fsdp`）新增 `module_types` 参数，按 dense / expert 两类各执行一次。
 
 旧路径 `expert_fsdp_mesh is None`，走原有的单 mesh 代码。tensor-wise FP8 只作用于 dense linear，shard group 仍是 `fsdp_mesh`，无需改动。
 
 ### 3.6 HF 权重与 DCP
 
-`LoadSpec.from_tensor` 直接从 DTensor placement 记录 shard 历史（EP 的 `Shard(0)`、`efsdp` 上的 `_StridedShard`、HSDP 的 `Replicate` 不产生 shard）。同步 HF save 按 shard 描述逆向 unshard 后再走模型已有的 HF key / fused-expert 映射；DCP 按 DTensor placement 保存并在载入时 reshard。因此没有为任何模型重写 `state_dict_adapter`，工作量在于让新 mesh 产出正确的 `LoadSpec`。
+位置：无代码改动。依赖 `xtuner/v1/utils/load_spec.py` 的 `LoadSpec.from_tensor`、`RuntimeLayout.from_dtensor`、`plan_hf_save`；验证脚本 `tests/model/run_decoupled_ep_fsdp_ckpt.py`。
+
+`LoadSpec.from_tensor` 直接从 DTensor placement 记录 shard 历史，新 placement 无需特殊处理：
+
+```text
+routed expert（解耦 + HSDP）
+  DTensor placement : (Replicate, _StridedShard(0), Shard(0))  on (replicate, efsdp, ep)
+  LoadSpec.shards   : [ShardDescriptor(dim=0, group=ep), ShardDescriptor(dim=0, group=efsdp)]   # Replicate 不产生 shard
+dense（解耦 + HSDP）
+  DTensor placement : (Replicate, Shard(0))                    on (replicate, dp_shard)
+  LoadSpec.shards   : [ShardDescriptor(dim=0, group=dp_shard)]
+```
+
+同步 HF save 按 shard 描述逆向 unshard 后再走模型已有的 HF key / fused-expert 映射；DCP 按 DTensor placement 保存并在载入时 reshard。因此没有为任何模型重写 `state_dict_adapter`，工作量在于让新 mesh 产出正确的 `LoadSpec`。
 
 ### 3.7 RL 权重同步
 
-Turbomind 的 layer-wise 更新只 gather FSDP shard、保留 EP-local 的 expert 切片。`BaseModel._fsdp_foreach_allgather` 按每个 `LoadSpec` 选择 gather group：spec 含 `efsdp` 上的 shard 时用 `expert_fsdp_mesh` 的 group，否则用 `fsdp_mesh` 的 group。
+位置：`xtuner/v1/model/base.py` 1916–1947；`xtuner/v1/rl/weight_update/weight_iterator.py` 140–149、196–208、236–247；测试 `tests/rl/test_weight_iterator.py` 234–418。
 
-compose 模型（如 Qwen3.5-VL MoE）曾有一个 owner 选择错误：`WeightIterator.iter_layer_batches` 从 language tower 取参数与 `LoadSpec`，却用外层 compose 模型的 mesh 做 gather。compose 模型本身在 world mesh 上包装、没有 `expert_fsdp_mesh`，也不维护自己的 `load_spec_mapping`，于是 language tower 的 `efsdp` shard（HSDP 时连 `dp_shard` shard）被当作"应保留"的 shard 而不 gather，Turbomind 收到的是 rank-local 碎片。现在 gather 由参数所属的子模块（language / vision / projector）执行，并从该子模块的 `load_spec_mapping` 取 spec；`tests/rl/test_weight_iterator.py::TestLayerBatchesGatherWithParamOwner` 用假 process group 固定了 `efsdp = 2` 与 HSDP 两种拓扑下每个 tensor 的完整形状与取值。
+Turbomind 的 layer-wise 更新只 gather FSDP shard、保留 EP-local 的 expert 切片。`BaseModel._fsdp_foreach_allgather` 按每个 `LoadSpec` 选择 gather group：
+
+```python
+# xtuner/v1/model/base.py::_fsdp_gather_group
+def _fsdp_gather_group(self, load_spec, fsdp_group, expert_fsdp_group):
+    if expert_fsdp_group is None:
+        return fsdp_group
+    if any(self._is_same_process_group(shard.group, expert_fsdp_group) for shard in load_spec.shards):
+        return expert_fsdp_group      # spec 带 efsdp shard：只 gather efsdp，EP shard 保留
+    return fsdp_group                 # dense：gather dp_shard
+```
+
+compose 模型（如 Qwen3.5-VL MoE）曾有一个 owner 选择错误：`WeightIterator.iter_layer_batches` 从 language tower 取参数与 `LoadSpec`，却用外层 compose 模型的 mesh 做 gather。compose 模型本身在 world mesh 上包装、没有 `expert_fsdp_mesh`，也不维护自己的 `load_spec_mapping`，于是 language tower 的 `efsdp` shard（HSDP 时连 `dp_shard` shard）被当作"应保留"的 shard 而不 gather，Turbomind 收到的是 rank-local 碎片。现在 gather 由参数所属的子模块执行，并从该子模块的 `load_spec_mapping` 取 spec：
+
+```python
+# xtuner/v1/rl/weight_update/weight_iterator.py::_param_owner
+def _param_owner(model, name):
+    if isinstance(model.config, BaseComposeConfig):
+        for submodule in ("language_model", "vision_tower", "multi_modal_projector"):
+            if name.startswith(f"{submodule}."):
+                return getattr(model, submodule), name[len(submodule) + 1 :]
+    return model, name                # plain 模型：owner 就是自己，行为不变
+```
+
+`tests/rl/test_weight_iterator.py::TestLayerBatchesGatherWithParamOwner` 用假 process group 固定了 `efsdp = 2` 与 HSDP 两种拓扑下每个 tensor 的完整形状与取值。
 
 ## 4. 与参考实现的对照
 
@@ -119,23 +291,52 @@ compose 模型（如 Qwen3.5-VL MoE）曾有一个 owner 选择错误：`WeightI
 
 ## 5. 验证结论与边界
 
-| 项目 | 证据 | 边界 |
-|---|---|---|
-| mesh / placement / 两级 FSDP | `tests/model/test_decoupled_ep_fsdp_mesh.py`，fake-PG 下 8/16/64 rank 共 29 例；旧布局在开关关闭时逐项固定 | 需要一张空闲 GPU 建 CUDA context，不通信 |
-| BF16 训练语义（L1） | tiny Qwen3-MoE 50 步：解耦 EP8 vs 旧 EP8 loss 最大相对差 `1.9e-5`（旧 EP8 vs EP1 为 `2.5e-5`）；3.4B 模型每卡 dense 参数 836 → 105 MiB，峰值 allocated 11861 → 8203 MiB，步时 170 → 158 ms | 单机；reduction order 不同，不是逐 bit 相同 |
-| `efsdp > 1`、HSDP + EP（L2） | 单机缩比拓扑 `(1,2,4)`、`(2,1,4)`、`(2,2,2)` 均在噪声内；16/64 rank 形状由 L0 固定 | 真正的双节点 collective 未跑 |
-| HF / DCP（L3） | 刚 `from_hf` 后导出 807 个 key 全部 bit-exact；DCP 同布局 resume 与跨布局 reshard 后 loss 连续 | 未覆盖 async save、FP8 checkpoint、GLM/MTP 导出、world size 变化 |
-| FP8 | 3.4B 与 GLM-5.2 tile-wise FP8 训练 20 步稳定，差异量级接近同配置重复噪声 | FP8 + HSDP、FP8 + checkpoint 未测 |
-| GLM-5.2-30B，8×H200 目标配方 | EP4：1.688 s / 99.5 GiB → 1.658 s / 83.5 GiB；EP8：11.8 s / 120.0 GiB → 1.64 s / 76.3 GiB | EP8 的加速来自离开 allocator 上限（legacy 每步 2–3 次 alloc retry，解耦为 0），不是 collective 本身快 7 倍 |
-| RL 权重同步 | plain MoE 的 per-spec gather 逻辑成立；compose 的 owner 错误已修复并有单测 | 未做真实 Turbomind 端到端对拍 |
-| legacy 兼容 | 开关默认关闭，旧分支执行逻辑未改动，L0 旧布局回归通过 | 未做 base-vs-branch 端到端逐 tensor 对照 |
+| 项目 | 证据 | 边界 | 链接 |
+|---|---|---|---|
+| mesh / placement / 两级 FSDP（L0） | fake-PG 下 8/16/64 rank 共 29 例；旧布局在开关关闭时逐项固定 | 需要一张空闲 GPU 建 CUDA context，不通信 | [test_decoupled_ep_fsdp_mesh.py](../../tests/model/test_decoupled_ep_fsdp_mesh.py)、[baseline.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/baseline.md) |
+| BF16 训练语义（L1） | tiny Qwen3-MoE 50 步：解耦 EP8 vs 旧 EP8 loss 最大相对差 `1.9e-5`（旧 EP8 vs EP1 为 `2.5e-5`）；3.4B 模型每卡 dense 参数 836 → 105 MiB，峰值 allocated 11861 → 8203 MiB，步时 170 → 158 ms | 单机；reduction order 不同，不是逐 bit 相同 | [L1.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/L1.md)、[run_decoupled_ep_fsdp_numerics.py](../../tests/model/run_decoupled_ep_fsdp_numerics.py) |
+| `efsdp > 1`、HSDP + EP（L2） | 单机缩比拓扑 `(1,2,4)`、`(2,1,4)`、`(2,2,2)` 均在噪声内；16/64 rank 形状由 L0 固定 | 真正的双节点 collective 未跑 | [L2.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/L2.md)、[decisions.md D10](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/decisions.md) |
+| HF / DCP（L3） | 刚 `from_hf` 后导出 807 个 key 全部 bit-exact；DCP 同布局 resume 与跨布局 reshard 后 loss 连续 | 未覆盖 async save、FP8 checkpoint、GLM/MTP 导出、world size 变化 | [L3.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/L3.md)、[run_decoupled_ep_fsdp_ckpt.py](../../tests/model/run_decoupled_ep_fsdp_ckpt.py) |
+| FP8 | 3.4B 与 GLM-5.2 tile-wise FP8 训练 20 步稳定，差异量级接近同配置重复噪声 | FP8 + HSDP、FP8 + checkpoint 未测 | [L3.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/L3.md)、[GLM52.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/GLM52.md) |
+| GLM-5.2-30B，8×H200 目标配方 | EP4：1.688 s / 99.5 GiB → 1.658 s / 83.5 GiB；EP8：11.8 s / 120.0 GiB → 1.64 s / 76.3 GiB | EP8 的加速来自离开 allocator 上限（legacy 每步 2–3 次 alloc retry，解耦为 0），不是 collective 本身快 7 倍 | [GLM52.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/GLM52.md) |
+| RL 权重同步 | plain MoE 的 per-spec gather 逻辑成立；compose 的 owner 错误已修复并有单测 | 未做真实 Turbomind 端到端对拍 | [test_weight_iterator.py](../../tests/rl/test_weight_iterator.py#L234-L418) |
+| legacy 兼容 | 开关默认关闭，旧分支执行逻辑未改动，L0 旧布局回归通过 | 未做 base-vs-branch 端到端逐 tensor 对照 | [baseline.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/baseline.md)、[decisions.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/decisions.md) |
 
-详细数据见 `reports/L1.md`、`reports/L2.md`、`reports/L3.md`、`reports/GLM52.md`（不随代码 PR 合入）。
+`reports/` 下的报告不随代码 PR 合入，链接指向 fork 分支 `feat/decouple-ep-fsdp` 上的固定地址；测试与脚本是仓库内相对链接。
 
 ## 6. 已知限制与后续工作
 
-- `fp32_keys_pattern` 命中 routed expert 时（当前内置 pattern 均不命中），该 expert 只被 `ignored_params` 排除而不会沿 `efsdp` 分片，梯度路径只做 `/ep`，`efsdp > 1` 或 `replicate > 1` 时副本会分叉。短期应显式拒绝；完整方案见 §7.2，与"expert 不做 FSDP"模式是同一实现。
-- expert 的分类在 FSDP 包装时按 `MoEBlock` 类型，在梯度缩放时按参数名含 `.experts`，不是同一事实来源；应在包装时记录 expert 参数身份，梯度、FP8、save / RL 复用。
+### 6.1 `fp32_keys_pattern` 命中 routed expert 时梯度不归约
+
+`HFSaveCfg.fp32_keys_pattern` 用 HF key 正则把少量参数保留在 fp32 并排除在 FSDP 之外，内置用途是 Qwen3.5 linear-attention 的 `A_log`、norm 这类 dense 小参数。`BaseModel._fully_shard` 对命中的参数分两种处理：普通 tensor 先 `distribute_tensor(Replicate on world_mesh)` 再放进 `ignored_params`；已经是 DTensor 的参数原样放进 `ignored_params`。routed expert 在 `build_grouped_linear` 里就已经是 `Shard(0)` on `ep` 的 DTensor，走的是第二种。
+
+于是一旦某条 pattern 命中 expert，会同时发生两件事：
+
+1. expert 不再被 `_fully_shard_expert_blocks` 沿 `efsdp` 分片，每个 `efsdp` rank（HSDP 时每个 replica）各持一份完整的 EP-local expert；
+2. `_scale_and_reduce_grad_decoupled` 看到参数名含 `.experts`，只做 `/ep` 就 `continue`，不会走第三行的 Replicate 维 all-reduce。
+
+每个 `efsdp` rank 的 expert 梯度只含自己 EP group 的 token 贡献，optimizer 一步之后同一个 expert 在不同 `efsdp` rank 上的权重就不再相同，训练静默出错。`efsdp = replicate = 1`（如单机 EP=8）时没有第二份副本，问题不显现；当前内置 pattern 也都只匹配 dense，GLM-5.2 没有 pattern，所以现有实验没有触发。旧路径同样存在这个边界：ignored expert 不会沿 `fsdp` 分片，`fsdp > 1` 时一样分叉。
+
+修法：短期在解耦路径检测到 pattern 命中 `MoEBlock` 参数时直接报错；完整方案是把这类 expert 表达成 `Replicate(replicate), Replicate(efsdp), Shard(0)(ep)`，先走 §3.4 第三行的 Replicate 维 all-reduce 求均值，再 `/ep`。这与 §7.2 的 `expert_fsdp = False` 模式是同一套实现。
+
+### 6.2 "什么是 expert 参数"有两套判定标准
+
+| 环节 | 判定依据 | 位置 |
+|---|---|---|
+| FSDP 包装 | 模块类型 `isinstance(m, MoEBlock)` | `MoE._expert_blocks` |
+| 梯度缩放 | 参数名 `".experts" in name` | `MoE._scale_and_reduce_grad_decoupled`（旧路径 `scale_and_reduce_grad` 同样） |
+| FP8 padding / reduce mesh | 模块类型 `TileWiseFloat8GroupedLinear` | `Float8Handler.pad_for_fsdp` / `_build_decoupled_reduce_meshes` |
+| RL gather | `LoadSpec.shards` 中是否有 `efsdp` group 的 shard | `BaseModel._fsdp_gather_group` |
+
+今天它们恰好一致，因为 `MoEDecoderLayer` 把 `MoEBlock` 挂在 `experts` 属性下（`shared_experts` 不含 `.experts` 子串，不会误伤）。两个方向都可能失效：
+
+- 新模型把 `MoEBlock` 挂到别的属性名（如 `moe`）：expert 会被 `expert_fsdp_mesh` 分片，reduce-scatter 只在 `efsdp` 上求均值，但名字里没有 `.experts`，不做 `/ep`，梯度被放大 `ep` 倍，等价于 expert 的学习率乘以 `ep`，没有任何报错；
+- 某个 dense 参数名恰好含 `.experts`（如 `experts_router`）：会被 `/ep`，梯度缩小 `ep` 倍。
+
+修法：在 `_fully_shard_expert_blocks` 包装时记录 expert 参数的 id / FQN 集合，梯度缩放、FP8、save / RL 都查这一份，删除按名字匹配的分支。
+
+### 6.3 其它
+
 - 新拓扑约束目前用 `assert`，应改为 Pydantic validator + `ValueError`。
 - 两次不同 mesh 的 `fully_shard` 与 `DeviceMesh._flatten(name)` 只在 torch 2.8 / 2.9 验证；`pyproject.toml` 声明 `torch>=2.6`，需要补 CI 或为该开关声明更高的最低版本。
 - L1–L3 是人工实验脚本（写 JSON、打印统计），不是会失败的 pytest gate。
@@ -162,7 +363,7 @@ expert_fsdp = True （现状）: Shard(0) on ep + _StridedShard on efsdp        
 expert_fsdp = False（新增）: Shard(0) on ep + Replicate on (replicate, efsdp) 手工 all-reduce 求均值，再 /ep
 ```
 
-后者的梯度处理正是 §3.4 第三行已经存在的"沿 Replicate 维 all-reduce"分支，也正是修复 §6 第一条（fp32 pattern 命中 expert）所需的实现，两件事可以一次做完。代价是 expert 参数与优化器状态在 `efsdp` 维复制、失去 FSDP wrapper 提供的 mixed precision（需手工 cast）。
+后者的梯度处理正是 §3.4 第三行已经存在的"沿 Replicate 维 all-reduce"分支，也正是修复 §6.1（fp32 pattern 命中 expert）所需的实现，两件事可以一次做完。代价是 expert 参数与优化器状态在 `efsdp` 维复制、失去 FSDP wrapper 提供的 mixed precision（需手工 cast）。
 
 建议：`efsdp` 保持派生；不新增整数配置。等 MoonEP / UltraEP 接入启动时，在 `FSDPConfig` 增加 `expert_fsdp: bool = True`（或 `expert_shard_mode: "fsdp" | "replicate"`）。root mesh 不变，`ep_mesh` 仍是最内层连续 rank 的 group，dispatcher 的替换与本方案正交。
 
