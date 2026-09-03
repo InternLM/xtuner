@@ -45,7 +45,7 @@ from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, finalize_train_policy_metrics, kl_penalty
-from xtuner.v1.rl.utils import SingleAcceleratorWorker
+from xtuner.v1.rl.utils import SingleAcceleratorWorker, free_object_refs
 from xtuner.v1.rl.weight_update import WeightUpdater
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
@@ -523,7 +523,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             else self.config.model_cfg
         )
 
-        to_free_routed_expert_refs: list[ray.ObjectRef] = []
+        to_free_routed_expert_refs: list[ray.ObjectRef | list[ray.ObjectRef]] = []
         if isinstance(rollout_routed_experts, list):
             # list[n,l,e]
             out_rollout_routed_expert = []
@@ -561,7 +561,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     # finish consuming the batch.
                     if self.config.free_rollout_routed_experts_in_worker:
                         if self.sp_mesh is None or self.sp_mesh.size() == 1:
-                            ray.internal.free(rollout_routed_expert_refs, local_only=False)
+                            free_object_refs(rollout_routed_expert_refs)
                         else:
                             if self.sp_mesh.get_local_rank() == 0:
                                 # only free once of sp mesh
@@ -596,7 +596,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self.config.free_rollout_routed_experts_in_worker and self.sp_mesh is not None and self.sp_mesh.size() > 1:
             dist.barrier()
             for free_routed_expert_refs in to_free_routed_expert_refs:
-                ray.internal.free(free_routed_expert_refs, local_only=False)
+                free_object_refs(free_routed_expert_refs)
             del to_free_routed_expert_refs
 
     @contextmanager

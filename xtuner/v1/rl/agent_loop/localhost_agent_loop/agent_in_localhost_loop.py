@@ -261,6 +261,7 @@ class AgentInLocalhostLoop(AgentLoop):
         ]
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
+        rollout_state.routed_experts_owner = "trace_store" if data["routed_experts"] is not None else None
         content = response_message.get("content")
         rollout_state.response = content if isinstance(content, str) else (str(content) if content is not None else "")
 
@@ -275,6 +276,7 @@ class AgentInLocalhostLoop(AgentLoop):
         rollout_state.response_ids = None
         rollout_state.logprobs = None
         rollout_state.routed_experts = None
+        rollout_state.routed_experts_owner = None
         rollout_state.response_mask = None
         rollout_state.response_model_steps = None
         rollout_state.extra_fields["agent_status"] = item.status.value
