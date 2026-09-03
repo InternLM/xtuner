@@ -88,6 +88,13 @@ on:
           already contains a preinstalled xtuner).
         type: boolean
         default: false
+      runner_label:
+        required: false
+        description: >-
+          GitHub Actions runner label for the ETE job.
+          Default is h_cluster_ete.
+        type: string
+        default: 'h_cluster_ete'
   schedule:
     - cron: '0 9 * * 5'  # Friday 17:00 UTC+8
 
@@ -167,7 +174,7 @@ jobs:
         !inputs.build_only &&
         (needs.build_image.result == 'success' || inputs.skip_build)
       }}
-    runs-on: [h_cluster_ete]
+    runs-on: ${{ github.event.inputs.runner_label || 'h_cluster_ete' }}
     timeout-minutes: 1440
     env:
       CI_ETE_TRAIN_IMAGE: >-
@@ -210,6 +217,7 @@ jobs:
             echo "- Train image: \`${{ env.CI_ETE_TRAIN_IMAGE }}\`"
             echo "- clusterx partition: \`${{ env.CI_ETE_CLUSTERX_PARTITION }}\`"
             echo "- clusterx project: \`${{ env.CI_ETE_CLUSTERX_PROJECT_NAME }}\`"
+            echo "- runner label: \`${{ github.event.inputs.runner_label || 'h_cluster_ete' }}\`"
             echo "- skip xtuner install: \`${{ env.CI_ETE_SKIP_XTUNER_INSTALL }}\`"
             echo "- Reports: [ete/${{ github.run_id }}](${{ env.CI_REPORTS_BROWSE_URL_BASE }}/${{ github.run_id }})"
             echo ""
@@ -232,6 +240,7 @@ jobs:
           echo "Using train image: ${CI_ETE_TRAIN_IMAGE}"
           echo "clusterx partition: ${CI_ETE_CLUSTERX_PARTITION}"
           echo "clusterx project: ${CI_ETE_CLUSTERX_PROJECT_NAME}"
+          echo "runner label: ${{ github.event.inputs.runner_label || 'h_cluster_ete' }}"
           echo "skip xtuner install: ${CI_ETE_SKIP_XTUNER_INSTALL:-false}"
           CASE_INPUT="${{ github.event.inputs.run_case || 'all' }}"
           PARALLEL_INPUT="${{ github.event.inputs.parallel || '4' }}"
