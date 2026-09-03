@@ -7,7 +7,7 @@ clusterx:
     partition: llmrazor_gpu
     project_name: ailab-llmrazor
 
-# When true, strip ``pip install -e .`` from train pip_package (image already contains xtuner).
+# When true, strip editable xtuner installs (e.g. pip install -e .[all]) from train pip_package.
 # Override via CI_ETE_SKIP_XTUNER_INSTALL env or workflow input.
 skip_xtuner_install: false
 

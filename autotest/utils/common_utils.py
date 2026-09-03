@@ -1,5 +1,5 @@
 import os
-import re
+from typing import Optional
 
 import yaml
 
@@ -8,6 +8,8 @@ CONFIG_FILE = "autotest/config.yaml"
 
 DEFAULT_CLUSTERX_PARTITION = "llmrazor_gpu"
 DEFAULT_CLUSTERX_PROJECT_NAME = "ailab-llmrazor"
+
+_EDITABLE_FLAGS = frozenset({"-e", "--editable"})
 
 
 def dict_merge(default, override):
@@ -22,7 +24,8 @@ def dict_merge(default, override):
 
 
 def _resolve_clusterx_config(env_config: dict) -> dict:
-    """Resolve clusterx partition/project_name from config and env overrides."""
+    """Resolve clusterx partition/project_name from config and env
+    overrides."""
     clusterx_cfg = dict(env_config.get("clusterx") or {})
     clusterx_cfg.setdefault("partition", DEFAULT_CLUSTERX_PARTITION)
     clusterx_cfg.setdefault("project_name", DEFAULT_CLUSTERX_PROJECT_NAME)
@@ -54,11 +57,48 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
 
 
+def _is_local_repo_editable_target(path: str) -> bool:
+    """Editable install of the current repo root (``.``, ``.[extra]``,
+    ``./``)."""
+    path = path.strip().strip("'\"")
+    if path in (".", "./"):
+        return True
+    if path.startswith("./"):
+        return True
+    return path.startswith(".[") and path.endswith("]")
+
+
+def _segment_is_xtuner_editable_install(segment: str) -> bool:
+    """True when a semicolon segment is only ``pip install -e .`` /
+    ``.[extra]``."""
+    tokens = segment.strip().split()
+    if len(tokens) < 4 or tokens[0] not in ("pip", "pip3") or tokens[1] != "install":
+        return False
+
+    install_args = tokens[2:]
+    if install_args[0] not in _EDITABLE_FLAGS or len(install_args) != 2:
+        return False
+    return _is_local_repo_editable_target(install_args[1])
+
+
 def strip_xtuner_editable_install(pip_package: str) -> str:
-    """Remove editable xtuner installs; keep other pip commands in the chain."""
+    """Remove editable xtuner installs; keep other pip commands in the
+    chain."""
     segments = [seg.strip() for seg in pip_package.split(";") if seg.strip()]
-    kept = [seg for seg in segments if not re.match(r"^pip\s+install\s+-e\s+\.", seg, re.IGNORECASE)]
+    kept = [seg for seg in segments if not _segment_is_xtuner_editable_install(seg)]
     return "; ".join(kept) if kept else "true"
+
+
+def _resolve_train_image(image: str, registry: Optional[str]) -> str:
+    """Join short image tags with registry; leave full refs and missing
+    registry unchanged."""
+    image = image.strip().lstrip("/")
+    if not registry:
+        return image
+    host = image.split("/", 1)[0]
+    if "." in host or host == "localhost":
+        return image
+    return f"{registry}/{image}"
 
 
 def _resolve_skip_xtuner_install(env_config: dict, step: dict) -> bool:
@@ -105,7 +145,7 @@ def get_config():
             r = merged.get("resource")
             if train_image_override and step_type == "train":
                 r["image"] = train_image_override.lstrip("/")
-            r["image"] = f"{registry}/{r['image']}"
+            r["image"] = _resolve_train_image(r["image"], registry)
             if step_type == "train" and _resolve_skip_xtuner_install(env_config, merged):
                 pip_package = r.get("pip_package")
                 if pip_package:
