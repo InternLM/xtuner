@@ -58,6 +58,9 @@ class Status(Enum):
     ARCHIVED = "archived"
 
 
+RoutedExpertsOwner: TypeAlias = Literal["rollout", "trace_store"]
+
+
 class MultimodalInfo(TypedDict):
     # 使用TypedDict给出pixel_values的类型提示
     pixel_values: NotRequired[np.ndarray | RayObjectRef | None]
@@ -110,6 +113,10 @@ class RolloutState(BaseModel):
     response_ids: list[int] | None = None
     logprobs: list[float] | None = None
     routed_experts: np.ndarray | RayObjectRef | list[RayObjectRef] | None = None
+    # ``routed_experts`` may either be produced by a rollout worker or borrowed
+    # from the shared TraceStore.  The distinction is deliberately explicit:
+    # an ObjectRef's container type does not convey ownership.
+    routed_experts_owner: RoutedExpertsOwner | None = None
     finish_reason: str | None = None
     # response_mask: 记录response_ids中哪个token算loss, 与response_ids长度相同，每轮rollout在 agent_loop.generate 中覆盖写
     response_mask: list[int] | None = None
@@ -176,13 +183,62 @@ def free_rollout_state_refs(rollout_state: RolloutState) -> None:
         return value
 
     clear_object_refs(rollout_state)
-    free_object_refs(refs)
+    if refs:
+        free_object_refs(refs)
 
 
-def discard_rollout_state(rollout_state: RolloutState) -> RolloutState:
-    """Release heavy references and clear fields before dropping a rollout."""
+def release_owned_routed_experts(rollout_state: RolloutState) -> None:
+    """Release routed-expert refs owned by the direct rollout path.
 
-    free_rollout_state_refs(rollout_state)
+    ``RolloutState`` can also contain refs borrowed from ``TraceStore``.  This
+    helper is intentionally conservative and refuses to free those refs; the
+    TraceStore session is their owner and must release them through its own
+    lifecycle.  Callers should invoke this helper only when they are disposing
+    a direct rollout result.
+    """
+
+    routed_experts = rollout_state.routed_experts
+    if routed_experts is None:
+        rollout_state.routed_experts_owner = None
+        return
+
+    if rollout_state.routed_experts_owner == "trace_store":
+        logger.warning(
+            "Refusing to free TraceStore-owned routed_experts from RolloutState "
+            f"(session_id={rollout_state.session_id!r}). Release the TraceStore session instead."
+        )
+        return
+
+    if rollout_state.routed_experts_owner != "rollout":
+        logger.warning(
+            "Skipping release of routed_experts with unknown owner "
+            f"{rollout_state.routed_experts_owner!r} (session_id={rollout_state.session_id!r})."
+        )
+        return
+
+    from ray import ObjectRef
+
+    from xtuner.v1.rl.utils.ray_utils import free_object_refs
+
+    if isinstance(routed_experts, (ObjectRef, list)):
+        free_object_refs(routed_experts)
+    rollout_state.routed_experts = None
+    rollout_state.routed_experts_owner = None
+
+
+def discard_rollout_state(rollout_state: RolloutState, *, release_refs: bool = False) -> RolloutState:
+    """Clear a rollout before dropping it.
+
+    Resource release is opt-in so the caller has to make the ownership
+    decision.  TraceStore-owned routed experts are detached before generic
+    cleanup so ``free_rollout_state_refs`` cannot free them a second time.
+    """
+
+    if release_refs:
+        if rollout_state.routed_experts_owner == "trace_store":
+            rollout_state.routed_experts = None
+            rollout_state.routed_experts_owner = None
+        free_rollout_state_refs(rollout_state)
 
     for field_name, field in type(rollout_state).model_fields.items():
         if field.is_required():
@@ -230,21 +286,13 @@ def update_status_from_finish_reason(finish_reason: str | None) -> Status:
 
 
 def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
-    routed_experts = getattr(rollout_state, "routed_experts", None)
-    if routed_experts is not None:
-        from ray import ObjectRef
-
-        from xtuner.v1.rl.utils.ray_utils import free_object_refs
-
-        if isinstance(routed_experts, (ObjectRef, list)):
-            free_object_refs(routed_experts)
-        rollout_state.routed_experts = None
     prompt_ids = getattr(rollout_state, "prompt_ids", None)
     rollout_state.tokens = list(prompt_ids) if prompt_ids is not None else None
     rollout_state.response = ""
     rollout_state.response_ids = []
     rollout_state.logprobs = []
     rollout_state.routed_experts = None
+    rollout_state.routed_experts_owner = None
     rollout_state.finish_reason = None
     rollout_state.response_mask = None
     rollout_state.response_model_steps = []

@@ -322,9 +322,10 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # 验证 discard 不破坏 RolloutState 的必填字段契约，同时释放可丢弃的重字段。
         item = make_rollout_state(42, status=Status.COMPLETED, reward_score=1.0)
         item.routed_experts = MagicMock()
+        item.routed_experts_owner = "rollout"
         item.extra_fields = {"large": [1, 2, 3]}
 
-        discarded = discard_rollout_state(item)
+        discarded = discard_rollout_state(item, release_refs=True)
 
         self.assertEqual(discarded.message, [{"role": "user", "content": "prompt 42"}])
         self.assertEqual(discarded.status, Status.INIT)

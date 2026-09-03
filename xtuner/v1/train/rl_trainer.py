@@ -1093,23 +1093,24 @@ class BaseRLTrainer:
                 self.train_controller.onload(target="all")
                 self.logger.info("Training controller loaded")
 
-        with timer("prepare_data", step_timer_dict):
-            data_batches, data_info = self._prepare_train_data(
-                train_batch,
-                self._train_worker_cfg.pack_max_length,
-                raw_rewards_sum=raw_rewards_sum,
-                raw_rewards_count=raw_rewards_count,
-            )
-        self.logger.info(f"Prepared {len(data_batches)} training data batches")
+        try:
+            with timer("prepare_data", step_timer_dict):
+                data_batches, data_info = self._prepare_train_data(
+                    train_batch,
+                    self._train_worker_cfg.pack_max_length,
+                    raw_rewards_sum=raw_rewards_sum,
+                    raw_rewards_count=raw_rewards_count,
+                )
+            self.logger.info(f"Prepared {len(data_batches)} training data batches")
 
-        with timer("training", step_timer_dict):
-            workers_log_item: list[WorkerLogItem] = self.train_controller.fit(
-                data_batches,
-                pack_max_length=self._train_worker_cfg.pack_max_length,
-                rollout_idx=train_step,
-            )
-
-        self._release_trace_sessions_after_train_batch(train_batch)
+            with timer("training", step_timer_dict):
+                workers_log_item: list[WorkerLogItem] = self.train_controller.fit(
+                    data_batches,
+                    pack_max_length=self._train_worker_cfg.pack_max_length,
+                    rollout_idx=train_step,
+                )
+        finally:
+            self._release_trace_sessions_after_train_batch(train_batch)
 
         return {
             "data_info": data_info,

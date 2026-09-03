@@ -348,6 +348,7 @@ class AgentInSandboxLoop(AgentLoop):
             # indistinguishable from a dense trace; catching that would need the MoE-vs-dense signal the loop lacks
             # (session_server gates on ``enable_return_routed_experts``).
             segment_state.routed_experts = data["routed_experts"]
+            segment_state.routed_experts_owner = "trace_store" if data["routed_experts"] is not None else None
             if segment_state.response_ids:
                 segment_state.response = self.tokenizer.decode(segment_state.response_ids)
             else:
@@ -368,6 +369,7 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.response_ids = None
         rollout_state.logprobs = None
         rollout_state.routed_experts = None
+        rollout_state.routed_experts_owner = None
         rollout_state.response_mask = None
         rollout_state.response_model_steps = None
         rollout_state.extra_fields["agent_status"] = item.status.value

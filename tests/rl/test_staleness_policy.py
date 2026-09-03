@@ -4,12 +4,15 @@
 """
 
 import unittest
+from unittest.mock import patch
 
+import ray
 from pydantic import ValidationError
 
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     calculate_group_effective_response_masks,
+    discard_rollout_state,
     reset_rollout_response,
 )
 from xtuner.v1.rl.agent_loop_manager import (
@@ -114,6 +117,58 @@ class TestTokenStalenessMask(unittest.TestCase):
 
         self.assertIsNone(state.response_mask)
         self.assertEqual(masks, [[1, 1]])
+
+    def test_reset_rollout_response_only_clears_fields(self):
+        """Reset must not implicitly release an ObjectRef owned by its caller."""
+        state = self._state(response_model_steps=[0, 4])
+        state.routed_experts = object()
+        state.routed_experts_owner = "rollout"
+
+        with patch("xtuner.v1.rl.utils.ray_utils.free_object_refs") as free_refs:
+            reset_rollout_response(state)
+
+        free_refs.assert_not_called()
+        self.assertIsNone(state.routed_experts)
+        self.assertIsNone(state.routed_experts_owner)
+
+    def test_release_owned_routed_experts_only_frees_direct_rollout_refs(self):
+        from xtuner.v1.data_proto.rl_data import release_owned_routed_experts
+
+        class FakeObjectRef:
+            pass
+
+        direct = self._state(response_model_steps=[0])
+        direct_ref = FakeObjectRef()
+        direct.routed_experts = direct_ref
+        direct.routed_experts_owner = "rollout"
+        borrowed = self._state(response_model_steps=[0])
+        borrowed.routed_experts = FakeObjectRef()
+        borrowed.routed_experts_owner = "trace_store"
+
+        with (
+            patch.object(ray, "ObjectRef", FakeObjectRef),
+            patch("xtuner.v1.rl.utils.ray_utils.free_object_refs") as free_refs,
+        ):
+            release_owned_routed_experts(direct)
+            release_owned_routed_experts(borrowed)
+
+        free_refs.assert_called_once_with(direct_ref)
+        self.assertIsNone(direct.routed_experts)
+        self.assertIsNone(direct.routed_experts_owner)
+        self.assertIsNotNone(borrowed.routed_experts)
+        self.assertEqual(borrowed.routed_experts_owner, "trace_store")
+
+    def test_discard_trace_store_state_detaches_without_freeing_trace_ref(self):
+        state = self._state(response_model_steps=[0])
+        state.routed_experts = object()
+        state.routed_experts_owner = "trace_store"
+
+        with patch("xtuner.v1.rl.utils.ray_utils.free_object_refs") as free_refs:
+            discarded = discard_rollout_state(state, release_refs=True)
+
+        free_refs.assert_not_called()
+        self.assertIsNone(discarded.routed_experts)
+        self.assertIsNone(discarded.routed_experts_owner)
 
     @staticmethod
     def _state(

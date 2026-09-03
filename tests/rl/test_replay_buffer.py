@@ -111,6 +111,58 @@ async def save_and_resume(
 
 
 class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
+    async def test_retryable_stale_rollout_refs_are_released_by_caller(self):
+        """Retryable expiry releases direct-rollout refs before resetting state."""
+        for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:
+            with self.subTest(replay_buffer_config=config_name):
+                replay_buffer = replay_buffer_config_cls().build()
+                stale = make_rollout_state(
+                    1,
+                    response_model_steps=[0],
+                    routed_experts=object(),
+                )
+                stale.routed_experts_owner = "rollout"
+
+                with patch("xtuner.v1.rl.replay_buffer.release_owned_routed_experts") as release_refs:
+                    status = replay_buffer._apply_staleness_lifecycle(
+                        [stale],
+                        current_train_step=5,
+                        stale_threshold=3,
+                        token_stale_threshold=None,
+                        expired_groups_retryable=True,
+                    )
+
+                self.assertEqual(status, Status.EXPIRED)
+                release_refs.assert_called_once_with(stale)
+                self.assertIsNone(stale.routed_experts)
+                self.assertIsNone(stale.routed_experts_owner)
+
+    async def test_retryable_stale_trace_store_refs_are_only_detached(self):
+        """A single stale segment must not release a shared TraceStore session."""
+        for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:
+            with self.subTest(replay_buffer_config=config_name):
+                replay_buffer = replay_buffer_config_cls().build()
+                stale = make_rollout_state(
+                    1,
+                    response_model_steps=[0],
+                    routed_experts=object(),
+                )
+                stale.routed_experts_owner = "trace_store"
+
+                with patch("xtuner.v1.rl.replay_buffer.release_owned_routed_experts") as release_refs:
+                    status = replay_buffer._apply_staleness_lifecycle(
+                        [stale],
+                        current_train_step=5,
+                        stale_threshold=3,
+                        token_stale_threshold=None,
+                        expired_groups_retryable=True,
+                    )
+
+                self.assertEqual(status, Status.EXPIRED)
+                release_refs.assert_not_called()
+                self.assertIsNone(stale.routed_experts)
+                self.assertIsNone(stale.routed_experts_owner)
+
     async def test_common_query_count_and_take_batch_contract(self):
         # ReplayBuffer 的公共读写契约：按 task/status 隔离统计，并且 take_batch 会消费已取出的数据。
         for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:

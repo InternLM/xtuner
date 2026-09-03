@@ -4,7 +4,7 @@
 - SGLangWorker pause/continue 对 abort flag 和 server request 的控制。
 - RolloutWorker abort、abort request timeout 和 in-flight request 取消语义。
 - RolloutHealthManager 对 inactive/unhealthy worker 的生命周期标记逻辑。
-- PartialRolloutHandler 拼接 routed_experts 后释放旧 Ray ObjectRef 的逻辑。
+- PartialRolloutHandler 拼接 routed_experts 后由调用方显式释放旧 Ray ObjectRef 的逻辑。
 
 旧 test_rollout_utils.py 中的 TestRolloutControllerRecover 需要真实 Ray controller / lmdeploy backend，
 不属于 PR-fast，后续应放到 PR-real smoke 或 nightly。
@@ -1725,7 +1725,7 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(rollout_state.response_ids), max_tokens)
 
     async def test_postprocess_frees_old_routed_expert_refs_after_concat(self):
-        # partial rollout 拼接 routed_experts 后，应释放历史和当前 ObjectRef，避免长期占用对象存储。
+        # direct rollout caller 显式要求 partial handler 释放历史和当前 ObjectRef。
         class FakeObjectRef:
             def __init__(self, value):
                 self.value = value
@@ -1745,6 +1745,7 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
             response_ids=[1, 2],
             logprobs=[0.1, 0.2],
             routed_experts=history_ref,
+            routed_experts_owner="rollout",
             status=Status.ABORTED,
         )
 
@@ -1763,6 +1764,7 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
                 status=Status.ABORTED,
                 prompt_tokens=3,
                 completion_tokens=1,
+                release_input_routed_experts=True,
             )
 
         self.assertIs(out.routed_experts, concat_ref)
@@ -1770,3 +1772,50 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
         free_object_refs.assert_any_call([history_ref])
         free_object_refs.assert_any_call([cur_ref])
         self.assertEqual(free_object_refs.call_count, 2)
+
+    async def test_postprocess_does_not_free_input_refs_by_default(self):
+        """PartialRolloutHandler must leave input refs to its caller by default."""
+
+        class FakeObjectRef:
+            def __init__(self, value):
+                self.value = value
+
+            def __await__(self):
+                async def _resolve():
+                    return self.value
+
+                return _resolve().__await__()
+
+        history_ref = FakeObjectRef([[1], [2]])
+        cur_ref = FakeObjectRef([[1], [2], [3]])
+        concat_ref = FakeObjectRef(None)
+        rollout_state = RolloutState(
+            message=[],
+            response="old",
+            response_ids=[1, 2],
+            logprobs=[0.1, 0.2],
+            routed_experts=history_ref,
+            routed_experts_owner="trace_store",
+            status=Status.ABORTED,
+        )
+
+        with (
+            patch("xtuner.v1.rl.rollout.utils.RayObjectRef", FakeObjectRef),
+            patch("xtuner.v1.rl.rollout.utils.ray.put", return_value=concat_ref),
+            patch("xtuner.v1.rl.rollout.utils.free_object_refs") as free_object_refs,
+        ):
+            out = await PartialRolloutHandler().postprocess(
+                rollout_state,
+                response="new",
+                response_ids=[3],
+                logprobs=[0.3],
+                routed_experts=cur_ref,
+                finish_reason="abort",
+                status=Status.ABORTED,
+                prompt_tokens=3,
+                completion_tokens=1,
+            )
+
+        self.assertIs(out.routed_experts, concat_ref)
+        free_object_refs.assert_not_called()
+        self.assertEqual(out.routed_experts_owner, "rollout")

@@ -103,7 +103,6 @@ class SessionRouter:
 async def _resolve_routed_experts(routed_experts: np.ndarray | RayObjectRef) -> np.ndarray:
     if isinstance(routed_experts, RayObjectRef):
         routed_experts_value = await routed_experts
-        free_object_refs([routed_experts])
     else:
         routed_experts_value = routed_experts
     assert routed_experts_value is not None, "routed_experts should not be empty after resolution"
@@ -150,8 +149,14 @@ class PartialRolloutHandler:
         status: Status,
         prompt_tokens: int,
         completion_tokens: int,
+        release_input_routed_experts: bool = False,
     ) -> RolloutState:
-        """Postprocess a partial rollout using the default semantics."""
+        """Postprocess a partial rollout using the default semantics.
+
+        The handler only releases the history/current refs when the direct
+        rollout caller explicitly opts in.  TraceStore refs are borrowed and
+        must never be released here.
+        """
         rollout_state.finish_reason = finish_reason
         rollout_state.status = status
         history_response = rollout_state.response or ""
@@ -165,7 +170,10 @@ class PartialRolloutHandler:
         rollout_state.logprobs = history_logprobs + current_logprobs
 
         history_routed_experts = rollout_state.routed_experts
+        history_routed_experts_owner = rollout_state.routed_experts_owner
         if history_routed_experts is not None and routed_experts is not None:
+            history_routed_experts_ref = history_routed_experts
+            current_routed_experts_ref = routed_experts
             routed_experts_expect_len = prompt_tokens + completion_tokens - 1
             history_routed_experts_expect_len = prompt_tokens - 1
 
@@ -209,6 +217,19 @@ class PartialRolloutHandler:
                 f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}"
             )
             rollout_state.routed_experts = ray.put(concat_routed_experts)
+            rollout_state.routed_experts_owner = "rollout"
+            if release_input_routed_experts:
+                if history_routed_experts_owner == "rollout":
+                    free_object_refs(
+                        history_routed_experts_ref
+                        if isinstance(history_routed_experts_ref, list)
+                        else [history_routed_experts_ref]
+                    )
+                free_object_refs(
+                    current_routed_experts_ref
+                    if isinstance(current_routed_experts_ref, list)
+                    else [current_routed_experts_ref]
+                )
             end_time = time.perf_counter()
             self.logger.debug(
                 f"[PartialRolloutHandler] Postprocess routed_experts concatenation time: {end_time - start_time:.4f} seconds"
@@ -221,6 +242,7 @@ class PartialRolloutHandler:
                 f"history_logprobs_len={len(history_logprobs)}, "
             )
             rollout_state.routed_experts = routed_experts
+            rollout_state.routed_experts_owner = "rollout"
         elif history_routed_experts is not None and routed_experts is None:
             # case3: 本次推理为超发的任务, token 还未生成时就被 abort了，所以本次 routed_experts 为空，并且response_ids, logprobs 需要也为空
             assert not current_response_ids and not current_logprobs, (
