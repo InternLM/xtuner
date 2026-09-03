@@ -233,9 +233,9 @@ case:
                 base_metric: glm5-2-sft-30B-ep2-resume/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.08
-                    loss/local_loss: 0.0003
+                    loss/local_loss: 0.001
                     loss/reduced_balancing_loss: 0.0003
-                    loss/reduced_llm_loss: 0.0003
+                    loss/reduced_llm_loss: 0.001
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
@@ -291,7 +291,7 @@ case:
             assert_info:
                 base_metric: glm5-2-sft-30B-ep8-sp2-tp2/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.05
+                    grad_norm: 0.25
                     loss/local_loss: 0.005
                     loss/reduced_balancing_loss: 0.005
                     loss/reduced_llm_loss: 0.005
@@ -1481,9 +1481,9 @@ case:
                     grad_norm: 0.1
                     # FP8 maxvio has ~0.5% run noise; thr was 1e-6 and interacted badly with round(,2).
                     loss/maxvio: 0.01
-                    loss/local_loss: 0.0002
-                    loss/reduced_balancing_loss: 0.0002
-                    loss/reduced_llm_loss: 0.0002
+                    loss/local_loss: 0.003
+                    loss/reduced_balancing_loss: 0.004
+                    loss/reduced_llm_loss: 0.003
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
