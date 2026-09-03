@@ -107,7 +107,9 @@ class HttpRequestResult:
             )
             if self.error_type == HttpRequestErrorType.REQUEST_ERROR and self.exception:
                 if hasattr(self.exception, "__cause__") and self.exception.__cause__:
-                    self.error_msg += f" __cause__: {self.exception.__cause__}"
+                    #  Truncate the chained exception message to prevent oversized error propagation.
+                    cause = str(self.exception.__cause__)
+                    self.error_msg += f" __cause__: {cause[:2048]}"
 
     @property
     def is_success(self) -> bool:
