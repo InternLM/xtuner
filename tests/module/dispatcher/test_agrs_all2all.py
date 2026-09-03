@@ -1,14 +1,13 @@
-import unittest
+import os
+
+import parametrize
 import torch
 from torch.testing._internal.common_distributed import DistributedTestBase
-from xtuner.v1.module.dispatcher.base import NaiveDispatcher, DispacherInterface
-from xtuner.v1.module.dispatcher.torch_all2all import TorchAll2AllDispatcher
-import parametrize
+
 from xtuner.v1.module.dispatcher.agrs import MoEAGRSDispatcher
+from xtuner.v1.module.dispatcher.base import DispacherInterface
+from xtuner.v1.module.dispatcher.torch_all2all import TorchAll2AllDispatcher
 from xtuner.v1.module.router.greedy import GreedyGroupedRouter
-
-
-import os
 
 
 EP_SIZE = 8
@@ -26,16 +25,10 @@ class TestNoETorchAll2AllDispatcher(DistributedTestBase):
         num_experts = 128
 
         all2all_dispatcher = TorchAll2AllDispatcher(
-            n_routed_experts=num_experts,
-            training_dtype="bf16",
-            process_group=torch.distributed.group.WORLD
+            n_routed_experts=num_experts, process_group=torch.distributed.group.WORLD
         )
 
-        agrs_dispatcher = MoEAGRSDispatcher(
-            n_routed_experts=num_experts,
-            training_dtype="bf16",
-            process_group=torch.distributed.group.WORLD
-        )
+        agrs_dispatcher = MoEAGRSDispatcher(n_routed_experts=num_experts, process_group=torch.distributed.group.WORLD)
 
         seq_len = 32
         hidden_size = 128
@@ -57,29 +50,32 @@ class TestNoETorchAll2AllDispatcher(DistributedTestBase):
             dispatcher=all2all_dispatcher,
             hidden_states=hidden_states,
             topk_ids=router_out["topk_ids"],
-            topk_weights=router_out["topk_weights"]
+            topk_weights=router_out["topk_weights"],
         )
 
         agrs_results = self._dispatcher_call(
             dispatcher=agrs_dispatcher,
             hidden_states=hidden_states,
             topk_ids=router_out["topk_ids"],
-            topk_weights=router_out["topk_weights"]
+            topk_weights=router_out["topk_weights"],
         )
 
-        self.assertTrue(torch.allclose(all2all_results["hidden_states"], agrs_results["hidden_states"], atol=1e-2, rtol=1e-2))
+        self.assertTrue(
+            torch.allclose(all2all_results["hidden_states"], agrs_results["hidden_states"], atol=1e-2, rtol=1e-2)
+        )
 
     def _dispatcher_call(
-            self,
-            dispatcher: DispacherInterface,
-            hidden_states: torch.Tensor,
-            topk_ids: torch.Tensor,
-            topk_weights: torch.Tensor
+        self,
+        dispatcher: DispacherInterface,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
     ):
         pre_dispatched = dispatcher.dispatch_preprocess(
             hidden_states=hidden_states,
             topk_ids=topk_ids,
             topk_weights=topk_weights,
+            tokens_per_expert=torch.bincount(topk_ids.flatten(), minlength=128),
         )
         dispatched = dispatcher.dispatch(
             pre_dispatched=pre_dispatched,

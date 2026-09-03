@@ -1,17 +1,13 @@
-from unittest.mock import Mock
+import os
 from typing import cast
 
+import parametrize
 import torch
 import torch.distributed as dist
 from torch.testing._internal.common_distributed import DistributedTestBase
 
+from xtuner.v1.module.dispatcher.base import GenericDispatcher, NaiveDispatcher
 from xtuner.v1.module.dispatcher.deepep import DeepEPDispatcher
-from xtuner.v1.model.base import TransformerConfig
-from xtuner.v1.module.dispatcher.base import NaiveDispatcher, GenericDispatcher
-import parametrize
-
-
-import os
 
 
 def mock_experts(hidden_states: torch.Tensor, tokens_per_exprts: torch.Tensor):
@@ -24,7 +20,7 @@ class TestMoETorchAll2AllDispatcher(DistributedTestBase):
         [
             (torch.bfloat16, "cuda", False),
             (torch.bfloat16, "cuda", True),
-        ]
+        ],
     )
     def test_dispatch_and_combine(self, dtype, device, async_op):
         self.create_pg(device)
@@ -32,13 +28,10 @@ class TestMoETorchAll2AllDispatcher(DistributedTestBase):
 
         noep_dispatcher = NaiveDispatcher(
             n_routed_experts=num_experts,
-            training_dtype="bf16",
         )
 
         all2all_dispatcher = DeepEPDispatcher(
-            n_routed_experts=num_experts,
-            training_dtype="bf16",
-            process_group=cast(dist.ProcessGroup, dist.group.WORLD)
+            n_routed_experts=num_experts, process_group=cast(dist.ProcessGroup, dist.group.WORLD)
         )
 
         seq_len = 32
@@ -49,10 +42,7 @@ class TestMoETorchAll2AllDispatcher(DistributedTestBase):
         topk_weights = torch.ones(seq_len, topk_experts).to(device).to(torch.float32)
 
         noep_results = self._dispatcher_call(
-            dispatcher=noep_dispatcher,
-            hidden_states=hidden_states,
-            topk_ids=topk_idx,
-            topk_weights=topk_weights
+            dispatcher=noep_dispatcher, hidden_states=hidden_states, topk_ids=topk_idx, topk_weights=topk_weights
         )
         all2all_results = self._dispatcher_call(
             dispatcher=all2all_dispatcher,
@@ -70,12 +60,13 @@ class TestMoETorchAll2AllDispatcher(DistributedTestBase):
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
-        async_op: bool=False
+        async_op: bool = False,
     ):
         pre_dispatched = dispatcher.dispatch_preprocess(
             hidden_states=hidden_states,
             topk_ids=topk_ids,
             topk_weights=topk_weights,
+            tokens_per_expert=torch.bincount(topk_ids.flatten(), minlength=16),
             async_op=async_op,
         )
         dispatched = dispatcher.dispatch(

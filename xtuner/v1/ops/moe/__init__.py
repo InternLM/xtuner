@@ -1,5 +1,6 @@
 import os
 import traceback
+from typing import cast
 
 import torch
 from mmengine import digit_version
@@ -19,7 +20,7 @@ def get_group_gemm() -> GroupGemmProtocol:
 
     device = get_device()
     if device == "cpu":
-        return cpu_group_gemm
+        return cast(GroupGemmProtocol, cpu_group_gemm)
     elif device == "cuda":
         if os.environ.get("XTUNER_USE_CUTLASS_GROUP_GEMM", "0") == "1":
             from .cuda import cutlass_group_gemm as cuda_group_gemm
@@ -28,12 +29,12 @@ def get_group_gemm() -> GroupGemmProtocol:
         else:
             from .cuda import triton_group_gemm as cuda_group_gemm
 
-        return cuda_group_gemm
+        return cast(GroupGemmProtocol, cuda_group_gemm)
 
     elif device == "npu":
         from .npu import npu_group_gemm
 
-        return npu_group_gemm
+        return cast(GroupGemmProtocol, npu_group_gemm)
     else:
         raise NotImplementedError
 

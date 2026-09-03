@@ -29,12 +29,12 @@ The reconstruction algorithm and its rationale are documented inline on
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import NamedTuple, TypeGuard
 
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Shard
-from torch.distributed.tensor.placement_types import _StridedShard
+from torch.distributed.tensor.placement_types import Placement, _StridedShard
 
 
 __all__ = [
@@ -117,6 +117,11 @@ class RuntimeLayout:
     global_shape: tuple[int, ...]
     ordered_shards: tuple[RuntimeShard, ...]
 
+    @staticmethod
+    def is_sharded_placement(placement: Placement) -> TypeGuard[Shard | _StridedShard]:
+        """Hide PyTorch's version-dependent strided-shard hierarchy."""
+        return isinstance(placement, (Shard, _StridedShard))
+
     @classmethod
     def from_dtensor(cls, tensor: DTensor) -> RuntimeLayout:
         mesh = tensor.device_mesh
@@ -129,7 +134,7 @@ class RuntimeLayout:
         chain_supported = True
         for mesh_dim in reversed(range(len(placements))):
             placement = placements[mesh_dim]
-            if not isinstance(placement, (Shard, _StridedShard)):
+            if not cls.is_sharded_placement(placement):
                 continue
             order = tensor_dim_to_order.setdefault(placement.dim, [])
             split_factor = placement.split_factor if isinstance(placement, _StridedShard) else 1
@@ -153,7 +158,7 @@ class RuntimeLayout:
             # placements first, then FSDP's bookkeeping placement.
             fsdp_prepended: list[tuple[int, int, int]] = []
             for mesh_dim, placement in enumerate(placements):
-                if not isinstance(placement, (Shard, _StridedShard)):
+                if not cls.is_sharded_placement(placement):
                     continue
                 is_fsdp_prepended = _is_fsdp_prepended_strided(placement, mesh_dim)
                 item = (

@@ -7,6 +7,7 @@ import shutil
 import threading
 import time
 import traceback
+import warnings
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, List, cast
@@ -150,16 +151,25 @@ class TrainEngine:
         fsdp_cfg: FSDPConfig,
         intra_layer_micro_batch: int = 1,
     ) -> None:
+        if intra_layer_micro_batch < 1:
+            raise ValueError("intra_layer_micro_batch must be positive")
+        self.intra_layer_micro_batch = intra_layer_micro_batch
+        execution_cfg = getattr(model_cfg, "text_config", model_cfg)
+        if hasattr(execution_cfg, "intra_layer_micro_batch"):
+            # This is the number of forwards issued consecutively inside one
+            # layer call; it is independent of EP size and MTP depth.
+            setattr(execution_cfg, "intra_layer_micro_batch", intra_layer_micro_batch)
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
         self.fsdp_cfg = fsdp_cfg
         self.model = self.build_model()
         self.optimizer = self.build_optimizer(optim_cfg)
-        self.intra_layer_micro_batch = intra_layer_micro_batch
         self._count = 0
         self.has_freeze_params = self.__has_freeze_params()
         self._async_checkpoint_pg: dist.ProcessGroup | None = None
         self._async_state_dict_cache: dict[str, Any] | None = None
+        self._pending_async_saves: list[Future[Any]] = []
+        self._closed = False
 
     def __has_freeze_params(self) -> bool:
         has_freeze_params = False
@@ -189,6 +199,7 @@ class TrainEngine:
 
     @torch.no_grad()
     def forward_only(self, seq_ctx: SequenceContext, loss_ctx: LogProbContext):
+        self._ensure_open()
         output = self.model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})  # type: ignore[call-overload]
         return output
 
@@ -202,6 +213,7 @@ class TrainEngine:
         Args:
             data_batches (List[Dict]): The input data batches for the training step.
         """
+        self._ensure_open()
         self._maybe_precompute_float8_dynamic_scale_for_fsdp()
 
         intra_layer_micro_batch = self.intra_layer_micro_batch
@@ -347,11 +359,14 @@ class TrainEngine:
         hf_dir: str,
         save_dtype: torch.dtype = torch.bfloat16,
     ) -> Future[Path]:
+        self._ensure_open()
         with profile_time_and_memory(f"[Async saving HF to {hf_dir} launch cost]"):
-            return self.model.async_save_hf(
+            future = self.model.async_save_hf(
                 hf_dir=hf_dir,
                 save_dtype=save_dtype,
             )
+        self._pending_async_saves.append(future)
+        return future
 
     def _get_dcp_state_dict(
         self,
@@ -404,6 +419,7 @@ class TrainEngine:
         weights_dir: Path,
         save_optimizer: bool = True,
     ) -> Future:
+        self._ensure_open()
         async_checkpoint_pg = self._get_async_checkpoint_pg()
 
         # Match async HF export semantics: write the DCP payload into a
@@ -474,6 +490,7 @@ class TrainEngine:
         commit_executor = ThreadPoolExecutor(max_workers=1)
         commit_future = commit_executor.submit(commit_async_save)
         commit_future.add_done_callback(lambda _: commit_executor.shutdown(wait=False))
+        self._pending_async_saves.append(commit_future)
         return commit_future
 
     def _build_async_storage_writer(self, weights_dir: Path, *, save_optimizer: bool) -> XtunerCacheWriter:
@@ -500,15 +517,38 @@ class TrainEngine:
                 dist.destroy_process_group(self._async_checkpoint_pg)
             self._async_checkpoint_pg = None
 
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("TrainEngine is closed")
+
+    def close(self) -> None:
+        """Collectively release model execution resources before PG teardown.
+
+        All ranks in the training group must call this method at the same quiescent boundary. Exception paths
+        intentionally leave cleanup to process exit, because a rank-divergent destructor cannot run collectives safely.
+        """
+        if self._closed:
+            return
+        # Both persistence paths snapshot before returning, but their writers
+        # still own CPU storage and auxiliary process groups until completion.
+        # Propagate background failures before releasing either resource.
+        for future in self._pending_async_saves:
+            future.result()
+        self._pending_async_saves.clear()
+        self.model.close_ep_runtime()
+        self.model.destroy_async_hf_resources()
+        self.destroy_async_checkpoint_pg()
+        self._closed = True
+
     def __del__(self) -> None:
-        try:
-            self.model.destroy_async_hf_resources()
-        except Exception:
-            pass
-        try:
-            self.destroy_async_checkpoint_pg()
-        except Exception:
-            pass
+        if not getattr(self, "_closed", True):
+            # A rank-divergent finalizer must never enter process-group or
+            # CUDA/VMM teardown. Normal clients own the coordinated close.
+            warnings.warn(
+                "TrainEngine.close() was not called; distributed resources are left for process exit",
+                ResourceWarning,
+                stacklevel=2,
+            )
 
     def load_dcp(
         self,

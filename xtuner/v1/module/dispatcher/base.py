@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import (
     Generic,
-    Literal,
+    NamedTuple,
     TypeAlias,
     TypeVar,
 )
@@ -15,6 +15,16 @@ from .expert_tp import ExpertTP
 
 
 HiddenStates: TypeAlias = torch.Tensor
+ProjectionPair: TypeAlias = tuple[torch.Tensor, torch.Tensor]
+
+
+class ExpertWeightLayout(NamedTuple):
+    """Call-local expert weight ownership at the dispatcher/MLP seam."""
+
+    trainable_weights: ProjectionPair | None = None
+    trainable_wgrad_outs: ProjectionPair | None = None
+    external_weights: ProjectionPair | None = None
+    external_wgrad_outs: ProjectionPair | None = None
 
 
 def _get_backward_pre_hook(backward_previous_event: torch.cuda.Event):
@@ -59,6 +69,7 @@ class PostDispatchResult(TypedDict):
     # TODO:
     hidden_states: torch.Tensor
     tokens_per_expert: torch.Tensor
+    expert_weight_layout: ExpertWeightLayout
 
 
 class PreCombineResult(TypedDict):
@@ -102,13 +113,9 @@ class GenericDispatcher(
         *,
         n_routed_experts: int,
         process_group: torch.distributed.ProcessGroup | None = None,
-        training_dtype: Literal["fp8", "bf16"] = "bf16",
-        generate_dtype: Literal["fp8", "bf16"] = "bf16",
     ):
         self._process_group = process_group
         self._n_routed_experts = n_routed_experts
-        self._training_dtype = training_dtype
-        self._generate_dtype = generate_dtype
 
     @abstractmethod
     def dispatch(
@@ -136,6 +143,9 @@ class GenericDispatcher(
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        # Source-logical counts are owned by Router. Post-dispatch counts have
+        # a different meaning: local physical groups consumed by expert GMM.
+        tokens_per_expert: torch.Tensor,
         async_op: bool = False,
     ) -> PreDispatch: ...
 
@@ -237,14 +247,10 @@ class NaiveDispatcher(
         n_routed_experts: int,
         process_group: torch.distributed.ProcessGroup | None = None,
         tp_group: torch.distributed.ProcessGroup | None = None,
-        training_dtype: Literal["fp8", "bf16"] = "bf16",
-        generate_dtype: Literal["fp8", "bf16"] = "bf16",
     ):
         super().__init__(
             n_routed_experts=n_routed_experts,
             process_group=process_group,
-            training_dtype=training_dtype,
-            generate_dtype=generate_dtype,
         )
         if self._process_group is not None:
             assert self._process_group.size() == 1, "Naive dispatcher is only for ep=1."
@@ -259,8 +265,10 @@ class NaiveDispatcher(
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
         async_op: bool = False,
     ) -> NaivePreDispatchResult:
+        del tokens_per_expert
         if async_op:
             if self._expert_tp is None:
                 raise NotImplementedError("Naive dispatcher async_op=True requires ExpertTP.")
@@ -409,6 +417,7 @@ class NaiveDispatcher(
                 hidden_states=hidden_states,
                 row_ids_map=row_id_maps,
                 tokens_per_expert=tokens_per_expert,
+                expert_weight_layout=ExpertWeightLayout(),
             )
 
     @override
