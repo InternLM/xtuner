@@ -50,33 +50,7 @@ expert    : Shard(0) over ep  +  FSDP over efsdp             (+ replicate 上 HS
 
 ## 3. 实现
 
-行号对应分支 `feat/decouple-ep-fsdp` 的代码提交 `5923dc1d`（2026-09-03）。改动的文件与位置：
-
-| 文件 | 行号 | 内容 |
-|---|---|---|
-| [`xtuner/v1/config/fsdp.py`](../../xtuner/v1/config/fsdp.py#L48-L65) | 48–65 | `decouple_ep_fsdp` 开关与校验 |
-| [`xtuner/v1/model/moe/moe.py`](../../xtuner/v1/model/moe/moe.py#L1651-L1716) | 1651–1716 | `_init_decoupled_device_mesh`：root mesh 与子 mesh |
-| | [1486–1492](../../xtuner/v1/model/moe/moe.py#L1486-L1492) | `_init_device_mesh` 分流到新路径 |
-| | [1194–1201](../../xtuner/v1/model/moe/moe.py#L1194-L1201) | 解耦路径跳过 `_replicate_other_params` |
-| | [1214–1225](../../xtuner/v1/model/moe/moe.py#L1214-L1225)、[1250–1260](../../xtuner/v1/model/moe/moe.py#L1250-L1260) | decoder layer 两级 `fully_shard` 与 forward prefetch |
-| | [1328–1360](../../xtuner/v1/model/moe/moe.py#L1328-L1360) | MTP layer 的同样处理 |
-| | [1631–1649](../../xtuner/v1/model/moe/moe.py#L1631-L1649) | `_expert_blocks` / `_fully_shard_expert_blocks` |
-| | [1392–1396](../../xtuner/v1/model/moe/moe.py#L1392-L1396)、[1583–1629](../../xtuner/v1/model/moe/moe.py#L1583-L1629) | `scale_and_reduce_grad` 分流与 `_scale_and_reduce_grad_decoupled` |
-| | [1165–1176](../../xtuner/v1/model/moe/moe.py#L1165-L1176) | FP8 padding 传入 `expert_fsdp_mesh` |
-| [`xtuner/v1/model/base.py`](../../xtuner/v1/model/base.py#L567-L569) | 567–569 | 新增 `expert_fsdp_mesh` 属性（dense 模型恒为 `None`） |
-| | [1015](../../xtuner/v1/model/base.py#L1015) | float8 handler 建 reduce mesh 时传入 expert mesh |
-| | [1916–1947](../../xtuner/v1/model/base.py#L1916-L1947) | `_fsdp_foreach_allgather` / `_fsdp_gather_group`：RL 按 spec 选 gather group |
-| [`xtuner/v1/float8/float8_handler.py`](../../xtuner/v1/float8/float8_handler.py#L121-L161) | 45–49、121–161 | `pad_for_fsdp` / `build_reduce_mesh` 的 expert 分支 |
-| | [166–239](../../xtuner/v1/float8/float8_handler.py#L166-L239) | `_build_decoupled_reduce_meshes` 与 strided reduce mesh helper |
-| | [316–335](../../xtuner/v1/float8/float8_handler.py#L316-L335) | tile-wise scale 预计算按类各执行一次 |
-| [`xtuner/v1/float8/fsdp_utils.py`](../../xtuner/v1/float8/fsdp_utils.py#L127-L137) | 127–137 | `precompute_tilewise_float8_scale_for_fsdp` 增加 `module_types` |
-| [`xtuner/v1/rl/weight_update/weight_iterator.py`](../../xtuner/v1/rl/weight_update/weight_iterator.py#L140-L149) | 140–149、196–208、228、236–247 | layer-wise 权重同步按参数 owner gather |
-| [`examples/v1/config/sft_glm5p2.py`](../../examples/v1/config/sft_glm5p2.py#L107-L115) | 107–115 | `DECOUPLE_EP_FSDP` / `HSDP_SHARDING_SIZE` 环境变量 |
-| [`tests/model/test_decoupled_ep_fsdp_mesh.py`](../../tests/model/test_decoupled_ep_fsdp_mesh.py) | 全文 | L0 fake-PG placement 测试（29 例） |
-| [`tests/rl/test_weight_iterator.py`](../../tests/rl/test_weight_iterator.py#L234-L418) | 234–418 | compose owner 回归测试 |
-| [`tests/model/run_decoupled_ep_fsdp_numerics.py`](../../tests/model/run_decoupled_ep_fsdp_numerics.py)、[`run_decoupled_ep_fsdp_ckpt.py`](../../tests/model/run_decoupled_ep_fsdp_ckpt.py)、[`summarize_decoupled_ep_fsdp_numerics.py`](../../tests/model/summarize_decoupled_ep_fsdp_numerics.py) | 全文 | L1–L3 实验脚本 |
-
-相关但**未改动**的文件：[`xtuner/v1/utils/load_spec.py`](../../xtuner/v1/utils/load_spec.py)（`LoadSpec.from_tensor`、`plan_hf_save`、`_preserved_shard_indices`，已能表达新 placement）、[`xtuner/v1/module/decoder_layer/moe_decoder_layer.py`](../../xtuner/v1/module/decoder_layer/moe_decoder_layer.py)（`MoEBlock` 定义，是 expert FSDP 的包装单元）、`xtuner/v1/module/grouped_linear/moe_group_linear.py`（expert 仍在 `ep_mesh` 上 `Shard(0)`）。
+各小节的"位置"行给出文件与行号，行号对应分支 `feat/decouple-ep-fsdp` 的代码提交 `5923dc1d`（2026-09-03）。
 
 ### 3.1 配置与校验
 
