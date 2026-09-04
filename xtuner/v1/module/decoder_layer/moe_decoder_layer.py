@@ -426,6 +426,9 @@ class MoEDecoderLayer(nn.Module):
         seq_ctx: SequenceContext,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
     ) -> tuple[HiddenStates, RouterLogits, RouterWeights, RouterTopKIds]:
+        # MoonEP uses this identity seam to place Join before attention and
+        # carries its opaque invocation token into dispatch phase 1.
+        hidden_states, layer_state = self.dispatcher.prepare_layer_input(hidden_states)
         residual, hidden_states, router_results = self._pre_moe_forward(
             hidden_states=hidden_states,
             seq_ctx=seq_ctx,
@@ -444,6 +447,7 @@ class MoEDecoderLayer(nn.Module):
             topk_ids=router_results["topk_ids"],
             topk_weights=router_results["topk_weights"],
             tokens_per_expert=router_results["tokens_per_expert"],
+            layer_state=layer_state,
         )
         dispatched = self.dispatcher.dispatch(
             pre_dispatched=pre_dispatched,
@@ -553,6 +557,7 @@ class MoEDecoderLayer(nn.Module):
             seq_ctx_list,
             position_embeddings_list,
         ):
+            hidden_states, layer_state = self.dispatcher.prepare_layer_input(hidden_states)
             residual, hidden_states, router_results = self._pre_moe_forward(
                 hidden_states=hidden_states,
                 seq_ctx=seq_ctx,
@@ -566,6 +571,7 @@ class MoEDecoderLayer(nn.Module):
                 topk_ids=router_results["topk_ids"],
                 topk_weights=router_results["topk_weights"],
                 tokens_per_expert=router_results["tokens_per_expert"],
+                layer_state=layer_state,
                 async_op=True,
             )
             pre_dispatched_list.append(pre_dispatched)
