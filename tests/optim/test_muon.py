@@ -19,6 +19,9 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.placement_types import Shard
 
 from xtuner._testing.testcase import DeterministicDDPTestCase
 from xtuner.v1.config import FSDPConfig
@@ -476,8 +479,13 @@ class TestMuonFSDP(DeterministicDDPTestCase):
     def world_size(self) -> int:
         return 4
 
-    @parametrize.parametrize("enable_all2all", [True, False])
-    def test_muon_fsdp_matches_reference(self, enable_all2all: bool):
+    @parametrize.parametrize(
+        "enable_all2all,remainder_strategy",
+        [(True, "agrs"), (False, "agrs"), (True, "pad_all2all")],
+    )
+    def test_muon_fsdp_matches_reference(
+        self, enable_all2all: bool, remainder_strategy: Literal["agrs", "pad_all2all"]
+    ):
         """One Muon step on a fully-sharded model must match the single-process
         reference for every parameter, across all param categories.
 
@@ -536,7 +544,13 @@ class TestMuonFSDP(DeterministicDDPTestCase):
 
         # ── Production Muon optimizer step ────────────────────────────────────
         muon_config = MuonConfig(
-            lr=LR, momentum=MU, weight_decay=WD, eps=EPSILON, betas=BETAS, enable_all2all=enable_all2all
+            lr=LR,
+            momentum=MU,
+            weight_decay=WD,
+            eps=EPSILON,
+            betas=BETAS,
+            enable_all2all=enable_all2all,
+            remainder_strategy=remainder_strategy,
         )
         optim = muon_config.build(model)
         optim.step()
@@ -553,3 +567,51 @@ class TestMuonFSDP(DeterministicDDPTestCase):
                 rtol=1e-5,
                 msg=f"mismatch on '{name}': max_abs={abs_diff.max().item():.2e}, max_rel={rel_diff.max().item():.2e}",
             )
+
+    def test_muon_ep_fsdp_remainder_uses_fsdp_global_dimension(self):
+        """AGRS must reconstruct the dimension visible inside the FSDP group.
+
+        The parameter is sharded on dim 0 by both EP and FSDP.  With three
+        parameters and a two-rank FSDP group, the final batch takes AGRS.  Its
+        Newton-Schulz input must contain the EP-local global rows (6), not the
+        DTensor's full global rows (12).
+        """
+        self.create_pg("cuda")
+        rank = dist.get_rank()
+        device = torch.device("cuda", rank % torch.cuda.device_count())
+        mesh = init_device_mesh(
+            "cuda",
+            (2, 2),
+            mesh_dim_names=("muon_regression.fsdp", "muon_regression.ep"),
+        )
+
+        global_rows, cols, num_experts = 12, 4, 6
+        local_rows = global_rows // (mesh.size(0) * mesh.size(1))
+        params = []
+        for index in range(3):
+            local = torch.full(
+                (local_rows, cols),
+                float(index + rank),
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            param = nn.Parameter(DTensor.from_local(local, mesh, (Shard(0), Shard(0)), run_check=False))
+            param.grad = DTensor.from_local(torch.ones_like(local), mesh, (Shard(0), Shard(0)), run_check=False)
+            params.append(param)
+
+        ns_shapes: list[tuple[int, ...]] = []
+
+        def track_newton_schulz(x, epsilon, num_experts):
+            ns_shapes.append(tuple(x.shape))
+            return zeropower_via_newtonschulz5(x, epsilon=epsilon, num_experts=num_experts)
+
+        optimizer = Muon(
+            [{"params": params, "num_experts": num_experts}],
+            lr=0.01,
+            newton_schulz_func=track_newton_schulz,
+            enable_all2all=True,
+        )
+        optimizer.step()
+
+        assert ns_shapes
+        assert all(shape == (global_rows // mesh.size(1), cols) for shape in ns_shapes)
