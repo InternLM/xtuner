@@ -98,11 +98,18 @@ class MoonEPModelRuntime:
         self._staging_reference = staging_reference
         self._num_sms = num_sms
 
+        # Model-owned execution resources. Buffer is created lazily once S is
+        # known; workspace/stream and FSDP bindings are installed as one unit.
         self._buffer: Any | None = None
         self._workspace: _ExpertVMMWorkspace | None = None
         self._comm_stream: torch.cuda.Stream | None = None
         self._fsdp_params: tuple[Any, ...] = ()
+
+        # Physical routed layers in FSDP execution order. Each entry is
+        # (layer FQN, (fused_w1w3, fused_w2), landing generation).
         self._layers: list[tuple[str, tuple[nn.Module, nn.Module], int]] = []
+        # MoonEP allocates fixed-size communication buffers on the first call;
+        # later calls must retain the same source-token count S per EP rank.
         self._fixed_tokens_per_rank: int | None = None
         self._closed = False
 
@@ -242,32 +249,56 @@ class MoonEPModelRuntime:
         self._closed = True
 
 
+# Dispatcher shape legend:
+#   S: source tokens on this EP rank, K: routed experts per token,
+#   NvS: MoonEP's padded VM-group rows, E: global experts, B=E/R: home
+#   experts per EP rank, H: hidden size.
+
+
 class MoonEPPreDispatchResult(TypedDict):
-    hidden_states: torch.Tensor
-    topk_ids: torch.Tensor
-    tokens_per_expert: torch.Tensor
+    """Stage 1: device-resident router-space inputs normalized for MoonEP."""
+
+    hidden_states: torch.Tensor  # [S, H], BF16 source-token order.
+    topk_ids: torch.Tensor  # [S, K], contiguous int32 global expert IDs.
+    tokens_per_expert: torch.Tensor  # [E], contiguous int32 source histogram.
 
 
 class MoonEPDispatchResult(TypedDict):
-    hidden_states: torch.Tensor
-    topk_weights: torch.Tensor
+    """Stage 2: global dispatch outputs plus its eager control-plane state."""
+
+    hidden_states: torch.Tensor  # [NvS, H], BF16 physical VM-group order.
+    topk_weights: torch.Tensor  # [NvS], FP32 weights in the same row order.
+    # [E+B], int32 padded group ends; stays on device and is non-differentiable.
     cu_seqlens: torch.Tensor
+    # Opaque per-call state shared by later stages; never enters compiled expert compute.
     _moonep_invocation: _MoonEPLayerInvocation
 
 
-class MoonEPPostDispatchResult(PostDispatchResult): ...
+class MoonEPPostDispatchResult(PostDispatchResult):
+    """Stage 3: tensor-only local ``[2B]`` expert-compute bundle.
+
+    ``hidden_states`` is ``[NvS, H]``; ``tokens_per_expert`` is device int32
+    ``[2B]`` for home then duplicate groups; ``expert_weight_layout`` holds
+    projection-paired ``[2B, O_p, I_p]`` weights and direct BF16 WGrad targets.
+    """
 
 
 class MoonEPPreCombineResult(TypedDict):
-    hidden_states: torch.Tensor
+    """Stage 4: expert outputs before route scaling and reverse transport."""
+
+    hidden_states: torch.Tensor  # [NvS, H], physical VM-group order.
 
 
 class MoonEPCombineResult(TypedDict):
-    hidden_states: torch.Tensor
+    """Stage 5: fused route-scaled output restored to source-token order."""
+
+    hidden_states: torch.Tensor  # [S, H].
 
 
 class MoonEPPostCombineResult(TypedDict):
-    hidden_states: torch.Tensor
+    """Stage 6: final tensor bundle returned through the generic interface."""
+
+    hidden_states: torch.Tensor  # [S, H].
 
 
 class _MoonEPLayerInvocation:
@@ -293,15 +324,24 @@ class _MoonEPLayerInvocation:
         self._generation = generation
         self._grad_slot = grad_slot
 
+        # One MoonEP communication plan and its device-side dependency chain.
+        # Events are recorded once their named producer has been enqueued.
         self._plan: Any | None = None
         self._dispatch_done: Any | None = None
         self._weights_ready: Any | None = None
         self._combine_done: Any | None = None
+
+        # Borrowed VMM aliases for this call. Weights and direct WGrad targets
+        # are projection pairs, each tensor laid out as [2B, O_p, I_p].
         self._local_weights: ProjectionPair | None = None
         self._gradient_targets: ProjectionPair | None = None
         self._fallback_gradient_targets: ProjectionPair | None = None
+
+        # Current FSDP unsharded home Parameters [B, O_p, I_p] receive the
+        # returned BF16 home gradients after both local projections complete.
         self._home_parameters: tuple[nn.Parameter, nn.Parameter] | None = None
         self._local_gradient_parameters: list[nn.Parameter | None] = [None, None]
+        # TODO: 上面所有关键数据结构，加上形状和注释
 
     def begin_dispatch(
         self,
@@ -313,6 +353,7 @@ class _MoonEPLayerInvocation:
         async_op: bool,
     ) -> MoonEPDispatchResult:
         """Create the activation autograd edge and start weight prefetch."""
+        # TODO: 这个函数改名 dispatch
         hidden_nvsh, weights_nvs, cu_seqlens = _DispatchAutograd.apply(
             hidden_states,
             topk_ids,
@@ -659,6 +700,7 @@ class _DispatchAutograd(torch.autograd.Function):
         async_op: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         ctx.invocation = invocation
+        # TODO: 所有外部调用的函数， 去掉 _ 前缀
         hidden_nvsh, route_weights_nvs, cu_seqlens = invocation._dispatch_forward(
             source_hidden,
             topk_ids,
@@ -677,7 +719,7 @@ class _DispatchAutograd(torch.autograd.Function):
         grad_cu_seqlens: None,
     ) -> tuple[torch.Tensor, None, None, torch.Tensor, None, None]:
         del grad_cu_seqlens
-        grad_hidden, grad_route_weights = ctx.invocation._dispatch_backward(
+        grad_hidden, grad_route_weights = cast(_MoonEPLayerInvocation, ctx.invocation)._dispatch_backward(
             grad_hidden_nvsh,
             grad_route_weights_nvs,
         )
