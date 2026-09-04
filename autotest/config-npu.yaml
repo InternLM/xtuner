@@ -216,7 +216,7 @@ case:
                 accelerator: NPU
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cic/qa-llm-cicd/test_output
             resource:
-                image: ccr-hw/910c:rl_s1_vllm
+                image: ccr-hw/910c_cann910_pta291_rl_s1_vllm:v0.1.0-20260826T114552Z
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/gsm8k/train-mini.jsonl
