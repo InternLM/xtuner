@@ -89,14 +89,11 @@ def _validate_distribution_shapes(
     target: Tensor,
     predict: Tensor,
     topk_indices: Tensor,
-    target_xlogx: Tensor | None,
 ) -> None:
     if target.shape != predict.shape:
         raise ValueError(f"target and predict must have the same shape, got {target.shape} and {predict.shape}")
     if target.shape != topk_indices.shape:
         raise ValueError(f"target/predict must match topk_indices shape {topk_indices.shape}, got {target.shape}")
-    if target_xlogx is not None and target_xlogx.shape != target.shape[:-1]:
-        raise ValueError(f"target_xlogx must have shape {target.shape[:-1]}, got {tuple(target_xlogx.shape)}")
 
 
 def _mask_invalid_query_rows(
@@ -215,7 +212,6 @@ def _standard_kl_loss(
     topk_indices: Tensor,
     *,
     row_coefficient: float,
-    target_xlogx: Tensor | None = None,
 ) -> Tensor:
     """
     1. 计算每个 query 的 teacher/student KL。
@@ -224,7 +220,7 @@ def _standard_kl_loss(
     4. 将所有 query 的 KL 求和并乘 row_coefficient。
     """
 
-    _validate_distribution_shapes(target, predict, topk_indices, target_xlogx)
+    _validate_distribution_shapes(target, predict, topk_indices)
     target_f32 = target.float()
     predict_f32 = predict.float()
     valid_slots = topk_indices != -1
@@ -236,10 +232,7 @@ def _standard_kl_loss(
         "DSA indexer predict has zero probability where target is positive; standard KL is not finite.",
     )
 
-    if target_xlogx is None:
-        target_self_term = torch.special.xlogy(target_f32, target_f32).sum(dim=-1)
-    else:
-        target_self_term = target_xlogx.float()
+    target_self_term = torch.special.xlogy(target_f32, target_f32).sum(dim=-1)
     target_cross_term = torch.special.xlogy(target_f32, predict_f32).sum(dim=-1)
     per_row_kl = (target_self_term - target_cross_term).masked_fill(~valid_rows, 0.0)
     return per_row_kl.sum() * float(row_coefficient)
@@ -352,8 +345,8 @@ def _xtuner_indexer_backward(
     # Work on fresh aligned buffers so the custom op remains functionally pure,
     # caller-visible distributions stay intact, and retain_graph backward gets a
     # new unmodified pair on every invocation.
-    target_for_cudnn = _aligned_contiguous(target).clone()
-    predict_for_cudnn = _aligned_contiguous(predict).clone()
+    target_for_cudnn = _aligned_contiguous(target.clone(memory_format=torch.contiguous_format))
+    predict_for_cudnn = _aligned_contiguous(predict.clone(memory_format=torch.contiguous_format))
     outputs = indexer_backward_wrapper(
         _aligned_contiguous(index_q_for_cudnn),
         _aligned_contiguous(index_weights_for_cudnn),
@@ -430,7 +423,6 @@ def _cudnn_dsa_indexer_kl_from_distribution(
     predict: Tensor,
     topk_indices: Tensor,
     row_coefficient: float,
-    target_xlogx: Tensor | None,
 ) -> Tensor:
     del index_q, index_k, index_weights
     return _standard_kl_loss(
@@ -438,7 +430,6 @@ def _cudnn_dsa_indexer_kl_from_distribution(
         predict,
         topk_indices,
         row_coefficient=row_coefficient,
-        target_xlogx=target_xlogx,
     )
 
 
@@ -451,15 +442,14 @@ def _(
     predict: Tensor,
     topk_indices: Tensor,
     row_coefficient: float,
-    target_xlogx: Tensor | None,
 ) -> Tensor:
-    del index_q, index_k, index_weights, predict, topk_indices, row_coefficient, target_xlogx
+    del index_q, index_k, index_weights, predict, topk_indices, row_coefficient
     return target.new_empty((), dtype=torch.float32)
 
 
 def _setup_indexer_kl_context(ctx, inputs, output) -> None:
     del output
-    index_q, index_k, index_weights, target, predict, topk_indices, row_coefficient, _ = inputs
+    index_q, index_k, index_weights, target, predict, topk_indices, row_coefficient = inputs
     safe_topk_indices, _, _ = _prepare_sparse_topk(topk_indices, topk_length=None)
     ctx.row_coefficient = row_coefficient
     ctx.save_for_backward(
@@ -484,7 +474,7 @@ def _indexer_kl_backward(ctx, grad_output: Tensor):
         ctx.row_coefficient,
         grad_output,
     )
-    return d_index_q, d_index_k, d_weights, None, None, None, None, None
+    return d_index_q, d_index_k, d_weights, None, None, None, None
 
 
 _cudnn_dsa_indexer_kl_from_distribution.register_autograd(
@@ -502,7 +492,6 @@ def dsa_indexer_kl_from_distribution(
     topk_indices: Tensor,
     *,
     row_coefficient: float,
-    target_xlogx: Tensor | None = None,
     valid_query_mask: Tensor | None = None,
     debug_name: str | None = None,
     debug_interval: int = 0,
@@ -511,7 +500,7 @@ def dsa_indexer_kl_from_distribution(
 
     if float(row_coefficient) == 0.0:
         return target.new_zeros((), dtype=torch.float32)
-    _validate_distribution_shapes(target, predict, topk_indices, target_xlogx)
+    _validate_distribution_shapes(target, predict, topk_indices)
     target, predict, topk_indices = _mask_invalid_query_rows(
         target,
         predict,
@@ -533,7 +522,6 @@ def dsa_indexer_kl_from_distribution(
         predict.detach(),
         topk_indices,
         float(row_coefficient),
-        target_xlogx.detach() if target_xlogx is not None else None,
     )
 
 

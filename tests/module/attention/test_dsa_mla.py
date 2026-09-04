@@ -4,6 +4,7 @@ TestTorchSparseMLA
     test_padded_indices_support_int32_and_backward: PyTorch 后端处理 padding、int32 和反向传播。
 TestDSAAttention
     test_source_layer_passes_real_query_mask_to_indexer_loss: padding query 不进入 indexer KL。
+    test_mtp_iteration_trains_indexer_only_at_compute_depth: MTP 复用深度不重复投影或累计 KL。
     test_packed_inputs_respect_causal_boundaries_and_backward: packed attention 遵守分段因果边界并可反传。
     test_shared_layers_reuse_topk_without_cross_context_leak: shared layer 复用当前样本 top-k 且不跨样本泄漏。
     test_reentrant_checkpoint_reuses_and_releases_topk: checkpoint 重算复用并最终释放 top-k。
@@ -33,7 +34,10 @@ from xtuner.v1.model.moe.moe import MoE
 from xtuner.v1.model.utils import checkpoint_wrapper
 from xtuner.v1.module.attention import DSAIndexerTrainingConfig, DSAMLAConfig
 from xtuner.v1.module.attention import dsa_mla as dsa_mla_module
-from xtuner.v1.module.attention.dsa_topk_sharing import register_dsa_topk_decoder_lifecycle_hooks
+from xtuner.v1.module.attention.dsa_topk_sharing import (
+    get_dsa_topk_sharing_runtime,
+    register_dsa_topk_decoder_lifecycle_hooks,
+)
 from xtuner.v1.ops.sparse_mla import dsa_topk_indices, sparse_mla
 from xtuner.v1.utils.test_utils import init_data_mesh
 
@@ -202,7 +206,7 @@ class TestDSAAttention:
         assert all(parameter.requires_grad for parameter in trainable.indexer.parameters())
         assert not hasattr(shared, "indexer")
 
-    def test_training_weights_preserve_existing_topk_score_scaling(self):
+    def test_single_weights_projection_preserves_score_scaling(self):
         attention = _tiny_dsa_attention(
             indexer_types=["full"],
             indexer_training=DSAIndexerTrainingConfig(loss_coeff=1.0),
@@ -212,15 +216,25 @@ class TestDSAAttention:
         position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
         seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
 
-        features = attention.indexer.project_features(hidden_states, q_resid, position_embeddings, seq_ctx)
+        projection_calls = []
+        handle = attention.indexer.weights_proj.register_forward_hook(lambda *_: projection_calls.append(None))
+        try:
+            features = attention.indexer.project_features(hidden_states, q_resid, position_embeddings, seq_ctx)
+        finally:
+            handle.remove()
         dot = torch.einsum("bshd,btd->bsht", features.q.float(), features.k.float())
         selection_logits = torch.einsum(
             "bsht,bsh->bst",
             torch.relu(dot * (attention.index_head_dim**-0.5)),
-            features.selection_weights,
+            features.weights.float() * (attention.index_n_heads**-0.5),
         )
-        training_logits = torch.einsum("bsht,bsh->bst", torch.relu(dot), features.training_weights.float())
+        training_logits = torch.einsum(
+            "bsht,bsh->bst",
+            torch.relu(dot),
+            (features.weights * ((attention.index_n_heads * attention.index_head_dim) ** -0.5)).float(),
+        )
 
+        assert len(projection_calls) == 1
         torch.testing.assert_close(training_logits, selection_logits)
 
     def test_source_layer_loss_updates_only_indexer_and_detaches_model_inputs(self, monkeypatch):
@@ -336,6 +350,45 @@ class TestDSAAttention:
         assert captured["row_coefficient"] == pytest.approx(0.25 / 2)
         assert captured["debug_name"] == "layer0"
         assert captured["debug_interval"] == 0
+
+    def test_mtp_iteration_trains_indexer_only_at_compute_depth(self, monkeypatch):
+        # GLM-5.2 的物理 MTP 层只在第一个 logical depth 计算 index；后续
+        # depth 复用同一 top-k，不能重复跑 projection 或重复加 KL。
+        loss_calls = []
+
+        def fake_indexer_loss(index_q, *args, **kwargs):
+            del args, kwargs
+            loss_calls.append(None)
+            return index_q.float().sum() * 0.0
+
+        monkeypatch.setattr(dsa_mla_module, "dsa_indexer_kl_loss", fake_indexer_loss)
+        attention = _tiny_dsa_attention(
+            indexer_types=["full"],
+            layer_idx=0,
+            indexer_training=DSAIndexerTrainingConfig(loss_coeff=1.0, train_mtp_indexer=True),
+        )
+        projection_calls = []
+        handle = attention.indexer.weights_proj.register_forward_hook(lambda *_: projection_calls.append(None))
+        hidden_states = torch.randn(1, 4, 4)
+        position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
+        seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
+        get_dsa_topk_sharing_runtime().register_mtp_iteration_topk_sharing(
+            seq_ctx=seq_ctx,
+            source_layer_idx=0,
+            num_iterations=2,
+        )
+
+        try:
+            attention(hidden_states, position_embeddings, seq_ctx)
+            first_topk = seq_ctx.dsa_topk_cache.indices[0]
+            attention(torch.randn_like(hidden_states), position_embeddings, seq_ctx)
+        finally:
+            handle.remove()
+
+        assert seq_ctx.dsa_topk_cache.indices[0] is first_topk
+        assert len(projection_calls) == 1
+        assert len(loss_calls) == 1
+        assert len(seq_ctx.dsa_topk_cache.indexer_losses) == 1
 
     def test_source_layer_training_rejects_no_grad_checkpoint_forward(self):
         attention = _tiny_dsa_attention(

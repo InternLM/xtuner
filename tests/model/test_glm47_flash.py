@@ -2,12 +2,13 @@ from unittest import mock
 
 import torch
 
-from xtuner.v1.model import Glm47FlashConfig, get_model_config
-from xtuner.v1.module.attention import MLAConfig
+from xtuner.v1.model import Glm47FlashConfig, Glm47FlashDSAConfig, get_model_config
+from xtuner.v1.module.attention import DSAIndexerTrainingConfig, DSAMLAConfig, MLAConfig
 from xtuner.v1.module.attention.mla import (
     mla_apply_rotary_pos_emb,
     mla_apply_rotary_pos_emb_non_interleaved,
 )
+from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 
 
@@ -52,6 +53,34 @@ def _tiny_glm47_flash_config() -> Glm47FlashConfig:
     )
 
 
+def _tiny_glm47_flash_dsa_config() -> Glm47FlashDSAConfig:
+    dense = _tiny_glm47_flash_config()
+    dense.num_nextn_predict_layers = 1
+    dense.mtp_config = MTPConfig(num_layers=1, share_weights=False)
+    values = {
+        name: getattr(dense, name) for name in Glm47FlashConfig.model_fields if name not in ("attention", "model_type")
+    }
+    return Glm47FlashDSAConfig(
+        **values,
+        attention=DSAMLAConfig(
+            **dense.attention.model_dump(),
+            index_topk=4,
+            index_head_dim=8,
+            index_n_heads=2,
+            index_topk_freq=2,
+            index_skip_topk_offset=1,
+            indexer_rope_interleave=True,
+            sparse_mla_backend="torch",
+            indexer_training=DSAIndexerTrainingConfig(
+                stage="dense_warmup",
+                train_mtp_indexer=True,
+                indexer_only=True,
+                dense_query_block_size=2,
+            ),
+        ),
+    )
+
+
 class TestGlm47FlashConfig:
     def test_alias_and_default_architecture(self):
         config = get_model_config("glm-4.7-flash")
@@ -64,16 +93,18 @@ class TestGlm47FlashConfig:
         assert config.n_routed_experts == 64
         assert config.num_experts_per_tok == 4
 
-    def test_hf_key_mapping_uses_packed_experts_and_mtp_layer(self):
+    def test_hf_key_mapping_uses_official_experts_and_mtp_layer(self):
         config = _tiny_glm47_flash_config()
         with mock.patch("torch.cuda.Stream"):
             model = config.build()
 
         assert model.to_hf_key_list("layers.1.experts.fused_w1w3.weight") == [
-            "model.layers.1.mlp.experts.gate_up_proj"
+            f"model.layers.1.mlp.experts.{expert_idx}.{projection}_proj.weight"
+            for expert_idx in range(4)
+            for projection in ("gate", "up")
         ]
         assert model.to_hf_key_list("layers.1.experts.fused_w2.weight") == [
-            "model.layers.1.mlp.experts.down_proj"
+            f"model.layers.1.mlp.experts.{expert_idx}.down_proj.weight" for expert_idx in range(4)
         ]
         assert model.to_hf_key_list("layers.1.gate.router.e_score_correction_bias") == [
             "model.layers.1.mlp.gate.e_score_correction_bias"
@@ -82,28 +113,42 @@ class TestGlm47FlashConfig:
             "model.layers.3.shared_head.norm.weight"
         ]
 
-    def test_packed_expert_layout_round_trip(self):
+    def test_dense_warmup_trains_main_and_mtp_source_indexers_only(self):
+        config = _tiny_glm47_flash_dsa_config()
+        with mock.patch("torch.cuda.Stream"):
+            model = config.build()
+
+        trainable = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
+        assert trainable
+        assert all(".self_attn.indexer." in name for name in trainable)
+        assert hasattr(model.layers["0"].self_attn, "indexer")
+        assert not hasattr(model.layers["1"].self_attn, "indexer")
+        assert hasattr(model.layers["2"].self_attn, "indexer")
+        assert model.mtp_block is not None
+        assert hasattr(model.mtp_block.layers[0].decoder_layer.self_attn, "indexer")
+
+    def test_official_expert_layout_round_trip(self):
         config = _tiny_glm47_flash_config()
         with mock.patch("torch.cuda.Stream"):
             model = config.build()
 
-        gate_up_hf = torch.arange(4 * 8 * 16, dtype=torch.float32).reshape(4, 8, 16)
+        gate_up_hf = [
+            torch.arange(offset, offset + 4 * 16, dtype=torch.float32).reshape(4, 16)
+            for offset in range(0, 8 * 4 * 16, 4 * 16)
+        ]
         gate_up_local = torch.empty(32, 16)
         model.safetensors_to_params(
-            [gate_up_hf], gate_up_local, "layers.1.experts.fused_w1w3.weight", None, None, None
+            gate_up_hf, gate_up_local, "layers.1.experts.fused_w1w3.weight", None, None, 0
         )
-        torch.testing.assert_close(gate_up_local, gate_up_hf.flatten(0, 1))
-        torch.testing.assert_close(
-            model.param_to_safetensor(gate_up_local, "model.layers.1.mlp.experts.gate_up_proj"), gate_up_hf
-        )
+        torch.testing.assert_close(gate_up_local, torch.cat(gate_up_hf))
 
-        down_hf = torch.arange(4 * 16 * 4, dtype=torch.float32).reshape(4, 16, 4)
+        down_hf = [
+            torch.arange(offset, offset + 16 * 4, dtype=torch.float32).reshape(16, 4)
+            for offset in range(0, 4 * 16 * 4, 16 * 4)
+        ]
         down_local = torch.empty(64, 4)
-        model.safetensors_to_params([down_hf], down_local, "layers.1.experts.fused_w2.weight", None, None, None)
-        torch.testing.assert_close(down_local, down_hf.flatten(0, 1))
-        torch.testing.assert_close(
-            model.param_to_safetensor(down_local, "model.layers.1.mlp.experts.down_proj"), down_hf
-        )
+        model.safetensors_to_params(down_hf, down_local, "layers.1.experts.fused_w2.weight", None, None, 0)
+        torch.testing.assert_close(down_local, torch.cat(down_hf))
 
 
 class TestGlm47FlashRope:

@@ -3,6 +3,8 @@
 TestGlm52Config
     test_from_hf_preserves_glm_specific_behavior: HF 配置转换保留 DSA、router 与 MTP 语义。
     test_rejects_shared_physical_mtp_indexer: 非法的 physical MTP indexer 计划会被拒绝。
+    test_indexer_training_can_include_physical_mtp_indexer: MTP indexer 可显式加入训练。
+    test_indexer_only_can_train_main_and_mtp_source_indexers: overfit 模式可同时训练两类 indexer。
 TestGlm52CheckpointConversion
     test_tiny_model_round_trips_through_hf: tiny 主干与 MTP 参数可经公共 HF API 无损往返。
 TestGlm52RouterBias
@@ -146,6 +148,23 @@ class TestGlm52Config:
         assert all(not parameter.requires_grad for parameter in mtp_attention.indexer.parameters())
         assert mtp_attention.indexer_training is None
 
+    def test_indexer_training_can_include_physical_mtp_indexer(self):
+        # 显式开启后，checkpoint 中的 physical MTP Full/source indexer 参与训练。
+        config = _tiny_glm52_config()
+        config.attention.indexer_training = DSAIndexerTrainingConfig(
+            loss_coeff=1.0,
+            train_mtp_indexer=True,
+        )
+        config.mtp_config = MTPConfig(num_layers=1, share_weights=True)
+
+        with mock.patch("torch.cuda.Stream"):
+            model = config.build()
+
+        mtp_attention = model.mtp_block.layers[0].decoder_layer.self_attn  # type: ignore[union-attr]
+        assert mtp_attention.indexer_training is not None
+        assert mtp_attention.indexer_training.train_mtp_indexer
+        assert all(parameter.requires_grad for parameter in mtp_attention.indexer.parameters())
+
     def test_indexer_only_trains_main_source_indexers_exclusively(self):
         # 严格过拟合模式固定 attention teacher，只训练主干 source indexer。
         config = _tiny_glm52_config()
@@ -160,6 +179,25 @@ class TestGlm52Config:
         assert all(name.startswith("layers.0.self_attn.indexer.") for name in trainable_names)
         assert all(not parameter.requires_grad for parameter in model.layers["1"].parameters())
         assert all(not parameter.requires_grad for parameter in model.mtp_block.parameters())  # type: ignore[union-attr]
+
+    def test_indexer_only_can_train_main_and_mtp_source_indexers(self):
+        # MTP opt-in 也适用于严格 overfit 模式，其余 MTP 参数仍全部冻结。
+        config = _tiny_glm52_config()
+        config.attention.indexer_training = DSAIndexerTrainingConfig(
+            loss_coeff=1.0,
+            train_mtp_indexer=True,
+            indexer_only=True,
+        )
+        config.mtp_config = MTPConfig(num_layers=1, share_weights=True)
+
+        with mock.patch("torch.cuda.Stream"):
+            model = config.build()
+
+        trainable_names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+        assert trainable_names
+        assert all(".self_attn.indexer." in name for name in trainable_names)
+        assert any(name.startswith("layers.0.") for name in trainable_names)
+        assert any(name.startswith("mtp_block.layers.0.") for name in trainable_names)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")

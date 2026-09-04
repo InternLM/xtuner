@@ -84,10 +84,10 @@ class Glm52MoE(MoE):
                 assert isinstance(self_attn, DSAMultiLatentAttention), (
                     f"GLM-5.2 MTP requires DSAMultiLatentAttention, got {type(self_attn).__name__}."
                 )
-                # Train only main-stack Full/source indexers.
-                # Freeze before optimizer construction, so MTP parameters are
-                # neither updated nor used to build an auxiliary loss graph.
-                if self_attn.indexer_training is not None:
+                # Keep the checkpoint-backed physical MTP indexer frozen unless
+                # its training is explicitly requested. This happens before
+                # optimizer construction and preserves the previous baseline.
+                if self_attn.indexer_training is not None and not self_attn.indexer_training.train_mtp_indexer:
                     self_attn.disable_indexer_training()
                 dsa_layers.append((decoder_layer, self_attn))
                 if mtp_idx == 0:
@@ -96,11 +96,12 @@ class Glm52MoE(MoE):
         sample_attn = dsa_layers[0][1]
         if sample_attn.indexer_training is not None and sample_attn.indexer_training.indexer_only:
             # Make the sparse-attention teacher stationary for the strict
-            # overfit gate. Only main-stack Full/source indexers are restored
-            # to trainable; shared layers own no indexer and MTP stays frozen.
+            # overfit gate. Only enabled Full/source indexers are restored to
+            # trainable; shared layers own no indexer, and MTP remains frozen
+            # unless ``train_mtp_indexer`` was explicitly enabled.
             self.requires_grad_(False)
-            for _, self_attn in dsa_layers[: self.config.num_hidden_layers]:
-                if self_attn.source_layer_idx == self_attn.layer_idx:
+            for _, self_attn in dsa_layers:
+                if self_attn.indexer_training is not None and self_attn.source_layer_idx == self_attn.layer_idx:
                     self_attn.indexer.requires_grad_(True)
         release_plan = build_dsa_topk_release_plan(
             num_main_layers=self.config.num_hidden_layers,

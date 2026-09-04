@@ -242,6 +242,11 @@ class MoE(BaseModel):
     def _configure_model_specific_layer_lifecycle(self) -> None:
         return
 
+    def _fully_shard_model_specific_submodules(self) -> None:
+        """Shard model-specific children before their enclosing layers."""
+
+        return
+
     def _z_loss_dist_token_count(
         self,
         z_ctx: list[ZLossContext] | ZLossContext | None,
@@ -495,6 +500,10 @@ class MoE(BaseModel):
             return None
         return torch.stack(losses).mean()
 
+    def _indexer_only_training(self) -> bool:
+        training_cfg = getattr(getattr(self.config, "attention", None), "indexer_training", None)
+        return bool(training_cfg is not None and training_cfg.indexer_only)
+
     def _micro_batch_forward(
         self,
         seq_ctx_list: list[SequenceContext],
@@ -548,6 +557,7 @@ class MoE(BaseModel):
 
         # Initialize output containers
         output: dict = {}
+        indexer_only = self._indexer_only_training()
 
         # Only the logits side is ever exposed to callers in the micro-batch path; the
         # weights side is not part of the returned schema, so we never accumulate it.
@@ -629,10 +639,7 @@ class MoE(BaseModel):
                 )
 
         assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
-
-        indexer_loss = self._consume_indexer_losses(seq_ctx_list)
-        if indexer_loss is not None:
-            output["indexer_loss"] = indexer_loss
+        indexer_loss_contexts = list(seq_ctx_list)
 
         if self.mtp_block is not None:
             assert self.config.mtp_config is not None
@@ -661,25 +668,29 @@ class MoE(BaseModel):
                 position_embeddings=position_embeddings_list,
                 seq_ctx=mtp_seq_ctx_list,
             )
+            indexer_loss_contexts.extend(mtp_seq_ctx_list)
 
             mtp_losses = torch.tensor(0.0, device=DEVICE)
             has_mtp_loss = False
-            for micro_batch_idx, (loss_ctx_dict, mtp_outputs) in enumerate(zip(loss_ctx_list, mtp_outputs_per_mb)):
-                mtp_loss_ctx_list = loss_ctx_dict.get("mtp")
-                if mtp_loss_ctx_list is None:
-                    continue
+            if not indexer_only:
+                for micro_batch_idx, (loss_ctx_dict, mtp_outputs) in enumerate(
+                    zip(loss_ctx_list, mtp_outputs_per_mb)
+                ):
+                    mtp_loss_ctx_list = loss_ctx_dict.get("mtp")
+                    if mtp_loss_ctx_list is None:
+                        continue
 
-                micro_batch_mtp_losses = torch.tensor(0.0, device=DEVICE)
-                for mtp_idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
-                    mtp_hidden_states, mtp_router_results, _, _ = mtp_hidden
-                    mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
-                    micro_batch_mtp_losses += mtp_loss
+                    micro_batch_mtp_losses = torch.tensor(0.0, device=DEVICE)
+                    for mtp_idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
+                        mtp_hidden_states, mtp_router_results, _, _ = mtp_hidden
+                        mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
+                        micro_batch_mtp_losses += mtp_loss
 
-                    if keep_router:
-                        router_logits_list[micro_batch_idx][f"mtp_layer{mtp_idx}"] = mtp_router_results
+                        if keep_router:
+                            router_logits_list[micro_batch_idx][f"mtp_layer{mtp_idx}"] = mtp_router_results
 
-                mtp_losses += micro_batch_mtp_losses / len(mtp_loss_ctx_list)
-                has_mtp_loss = True
+                    mtp_losses += micro_batch_mtp_losses / len(mtp_loss_ctx_list)
+                    has_mtp_loss = True
 
             if has_mtp_loss:
                 # MTP routed experts feed the same balancing / z aux loss as the main MoE layers
@@ -723,22 +734,28 @@ class MoE(BaseModel):
 
                 output["mtp_loss"] = mtp_losses * self.config.mtp_config.loss_scaling_factor
 
-        # Apply final norm to all micro-batches
-        cat_hidden_states = torch.cat(hidden_states_list, dim=1)
-        cat_hidden_states = self.norm(cat_hidden_states)
+        indexer_loss = self._consume_indexer_losses(indexer_loss_contexts)
+        if indexer_loss is not None:
+            output["indexer_loss"] = indexer_loss
 
-        # Process final outputs for each micro-batch
-        # Extract LM loss context from dict
-        lm_loss_ctx_list = [loss_ctx_dict["lm"] for loss_ctx_dict in loss_ctx_list]
-        cat_loss_ctx = type(lm_loss_ctx_list[0]).cat(lm_loss_ctx_list)
-        loss, (logits, extra_info) = self.lm_head(cat_hidden_states, cast(LMHeadLossContext, cat_loss_ctx))
+        logits = None
+        if not indexer_only:
+            # Apply final norm to all micro-batches
+            cat_hidden_states = torch.cat(hidden_states_list, dim=1)
+            cat_hidden_states = self.norm(cat_hidden_states)
 
-        # Aggregate losses (mean across micro-batches)
-        output["loss"] = loss.sum()
-        moe_extra_info = ModelForwardExtraLogInfo()
-        if extra_info:
-            moe_extra_info.append(extra_info)
-        output["extra_info"] = moe_extra_info
+            # Process final outputs for each micro-batch
+            # Extract LM loss context from dict
+            lm_loss_ctx_list = [loss_ctx_dict["lm"] for loss_ctx_dict in loss_ctx_list]
+            cat_loss_ctx = type(lm_loss_ctx_list[0]).cat(lm_loss_ctx_list)
+            loss, (logits, extra_info) = self.lm_head(cat_hidden_states, cast(LMHeadLossContext, cat_loss_ctx))
+
+            # Aggregate losses (mean across micro-batches)
+            output["loss"] = loss.sum()
+            moe_extra_info = ModelForwardExtraLogInfo()
+            if extra_info:
+                moe_extra_info.append(extra_info)
+            output["extra_info"] = moe_extra_info
 
         split_aux_output = self.aux_loss.finalize(
             balancing_ctx=balancing_ctx,
@@ -795,6 +812,7 @@ class MoE(BaseModel):
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         output: dict = {}  # type: ignore
+        indexer_only = self._indexer_only_training()
         if self.config.return_hidden_states:
             output["hidden_states"] = []
 
@@ -862,26 +880,21 @@ class MoE(BaseModel):
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
 
-        indexer_loss = self._consume_indexer_losses([seq_ctx])
-        if indexer_loss is not None:
-            output["indexer_loss"] = indexer_loss
-
         layer_hidden_states = hidden_states
-        hidden_states = self.norm(hidden_states)
+        if not indexer_only:
+            hidden_states = self.norm(hidden_states)
 
-        # Get LM loss context from dict
-        lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
-        loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
-        output["loss"] = loss
-        output["logits"] = logits
-        output["extra_info"] = extra_info
+            # Get LM loss context from dict
+            lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
+            loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
+            output["loss"] = loss
+            output["logits"] = logits
+            output["extra_info"] = extra_info
+        indexer_loss_contexts = [seq_ctx]
 
         # MTP forward pass and loss computation
-        if (
-            self.mtp_block is not None
-            and loss_ctx is not None
-            and (mtp_loss_ctx_list := loss_ctx.get("mtp")) is not None
-        ):
+        mtp_loss_ctx_list = loss_ctx.get("mtp") if loss_ctx is not None else None
+        if self.mtp_block is not None and (indexer_only or mtp_loss_ctx_list is not None):
             mtp_seq_ctx = seq_ctx.copy(
                 input_ids=input_ids.clone() if input_ids is not None else None,
                 position_ids=position_ids.clone(),
@@ -904,39 +917,48 @@ class MoE(BaseModel):
                 position_embeddings=position_embeddings,
                 seq_ctx=mtp_seq_ctx,
             )
+            indexer_loss_contexts.append(mtp_seq_ctx)
 
-            # Compute MTP losses for each depth
-            mtp_losses = torch.tensor(0.0, device=DEVICE)
-            for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
-                mtp_hidden_states, mtp_router_results, mtp_router_weights, mtp_router_topk_ids = mtp_hidden
+            if not indexer_only:
+                assert mtp_loss_ctx_list is not None
+                # Compute MTP losses for each depth
+                mtp_losses = torch.tensor(0.0, device=DEVICE)
+                for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
+                    mtp_hidden_states, mtp_router_results, mtp_router_weights, mtp_router_topk_ids = mtp_hidden
 
-                if keep_router:
-                    output["router_logits"][f"mtp_layer{idx}"] = mtp_router_results
-                    output["router_weights"][f"mtp_layer{idx}"] = mtp_router_weights
-                # Inject this MTP layer's z-loss before lm_head so backward through mtp_loss
-                # traverses the AuxLossScaler node and releases this layer's logsumexp activations.
-                mtp_hidden_states = self.aux_loss.accumulate(
-                    selected_router_weights=mtp_router_weights.index_select(0, mtp_nonpad_indices)
-                    .contiguous()
-                    .float(),
-                    selected_router_logits=mtp_router_results.index_select(0, mtp_nonpad_indices).contiguous().float(),
-                    selected_experts=mtp_router_topk_ids.index_select(0, mtp_nonpad_indices).contiguous(),
-                    hidden_states=mtp_hidden_states,
-                    balancing_ctx=balancing_ctx,
-                    z_ctx=z_ctx,
-                    num_tokens_local=mtp_non_pad_token,
-                    num_tokens_global=mtp_num_tokens_global,
-                    world_size=mtp_z_world_size,
-                )
-                mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
-                mtp_losses += mtp_loss
+                    if keep_router:
+                        output["router_logits"][f"mtp_layer{idx}"] = mtp_router_results
+                        output["router_weights"][f"mtp_layer{idx}"] = mtp_router_weights
+                    # Inject this MTP layer's z-loss before lm_head so backward through mtp_loss
+                    # traverses the AuxLossScaler node and releases this layer's logsumexp activations.
+                    mtp_hidden_states = self.aux_loss.accumulate(
+                        selected_router_weights=mtp_router_weights.index_select(0, mtp_nonpad_indices)
+                        .contiguous()
+                        .float(),
+                        selected_router_logits=mtp_router_results.index_select(0, mtp_nonpad_indices)
+                        .contiguous()
+                        .float(),
+                        selected_experts=mtp_router_topk_ids.index_select(0, mtp_nonpad_indices).contiguous(),
+                        hidden_states=mtp_hidden_states,
+                        balancing_ctx=balancing_ctx,
+                        z_ctx=z_ctx,
+                        num_tokens_local=mtp_non_pad_token,
+                        num_tokens_global=mtp_num_tokens_global,
+                        world_size=mtp_z_world_size,
+                    )
+                    mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
+                    mtp_losses += mtp_loss
 
-            # Average MTP losses across depths and scale
-            mtp_losses = mtp_losses / len(mtp_loss_ctx_list)
-            scaled_mtp_loss = mtp_losses * self.config.mtp_config.loss_scaling_factor  # type: ignore
+                # Average MTP losses across depths and scale
+                mtp_losses = mtp_losses / len(mtp_loss_ctx_list)
+                scaled_mtp_loss = mtp_losses * self.config.mtp_config.loss_scaling_factor  # type: ignore
 
-            # Add to total loss
-            output["mtp_loss"] = scaled_mtp_loss
+                # Add to total loss
+                output["mtp_loss"] = scaled_mtp_loss
+
+        indexer_loss = self._consume_indexer_losses(indexer_loss_contexts)
+        if indexer_loss is not None:
+            output["indexer_loss"] = indexer_loss
 
         split_aux_output = self.aux_loss.finalize(
             balancing_ctx=balancing_ctx,
@@ -1165,6 +1187,8 @@ class MoE(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
+
+        self._fully_shard_model_specific_submodules()
 
         for layer_idx, layer in tqdm(self.layers.items(), desc="[FSDP Sharding]"):
             layer_idx = int(layer_idx)

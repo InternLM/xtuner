@@ -2,13 +2,14 @@
 from typing import Literal, NamedTuple
 
 import torch
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch import nn
 from torch.distributed.tensor import DTensor
 
 from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
+from xtuner.v1.loss import dense_dsa_indexer_kl_loss
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
 from xtuner.v1.ops.sparse_mla import (
@@ -24,7 +25,7 @@ from xtuner.v1.ops.sparse_mla import (
 from ..linear import build_linear
 from .attn_outputs import AttnOutputs
 from .dsa_topk_sharing import build_dsa_topk_release_plan, dsa_topk_source_layer, get_dsa_topk_sharing_runtime
-from .mla import MLAConfig, MultiLatentAttention, mla_apply_rotary_pos_emb
+from .mla import MLAConfig, MultiLatentAttention, mla_apply_rotary_pos_emb, mla_apply_rotary_pos_emb_non_interleaved
 
 
 class LayerNorm(nn.Module):
@@ -60,31 +61,45 @@ class LayerNorm(nn.Module):
 
 
 class DSAIndexerTrainingConfig(BaseModel):
-    """Source-layer-only sparse indexer training configuration.
+    """Two-stage DSA indexer distillation configuration.
 
     ``None`` on :class:`DSAMLAConfig` remains the strict frozen baseline.  This
-    implementation excludes IndexShare supervision, sequence parallelism,
-    activation checkpoint replay, and MTP indexers.
+    ``dense_warmup`` keeps the dense attention teacher frozen and trains new
+    source indexers with a query-blocked PyTorch KL. ``sparse`` runs the
+    selected sparse backend. Each source indexer is supervised by the attention
+    layer that owns it; shared consumer layers only reuse its discrete top-k.
+
+    Sequence parallelism and decoder activation checkpoint replay are not
+    supported while indexer loss is active. ``train_mtp_indexer`` additionally
+    enables the checkpoint-backed physical MTP source indexer; when one
+    physical MTP layer is reused for multiple prediction depths, only the
+    first (index-compute) depth is supervised.
 
     ``indexer_only`` is a diagnostic overfit mode: GLM freezes the teacher and
-    every non-indexer parameter, leaving only main-stack source indexers
-    trainable.  ``debug_interval`` prints per-source teacher/student
+    every non-indexer parameter, leaving only the selected source indexers
+    trainable. ``debug_interval`` prints per-source teacher/student
     distribution statistics without changing the loss.
     """
 
     model_config = ConfigDict(extra="forbid")
+    stage: Literal["dense_warmup", "sparse"] = "sparse"
     loss_coeff: float = Field(default=1.0, ge=0.0)
-    supervision: Literal["source_layer"] = "source_layer"
-    train_mtp_indexer: Literal[False] = False
+    train_mtp_indexer: bool = False
     indexer_only: bool = False
+    dense_query_block_size: int = Field(default=256, ge=1)
     debug_interval: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_stage(self) -> "DSAIndexerTrainingConfig":
+        if self.stage == "dense_warmup" and not self.indexer_only:
+            raise ValueError("dense_warmup requires indexer_only=True so the full-attention teacher stays frozen.")
+        return self
 
 
 class DSAIndexerFeatures(NamedTuple):
     q: torch.Tensor
     k: torch.Tensor
-    selection_weights: torch.Tensor
-    training_weights: torch.Tensor
+    weights: torch.Tensor
 
 
 class DSAIndexer(nn.Module):
@@ -97,6 +112,7 @@ class DSAIndexer(nn.Module):
         index_head_dim: int,
         index_n_heads: int,
         index_topk: int,
+        rope_interleave: bool = True,
         indexer_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch",
         trainable: bool = False,
     ):
@@ -105,6 +121,7 @@ class DSAIndexer(nn.Module):
         self.index_head_dim = index_head_dim
         self.index_n_heads = index_n_heads
         self.index_topk = index_topk
+        self.rope_interleave = rope_interleave
         self.indexer_backend = indexer_backend
         self.dsa_topk_indices_func: DSATopKIndicesProtocol = get_dsa_topk_indices(indexer_backend)
         # wq_b.weight: [index_n_heads * index_head_dim, q_lora_rank]
@@ -163,9 +180,11 @@ class DSAIndexer(nn.Module):
         k_pe, k_nope = torch.split(k, [self.qk_rope_head_dim, self.index_head_dim - self.qk_rope_head_dim], dim=-1)
         k_pe = k_pe.view(bsz, seq_len, 1, self.qk_rope_head_dim).transpose(1, 2)
 
-        # GLM-MoE-DSA applies interleaved RoPE in the indexer, matching HF PR #46842.
+        # GLM-5.2 uses interleaved RoPE. GLM-4.7 follows its checkpoint
+        # setting for both the dense teacher and newly initialized indexer.
         cos, sin = position_embeddings
-        q_pe, k_pe = mla_apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
+        rope_fn = mla_apply_rotary_pos_emb if self.rope_interleave else mla_apply_rotary_pos_emb_non_interleaved
+        q_pe, k_pe = rope_fn(q_pe, k_pe, cos, sin)
         # q_pe: [bsz, S, Ni, Dr]; k_pe: [bsz, S, Dr]
         q_pe = q_pe.transpose(1, 2)
         k_pe = k_pe.transpose(1, 2).squeeze(2)
@@ -173,13 +192,7 @@ class DSAIndexer(nn.Module):
         # q: [bsz, S, Ni, Di]; k: [bsz, S, Di]
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe, k_nope], dim=-1)
-        raw_weights = self.weights_proj(hidden_states)
-        # The selection backends apply ``index_head_dim**-0.5`` internally.
-        # cuDNN indexer backward uses ``sm_scale=1`` and therefore consumes the
-        # complete effective scaling in its BF16 weights tensor.
-        selection_weights = raw_weights.float() * (self.index_n_heads**-0.5)
-        training_weights = raw_weights * ((self.index_n_heads * self.index_head_dim) ** -0.5)
-
+        weights = self.weights_proj(hidden_states)
         # Top-k 索引是整数，不需要梯度，所以 selection 始终放在 no_grad 下。
         # 这解释了 Case 1 为什么只在 compile 下显错：
         #   eager COMPUTE: indexer 不产生槽位 -> SparseMLA 保存 [A, B, C]
@@ -192,7 +205,7 @@ class DSAIndexer(nn.Module):
         # Index Q 按 query token 保持分片，只有 K 需要全局 gather。
         # k: [bsz, S_g, Di]
         k = gather_for_sequence_parallel(k, dim=1, sp_mesh=seq_ctx.sequence_parallel_mesh)
-        return DSAIndexerFeatures(q, k, selection_weights, training_weights)
+        return DSAIndexerFeatures(q, k, weights)
 
     @torch.no_grad()
     def select_topk(self, features: DSAIndexerFeatures, seq_ctx: SequenceContext) -> torch.Tensor:
@@ -202,7 +215,7 @@ class DSAIndexer(nn.Module):
         return self.dsa_topk_indices_func(
             features.q.detach(),
             features.k.detach(),
-            features.selection_weights.detach(),
+            features.weights.detach().float() * (self.index_n_heads**-0.5),
             seq_ctx,
             index_head_dim=self.index_head_dim,
             index_topk=self.index_topk,
@@ -331,6 +344,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             index_head_dim=self.index_head_dim,
             index_n_heads=self.index_n_heads,
             index_topk=self.index_topk,
+            rope_interleave=self.indexer_rope_interleave,
             indexer_backend=self.sparse_mla_backend,
             trainable=self.indexer_training is not None,
         )
@@ -342,7 +356,97 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         if hasattr(self, "indexer"):
             self.indexer.requires_grad_(False)
 
+    def _validate_indexer_training_runtime(self, seq_ctx: SequenceContext) -> None:
+        if self.training and not torch.is_grad_enabled():
+            raise RuntimeError(
+                "DSA indexer training does not support activation checkpointing; set recompute_ratio=0."
+            )
+        if seq_ctx.sequence_parallel_mesh is not None and seq_ctx.sequence_parallel_mesh.size() > 1:
+            raise RuntimeError("DSA indexer training requires sequence parallel size 1.")
+
+    @torch.no_grad()
+    def _project_dense_teacher_states(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return Q-LoRA residual and explicit dense teacher Q/K states."""
+
+        bsz, q_len, _ = hidden_states.shape
+        assert self.q_lora_rank is not None
+        q_resid = self.q_a_layernorm(self.q_a_proj(hidden_states))
+        q = self.q_b_proj(q_resid).view(bsz, q_len, self.num_attention_heads, self.q_head_dim)
+        q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+
+        compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
+        compressed_kv, k_pe = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv = self.kv_b_proj(self.kv_a_layernorm(compressed_kv)).view(
+            bsz,
+            q_len,
+            self.num_attention_heads,
+            self.qk_nope_head_dim + self.v_head_dim,
+        )
+        k_nope = kv[..., : self.qk_nope_head_dim]
+
+        q_pe = q_pe.transpose(1, 2)
+        k_pe = k_pe.view(bsz, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
+        cos, sin = position_embeddings
+        rope_fn = mla_apply_rotary_pos_emb if self.rope_interleave else mla_apply_rotary_pos_emb_non_interleaved
+        q_pe, k_pe = rope_fn(q_pe, k_pe, cos, sin)
+        q_pe = q_pe.transpose(1, 2)
+        k_pe = k_pe.transpose(1, 2).expand(-1, -1, self.num_attention_heads, -1)
+        return q_resid, torch.cat([q_nope, q_pe], dim=-1), torch.cat([k_nope, k_pe], dim=-1)
+
+    def _forward_dense_warmup(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        seq_ctx: SequenceContext,
+    ) -> AttnOutputs:
+        """Run original dense MLA while distilling only the DSA indexers."""
+
+        dense_outputs = MultiLatentAttention.forward(self, hidden_states, position_embeddings, seq_ctx)
+        training_cfg = self.indexer_training
+        if training_cfg is None or training_cfg.loss_coeff == 0 or not self.training:
+            return dense_outputs
+        if self.source_layer_idx != self.layer_idx:
+            return dense_outputs
+
+        self._validate_indexer_training_runtime(seq_ctx)
+        q_resid, teacher_q, teacher_k = self._project_dense_teacher_states(hidden_states.detach(), position_embeddings)
+        features = self.indexer.project_features(
+            hidden_states.detach(),
+            q_resid.detach(),
+            position_embeddings,
+            seq_ctx,
+        )
+
+        indexer_loss = dense_dsa_indexer_kl_loss(
+            features.q,
+            features.k,
+            features.weights * ((self.index_n_heads * self.index_head_dim) ** -0.5),
+            teacher_q,
+            teacher_k,
+            seq_ctx,
+            softmax_scale=self.softmax_scale,
+            loss_coefficient=training_cfg.loss_coeff,
+            query_block_size=training_cfg.dense_query_block_size,
+        )
+        seq_ctx.dsa_topk_cache.indexer_losses.append(indexer_loss)
+        return dense_outputs
+
     def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        seq_ctx: SequenceContext,
+    ) -> AttnOutputs:
+        training_cfg = self.indexer_training
+        if training_cfg is not None and training_cfg.stage == "dense_warmup":
+            return self._forward_dense_warmup(hidden_states, position_embeddings, seq_ctx)
+        return self._forward_sparse(hidden_states, position_embeddings, seq_ctx)
+
+    def _forward_sparse(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
@@ -392,7 +496,8 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         k_pe = k_pe.view(bsz, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
 
         cos, sin = position_embeddings
-        q_pe, k_pe = mla_apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
+        rope_fn = mla_apply_rotary_pos_emb if self.rope_interleave else mla_apply_rotary_pos_emb_non_interleaved
+        q_pe, k_pe = rope_fn(q_pe, k_pe, cos, sin)
 
         # kv_b_proj.weight: [N * (Dn + Dv), Rkv]
         if isinstance(self.kv_b_proj.weight, DTensor):
@@ -421,23 +526,24 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         # key_states: [S_g, 1, Rkv + Dr]
         key_states = gather_for_sequence_parallel(key_states, dim=0, sp_mesh=seq_ctx.sequence_parallel_mesh)
 
+        training_cfg = self.indexer_training
         indexer_features: DSAIndexerFeatures | None = None
         indexer_loss_enabled = (
-            self.indexer_training is not None
-            and self.indexer_training.loss_coeff > 0
+            training_cfg is not None
+            and training_cfg.stage == "sparse"
+            and training_cfg.loss_coeff > 0
             and self.source_layer_idx == self.layer_idx
+            and self.training
         )
-        if indexer_loss_enabled and self.training and not torch.is_grad_enabled():
-            raise RuntimeError(
-                "DSA indexer training does not support activation checkpointing; set recompute_ratio=0."
-            )
-        if (
-            indexer_loss_enabled
-            and seq_ctx.sequence_parallel_mesh is not None
-            and seq_ctx.sequence_parallel_mesh.size() > 1
-        ):
-            raise RuntimeError("DSA indexer training requires sequence parallel size 1.")
-        train_source_indexer = indexer_loss_enabled and torch.is_grad_enabled()
+        if indexer_loss_enabled:
+            self._validate_indexer_training_runtime(seq_ctx)
+        topk_runtime = get_dsa_topk_sharing_runtime()
+        # GLM-5.2 runs the physical MTP layer once as an index-compute layer,
+        # then reuses its discrete top-k for later logical MTP depths. Mirror
+        # that contract during training: later depths must neither rerun the
+        # indexer projections nor add duplicate KL terms.
+        reuse_mtp_iteration_topk = topk_runtime.reuses_mtp_iteration_topk(layer=self, seq_ctx=seq_ctx)
+        train_source_indexer = indexer_loss_enabled and torch.is_grad_enabled() and not reuse_mtp_iteration_topk
         if train_source_indexer:
             # The indexer learns from attention, but must not inject an extra
             # gradient path into the transformer hidden/Q-LoRA activations.
@@ -447,7 +553,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
                 position_embeddings,
                 seq_ctx,
             )
-            topk_indices = get_dsa_topk_sharing_runtime().get_or_compute(
+            topk_indices = topk_runtime.get_or_compute(
                 layer=self,
                 seq_ctx=seq_ctx,
                 compute_source_topk=lambda: self.indexer.select_topk(indexer_features, seq_ctx),
@@ -455,7 +561,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         else:
             # ``loss_coeff=0`` follows this no-grad path so optimizer-visible
             # indexer parameters retain ``grad is None`` rather than zero grads.
-            topk_indices = get_dsa_topk_sharing_runtime().get_or_compute(
+            topk_indices = topk_runtime.get_or_compute(
                 layer=self,
                 seq_ctx=seq_ctx,
                 compute_source_topk=lambda: self.indexer(
@@ -479,22 +585,39 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             assert indexer_features is not None
             valid_query_rows = q_len - seq_ctx.num_padding
             if valid_query_rows <= 0:
-                raise ValueError("DSA indexer training requires at least one attention-valid query row.")
-            valid_query_mask = torch.arange(q_len, device=query_states.device).unsqueeze(0) < valid_query_rows
-            indexer_loss = dsa_indexer_kl_loss(
-                indexer_features.q,
-                indexer_features.k,
-                indexer_features.training_weights,
-                query_states.unsqueeze(0),
-                key_states.squeeze(1).unsqueeze(0),
-                softmax_lse.unsqueeze(0),
-                topk_indices.squeeze(1).unsqueeze(0),
-                softmax_scale=self.softmax_scale,
-                row_coefficient=self.indexer_training.loss_coeff / valid_query_rows,
-                valid_query_mask=valid_query_mask,
-                debug_name=f"layer{self.layer_idx}",
-                debug_interval=self.indexer_training.debug_interval,
-            )
+                # Packed data may legitimately produce an all-padding shard.
+                # Keep every indexer parameter in the FSDP backward graph while
+                # contributing no supervision on that rank.
+                indexer_loss = (
+                    indexer_features.q.sum() + indexer_features.k.sum() + indexer_features.weights.sum()
+                ) * 0.0
+            else:
+                valid_query_mask = torch.arange(q_len, device=query_states.device).unsqueeze(0) < valid_query_rows
+                attn_q_for_loss = query_states.unsqueeze(0)
+                attn_lse_for_loss = softmax_lse.unsqueeze(0)
+                # The cuDNN score-recompute MMA requires an attention-head count
+                # divisible by 8. Zero Q with +inf LSE contributes exactly zero to
+                # its head-summed teacher before the existing L1 normalization.
+                pad_heads = (-self.num_attention_heads) % 8
+                if pad_heads:
+                    attn_q_for_loss = torch.nn.functional.pad(attn_q_for_loss, (0, 0, 0, pad_heads))
+                    attn_lse_for_loss = torch.nn.functional.pad(
+                        attn_lse_for_loss, (0, pad_heads), value=float("inf")
+                    )
+                indexer_loss = dsa_indexer_kl_loss(
+                    indexer_features.q,
+                    indexer_features.k,
+                    indexer_features.weights * ((self.index_n_heads * self.index_head_dim) ** -0.5),
+                    attn_q_for_loss,
+                    key_states.squeeze(1).unsqueeze(0),
+                    attn_lse_for_loss,
+                    topk_indices.squeeze(1).unsqueeze(0),
+                    softmax_scale=self.softmax_scale,
+                    row_coefficient=training_cfg.loss_coeff / valid_query_rows,
+                    valid_query_mask=valid_query_mask,
+                    debug_name=f"layer{self.layer_idx}",
+                    debug_interval=training_cfg.debug_interval,
+                )
             seq_ctx.dsa_topk_cache.indexer_losses.append(indexer_loss)
         # raw_output: [S, N, Dv] -> [bsz, S, N * Dv]
         raw_output = torch.einsum("shm,hdm->shd", raw_output, w_vc)

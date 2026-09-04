@@ -101,11 +101,9 @@ def _explicit_standard_kl(
     predict: torch.Tensor,
     topk_indices: torch.Tensor,
     row_coefficient: float,
-    target_xlogx: torch.Tensor | None = None,
 ) -> torch.Tensor:
     valid_rows = (topk_indices != -1).any(dim=-1)
-    if target_xlogx is None:
-        target_xlogx = torch.special.xlogy(target, target).sum(dim=-1)
+    target_xlogx = torch.special.xlogy(target, target).sum(dim=-1)
     cross_entropy = torch.special.xlogy(target, predict).sum(dim=-1)
     return row_coefficient * (target_xlogx - cross_entropy).masked_fill(~valid_rows, 0.0).sum()
 
@@ -234,30 +232,6 @@ class TestStandardKLLoss:
         loss = _standard_kl_loss(distribution, distribution, topk_indices, row_coefficient=0.5)
 
         torch.testing.assert_close(loss, torch.tensor(0.0), atol=0.0, rtol=0.0)
-
-    def test_target_xlogx_recovers_strict_average_multi_layer_kl(self):
-        target_0 = torch.tensor([[[0.7, 0.2, 0.1]]], dtype=torch.float32)
-        target_1 = torch.tensor([[[0.1, 0.3, 0.6]]], dtype=torch.float32)
-        predict = torch.tensor([[[0.2, 0.5, 0.3]]], dtype=torch.float32)
-        topk_indices = torch.tensor([[[0, 1, 2]]], dtype=torch.int32)
-        target_mean = (target_0 + target_1) / 2
-        mean_xlogx = (
-            torch.special.xlogy(target_0, target_0).sum(dim=-1) + torch.special.xlogy(target_1, target_1).sum(dim=-1)
-        ) / 2
-
-        actual = _standard_kl_loss(
-            target_mean,
-            predict,
-            topk_indices,
-            row_coefficient=0.4,
-            target_xlogx=mean_xlogx,
-        )
-        expected = (
-            _explicit_standard_kl(target_0, predict, topk_indices, row_coefficient=0.4)
-            + _explicit_standard_kl(target_1, predict, topk_indices, row_coefficient=0.4)
-        ) / 2
-
-        torch.testing.assert_close(actual, expected)
 
     def test_positive_target_with_zero_predict_is_rejected(self):
         target = torch.tensor([[[1.0, 0.0]]], dtype=torch.float32)

@@ -1,0 +1,6 @@
+.git/
+.mypy_cache/
+.third_party/
+work_dirs/
+**/__pycache__/
+*.pyc

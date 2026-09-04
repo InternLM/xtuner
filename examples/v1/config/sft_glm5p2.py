@@ -62,6 +62,7 @@ if train_dsa_indexer:
         raise ValueError("DSA indexer training requires SPARSE_MLA_BACKEND=cudnn_dsa.")
     model_cfg.attention.indexer_training = DSAIndexerTrainingConfig(
         loss_coeff=float(os.environ.get("INDEXER_LOSS_COEFF", "1.0")),
+        train_mtp_indexer=_get_bool_env("TRAIN_MTP_INDEXER", False),
         indexer_only=_get_bool_env("INDEXER_ONLY", False),
         debug_interval=int(os.environ.get("INDEXER_DEBUG_INTERVAL", "0")),
     )

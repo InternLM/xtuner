@@ -261,6 +261,20 @@ class CrossLayerTopKSharingRuntime:
             residency.store_gpu(seq_ctx, layer.layer_idx, topk_indices)
         return topk_indices
 
+    def reuses_mtp_iteration_topk(
+        self,
+        *,
+        layer: DSATopKSharingLayerProtocol,
+        seq_ctx: SequenceContext,
+    ) -> bool:
+        """Whether this logical MTP depth reuses the first depth's top-k."""
+
+        return self._can_reuse_mtp_iteration_topk(
+            seq_ctx,
+            layer.source_layer_idx,
+            self._residency(),
+        )
+
     def after_sparse_mla_use(self, *, layer: DSATopKSharingLayerProtocol, seq_ctx: SequenceContext) -> None:
         residency = self._residency()
         cache = seq_ctx.dsa_topk_cache
