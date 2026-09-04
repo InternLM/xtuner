@@ -5,7 +5,12 @@ import torch
 from torch import nn
 
 from xtuner.v1.module.dispatcher import build_dispatcher
-from xtuner.v1.module.dispatcher.moonep import MoonEPDispatcher, MoonEPModelRuntime
+from xtuner.v1.module.dispatcher.moonep import (
+    MoonEPDispatcher,
+    MoonEPModelRuntime,
+    _MoonEPGradReduceJoin,
+    _MoonEPGradReduceStart,
+)
 
 
 class _Event:
@@ -287,3 +292,119 @@ def test_direct_install_failure_is_explicit_and_never_falls_back_to_staging(back
         runtime.install_after_fsdp(fsdp_root=experts)
 
     assert _Workspace.allocated[-1].destroyed
+
+
+def test_gradient_parameter_pair_is_independent_of_hook_order() -> None:
+    from xtuner.v1.module.dispatcher import moonep as moonep_integration
+
+    invocation = moonep_integration._MoonEPLayerInvocation(
+        runtime=SimpleNamespace(),
+        layer_fqn="layers.0.experts",
+        projections=(nn.Linear(3, 3), nn.Linear(3, 3)),
+        generation=0,
+        grad_slot=0,
+        defer_gradient_completion=True,
+    )
+    gradients = tuple(
+        torch.arange(12, dtype=torch.bfloat16).view(2, 2, 3) + projection
+        for projection in range(2)
+    )
+    parameters = tuple(nn.Parameter(gradient.new_zeros(gradient.shape)) for gradient in gradients)
+    for parameter, gradient in zip(parameters, gradients, strict=True):
+        parameter.grad = gradient
+
+    invocation._record_parameter_gradient(1, parameters[1])
+    invocation._record_parameter_gradient(0, parameters[0])
+
+    assert invocation._local_gradient_parameters[0] is parameters[0]
+    assert invocation._local_gradient_parameters[1] is parameters[1]
+
+    with pytest.raises(RuntimeError, match="duplicate WGrad"):
+        invocation._record_parameter_gradient(1, parameters[1])
+
+
+def test_gradient_reduce_start_reads_the_registered_pair_once() -> None:
+    from xtuner.v1.module.dispatcher import moonep as moonep_integration
+
+    class _CompletionEvent:
+        def __init__(self) -> None:
+            self.waits = 0
+
+        def wait(self) -> None:
+            self.waits += 1
+
+    local_grads = tuple(
+        torch.arange(24, dtype=torch.bfloat16).view(4, 2, 3) + projection
+        for projection in range(2)
+    )
+    fallback = tuple(gradient.clone() for gradient in local_grads)
+    parameters = tuple(nn.Parameter(gradient.new_zeros(gradient.shape)) for gradient in local_grads)
+    for parameter, gradient in zip(parameters, local_grads, strict=True):
+        parameter.grad = gradient.clone()
+
+    calls: list[tuple[torch.Tensor, torch.Tensor]] = []
+    event = _CompletionEvent()
+
+    class _Workspace:
+        def complete_gradients(self, *, local_grads, **kwargs):
+            del kwargs
+            calls.append(local_grads)
+            return local_grads[0][:2], local_grads[1][:2]
+
+    runtime = SimpleNamespace(_workspace=_Workspace(), _buffer=object())
+
+    def enqueue(operation, inputs=()):
+        del inputs
+        return operation(), event
+
+    runtime._enqueue = enqueue
+    invocation = moonep_integration._MoonEPLayerInvocation(
+        runtime=runtime,
+        layer_fqn="layers.0.experts",
+        projections=(nn.Linear(3, 3), nn.Linear(3, 3)),
+        generation=0,
+        grad_slot=0,
+        defer_gradient_completion=True,
+    )
+    invocation._plan = object()
+    invocation._home_parameters = (
+        nn.Parameter(torch.zeros_like(local_grads[0][:2])),
+        nn.Parameter(torch.zeros_like(local_grads[1][:2])),
+    )
+    invocation._fallback_gradient_targets = fallback
+
+    invocation._record_parameter_gradient(1, parameters[1])
+    invocation._record_parameter_gradient(0, parameters[0])
+    invocation._start_gradient_completion()
+
+    assert len(calls) == 1
+    assert all(actual is expected for actual, expected in zip(calls[0], fallback, strict=True))
+    assert event.waits == 0
+
+    invocation._finish_gradient_completion()
+    assert event.waits == 1
+    assert all(parameter.grad is None for parameter in parameters)
+
+
+def test_gradient_reduce_start_and_join_preserve_device_order() -> None:
+    events: list[str] = []
+
+    class _Invocation:
+        def _start_gradient_completion(self) -> None:
+            events.append("start")
+
+        def _finish_gradient_completion(self) -> None:
+            events.append("finish")
+
+    invocation = _Invocation()
+    source = torch.ones(4, requires_grad=True)
+    weight = nn.Parameter(torch.ones(4))
+    weight.register_post_accumulate_grad_hook(lambda parameter: events.append("parameter"))
+
+    joined = _MoonEPGradReduceJoin.apply(source, invocation)
+    started = _MoonEPGradReduceStart.apply(joined, invocation)
+    started.mul(weight).sum().backward()
+
+    assert joined.data_ptr() == source.data_ptr()
+    assert started.data_ptr() == source.data_ptr()
+    assert events == ["parameter", "start", "finish"]

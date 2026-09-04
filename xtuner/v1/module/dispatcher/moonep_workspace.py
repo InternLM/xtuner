@@ -13,7 +13,7 @@ import socket
 import warnings
 from collections.abc import Sequence
 from contextlib import ExitStack
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 import torch
 import torch.distributed as dist
@@ -405,7 +405,7 @@ class _ExpertVMMWorkspace:
             raise RuntimeError("MoonEP workspace has been destroyed")
         if generation not in (0, 1):
             raise ValueError(f"generation must be 0 or 1, got {generation}")
-        return self._landings[generation]
+        return cast(tuple[torch.Tensor, torch.Tensor], self._landings[generation])
 
     def local_token_counts(self, cu_seqlens: torch.Tensor) -> torch.Tensor:
         """Convert ``[E+B]`` endpoints to ``[2B]`` home/duplicate counts."""
@@ -426,7 +426,8 @@ class _ExpertVMMWorkspace:
         )
 
     def prefetch_weights(self, *, buffer, plan, generation: int, grad_slot: int):
-        """Prefetch ``[E+B]`` weights and return local ``[2B]`` weight/WGrad pairs."""
+        """Prefetch ``[E+B]`` weights and return local ``[2B]`` weight/WGrad
+        pairs."""
         if self._destroyed:
             raise RuntimeError("MoonEP workspace has been destroyed")
         if generation not in (0, 1):
@@ -453,7 +454,8 @@ class _ExpertVMMWorkspace:
         return self._local_weights[generation], grad_outputs
 
     def complete_gradients(self, *, buffer, plan, local_grads, grad_slot: int):
-        """Reduce ``[2B]`` WGrads and return their local-home ``[B]`` prefixes."""
+        """Reduce ``[2B]`` WGrads and return their local-home ``[B]``
+        prefixes."""
         if self._destroyed:
             raise RuntimeError("MoonEP workspace has been destroyed")
         if not 0 <= grad_slot < self._gradient_slots:

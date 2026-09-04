@@ -117,6 +117,18 @@ class GenericDispatcher(
         self._process_group = process_group
         self._n_routed_experts = n_routed_experts
 
+    def prepare_layer_input(
+        self,
+        layer_input: torch.Tensor,
+    ) -> tuple[torch.Tensor, object | None]:
+        """Return the layer input and optional backend ordering state.
+
+        Most dispatchers have no work to schedule before attention, so they
+        keep the identity behavior.  A backend that needs an autograd ordering
+        seam may return an opaque token for ``dispatch_preprocess``.
+        """
+        return layer_input, None
+
     @abstractmethod
     def dispatch(
         self,
@@ -146,6 +158,7 @@ class GenericDispatcher(
         # Source-logical counts are owned by Router. Post-dispatch counts have
         # a different meaning: local physical groups consumed by expert GMM.
         tokens_per_expert: torch.Tensor,
+        layer_state: object | None = None,
         async_op: bool = False,
     ) -> PreDispatch: ...
 
@@ -266,9 +279,10 @@ class NaiveDispatcher(
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
         tokens_per_expert: torch.Tensor,
+        layer_state: object | None = None,
         async_op: bool = False,
     ) -> NaivePreDispatchResult:
-        del tokens_per_expert
+        del tokens_per_expert, layer_state
         if async_op:
             if self._expert_tp is None:
                 raise NotImplementedError("Naive dispatcher async_op=True requires ExpertTP.")
