@@ -76,6 +76,12 @@ fi
 # 2. Launch Ray cluster
 # 根据 NODE_COUNT 分配 num_cpus, 防止内存OOM
 node_count=${NODE_COUNT:-1}
+expected_accelerator_count=$((node_count * ACCELERATOR_PER_NODE))
+# OPD launchers may assign a different number of Student GPUs to each node
+# after placing Teacher replicas.  Use their already-computed cluster total
+# for readiness and the submitted Trainer resource count.
+expected_accelerator_count=${XTUNER_RL_NUM_WORKERS:-$expected_accelerator_count}
+export XTUNER_RL_NUM_WORKERS=${expected_accelerator_count}
 
 if [ "$RAY_RANK" -eq 0 ]; then
   rm -rf /tmp/ray_log
@@ -105,7 +111,6 @@ fi
 
 while true; do
   result=$(ray status | grep ${ACCELERATOR} | cut -d ' ' -f2 | cut -d '/' -f2)
-  expected_accelerator_count=$((node_count * ${ACCELERATOR_PER_NODE}))
   if [ "$result" = "$expected_accelerator_count.0" ]; then
     break
   else
@@ -148,6 +153,7 @@ if [ "$RAY_RANK" -eq 0 ]; then
     "PYTORCH_CUDA_ALLOC_CONF": "${PYTORCH_CUDA_ALLOC_CONF_VALUE}",
     "LMDEPLOY_LOG_FILE": "${LMDEPLOY_LOG_FILE}",
     "XTUNER_RL_MEM_DIR": "${XTUNER_RL_MEM_DIR}",
+    "XTUNER_RL_NUM_WORKERS": "${XTUNER_RL_NUM_WORKERS}",
     "CUDA_DEVICE_MAX_CONNECTIONS": "1",
     "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN": "1",
     "SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION": "False"
@@ -160,6 +166,7 @@ EOF_JSON
        --runtime-env-json="$RUNTIME_ENV_JSON" \
        -- python xtuner/v1/train/cli/rl.py \
        --config $CONFIG_PATH \
+       --num-workers "$XTUNER_RL_NUM_WORKERS" \
        2>&1 | tee -a "$LOG_FILE"
 
   echo "训练任务提交完成。日志文件: $LOG_FILE"

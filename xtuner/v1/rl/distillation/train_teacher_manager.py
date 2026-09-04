@@ -7,7 +7,7 @@ from typing import Iterator, cast
 
 import torch
 
-from xtuner.v1.data_proto.sequence_context import DSATopKCacheState, SequenceContext
+from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.loss import LogProbConfig, LogProbContext, TopKLogProbConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.rl.loss import DistillationLossConfig
@@ -190,7 +190,6 @@ class TrainTeacherManager:
         overrides = {
             "rollout_routed_experts": None,
             "offload_rollout_routed_experts": False,
-            "dsa_topk_cache": DSATopKCacheState(),
         }
         if not is_composed:
             # A VLM tokenizer supplies 3D M-RoPE position ids for every sample,

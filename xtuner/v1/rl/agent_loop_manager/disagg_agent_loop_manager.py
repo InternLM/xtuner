@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn
+from xtuner.v1.rl.distillation import DistillationConfig
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
@@ -27,7 +28,6 @@ from .produce_utils import (
     _MANAGER_STATE_PATH,
     _STATUS_POLL_INTERVAL_S,
     _TASK_CHECKPOINT_DIR,
-    IsValidSampleFn,
     ProduceBatchResult,
     ProduceBatchStatus,
     _TaskRunner,
@@ -101,7 +101,6 @@ class DisaggAgentLoopManagerConfig(BaseModel):
                     agent_loop=agent_loop,
                     produce_strategy=produce_strategy,
                     sampler=sampler,
-                    is_valid_sample_fn=task_cfg.filter_func,
                     weight=task_cfg.weight,
                     order=order,
                 )

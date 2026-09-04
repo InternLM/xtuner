@@ -143,13 +143,11 @@ class BaseProduceContext:
         if isinstance(self.agent_loop, ray.actor.ActorHandle):
             result = await self.agent_loop.generate_group.remote(
                 rollout_state,
-                is_valid_sample_func=self.is_valid_sample_fn,
                 enable_partial_rollout=enable_partial_rollout,
             )
         else:
             result = await self.agent_loop.generate_group(
                 rollout_state,
-                is_valid_sample_func=self.is_valid_sample_fn,
                 enable_partial_rollout=enable_partial_rollout,
             )
         elapsed = time.perf_counter() - start
@@ -256,7 +254,6 @@ class _TaskRunner:
     agent_loop: AgentLoopSpec
     produce_strategy: Any
     sampler: Sampler
-    is_valid_sample_fn: IsValidSampleFn | None = None
     weight: float = 1.0
     order: int = 0
 
