@@ -77,6 +77,32 @@ from .critic_config import CriticWorkerConfig, KLRewardConfig
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
+_UINT16_CAPACITY = 1 << 16
+
+
+def _rollout_routed_experts_storage_dtype(n_routed_experts: int) -> torch.dtype:
+    """Choose a compact lossless dtype for stored routed-expert IDs."""
+    if n_routed_experts <= _UINT16_CAPACITY:
+        return torch.uint16
+    return torch.long
+
+
+def _as_rollout_routed_experts_tensor(
+    rollout_routed_experts: np.ndarray,
+    *,
+    n_routed_experts: int,
+) -> torch.Tensor:
+    """Convert finalized routed-expert IDs to their CPU storage dtype."""
+    storage_dtype = _rollout_routed_experts_storage_dtype(n_routed_experts)
+    if storage_dtype == torch.uint16 and rollout_routed_experts.dtype != np.uint16:
+        if rollout_routed_experts.size > 0:
+            min_expert_id = rollout_routed_experts.min()
+            max_expert_id = rollout_routed_experts.max()
+            if min_expert_id < 0 or max_expert_id >= _UINT16_CAPACITY:
+                raise ValueError(
+                    f"Routed-expert IDs cannot be represented as uint16: min={min_expert_id}, max={max_expert_id}"
+                )
+    return torch.as_tensor(rollout_routed_experts, dtype=storage_dtype)
 
 
 def calculate_entropy(
@@ -738,6 +764,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             if isinstance(self.config.model_cfg, BaseComposeConfig)
             else self.config.model_cfg
         )
+        storage_dtype = _rollout_routed_experts_storage_dtype(language_cfg.n_routed_experts)
 
         to_free_routed_expert_refs: list[ray.ObjectRef] = []
         if isinstance(rollout_routed_experts, list):
@@ -753,6 +780,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                             language_cfg.num_hidden_layers,
                             language_cfg.num_experts_per_tok,
                         ),
+                        dtype=storage_dtype,
                     )
                     out_rollout_routed_expert.append(rollout_routed_experts_tensor)
                 else:
@@ -782,7 +810,10 @@ class TrainingWorker(SingleAcceleratorWorker):
                             if self.sp_mesh.get_local_rank() == 0:
                                 # only free once of sp mesh
                                 to_free_routed_expert_refs.append(rollout_routed_expert_refs)
-                    rollout_routed_expert = torch.as_tensor(rollout_routed_expert, dtype=torch.long)
+                    rollout_routed_expert = _as_rollout_routed_experts_tensor(
+                        rollout_routed_expert,
+                        n_routed_experts=language_cfg.n_routed_experts,
+                    )
                     rollout_routed_expert = rollout_routed_expert.reshape(
                         -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
                     )
@@ -801,6 +832,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     language_cfg.num_hidden_layers,
                     language_cfg.num_experts_per_tok,
                 ),
+                dtype=storage_dtype,
             )
             seq_ctx.rollout_routed_experts = rollout_routed_experts_tensor
 
