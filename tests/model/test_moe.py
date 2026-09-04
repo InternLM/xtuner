@@ -145,7 +145,7 @@ class TestDistributedMoE(DeterministicDDPTestCase):
 
         loss_expected = model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})["loss"]
 
-        torch.allclose(loss_expected, loss_parallel, atol=1e-6, rtol=1e-4)
+        assert torch.allclose(loss_expected, loss_parallel, atol=1e-6, rtol=1e-4)
 
     @property
     def world_size(self) -> int:
