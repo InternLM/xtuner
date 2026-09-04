@@ -19,7 +19,6 @@ from .produce_utils import (
     _MANAGER_STATE_PATH,
     _STATUS_POLL_INTERVAL_S,
     _TASK_CHECKPOINT_DIR,
-    IsValidSampleFn,
     ProduceBatchResult,
     _TaskRunner,
     _TaskSamplerView,
@@ -162,7 +161,6 @@ class AgentLoopManagerConfig(BaseModel):
                     agent_loop=agent_loop,
                     produce_strategy=produce_strategy,
                     sampler=sampler,
-                    is_valid_sample_fn=task_cfg.filter_func,
                     weight=task_cfg.weight,
                     order=order,
                 )

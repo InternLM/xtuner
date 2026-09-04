@@ -6,7 +6,6 @@ import importlib
 import json
 import traceback
 import uuid
-from collections.abc import Callable
 from typing import Any, Literal
 
 from lagent.utils import create_object

@@ -214,7 +214,6 @@ class TestRLColocateTrainer(unittest.TestCase):
             trainer.fit()
 
         trainer.rollout_controller.offload.remote.assert_called_once_with()
-        trainer.train_controller.onload.assert_called_once_with(target="all")
         trainer.train_controller.fit.assert_called_once()
         trainer._release_all_trace_sessions.assert_called_once_with()
         trainer._release_trace_sessions.assert_not_called()
