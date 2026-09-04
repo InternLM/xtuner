@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import contextlib
 import os
 import types
 from pathlib import Path
@@ -11,7 +12,6 @@ from cyclopts import Parameter
 from pydantic import ConfigDict
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.distributed_c10d import ReduceOp
 from torch.distributed.fsdp import (
@@ -23,7 +23,7 @@ from tqdm import tqdm
 from typing_extensions import overload, override
 
 from xtuner.v1.config import FSDPConfig
-from xtuner.v1.data_proto import DSATopKCacheState, SequenceContext
+from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import (
     AuxLossConfig,
@@ -47,9 +47,8 @@ from xtuner.v1.model.base import (
 )
 from xtuner.v1.model.utils import (
     ModelForwardExtraLogInfo,
-    checkpoint_wrapper,
+    apply_activation_checkpointing,
     module_dict_repr,
-    pytree_reentrant_checkpoint,
 )
 from xtuner.v1.module import (
     GatedDeltaNetConfig,
@@ -61,8 +60,19 @@ from xtuner.v1.module import (
     NoAuxRouterConfig,
     RMSNorm,
 )
-from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
-from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer, MoEGate
+from xtuner.v1.module.decoder_layer.dense_decoder_layer import (
+    DenseDecoderLayer,
+    DenseDecoderLayerMicroBatchOutput,
+    DenseDecoderLayerOutput,
+)
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
+    MoEActFnConfig,
+    MoEBlock,
+    MoEDecoderLayer,
+    MoEDecoderLayerMicroBatchOutput,
+    MoEDecoderLayerOutput,
+    MoEGate,
+)
 from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
 from xtuner.v1.utils import (
     get_device,
@@ -81,8 +91,9 @@ DEVICE = get_device()
 logger = get_logger()
 
 
+MOE_BLOCK_FORWARD = "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward"
 MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
-    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward": TorchCompileOption(fullgraph=True),
+    MOE_BLOCK_FORWARD: TorchCompileOption(fullgraph=True),
     "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward": TorchCompileOption(fullgraph=True),
     "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._pre_moe_forward": TorchCompileOption(
         fullgraph=True
@@ -190,6 +201,10 @@ class MoE(BaseModel):
     ep_mesh: DeviceMesh | None = None
     expert_tp_mesh: DeviceMesh | None = None
     ep_tp_mesh: DeviceMesh | None = None
+    dense_decoder_layer_cls = DenseDecoderLayer
+    moe_decoder_layer_cls = MoEDecoderLayer
+    mtp_layer_cls = MTPLayer
+    mtp_block_cls = MTPBlock
 
     def __init__(self, config: MoEConfig):
         # Concrete MoE configs override build(), so validate dispatcher support
@@ -246,7 +261,7 @@ class MoE(BaseModel):
         self.rotary_emb = self.build_rotary_embedding(config)
         self.embed_tokens = self.build_embeddings(config)
         self.mtp_block = self.build_mtp_block(config) if config.mtp_config is not None else None
-        self._configure_model_specific_layer_lifecycle()
+        self._configure_model_specific_layers()
 
         self.fp32_layers = [self.rotary_emb]
 
@@ -276,8 +291,32 @@ class MoE(BaseModel):
             return async_offload_to_cpu(tensor, self.offload_stream)
         return tensor
 
-    def _configure_model_specific_layer_lifecycle(self) -> None:
+    def _configure_model_specific_layers(self) -> None:
         return
+
+    def _saved_tensors_offload_ctx(
+        self,
+        block_idx: int,
+        tensors: list[torch.Tensor],
+    ) -> contextlib.AbstractContextManager:
+        """Build one policy-neutral saved-tensor offload window.
+
+        The decoder-stack caller decides which tensors belong to the current
+        window and advances ``block_idx`` only when the list is non-empty.
+        """
+        if not tensors:
+            return contextlib.nullcontext()
+
+        data_ptrs = {tensor.data_ptr() for tensor in tensors}
+        return async_save_on_cpu(
+            h2d_stream=self.offload_stream,
+            d2h_stream=self.offload_stream,
+            block_idx=block_idx,
+            group="text",
+            custom_check_fn=lambda tensor: tensor.data_ptr() in data_ptrs,
+            prefetch=True,
+            reserve_pin_memory=True,
+        )
 
     def _z_loss_dist_token_count(
         self,
@@ -513,14 +552,6 @@ class MoE(BaseModel):
         moe_info = cast(MoEBatchForwardInfo, base_info)
         return moe_info
 
-    @staticmethod
-    def _prepare_seq_ctx_topk_cache(seq_ctx_list: Sequence[SequenceContext]) -> None:
-        # A slot owns both runtime offload state and pinned storage. TrainEngine
-        # finishes backward before the next accumulation group, so only contexts
-        # in one model call can be live concurrently and need distinct slots.
-        for offload_slot, seq_ctx in enumerate(seq_ctx_list):
-            seq_ctx.dsa_topk_cache.offload_slot = offload_slot
-
     def _micro_batch_forward(
         self,
         seq_ctx_list: list[SequenceContext],
@@ -532,7 +563,6 @@ class MoE(BaseModel):
         This method processes multiple micro-batches in parallel, similar to how MoEDecoderLayer handles micro-batching
         at the layer level.
         """
-        self._prepare_seq_ctx_topk_cache(seq_ctx_list)
         if self.config.return_hidden_states:
             raise NotImplementedError
 
@@ -587,72 +617,19 @@ class MoE(BaseModel):
         for seq_ctx in seq_ctx_list:
             self._mark_dynamic(seq_ctx)
 
-        for idx, decoder_layer in self.layers.items():
-            layer_idx = int(idx)
-
-            if layer_idx < self.config.first_k_dense_replace:
-                # Keep each micro-batch in its own SequenceContext while issuing
-                # one outer layer call, so FSDP materializes dense weights once.
-                hidden_states_list = list(
-                    decoder_layer(
-                        *hidden_states_list,
-                        position_embeddings=position_embeddings_list,
-                        seq_ctx=seq_ctx_list,
-                    )
-                )
-            else:
-                if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
-                    with async_save_on_cpu(
-                        h2d_stream=self.offload_stream,
-                        d2h_stream=self.offload_stream,
-                        block_idx=layer_idx - self.config.first_k_dense_replace,
-                        group="text",
-                        custom_check_fn=lambda x: x.data_ptr()
-                        in [hidden_states.data_ptr() for hidden_states in hidden_states_list],
-                        prefetch=True,
-                        reserve_pin_memory=True,
-                    ):
-                        layer_results = decoder_layer(
-                            *hidden_states_list,
-                            position_embeddings=position_embeddings_list,
-                            seq_ctx=seq_ctx_list,
-                        )
-                else:
-                    layer_results = decoder_layer(
-                        *hidden_states_list,
-                        position_embeddings=position_embeddings_list,
-                        seq_ctx=seq_ctx_list,
-                    )
-                hidden_states = layer_results[: len(hidden_states_list)]
-                router_logits = layer_results[len(hidden_states_list) : len(hidden_states_list) * 2]
-                router_weights = layer_results[len(hidden_states_list) * 2 : len(hidden_states_list) * 3]
-                router_topk_ids = layer_results[len(hidden_states_list) * 3 :]
-
-                # Update hidden states and (optionally) collect router logits.
-                # router_weights are only consumed by aux_loss.accumulate below, so we
-                # never stash them per-MB the way we do for logits.
-                for i, hidden_states in enumerate(hidden_states):
-                    hidden_states_list[i] = hidden_states
-                    if keep_router:
-                        router_logits_list[i][f"layer{idx}"] = self._maybe_offload_router(router_logits[i])
-
-                cat_router_weights = torch.cat(router_weights, dim=0)
-                cat_router_logits = torch.cat(router_logits, dim=0)
-                cat_router_topk_ids = torch.cat(router_topk_ids, dim=0)
-                # Pin the per-layer z-loss to MB0's hidden_states stream. With multiple MBs, only
-                # one carrier may be chosen — all MBs converge into the same total_loss backward,
-                # so MB0's path traverses every aux-loss node exactly once.
-                hidden_states_list[0] = self.aux_loss.accumulate(
-                    selected_router_weights=cat_router_weights.index_select(0, nonpad_indices).contiguous().float(),
-                    selected_router_logits=cat_router_logits.index_select(0, nonpad_indices).contiguous().float(),
-                    selected_experts=cat_router_topk_ids.index_select(0, nonpad_indices).contiguous(),
-                    hidden_states=hidden_states_list[0],
-                    balancing_ctx=balancing_ctx,
-                    z_ctx=z_ctx,
-                    num_tokens_local=non_pad_token,
-                    num_tokens_global=num_tokens_global,
-                    world_size=z_world_size,
-                )
+        hidden_states_list = self._micro_batch_decoder_stack(
+            hidden_states_list=hidden_states_list,
+            position_embeddings_list=position_embeddings_list,
+            seq_ctx_list=seq_ctx_list,
+            router_logits_list=router_logits_list,
+            keep_router=keep_router,
+            balancing_ctx=balancing_ctx,
+            z_ctx=z_ctx,
+            nonpad_indices=nonpad_indices,
+            non_pad_token=non_pad_token,
+            num_tokens_global=num_tokens_global,
+            z_world_size=z_world_size,
+        )
 
         assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
 
@@ -671,14 +648,11 @@ class MoE(BaseModel):
                         input_ids=seq_ctx.input_ids.clone() if seq_ctx.input_ids is not None else None,
                         position_ids=seq_ctx.position_ids.clone(),
                         inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
-                        dsa_topk_cache=DSATopKCacheState(
-                            offload_slot=seq_ctx.dsa_topk_cache.offload_slot,
-                        ),
                     )
                 )
 
             mtp_outputs_per_mb = self.mtp_block(
-                *hidden_states_list,
+                hidden_states_list,
                 embed_tokens_fn=self.embed_tokens,
                 position_embeddings=position_embeddings_list,
                 seq_ctx=mtp_seq_ctx_list,
@@ -693,12 +667,11 @@ class MoE(BaseModel):
 
                 micro_batch_mtp_losses = torch.tensor(0.0, device=DEVICE)
                 for mtp_idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
-                    mtp_hidden_states, mtp_router_results, _, _ = mtp_hidden
-                    mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
+                    mtp_loss, _ = self.lm_head(mtp_hidden["hidden_states"], cast(MTPLossContext, mtp_ctx))
                     micro_batch_mtp_losses += mtp_loss
 
                     if keep_router:
-                        router_logits_list[micro_batch_idx][f"mtp_layer{mtp_idx}"] = mtp_router_results
+                        router_logits_list[micro_batch_idx][f"mtp_layer{mtp_idx}"] = mtp_hidden["router_logits"]
 
                 mtp_losses += micro_batch_mtp_losses / len(mtp_loss_ctx_list)
                 has_mtp_loss = True
@@ -719,13 +692,13 @@ class MoE(BaseModel):
                 # loss already rides on, so backward traverses each MTP aux node exactly once.
                 for mtp_idx in range(self.config.mtp_config.num_layers):
                     cat_mtp_router_weights = torch.cat(
-                        [mb_outputs[mtp_idx][2] for mb_outputs in mtp_outputs_per_mb], dim=0
+                        [mb_outputs[mtp_idx]["router_weights"] for mb_outputs in mtp_outputs_per_mb], dim=0
                     )
                     cat_mtp_router_logits = torch.cat(
-                        [mb_outputs[mtp_idx][1] for mb_outputs in mtp_outputs_per_mb], dim=0
+                        [mb_outputs[mtp_idx]["router_logits"] for mb_outputs in mtp_outputs_per_mb], dim=0
                     )
                     cat_mtp_router_topk_ids = torch.cat(
-                        [mb_outputs[mtp_idx][3] for mb_outputs in mtp_outputs_per_mb], dim=0
+                        [mb_outputs[mtp_idx]["router_topk_ids"] for mb_outputs in mtp_outputs_per_mb], dim=0
                     )
                     hidden_states_list[0] = self.aux_loss.accumulate(
                         selected_router_weights=cat_mtp_router_weights.index_select(0, nonpad_indices)
@@ -783,12 +756,80 @@ class MoE(BaseModel):
                 layer_router_logits_list: list[torch.Tensor] = []
                 for micro_batch_idx in range(len(seq_ctx_list)):
                     layer_router_logits_list.append(router_logits_list[micro_batch_idx][layer_name].detach())
-                router_logits = torch.stack(layer_router_logits_list, dim=0).unsqueeze(0)
-                router_logits_dict[layer_name] = router_logits
+                router_logits_dict[layer_name] = torch.stack(layer_router_logits_list, dim=0).unsqueeze(0)
 
             output["router_logits"] = router_logits_dict
 
         return MoEModelOutputs(**output, logits=logits)
+
+    def _micro_batch_decoder_stack(
+        self,
+        *,
+        hidden_states_list: list[torch.Tensor],
+        position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
+        seq_ctx_list: list[SequenceContext],
+        router_logits_list: list[dict[str, torch.Tensor]],
+        keep_router: bool,
+        balancing_ctx: list[BalancingLossContext] | BalancingLossContext | None,
+        z_ctx: list[ZLossContext] | ZLossContext | None,
+        nonpad_indices: torch.Tensor,
+        non_pad_token: int,
+        num_tokens_global: torch.Tensor | None,
+        z_world_size: int,
+    ) -> list[torch.Tensor]:
+        """Run the main decoder stack for intra-layer micro-batches."""
+        previous_layer_results: DenseDecoderLayerMicroBatchOutput | MoEDecoderLayerMicroBatchOutput | None = None
+
+        for idx, decoder_layer in self.layers.items():
+            layer_idx = int(idx)
+            layer_results = self._call_decoder_layer(
+                decoder_layer=decoder_layer,
+                layer_idx=layer_idx,
+                hidden_states=hidden_states_list,
+                position_embeddings=position_embeddings_list,
+                seq_ctx=seq_ctx_list,
+                previous_layer_results=previous_layer_results,
+            )
+            previous_layer_results = cast(
+                DenseDecoderLayerMicroBatchOutput | MoEDecoderLayerMicroBatchOutput,
+                layer_results,
+            )
+            if layer_idx < self.config.first_k_dense_replace:
+                # Keep each micro-batch in its own SequenceContext while issuing
+                # one outer layer call, so FSDP materializes dense weights once.
+                dense_results = cast(DenseDecoderLayerMicroBatchOutput, layer_results)
+                hidden_states_list = dense_results["hidden_states"]
+                continue
+
+            layer_results = cast(MoEDecoderLayerMicroBatchOutput, layer_results)
+            hidden_states = layer_results["hidden_states"]
+            router_logits = layer_results["router_logits"]
+            router_weights = layer_results["router_weights"]
+            router_topk_ids = layer_results["router_topk_ids"]
+
+            # Router weights are consumed immediately by aux loss; only logits
+            # requested by the caller are retained per micro-batch.
+            for i, hidden_state in enumerate(hidden_states):
+                hidden_states_list[i] = hidden_state
+                if keep_router:
+                    router_logits_list[i][f"layer{idx}"] = self._maybe_offload_router(router_logits[i])
+
+            cat_router_weights = torch.cat(router_weights, dim=0)
+            cat_router_logits = torch.cat(router_logits, dim=0)
+            cat_router_topk_ids = torch.cat(router_topk_ids, dim=0)
+            hidden_states_list[0] = self.aux_loss.accumulate(
+                selected_router_weights=cat_router_weights.index_select(0, nonpad_indices).contiguous().float(),
+                selected_router_logits=cat_router_logits.index_select(0, nonpad_indices).contiguous().float(),
+                selected_experts=cat_router_topk_ids.index_select(0, nonpad_indices).contiguous(),
+                hidden_states=hidden_states_list[0],
+                balancing_ctx=balancing_ctx,
+                z_ctx=z_ctx,
+                num_tokens_local=non_pad_token,
+                num_tokens_global=num_tokens_global,
+                world_size=z_world_size,
+            )
+
+        return hidden_states_list
 
     def _forward(
         self,
@@ -796,7 +837,6 @@ class MoE(BaseModel):
         loss_ctx: MoELossContextDict | None,
         return_router_logits: bool = False,
     ) -> MoEModelOutputs:
-        self._prepare_seq_ctx_topk_cache([seq_ctx])
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
 
@@ -832,57 +872,26 @@ class MoE(BaseModel):
             output["router_weights"] = None
         self._mark_dynamic(seq_ctx)
         balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
+        balancing_ctx = cast(BalancingLossContext | None, balancing_ctx)
+        z_ctx = cast(ZLossContext | None, z_ctx)
         # Hoisted out of the per-layer accumulate path: mask is constant across layers.
         nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
         non_pad_token = nonpad_indices.numel()
         num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
 
-        for idx, decoder_layer in self.layers.items():
-            if int(idx) < self.config.first_k_dense_replace:
-                hidden_states = decoder_layer(
-                    hidden_states,
-                    position_embeddings=position_embeddings,
-                    seq_ctx=seq_ctx,
-                )
-            else:
-                if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
-                    with async_save_on_cpu(
-                        h2d_stream=self.offload_stream,
-                        d2h_stream=self.offload_stream,
-                        block_idx=int(idx),
-                        group="text",
-                        custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
-                    ):
-                        layer_results = decoder_layer(
-                            hidden_states,
-                            position_embeddings=position_embeddings,
-                            seq_ctx=seq_ctx,
-                        )
-
-                else:
-                    layer_results = decoder_layer(
-                        hidden_states,
-                        position_embeddings=position_embeddings,
-                        seq_ctx=seq_ctx,
-                    )
-                hidden_states, router_results, router_weights, router_topk_ids = layer_results
-                if keep_router:
-                    output["router_logits"][f"layer{idx}"] = self._maybe_offload_router(router_results)
-                    output["router_weights"][f"layer{idx}"] = self._maybe_offload_router(router_weights)
-                hidden_states = self.aux_loss.accumulate(
-                    selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
-                    selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
-                    selected_experts=router_topk_ids.index_select(0, nonpad_indices).contiguous(),
-                    hidden_states=hidden_states,
-                    balancing_ctx=balancing_ctx,
-                    z_ctx=z_ctx,
-                    num_tokens_local=non_pad_token,
-                    num_tokens_global=num_tokens_global,
-                    world_size=z_world_size,
-                )
-
-            if self.config.return_hidden_states:
-                output["hidden_states"].append(hidden_states)
+        hidden_states = self._decoder_stack(
+            hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
+            seq_ctx=seq_ctx,
+            output=output,
+            keep_router=keep_router,
+            balancing_ctx=balancing_ctx,
+            z_ctx=z_ctx,
+            nonpad_indices=nonpad_indices,
+            non_pad_token=non_pad_token,
+            num_tokens_global=num_tokens_global,
+            z_world_size=z_world_size,
+        )
 
         layer_hidden_states = hidden_states
         hidden_states = self.norm(hidden_states)
@@ -904,9 +913,6 @@ class MoE(BaseModel):
                 input_ids=input_ids.clone() if input_ids is not None else None,
                 position_ids=position_ids.clone(),
                 inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
-                dsa_topk_cache=DSATopKCacheState(
-                    offload_slot=seq_ctx.dsa_topk_cache.offload_slot,
-                ),
             )
             # MTP uses its own mask; main mask's non-pad indices do not apply.
             mtp_nonpad_indices = torch.nonzero(mtp_seq_ctx.mask, as_tuple=True)[1]
@@ -926,10 +932,13 @@ class MoE(BaseModel):
             # Compute MTP losses for each depth
             mtp_losses = torch.tensor(0.0, device=DEVICE)
             for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
-                mtp_hidden_states, mtp_router_results, mtp_router_weights, mtp_router_topk_ids = mtp_hidden
+                mtp_hidden_states = mtp_hidden["hidden_states"]
+                mtp_router_logits = mtp_hidden["router_logits"]
+                mtp_router_weights = mtp_hidden["router_weights"]
+                mtp_router_topk_ids = mtp_hidden["router_topk_ids"]
 
                 if keep_router:
-                    output["router_logits"][f"mtp_layer{idx}"] = mtp_router_results
+                    output["router_logits"][f"mtp_layer{idx}"] = mtp_router_logits
                     output["router_weights"][f"mtp_layer{idx}"] = mtp_router_weights
                 # Inject this MTP layer's z-loss before lm_head so backward through mtp_loss
                 # traverses the AuxLossScaler node and releases this layer's logsumexp activations.
@@ -937,7 +946,7 @@ class MoE(BaseModel):
                     selected_router_weights=mtp_router_weights.index_select(0, mtp_nonpad_indices)
                     .contiguous()
                     .float(),
-                    selected_router_logits=mtp_router_results.index_select(0, mtp_nonpad_indices).contiguous().float(),
+                    selected_router_logits=mtp_router_logits.index_select(0, mtp_nonpad_indices).contiguous().float(),
                     selected_experts=mtp_router_topk_ids.index_select(0, mtp_nonpad_indices).contiguous(),
                     hidden_states=mtp_hidden_states,
                     balancing_ctx=balancing_ctx,
@@ -975,6 +984,113 @@ class MoE(BaseModel):
 
         return MoEModelOutputs(**output)
 
+    def _decoder_stack(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        seq_ctx: SequenceContext,
+        output: dict,
+        keep_router: bool,
+        balancing_ctx: BalancingLossContext | None,
+        z_ctx: ZLossContext | None,
+        nonpad_indices: torch.Tensor,
+        non_pad_token: int,
+        num_tokens_global: torch.Tensor | None,
+        z_world_size: int,
+    ) -> torch.Tensor:
+        """Run the main decoder stack for one sequence context."""
+        previous_layer_results: DenseDecoderLayerOutput | MoEDecoderLayerOutput | None = None
+
+        for idx, decoder_layer in self.layers.items():
+            layer_idx = int(idx)
+            layer_results = self._call_decoder_layer(
+                decoder_layer=decoder_layer,
+                layer_idx=layer_idx,
+                hidden_states=hidden_states,
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+                previous_layer_results=previous_layer_results,
+            )
+            previous_layer_results = cast(DenseDecoderLayerOutput | MoEDecoderLayerOutput, layer_results)
+            if layer_idx < self.config.first_k_dense_replace:
+                dense_results = cast(DenseDecoderLayerOutput, layer_results)
+                hidden_states = dense_results["hidden_states"]
+            else:
+                layer_results = cast(MoEDecoderLayerOutput, layer_results)
+                hidden_states = layer_results["hidden_states"]
+                router_results = layer_results["router_logits"]
+                router_weights = layer_results["router_weights"]
+                router_topk_ids = layer_results["router_topk_ids"]
+                if keep_router:
+                    output["router_logits"][f"layer{idx}"] = self._maybe_offload_router(router_results)
+                    output["router_weights"][f"layer{idx}"] = self._maybe_offload_router(router_weights)
+                hidden_states = self.aux_loss.accumulate(
+                    selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
+                    selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
+                    selected_experts=router_topk_ids.index_select(0, nonpad_indices).contiguous(),
+                    hidden_states=hidden_states,
+                    balancing_ctx=balancing_ctx,
+                    z_ctx=z_ctx,
+                    num_tokens_local=non_pad_token,
+                    num_tokens_global=num_tokens_global,
+                    world_size=z_world_size,
+                )
+
+            if self.config.return_hidden_states:
+                output["hidden_states"].append(hidden_states)
+
+        return hidden_states
+
+    def _call_decoder_layer(
+        self,
+        *,
+        decoder_layer: nn.Module,
+        layer_idx: int,
+        hidden_states: torch.Tensor | list[torch.Tensor],
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
+        seq_ctx: SequenceContext | list[SequenceContext],
+        previous_layer_results: (
+            DenseDecoderLayerOutput
+            | DenseDecoderLayerMicroBatchOutput
+            | MoEDecoderLayerOutput
+            | MoEDecoderLayerMicroBatchOutput
+            | None
+        ),
+    ) -> (
+        DenseDecoderLayerOutput
+        | DenseDecoderLayerMicroBatchOutput
+        | MoEDecoderLayerOutput
+        | MoEDecoderLayerMicroBatchOutput
+    ):
+        """Call one decoder layer and contain its activation-offload window.
+
+        ``previous_layer_results`` is intentionally unused by the generic model; subclasses may
+        consume private cross-layer fields without widening the common decoder API.
+        """
+        if layer_idx < self.config.first_k_dense_replace:
+            return decoder_layer(
+                hidden_states,
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+            )
+
+        offload_tensors = list(hidden_states) if isinstance(hidden_states, list) else [hidden_states]
+        if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) != 1:
+            offload_tensors = []
+        offload_block_idx = sum(
+            self.config.first_k_dense_replace <= int(previous_idx) < layer_idx for previous_idx in self.layers
+        )
+        with self._saved_tensors_offload_ctx(
+            offload_block_idx,
+            offload_tensors,
+        ):
+            return decoder_layer(
+                hidden_states,
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+            )
+
     def build_embeddings(self, config: MoEConfig):
         return nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
 
@@ -1011,7 +1127,7 @@ class MoE(BaseModel):
                 )
 
             if layer_idx < config.first_k_dense_replace:
-                layers[str(layer_idx)] = DenseDecoderLayer(
+                layers[str(layer_idx)] = self.dense_decoder_layer_cls(
                     hidden_size=config.hidden_size,
                     intermediate_size=config.intermediate_size,
                     mlp_bias=config.mlp_bias,
@@ -1026,7 +1142,7 @@ class MoE(BaseModel):
                     layer_idx=layer_idx,
                 )
             else:
-                layers[str(layer_idx)] = MoEDecoderLayer(
+                layers[str(layer_idx)] = self.moe_decoder_layer_cls(
                     hidden_size=config.hidden_size,
                     intermediate_size=config.intermediate_size,
                     moe_intermediate_size=config.moe_intermediate_size,
@@ -1093,7 +1209,7 @@ class MoE(BaseModel):
         num_physical_layer = 1 if mtp_config.share_weights else mtp_config.num_layers
         for i in range(num_physical_layer):
             # Build MoE decoder layer for MTP
-            decoder_layer = MoEDecoderLayer(
+            decoder_layer = self.moe_decoder_layer_cls(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 moe_intermediate_size=config.moe_intermediate_size,
@@ -1124,7 +1240,7 @@ class MoE(BaseModel):
             )
 
             # Wrap decoder layer in MTPLayer
-            mtp_layer = MTPLayer(
+            mtp_layer = self.mtp_layer_cls(
                 hidden_size=config.hidden_size,
                 rms_norm_eps=config.rms_norm_eps,
                 rms_norm_type=config.rms_norm_type,
@@ -1133,7 +1249,7 @@ class MoE(BaseModel):
             )
             mtp_layers.append(mtp_layer)
 
-        return MTPBlock(
+        return self.mtp_block_cls(
             mtp_config=mtp_config,
             mtp_layers=mtp_layers,
         )
@@ -1207,6 +1323,7 @@ class MoE(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
+        checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
 
         for layer_idx, layer in tqdm(self.layers.items(), desc="[FSDP Sharding]"):
             layer_idx = int(layer_idx)
@@ -1214,7 +1331,10 @@ class MoE(BaseModel):
                 layer_idx=layer_idx,
                 mtp_idx=None,
             ):
-                layer = checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
+                layer = apply_activation_checkpointing(
+                    layer,
+                    preserve_rng_state=checkpoint_preserve_rng_state,
+                )
 
             self.layers[str(layer_idx)] = layer
             if layer_idx >= len(self.layers) - 1 and self.mtp_block is None:
@@ -1266,39 +1386,10 @@ class MoE(BaseModel):
                 if self._should_recompute(None, mtp_idx=mtp_idx) or (
                     self.config.mtp_config is not None and self.config.mtp_config.share_weights
                 ):  # share mtp head must recompute
-                    # MTP 默认使用 reentrant 的原因：
-                    #   Case 1：最小触发条件是 compile, topk offload, MTP share weights and depth > 1.
-                    #   多个 logical depth 共用 top-k cache。reentrant 的 original
-                    #   关闭 grad、replay 开启 grad，DSA 能据此正确更新 cache 计数。
-                    #   original 不建立内部图，所以 replay 可以安全复用离散 top-k。
-                    #   non-reentrant 的两次执行都开启 grad，却仍沿用该复用策略，
-                    #   因而出现 original=COMPUTE、replay=REUSE，无法重建相同清单。
-                    #
-                    #   indexer 本身始终 no_grad。不开 compile 时，多执行/少执行一次
-                    #   indexer 不会改变 eager autograd 的保存清单；开启 compile 后，
-                    #   COMPUTE/REUSE 经过不同 graph break 和 compiled block，才可能让
-                    #   checkpoint 保存槽位错位并报 different metadata。例如 original
-                    #   保存 [A, B, C]、replay 保存 [A, X, C] 时，槽位 1 的 metadata
-                    #   不同。后续若显式记录 ORIGINAL/REPLAY phase，可再让
-                    #   non-reentrant 正确推进 cache 状态。
-                    #
-                    # 使用 reentrant 时还必须用 pytree_reentrant_checkpoint：
-                    #   Case 2：触发条件是 EP > 1, intra-layer micro-batch > 1（例如 micro2）.
-                    #   micro2 传入 [embedding_0, embedding_1]；pytree 把 list 内 Tensor
-                    #   展开后，checkpoint 才能在 replay 前逐个 detach，并在 backward
-                    #   中把梯度交回原始 embedding graph。
-                    use_reentrant = self.fsdp_config.mtp_checkpoint_use_reentrant
-                    if use_reentrant:
-                        mtp_layer = checkpoint_wrapper(
-                            mtp_layer,
-                            checkpoint_impl=CheckpointImpl.REENTRANT,
-                            checkpoint_fn=pytree_reentrant_checkpoint,
-                        )
-                    else:
-                        mtp_layer = checkpoint_wrapper(
-                            mtp_layer,
-                            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-                        )
+                    mtp_layer = apply_activation_checkpointing(
+                        mtp_layer,
+                        preserve_rng_state=checkpoint_preserve_rng_state,
+                    )
                 self.mtp_block.layers[mtp_idx] = mtp_layer
 
                 reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1
@@ -1340,8 +1431,7 @@ class MoE(BaseModel):
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
         if use_moe_ep_compile_cfg(self.config):
             return MOE_EP_COMPILE_CFG
-        else:
-            return MOE_NON_EP_COMPILE_CFG
+        return MOE_NON_EP_COMPILE_CFG
 
     @property
     def need_update_bias(self) -> bool:

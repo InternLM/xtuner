@@ -125,6 +125,8 @@ class WorkerConfig(BaseModel):
             trainer seed is used. Defaults to None.
         offload_rollout_routed_experts (bool): Keep rollout routed experts on
             CPU and move each layer's slice to device during forward. Defaults to False.
+        offload_old_logprobs (bool): Keep actor old log probabilities on CPU between
+            metric computation and the optimizer step. Defaults to False.
 
     **Examples:**
 
@@ -170,6 +172,7 @@ class WorkerConfig(BaseModel):
     profile_memory: bool = False
     free_rollout_routed_experts_in_worker: bool = True  # 默认不需要用户配置
     offload_rollout_routed_experts: bool = False
+    offload_old_logprobs: bool = False
 
     # PPO. Both stay unset for group-baseline algorithms, which keep the
     # original actor-only behavior.
@@ -218,6 +221,7 @@ class WorkerTrainLogItem(TypedDict, total=False):
     step_consumed_tokens: int
     efficient_attn_ratio: float
     grad_norm: float
+    mtp_grad_parameter_coverage: float
     max_memory: float
     reserved_memory: float
     lr: float
@@ -334,6 +338,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         elif hasattr(worker_cfg.model_cfg, "mtp_config"):
             # 非 compose 模型的 mtp_config 直接放在了 model_cfg 中
             self.mtp_config = worker_cfg.model_cfg.mtp_config
+        self._mtp_trainable_parameters = (
+            [parameter for name, parameter in self._engine.model.trainable_parameters() if "mtp_block" in name]
+            if self.mtp_config is not None
+            else []
+        )
 
         self.update_weighter = WeightUpdater(
             rank=self.rank,
@@ -388,6 +397,10 @@ class TrainingWorker(SingleAcceleratorWorker):
     @ray_method
     def weight_update(self, **kwargs):
         return self.update_weighter.weight_update(**kwargs)
+
+    @ray_method
+    def has_registered_weight_checkpoint(self) -> bool:
+        return self.update_weighter.has_registered_weight_checkpoint()
 
     def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
@@ -673,6 +686,34 @@ class TrainingWorker(SingleAcceleratorWorker):
             output = self._engine.forward_only(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
             old_logprobs_list.append(output["loss"])
         return old_logprobs_list
+
+    def _maybe_offload_logprob(self, loss_ctx_list: Sequence[BaseRLLossContext]) -> None:
+        """Keep old policy logprobs on CPU between their metric and train
+        uses."""
+        if not self.config.offload_old_logprobs:
+            return
+        for loss_ctx in loss_ctx_list:
+            old_logprobs = loss_ctx.loss_kwargs.old_logprobs
+            if old_logprobs is not None:
+                loss_ctx.loss_kwargs.old_logprobs = old_logprobs.cpu()
+
+    def _maybe_onload_logprob(self, loss_ctx_list: Sequence[BaseRLLossContext]) -> None:
+        """Load old policy logprobs to the training device for one optimizer
+        group."""
+        if not self.config.offload_old_logprobs:
+            return
+        for loss_ctx in loss_ctx_list:
+            old_logprobs = loss_ctx.loss_kwargs.old_logprobs
+            if old_logprobs is not None:
+                loss_ctx.loss_kwargs.old_logprobs = old_logprobs.to(DEVICE)
+
+    def _maybe_clear_logprob(self, loss_ctx_list: Sequence[BaseRLLossContext]) -> None:
+        """Release old policy logprobs after their optimizer group is
+        consumed."""
+        if not self.config.offload_old_logprobs:
+            return
+        for loss_ctx in loss_ctx_list:
+            loss_ctx.loss_kwargs.old_logprobs = None
 
     def compute_ref_logprobs(
         self, seq_ctx_list: list[SequenceContext], shifted_labels_list: list[torch.Tensor]
@@ -975,6 +1016,12 @@ class TrainingWorker(SingleAcceleratorWorker):
             avg_kl_div = kl_div_sum / global_grad_tokens if global_grad_tokens > 0 else 0
             self.logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
 
+        # Keep old logprobs on CPU once all rollout-level metrics have consumed
+        # them. They are loaded back only for the train group that is about to
+        # run, which bounds their GPU residency by the optimizer group size.
+        self._maybe_offload_logprob(loss_ctx_list)
+        del old_logprobs_list
+
         worker_log_item["train_metrics"].extend(
             self._train_actor(
                 seq_ctx_list,
@@ -1030,7 +1077,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         """
         loss_cfg: BaseRLLossConfig = self.config.loss_cfg
         train_metrics: list[WorkerTrainLogItem] = []
-
         # compute batched loss context
         batched_loss_ctx_list: list[BaseRLLossContext] = []
         batched_mtp_loss_ctx_list: list[list[MTPLossContext]] = []
@@ -1093,6 +1139,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                     )
                 ]
 
+            self._maybe_onload_logprob(batches_loss_ctx)
+
             train_step_begin = time.perf_counter()
             with self._maybe_profiling(global_train_step, "train_step"):
                 train_step_info = self._engine.train_step(
@@ -1103,8 +1151,21 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f"Rank{self.rank} Rollout {rollout_idx} GlobalStep {global_train_step} "
                 f"train_step[{i}].engine_train_step elapsed={time.perf_counter() - train_step_begin:.4f}s"
             )
+            mtp_grad_metrics: dict[str, float] = {}
+            if self._mtp_trainable_parameters:
+                # `grad is None` is a structural signal: unlike a zero-valued grad,
+                # it means the MTP loss never reached that trainable parameter.
+                present_grad_count = sum(parameter.grad is not None for parameter in self._mtp_trainable_parameters)
+                mtp_grad_metrics = {
+                    "mtp_grad_parameter_coverage": present_grad_count / len(self._mtp_trainable_parameters),
+                }
             grad_norm = self._engine.clip_grad_norm()
             self._step_optimizer_and_scheduler(grad_norm)
+
+            # The current group will not be revisited in this fit call.
+            # Release its old-logprob references after backward and the
+            # optimizer update have both completed.
+            self._maybe_clear_logprob(batches_loss_ctx)
 
             engine_logs_info = cast(dict[str, float], train_step_info.pop("logs_info"))  # type: ignore[misc]
             engine_extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]
@@ -1128,6 +1189,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 **engine_logs_info,  # type: ignore[typeddict-item]
                 **train_step_info,
                 **extra_info_dict,
+                **mtp_grad_metrics,  # type: ignore[typeddict-item]
                 grad_norm=grad_norm.item(),
                 max_memory=max_memory,
                 reserved_memory=reserved_memory,

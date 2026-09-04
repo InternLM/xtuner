@@ -13,11 +13,12 @@ from lagent.utils import create_object
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.trace.rollout_api import trace_rollout_endpoint
 from xtuner.v1.rl.utils import create_task
 
 from ...rollout.chat_template import canonicalize_messages_for_chat_template
 from ...rollout.trace_store import get_store
-from ..agent_loop import AgentLoop, AgentLoopConfig
+from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
 from .schemas import AgentRolloutItem, RolloutStatus
 
 
@@ -243,11 +244,14 @@ class AgentInSandboxLoop(AgentLoop):
         generated_samples = asyncio.gather(*pending_tasks)
         sample_groups = await generated_samples
         samples = [sample for sample_group in sample_groups for sample in sample_group]
-        return _drop_failed_train_samples(samples, self.mode)
+        samples = _drop_failed_train_samples(samples, self.mode)
+        # Keep sample validation as the final group-generation step.
+        return maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
 
     # NOTE: A single sandbox session may yield multiple trainable segments, so this returns a list
     # rather than the base class's single RolloutState. The base contract is never exercised for
     # this loop (generate_group is the only entry point), so we override the return type here.
+    @trace_rollout_endpoint("agent_in_sandbox_loop.generate_sample")
     async def generate_sample(  # type: ignore[override]
         self, rollout_state: RolloutState, **kwargs
     ) -> list[RolloutState]:
@@ -292,7 +296,6 @@ class AgentInSandboxLoop(AgentLoop):
         if selected_agent is not None:
             rollout_state.extra_fields["agent_name"] = selected_agent.get("name")
             rollout_state.extra_fields["agent_selected"] = _to_json_safe(selected_agent)
-        rollout_state.extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
         rollout_state.extra_fields["agent_judgers"] = {
             name: record.model_dump(mode="json") for name, record in item.judgers.items()
         }
@@ -302,6 +305,7 @@ class AgentInSandboxLoop(AgentLoop):
         if item.error is not None:
             rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
         if item.status != RolloutStatus.COMPLETED:
+            rollout_state.extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
             return [rollout_state]
 
         segments = _load_train_trace_segments(item.artifacts)
@@ -350,6 +354,7 @@ class AgentInSandboxLoop(AgentLoop):
                 segment_state.response = _response_text(response_message)
             rollout_states.append(segment_state)
 
+        rollout_states[0].extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
         return rollout_states
 
     def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:

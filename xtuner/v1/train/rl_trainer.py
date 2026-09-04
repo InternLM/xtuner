@@ -33,6 +33,7 @@ from xtuner.v1.rl.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
 from xtuner.v1.rl.evaluator import EvaluatorConfig
+from xtuner.v1.rl.health_manager import RLHealthManager, _NoOpRLHealthManager
 from xtuner.v1.rl.replay_buffer import (
     AsyncReplayBufferConfig,
     SyncReplayBufferConfig,
@@ -41,6 +42,7 @@ from xtuner.v1.rl.replay_buffer import (
 )
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.rollout.worker_registry import WorkerLifecycleState
 from xtuner.v1.rl.trace import TraceConfig, close_trace, configure_trace
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
@@ -104,6 +106,60 @@ def _agent_loop_manager_uses_trace_store(
     return _agent_loop_manager_requires_rollout_proxy(cfg)
 
 
+def _migrate_manager_is_valid_sample_fn(
+    manager_cfg: AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None,
+    logger,
+) -> AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None:
+    """Move the legacy produce-strategy validity check to its task config."""
+    if manager_cfg is None:
+        return None
+
+    tasks = manager_cfg.tasks if isinstance(manager_cfg.tasks, list) else [manager_cfg.tasks]
+    migrated_tasks = []
+    changed = False
+    for task in tasks:
+        strategy_cfg = task.produce_strategy_config
+        legacy_fn = strategy_cfg.is_valid_sample_fn
+        if legacy_fn is None:
+            migrated_tasks.append(task)
+            continue
+        if task.is_valid_sample_fn is not None and task.is_valid_sample_fn is not legacy_fn:
+            raise ValueError(
+                f"Task {task.task_name!r} configures is_valid_sample_fn in both the task and its "
+                "produce strategy. Remove the deprecated produce-strategy value."
+            )
+
+        logger.warning(
+            f"Task {task.task_name!r} uses deprecated produce_strategy_config.is_valid_sample_fn; "
+            "move it to TaskSpecConfig.is_valid_sample_fn."
+        )
+        migrated_tasks.append(
+            task.model_copy(
+                update={
+                    "is_valid_sample_fn": legacy_fn,
+                    "produce_strategy_config": strategy_cfg.model_copy(update={"is_valid_sample_fn": None}),
+                }
+            )
+        )
+        changed = True
+
+    if not changed:
+        return manager_cfg
+    migrated_value = migrated_tasks if isinstance(manager_cfg.tasks, list) else migrated_tasks[0]
+    return manager_cfg.model_copy(update={"tasks": migrated_value})
+
+
+def _migrate_legacy_is_valid_sample_fn(cfg: "BaseRLTrainerConfig", logger) -> None:
+    cfg.agent_loop_manager_cfg = cast(
+        AgentLoopManagerConfig | DisaggAgentLoopManagerConfig,
+        _migrate_manager_is_valid_sample_fn(cfg.agent_loop_manager_cfg, logger),
+    )
+    cfg.eval_agent_loop_manager_cfg = cast(
+        AgentLoopManagerConfig | None,
+        _migrate_manager_is_valid_sample_fn(cfg.eval_agent_loop_manager_cfg, logger),
+    )
+
+
 def _trace_session_ids(rollout_batches: list[list[RolloutState]]) -> list[str]:
     """Return stable, unique trace session ids owned by rollout batches."""
     return list(
@@ -134,8 +190,17 @@ def bind_train_rollout(
     rollout_config: RolloutConfig,
 ) -> None:
     """Bind the training and rollout workers for update weights."""
+    # Promote pending workers to active before the regular weight update so
+    # subsequent lifecycle operations can handle them together.
+    ray.get(
+        rollout_controller.mark_worker_groups_lifecycle_state.remote(
+            source_state=WorkerLifecycleState.PENDING_WEIGHTS,
+            target_state=WorkerLifecycleState.ACTIVE,
+        ),
+        timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+    )
     targets = ray.get(
-        rollout_controller.get_weight_update_targets.remote(),  # type: ignore[attr-defined]
+        rollout_controller.get_weight_update_targets.remote(target_state=WorkerLifecycleState.ACTIVE),
         timeout=RL_TRAINER_RAY_GET_TIMEOUT,
     )
     train_controller.bind_rollout_weight_update(
@@ -650,6 +715,7 @@ class BaseRLTrainer:
         self._init_load_source(cfg)
         self._init_save_config(cfg)
         log_dir = self._init_logger(cfg, logger_tag)
+        _migrate_legacy_is_valid_sample_fn(cfg, self.logger)
         self._init_trace(cfg)
         self._save_runtime_environment(log_dir)
         self._init_train_state(cfg)
@@ -716,6 +782,15 @@ class BaseRLTrainer:
 
         env_path = log_dir / "env.json"
         environment_variables = dict(os.environ)
+        xtuner_environment = {
+            key: value for key, value in sorted(environment_variables.items()) if key.startswith("XTUNER")
+        }
+        log_str = "\n============XTuner RL Training Environment============\n"
+        for key, value in xtuner_environment.items():
+            log_str += f"{key}: {value}\n"
+        log_str += "======================================================"
+        self.logger.info(log_str)
+
         infer_engine_version = get_rollout_engine_version()
         environment_variables.update(infer_engine_version)
         with env_path.open("w") as f:
@@ -1008,10 +1083,6 @@ class BaseRLTrainer:
 
         # 共卡训练前切换资源：检查 rollout -> offload rollout -> onload train。
         if offload_rollout_before_train:
-            ray.get(
-                self.rollout_controller.check_and_shutdown_inactive_workers.remote(),
-                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
-            )
             ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         if onload_train_before_train:
             if getattr(self, "_train_nccl_suspended", False):
@@ -1514,54 +1585,20 @@ class BaseRLTrainer:
 
     def _save_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
         rewards = []
-        trajectory_items = []
+        response_len_list = []
+        valid_groups = []
 
         for group in data_groups:
             if not is_valid_for_training(group, self.logger):
                 continue
+            valid_groups.append(group)
             for data in group:
                 assert data.reward is not None
                 rewards.append(data.reward["score"])
                 response_ids = self._get_trajectory_response_ids(data)
-                response = data.response
-                if response is None and response_ids:
-                    response = self.tokenizer.decode(response_ids)
-                ground_truth = None
-                if data.reward_model is not None:
-                    ground_truth = data.reward_model.get("ground_truth")
-                response_len = len(response_ids)
-                trajectory_items.append(
-                    {
-                        "rollout_id": data.rollout_id,
-                        "group_id": data.group_id,
-                        "task_name": data.task_name,
-                        "data_source": data.data_source,
-                        "status": data.status.value if hasattr(data.status, "value") else str(data.status),
-                        "finish_reason": data.finish_reason,
-                        "error_msg": data.error_msg,
-                        "prompt": data.message,
-                        "label": ground_truth,
-                        "response": response,
-                        "reward": data.reward["score"],
-                        "prompt_len": data.num_tokens,
-                        "response_len": response_len,
-                        "reward_payload": data.reward,
-                        "agent": {
-                            "name": data.extra_fields.get("agent_name"),
-                            "selected": data.extra_fields.get("agent_selected"),
-                            "status": data.extra_fields.get("agent_status", None),
-                            "judgers": data.extra_fields.get("agent_judgers", None),
-                            "finish_info": data.extra_fields.get("agent_finish_info", None),
-                            "tool_turns": data.extra_fields.get("agent_tool_turns", None),
-                            "artifacts": data.extra_fields.get("agent_artifacts"),
-                            "messages": data.extra_fields.get("agent_messages"),
-                            "tools": data.extra_fields.get("agent_tools"),
-                        },
-                    }
-                )
+                response_len_list.append(len(response_ids))
 
         rewards_tensor = torch.tensor(rewards).float() if rewards else torch.tensor([0.0]).float()
-        response_len_list = [item["response_len"] for item in trajectory_items]
         response_lens = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
 
         with open(save_path, "w", encoding="utf-8") as f:
@@ -1578,40 +1615,32 @@ class BaseRLTrainer:
             }
             json.dump(summary, f, ensure_ascii=False, separators=(",", ":"))
             f.write("\n")
-            for item in trajectory_items:
-                json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
-                f.write("\n")
+            for group in valid_groups:
+                for data in group:
+                    assert data.reward is not None
+                    response_ids = self._get_trajectory_response_ids(data)
+                    response = data.response
+                    if response is None and response_ids:
+                        response = self.tokenizer.decode(response_ids)
+                    ground_truth = None
+                    if data.reward_model is not None:
+                        ground_truth = data.reward_model.get("ground_truth")
 
-    def _save_eval_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
-        rewards = []
-        trajectory_items = []
-
-        for group in data_groups:
-            for data in group:
-                reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
-                response = data.response or ""
-                response_ids = self._get_trajectory_response_ids(data)
-                response_len = len(response_ids)
-                rewards.append(reward)
-                ground_truth = None
-                if data.reward_model is not None:
-                    ground_truth = data.reward_model.get("ground_truth")
-                trajectory_items.append(
-                    {
+                    item = {
                         "rollout_id": data.rollout_id,
                         "group_id": data.group_id,
                         "task_name": data.task_name,
                         "data_source": data.data_source,
                         "status": data.status.value if hasattr(data.status, "value") else str(data.status),
-                        "prompt": data.message,
-                        "response": response,
-                        "prompt_len": data.num_tokens,
-                        "response_len": response_len,
-                        "label": ground_truth,
-                        "reward": reward,
-                        "reward_payload": data.reward or {"score": reward},
                         "finish_reason": data.finish_reason,
                         "error_msg": data.error_msg,
+                        "prompt": data.message,
+                        "label": ground_truth,
+                        "response": response,
+                        "reward": data.reward["score"],
+                        "prompt_len": data.num_tokens,
+                        "response_len": len(response_ids),
+                        "reward_payload": data.reward,
                         "agent": {
                             "name": data.extra_fields.get("agent_name"),
                             "selected": data.extra_fields.get("agent_selected"),
@@ -1619,15 +1648,29 @@ class BaseRLTrainer:
                             "judgers": data.extra_fields.get("agent_judgers", None),
                             "finish_info": data.extra_fields.get("agent_finish_info", None),
                             "tool_turns": data.extra_fields.get("agent_tool_turns", None),
+                            "session_id": str(data.session_id) if data.session_id is not None else None,
+                            "segment_index": data.extra_fields.get("agent_trace_segment_index"),
+                            "segment_count": data.extra_fields.get("agent_trace_segment_count"),
                             "artifacts": data.extra_fields.get("agent_artifacts"),
                             "messages": data.extra_fields.get("agent_messages"),
                             "tools": data.extra_fields.get("agent_tools"),
                         },
                     }
-                )
+                    json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
+                    f.write("\n")
+
+    def _save_eval_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
+        rewards = []
+        response_len_list = []
+
+        for group in data_groups:
+            for data in group:
+                reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
+                response_ids = self._get_trajectory_response_ids(data)
+                rewards.append(reward)
+                response_len_list.append(len(response_ids))
 
         rewards_tensor = torch.tensor(rewards).float() if rewards else torch.tensor([0.0]).float()
-        response_len_list = [item["response_len"] for item in trajectory_items]
         response_lens = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
 
         with open(save_path, "w", encoding="utf-8") as f:
@@ -1644,9 +1687,46 @@ class BaseRLTrainer:
             }
             json.dump(summary, f, ensure_ascii=False, separators=(",", ":"))
             f.write("\n")
-            for item in trajectory_items:
-                json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
-                f.write("\n")
+            for group in data_groups:
+                for data in group:
+                    reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
+                    response_ids = self._get_trajectory_response_ids(data)
+                    ground_truth = None
+                    if data.reward_model is not None:
+                        ground_truth = data.reward_model.get("ground_truth")
+
+                    item = {
+                        "rollout_id": data.rollout_id,
+                        "group_id": data.group_id,
+                        "task_name": data.task_name,
+                        "data_source": data.data_source,
+                        "status": data.status.value if hasattr(data.status, "value") else str(data.status),
+                        "prompt": data.message,
+                        "response": data.response or "",
+                        "prompt_len": data.num_tokens,
+                        "response_len": len(response_ids),
+                        "label": ground_truth,
+                        "reward": reward,
+                        "reward_payload": data.reward or {"score": reward},
+                        "finish_reason": data.finish_reason,
+                        "error_msg": data.error_msg,
+                        "agent": {
+                            "name": data.extra_fields.get("agent_name"),
+                            "selected": data.extra_fields.get("agent_selected"),
+                            "status": data.extra_fields.get("agent_status", None),
+                            "judgers": data.extra_fields.get("agent_judgers", None),
+                            "finish_info": data.extra_fields.get("agent_finish_info", None),
+                            "tool_turns": data.extra_fields.get("agent_tool_turns", None),
+                            "session_id": str(data.session_id) if data.session_id is not None else None,
+                            "segment_index": data.extra_fields.get("agent_trace_segment_index"),
+                            "segment_count": data.extra_fields.get("agent_trace_segment_count"),
+                            "artifacts": data.extra_fields.get("agent_artifacts"),
+                            "messages": data.extra_fields.get("agent_messages"),
+                            "tools": data.extra_fields.get("agent_tools"),
+                        },
+                    }
+                    json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
+                    f.write("\n")
 
     def _get_trajectory_response_ids(self, data: RolloutState) -> list[int]:
         if data.response_ids is not None:
@@ -1679,6 +1759,7 @@ class BaseRLTrainer:
 class RLColocateTrainer(BaseRLTrainer):
     _META_PATH = ".xtuner_rl_colocate_trainer"
     agent_loop_manager: AgentLoopManager
+    rl_health_manager: RLHealthManager | _NoOpRLHealthManager
 
     # 共卡保留资源切换和权重同步流程；通用保存、日志在 BaseRLTrainer。
     def __init__(self, cfg: RLColocateTrainerConfig):
@@ -1692,6 +1773,7 @@ class RLColocateTrainer(BaseRLTrainer):
         set_cpu_resource_manager(self._cpu_resource_manager)
 
         if self._debug_rollout:
+            self.rl_health_manager = _NoOpRLHealthManager()
             if self._rollout_config.skip_load_weights:
                 self.logger.info(
                     "debug_rollout cannot be used with rollout_config.skip_load_weights=True. force set skip_load_weights to False"
@@ -1713,6 +1795,7 @@ class RLColocateTrainer(BaseRLTrainer):
             checkpoint_path = self._resume_train_controller_and_state(checkpoint_path)
 
         if self._debug_train:
+            self.rl_health_manager = _NoOpRLHealthManager()
             assert self._debug_rollout_dir is not None
             self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
             self._debug_train_files = self._list_debug_rollout_files(self._debug_rollout_dir)
@@ -1729,6 +1812,12 @@ class RLColocateTrainer(BaseRLTrainer):
         self.rollout_controller = self._rollout_config.build(self._pg)
         if self._rollout_config.weight_transport_type is None:
             self._rollout_config.weight_transport_type = "ipc"
+
+        self.rl_health_manager = RLHealthManager(
+            train_controller=self.train_controller,
+            rollout_controller=self.rollout_controller,
+            rollout_config=self._rollout_config,
+        )
 
         bind_train_rollout(
             train_controller=self.train_controller,
@@ -1768,9 +1857,11 @@ class RLColocateTrainer(BaseRLTrainer):
             self.logger.info("Rollout workers updated weights from train workers.")
 
     def fit(self):
+        self.rl_health_manager.start()
         try:
             self._fit()
         finally:
+            self.rl_health_manager.stop()
             self._exp_tracker.close()
             close_trace()
 
@@ -1803,17 +1894,22 @@ class RLColocateTrainer(BaseRLTrainer):
             step_timer_dict = {}
             with timer("step", step_timer_dict):
                 # 共卡一次调用内完成生产和消费。
+                self.rl_health_manager.set_rollout_resources_available(True)
                 self.logger.info(
                     f"[Step {train_step}] start to generate rollout experience for train step {train_step} with model step {model_step}"
                 )
-                with timer("produce_batch", step_timer_dict):
-                    produce_result: ProduceBatchResult = asyncio_run(
-                        self.agent_loop_manager.produce_batch(
-                            self.train_batch_size,
-                            train_step=train_step,
-                            model_step=model_step,
+                try:
+                    with timer("produce_batch", step_timer_dict):
+                        produce_result: ProduceBatchResult = asyncio_run(
+                            self.agent_loop_manager.produce_batch(
+                                self.train_batch_size,
+                                train_step=train_step,
+                                model_step=model_step,
+                            )
                         )
-                    )
+                finally:
+                    self.rl_health_manager.set_rollout_resources_available(False)
+
                 if XTUNER_DETERMINISTIC:
                     produce_result.rollout_states = sort_rollout_state_for_deterministic(produce_result.rollout_states)
                 train_batch = produce_result.rollout_states
@@ -1898,33 +1994,29 @@ class RLColocateTrainer(BaseRLTrainer):
         timer_name = "sync_weight" if should_sync_weights else "switch_to_rollout"
         with timer(timer_name, step_timer_dict):
             if should_sync_weights:
-                ray.get(
-                    self.rollout_controller.restart_inactive_workers.remote(),
-                    timeout=RL_TRAINER_RAY_GET_TIMEOUT,
-                )
-                bind_train_rollout(
-                    train_controller=self.train_controller,
-                    rollout_controller=self.rollout_controller,
-                    rollout_config=self._rollout_config,
-                )
-
-                if self._rollout_config.weight_transport_type == "checkpoint_engine":
-                    self.train_controller.weight_update(need_register=True, need_update=False)
-                    self.train_controller.offload(target="model")
-                    ray.get(
-                        self.rollout_controller.onload_weights.remote(),
-                        timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+                with self.rl_health_manager.weight_update_guard():
+                    bind_train_rollout(
+                        train_controller=self.train_controller,
+                        rollout_controller=self.rollout_controller,
+                        rollout_config=self._rollout_config,
                     )
-                    self.train_controller.weight_update(need_register=False, need_update=True)
+                    if self._rollout_config.weight_transport_type == "checkpoint_engine":
+                        self.train_controller.weight_update(need_register=True, need_update=False)
+                        self.train_controller.offload(target="model")
+                        ray.get(
+                            self.rollout_controller.onload_weights.remote(),
+                            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+                        )
+                        self.train_controller.weight_update(need_register=False, need_update=True)
+                    else:
+                        ray.get(
+                            self.rollout_controller.onload_weights.remote(),
+                            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+                        )
+                        self.train_controller.weight_update()
+                        self.train_controller.offload(target="model")
+                    self.logger.info("Rollout workers update weights successfully in colocate mode")
 
-                else:
-                    ray.get(
-                        self.rollout_controller.onload_weights.remote(),
-                        timeout=RL_TRAINER_RAY_GET_TIMEOUT,
-                    )
-                    self.train_controller.weight_update()
-                    self.train_controller.offload(target="model")
-                self.logger.info("Rollout workers update weights successfully in colocate mode")
                 suspend_train_nccl = (
                     os.getenv(
                         "XTUNER_SUSPEND_TRAIN_NCCL_AFTER_SYNC",

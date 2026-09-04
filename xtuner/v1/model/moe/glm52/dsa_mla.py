@@ -1,13 +1,18 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Literal, cast
+from typing import Literal, TypedDict, cast
 
 import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
+from typing_extensions import NotRequired, overload
 
 from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
+from xtuner.v1.model.utils import reuse_during_recompute
+from xtuner.v1.module.attention.attn_outputs import AttnOutputs
+from xtuner.v1.module.attention.mla import MLAConfig, MultiLatentAttention, mla_apply_rotary_pos_emb
+from xtuner.v1.module.linear import build_linear
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
 from xtuner.v1.ops.sparse_mla import (
@@ -19,10 +24,21 @@ from xtuner.v1.ops.sparse_mla import (
     get_sparse_mla,
 )
 
-from ..linear import build_linear
-from .attn_outputs import AttnOutputs
-from .dsa_topk_sharing import build_dsa_topk_release_plan, dsa_topk_source_layer, get_dsa_topk_sharing_runtime
-from .mla import MLAConfig, MultiLatentAttention, mla_apply_rotary_pos_emb
+from .dsa_topk_sharing import dsa_topk_source_layer
+
+
+class GLM52AttnOutputs(AttnOutputs):
+    """GLM-5.2 attention outputs with explicit cross-layer DSA IDs."""
+
+    dsa_topk_ids: torch.Tensor
+
+
+class DSAIndexerOutput(TypedDict):
+    """Frozen indexer result; logits are reserved for a future trainable
+    path."""
+
+    dsa_topk_ids: torch.Tensor
+    dsa_topk_logits: NotRequired[torch.Tensor]
 
 
 class LayerNorm(nn.Module):
@@ -83,18 +99,14 @@ class DSAIndexer(nn.Module):
         self.k_norm = LayerNorm(index_head_dim, eps=1e-6)
         # weights_proj.weight: [index_n_heads, hidden_size]
         self.weights_proj = build_linear(hidden_size, index_n_heads, bias=False)
-        # The indexer only produces integer DSA top-k IDs under no_grad, so its
-        # parameters must not be registered with the training optimizer.
-        self.requires_grad_(False)
 
-    @torch.no_grad()
     def forward(
         self,
         hidden_states: torch.Tensor,
         q_resid: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
-    ) -> torch.Tensor:
+    ) -> DSAIndexerOutput:
         """Compute DSA top-k indices for each local query token.
 
         Shapes use ``S`` for the local sequence length and ``S_g`` for the
@@ -144,27 +156,19 @@ class DSAIndexer(nn.Module):
         # weights: [bsz, S, Ni]
         weights = self.weights_proj(hidden_states).float() * (self.index_n_heads**-0.5)
 
-        # Top-k 索引是整数，不需要梯度，所以整个 indexer 都放在 no_grad 下。
-        # 这解释了 Case 1 为什么只在 compile 下显错：
-        #   eager COMPUTE: indexer 不产生槽位 -> SparseMLA 保存 [A, B, C]
-        #   eager REUSE:   cache read 不产生槽位 -> SparseMLA 保存 [A, B, C]
-        # original/replay 虽然走了不同分支，但 checkpoint 看到的保存清单仍能对齐。
-        # compile 会把 indexer 周围的可求导计算按 compiled block 打包；COMPUTE 与
-        # REUSE 经过不同 graph break 后，可能分别保存 [A, B, C, D] 和
-        # [A, X, C, D]，同一槽位的 metadata 不同才触发 CheckpointError。
-        # 这里的字母只表示保存槽位，不表示真实变量或 Tensor 数值。
         # Index Q 按 query token 保持分片，只有 K 需要全局 gather。
         # k: [bsz, S_g, Di]
         k = gather_for_sequence_parallel(k, dim=1, sp_mesh=seq_ctx.sequence_parallel_mesh)
-        # returns topk_indices: [S, 1, K]
-        return self.dsa_topk_indices_func(
-            q,
-            k,
-            weights,
-            seq_ctx,
-            index_head_dim=self.index_head_dim,
-            index_topk=self.index_topk,
+        # The indexer contract owns dtype/layout so checkpoint reuse never needs
+        # to clone or convert the storage shared with downstream layers.
+        dsa_topk_ids = (
+            self.dsa_topk_indices_func(
+                q, k, weights, seq_ctx, index_head_dim=self.index_head_dim, index_topk=self.index_topk
+            )
+            .to(torch.int32)
+            .contiguous()
         )
+        return {"dsa_topk_ids": dsa_topk_ids}
 
 
 class DSAMLAConfig(MLAConfig):
@@ -176,6 +180,7 @@ class DSAMLAConfig(MLAConfig):
     indexer_rope_interleave: bool = True
     indexer_types: list[str] | None = None
     sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch"
+    freeze_dsa_indexer: bool = True
 
     def build(
         self,
@@ -186,6 +191,8 @@ class DSAMLAConfig(MLAConfig):
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
     ) -> "DSAMultiLatentAttention":
+        if not self.freeze_dsa_indexer:
+            raise ValueError("freeze_dsa_indexer=False is not supported until the indexer has a differentiable output")
         if self.sparse_mla_backend in ("tilelang", "cudnn_dsa"):
             ensure_tilelang_runtime_available()
         if self.sparse_mla_backend == "cudnn_dsa":
@@ -214,6 +221,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         indexer_rope_interleave: bool = True,
         indexer_types: list[str] | None = None,
         sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch",
+        freeze_dsa_indexer: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -240,19 +248,8 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         self.indexer_rope_interleave = indexer_rope_interleave
         self.indexer_types = indexer_types
         self.sparse_mla_backend = sparse_mla_backend
+        self.freeze_dsa_indexer = freeze_dsa_indexer
         self.sparse_mla_func: SparseMLAProtocol = get_sparse_mla(sparse_mla_backend)
-        if indexer_types is None:
-            self.dsa_topk_last_use, self.dsa_topk_recompute_release = {}, {}
-        else:
-            release_plan = build_dsa_topk_release_plan(
-                num_main_layers=len(indexer_types),
-                num_mtp_layers=0,
-                indexer_types=indexer_types,
-                index_skip_topk_offset=index_skip_topk_offset,
-                index_topk_freq=index_topk_freq,
-            )
-            self.dsa_topk_last_use = release_plan.forward_last_use
-            self.dsa_topk_recompute_release = release_plan.recompute_release
 
         if self.q_lora_rank is None:
             raise ValueError("DSA MLA requires q_lora_rank because the indexer consumes q_a_layernorm output.")
@@ -275,6 +272,8 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             index_topk=self.index_topk,
             indexer_backend=self.sparse_mla_backend,
         )
+        if self.freeze_dsa_indexer:
+            self.indexer.requires_grad_(False)
 
     def get_muon_split_sizes(self) -> dict[nn.Parameter, tuple[int, ...]]:
         """Return the logical row blocks used by GLM MuonSplit."""
@@ -291,7 +290,8 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
-    ) -> AttnOutputs:
+        dsa_topk_ids: torch.Tensor | None = None,
+    ) -> GLM52AttnOutputs:
         """Absorbed DSA-MLA forward for packed training (``bsz == 1``).
 
         Shapes use ``S`` for the local sequence length and ``S_g`` for the
@@ -365,21 +365,35 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         # key_states: [S_g, 1, Rkv + Dr]
         key_states = gather_for_sequence_parallel(key_states, dim=0, sp_mesh=seq_ctx.sequence_parallel_mesh)
 
-        # topk_indices: [S, 1, K]
-        topk_indices = get_dsa_topk_sharing_runtime().get_or_compute(
-            layer=self,
-            seq_ctx=seq_ctx,
-            compute_source_topk=lambda: self.indexer(
-                hidden_states,
-                q_resid,
-                position_embeddings,
-                seq_ctx,
-            ),
-        )
+        # A source layer computes IDs once; shared layers receive the same
+        # explicit tensor reference from the GLM decoder stack.
+        if dsa_topk_ids is None:
+            if not hasattr(self, "indexer"):
+                raise RuntimeError(f"DSA shared layer {self.layer_idx} requires dsa_topk_ids.")
+            if self.freeze_dsa_indexer:
+                with torch.no_grad():
+                    indexer_output = reuse_during_recompute(
+                        self.indexer,
+                        hidden_states,
+                        q_resid,
+                        position_embeddings,
+                        seq_ctx,
+                    )
+            else:
+                indexer_output = self.indexer(
+                    hidden_states,
+                    q_resid,
+                    position_embeddings,
+                    seq_ctx,
+                )
+            dsa_topk_ids = indexer_output["dsa_topk_ids"]
+        elif dsa_topk_ids.dtype != torch.int32 or not dsa_topk_ids.is_contiguous():
+            raise RuntimeError("dsa_topk_ids must be a contiguous torch.int32 tensor.")
+
         sparse_mla_outputs = self.sparse_mla_func(
             query_states,
             key_states,
-            topk_indices,
+            dsa_topk_ids,
             self.softmax_scale,
             value_dim=self.kv_lora_rank,
         )
@@ -396,4 +410,16 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             "raw_output": raw_output,
             "projected_output": projected_output,
             "softmax_lse": softmax_lse,
+            "dsa_topk_ids": dsa_topk_ids,
         }
+
+    @overload  # type: ignore
+    def __call__(  # type: ignore
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        seq_ctx: SequenceContext,
+        dsa_topk_ids: torch.Tensor | None = None,
+    ) -> GLM52AttnOutputs: ...
+
+    __call__ = nn.Module.__call__

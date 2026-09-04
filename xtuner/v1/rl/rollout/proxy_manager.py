@@ -57,8 +57,8 @@ class RolloutProxyManager(RolloutWorkerLifecycleListener):
             if worker.is_request_entrypoint:
                 self._delete_session_url(worker.session_url)
 
-    def on_worker_group_recovered(self, group: "WorkerGroup") -> None:
-        """Register recovered request entrypoints to routed API proxy."""
+    def on_worker_group_active(self, group: "WorkerGroup") -> None:
+        """Register active request entrypoints to routed API proxy."""
         for worker in group.workers:
             if worker.is_request_entrypoint:
                 self._register_session_url(worker.session_url)
