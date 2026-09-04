@@ -1,12 +1,8 @@
 import copy
 import json
-import os
-import time
-import uuid
 from functools import reduce
 from http import HTTPStatus
 from operator import add
-from pathlib import Path
 from typing import Any, List, Optional
 
 import numpy as np
@@ -25,61 +21,6 @@ FMT_ANTHROPIC = "anthropic"
 
 # Fields the SessionServer consumes locally and never forwards upstream.
 _SESSION_SERVER_ONLY_KEYS = {"session_id"}
-_raw_sse_capture_counts: dict[str, int] = {}
-
-
-def _capture_raw_sse(raw_response: bytes, *, fmt: str, upstream_status: int, request_path: str) -> None:
-    """Optionally persist exact upstream SSE bytes before response parsing.
-
-    This is opt-in and fail-open: production requests are unchanged unless
-    ``XTUNER_RAW_SSE_DIR`` is set. Metadata deliberately excludes request
-    bodies and headers (which may contain prompts or credentials).
-    """
-    directory = os.environ.get("XTUNER_RAW_SSE_DIR")
-    if not directory:
-        return
-    try:
-        max_files = int(os.environ.get("XTUNER_RAW_SSE_MAX_FILES", "64"))
-    except ValueError:
-        max_files = 64
-    if max_files <= 0:
-        return
-
-    directory = str(Path(directory).expanduser())
-    capture_number = _raw_sse_capture_counts.get(directory, 0)
-    if capture_number >= max_files:
-        return
-    _raw_sse_capture_counts[directory] = capture_number + 1
-
-    stem = f"{time.time_ns()}-{os.getpid()}-{capture_number:04d}-{uuid.uuid4().hex}"
-    root = Path(directory)
-    raw_path = root / f"{stem}.sse"
-    raw_tmp = root / f".{stem}.sse.tmp"
-    metadata_path = root / f"{stem}.meta.json"
-    metadata_tmp = root / f".{stem}.meta.json.tmp"
-    metadata = {
-        "format": fmt,
-        "upstream_status": upstream_status,
-        "request_path": request_path,
-        "byte_count": len(raw_response),
-        "captured_at_ns": time.time_ns(),
-        "pid": os.getpid(),
-    }
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-        raw_tmp.write_bytes(raw_response)
-        os.chmod(raw_tmp, 0o600)
-        os.replace(raw_tmp, raw_path)
-        metadata_tmp.write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
-        os.chmod(metadata_tmp, 0o600)
-        os.replace(metadata_tmp, metadata_path)
-    except Exception as exc:  # pragma: no cover - filesystem failures are fail-open diagnostics
-        for path in (raw_tmp, metadata_tmp):
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        get_logger().warning("Failed to persist raw SSE capture in %s: %s", directory, exc)
 
 
 def _detect_format(req_path: str) -> str:
@@ -719,13 +660,6 @@ class SessionServer:
                                 client_alive = False
 
                     raw_response = b"".join(response_chunks) if trace_enabled else b""
-                    if trace_enabled:
-                        _capture_raw_sse(
-                            raw_response,
-                            fmt=fmt,
-                            upstream_status=resp.status,
-                            request_path=req_path,
-                        )
                 else:
                     raw_response = await resp.read()
                     final_raw_response = raw_response
