@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from xtuner.v1.rl.utils.misc import find_free_ports
 from xtuner.v1.utils import get_logger
@@ -31,7 +31,6 @@ TRACE_ENV_KEYS = (
     "XTUNER_OTEL_OUTPUT_DIR",
     "XTUNER_OTEL_RUN_ID",
     "XTUNER_OTEL_RUN_DIR",
-    "XTUNER_OTEL_JSONL_PATH",
     "XTUNER_TRACE_ENABLE_ROLLOUT",
     "OTEL_TRACES_EXPORTER",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -118,6 +117,8 @@ class TraceConfig(BaseModel):
     enabled: bool = False
     output_dir: Path | str | None = Field(default=None)
     service_name: str = "xtuner-rollout"
+    external_otlp_endpoint: str | None = None
+    external_trace_jsonl_path: Path | str | None = None
     xtuner_viewer_enabled: bool = False
     xtuner_viewer_host: str = "127.0.0.1"
     xtuner_viewer_port: int = Field(default=18080, ge=0, le=65535)
@@ -131,6 +132,34 @@ class TraceConfig(BaseModel):
             return None
         return Path(value).expanduser()
 
+    @field_validator("external_otlp_endpoint")
+    @classmethod
+    def _validate_external_otlp_endpoint(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        endpoint = value.strip()
+        if not endpoint:
+            raise ValueError("external_otlp_endpoint cannot be empty")
+        return endpoint
+
+    @field_validator("external_trace_jsonl_path")
+    @classmethod
+    def _expand_external_trace_jsonl_path(cls, value: Path | str | None) -> Path | None:
+        if value is None:
+            return None
+        return Path(value).expanduser()
+
+    @model_validator(mode="after")
+    def _validate_external_collector_config(self) -> TraceConfig:
+        if self.external_trace_jsonl_path is not None and self.external_otlp_endpoint is None:
+            raise ValueError("external_trace_jsonl_path requires external_otlp_endpoint")
+        if self.xtuner_viewer_enabled and self.external_otlp_endpoint is not None:
+            if self.external_trace_jsonl_path is None:
+                raise ValueError(
+                    "xtuner_viewer_enabled with an external OTLP collector requires external_trace_jsonl_path"
+                )
+        return self
+
 
 @dataclass(frozen=True)
 class TraceRuntime:
@@ -138,7 +167,7 @@ class TraceRuntime:
     mode: TraceRuntimeMode
     run_id: str
     run_dir: Path
-    trace_jsonl_path: Path
+    trace_jsonl_path: Path | None
     service_name: str
     trace_viewer_url: str | None = None
     trace_viewer_port: int | None = None
@@ -296,6 +325,7 @@ class _TraceRuntimeHandle:
     endpoint: str
     env_vars: dict[str, str]
     collector_port: int | None = None
+    start_local_collector: bool = False
     collector: _OTelCollector | None = None
     provider: Any | None = None
     xtuner_viewer_host: str | None = None
@@ -311,9 +341,11 @@ class _TraceRuntimeHandle:
             logger.info("XTuner OTel tracing disabled.")
             return
         try:
-            if self.runtime.mode == "driver":
+            if self.runtime.mode == "driver" and self.start_local_collector:
                 if self.collector_port is None:
-                    raise RuntimeError("driver trace runtime requires a collector port")
+                    raise RuntimeError("local collector trace runtime requires a collector port")
+                if self.runtime.trace_jsonl_path is None:
+                    raise RuntimeError("local collector trace runtime requires a trace JSONL path")
                 self.collector = _OTelCollector.start(
                     port=self.collector_port,
                     output_path=self.runtime.trace_jsonl_path,
@@ -325,6 +357,8 @@ class _TraceRuntimeHandle:
                 protocol=self.env_vars["OTEL_EXPORTER_OTLP_PROTOCOL"],
             )
             if self.runtime.mode == "driver" and self.xtuner_viewer_host is not None:
+                if self.runtime.trace_jsonl_path is None:
+                    raise RuntimeError("XTuner trace viewer requires a trace JSONL path")
                 if self.xtuner_viewer_port == 0:
                     self.xtuner_viewer_port = find_free_ports(nums=1, host=self.xtuner_viewer_host)[0]
                 self.xtuner_viewer_command = _build_xtuner_viewer_command(
@@ -355,9 +389,10 @@ class _TraceRuntimeHandle:
             self.close(stop_viewer=True)
             clear_trace_env()
             raise
+        trace_source = self.runtime.trace_jsonl_path or "external collector (JSONL path not configured)"
         logger.info(
             f"XTuner OTel tracing enabled: run_id={self.runtime.run_id}, endpoint={self.endpoint}, "
-            f"traces={self.runtime.trace_jsonl_path}"
+            f"traces={trace_source}"
         )
         if self.xtuner_viewer_process is not None:
             logger.info(
@@ -422,7 +457,7 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
                 mode="disabled",
                 run_id="",
                 run_dir=Path(),
-                trace_jsonl_path=Path(),
+                trace_jsonl_path=None,
                 service_name=config.service_name,
                 trace_viewer_url=None,
                 trace_viewer_port=None,
@@ -435,24 +470,35 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
     timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
     run_id = f"{timestamp}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     run_dir = output_dir / run_id
-    traces_dir = run_dir / "traces"
-    traces_dir.mkdir(parents=True, exist_ok=True)
-    trace_jsonl_path = traces_dir / "traces.jsonl"
-    trace_jsonl_path.touch(exist_ok=True)
-
-    try:
-        port = find_free_ports(nums=1, host="127.0.0.1", start_port=4317, end_port=4318)[0]
-    except RuntimeError:
-        port = find_free_ports(nums=1, host="127.0.0.1")[0]
-    endpoint = f"http://127.0.0.1:{port}"
+    external_endpoint = config.external_otlp_endpoint
+    endpoint: str
+    trace_jsonl_path: Path | None
+    port: int | None
+    if external_endpoint is not None:
+        endpoint = external_endpoint
+        start_local_collector = False
+        trace_jsonl_path = (
+            Path(config.external_trace_jsonl_path) if config.external_trace_jsonl_path is not None else None
+        )
+        port = None
+    else:
+        traces_dir = run_dir / "traces"
+        traces_dir.mkdir(parents=True, exist_ok=True)
+        trace_jsonl_path = traces_dir / "traces.jsonl"
+        trace_jsonl_path.touch(exist_ok=True)
+        try:
+            port = find_free_ports(nums=1, host="127.0.0.1", start_port=4317, end_port=4318)[0]
+        except RuntimeError:
+            port = find_free_ports(nums=1, host="127.0.0.1")[0]
+        endpoint = f"http://127.0.0.1:{port}"
+        start_local_collector = True
     protocol = "grpc"
 
-    env_vars = {
+    env_vars: dict[str, str] = {
         "XTUNER_OTEL_ENABLED": "1",
         "XTUNER_OTEL_OUTPUT_DIR": os.fspath(output_dir),
         "XTUNER_OTEL_RUN_ID": run_id,
         "XTUNER_OTEL_RUN_DIR": os.fspath(run_dir),
-        "XTUNER_OTEL_JSONL_PATH": os.fspath(trace_jsonl_path),
         "XTUNER_TRACE_ENABLE_ROLLOUT": "1" if config.enable_rollout_trace else "0",
         "OTEL_TRACES_EXPORTER": "otlp",
         "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
@@ -474,6 +520,7 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
         endpoint=endpoint,
         env_vars=env_vars,
         collector_port=port,
+        start_local_collector=start_local_collector,
         xtuner_viewer_host=config.xtuner_viewer_host if config.xtuner_viewer_enabled else None,
         xtuner_viewer_port=config.xtuner_viewer_port,
         xtuner_viewer_jaeger_query_url=config.xtuner_viewer_jaeger_query_url,
@@ -524,14 +571,13 @@ def ensure_trace_runtime_from_env() -> bool:
     env_vars.setdefault("OTEL_TRACES_EXPORTER", "otlp")
 
     run_dir = Path(env_vars.get("XTUNER_OTEL_RUN_DIR") or Path.cwd()).expanduser()
-    trace_jsonl_path = Path(env_vars.get("XTUNER_OTEL_JSONL_PATH") or run_dir / "traces" / "traces.jsonl").expanduser()
     runtime_handle = _TraceRuntimeHandle(
         runtime=TraceRuntime(
             enabled=True,
             mode="inherited",
             run_id=env_vars.get("XTUNER_OTEL_RUN_ID", ""),
             run_dir=run_dir,
-            trace_jsonl_path=trace_jsonl_path,
+            trace_jsonl_path=None,
             service_name=env_vars.get("OTEL_SERVICE_NAME", "xtuner-rollout"),
             trace_viewer_url=None,
             trace_viewer_port=None,

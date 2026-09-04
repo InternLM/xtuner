@@ -205,6 +205,9 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
             rerolls out immediately without entering tail-batch mode, and
             ``N > 0`` waits until the expired pool contains at least ``N``
             groups before entering tail-batch mode.
+        max_pending_tasks (int | None): Maximum number of concurrently pending
+            rollout groups in one produce_batch call. Defaults to None, which
+            keeps the existing unbounded scheduling behavior.
 
     **Examples:**
 
@@ -222,6 +225,7 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
     max_staleness: int = Field(default=0, ge=0)
     max_token_staleness: int | None = Field(default=None, ge=0)
     tail_batch_trigger_size: int = Field(default=-1, ge=-1)
+    max_pending_tasks: int | None = Field(default=None, gt=0)
 
     def build(
         self,
@@ -250,6 +254,7 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
             max_token_staleness=self.max_token_staleness,
             sync_weights_interval=sync_weights_interval,
             tail_batch_trigger_size=self.tail_batch_trigger_size,
+            max_pending_tasks=self.max_pending_tasks,
             should_continue_fn=self.should_continue_fn,
         )
 
@@ -324,6 +329,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         over_sample_threshold: float,
         enable_partial_rollout: bool,
         tail_batch_trigger_size: int,
+        max_pending_tasks: int | None,
         max_staleness: int,
         max_token_staleness: int | None,
         sync_weights_interval: int,
@@ -353,6 +359,7 @@ class AsyncProduceStrategy(ProduceStrategy):
             else calculate_stale_threshold(max_token_staleness, sync_weights_interval)
         )
         self.tail_batch_trigger_size = tail_batch_trigger_size
+        self.max_pending_tasks = max_pending_tasks
         self._local_pending_tasks: set[asyncio.Task] = set()
 
     def pending_task_count(self) -> int:
@@ -419,7 +426,9 @@ class AsyncProduceStrategy(ProduceStrategy):
 
             pending_count = len(self._local_pending_tasks)
             desired_pending = max(0, scheduled_target - available)
-            if available + pending_count < scheduled_target:
+            if self.max_pending_tasks is not None:
+                desired_pending = min(desired_pending, self.max_pending_tasks)
+            if pending_count < desired_pending:
                 while len(self._local_pending_tasks) < desired_pending:
                     self._local_pending_tasks.add(await spawn_one())
 

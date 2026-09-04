@@ -108,6 +108,15 @@ class ModelForwardExtraLogInfo(dict):
             "reduced_train_policy_kl1_sum",
             "reduced_train_policy_kl3_sum",
             "reduced_train_policy_valid_count",
+            # PPO critic health: counts and sums reduced across ranks by
+            # `_finalize_critic_metrics`.
+            "reduced_critic_valid_count",
+            "reduced_critic_value_sum",
+            "reduced_critic_value_square_sum",
+            "reduced_critic_return_sum",
+            "reduced_critic_return_square_sum",
+            "reduced_critic_error_square_sum",
+            "reduced_critic_clip_count",
         )
         max_keys = ("max_ratio", "reduced_train_policy_ratio_max")
         min_keys = ("reduced_train_policy_ratio_min",)
