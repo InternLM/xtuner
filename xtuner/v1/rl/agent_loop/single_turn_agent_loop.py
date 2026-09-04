@@ -1,4 +1,4 @@
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.trace.rollout_api import trace_rollout_endpoint, trace_rollout_remote
@@ -80,10 +80,4 @@ class SingleTurnAgentLoop(AgentLoop):
             self.rollout_ctl.generate,  # type: ignore[attr-defined]
             rollout_state,
         )
-        # 非 COMPLETED 状态（如被截断、放弃等）直接早退，不触发打分
-        if rollout_state.status != Status.COMPLETED:
-            return rollout_state
-        if self.judger is not None and not self.enable_batch_judge:
-            # 如果开启了批量打分，则在 generate_group 里统一打分，不在这里逐条打分
-            rollout_state = await self.run_judger(rollout_state)
         return rollout_state

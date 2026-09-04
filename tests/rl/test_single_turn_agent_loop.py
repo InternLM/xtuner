@@ -5,6 +5,9 @@
 - batch judge 只在整组样本全部 COMPLETED 时触发。
 - batch judge 返回结果必须保持输入顺序。
 - rollout group validity check 在 batch judge 之后执行。
+- 没有 validity check 时，每条样本先算 Teacher、再进入 Judger。
+- 有 validity check 时，只有通过过滤的 rollout group 才进入 Teacher scoring。
+- 被过滤的 rollout group 不进入 Teacher scoring。
 - 组内存在 ABORTED / FAILED 等非 COMPLETED 样本时跳过 judge。
 - pause 发生在 slow judger 期间时，整组样本被标记为 ABORTED。
 """
@@ -38,14 +41,27 @@ class _RemoteGenerate:
 
 
 class _BatchJudger:
-    def __init__(self):
+    def __init__(self, events: list[str] | None = None):
         self.calls: list[list[RolloutState]] = []
+        self.events = events
 
     async def batch_judge(self, rollout_states):
+        if self.events is not None:
+            self.events.append("judge")
         self.calls.append(rollout_states)
         for state in rollout_states:
             state.reward = {"score": float(state.rollout_id)}
         return rollout_states
+
+
+class _PerSampleJudger:
+    def __init__(self, events: list[str]):
+        self.events = events
+
+    async def judge(self, rollout_state):
+        self.events.append("judge")
+        rollout_state.reward = {"score": float(rollout_state.rollout_id)}
+        return rollout_state
 
 
 class _SlowJudger:
@@ -68,7 +84,14 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
             extra_fields={},
         )
 
-    def _build_loop(self, statuses_by_uid: dict[int, Status], judger=None, is_valid_sample_fn=None):
+    def _build_loop(
+        self,
+        statuses_by_uid: dict[int, Status],
+        judger=None,
+        is_valid_sample_fn=None,
+        *,
+        enable_batch_judge: bool = True,
+    ):
         loop = SingleTurnAgentLoop.__new__(SingleTurnAgentLoop)
         rollout_ctl = MagicMock()
         rollout_ctl.generate = _RemoteGenerate(statuses_by_uid)
@@ -76,11 +99,27 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         loop.rollout_ctl = rollout_ctl
         loop.sample_params = SampleParams(max_tokens=8, temperature=0.7)
         loop.judger = judger
-        loop.enable_batch_judge = True
+        loop.enable_batch_judge = enable_batch_judge
         loop.is_valid_sample_fn = is_valid_sample_fn
+        loop.teacher_clients = {}
+        loop.data_source_teacher_map = {}
         loop._judger_pause_event = asyncio.Event()
         loop.logger = MagicMock()
         return loop
+
+    @staticmethod
+    def _bind_teacher(loop, events: list[str]):
+        teacher = MagicMock()
+
+        async def compute_logprobs(state):
+            events.append("teacher")
+            state.teacher_logprobs = [-0.5] * len(state.response_ids or [])
+            return state
+
+        teacher.compute_logprobs = AsyncMock(side_effect=compute_logprobs)
+        loop.teacher_clients = {"teacher": teacher}
+        loop.data_source_teacher_map = {"math": "teacher"}
+        return teacher
 
     def test_config_binds_validity_check_to_local_agent_loop_once(self):
         is_valid_sample_fn = MagicMock()
@@ -141,6 +180,77 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(filtered_rewards, [{"score": 1.0}, {"score": 2.0}])
         self.assertTrue(all(state.status == Status.FILTERED for state in result))
         loop.logger.info.assert_called_once()
+
+    async def test_generate_skips_teacher_scoring_for_filtered_group(self):
+        teacher = MagicMock()
+        teacher.compute_logprobs = AsyncMock()
+        loop = self._build_loop(
+            {1: Status.COMPLETED},
+            is_valid_sample_fn=lambda _samples: False,
+        )
+        loop.teacher_clients = {"teacher": teacher}
+        loop.data_source_teacher_map = {"math": "teacher"}
+        state = self._state(1)
+        state.extra_fields["origin_data_source"] = "math"
+
+        result = await loop.generate_group([state])
+
+        self.assertEqual(result[0].status, Status.FILTERED)
+        teacher.compute_logprobs.assert_not_awaited()
+
+    async def test_teacher_scoring_precedes_batch_judge_without_filter(self):
+        events: list[str] = []
+        loop = self._build_loop(
+            {1: Status.COMPLETED, 2: Status.COMPLETED},
+            judger=_BatchJudger(events),
+        )
+        teacher = self._bind_teacher(loop, events)
+        states = [self._state(1), self._state(2)]
+        for state in states:
+            state.extra_fields["origin_data_source"] = "math"
+
+        result = await loop.generate_group(states)
+
+        self.assertEqual(events.count("teacher"), 2)
+        self.assertEqual(events[-1], "judge")
+        self.assertTrue(all(state.teacher_logprobs == [-0.5] for state in result))
+        self.assertEqual(teacher.compute_logprobs.await_count, 2)
+
+    async def test_teacher_scoring_precedes_per_sample_judge_without_filter(self):
+        events: list[str] = []
+        loop = self._build_loop(
+            {1: Status.COMPLETED},
+            judger=_PerSampleJudger(events),
+            enable_batch_judge=False,
+        )
+        self._bind_teacher(loop, events)
+        state = self._state(1)
+        state.extra_fields["origin_data_source"] = "math"
+
+        result = await loop.generate_group([state])
+
+        self.assertEqual(events, ["teacher", "judge"])
+        self.assertEqual(result[0].reward, {"score": 1.0})
+
+    async def test_valid_group_is_scored_after_batch_judge_and_filter(self):
+        events: list[str] = []
+
+        def is_valid_sample_fn(_samples):
+            events.append("filter")
+            return True
+
+        loop = self._build_loop(
+            {1: Status.COMPLETED},
+            judger=_BatchJudger(events),
+            is_valid_sample_fn=is_valid_sample_fn,
+        )
+        self._bind_teacher(loop, events)
+        state = self._state(1)
+        state.extra_fields["origin_data_source"] = "math"
+
+        await loop.generate_group([state])
+
+        self.assertEqual(events, ["judge", "filter", "teacher"])
 
     async def test_batch_judge_runs_once_when_all_samples_completed_and_preserves_order(self):
         # 整组样本全部 COMPLETED 时才触发 batch judger；返回顺序必须和输入顺序一致。

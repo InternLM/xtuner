@@ -147,8 +147,4 @@ class VerlToolAgentLoop(AgentLoop):
         # raw_prompt is updated in tool_agent_loop: apply_chat_template of tools
         rollout_state.extra_fields["raw_prompt"] = self.tokenizer.decode(rollout_state.prompt_ids)
 
-        # judge rollout_state
-        if self.judger is not None:
-            rollout_state = await self.judger.judge(rollout_state)
-
         return rollout_state

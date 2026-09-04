@@ -35,16 +35,24 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
 from xtuner.v1.engine.train_engine import TrainEngine, TrainStepInfo
-from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BaseLossContext, CELossConfig, LogProbConfig
 from xtuner.v1.loss.ce_loss import CELossContext, LMHeadLossContext
 from xtuner.v1.loss.mtp_loss import MTPLossConfig, MTPLossContext
-from xtuner.v1.model.base import BaseModel as XtunerBaseModel
+from xtuner.v1.loss.utils import sp_split
 from xtuner.v1.model.base import ModelItem, TransformerConfig
-from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
+from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.profiler import profiling_memory, profiling_time
-from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, finalize_train_policy_metrics, kl_penalty
+from xtuner.v1.rl.distillation import DistillationConfig, TrainTeacherManager, TrainTeacherTimings
+from xtuner.v1.rl.loss import (
+    BaseRLLossConfig,
+    BaseRLLossContext,
+    DistillationLossConfig,
+    finalize_distillation_metrics,
+    finalize_train_policy_metrics,
+    kl_penalty,
+)
+from xtuner.v1.rl.model_utils import build_frozen_model
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
 from xtuner.v1.rl.weight_update import WeightUpdater
 from xtuner.v1.train.trainer import LoadCheckpointConfig
@@ -154,6 +162,7 @@ class WorkerConfig(BaseModel):
     profile_memory: bool = False
     free_rollout_routed_experts_in_worker: bool = True  # 默认不需要用户配置
     offload_rollout_routed_experts: bool = False
+    distillation_config: DistillationConfig | None = None
 
     # sft config
     sft_dataloader_cfg: DataloaderConfig | None = None
@@ -187,6 +196,9 @@ class WorkerInputItem(TypedDict):
     shifted_labels: torch.LongTensor
     advantages: torch.Tensor
     rollout_logprobs: torch.Tensor | None
+    teacher_logprobs: NotRequired[torch.Tensor | None]
+    target_token_ids: NotRequired[torch.Tensor | None]
+    teacher_indices: NotRequired[torch.Tensor]
 
 
 class WorkerTrainLogItem(TypedDict, total=False):
@@ -200,6 +212,10 @@ class WorkerTrainLogItem(TypedDict, total=False):
 
 class WorkerLogItem(TypedDict):
     train_entropy: float
+    teacher_timings: NotRequired[dict[str, dict[str, float]]]
+    teacher_compute_time: NotRequired[float]
+    teacher_onload_time: NotRequired[float]
+    teacher_offload_time: NotRequired[float]
     rollout_entropy: NotRequired[float]
     mismatch_metrics: NotRequired[dict[str, float]]
     rollout_is_metrics: NotRequired[dict[str, float]]
@@ -252,8 +268,16 @@ class TrainingWorker(SingleAcceleratorWorker):
             self._has_ref = True
             if worker_cfg.ref_load_from is None:
                 worker_cfg.ref_load_from = worker_cfg.load_from
-            self._ref_model = self._build_ref_model(
+            self._ref_model = build_frozen_model(
                 worker_cfg.model_cfg, worker_cfg.ref_load_from, worker_cfg.ref_model_fsdp_cfg
+            )
+
+        self._train_teacher_manager: TrainTeacherManager | None = None
+        distillation_config = worker_cfg.distillation_config
+        if distillation_config is not None and distillation_config.train_teachers:
+            self._train_teacher_manager = TrainTeacherManager(
+                distillation_config,
+                chunk_size=worker_cfg.loss_cfg.chunk_size,
             )
 
         self._optimizer_steps = worker_cfg.optimizer_steps
@@ -391,46 +415,6 @@ class TrainingWorker(SingleAcceleratorWorker):
             self.logger.info(f"The `compile_cfg` of model is {json.dumps(engine.model.compile_cfg, indent=4)}")
         return engine
 
-    def _build_ref_model(
-        self,
-        ref_model_cfg: TransformerConfig | BaseComposeConfig,
-        load_from: str | Path,
-        ref_model_fsdp_cfg: FSDPConfig | None = None,
-    ):
-        # TODO: 需要重构，使得能更优雅的兼容 mllm
-        model: BaseComposeModel | XtunerBaseModel
-        with torch.device("meta"):
-            model = ref_model_cfg.build()
-
-        if isinstance(ref_model_cfg, BaseComposeConfig):
-            assert ref_model_cfg.text_config.float8_cfg is None, "BaseComposeConfig does not support float8"
-            if ref_model_fsdp_cfg is None:
-                ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
-            model = model.fully_shard(ref_model_fsdp_cfg)
-            model.from_hf(hf_path=load_from)
-            model.eval()  # type: ignore
-        else:
-            ref_model_cfg = cast(TransformerConfig, ref_model_cfg)
-            if ref_model_cfg.float8_cfg is not None and ref_model_cfg.float8_cfg.enable_float8:
-                float8_handler = Float8Handler(
-                    scaling_granularity_gemm=ref_model_cfg.float8_cfg.scaling_granularity_gemm,
-                    scaling_granularity_grouped_gemm=ref_model_cfg.float8_cfg.scaling_granularity_grouped_gemm,
-                )
-            else:
-                float8_handler = None
-            if ref_model_fsdp_cfg is None:
-                ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
-            model = model.fully_shard(ref_model_fsdp_cfg)  # type: ignore
-
-            model.from_hf(hf_path=load_from)
-            model.eval()  # type: ignore
-            if float8_handler is not None:
-                # As the ref model is not updated, we only compute params' scales once
-                float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)  # type: ignore
-        model.to_device("cpu")  # type: ignore
-        DEVICE_MODULE.empty_cache()
-        return model
-
     def _init_data_mesh(
         self,
         sp_size: int,
@@ -482,6 +466,44 @@ class TrainingWorker(SingleAcceleratorWorker):
                 ref_logprobs_list.append(ref_output["loss"])
         self._ref_model.to_device("cpu")
         return ref_logprobs_list
+
+    def _compute_train_teacher_outputs(
+        self,
+        seq_ctx_list: list[SequenceContext],
+        teacher_indices_list: list[torch.Tensor],
+        loss_ctx_list: list[BaseRLLossContext],
+    ) -> TrainTeacherTimings:
+        self._engine.put_model_to_device("cpu")
+        self._engine.put_optimizer_to_device("cpu")
+        if hasattr(DEVICE_MODULE, "empty_cache"):
+            DEVICE_MODULE.empty_cache()
+        try:
+            assert self._train_teacher_manager is not None
+            outputs = self._train_teacher_manager.compute_logprobs(
+                seq_ctx_list=seq_ctx_list,
+                shifted_labels_list=[loss_ctx.loss_kwargs.shifted_labels for loss_ctx in loss_ctx_list],
+                teacher_indices_list=teacher_indices_list,
+            )
+            if outputs.target_token_ids is None:
+                for loss_ctx, teacher_logprobs in zip(loss_ctx_list, outputs.teacher_logprobs):
+                    loss_ctx.loss_kwargs.teacher_logprobs = teacher_logprobs
+            else:
+                for loss_ctx, token_ids, teacher_logprobs in zip(
+                    loss_ctx_list,
+                    outputs.target_token_ids,
+                    outputs.teacher_logprobs,
+                ):
+                    loss_ctx.loss_kwargs.target_token_ids = token_ids
+                    loss_ctx.loss_kwargs.teacher_logprobs = teacher_logprobs
+            return outputs.timings
+        finally:
+            if self._train_teacher_manager is not None:
+                self._train_teacher_manager.offload_all_to_cpu()
+            self._onload_actor_and_optimizer()
+
+    def _onload_actor_and_optimizer(self) -> None:
+        self._engine.put_model_to_device(DEVICE)
+        self._engine.put_optimizer_to_device(DEVICE)
 
     def _add_rollout_routed_experts(
         self, seq_ctx: SequenceContext, rollout_routed_experts: torch.Tensor | list[torch.Tensor | ray.ObjectRef]
@@ -592,6 +614,8 @@ class TrainingWorker(SingleAcceleratorWorker):
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
+        if self._train_teacher_manager is None:
+            self._onload_actor_and_optimizer()
         loss_cfg: BaseRLLossConfig = self.config.loss_cfg
         num_batches = len(data_batches)
         iters_per_step = math.ceil(num_batches / self._optimizer_steps)
@@ -604,11 +628,13 @@ class TrainingWorker(SingleAcceleratorWorker):
         # Init loss_ctx: shifted_labels, advantages, rollout_logprobs
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_list: list[BaseRLLossContext] = []
+        teacher_indices_list: list[torch.Tensor] = []
         mtp_loss_ctx_list: list[list[MTPLossContext]] = []
         prepare_inputs_begin = time.perf_counter()
         for data in data_batches:
             # update seq_ctx
             seq_ctx = data["seq_ctx"]
+            teacher_indices = data.get("teacher_indices")
             pixel_values = seq_ctx.pixel_values
             if pixel_values is not None:
                 if not isinstance(pixel_values, np.ndarray):
@@ -636,11 +662,25 @@ class TrainingWorker(SingleAcceleratorWorker):
             advantages = data["advantages"].to(DEVICE)
             rollout_logprobs = data.get("rollout_logprobs", None)
             rollout_logprobs = rollout_logprobs.to(DEVICE) if rollout_logprobs is not None else None
+            if teacher_indices is not None:
+                # Keep the full indices on the host until each SP rank selects
+                # its local slice.
+                if self.sp_mesh.size() > 1:
+                    teacher_indices = sp_split(
+                        teacher_indices,
+                        sp_mesh=self.sp_mesh,
+                        split_dim=1,
+                        padding_value=-1,
+                    )
+                teacher_indices = teacher_indices.to(DEVICE)
+                teacher_indices_list.append(teacher_indices)
             loss_ctx = loss_cfg.build(
                 data={
                     "shifted_labels": shifted_labels,
                     "advantages": advantages,
                     "rollout_logprobs": rollout_logprobs,
+                    "teacher_logprobs": data.get("teacher_logprobs", None),
+                    "target_token_ids": data.get("target_token_ids", None),
                 },
                 sp_mesh=self.sp_mesh,
             )
@@ -678,12 +718,26 @@ class TrainingWorker(SingleAcceleratorWorker):
         shifted_labels_list = [loss_ctx.loss_kwargs.shifted_labels for loss_ctx in loss_ctx_list]
         rollout_logprobs_list = [loss_ctx.loss_kwargs.rollout_logprobs for loss_ctx in loss_ctx_list]
 
+        worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
+        if self._train_teacher_manager is not None:
+            # Training-side Teachers share the training workers' devices. Keep
+            # Actor and optimizer on CPU while each frozen Teacher produces its
+            # targets, then restore Actor state for old-logprob and train forward.
+            teacher_timings = self._compute_train_teacher_outputs(
+                seq_ctx_list,
+                teacher_indices_list,
+                loss_ctx_list,
+            )
+            worker_log_item["teacher_timings"] = teacher_timings.to_dict()
+            worker_log_item["teacher_compute_time"] = teacher_timings.compute
+            worker_log_item["teacher_onload_time"] = teacher_timings.onload
+            worker_log_item["teacher_offload_time"] = teacher_timings.offload
+
         # compute old logprobs
         old_logprobs_list = self.compute_actor_logprobs(seq_ctx_list, shifted_labels_list)
         for old_logprobs, loss_ctx in zip(old_logprobs_list, loss_ctx_list):
             loss_ctx.loss_kwargs.old_logprobs = old_logprobs
 
-        worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
         logger_msg = f"Rollout {rollout_idx}: "
 
         # compute entropy
@@ -864,6 +918,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                 if isinstance(v, (torch.Tensor, int, float))
             }
             extra_info_dict = finalize_train_policy_metrics(extra_info_dict, DEVICE)
+            if isinstance(loss_cfg, DistillationLossConfig):
+                extra_info_dict = finalize_distillation_metrics(extra_info_dict, DEVICE)
             train_step_info.pop("total_loss")  # type: ignore[misc]
             max_memory = DEVICE_MODULE.max_memory_allocated() / (1024**3)  # type: ignore[attr-defined]
             reserved_memory = DEVICE_MODULE.max_memory_reserved() / (1024**3)  # type: ignore[attr-defined]
