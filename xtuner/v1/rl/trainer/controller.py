@@ -4,6 +4,7 @@ from typing import Any, Literal, TypedDict
 
 import ray
 import torch
+from typing_extensions import NotRequired
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.compose.base import BaseComposeConfig
@@ -16,12 +17,21 @@ from .worker import TrainingWorker, WorkerLogItem
 
 TRAIN_RAY_GET_TIMEOUT = os.getenv("XTUNER_TRAIN_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 
+#: Per-token tensors, shaped ``[1, seq_len]``, that must be packed and padded
+#: alongside ``shifted_labels``. Listed once here so adding a token-level signal
+#: does not require touching the packing and padding code paths separately.
+#: All are zero-padded, which is the neutral value for a reward.
+TOKEN_TENSOR_KEYS: tuple[str, ...] = ("token_rewards",)
+
 
 class ColateItem(TypedDict):
     seq_ctx: SequenceContext
     shifted_labels: torch.Tensor
-    advantage: float
+    advantage: list[float]
     rollout_logprobs: torch.Tensor | None
+    # Per-token rewards for PPO. Absent for group-baseline algorithms, whose
+    # advantages are computed trainer-side without a value function.
+    token_rewards: NotRequired[torch.Tensor]
 
 
 def _summarize_process_group_results(results: list[dict[str, Any]]) -> str:
@@ -121,6 +131,12 @@ class TrainingController:
             if "rollout_logprobs" in data_batches[0] and data_batches[0]["rollout_logprobs"] is not None:
                 rollout_logprobs_list = [data_batches[i]["rollout_logprobs"] for i in indices]
 
+            token_tensor_lists = {
+                key: [data_batches[i][key] for i in indices]
+                for key in TOKEN_TENSOR_KEYS
+                if data_batches[0].get(key) is not None
+            }
+
             if pad_len > 0:
                 # Reduce the attn calculation time by using multiple short sequence packs
                 pad_tokens = tuple(
@@ -154,6 +170,16 @@ class TrainingController:
                 seq_ctx_list.append(pad_seq_ctx)
                 label_list.append(pad_labels)
                 advantage_list.append(pad_advantages)
+                for key, tensors in token_tensor_lists.items():
+                    # Zero is the neutral padding value for a per-token reward.
+                    tensors.append(
+                        torch.zeros(
+                            1,
+                            pad_len,
+                            dtype=data_batches[0][key].dtype,
+                            device=data_batches[0][key].device,
+                        )
+                    )
                 if rollout_logprobs_list is not None:
                     pad_rollout_logprobs = torch.zeros(
                         1,
@@ -172,14 +198,15 @@ class TrainingController:
             if rollout_logprobs_list is not None:
                 rollout_logprobs = torch.cat(rollout_logprobs_list, dim=1)  # (1, max_len)
 
-            packed_data_batches.append(
-                {
-                    "seq_ctx": seq_ctx,
-                    "shifted_labels": shifted_labels,
-                    "advantages": advantages,
-                    "rollout_logprobs": rollout_logprobs,
-                }
-            )
+            packed_data = {
+                "seq_ctx": seq_ctx,
+                "shifted_labels": shifted_labels,
+                "advantages": advantages,
+                "rollout_logprobs": rollout_logprobs,
+            }
+            for key, tensors in token_tensor_lists.items():
+                packed_data[key] = torch.cat(tensors, dim=1)  # (1, max_len)
+            packed_data_batches.append(packed_data)
         return packed_data_batches
 
     def _grouped_by_max_length(self, packed_data_batches):
@@ -266,6 +293,14 @@ class TrainingController:
                 "advantages": pad_advantages,
                 "rollout_logprobs": pad_rollout_logprobs,
             }
+            for key in TOKEN_TENSOR_KEYS:
+                if packed_data_batches[0].get(key) is None:
+                    continue
+                pad_data[key] = torch.zeros(
+                    (1, pack_max_length),
+                    dtype=packed_data_batches[0][key].dtype,
+                    device="cpu",
+                )
             pad_data_samples = [pad_data for _ in range(pad_num)]
             packed_data_batches = packed_data_batches + pad_data_samples
 

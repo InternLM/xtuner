@@ -100,23 +100,29 @@ def sft_loss_fn(
     return sft_loss
 
 
-def kl_penalty(
-    logprobs: torch.Tensor, ref_logprobs: torch.Tensor, loss_weights: torch.Tensor, kl_penalty
-) -> torch.Tensor:
-    """
+def kl_divergence_per_token(logprobs: torch.Tensor, ref_logprobs: torch.Tensor, kl_penalty) -> torch.Tensor:
+    """Compute the per-token KL divergence estimate against a reference policy.
+
     Modified from https://github.com/volcengine/verl/blob/313366fd85e95ad43d567a808dd647089723a255/verl/trainer/ppo/core_algos.py#L1272
-    Compute KL divergence given logprobs and ref_logprobs.
     Copied from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1104
     See more description in http://joschu.net/blog/kl-approx.html
+
+    Args:
+        logprobs (torch.Tensor): Log probabilities of the current policy.
+        ref_logprobs (torch.Tensor): Log probabilities of the reference policy.
+        kl_penalty: Estimator name, one of ``kl``/``k1``, ``abs``,
+            ``mse``/``k2``, ``low_var_kl``/``k3``.
+
+    Returns:
+        torch.Tensor: Unweighted per-token KL estimate, shaped like ``logprobs``.
     """
     if kl_penalty in ("kl", "k1"):
-        loss = logprobs - ref_logprobs
-        # return logprobs - ref_logprobs
-    elif kl_penalty == "abs":
-        loss = (logprobs - ref_logprobs).abs()
-    elif kl_penalty in ("mse", "k2"):
-        loss = 0.5 * (logprobs - ref_logprobs).square()
-    elif kl_penalty in ("low_var_kl", "k3"):
+        return logprobs - ref_logprobs
+    if kl_penalty == "abs":
+        return (logprobs - ref_logprobs).abs()
+    if kl_penalty in ("mse", "k2"):
+        return 0.5 * (logprobs - ref_logprobs).square()
+    if kl_penalty in ("low_var_kl", "k3"):
         # J. Schulman. Approximating kl divergence, 2020.
         # # URL http://joschu.net/blog/kl-approx.html.
         kl = ref_logprobs - logprobs
@@ -124,8 +130,24 @@ def kl_penalty(
         kl = torch.clamp(kl, min=-20, max=20)
         ratio = torch.exp(kl)
         kld = (ratio - kl - 1).contiguous()
-        loss = torch.clamp(kld, min=-10, max=10)
-    else:
-        raise NotImplementedError
+        return torch.clamp(kld, min=-10, max=10)
+    raise NotImplementedError
 
+
+def kl_penalty(
+    logprobs: torch.Tensor, ref_logprobs: torch.Tensor, loss_weights: torch.Tensor, kl_penalty
+) -> torch.Tensor:
+    """Compute the globally calibrated KL penalty term added to the RL loss.
+
+    Args:
+        logprobs (torch.Tensor): Log probabilities of the current policy.
+        ref_logprobs (torch.Tensor): Log probabilities of the reference policy.
+        loss_weights (torch.Tensor): Per-token weights, normally the KL
+            coefficient divided by the global gradient-token count.
+        kl_penalty: Estimator name; see :func:`kl_divergence_per_token`.
+
+    Returns:
+        torch.Tensor: Scalar weighted KL penalty.
+    """
+    loss = kl_divergence_per_token(logprobs, ref_logprobs, kl_penalty)
     return (loss * loss_weights.to(loss.dtype)).sum()

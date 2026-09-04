@@ -13,6 +13,7 @@ from lagent.utils import create_object
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.trace.rollout_api import trace_rollout_endpoint
 from xtuner.v1.rl.utils import create_task
 
 from ...rollout.chat_template import canonicalize_messages_for_chat_template
@@ -250,6 +251,7 @@ class AgentInSandboxLoop(AgentLoop):
     # NOTE: A single sandbox session may yield multiple trainable segments, so this returns a list
     # rather than the base class's single RolloutState. The base contract is never exercised for
     # this loop (generate_group is the only entry point), so we override the return type here.
+    @trace_rollout_endpoint("agent_in_sandbox_loop.generate_sample")
     async def generate_sample(  # type: ignore[override]
         self, rollout_state: RolloutState, **kwargs
     ) -> list[RolloutState]:
