@@ -87,7 +87,7 @@ on:
           If true, skip ``pip install -e .`` in train jobs (use when the image
           already contains a preinstalled xtuner).
         type: boolean
-        default: false
+        default: true
       runner_label:
         required: false
         description: >-
