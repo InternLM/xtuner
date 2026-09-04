@@ -67,6 +67,34 @@ on:
           If true, keep the cluster job alive after install for interactive debug.
         type: boolean
         default: false
+      clusterx_partition:
+        required: false
+        description: >-
+          clusterx partition (yidian group), e.g. llmrazor_gpu.
+          Empty uses llmrazor_gpu.
+        type: string
+        default: 'llmrazor_gpu'
+      clusterx_project_name:
+        required: false
+        description: >-
+          clusterx project namespace, e.g. ailab-llmrazor.
+          Empty uses ailab-llmrazor.
+        type: string
+        default: 'ailab-llmrazor'
+      skip_xtuner_install:
+        required: false
+        description: >-
+          If true, skip ``pip install -e .`` in train jobs (use when the image
+          already contains a preinstalled xtuner).
+        type: boolean
+        default: false
+      runner_label:
+        required: false
+        description: >-
+          GitHub Actions runner label for the ETE job.
+          Default is h_cluster_ete.
+        type: string
+        default: 'h_cluster_ete'
   schedule:
     - cron: '0 9 * * 5'  # Friday 17:00 UTC+8
 
@@ -146,20 +174,22 @@ jobs:
         !inputs.build_only &&
         (needs.build_image.result == 'success' || inputs.skip_build)
       }}
-    runs-on: [h_cluster_ete]
+    runs-on: ${{ github.event.inputs.runner_label || 'h_cluster_ete' }}
     timeout-minutes: 1440
     env:
       CI_ETE_TRAIN_IMAGE: >-
         ${{
           inputs.skip_build
           && format(
-            '{0}/ailab-llmrazor/{1}:{2}',
-            secrets.CI_GPU_IMAGE_REGISTRY,
+            'ailab-llmrazor/{0}:{1}',
             inputs.image_repo_short || 'xtuner',
             inputs.image_tag
           )
-          || needs.build_image.outputs.docker_tag
+          || needs.build_image.outputs.short_docker_tag
         }}
+      CI_ETE_CLUSTERX_PARTITION: ${{ github.event.inputs.clusterx_partition || 'llmrazor_gpu' }}
+      CI_ETE_CLUSTERX_PROJECT_NAME: ${{ github.event.inputs.clusterx_project_name || 'ailab-llmrazor' }}
+      CI_ETE_SKIP_XTUNER_INSTALL: ${{ github.event.inputs.skip_xtuner_install }}
     steps:
       - name: Validate inputs
         if: ${{ inputs.skip_build }}
@@ -173,7 +203,7 @@ jobs:
         run: sudo git clean -ffdx
 
       - name: Clone repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.event.inputs.repo_org || 'InternLM/xtuner' }}
           ref: ${{ github.event.inputs.repo_ref || 'main' }}
@@ -185,6 +215,10 @@ jobs:
             echo ""
             echo "- Workflow run: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
             echo "- Train image: \`${{ env.CI_ETE_TRAIN_IMAGE }}\`"
+            echo "- clusterx partition: \`${{ env.CI_ETE_CLUSTERX_PARTITION }}\`"
+            echo "- clusterx project: \`${{ env.CI_ETE_CLUSTERX_PROJECT_NAME }}\`"
+            echo "- runner label: \`${{ github.event.inputs.runner_label || 'h_cluster_ete' }}\`"
+            echo "- skip xtuner install: \`${{ env.CI_ETE_SKIP_XTUNER_INSTALL }}\`"
             echo "- Reports: [ete/${{ github.run_id }}](${{ env.CI_REPORTS_BROWSE_URL_BASE }}/${{ github.run_id }})"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
@@ -195,12 +229,19 @@ jobs:
           CI_REPORTS_RAW_URL_BASE: ${{ env.CI_REPORTS_RAW_URL_BASE }}
           CI_E2E_DEBUG: ${{ github.event.inputs.CI_E2E_DEBUG || 'false' }}
           CI_ETE_TRAIN_IMAGE: ${{ env.CI_ETE_TRAIN_IMAGE }}
+          CI_ETE_CLUSTERX_PARTITION: ${{ env.CI_ETE_CLUSTERX_PARTITION }}
+          CI_ETE_CLUSTERX_PROJECT_NAME: ${{ env.CI_ETE_CLUSTERX_PROJECT_NAME }}
+          CI_ETE_SKIP_XTUNER_INSTALL: ${{ env.CI_ETE_SKIP_XTUNER_INSTALL }}
         run: |
-          source /mnt/shared-storage-user/opencompass-shared/qa-llm-cicd/miniconda3/bin/activate
+          source /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/miniconda3/bin/activate
           conda activate clusterx
           conda env list
           unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
           echo "Using train image: ${CI_ETE_TRAIN_IMAGE}"
+          echo "clusterx partition: ${CI_ETE_CLUSTERX_PARTITION}"
+          echo "clusterx project: ${CI_ETE_CLUSTERX_PROJECT_NAME}"
+          echo "runner label: ${{ github.event.inputs.runner_label || 'h_cluster_ete' }}"
+          echo "skip xtuner install: ${CI_ETE_SKIP_XTUNER_INSTALL:-false}"
           CASE_INPUT="${{ github.event.inputs.run_case || 'all' }}"
           PARALLEL_INPUT="${{ github.event.inputs.parallel || '4' }}"
           PYTEST_NODES=()
