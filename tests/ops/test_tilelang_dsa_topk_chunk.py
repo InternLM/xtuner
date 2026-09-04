@@ -136,7 +136,8 @@ def test_indexer_forwards_query_chunk_to_selector():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("query_chunk_size", [None, 4, 3])
 def test_query_chunk_orchestration_preserves_boundaries(monkeypatch, query_chunk_size):
-    """Exercise chunk boundaries without compiling the opaque TileLang kernel."""
+    """Exercise chunk boundaries without compiling the opaque TileLang
+    kernel."""
 
     calls = []
 

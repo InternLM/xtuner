@@ -145,8 +145,6 @@ def tilelang_dsa_topk_indices(
     index_topk: int,
     query_chunk_size: int | None = None,
 ) -> torch.Tensor:
-    _, _, index_n_heads, _ = q.shape
-
     """Select fixed-ID Top-K supports, optionally bounded by query chunks.
 
     ``query_chunk_size=None`` keeps a single selector launch; a non-aligned
@@ -166,6 +164,8 @@ def tilelang_dsa_topk_indices(
     Returns:
         torch.Tensor: Contiguous int32 IDs shaped ``(S, 1, min(index_topk, S_k))``.
     """
+
+    _, _, index_n_heads, _ = q.shape
 
     if query_chunk_size is not None and (
         isinstance(query_chunk_size, bool) or not isinstance(query_chunk_size, int) or query_chunk_size <= 0

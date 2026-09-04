@@ -303,7 +303,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         self.freeze_dsa_indexer = freeze_dsa_indexer
         _validate_query_chunk_size(
             indexer_topk_query_chunk_size,
-            sparse_mla_backend,
+            self.indexer_backend,
             field_name="indexer_topk_query_chunk_size",
         )
         self.indexer_topk_query_chunk_size = indexer_topk_query_chunk_size

@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-
 """Recipe-level default for GLM-5.2 Indexer query chunking."""
 
 DEFAULT_INDEXER_TOPK_QUERY_CHUNK_SIZE = 8192
