@@ -59,7 +59,7 @@ class Dense(BaseModel):
         super().__init__(config)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, type=config.rms_norm_type)
-        self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = self.build_head(config)
         self.layers = self.build_layers(config)
         self.rotary_emb = self.build_rotary_embedding(config)
         self.embed_tokens = self.build_embeddings(config)
@@ -124,6 +124,20 @@ class Dense(BaseModel):
 
     def build_embeddings(self, config: TransformerConfig):
         return nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
+
+    def build_head(self, config: TransformerConfig) -> LMHead:
+        """Build the output head.
+
+        Args:
+            config (TransformerConfig): Model configuration.
+
+        Returns:
+            LMHead: A scalar value head when the config requests one (RL
+            critic), otherwise the vocabulary head.
+        """
+        from xtuner.v1.model.value import build_lm_or_value_head
+
+        return build_lm_or_value_head(config)
 
     def build_layers(self, config: TransformerConfig) -> nn.ModuleDict:
         # 让 layers 是一个 nn.ModuleDict 方便做 pipeline parallel 的参数切分，
