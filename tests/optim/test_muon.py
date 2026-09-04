@@ -476,8 +476,13 @@ class TestMuonFSDP(DeterministicDDPTestCase):
     def world_size(self) -> int:
         return 4
 
-    @parametrize.parametrize("enable_all2all", [True, False])
-    def test_muon_fsdp_matches_reference(self, enable_all2all: bool):
+    @parametrize.parametrize(
+        "enable_all2all,remainder_strategy",
+        [(True, "agrs"), (False, "agrs"), (True, "pad_all2all")],
+    )
+    def test_muon_fsdp_matches_reference(
+        self, enable_all2all: bool, remainder_strategy: Literal["agrs", "pad_all2all"]
+    ):
         """One Muon step on a fully-sharded model must match the single-process
         reference for every parameter, across all param categories.
 
@@ -536,7 +541,13 @@ class TestMuonFSDP(DeterministicDDPTestCase):
 
         # ── Production Muon optimizer step ────────────────────────────────────
         muon_config = MuonConfig(
-            lr=LR, momentum=MU, weight_decay=WD, eps=EPSILON, betas=BETAS, enable_all2all=enable_all2all
+            lr=LR,
+            momentum=MU,
+            weight_decay=WD,
+            eps=EPSILON,
+            betas=BETAS,
+            enable_all2all=enable_all2all,
+            remainder_strategy=remainder_strategy,
         )
         optim = muon_config.build(model)
         optim.step()
