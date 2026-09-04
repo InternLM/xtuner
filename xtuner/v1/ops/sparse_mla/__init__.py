@@ -50,6 +50,7 @@ def dsa_topk_indices(
     *,
     index_head_dim: int,
     index_topk: int,
+    query_chunk_size: int | None = None,
     backend: SparseMLABackend = "torch",
 ) -> torch.Tensor:
     return get_dsa_topk_indices(backend)(
@@ -59,6 +60,7 @@ def dsa_topk_indices(
         seq_ctx,
         index_head_dim=index_head_dim,
         index_topk=index_topk,
+        query_chunk_size=query_chunk_size,
     )
 
 
