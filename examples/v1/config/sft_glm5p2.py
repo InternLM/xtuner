@@ -1,4 +1,5 @@
 import os
+from typing import Literal, cast
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig, MuonConfig
 from xtuner.v1.datasets import OpenaiTokenizeFunctionConfig
@@ -52,6 +53,16 @@ model_cfg.ep_size = ep_size
 model_cfg.compile_cfg = _get_bool_env("MODEL_COMPILE", False)
 model_cfg.float8_cfg = _get_float8_config()
 model_cfg.lm_loss_cfg = loss_cfg
+if model_cfg.mtp_config is not None:
+    # GLM-5.2 uses the joint multi-step TV objective with rejection-sampling
+    # verification: https://z.ai/blog/glm-5.2. CE remains the compatibility
+    # default; opt in with MTP_LOSS_TYPE=e2e_tv.
+    mtp_loss_type = os.environ.get("MTP_LOSS_TYPE", "ce")
+    if mtp_loss_type not in ("ce", "e2e_tv"):
+        raise ValueError(f"Unsupported MTP_LOSS_TYPE={mtp_loss_type!r}. Use ce or e2e_tv.")
+    model_cfg.mtp_config.loss_type = cast(Literal["ce", "e2e_tv"], mtp_loss_type)
+    model_cfg.mtp_config.loss_scaling_factor = float(os.environ.get("MTP_LOSS_WEIGHT", "0.1"))
+    model_cfg.mtp_config.tv_loss_chunk_size = int(os.environ.get("MTP_TV_LOSS_CHUNK_SIZE", "128"))
 if hasattr(model_cfg.attention, "sparse_mla_backend"):
     model_cfg.attention.sparse_mla_backend = os.environ.get("SPARSE_MLA_BACKEND", "tilelang")
 
