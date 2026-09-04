@@ -36,6 +36,154 @@ default_config:
                 - HF_HUB_OFFLINE=1
 
 case: 
+   
+    qwen3-5-rl-lmdeploy-grpo-sp4:
+        -
+            type: rl
+            parameters:
+                config: autotest/config/rl_qwen3p5_35B_grpo_sp4.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
+                    - GEO3K_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k/train.jsonl
+                    - GEO3K_EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k/test.jsonl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
+            assert_info:
+                base_metric: qwen3-5-rl-lmdeploy-grpo-sp4/tracker.jsonl
+                check_metrics:
+                    -
+                       metric:  eval/accuracy
+                       threshold: 0.1
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 20
+                       method: absolute
+                       operator: <
+            timeout: 7200
+
+    glm5-2-rl-lmdeploy-fp8-mtp4-resume:
+        -
+            type: rl
+            phase: first
+            parameters:
+                config: autotest/config/rl_glm5p2_fp8_mtp4_resume.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                memory_per_task: 1200
+                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_GC_ENABLE=1
+            assert_info:
+                base_metric: glm5-2-rl-lmdeploy-fp8-mtp4-resume/tracker.jsonl
+                check_metrics:
+                    -
+                       metric:  eval/accuracy
+                       threshold: 0.1
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 45
+                       method: absolute
+                       operator: <
+            timeout: 7200
+
+        -
+            type: rl
+            phase: resume
+            pre_action:
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output glm5-2-rl-lmdeploy-fp8-mtp4-resume rl'
+            parameters:
+                config: autotest/config/rl_glm5p2_fp8_mtp4_resume.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                memory_per_task: 1200
+                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_GC_ENABLE=1
+            assert_info:
+                base_metric: glm5-2-rl-lmdeploy-fp8-mtp4-resume/tracker-resume.jsonl
+                check_metrics:
+                    -
+                       metric:  eval/accuracy
+                       threshold: 0.1
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.001
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 20
+                       method: absolute
+                       operator: <
+            timeout: 7200
     
     glm5-2-rl-lmdeploy-grpo:
         -
