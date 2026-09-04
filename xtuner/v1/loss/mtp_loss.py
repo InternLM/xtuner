@@ -300,7 +300,8 @@ def _shift_target_hidden_states(
     num_steps: int,
     sp_mesh: DeviceMesh | None,
 ) -> list[torch.Tensor]:
-    """Left-shift target states with a small halo across sequence-parallel ranks."""
+    """Left-shift target states with a small halo across sequence-parallel
+    ranks."""
 
     target_hidden_states = target_hidden_states.detach()
     batch_size, local_length, hidden_size = target_hidden_states.shape
