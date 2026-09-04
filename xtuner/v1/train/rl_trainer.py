@@ -22,7 +22,7 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
-from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
+from xtuner.v1.rl.advantage import BaseAdvantageConfig, BaseTokenLevelAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManager,
     AgentLoopManagerConfig,
@@ -301,6 +301,31 @@ def get_train_seq_ctx(
     return seq_ctx
 
 
+def _terminal_token_rewards(shifted_labels: torch.Tensor, reward: float) -> torch.Tensor:
+    """Place a trajectory's scalar reward on its last trainable token.
+
+    PPO treats a completion as an episode whose reward arrives at termination,
+    so the sequence-level score becomes one non-zero token reward that GAE then
+    propagates backwards.
+
+    Args:
+        shifted_labels (torch.Tensor): Labels shaped ``[1, seq_len]``; positions
+            equal to -100 are not controlled by the policy.
+        reward (float): The trajectory's scalar reward.
+
+    Returns:
+        torch.Tensor: Float32 token rewards shaped like ``shifted_labels``.
+    """
+    token_rewards = torch.zeros_like(shifted_labels, dtype=torch.float32)
+    action_indices = torch.nonzero((shifted_labels != -100).reshape(-1), as_tuple=False).flatten()
+    if action_indices.numel() == 0:
+        if reward != 0.0:
+            raise ValueError("A trajectory with a non-zero reward has no trainable token.")
+        return token_rewards
+    token_rewards.reshape(-1)[action_indices[-1]] = reward
+    return token_rewards
+
+
 def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
     """Checks if a group of rollout states is valid for a training step.
 
@@ -456,7 +481,37 @@ class BaseRLTrainerConfig(BaseModel):
             evaluate_step=self.evaluate_step,
             enable_evaluate=self.enable_evaluate,
         )
+        self._validate_ppo()
         return self
+
+    def _validate_ppo(self) -> None:
+        """Keep the critic and the advantage estimator consistent.
+
+        A token-level estimator such as GAE needs a value function, and a critic
+        is useless without one, so the two must be enabled together.
+        """
+        wants_critic = self.train_worker_cfg.critic_cfg is not None
+        wants_token_level = isinstance(self.advantage_estimator_config, BaseTokenLevelAdvantageConfig)
+        if wants_critic and not wants_token_level:
+            raise ValueError(
+                "A critic requires a token-level advantage estimator, e.g. GAEAdvantageConfig, but "
+                f"got {type(self.advantage_estimator_config).__name__}."
+            )
+        if wants_token_level and not wants_critic:
+            raise ValueError(
+                f"{type(self.advantage_estimator_config).__name__} needs a value function; set "
+                "train_worker_cfg.critic_cfg."
+            )
+        if self.train_worker_cfg.kl_reward_cfg is not None and not wants_critic:
+            raise ValueError(
+                "kl_reward_cfg folds the KL penalty into the token reward, which only has an effect "
+                "with a critic. Group-baseline algorithms should use loss_cfg.use_kl_loss instead."
+            )
+        if wants_critic:
+            # The worker owns the estimator, since advantages are derived from
+            # the critic forward. Push the trainer-level config down so there is
+            # only one place to configure gamma and lambda.
+            self.train_worker_cfg.advantage_cfg = cast(BaseTokenLevelAdvantageConfig, self.advantage_estimator_config)
 
 
 class RLColocateTrainerConfig(BaseRLTrainerConfig):
@@ -650,6 +705,9 @@ class BaseRLTrainer:
     agent_loop_manager: AgentLoopManager | DisaggAgentLoopManager
     eval_agent_loop_manager: AgentLoopManager
     _debug_train_files: dict[int, Path]
+    # Set from the config in `_init_common`. Defaults to the group-baseline
+    # path so partially constructed trainers behave like plain RL.
+    _is_ppo: bool = False
 
     def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
         check_fa3()
@@ -665,7 +723,10 @@ class BaseRLTrainer:
         self._init_rollout_config(cfg, log_dir)
         self._ensure_rollout_proxy_config(cfg)
         self._init_runtime_flags(cfg)
-        self._advantage_estimator = cfg.advantage_estimator_config.build()
+        # PPO derives advantages in the worker from critic values, so the
+        # trainer-side estimator is only built for group-baseline algorithms.
+        self._is_ppo = cfg.train_worker_cfg.critic_cfg is not None
+        self._advantage_estimator = None if self._is_ppo else cfg.advantage_estimator_config.build()
         self._cpu_resource_manager: CPUResourceManager | None = None
         self._num_workers = 1.0
         self._rollout_num_workers = 1.0
@@ -1032,23 +1093,24 @@ class BaseRLTrainer:
                 self.train_controller.onload(target="all")
                 self.logger.info("Training controller loaded")
 
-        with timer("prepare_data", step_timer_dict):
-            data_batches, data_info = self._prepare_train_data(
-                train_batch,
-                self._train_worker_cfg.pack_max_length,
-                raw_rewards_sum=raw_rewards_sum,
-                raw_rewards_count=raw_rewards_count,
-            )
-        self.logger.info(f"Prepared {len(data_batches)} training data batches")
+        try:
+            with timer("prepare_data", step_timer_dict):
+                data_batches, data_info = self._prepare_train_data(
+                    train_batch,
+                    self._train_worker_cfg.pack_max_length,
+                    raw_rewards_sum=raw_rewards_sum,
+                    raw_rewards_count=raw_rewards_count,
+                )
+            self.logger.info(f"Prepared {len(data_batches)} training data batches")
 
-        with timer("training", step_timer_dict):
-            workers_log_item: list[WorkerLogItem] = self.train_controller.fit(
-                data_batches,
-                pack_max_length=self._train_worker_cfg.pack_max_length,
-                rollout_idx=train_step,
-            )
-
-        self._release_trace_sessions_after_train_batch(train_batch)
+            with timer("training", step_timer_dict):
+                workers_log_item: list[WorkerLogItem] = self.train_controller.fit(
+                    data_batches,
+                    pack_max_length=self._train_worker_cfg.pack_max_length,
+                    rollout_idx=train_step,
+                )
+        finally:
+            self._release_trace_sessions_after_train_batch(train_batch)
 
         return {
             "data_info": data_info,
@@ -1177,9 +1239,18 @@ class BaseRLTrainer:
 
             rewards_list.extend(rewards)
             cluster_rewards_list.extend(cluster_rewards)
-            rewards_tensor = torch.tensor(cluster_rewards, dtype=torch.float32)
-            cluster_advantages = self._advantage_estimator.compute(rewards_tensor, cluster_representatives)
-            sample_advantages = [cluster_advantages[cluster_index].item() for cluster_index in sample_cluster_indices]
+            if self._is_ppo:
+                # PPO has a learned baseline, so there is no group-relative
+                # advantage to compute here. The worker derives per-token
+                # advantages from the critic; the trainer only forwards the
+                # terminal reward of each trajectory.
+                sample_advantages = [0.0] * len(group)
+            else:
+                rewards_tensor = torch.tensor(cluster_rewards, dtype=torch.float32)
+                cluster_advantages = self._advantage_estimator.compute(rewards_tensor, cluster_representatives)
+                sample_advantages = [
+                    cluster_advantages[cluster_index].item() for cluster_index in sample_cluster_indices
+                ]
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
@@ -1234,6 +1305,8 @@ class BaseRLTrainer:
                         "advantage": actual_advantages,
                         "rollout_logprobs": rollout_logprobs,
                     }
+                    if self._is_ppo:
+                        data_dict["token_rewards"] = _terminal_token_rewards(shifted_labels_t, rewards[i])
 
                     seq_ctx.rollout_routed_experts = group[i].routed_experts
                     data_batches.append(data_dict)
@@ -1314,6 +1387,8 @@ class BaseRLTrainer:
                     "advantage": actual_advantages,
                     "rollout_logprobs": rollout_logprobs,
                 }
+                if self._is_ppo:
+                    data_dict["token_rewards"] = _terminal_token_rewards(shifted_labels_t, rewards[i])
 
                 seq_ctx.rollout_routed_experts = group[i].routed_experts  # n,layer*expert
 
@@ -1470,6 +1545,9 @@ class BaseRLTrainer:
             all_scalars.update({f"{k}": v for k, v in rank0_mismatch_metrics.items()})
             all_scalars.update({"entropy/rollout": rank0_rollout_entropy})
             all_scalars.update({"entropy/train": rank0_log_item["train_entropy"]})
+            all_scalars.update(rank0_log_item.get("critic_metrics", {}))
+            if (kl_reward_mean := rank0_log_item.get("kl_reward_mean")) is not None:
+                all_scalars["kl_reward/mean_kl"] = kl_reward_mean
             for worker_idx, log_item in enumerate(train_info["workers_log_item"]):
                 if not self._display_all_workers_log and worker_idx > 0:
                     break
@@ -1482,7 +1560,14 @@ class BaseRLTrainer:
                     avg_value = sum(value) / len(value)
                     all_scalars.update({f"train_metrics/worker_{worker_idx}/step_avg_{key}": avg_value})
 
-                rank_sft_log = log_item["sft_train_metrics"]
+                critic_metrics: dict[str, List[float]] = {}
+                for critic_log in log_item.get("critic_train_metrics", []):
+                    for k, v in critic_log.items():
+                        critic_metrics.setdefault(k, []).append(cast(float, v))
+                for key, values in critic_metrics.items():
+                    all_scalars[f"critic_metrics/worker_{worker_idx}/step_avg_{key}"] = sum(values) / len(values)
+
+                rank_sft_log = log_item.get("sft_train_metrics", {})
                 for k, v in rank_sft_log.items():
                     all_scalars.update({f"sft_train_metrics/worker_{worker_idx}/{k}": v})
 

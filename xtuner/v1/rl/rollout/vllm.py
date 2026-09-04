@@ -443,6 +443,8 @@ class vLLMWorker(RolloutWorker):
             if validation_errors:
                 error_msg = f"Incomplete rollout data for request {uid}: {', '.join(validation_errors)}"
                 self.logger.error(f"{error_msg}. Raw response: {response_json}")
+                rollout_state.routed_experts = routed_experts
+                rollout_state.routed_experts_owner = "rollout" if routed_experts is not None else None
                 rollout_state.status = Status.FAILED
                 rollout_state.error_msg = error_msg
                 return rollout_state
@@ -451,6 +453,7 @@ class vLLMWorker(RolloutWorker):
         rollout_state.response_ids = last_token_ids if len(last_token_ids) > 0 else None
         rollout_state.logprobs = last_logprobs if len(last_logprobs) > 0 else None
         rollout_state.routed_experts = routed_experts
+        rollout_state.routed_experts_owner = "rollout" if routed_experts is not None else None
         rollout_state.finish_reason = finish_reason
         rollout_state.status = rollout_status
 
