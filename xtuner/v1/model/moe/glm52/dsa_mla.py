@@ -65,6 +65,13 @@ def _validate_indexer_backend_config(
         )
 
 
+def _validate_query_chunk_size(value: int | None, backend: str, *, field_name: str) -> None:
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
+        raise ValueError(f"{field_name} must be a positive integer, got {value!r}")
+    if value is not None and backend not in ("tilelang", "cudnn_dsa"):
+        raise ValueError("query-chunk Indexer selection requires a TileLang selector")
+
+
 class LayerNorm(nn.Module):
     weight: torch.Tensor
     bias: torch.Tensor
@@ -108,6 +115,7 @@ class DSAIndexer(nn.Module):
         index_n_heads: int,
         index_topk: int,
         indexer_backend: DSAIndexerBackend = "torch",
+        topk_query_chunk_size: int | None = None,
     ):
         super().__init__()
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -115,6 +123,8 @@ class DSAIndexer(nn.Module):
         self.index_n_heads = index_n_heads
         self.index_topk = index_topk
         self.indexer_backend = indexer_backend
+        _validate_query_chunk_size(topk_query_chunk_size, indexer_backend, field_name="topk_query_chunk_size")
+        self.topk_query_chunk_size = topk_query_chunk_size
         self.dsa_topk_indices_func: DSATopKIndicesProtocol = get_dsa_topk_indices(indexer_backend)
         # wq_b.weight: [index_n_heads * index_head_dim, q_lora_rank]
         self.wq_b = build_linear(q_lora_rank, index_n_heads * index_head_dim, bias=False)
@@ -191,6 +201,7 @@ class DSAIndexer(nn.Module):
             seq_ctx,
             index_head_dim=self.index_head_dim,
             index_topk=self.index_topk,
+            query_chunk_size=self.topk_query_chunk_size,
         )
         dsa_topk_ids = dsa_topk_ids.to(torch.int32).contiguous()
         return {"dsa_topk_ids": dsa_topk_ids}
@@ -208,6 +219,7 @@ class DSAMLAConfig(MLAConfig):
     # ``deep_gemm_fp8`` selects the DeepGEMM FP8 MQA score path.
     indexer_backend: DSAIndexerBackend | None = None
     freeze_dsa_indexer: bool = True
+    indexer_topk_query_chunk_size: int | None = None
 
     def build(
         self,
@@ -225,6 +237,11 @@ class DSAMLAConfig(MLAConfig):
             indexer_backend,
             index_head_dim=self.index_head_dim,
             index_n_heads=self.index_n_heads,
+        )
+        _validate_query_chunk_size(
+            self.indexer_topk_query_chunk_size,
+            indexer_backend,
+            field_name="indexer_topk_query_chunk_size",
         )
         if self.sparse_mla_backend in ("tilelang", "cudnn_dsa", "flash_mla"):
             ensure_tilelang_runtime_available()
@@ -258,6 +275,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         sparse_mla_backend: SparseMLABackend = "torch",
         indexer_backend: DSAIndexerBackend | None = None,
         freeze_dsa_indexer: bool = True,
+        indexer_topk_query_chunk_size: int | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -286,6 +304,12 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         self.sparse_mla_backend = sparse_mla_backend
         self.indexer_backend = indexer_backend or sparse_mla_backend
         self.freeze_dsa_indexer = freeze_dsa_indexer
+        _validate_query_chunk_size(
+            indexer_topk_query_chunk_size,
+            sparse_mla_backend,
+            field_name="indexer_topk_query_chunk_size",
+        )
+        self.indexer_topk_query_chunk_size = indexer_topk_query_chunk_size
         self.sparse_mla_func: SparseMLAProtocol = get_sparse_mla(sparse_mla_backend)
 
         if self.q_lora_rank is None:
@@ -308,6 +332,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             index_n_heads=self.index_n_heads,
             index_topk=self.index_topk,
             indexer_backend=self.indexer_backend,
+            topk_query_chunk_size=self.indexer_topk_query_chunk_size,
         )
         if self.freeze_dsa_indexer:
             self.indexer.requires_grad_(False)
