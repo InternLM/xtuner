@@ -84,6 +84,7 @@ class DSAIndexer(nn.Module):
         index_n_heads: int,
         index_topk: int,
         indexer_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch",
+        topk_query_chunk_size: int | None = None,
     ):
         super().__init__()
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -91,6 +92,15 @@ class DSAIndexer(nn.Module):
         self.index_n_heads = index_n_heads
         self.index_topk = index_topk
         self.indexer_backend = indexer_backend
+        if topk_query_chunk_size is not None and (
+            isinstance(topk_query_chunk_size, bool)
+            or not isinstance(topk_query_chunk_size, int)
+            or topk_query_chunk_size <= 0
+        ):
+            raise ValueError(f"topk_query_chunk_size must be a positive integer, got {topk_query_chunk_size!r}")
+        if topk_query_chunk_size is not None and indexer_backend == "torch":
+            raise ValueError("query-chunk Indexer selection requires a TileLang selector")
+        self.topk_query_chunk_size = topk_query_chunk_size
         self.dsa_topk_indices_func: DSATopKIndicesProtocol = get_dsa_topk_indices(indexer_backend)
         # wq_b.weight: [index_n_heads * index_head_dim, q_lora_rank]
         self.wq_b = build_linear(q_lora_rank, index_n_heads * index_head_dim, bias=False)
@@ -161,13 +171,26 @@ class DSAIndexer(nn.Module):
         k = gather_for_sequence_parallel(k, dim=1, sp_mesh=seq_ctx.sequence_parallel_mesh)
         # The indexer contract owns dtype/layout so checkpoint reuse never needs
         # to clone or convert the storage shared with downstream layers.
-        dsa_topk_ids = (
-            self.dsa_topk_indices_func(
-                q, k, weights, seq_ctx, index_head_dim=self.index_head_dim, index_topk=self.index_topk
+        if self.topk_query_chunk_size is None:
+            dsa_topk_ids = self.dsa_topk_indices_func(
+                q,
+                k,
+                weights,
+                seq_ctx,
+                index_head_dim=self.index_head_dim,
+                index_topk=self.index_topk,
             )
-            .to(torch.int32)
-            .contiguous()
-        )
+        else:
+            dsa_topk_ids = self.dsa_topk_indices_func(
+                q,
+                k,
+                weights,
+                seq_ctx,
+                index_head_dim=self.index_head_dim,
+                index_topk=self.index_topk,
+                query_chunk_size=self.topk_query_chunk_size,
+            )
+        dsa_topk_ids = dsa_topk_ids.to(torch.int32).contiguous()
         return {"dsa_topk_ids": dsa_topk_ids}
 
 
@@ -181,6 +204,7 @@ class DSAMLAConfig(MLAConfig):
     indexer_types: list[str] | None = None
     sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch"
     freeze_dsa_indexer: bool = True
+    indexer_topk_query_chunk_size: int | None = None
 
     def build(
         self,
@@ -193,6 +217,16 @@ class DSAMLAConfig(MLAConfig):
     ) -> "DSAMultiLatentAttention":
         if not self.freeze_dsa_indexer:
             raise ValueError("freeze_dsa_indexer=False is not supported until the indexer has a differentiable output")
+        if self.indexer_topk_query_chunk_size is not None and (
+            isinstance(self.indexer_topk_query_chunk_size, bool)
+            or not isinstance(self.indexer_topk_query_chunk_size, int)
+            or self.indexer_topk_query_chunk_size <= 0
+        ):
+            raise ValueError(
+                f"indexer_topk_query_chunk_size must be a positive integer, got {self.indexer_topk_query_chunk_size!r}"
+            )
+        if self.indexer_topk_query_chunk_size is not None and self.sparse_mla_backend == "torch":
+            raise ValueError("query-chunk Indexer selection requires a TileLang selector")
         if self.sparse_mla_backend in ("tilelang", "cudnn_dsa"):
             ensure_tilelang_runtime_available()
         if self.sparse_mla_backend == "cudnn_dsa":
@@ -222,6 +256,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         indexer_types: list[str] | None = None,
         sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch",
         freeze_dsa_indexer: bool = True,
+        indexer_topk_query_chunk_size: int | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -249,6 +284,17 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         self.indexer_types = indexer_types
         self.sparse_mla_backend = sparse_mla_backend
         self.freeze_dsa_indexer = freeze_dsa_indexer
+        if indexer_topk_query_chunk_size is not None and (
+            isinstance(indexer_topk_query_chunk_size, bool)
+            or not isinstance(indexer_topk_query_chunk_size, int)
+            or indexer_topk_query_chunk_size <= 0
+        ):
+            raise ValueError(
+                f"indexer_topk_query_chunk_size must be a positive integer, got {indexer_topk_query_chunk_size!r}"
+            )
+        if indexer_topk_query_chunk_size is not None and sparse_mla_backend == "torch":
+            raise ValueError("query-chunk Indexer selection requires a TileLang selector")
+        self.indexer_topk_query_chunk_size = indexer_topk_query_chunk_size
         self.sparse_mla_func: SparseMLAProtocol = get_sparse_mla(sparse_mla_backend)
 
         if self.q_lora_rank is None:
@@ -271,6 +317,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             index_n_heads=self.index_n_heads,
             index_topk=self.index_topk,
             indexer_backend=self.sparse_mla_backend,
+            topk_query_chunk_size=self.indexer_topk_query_chunk_size,
         )
         if self.freeze_dsa_indexer:
             self.indexer.requires_grad_(False)

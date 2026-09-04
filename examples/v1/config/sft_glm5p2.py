@@ -55,6 +55,13 @@ model_cfg.lm_loss_cfg = loss_cfg
 if hasattr(model_cfg.attention, "sparse_mla_backend"):
     model_cfg.attention.sparse_mla_backend = os.environ.get("SPARSE_MLA_BACKEND", "tilelang")
 
+# Optional no-grad selector chunking.  Leaving the variable unset preserves
+# the historical one-shot Top-K path; the attention config validates positive
+# values and rejects the option for the PyTorch selector.
+selector_chunk_env = os.environ.get("INDEXER_TOPK_QUERY_CHUNK_SIZE")
+if selector_chunk_env is not None:
+    model_cfg.attention.indexer_topk_query_chunk_size = int(selector_chunk_env)
+
 cache_dir = os.path.join(work_dir, "jsonl_cache")
 cache_tag = os.environ.get("CACHE_TAG", f"glm52_{sample_max_length}")
 dataset_type = os.environ.get("DATASET_TYPE", "alpaca").lower()
