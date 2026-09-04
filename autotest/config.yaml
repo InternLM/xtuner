@@ -133,7 +133,7 @@ case:
                        threshold: 45
                        method: absolute
                        operator: <
-            timeout: 7200
+            timeout: 9600
 
         -
             type: rl
