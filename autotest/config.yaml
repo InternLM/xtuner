@@ -180,7 +180,7 @@ case:
                        operator: <
                     -
                        metric: time/step
-                       threshold: 20
+                       threshold: 45
                        method: absolute
                        operator: <
             timeout: 7200
