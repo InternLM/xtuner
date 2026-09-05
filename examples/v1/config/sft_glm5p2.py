@@ -6,6 +6,7 @@ from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model import get_model_config_from_hf
+from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.train import TrainerConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 
@@ -47,6 +48,18 @@ loss_cfg = CELossConfig(
 )
 
 model_cfg = get_model_config_from_hf(GLM5_2_MODEL_PATH)
+# The released checkpoint contains one *physical* MTP layer
+# (``num_nextn_predict_layers=1``).  GLM-5.2 training reuses that layer for
+# seven logical prediction depths; ``MTPConfig.num_layers`` controls the
+# recurrent depth while ``share_weights=True`` keeps construction/checkpoint
+# loading at one physical layer.
+model_cfg.mtp_config = MTPConfig(
+    num_layers=7,
+    share_weights=True,
+    detach_mtp_lm_head_weight=False,
+    detach_mtp_inputs=False,
+    loss_scaling_factor=0.1,
+)
 model_cfg.dispatcher = _get_dispatcher()
 model_cfg.ep_size = ep_size
 model_cfg.compile_cfg = _get_bool_env("MODEL_COMPILE", False)
