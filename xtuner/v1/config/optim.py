@@ -83,6 +83,12 @@ class MuonConfig(OptimConfig):
         trainable_parameters_names = model.trainable_parameters()
         trainable_names = {name for name, _ in trainable_parameters_names}
 
+        muon_split_sizes = {}
+        for module in model.modules():
+            get_muon_split_sizes = getattr(module, "get_muon_split_sizes", None)
+            if callable(get_muon_split_sizes):
+                muon_split_sizes.update(get_muon_split_sizes())
+
         untrainable_names = []
         num_total = 0
         num_total_requires_grad = 0
@@ -149,14 +155,14 @@ class MuonConfig(OptimConfig):
         # Build parameter groups
         param_groups = []
         if muon_params_regular:
-            param_groups.append(dict(params=muon_params_regular))
+            param_groups.append(dict(params=muon_params_regular, clip_grad=False))
         # fused_w1w3: w1 and w3 are fused, so num_experts = 2 * n_routed_experts
         if muon_params_moe_fused_w1w3:
-            param_groups.append(dict(params=muon_params_moe_fused_w1w3, num_experts=2 * num_experts))
+            param_groups.append(dict(params=muon_params_moe_fused_w1w3, num_experts=2 * num_experts, clip_grad=False))
         # Other expert params: num_experts = n_routed_experts
         if muon_params_moe_other:
-            param_groups.append(dict(params=muon_params_moe_other, num_experts=num_experts))
-        param_groups.append(dict(params=adamw_params, algorithm="adamw"))
+            param_groups.append(dict(params=muon_params_moe_other, num_experts=num_experts, clip_grad=False))
+        param_groups.append(dict(params=adamw_params, algorithm="adamw", clip_grad=True))
 
         # Sanity check: ensure all trainable parameters are assigned to optimizer
         total_assigned = (
@@ -201,6 +207,7 @@ class MuonConfig(OptimConfig):
             use_triton=False,
             epsilon=self.eps,
             enable_all2all=self.enable_all2all,
+            muon_split_sizes=muon_split_sizes,
         )
 
         return optimizer

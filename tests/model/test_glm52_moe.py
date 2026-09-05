@@ -1,6 +1,7 @@
 """GLM-5.2 配置、HF 转换、路由、checkpoint 与并行数值行为测试。
 
 TestGlm52Config
+    test_save_hf_matches_transformers_and_engine_contracts: HF round-trip 与推理引擎字段契约一致。
     test_from_hf_preserves_glm_specific_behavior: HF 配置转换保留 DSA、router 与 MTP 语义。
     test_rejects_shared_physical_mtp_indexer: 非法的 physical MTP indexer 计划会被拒绝。
     test_indexer_training_can_include_physical_mtp_indexer: MTP indexer 可显式加入训练。
@@ -24,8 +25,9 @@ import pytest
 import torch
 import torch.distributed as dist
 
+import transformers
 from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as HFGlmMoeDsaConfig
-from xtuner._testing import DeterministicDDPTestCase
+from xtuner._testing import DeterministicDDPTestCase, HFConfigFieldDependency, check_hf_config_save
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import Glm52MoEConfig, get_model_config, get_model_config_from_hf
@@ -83,6 +85,55 @@ def _tiny_glm52_config() -> Glm52MoEConfig:
 
 
 class TestGlm52Config:
+    def test_save_hf_matches_transformers_and_engine_contracts(self):
+        # 走公共 from_hf/save_hf 路径，并将当前 Transformers 的强制归一化与 XTuner 丢字段区分开。
+        config = get_model_config_from_hf(GLM5_2_TINY_MOE_PATH)
+        report = check_hf_config_save(
+            config,
+            GLM5_2_TINY_MOE_PATH,
+            engine_dependencies=(
+                HFConfigFieldDependency(
+                    engine="vllm",
+                    version="0.26.0",
+                    path="/topk_method",
+                    expected="noaux_tc",
+                    reason=(
+                        "vLLM only registers gate.e_score_correction_bias for noaux_tc; "
+                        "otherwise loading the GLM checkpoint raises KeyError."
+                    ),
+                    source=(
+                        "https://github.com/vllm-project/vllm/blob/v0.26.0/"
+                        "vllm/model_executor/models/deepseek_v2.py#L314-L319"
+                    ),
+                ),
+                HFConfigFieldDependency(
+                    engine="sglang",
+                    version="0.5.16",
+                    path="/topk_method",
+                    expected="noaux_tc",
+                    reason="SGLang uses this field to register and route with the correction-bias parameter.",
+                    source=(
+                        "https://github.com/sgl-project/sglang/blob/v0.5.16/"
+                        "python/sglang/srt/models/deepseek_v2.py#L454-L475"
+                    ),
+                ),
+                HFConfigFieldDependency(
+                    engine="sglang",
+                    version="0.5.16",
+                    path="/moe_layer_freq",
+                    expected=1,
+                    reason="SGLang directly reads this field when deciding whether a decoder layer is sparse.",
+                    source=(
+                        "https://github.com/sgl-project/sglang/blob/v0.5.16/"
+                        "python/sglang/srt/models/deepseek_v2.py#L2190-L2196"
+                    ),
+                ),
+            ),
+        )
+
+        assert report.transformers_version == transformers.__version__
+        assert report.checked_engine_versions == ("vllm==0.26.0", "sglang==0.5.16")
+
     def test_from_hf_preserves_glm_specific_behavior(self):
         # 验证公共 HF 配置转换保留 GLM-5.2 的 DSA、router、MTP 及回写语义。
         hf_config = HFGlmMoeDsaConfig.from_pretrained(GLM5_2_TINY_MOE_PATH)

@@ -12,6 +12,8 @@ from .qwen35_chat import get_offset_mapping
 
 
 _MEDIA_TYPES = {"image", "image_url", "video", "video_url", "audio", "audio_url", "input_audio"}
+_END_OF_TEXT = "<|endoftext|>"
+_NEXT_ROLE_STOP_TOKENS = {"user": "<|user|>", "tool": "<|observation|>"}
 
 
 def _visible_text(content: Any) -> str:
@@ -167,10 +169,14 @@ def render_glm52_chat(
         if message.get("role") == "user":
             last_user_index = index
 
+    # user/observation 角色 token 同时是生成停止目标，其 loss 归属前一个 assistant。
+    previous_assistant_loss = False
     for index, message in enumerate(messages):
         role = message.get("role")
         if role == "user":
-            append(f"<|user|>{_visible_text(message.get('content', ''))}", False)
+            boundary_loss = index > 0 and messages[index - 1].get("role") == "assistant" and previous_assistant_loss
+            append(_NEXT_ROLE_STOP_TOKENS[role], boundary_loss)
+            append(_visible_text(message.get("content", "")), False)
         elif role == "system":
             append(f"<|system|>{_visible_text(message.get('content', ''))}", False)
         elif role == "assistant":
@@ -191,9 +197,17 @@ def render_glm52_chat(
                 append(content.strip(), loss)
             if message.get("tool_calls"):
                 append(_render_tool_calls(message["tool_calls"]), loss)
+            previous_assistant_loss = loss
+            next_role = messages[index + 1].get("role") if index + 1 < len(messages) else None
+            if next_role not in _NEXT_ROLE_STOP_TOKENS:
+                # 没有 user/observation 角色边界时，用标准 EOS 结束 assistant。
+                append(_END_OF_TEXT, loss)
         elif role == "tool":
             if index == 0 or messages[index - 1].get("role") != "tool":
-                append("<|observation|>", False)
+                boundary_loss = (
+                    index > 0 and messages[index - 1].get("role") == "assistant" and previous_assistant_loss
+                )
+                append(_NEXT_ROLE_STOP_TOKENS[role], boundary_loss)
             append(_render_tool_result(message.get("content", ""), tools), False)
 
     if add_generation_prompt:
@@ -255,24 +269,21 @@ def glm52_tokenize_fn_slowspeed(
 ) -> tuple[list[int], list[int]]:
     """慢速 golden 参考实现：基于 token 级别前缀 diff 对齐 labels。
 
-    这份逻辑刻意保持和旧 `golden_tokenize_fn.py` 一致，用来校验 fast path：
+    渲染复用 GLM 多停止边界的 SFT 语义，标签仍通过独立的 token 前缀 diff 计算：
     1. 先渲染完整对话，得到唯一的 total_ids 参考序列。
     2. 对每条需要 loss 的 assistant 消息，渲染其历史前缀并加 generation prompt。
     3. 再渲染“历史 + 当前 assistant”，用 token 前缀差得到当前 assistant 应监督的 suffix。
     4. 从上次命中位置开始在 total_ids 里顺序查找 suffix，找到后复制到 labels。
     """
-    # 显式传递确定值，避免 Jinja 将已定义的 None 解释成 False。
-    hf_kwargs: dict[str, Any] = dict(
-        tokenize=False,
-        add_generation_prompt=add_generation_prompt,
+    # SFT 渲染保持官方轮间格式，并在没有后继角色边界时补标准 EOS。
+    full_text, _ = render_glm52_chat(
+        messages,
         tools=tools,
+        add_generation_prompt=add_generation_prompt,
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
         clear_thinking=clear_thinking,
     )
-    hf_kwargs.update(kwargs)
-
-    full_text = tokenizer.apply_chat_template(messages, **hf_kwargs)
     total_ids = tokenizer.encode(full_text, add_special_tokens=False)
     labels = [IGNORE_INDEX] * len(total_ids)
 
@@ -283,23 +294,36 @@ def glm52_tokenize_fn_slowspeed(
             continue
 
         # 历史前缀以 generation prompt 结束；prefix 之后的 token 才是当前 assistant 生成区间。
-        prompt_kwargs = dict(hf_kwargs)
-        prompt_kwargs["add_generation_prompt"] = True
-        prompt_kwargs["tools"] = tools if index == 0 else None
-        prefix_text = tokenizer.apply_chat_template(messages[:index], **prompt_kwargs)
+        prefix_text, _ = render_glm52_chat(
+            messages[:index],
+            tools=tools if index == 0 else None,
+            add_generation_prompt=True,
+            enable_thinking=enable_thinking,
+            reasoning_effort=reasoning_effort,
+            clear_thinking=clear_thinking,
+        )
 
         # 当前截断渲染可能和 full render 不同，例如历史 thinking 会被模板清掉；是否能在 full
         # render 中匹配上 suffix，正是 golden 语义的一部分。
-        message_kwargs = dict(hf_kwargs)
-        message_kwargs["add_generation_prompt"] = False
-        message_kwargs["tools"] = tools if index == 0 else None
-        message_text = tokenizer.apply_chat_template([m.copy() for m in messages[: index + 1]], **message_kwargs)
+        message_text, _ = render_glm52_chat(
+            [m.copy() for m in messages[: index + 1]],
+            tools=tools if index == 0 else None,
+            add_generation_prompt=False,
+            enable_thinking=enable_thinking,
+            reasoning_effort=reasoning_effort,
+            clear_thinking=clear_thinking,
+        )
 
         prefix_ids = tokenizer.encode(prefix_text, add_special_tokens=False)
         message_ids = tokenizer.encode(message_text, add_special_tokens=False)
         content_ids = message_ids[len(prefix_ids) :]
         if not content_ids:
             continue
+
+        next_role = messages[index + 1].get("role") if index + 1 < len(messages) else None
+        if next_role in _NEXT_ROLE_STOP_TOKENS:
+            # 截断渲染以 endoftext 结尾；完整对话改用实际的下一角色停止 token。
+            content_ids[-1] = tokenizer.convert_tokens_to_ids(_NEXT_ROLE_STOP_TOKENS[next_role])
 
         # 在完整 token 序列中做 token 级绝对对齐，避免字符 offset 对特殊 token 的边界解释差异。
         for start in range(curr_ptr, len(total_ids) - len(content_ids) + 1):

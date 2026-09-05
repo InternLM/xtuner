@@ -18,9 +18,20 @@ on:
         default: 'main'
       run_case:
         required: false
-        description: 'Run a specific test case, e.g., "npu-qwen3-sft", as defined in autotest/config-npu.yaml.'
+        description: >-
+          Case name(s) from autotest/config-npu.yaml. Use "all" for every case,
+          one name (e.g. "npu-qwen3-sft"), or comma-separated names
+          (e.g. "npu-qwen3-sft,npu-qwen3-rl-vllm").
         type: string
         default: 'all'
+      CI_E2E_DEBUG:
+        required: false
+        description: >-
+          CI_E2E_DEBUG:if true, start "sleep inf &" after install and before training so the
+          cluster job stays alive for interactive debug (including after OOM).
+          Default false.
+        type: boolean
+        default: false
   schedule:
     - cron:  '00 16 * * 0-5'
 env:
@@ -56,15 +67,30 @@ jobs:
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
           CI_REPORTS_RAW_URL_BASE: ${{ env.CI_REPORTS_RAW_URL_BASE }}
+          CI_E2E_DEBUG: ${{ github.event.inputs.CI_E2E_DEBUG || 'false' }}
         run: |
           source /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/miniconda3/bin/activate
           source activate npuci
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
-          CASE_NAME="${{ github.event.inputs.run_case || 'all' }}"
-          if [ "$CASE_NAME" = "all" ]; then
+          CASE_INPUT="${{ github.event.inputs.run_case || 'all' }}"
+          if [ "$CASE_INPUT" = "all" ]; then
             export DEVICE=npu && pytest autotest/test_all.py -m all -n 1 -s -vv --run_id ${{ github.run_id }}
           else
-            export DEVICE=npu && pytest autotest/test_all.py::test_all[$CASE_NAME] -m all -n 1 -s -vv --run_id ${{ github.run_id }}
+            # Support one or more cases: "case_a" or "case_a,case_b, case_c"
+            PYTEST_NODES=()
+            IFS=',' read -ra RAW_CASES <<< "$CASE_INPUT"
+            for raw in "${RAW_CASES[@]}"; do
+              case_name="$(echo "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+              [ -z "$case_name" ] && continue
+              PYTEST_NODES+=("autotest/test_all.py::test_all[${case_name}]")
+            done
+            if [ "${#PYTEST_NODES[@]}" -eq 0 ]; then
+              echo "No valid case names parsed from run_case='${CASE_INPUT}'"
+              exit 1
+            fi
+            echo "Running cases: ${PYTEST_NODES[*]}"
+            export DEVICE=npu
+            pytest "${PYTEST_NODES[@]}" -m all -n 1 -s -vv --run_id ${{ github.run_id }}
           fi
 
       - name: Check report files
