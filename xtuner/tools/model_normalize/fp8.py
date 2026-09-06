@@ -50,7 +50,6 @@ def convert(
     block_size: int = 128,
     float8_dtype: torch.dtype = torch.float8_e4m3fn,
     max_workers: int = 4,
-    device: str = "cuda",
 ) -> None:
     """Quantize an HF safetensors checkpoint to FP8 in-place into ``target``.
 
@@ -65,7 +64,6 @@ def convert(
         block_size (int): Block size for per-block scaling (default 128).
         float8_dtype (torch.dtype): Target FP8 dtype (default ``e4m3fn``).
         max_workers (int): Max parallel save workers.
-        device (str): CUDA device used for quantization.
     """
     with open(source / "model.safetensors.index.json") as f:
         index = json.load(f)
@@ -108,7 +106,7 @@ def convert(
                 continue
 
             fp8_tensor, scale = per_block_quant_torch(
-                tensor.to(device), block_size=block_size, float8_dtype=float8_dtype
+                tensor.cuda(), block_size=block_size, float8_dtype=float8_dtype
             )
             scale_key = f"{key}_scale_inv"
             new_shard[key] = fp8_tensor.cpu()
@@ -285,4 +283,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

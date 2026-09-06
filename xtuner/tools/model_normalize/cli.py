@@ -35,7 +35,6 @@ def build_parser() -> argparse.ArgumentParser:
     policy = fp8.add_mutually_exclusive_group(required=True)
     policy.add_argument("--reference", type=Path, help="FP8 reference checkpoint")
     policy.add_argument("--policy", choices=["heuristic"], help="explicit fallback quantization policy")
-    fp8.add_argument("--device", default=os.getenv("MODEL_NORMALIZE_DEVICE", "cuda"))
     fp8.add_argument(
         "--max-save-workers",
         type=int,
@@ -116,7 +115,6 @@ def _run_fp8(args: argparse.Namespace) -> None:
             should_quantize=predicate,
             block_size=args.block_size,
             max_workers=args.max_save_workers,
-            device=args.device,
         )
         repack(staging, args.output, shard_size_bytes=int(args.shard_size_gb * 1024**3))
     _copy_generation_config(args.generation_config, args.output)
