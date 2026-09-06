@@ -40,6 +40,61 @@ python -m xtuner.tools.model_normalize to-fp8 \
 FP8 conversion requires CUDA. Save workers are bounded so conversion and disk
 writes can overlap without submitting an unbounded number of shard writes.
 
+## One-command GLM-5.2 example
+
+`examples/run_glm52.sh` is a small wrapper around the generic CLI. It writes
+the two release variants below one level under `OUTPUT_ROOT`.
+
+For the BF16, standard-shard variant:
+
+```bash
+SOURCE_DIR=/path/to/glm52-hf-source \
+OUTPUT_ROOT=/path/to/release \
+bash xtuner/tools/model_normalize/examples/run_glm52.sh bf16
+```
+
+For the reference-guided FP8 variant:
+
+```bash
+SOURCE_DIR=/path/to/glm52-hf-source \
+OUTPUT_ROOT=/path/to/release \
+REFERENCE_DIR=/path/to/glm52-fp8-reference \
+SHARD_SIZE_GB=4 \
+MAX_SAVE_WORKERS=4 \
+bash xtuner/tools/model_normalize/examples/run_glm52.sh fp8
+```
+
+The wrapper produces this shape (the actual shard count depends on the input
+and `SHARD_SIZE_GB`):
+
+```text
+<OUTPUT_ROOT>/
+├── 20_hf_bf16_mtp/
+│   ├── model-00001-of-00NNN.safetensors
+│   ├── ...
+│   ├── model.safetensors.index.json
+│   ├── config.json
+│   ├── tokenizer.json / tokenizer_config.json
+│   ├── chat_template.jinja        # when supplied by the source
+│   └── generation_config.json     # when supplied by the source or explicitly
+│                                    # passed through the generic CLI
+└── 20_hf_fp8_mtp/
+    ├── model-00001-of-00NNN.safetensors
+    ├── ...
+    ├── model.safetensors.index.json
+    ├── config.json                 # includes the FP8 quantization metadata
+    ├── tokenizer/chat-template files
+    └── generation_config.json      # when supplied by the source or explicitly
+                                     # passed through the generic CLI
+```
+
+The BF16 output keeps the original tensor keys, including MTP keys, and only
+repackages them into standard HF shards. The FP8 output also keeps the complete
+key set, while converting selected weights to FP8 and writing their matching
+`*_scale_inv` tensors. Both variants regenerate a consistent
+`model.safetensors.index.json`; neither variant uploads to the Hub or performs a
+full-model validation/SHA256 scan.
+
 ## MTP and output safety
 
 The tool has no option that drops MTP. Repack and FP8 conversion preserve the
