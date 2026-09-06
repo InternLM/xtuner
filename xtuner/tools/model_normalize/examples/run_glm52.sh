@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-MODE="${1:?usage: $0 {bf16|fp8}}"
+if (($# < 1)); then
+  echo "usage: $0 {bf16|fp8}" >&2
+  exit 2
+fi
+MODE="$1"
 SOURCE_DIR="${SOURCE_DIR:?set SOURCE_DIR to the source HF directory}"
 OUTPUT_ROOT="${OUTPUT_ROOT:?set OUTPUT_ROOT to the output root}"
 SHARD_SIZE_GB="${SHARD_SIZE_GB:-4}"
