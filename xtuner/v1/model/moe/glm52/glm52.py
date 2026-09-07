@@ -281,6 +281,7 @@ class Glm52MoEConfig(MoEConfig):
         index_topk_freq=4,
         index_skip_topk_offset=3,
         indexer_rope_interleave=True,
+        indexer_quant_mode="none",
     )
     hf_head_dim: int = 192
     qk_head_dim: int = 256
@@ -392,6 +393,7 @@ class Glm52MoEConfig(MoEConfig):
                 index_skip_topk_offset=cfg.index_skip_topk_offset,
                 indexer_rope_interleave=cfg.indexer_rope_interleave,
                 indexer_types=list(cfg.indexer_types) if cfg.indexer_types is not None else None,
+                indexer_quant_mode="none",
             ),
             hf_head_dim=cfg.head_dim,
             qk_head_dim=cfg.qk_head_dim,
