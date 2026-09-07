@@ -114,6 +114,8 @@ class WorkerConfig(BaseModel):
             trainer seed is used. Defaults to None.
         offload_rollout_routed_experts (bool): Keep rollout routed experts on
             CPU and move each layer's slice to device during forward. Defaults to False.
+        offload_old_logprobs (bool): Keep actor old log probabilities on CPU between
+            metric computation and the optimizer step. Defaults to False.
 
     **Examples:**
 
@@ -154,6 +156,7 @@ class WorkerConfig(BaseModel):
     profile_memory: bool = False
     free_rollout_routed_experts_in_worker: bool = True  # 默认不需要用户配置
     offload_rollout_routed_experts: bool = False
+    offload_old_logprobs: bool = False
 
     # sft config
     sft_dataloader_cfg: DataloaderConfig | None = None
@@ -468,6 +471,34 @@ class TrainingWorker(SingleAcceleratorWorker):
             old_logprobs_list.append(output["loss"])
         return old_logprobs_list
 
+    def _maybe_offload_logprob(self, loss_ctx_list: Sequence[BaseRLLossContext]) -> None:
+        """Keep old policy logprobs on CPU between their metric and train
+        uses."""
+        if not self.config.offload_old_logprobs:
+            return
+        for loss_ctx in loss_ctx_list:
+            old_logprobs = loss_ctx.loss_kwargs.old_logprobs
+            if old_logprobs is not None:
+                loss_ctx.loss_kwargs.old_logprobs = old_logprobs.cpu()
+
+    def _maybe_onload_logprob(self, loss_ctx_list: Sequence[BaseRLLossContext]) -> None:
+        """Load old policy logprobs to the training device for one optimizer
+        group."""
+        if not self.config.offload_old_logprobs:
+            return
+        for loss_ctx in loss_ctx_list:
+            old_logprobs = loss_ctx.loss_kwargs.old_logprobs
+            if old_logprobs is not None:
+                loss_ctx.loss_kwargs.old_logprobs = old_logprobs.to(DEVICE)
+
+    def _maybe_clear_logprob(self, loss_ctx_list: Sequence[BaseRLLossContext]) -> None:
+        """Release old policy logprobs after their optimizer group is
+        consumed."""
+        if not self.config.offload_old_logprobs:
+            return
+        for loss_ctx in loss_ctx_list:
+            loss_ctx.loss_kwargs.old_logprobs = None
+
     def compute_ref_logprobs(
         self, seq_ctx_list: list[SequenceContext], shifted_labels_list: list[torch.Tensor]
     ) -> list[torch.Tensor]:
@@ -767,6 +798,12 @@ class TrainingWorker(SingleAcceleratorWorker):
             avg_kl_div = kl_div_sum / global_grad_tokens if global_grad_tokens > 0 else 0
             self.logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
 
+        # Keep old logprobs on CPU once all rollout-level metrics have consumed
+        # them.  They are loaded back only for the train group that is about to
+        # run, which bounds their GPU residency by the optimizer group size.
+        self._maybe_offload_logprob(loss_ctx_list)
+        del old_logprobs_list
+
         # compute batched loss context
         batched_loss_ctx_list: list[BaseRLLossContext] = []
         batched_mtp_loss_ctx_list: list[list[MTPLossContext]] = []
@@ -829,6 +866,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                     )
                 ]
 
+            self._maybe_onload_logprob(batches_loss_ctx)
+
             train_step_begin = time.perf_counter()
             with self._maybe_profiling(global_train_step, "train_step"):
                 train_step_info = self._engine.train_step(
@@ -849,6 +888,11 @@ class TrainingWorker(SingleAcceleratorWorker):
                 }
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
+
+            # The current group will not be revisited in this fit call.
+            # Release its old-logprob references after backward and the
+            # optimizer update have both completed.
+            self._maybe_clear_logprob(batches_loss_ctx)
 
             engine_logs_info = cast(dict[str, float], train_step_info.pop("logs_info"))  # type: ignore[misc]
             engine_extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]
