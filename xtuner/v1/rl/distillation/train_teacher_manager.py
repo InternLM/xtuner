@@ -245,8 +245,12 @@ class TrainTeacherManager:
                             loss_ctx={"lm": loss_ctx},
                         )
                     selected = teacher_indices == teacher_index
-                    target_ids[batch_index][selected] = cast(torch.Tensor, output.logits)[selected]
-                    target_logprobs[batch_index][selected] = cast(torch.Tensor, output.loss)[selected]
+                    # Top-k teacher outputs reuse ModelOutputs.logits for token ids
+                    # and ModelOutputs.loss for selected logprobs.
+                    topk_token_ids = cast(torch.Tensor, output.logits)
+                    topk_logprobs = cast(torch.Tensor, output.loss)
+                    target_ids[batch_index][selected] = topk_token_ids[selected]
+                    target_logprobs[batch_index][selected] = topk_logprobs[selected]
         return target_ids, target_logprobs
 
     def _compute_sampled_logprobs(

@@ -274,6 +274,26 @@ class AgentLoop(ABC):
     async def maybe_compute_teacher_logprobs(self, group: list[RolloutState]) -> list[RolloutState]:
         return list(await asyncio.gather(*(create_task(self.maybe_compute_teacher_logprob(state)) for state in group)))
 
+    def _should_filter_before_teacher(self) -> bool:
+        return self.is_valid_sample_fn is not None
+
+    async def _maybe_score_state(self, state: RolloutState) -> RolloutState:
+        if not self._should_filter_before_teacher():
+            return await self.maybe_compute_teacher_logprob(state)
+        return state
+
+    async def _maybe_filter_group(self, group: list[RolloutState]) -> list[RolloutState]:
+        if self.is_valid_sample_fn is None:
+            return group
+        return maybe_filter_invalid_sample(group, self.is_valid_sample_fn, self.logger)
+
+    async def _maybe_score_filtered_group(self, group: list[RolloutState]) -> list[RolloutState]:
+        if not self._should_filter_before_teacher():
+            return group
+        if get_group_status(group) != Status.COMPLETED:
+            return group
+        return await self.maybe_compute_teacher_logprobs(group)
+
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         """Generate one rollout group.
 
@@ -283,14 +303,11 @@ class AgentLoop(ABC):
             start as soon as each sample finishes generation. With a validity check,
             only a completed group that passes filtering should be sent to the Teacher.
         """
-        filter_before_teacher = self.is_valid_sample_fn is not None
 
         async def generate_one(state: RolloutState) -> RolloutState:
             state.sample_params = self.sample_params
             state = await self.generate_sample(state, **kwargs)
-            # Fast path: overlap Teacher scoring with the remaining generations.
-            if not filter_before_teacher:
-                state = await self.maybe_compute_teacher_logprob(state)
+            state = await self._maybe_score_state(state)
             if state.status == Status.COMPLETED and self.judger is not None and not self.enable_batch_judge:
                 state = await self.run_judger(state)
             return state
@@ -299,11 +316,8 @@ class AgentLoop(ABC):
         if self.judger is not None and self.enable_batch_judge and get_group_status(group) == Status.COMPLETED:
             group = await self.run_judger(group)
 
-        group = maybe_filter_invalid_sample(group, self.is_valid_sample_fn, self.logger)
-        # Filter path: avoid Teacher work for a group that will be discarded.
-        if filter_before_teacher and get_group_status(group) == Status.COMPLETED:
-            group = await self.maybe_compute_teacher_logprobs(group)
-        return group
+        group = await self._maybe_filter_group(group)
+        return await self._maybe_score_filtered_group(group)
 
     @overload
     async def run_judger(self, rollout_state: RolloutState) -> RolloutState: ...

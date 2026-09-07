@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from lagent.utils import create_object, ctx_session_id
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
     RolloutStatus,
@@ -20,7 +20,7 @@ from xtuner.v1.rl.rollout.chat_template import canonicalize_messages_for_chat_te
 from xtuner.v1.rl.rollout.trace_store import get_store
 from xtuner.v1.rl.utils import create_task
 
-from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
+from ..agent_loop import AgentLoop, AgentLoopConfig
 
 
 def _import_from_path(path: str) -> Any:
@@ -134,17 +134,13 @@ class AgentInLocalhostLoop(AgentLoop):
         self.mode = mode
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
-        filter_before_teacher = self.is_valid_sample_fn is not None
-
         async def generate_one(state: RolloutState) -> RolloutState:
             if self._sample_semaphore is None:
                 state = await self.generate_sample(state, **kwargs)
             else:
                 async with self._sample_semaphore:
                     state = await self.generate_sample(state, **kwargs)
-            # Fast path: release the sample slot, then score immediately.
-            if not filter_before_teacher:
-                state = await self.maybe_compute_teacher_logprob(state)
+            state = await self._maybe_score_state(state)
             return state
 
         tasks: list[asyncio.Task[RolloutState]] = []
@@ -155,11 +151,8 @@ class AgentInLocalhostLoop(AgentLoop):
 
         samples = await asyncio.gather(*tasks)
         samples = _drop_failed_train_samples(samples, self.mode)
-        samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
-        # Filter path: score only the completed group that survived filtering.
-        if filter_before_teacher and get_group_status(samples) == Status.COMPLETED:
-            samples = await self.maybe_compute_teacher_logprobs(samples)
-        return samples
+        samples = await self._maybe_filter_group(samples)
+        return await self._maybe_score_filtered_group(samples)
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         try:
