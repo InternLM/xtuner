@@ -246,11 +246,19 @@ class LMHeadLossContext(BaseLossContext):
             bs, seq, dim = hidden_states.shape
             hidden_states = hidden_states.reshape(bs * seq, dim)
             shifted_labels = shifted_labels.flatten()
+            mask = loss_weight != 0
+            if not bool(mask.any()):
+                # All tokens in this context are ignored: loss_weight.sum() is 0
+                # and mask.sum() is 0, so the calibration below would compute
+                # 0/0 = NaN. Bypass Liger entirely and return a finite zero that
+                # stays connected to hidden_states/head_weight so autograd still
+                # produces zero (not None) gradients for both inputs.
+                loss = (hidden_states.sum() * 0 + head_weight.sum() * 0).float()
+                return loss, (None, {})
             # liger kernel dont support reduction=="none"
             # step 2.b in the loss calculation: sum the loss over all tokens, then multiply the loss weight (i.e. divide by the global_denominator)
             loss = self.liger_loss_fct(head_weight, hidden_states, shifted_labels)
             # ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
-            mask = loss_weight != 0
             w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
             loss = loss * w
             return loss, (None, {})
