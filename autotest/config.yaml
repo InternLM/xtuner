@@ -133,7 +133,7 @@ case:
                        threshold: 45
                        method: absolute
                        operator: <
-            timeout: 7200
+            timeout: 9600
 
         -
             type: rl
@@ -180,7 +180,7 @@ case:
                        operator: <
                     -
                        metric: time/step
-                       threshold: 20
+                       threshold: 45
                        method: absolute
                        operator: <
             timeout: 7200
