@@ -116,6 +116,12 @@ class TopKLogProbConfig(BaseLossConfig):
 class TopKLogProbContext(BaseLossContext):
     """Select model Top-K IDs without storing full log-softmax."""
 
+    # Top-k mode reuses the standard loss-context return protocol:
+    # - the loss slot carries selected logprobs
+    # - the logits slot carries token ids
+    # This keeps the model/worker plumbing unchanged, but callers must
+    # interpret ModelOutputs.loss/logits according to this contract.
+
     loss_cfg: TopKLogProbConfig
     loss_kwargs: BaseLossKwargs
 

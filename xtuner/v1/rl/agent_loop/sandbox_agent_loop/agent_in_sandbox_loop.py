@@ -10,14 +10,14 @@ from typing import Any, Literal
 
 from lagent.utils import create_object
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import create_task
 
 from ...rollout.chat_template import canonicalize_messages_for_chat_template
 from ...rollout.trace_store import get_store
-from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
+from ..agent_loop import AgentLoop, AgentLoopConfig
 from .schemas import AgentRolloutItem, RolloutStatus
 
 
@@ -229,17 +229,13 @@ class AgentInSandboxLoop(AgentLoop):
         self.mode = mode
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
-        filter_before_teacher = self.is_valid_sample_fn is not None
-
         async def generate_one(state: RolloutState) -> list[RolloutState]:
             if self._sample_semaphore is None:
                 samples = await self.generate_sample(state)
             else:
                 async with self._sample_semaphore:
                     samples = await self.generate_sample(state)
-            # Fast path: score every completed trace segment as soon as its session returns.
-            if not filter_before_teacher:
-                samples = await self.maybe_compute_teacher_logprobs(samples)
+            samples = [await self._maybe_score_state(sample) for sample in samples]
             return samples
 
         pending_tasks = []
@@ -251,11 +247,8 @@ class AgentInSandboxLoop(AgentLoop):
         sample_groups = await generated_samples
         samples = [sample for sample_group in sample_groups for sample in sample_group]
         samples = _drop_failed_train_samples(samples, self.mode)
-        samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
-        # Filter path: score only the completed group that survived filtering.
-        if filter_before_teacher and get_group_status(samples) == Status.COMPLETED:
-            samples = await self.maybe_compute_teacher_logprobs(samples)
-        return samples
+        samples = await self._maybe_filter_group(samples)
+        return await self._maybe_score_filtered_group(samples)
 
     # NOTE: A single sandbox session may yield multiple trainable segments, so this returns a list
     # rather than the base class's single RolloutState. The base contract is never exercised for
