@@ -40,6 +40,9 @@ MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
 MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
 MOE_EP_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward")
 
+SONICMOE_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
+SONICMOE_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward")
+
 
 class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
     def to_hf_key_list(self, key: str) -> list[str]:
@@ -164,6 +167,8 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
     @property
     @override
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
+        if self.config.expert_backend == "sonicmoe":
+            return SONICMOE_COMPILE_CFG
         if use_moe_ep_compile_cfg(self.config):
             return MOE_EP_COMPILE_CFG
         else:

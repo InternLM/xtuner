@@ -75,7 +75,10 @@ rl = [
   "uvicorn",
   "mathruler",
   "pylatexenc",
-  "checkpoint-engine[p2p]"
+  "checkpoint-engine[p2p]",
+]
+sonicmoe = [
+  "sonic-moe>=0.1.2,<0.2",
 ]
 video = [
   "decord",
@@ -93,7 +96,8 @@ all = [
   "parametrize",
   "mathruler",
   "pylatexenc",
-  "flash-linear-attention==0.4.2"
+  "flash-linear-attention==0.4.2",
+  "sonic-moe>=0.1.2,<0.2",
 ]
 
 [tool.mypy]

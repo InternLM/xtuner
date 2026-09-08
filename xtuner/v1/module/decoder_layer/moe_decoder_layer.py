@@ -34,6 +34,7 @@ from xtuner.v1.module.dispatcher import (
     build_dispatcher,
 )
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
+from xtuner.v1.module.moe_backend import SonicMoEBackendConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
@@ -182,8 +183,19 @@ class MoEBlock(nn.Module):
         float8_cfg: Float8Config | None = None,
         moe_act_fn_cfg: MoEActFnConfig,
         ep_tp_mesh: DeviceMesh | None = None,
+        expert_backend: Literal["grouped_gemm", "sonicmoe"] = "grouped_gemm",
+        sonicmoe_cfg: SonicMoEBackendConfig | None = None,
     ):
         super().__init__()
+        if expert_backend == "sonicmoe":
+            if ep_mesh is not None and ep_mesh.size() > 1:
+                raise ValueError("The initial SonicMoE integration does not support EP.")
+            if expert_tp_mesh is not None and expert_tp_mesh.size() > 1:
+                raise ValueError("The initial SonicMoE integration does not support ExpertTP.")
+            if float8_cfg is not None:
+                raise ValueError("The initial SonicMoE integration does not support FP8.")
+            if moe_act_fn_cfg.act_type != "swiglu":
+                raise ValueError("The initial SonicMoE integration supports SwiGLU only.")
         self.hidden_size = hidden_size
         self.intermediate_size = moe_intermediate_size
         self.num_routed_experts = n_routed_experts
@@ -214,6 +226,69 @@ class MoEBlock(nn.Module):
             ep_tp_mesh=ep_tp_mesh,
         )
         self.moe_act = moe_act_fn_cfg.build()
+        self.sonicmoe = (sonicmoe_cfg or SonicMoEBackendConfig()).build() if expert_backend == "sonicmoe" else None
+
+    @property
+    def uses_sonicmoe(self) -> bool:
+        """Return whether this expert block uses the SonicMoE backend.
+
+        Returns:
+            bool: Whether SonicMoE is enabled.
+        """
+        return self.sonicmoe is not None
+
+    @staticmethod
+    def _local_parameter(tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.to_local() if isinstance(tensor, DTensor) else tensor
+
+    def forward_routed(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        router_weights: torch.Tensor,
+        *,
+        decoding: bool = False,
+    ) -> torch.Tensor:
+        """Run SonicMoE directly from XTuner's unpermuted router output.
+
+        Args:
+            hidden_states (torch.Tensor): Unpermuted expert input with shape ``[T, H]``.
+            topk_ids (torch.Tensor): Original top-k expert ids with shape ``[T, K]``.
+            topk_weights (torch.Tensor): Original top-k router weights with shape ``[T, K]``.
+            router_weights (torch.Tensor): Full router weights with shape ``[T, E]``.
+            decoding (bool): Whether the call is an inference decode step.
+
+        Returns:
+            torch.Tensor: Combined routed-expert output with shape ``[T, H]``.
+        """
+        if self.sonicmoe is None:
+            raise RuntimeError("forward_routed is only available when expert_backend='sonicmoe'.")
+
+        w1w3 = self._local_parameter(self.fused_w1w3.weight).view(
+            self.num_routed_experts, 2 * self.intermediate_size, self.hidden_size
+        )
+        w2 = self._local_parameter(self.fused_w2.weight).view(
+            self.num_routed_experts, self.hidden_size, self.intermediate_size
+        )
+        w1w3_bias = None
+        w2_bias = None
+        if self.fused_w1w3.moe_bias:
+            w1w3_bias = self._local_parameter(self.fused_w1w3.bias)
+            w2_bias = self._local_parameter(self.fused_w2.bias)
+
+        output, _ = self.sonicmoe(
+            hidden_states=hidden_states,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            router_weights=router_weights,
+            fused_w1w3=w1w3,
+            fused_w2=w2,
+            fused_w1w3_bias=w1w3_bias,
+            fused_w2_bias=w2_bias,
+            training=self.training and not decoding,
+        )
+        return output
 
     def forward(self, x, tokens_per_expert, decoding):
         gate_up_out = self.fused_w1w3(x, tokens_per_expert, decoding)
@@ -249,6 +324,8 @@ class MoEDecoderLayer(nn.Module):
         router_config: GreedyRouterConfig | NoAuxRouterConfig,
         router_compute_dtype: Literal["float32", "native"] = "float32",
         moe_act_fn_cfg: MoEActFnConfig,
+        expert_backend: Literal["grouped_gemm", "sonicmoe"] = "grouped_gemm",
+        sonicmoe_cfg: SonicMoEBackendConfig | None = None,
         float8_cfg: Float8Config | None = None,
         layer_idx: int = 0,
         dispatcher: Literal["deepep", "all2all", "agrs"] | None,
@@ -257,6 +334,8 @@ class MoEDecoderLayer(nn.Module):
         ep_tp_mesh: DeviceMesh | None = None,
     ):
         super().__init__()
+        if expert_backend == "sonicmoe" and dispatcher is not None:
+            raise ValueError("SonicMoE owns local token dispatch, so dispatcher must be None in the initial version.")
         self.ep_mesh = ep_mesh
         self.ep_tp_mesh = ep_tp_mesh
         self.hidden_size = hidden_size
@@ -314,20 +393,24 @@ class MoEDecoderLayer(nn.Module):
             float8_cfg=float8_cfg,
             moe_act_fn_cfg=moe_act_fn_cfg,
             ep_tp_mesh=ep_tp_mesh,
+            expert_backend=expert_backend,
+            sonicmoe_cfg=sonicmoe_cfg,
         )
         # TODO: (yehaochen) Maybe should be replaced by build_dispatcher
         process_group = ep_mesh.get_group() if ep_mesh is not None else None
         tp_group = expert_tp_mesh.get_group() if expert_tp_mesh is not None else None
         ep_tp_group = ep_tp_mesh._flatten().get_group() if ep_tp_mesh is not None else None
-        self.dispatcher = build_dispatcher(
-            dispatcher=dispatcher,
-            n_routed_experts=n_routed_experts,
-            ep_group=process_group,
-            tp_group=tp_group,
-            ep_tp_group=ep_tp_group,
-            training_dtype="fp8" if float8_cfg is not None else "bf16",
-            generate_dtype=generate_config.dtype if generate_config is not None else "bf16",
-        )
+        self.dispatcher = None
+        if not self.experts.uses_sonicmoe:
+            self.dispatcher = build_dispatcher(
+                dispatcher=dispatcher,
+                n_routed_experts=n_routed_experts,
+                ep_group=process_group,
+                tp_group=tp_group,
+                ep_tp_group=ep_tp_group,
+                training_dtype="fp8" if float8_cfg is not None else "bf16",
+                generate_dtype=generate_config.dtype if generate_config is not None else "bf16",
+            )
 
     def forward(
         self,
@@ -435,6 +518,20 @@ class MoEDecoderLayer(nn.Module):
         )
 
         origin_shape = hidden_states.shape
+
+        if self.experts.uses_sonicmoe:
+            hidden_states = self._sonicmoe_forward(
+                hidden_states=hidden_states,
+                residual=residual,
+                router_results=router_results,
+            )
+            return self._build_output(
+                hidden_states=hidden_states,
+                router_results=router_results,
+                attn_outputs=attn_outputs,
+            )
+
+        assert self.dispatcher is not None
 
         # reshape hidden_states to (batch_size * seq_len, hidden_size)
         # ProberList.before_dispatch(
@@ -545,6 +642,15 @@ class MoEDecoderLayer(nn.Module):
         position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
         attention_kwargs_list: list[dict[str, object]] | None = None,
     ) -> MoEDecoderLayerMicroBatchOutput:
+        if self.experts.uses_sonicmoe:
+            return self._sonicmoe_micro_batch_forward(
+                hidden_states_list=hidden_states_list,
+                seq_ctx_list=seq_ctx_list,
+                position_embeddings_list=position_embeddings_list,
+                attention_kwargs_list=attention_kwargs_list,
+            )
+
+        assert self.dispatcher is not None
         origin_shape = hidden_states_list[0].shape
         assert all(hidden_states.shape == origin_shape for hidden_states in hidden_states_list), (
             "All hidden states should have the same shape"
@@ -702,6 +808,74 @@ class MoEDecoderLayer(nn.Module):
             "router_weights": [router_results["router_weights"] for router_results in router_results_list],
             "router_topk_ids": [router_results["topk_ids"] for router_results in router_results_list],
         }
+
+    def _sonicmoe_micro_batch_forward(
+        self,
+        hidden_states_list: list[torch.Tensor],
+        seq_ctx_list: list[SequenceContext],
+        position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
+        attention_kwargs_list: list[dict[str, object]] | None = None,
+    ) -> MoEDecoderLayerMicroBatchOutput:
+        """Execute intra-layer micro-batches without the EP dispatcher pipeline."""
+        origin_shape = hidden_states_list[0].shape
+        assert all(hidden_states.shape == origin_shape for hidden_states in hidden_states_list), (
+            "All hidden states should have the same shape"
+        )
+
+        hidden_states_out_list: list[torch.Tensor] = []
+        router_results_list: list[RouterResults] = []
+        attn_outputs_list: list[AttnOutputs] = []
+        if attention_kwargs_list is None:
+            attention_kwargs_list = [{} for _ in hidden_states_list]
+        assert len(attention_kwargs_list) == len(hidden_states_list)
+        for hidden_states, attention_kwargs, seq_ctx, position_embeddings in zip(
+            hidden_states_list,
+            attention_kwargs_list,
+            seq_ctx_list,
+            position_embeddings_list,
+        ):
+            residual, expert_inputs, router_results, attn_outputs = self._pre_moe_forward(
+                hidden_states=hidden_states,
+                seq_ctx=seq_ctx,
+                position_embeddings=position_embeddings,
+                state=ForwardState.TRAINING,
+                attention_kwargs=attention_kwargs,
+            )
+            output = self._sonicmoe_forward(
+                hidden_states=expert_inputs,
+                residual=residual,
+                router_results=router_results,
+            )
+            hidden_states_out_list.append(output)
+            router_results_list.append(router_results)
+            attn_outputs_list.append(attn_outputs)
+
+        return self._build_micro_batch_output(
+            hidden_states_list=hidden_states_out_list,
+            router_results_list=router_results_list,
+            attn_outputs_list=attn_outputs_list,
+        )
+
+    def _sonicmoe_forward(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        router_results: RouterResults,
+    ) -> torch.Tensor:
+        combined_hidden_states = self.experts.forward_routed(
+            hidden_states.view(-1, hidden_states.shape[-1]),
+            router_results["topk_ids"],
+            router_results["topk_weights"],
+            router_results["router_weights"],
+        ).view_as(hidden_states)
+        shared_experts_out = (
+            self._shared_experts_forward(hidden_states=hidden_states) if self.n_shared_experts > 0 else None
+        )
+        return self._post_moe_forward(
+            combined_hidden_states=combined_hidden_states,
+            residual=residual,
+            shared_experts_out=shared_experts_out,
+        )
 
     def _pre_moe_forward(
         self,
