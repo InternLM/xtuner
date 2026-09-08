@@ -20,6 +20,14 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--shard-size-gb", type=float, default=float(os.getenv("MODEL_NORMALIZE_SHARD_SIZE_GB", "4")))
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--generation-config", type=Path, default=None)
+    parser.add_argument(
+        "--base-model-dir",
+        type=Path,
+        default=None,
+        help="directory with user-supplied LICENSE and generation_config.json "
+        "to apply after conversion; the Copyright line of LICENSE is rewritten "
+        "to 'Shanghai AI Laboratory'",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,6 +76,74 @@ def _copy_generation_config(path: Path | None, output: Path) -> None:
     shutil.copy2(path, output / "generation_config.json")
 
 
+# Fixed copyright line stamped onto a user-supplied LICENSE. The year range is
+# a literal, not derived from the input, so the release copyright is stable.
+_LICENSE_COPYRIGHT_LINE = "Copyright 2025-2026 Shanghai AI Laboratory"
+
+
+def _rewrite_license_holder(text: str) -> tuple[str, bool]:
+    """Rewrite the Copyright holder line in a LICENSE text.
+
+    Only the first line that starts with ``Copyright`` (after stripping leading
+    whitespace) is replaced with the fixed Shanghai AI Laboratory copyright line;
+    the rest of the text (e.g. the MIT permission grant) is left untouched.
+
+    Args:
+        text (str): Original LICENSE content.
+
+    Returns:
+        tuple[str, bool]: The rewritten text and whether a Copyright line was
+        found and replaced.
+    """
+    lines = text.splitlines(keepends=True)
+    replaced = False
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("Copyright"):
+            # Preserve the original line ending style of the replaced line.
+            newline = "\r\n" if line.endswith("\r\n") else ("\n" if line.endswith("\n") else "")
+            lines[i] = f"{_LICENSE_COPYRIGHT_LINE}{newline}" if newline else _LICENSE_COPYRIGHT_LINE
+            replaced = True
+            break
+    return "".join(lines), replaced
+
+
+def _apply_base_model_assets(base_dir: Path | None, output: Path) -> None:
+    """Apply user-supplied assets from ``base_dir`` into ``output``.
+
+    ``base_dir`` may contain a ``generation_config.json`` (copied verbatim,
+    overwriting any existing one) and a ``LICENSE`` (copied with its Copyright
+    line rewritten to Shanghai AI Laboratory). Missing files are skipped
+    silently; a ``None`` directory is a no-op so existing behavior is preserved.
+
+    Args:
+        base_dir (Path | None): User-supplied base-model assets directory.
+        output (Path): Conversion product directory.
+    """
+    if base_dir is None:
+        return
+    base_dir = base_dir.resolve()
+    if not base_dir.is_dir():
+        raise FileNotFoundError(f"base-model directory does not exist: {base_dir}")
+
+    gen_src = base_dir / "generation_config.json"
+    if gen_src.is_file():
+        gen_dst = output / "generation_config.json"
+        if gen_dst.exists():
+            print("[model_normalize] overwriting existing generation_config.json from base-model-dir")
+        shutil.copy2(gen_src, gen_dst)
+
+    license_src = base_dir / "LICENSE"
+    if license_src.is_file():
+        license_dst = output / "LICENSE"
+        if license_dst.exists():
+            print("[model_normalize] overwriting existing LICENSE from base-model-dir")
+        text = license_src.read_text(encoding="utf-8")
+        rewritten, replaced = _rewrite_license_holder(text)
+        if not replaced:
+            print("[model_normalize] warning: no Copyright line found in base-model LICENSE; writing unchanged")
+        license_dst.write_text(rewritten, encoding="utf-8")
+
+
 def _run_repack(args: argparse.Namespace) -> None:
     try:
         from .repack import repack
@@ -76,6 +152,7 @@ def _run_repack(args: argparse.Namespace) -> None:
     _prepare_output(args.source, args.output, args.overwrite)
     repack(args.source, args.output, shard_size_bytes=int(args.shard_size_gb * 1024**3))
     _copy_generation_config(args.generation_config, args.output)
+    _apply_base_model_assets(args.base_model_dir, args.output)
 
 
 def _reference_predicate(reference: Path):
@@ -118,6 +195,7 @@ def _run_fp8(args: argparse.Namespace) -> None:
         )
         repack(staging, args.output, shard_size_bytes=int(args.shard_size_gb * 1024**3))
     _copy_generation_config(args.generation_config, args.output)
+    _apply_base_model_assets(args.base_model_dir, args.output)
 
 
 def main(argv: list[str] | None = None) -> None:

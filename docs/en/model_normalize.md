@@ -18,6 +18,23 @@ All tensors, including MTP tensors, are retained. Non-weight files such as
 `generation_config.json` are copied. A model-team supplied generation config
 can be explicitly added with `--generation-config`.
 
+## Base-model assets (LICENSE + generation_config)
+
+Both `repack` and `to-fp8` accept `--base-model-dir <dir>`, a directory of
+user-supplied release assets applied *after* conversion completes:
+
+- `generation_config.json` (if present) is copied verbatim into the output,
+  overwriting any existing file (the overwrite is logged).
+- `LICENSE` (if present) is copied into the output with its Copyright line
+  rewritten to the fixed string `Copyright 2025-2026 Shanghai AI Laboratory`;
+  the rest of the license text (e.g. the MIT permission grant) is left
+  untouched. An existing output `LICENSE` is overwritten (logged). If no
+  Copyright line is found, the file is written unchanged with a warning.
+
+When `--base-model-dir` is omitted, conversion behavior is unchanged. A
+`--base-model-dir` `generation_config.json` takes precedence over
+`--generation-config` (it is applied later and overwrites it).
+
 ## FP8 conversion
 
 For a reference-guided conversion:
@@ -64,6 +81,27 @@ MAX_SAVE_WORKERS=4 \
 bash xtuner/tools/model_normalize/examples/run_glm52.sh fp8
 ```
 
+To stamp a user-supplied `LICENSE` and `generation_config.json` into the
+product, set `BASE_MODEL_DIR` (optional; applies to both variants):
+
+```bash
+SOURCE_DIR=/path/to/glm52-hf-source \
+OUTPUT_ROOT=/path/to/release \
+BASE_MODEL_DIR=/path/to/base-model/glm5-2 \
+bash xtuner/tools/model_normalize/examples/run_glm52.sh bf16
+```
+
+`run_glm52.sh` environment variables:
+
+| Variable | BF16 | FP8 | Default | Description |
+|---|---|---|---|---|
+| `SOURCE_DIR` | required | required | — | Input HF model directory |
+| `OUTPUT_ROOT` | required | required | — | Output root directory |
+| `SHARD_SIZE_GB` | optional | optional | `4` | Target shard size in GiB |
+| `REFERENCE_DIR` | not used | required | — | FP8 reference model directory |
+| `MAX_SAVE_WORKERS` | not used | optional | `4` | Parallel FP8 shard-save workers |
+| `BASE_MODEL_DIR` | optional | optional | unset | Directory with user-supplied `LICENSE` and `generation_config.json` |
+
 The wrapper produces this shape (the actual shard count depends on the input
 and `SHARD_SIZE_GB`):
 
@@ -76,16 +114,16 @@ and `SHARD_SIZE_GB`):
 │   ├── config.json
 │   ├── tokenizer.json / tokenizer_config.json
 │   ├── chat_template.jinja        # when supplied by the source
-│   └── generation_config.json     # when supplied by the source or explicitly
-│                                    # passed through the generic CLI
+│   ├── generation_config.json     # from source, --generation-config, or base-model-dir
+│   └── LICENSE                    # when supplied via --base-model-dir (Copyright rewritten)
 └── 20_hf_fp8_mtp/
     ├── model-00001-of-00NNN.safetensors
     ├── ...
     ├── model.safetensors.index.json
     ├── config.json                 # includes the FP8 quantization metadata
     ├── tokenizer/chat-template files
-    └── generation_config.json      # when supplied by the source or explicitly
-                                     # passed through the generic CLI
+    ├── generation_config.json      # from source, --generation-config, or base-model-dir
+    └── LICENSE                     # when supplied via --base-model-dir (Copyright rewritten)
 ```
 
 The BF16 output keeps the original tensor keys, including MTP keys, and only
