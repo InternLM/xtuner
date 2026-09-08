@@ -242,8 +242,12 @@ class TestDSAAttention:
     def test_checkpoint_reuses_source_topk_storage(self):
         # 验证显式 IDs 穿过 checkpoint 且真实 indexer backend 只执行一次。
         torch.manual_seed(0)
-        source_block = apply_activation_checkpointing(_tiny_dsa_decoder(["full", "shared"], layer_idx=0))
-        shared_block = apply_activation_checkpointing(_tiny_dsa_decoder(["full", "shared"], layer_idx=1))
+        source_block = apply_activation_checkpointing(
+            _tiny_dsa_decoder(["full", "shared"], layer_idx=0)
+        )
+        shared_block = apply_activation_checkpointing(
+            _tiny_dsa_decoder(["full", "shared"], layer_idx=1)
+        )
         hidden_states = torch.randn(1, 4, 4, requires_grad=True)
         position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
         seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")

@@ -152,8 +152,8 @@ def fp8_index(
     cu_seqlen_q: torch.Tensor,
     k_seqlens: torch.Tensor,
     block_offset: torch.Tensor,
-    max_q_seqlen: int = None,
-    max_k_seqlen: int = None,
+    max_q_seqlen: int | None = None,
+    max_k_seqlen: int | None = None,
     causal: bool = False,
     raw_k_seqlens: torch.Tensor | None = None,
     compress_ratio: int = 1,
@@ -181,7 +181,7 @@ def fp8_index(
     block_size = k_cache.size(1)
     batch_size = k_seqlens.numel()
     use_raw_causal_seqlen = raw_k_seqlens is not None
-    if use_raw_causal_seqlen:
+    if raw_k_seqlens is not None:
         assert raw_k_seqlens.dim() == 1
         assert raw_k_seqlens.numel() == batch_size
     is_decoding = batch_size == cum_seqlen
@@ -420,10 +420,9 @@ def _lmdeploy_fp8_indexer_topk_impl(
 
     # With ``trim_causal_tail=True`` LMDeploy deliberately leaves the padded
     # suffix uninitialized and passes ``row_k_seqlens`` to its top-k kernel.
-    # The XTuner adapter masks that suffix before invoking the same selector;
-    # otherwise arbitrary allocator contents can evict valid keys.
-    column_ids = torch.arange(scores.size(1), device=scores.device)
-    scores = scores.masked_fill(column_ids[None, :] >= row_k_seqlens[:, None], -torch.inf)
+    # The LMDeploy radix selector consumes those row lengths directly, so do
+    # not materialize a full [num_query, max_k_seqlen] mask.  The fallback
+    # torch.topk path still masks in-place for correctness.
     width = min(index_topk, scores.size(1))
     if width == index_topk:
         # LMDeploy uses its TileLang byte-radix selector for GLM-5.2's
@@ -438,7 +437,7 @@ def _lmdeploy_fp8_indexer_topk_impl(
             )
         except ImportError:
 
-            def is_sparse_index_topk_supported(_k: int) -> bool:
+            def is_sparse_index_topk_supported(k: int) -> bool:
                 return False
 
         if is_sparse_index_topk_supported(index_topk):
@@ -453,9 +452,13 @@ def _lmdeploy_fp8_indexer_topk_impl(
             )
             valid = local_ids >= 0
         else:
+            column_ids = torch.arange(scores.size(1), device=scores.device)
+            scores.masked_fill_(column_ids[None, :] >= row_k_seqlens[:, None], -torch.inf)
             values, local_ids = scores.topk(width, dim=-1, sorted=True)
             valid = (local_ids < row_k_seqlens[:, None]) & torch.isfinite(values)
     else:
+        column_ids = torch.arange(scores.size(1), device=scores.device)
+        scores.masked_fill_(column_ids[None, :] >= row_k_seqlens[:, None], -torch.inf)
         values, local_ids = scores.topk(width, dim=-1, sorted=True)
         valid = (local_ids < row_k_seqlens[:, None]) & torch.isfinite(values)
     # Map each request-local page coordinate back to XTuner's packed K space.
