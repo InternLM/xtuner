@@ -1,8 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """LMDeploy-compatible DeepGEMM FP8 Indexer score path.
 
-The training adapter requires DeepGEMM's contiguous Prefill MQA API. It
-uses dense K tensors without a paged cache.
+The adapter uses dense K tensors and requires DeepGEMM's contiguous prefill MQA API. It does not build a paged cache.
 """
 
 from functools import lru_cache
@@ -13,8 +12,7 @@ import torch
 def _sequence_ranges(cu: torch.Tensor) -> list[tuple[int, int]]:
     """Read packed boundaries once for the correctness adapter.
 
-    XTuner's SFT Indexer receives dense, gathered K tensors. Boundary reads
-    happen once per invocation before the per-request DeepGEMM calls.
+    XTuner's SFT Indexer receives dense, gathered K tensors. Boundary reads happen once before the DeepGEMM calls.
     """
     return [(int(start), int(end)) for start, end in zip(cu[:-1].tolist(), cu[1:].tolist())]
 
