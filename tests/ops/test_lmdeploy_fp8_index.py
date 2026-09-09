@@ -154,9 +154,9 @@ def test_lmdeploy_adapter_preserves_packed_global_topk_ids():
 
     device = torch.device("cuda")
     torch.manual_seed(20260908)
-    seq_lens = [129, 65]
+    seq_lens = [2048, 2048]
     total = sum(seq_lens)
-    heads, head_dim, topk = 32, 128, 8
+    heads, head_dim, topk = 32, 128, 2048
     q = (torch.randn(1, total, heads, head_dim, device=device) * 1.5).to(torch.float8_e4m3fn)
     k = (torch.randn(1, total, head_dim, device=device) * 1.5).to(torch.float8_e4m3fn)
     q_scale = torch.rand(1, total, heads, device=device, dtype=torch.float32) + 0.5
