@@ -15,8 +15,7 @@ bash xtuner/tools/model_normalize/run_model_normalize.sh repack \
 
 All tensors, including MTP tensors, are retained. Non-weight files such as
 `config.json`, tokenizer files, chat templates, and an existing
-`generation_config.json` are copied. A model-team supplied generation config
-can be explicitly added with `--generation-config`.
+`generation_config.json` are copied from the source.
 
 ## Base-model assets (LICENSE + generation_config)
 
@@ -32,8 +31,7 @@ user-supplied release assets applied *after* conversion completes:
   Copyright line is found, the file is written unchanged with a warning.
 
 When `--base-model-dir` is omitted, conversion behavior is unchanged. A
-`--base-model-dir` `generation_config.json` takes precedence over
-`--generation-config` (it is applied later and overwrites it).
+source-supplied `generation_config.json` remains in the output as-is.
 
 ## FP8 conversion
 
@@ -114,7 +112,7 @@ and `SHARD_SIZE_GB`):
 │   ├── config.json
 │   ├── tokenizer.json / tokenizer_config.json
 │   ├── chat_template.jinja        # when supplied by the source
-│   ├── generation_config.json     # from source, --generation-config, or base-model-dir
+│   ├── generation_config.json     # from source or base-model-dir
 │   └── LICENSE                    # when supplied via --base-model-dir (Copyright rewritten)
 └── 20_hf_fp8_mtp/
     ├── model-00001-of-00NNN.safetensors
@@ -122,7 +120,7 @@ and `SHARD_SIZE_GB`):
     ├── model.safetensors.index.json
     ├── config.json                 # includes the FP8 quantization metadata
     ├── tokenizer/chat-template files
-    ├── generation_config.json      # from source, --generation-config, or base-model-dir
+    ├── generation_config.json      # from source or base-model-dir
     └── LICENSE                     # when supplied via --base-model-dir (Copyright rewritten)
 ```
 

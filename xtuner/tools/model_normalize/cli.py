@@ -19,7 +19,6 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--shard-size-gb", type=float, default=float(os.getenv("MODEL_NORMALIZE_SHARD_SIZE_GB", "4")))
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--generation-config", type=Path, default=None)
     parser.add_argument(
         "--base-model-dir",
         type=Path,
@@ -66,14 +65,6 @@ def _prepare_output(source: Path, output: Path, overwrite: bool) -> None:
         if overwrite:
             shutil.rmtree(output)
     output.mkdir(parents=True, exist_ok=True)
-
-
-def _copy_generation_config(path: Path | None, output: Path) -> None:
-    if path is None:
-        return
-    if not path.is_file():
-        raise FileNotFoundError(f"generation config does not exist: {path}")
-    shutil.copy2(path, output / "generation_config.json")
 
 
 # Fixed copyright line stamped onto a user-supplied LICENSE. The year range is
@@ -151,7 +142,6 @@ def _run_repack(args: argparse.Namespace) -> None:
         raise RuntimeError("repack requires the 'safetensors' package") from exc
     _prepare_output(args.source, args.output, args.overwrite)
     repack(args.source, args.output, shard_size_bytes=int(args.shard_size_gb * 1024**3))
-    _copy_generation_config(args.generation_config, args.output)
     _apply_base_model_assets(args.base_model_dir, args.output)
 
 
@@ -194,7 +184,6 @@ def _run_fp8(args: argparse.Namespace) -> None:
             max_workers=args.max_save_workers,
         )
         repack(staging, args.output, shard_size_bytes=int(args.shard_size_gb * 1024**3))
-    _copy_generation_config(args.generation_config, args.output)
     _apply_base_model_assets(args.base_model_dir, args.output)
 
 
