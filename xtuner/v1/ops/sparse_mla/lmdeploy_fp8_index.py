@@ -1,9 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """LMDeploy-compatible DeepGEMM FP8 Indexer score path.
 
-The DeepGEMM path is used when the matching package is available. The vendored
-Triton implementation remains as a compatibility fallback for environments
-that do not provide DeepGEMM.
+The training adapter requires DeepGEMM's contiguous Prefill MQA API. It does
+not construct a paged cache or fall back to the Triton score helper.
 """
 
 from functools import lru_cache
@@ -276,9 +275,8 @@ def _pack_deepgemm_k_cache(k_cache: torch.Tensor, k_s_cache: torch.Tensor) -> to
 def _sequence_ranges(cu: torch.Tensor) -> list[tuple[int, int]]:
     """Read packed boundaries once for the correctness adapter.
 
-    The production LMDeploy path already owns a paged cache.  XTuner's SFT Indexer receives a dense, gathered K tensor,
-    so this bridge materializes temporary pages.  Boundary reads are intentionally kept out of the Triton kernel and
-    happen once per invocation.
+    XTuner's SFT Indexer receives dense, gathered K tensors. Boundary reads
+    happen once per invocation before the per-request DeepGEMM calls.
     """
     return [(int(start), int(end)) for start, end in zip(cu[:-1].tolist(), cu[1:].tolist())]
 
@@ -324,9 +322,8 @@ def _get_deep_gemm():
         import deep_gemm
     except ImportError:
         return None
-    required = ("get_paged_mqa_logits_metadata", "get_num_sms")
     has_mqa = hasattr(deep_gemm, "fp8_mqa_logits") or hasattr(deep_gemm, "fp8_fp4_mqa_logits")
-    return deep_gemm if has_mqa and all(hasattr(deep_gemm, name) for name in required) else None
+    return deep_gemm if has_mqa else None
 
 
 def _deep_gemm_scores(
@@ -337,15 +334,14 @@ def _deep_gemm_scores(
     k_ranges: list[tuple[int, int]],
     q_lens: list[int],
     raw_k_seqlens: list[int],
-) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """Run LMDeploy's DeepGEMM MQA Indexer kernel when available."""
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run LMDeploy's contiguous DeepGEMM MQA Indexer kernel."""
     deep_gemm = _get_deep_gemm()
     if deep_gemm is None:
-        return None
-    # DeepGEMM MQA requires a full 128-entry tile.  Keep the adapter
-    # compatible with short unit-test/request sequences via the Triton path.
-    if any(end - start < _PAGE_SIZE for start, end in k_ranges):
-        return None
+        raise RuntimeError(
+            "indexer_quant_mode='ue8m0_fp8' requires DeepGEMM's contiguous "
+            "fp8_mqa_logits API; the FP8 Indexer path does not fall back to Triton"
+        )
     max_k = max((end - start for start, end in k_ranges), default=1)
     scores = torch.full((q_flat.size(0), max_k), -torch.inf, device=q_flat.device, dtype=torch.float32)
     row_lens = torch.zeros((q_flat.size(0),), device=q_flat.device, dtype=torch.int32)
@@ -353,6 +349,10 @@ def _deep_gemm_scores(
     for (k_start, k_end), q_len, raw_len in zip(k_ranges, q_lens, raw_k_seqlens):
         k_seq = k_fp8[k_start:k_end].contiguous()
         ks_seq = k_scale[k_start:k_end].contiguous()
+        # A contiguous packed slice may still have an unaligned scale pointer.
+        # DeepGEMM's TMA input requires 16-byte alignment.
+        if ks_seq.data_ptr() % 16:
+            ks_seq = ks_seq.clone()
         k_len = k_seq.size(0)
         q_end = q_cursor + q_len
         # Each sequence is passed as an independent contiguous K tensor, so
@@ -366,13 +366,19 @@ def _deep_gemm_scores(
             continue
         mqa = getattr(deep_gemm, "fp8_mqa_logits", None)
         if mqa is not None:
-            seq_scores = mqa(q_flat[q_cursor:q_end], (k_seq, ks_seq), q_s[q_cursor:q_end], starts, ends,
-                             clean_logits=False)
+            seq_scores = mqa(
+                q_flat[q_cursor:q_end], (k_seq, ks_seq), q_s[q_cursor:q_end], starts, ends, clean_logits=False
+            )
         else:
             seq_scores = deep_gemm.fp8_fp4_mqa_logits(
-                q=(q_flat[q_cursor:q_end], None), kv=(k_seq, ks_seq), weights=q_s[q_cursor:q_end],
-                cu_seq_len_k_start=starts, cu_seq_len_k_end=ends, clean_logits=False,
-                max_seqlen_k=max(k_len, 1), logits_dtype=torch.float32,
+                q=(q_flat[q_cursor:q_end], None),
+                kv=(k_seq, ks_seq),
+                weights=q_s[q_cursor:q_end],
+                cu_seq_len_k_start=starts,
+                cu_seq_len_k_end=ends,
+                clean_logits=False,
+                max_seqlen_k=max(k_len, 1),
+                logits_dtype=torch.float32,
             )
         scores[q_cursor:q_end, : seq_scores.size(1)].copy_(seq_scores)
         row_lens[q_cursor:q_end] = ends
@@ -392,10 +398,10 @@ def _lmdeploy_fp8_indexer_topk_impl(
     index_head_dim: int,
     index_topk: int,
 ) -> torch.Tensor:
-    """Dense XTuner input -> LMDeploy ``fp8_index`` -> global top-k ids.
+    """Dense XTuner input -> LMDeploy DeepGEMM score -> global top-k ids.
 
-    This is a correctness bridge for the current packed SFT path.  It uses
-    the exact LMDeploy Triton score kernel, while retaining XTuner's public
+    This is a correctness bridge for the current packed SFT path. It uses
+    LMDeploy's contiguous DeepGEMM MQA kernel, while retaining XTuner's public
     ``[S, 1, K]`` output and packed global K indices. ``weights`` are the raw
     per-head gates; the head-count and head-dimension factors are folded into
     one FP32 scale exactly as in LMDeploy's fused Q preprocessing.
@@ -449,8 +455,8 @@ def _lmdeploy_fp8_indexer_topk_impl(
     if not active_q:
         return result
 
-    # Build the exact LMDeploy argument layout.  Q is concatenated in the
-    # active packed order; K pages remain request-local to prevent leakage.
+    # Build the exact LMDeploy argument layout. Q is concatenated in the
+    # active packed order; each DeepGEMM call receives a request-local dense K.
     q_parts = [q_fp8[start:end] for start, end, _, _ in active_q]
     qs_parts = [q_scale[start:end] for start, end, _, _ in active_q]
     weight_parts = [weights[start:end] for start, end, _, _ in active_q]
@@ -462,11 +468,6 @@ def _lmdeploy_fp8_indexer_topk_impl(
     if not any(end > start for start, end in active_k_ranges):
         return result
     q_lens = [end - start for start, end, _, _ in active_q]
-    cu_q = torch.tensor(
-        [0, *torch.cumsum(torch.tensor(q_lens, device="cpu"), dim=0).tolist()],
-        device=q_fp8.device,
-        dtype=torch.int32,
-    )
     # raw_k_seqlens is request-local in LMDeploy's causal formula.  It is the
     # end position of the current query suffix in that request's K sequence.
     raw_k_seqlens = torch.tensor(
@@ -485,36 +486,10 @@ def _lmdeploy_fp8_indexer_topk_impl(
         q_lens,
         raw_k_seqlens.tolist(),
     )
-    if deepgemm_result is None:
-        k_cache, k_s_cache, k_seqlens, block_offset, _ = _build_paged_k_cache(
-            k_fp8, k_scale, active_k_ranges
-        )
-        max_q_seqlen = max(q_lens)
-        max_k_seqlen = max(int(k_cache_len) for k_cache_len in k_seqlens.tolist())
-        scores, row_k_seqlens = fp8_index(
-            q_flat,
-            weighted_q_scale,
-            k_cache,
-            k_s_cache,
-            cu_q,
-            k_seqlens,
-            block_offset,
-            max_q_seqlen=max_q_seqlen,
-            max_k_seqlen=max_k_seqlen,
-            causal=True,
-            raw_k_seqlens=raw_k_seqlens,
-            compress_ratio=1,
-            return_row_k_seqlens=True,
-            trim_causal_tail=True,
-        )
-    else:
-        scores, row_k_seqlens = deepgemm_result
+    scores, row_k_seqlens = deepgemm_result
 
-    # With ``trim_causal_tail=True`` LMDeploy deliberately leaves the padded
-    # suffix uninitialized and passes ``row_k_seqlens`` to its top-k kernel.
-    # The LMDeploy radix selector consumes those row lengths directly, so do
-    # not materialize a full [num_query, max_k_seqlen] mask.  The fallback
-    # torch.topk path still masks in-place for correctness.
+    # Mask the causal suffix before top-k. The per-row lengths are passed to
+    # the LMDeploy-compatible selector when it is available.
     width = min(index_topk, scores.size(1))
     if width == index_topk:
         # LMDeploy uses its TileLang byte-radix selector for GLM-5.2's

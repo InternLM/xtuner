@@ -1,8 +1,8 @@
 """GPU tests for XTuner's LMDeploy-compatible FP8 Indexer path.
 
-The score kernel in this test is the vendored LMDeploy Triton ``fp8_index``
-kernel.  The adapter test additionally checks dense packed K -> temporary
-paged K conversion and the public ``[S, 1, K]`` output contract.
+The direct kernel test covers the vendored LMDeploy Triton helper.  The
+public XTuner adapter test uses the DeepGEMM contiguous MQA API used by the
+training/prefill path.
 """
 
 from __future__ import annotations
@@ -33,6 +33,20 @@ def _fp8_index_available() -> bool:
         check=False,
     )
     return result.returncode == 0
+
+
+@cache
+def _deepgemm_mqa_available() -> bool:
+    """Whether the contiguous DeepGEMM Indexer API is available."""
+    if not hasattr(torch, "float8_e4m3fn") or not torch.cuda.is_available():
+        return False
+    try:
+        if torch.cuda.get_device_capability()[0] < 9:
+            return False
+        import deep_gemm
+    except Exception:
+        return False
+    return hasattr(deep_gemm, "fp8_mqa_logits") or hasattr(deep_gemm, "fp8_fp4_mqa_logits")
 
 
 @cache
@@ -134,7 +148,7 @@ def test_lmdeploy_score_kernel_matches_fp32_reference_on_paged_cache():
     torch.testing.assert_close(row_lens, ends, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not _fp8_index_available(), reason="requires SM90 CUDA and Triton")
+@pytest.mark.skipif(not _deepgemm_mqa_available(), reason="requires SM90 CUDA and contiguous DeepGEMM MQA")
 def test_lmdeploy_adapter_preserves_packed_global_topk_ids():
     from xtuner.v1.ops.sparse_mla.lmdeploy_fp8_index import lmdeploy_fp8_indexer_topk
 
@@ -177,7 +191,7 @@ def test_lmdeploy_adapter_preserves_packed_global_topk_ids():
         count = min(topk, int(ends[row] - starts[row]))
         _, ids = expected_scores[row, starts[row] : ends[row]].topk(count)
         expected[row, :count] = ids.to(torch.int32) + starts[row]
-    # The Triton and torch reductions can differ at a near-tie.  Compare set
+    # DeepGEMM and torch reductions can differ at a near-tie.  Compare set
     # recall rather than relying on an ordering of equal scores.
     actual_set = actual[:, 0].sort(dim=-1).values
     expected_set = expected.sort(dim=-1).values
