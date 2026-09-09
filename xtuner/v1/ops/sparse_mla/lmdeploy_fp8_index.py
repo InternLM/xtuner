@@ -342,6 +342,10 @@ def _deep_gemm_scores(
     deep_gemm = _get_deep_gemm()
     if deep_gemm is None:
         return None
+    # DeepGEMM MQA requires a full 128-entry tile.  Keep the adapter
+    # compatible with short unit-test/request sequences via the Triton path.
+    if any(end - start < _PAGE_SIZE for start, end in k_ranges):
+        return None
     max_k = max((end - start for start, end in k_ranges), default=1)
     scores = torch.full((q_flat.size(0), max_k), -torch.inf, device=q_flat.device, dtype=torch.float32)
     row_lens = torch.zeros((q_flat.size(0),), device=q_flat.device, dtype=torch.int32)
