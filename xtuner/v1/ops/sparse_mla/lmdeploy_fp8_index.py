@@ -1,9 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""LMDeploy-compatible Triton FP8 Indexer score kernel.
+"""LMDeploy-compatible DeepGEMM FP8 Indexer score path.
 
-The kernel body is kept aligned with LMDeploy's ``cuda/ds_index.py``. XTuner
-vendors it so the training environment does not need a runtime lmdeploy import;
-only the dense-to-paged adapter below is XTuner-specific.
+The DeepGEMM path is used when the matching package is available. The vendored
+Triton implementation remains as a compatibility fallback for environments
+that do not provide DeepGEMM.
 """
 
 from functools import lru_cache
@@ -255,6 +255,22 @@ def fp8_index(
 
 
 _PAGE_SIZE = 128
+_INDEX_SCALE_BYTES = 4
+
+
+def _pack_deepgemm_k_cache(k_cache: torch.Tensor, k_s_cache: torch.Tensor) -> torch.Tensor:
+    """Pack split FP8 values/scales into DeepGEMM's uint8 page layout."""
+    blocks, entries, head_dim = k_cache.shape
+    packed = torch.empty(
+        (blocks, entries, 1, head_dim + _INDEX_SCALE_BYTES),
+        device=k_cache.device,
+        dtype=torch.uint8,
+    )
+    packed_values = packed[..., :head_dim].view(torch.float8_e4m3fn)
+    packed_scales = packed[..., head_dim:].view(torch.float32).squeeze(-1)
+    packed_values.copy_(k_cache)
+    packed_scales.copy_(k_s_cache)
+    return packed
 
 
 def _sequence_ranges(cu: torch.Tensor) -> list[tuple[int, int]]:
@@ -300,6 +316,63 @@ def _build_paged_k_cache(
             k_s_cache[base + page_id, : page_end - page_start].copy_(scales[page_start:page_end])
     k_seqlens = torch.tensor(lengths, device=k_fp8.device, dtype=torch.int32)
     return k_cache, k_s_cache, k_seqlens, block_offset, lengths
+
+
+@lru_cache(maxsize=1)
+def _get_deep_gemm():
+    try:
+        import deep_gemm
+    except ImportError:
+        return None
+    required = ("fp8_fp4_mqa_logits", "fp8_fp4_paged_mqa_logits", "get_paged_mqa_logits_metadata", "get_num_sms")
+    return deep_gemm if all(hasattr(deep_gemm, name) for name in required) else None
+
+
+def _deep_gemm_scores(
+    q_flat: torch.Tensor,
+    q_s: torch.Tensor,
+    k_fp8: torch.Tensor,
+    k_scale: torch.Tensor,
+    k_ranges: list[tuple[int, int]],
+    q_lens: list[int],
+    raw_k_seqlens: list[int],
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Run LMDeploy's DeepGEMM MQA Indexer kernel when available."""
+    deep_gemm = _get_deep_gemm()
+    if deep_gemm is None:
+        return None
+    max_k = max((end - start for start, end in k_ranges), default=1)
+    scores = torch.full((q_flat.size(0), max_k), -torch.inf, device=q_flat.device, dtype=torch.float32)
+    row_lens = torch.zeros((q_flat.size(0),), device=q_flat.device, dtype=torch.int32)
+    q_cursor = 0
+    for (k_start, k_end), q_len, raw_len in zip(k_ranges, q_lens, raw_k_seqlens):
+        k_seq = k_fp8[k_start:k_end].contiguous()
+        ks_seq = k_scale[k_start:k_end].contiguous()
+        k_len = k_seq.size(0)
+        q_end = q_cursor + q_len
+        # Each sequence is passed as an independent contiguous K tensor, so
+        # DeepGEMM starts at zero.  ``raw_len`` identifies the query suffix
+        # position for decode; prefill has raw_len == q_len.
+        q_start = max(raw_len - q_len, 0)
+        starts = torch.zeros((q_len,), device=q_flat.device, dtype=torch.int32)
+        ends = (q_start + torch.arange(1, q_len + 1, device=q_flat.device, dtype=torch.int32)).clamp(max=k_len)
+        if k_len == 0:
+            q_cursor = q_end
+            continue
+        seq_scores = deep_gemm.fp8_fp4_mqa_logits(
+            q=(q_flat[q_cursor:q_end], None),
+            kv=(k_seq, ks_seq),
+            weights=q_s[q_cursor:q_end],
+            cu_seq_len_k_start=starts,
+            cu_seq_len_k_end=ends,
+            clean_logits=False,
+            max_seqlen_k=max(k_len, 1),
+            logits_dtype=torch.float32,
+        )
+        scores[q_cursor:q_end, : seq_scores.size(1)].copy_(seq_scores)
+        row_lens[q_cursor:q_end] = ends
+        q_cursor = q_end
+    return scores, row_lens
 
 
 def _lmdeploy_fp8_indexer_topk_impl(
@@ -401,22 +474,35 @@ def _lmdeploy_fp8_indexer_topk_impl(
     max_q_seqlen = max(q_lens)
     max_k_seqlen = max(int(k_cache_len) for k_cache_len in k_seqlens.tolist())
     score_scale = (q_fp8.size(1) ** -0.5) * (index_head_dim**-0.5)
-    scores, row_k_seqlens = fp8_index(
+    weighted_q_scale = q_s * q_weight * score_scale
+    deepgemm_result = _deep_gemm_scores(
         q_flat,
-        q_s * q_weight * score_scale,
-        k_cache,
-        k_s_cache,
-        cu_q,
-        k_seqlens,
-        block_offset,
-        max_q_seqlen=max_q_seqlen,
-        max_k_seqlen=max_k_seqlen,
-        causal=True,
-        raw_k_seqlens=raw_k_seqlens,
-        compress_ratio=1,
-        return_row_k_seqlens=True,
-        trim_causal_tail=True,
+        weighted_q_scale,
+        k_fp8.squeeze(0),
+        k_scale.squeeze(0),
+        active_k_ranges,
+        q_lens,
+        raw_k_seqlens.tolist(),
     )
+    if deepgemm_result is None:
+        scores, row_k_seqlens = fp8_index(
+            q_flat,
+            weighted_q_scale,
+            k_cache,
+            k_s_cache,
+            cu_q,
+            k_seqlens,
+            block_offset,
+            max_q_seqlen=max_q_seqlen,
+            max_k_seqlen=max_k_seqlen,
+            causal=True,
+            raw_k_seqlens=raw_k_seqlens,
+            compress_ratio=1,
+            return_row_k_seqlens=True,
+            trim_causal_tail=True,
+        )
+    else:
+        scores, row_k_seqlens = deepgemm_result
 
     # With ``trim_causal_tail=True`` LMDeploy deliberately leaves the padded
     # suffix uninitialized and passes ``row_k_seqlens`` to its top-k kernel.
