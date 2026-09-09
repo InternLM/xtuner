@@ -324,8 +324,9 @@ def _get_deep_gemm():
         import deep_gemm
     except ImportError:
         return None
-    required = ("fp8_fp4_mqa_logits", "fp8_fp4_paged_mqa_logits", "get_paged_mqa_logits_metadata", "get_num_sms")
-    return deep_gemm if all(hasattr(deep_gemm, name) for name in required) else None
+    required = ("get_paged_mqa_logits_metadata", "get_num_sms")
+    has_mqa = hasattr(deep_gemm, "fp8_mqa_logits") or hasattr(deep_gemm, "fp8_fp4_mqa_logits")
+    return deep_gemm if has_mqa and all(hasattr(deep_gemm, name) for name in required) else None
 
 
 def _deep_gemm_scores(
@@ -359,16 +360,16 @@ def _deep_gemm_scores(
         if k_len == 0:
             q_cursor = q_end
             continue
-        seq_scores = deep_gemm.fp8_fp4_mqa_logits(
-            q=(q_flat[q_cursor:q_end], None),
-            kv=(k_seq, ks_seq),
-            weights=q_s[q_cursor:q_end],
-            cu_seq_len_k_start=starts,
-            cu_seq_len_k_end=ends,
-            clean_logits=False,
-            max_seqlen_k=max(k_len, 1),
-            logits_dtype=torch.float32,
-        )
+        mqa = getattr(deep_gemm, "fp8_mqa_logits", None)
+        if mqa is not None:
+            seq_scores = mqa(q_flat[q_cursor:q_end], (k_seq, ks_seq), q_s[q_cursor:q_end], starts, ends,
+                             clean_logits=False)
+        else:
+            seq_scores = deep_gemm.fp8_fp4_mqa_logits(
+                q=(q_flat[q_cursor:q_end], None), kv=(k_seq, ks_seq), weights=q_s[q_cursor:q_end],
+                cu_seq_len_k_start=starts, cu_seq_len_k_end=ends, clean_logits=False,
+                max_seqlen_k=max(k_len, 1), logits_dtype=torch.float32,
+            )
         scores[q_cursor:q_end, : seq_scores.size(1)].copy_(seq_scores)
         row_lens[q_cursor:q_end] = ends
         q_cursor = q_end
