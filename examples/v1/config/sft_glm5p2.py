@@ -99,6 +99,7 @@ elif optimizer == "adamw":
     optim_cfg = AdamWConfig(
         lr=lr,
         foreach=_get_bool_env("ADAMW_FOREACH", False),
+        fused=_get_bool_env("ADAMW_FUSED", False),
         swap_optimizer=_get_bool_env("SWAP_OPTIMIZER", False),
     )
 else:
