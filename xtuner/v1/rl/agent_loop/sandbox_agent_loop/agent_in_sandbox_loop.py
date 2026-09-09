@@ -17,7 +17,14 @@ from xtuner.v1.rl.utils import create_task
 
 from ...rollout.chat_template import canonicalize_messages_for_chat_template
 from ...rollout.trace_store import get_store
-from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
+from ..agent_loop import (
+    AgentLoop,
+    AgentLoopConfig,
+    mark_training_artifacts_failed,
+    maybe_filter_invalid_sample,
+    normalize_token_ids,
+    validate_training_artifacts,
+)
 from .schemas import AgentRolloutItem, RolloutStatus
 
 
@@ -244,8 +251,12 @@ class AgentInSandboxLoop(AgentLoop):
         sample_groups = await generated_samples
         samples = [sample for sample_group in sample_groups for sample in sample_group]
         samples = _drop_failed_train_samples(samples, self.mode)
-        # Keep sample validation as the final group-generation step.
-        return maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
+        # Filter completed groups before preparing training artifacts so intentionally
+        # filtered samples do not fail artifact validation.
+        samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
+        if self.mode == "train":
+            samples = await asyncio.gather(*(self.prepare_training_artifacts(sample) for sample in samples))
+        return samples
 
     # NOTE: A single sandbox session may yield multiple trainable segments, so this returns a list
     # rather than the base class's single RolloutState. The base contract is never exercised for
@@ -271,6 +282,22 @@ class AgentInSandboxLoop(AgentLoop):
             rollout_state.error_msg = f"{type(exc).__name__}: {exc}"
             self.logger.error(f"[AgentInSandboxLoop] failed: {exc}\n{traceback.format_exc()}")
             return [rollout_state]
+
+    async def prepare_training_artifacts(self, rollout_state: RolloutState) -> RolloutState:
+        """Validate and normalize already exported sandbox training
+        artifacts."""
+        try:
+            if rollout_state.status != Status.COMPLETED:
+                return rollout_state
+            validate_training_artifacts(rollout_state)
+            rollout_state.response_ids = normalize_token_ids(rollout_state.response_ids)
+            rollout_state.input_ids = normalize_token_ids(rollout_state.input_ids)
+            rollout_state.labels = normalize_token_ids(rollout_state.labels)
+            if rollout_state.logprobs is not None:
+                rollout_state.logprobs = [float(value) for value in rollout_state.logprobs]
+            return rollout_state
+        except Exception as exc:
+            return mark_training_artifacts_failed(rollout_state, exc, self.logger)
 
     async def _run_item(self, item: AgentRolloutItem) -> AgentRolloutItem:
         runner = _resolve_runner(item.pipeline, str(item.uid))

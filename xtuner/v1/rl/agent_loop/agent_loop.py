@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any, TypeAlias, cast, overload
 
 import ray
+import torch
 from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
@@ -31,6 +32,39 @@ from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 
 AGENT_LOOP_CONCURRENCY_GROUP_GENERATE = "generate"
 IsValidSampleFn: TypeAlias = Callable[[list[RolloutState]], bool]
+
+
+def normalize_token_ids(value: Any) -> list[int]:
+    """Convert list-like token IDs, including CPU tensors, to Python
+    integers."""
+    if value is None:
+        raise ValueError("token IDs must be provided.")
+    if isinstance(value, torch.Tensor):
+        value = value.flatten().tolist()
+    return [int(item) for item in value]
+
+
+def validate_training_artifacts(rollout_state: RolloutState) -> None:
+    """Validate the final fields required by the train worker."""
+    if rollout_state.input_ids is None or rollout_state.labels is None:
+        raise ValueError("training artifacts must provide input_ids and labels.")
+    if len(rollout_state.input_ids) != len(rollout_state.labels):
+        raise ValueError("training artifacts input_ids and labels must have the same length.")
+    if rollout_state.logprobs is not None and len(rollout_state.logprobs) != len(rollout_state.input_ids):
+        raise ValueError("training artifacts logprobs and input_ids must have the same length.")
+
+
+def mark_training_artifacts_failed(rollout_state: RolloutState, error: Exception, logger) -> RolloutState:
+    """Mark artifact preparation failure on a rollout state without raising
+    it."""
+    rollout_state.status = Status.FAILED
+    rollout_state.finish_reason = "error"
+    rollout_state.error_msg = f"{type(error).__name__}: {error}"
+    logger.error(
+        f"[AgentLoop] failed to prepare training artifacts for rollout_id={rollout_state.rollout_id}: "
+        f"{type(error).__name__}: {error}"
+    )
+    return rollout_state
 
 
 def maybe_filter_invalid_sample(
@@ -238,6 +272,18 @@ class AgentLoop(ABC):
     @abstractmethod
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
 
+    @abstractmethod
+    async def prepare_training_artifacts(self, rollout_state: RolloutState) -> RolloutState:
+        """Prepare and validate the training fields for one completed rollout.
+
+        Args:
+            rollout_state (RolloutState): Completed rollout state to prepare.
+
+        Returns:
+            RolloutState: The rollout state with canonical training fields.
+        """
+        ...
+
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         """Generate one rollout group.
 
@@ -256,8 +302,9 @@ class AgentLoop(ABC):
         if self.judger is not None and self.enable_batch_judge:
             if all(sample.status == Status.COMPLETED for sample in group_samples):
                 group_samples = await self.run_judger(group_samples)
-        # Keep sample validation as the final group-generation step.
-        return maybe_filter_invalid_sample(group_samples, self.is_valid_sample_fn, self.logger)
+        # Filter completed groups before preparing training artifacts.
+        group_samples = maybe_filter_invalid_sample(group_samples, self.is_valid_sample_fn, self.logger)
+        return await asyncio.gather(*(self.prepare_training_artifacts(sample) for sample in group_samples))
 
     @overload
     async def run_judger(self, rollout_state: RolloutState) -> RolloutState: ...

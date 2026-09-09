@@ -3,7 +3,13 @@ from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.trace.rollout_api import trace_rollout_endpoint, trace_rollout_remote
 
-from .agent_loop import AgentLoop, AgentLoopConfig
+from .agent_loop import (
+    AgentLoop,
+    AgentLoopConfig,
+    mark_training_artifacts_failed,
+    normalize_token_ids,
+    validate_training_artifacts,
+)
 
 
 class SingleTurnAgentLoopConfig(AgentLoopConfig):
@@ -87,3 +93,32 @@ class SingleTurnAgentLoop(AgentLoop):
             # 如果开启了批量打分，则在 generate_group 里统一打分，不在这里逐条打分
             rollout_state = await self.run_judger(rollout_state)
         return rollout_state
+
+    async def prepare_training_artifacts(self, rollout_state: RolloutState) -> RolloutState:
+        """Prepare list-based training artifacts for a completed single-turn
+        rollout."""
+        try:
+            if rollout_state.status != Status.COMPLETED:
+                return rollout_state
+            prompt_ids = rollout_state.prompt_ids or rollout_state.extra_fields.get("train_prompt_ids")
+            prompt_ids = normalize_token_ids(prompt_ids)
+            response_ids = normalize_token_ids(rollout_state.response_ids)
+            response_mask = rollout_state.response_mask
+            if response_mask is None:
+                response_mask = [1] * len(response_ids)
+            response_labels = [
+                response_id if mask_id != 0 else -100 for response_id, mask_id in zip(response_ids, response_mask)
+            ]
+            rollout_state.input_ids = prompt_ids + response_ids[:-1]
+            rollout_state.labels = [-100] * (len(prompt_ids) - 1) + response_labels
+            if rollout_state.logprobs is not None:
+                rollout_state.logprobs = [0.0] * (len(prompt_ids) - 1) + [
+                    float(value) for value in rollout_state.logprobs
+                ]
+            validate_training_artifacts(rollout_state)
+            rollout_state.response_ids = response_ids
+            rollout_state.input_ids = normalize_token_ids(rollout_state.input_ids)
+            rollout_state.labels = normalize_token_ids(rollout_state.labels)
+            return rollout_state
+        except Exception as exc:
+            return mark_training_artifacts_failed(rollout_state, exc, self.logger)

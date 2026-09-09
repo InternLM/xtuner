@@ -20,7 +20,14 @@ from xtuner.v1.rl.rollout.chat_template import canonicalize_messages_for_chat_te
 from xtuner.v1.rl.rollout.trace_store import get_store
 from xtuner.v1.rl.utils import create_task
 
-from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
+from ..agent_loop import (
+    AgentLoop,
+    AgentLoopConfig,
+    mark_training_artifacts_failed,
+    maybe_filter_invalid_sample,
+    normalize_token_ids,
+    validate_training_artifacts,
+)
 
 
 def _import_from_path(path: str) -> Any:
@@ -148,8 +155,12 @@ class AgentInLocalhostLoop(AgentLoop):
 
         samples = await asyncio.gather(*tasks)
         samples = _drop_failed_train_samples(samples, self.mode)
-        # Keep sample validation as the final group-generation step.
-        return maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
+        # Filter completed groups before preparing training artifacts so intentionally
+        # filtered samples do not fail artifact validation.
+        samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
+        if self.mode == "train":
+            samples = await asyncio.gather(*(self.prepare_training_artifacts(sample) for sample in samples))
+        return samples
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         try:
@@ -180,6 +191,22 @@ class AgentInLocalhostLoop(AgentLoop):
                 error_msg=f"{type(exc).__name__}: {exc}",
                 agent_status="exception",
             )
+
+    async def prepare_training_artifacts(self, rollout_state: RolloutState) -> RolloutState:
+        """Prepare list-based training artifacts for a completed localhost
+        rollout."""
+        try:
+            if rollout_state.status != Status.COMPLETED:
+                return rollout_state
+            validate_training_artifacts(rollout_state)
+            rollout_state.response_ids = normalize_token_ids(rollout_state.response_ids)
+            rollout_state.input_ids = normalize_token_ids(rollout_state.input_ids)
+            rollout_state.labels = normalize_token_ids(rollout_state.labels)
+            if rollout_state.logprobs is not None:
+                rollout_state.logprobs = [float(value) for value in rollout_state.logprobs]
+            return rollout_state
+        except Exception as exc:
+            return mark_training_artifacts_failed(rollout_state, exc, self.logger)
 
     async def _generate_sample_impl(self, rollout_state: RolloutState) -> RolloutState:
         item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
