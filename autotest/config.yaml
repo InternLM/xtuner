@@ -297,6 +297,7 @@ case:
                     - XTUNER_ACTIVATION_OFFLOAD=0
                     - XTUNER_USE_CUTLASS_GROUP_GEMM=1
                     - XTUNER_DETERMINISTIC=true
+                    - ADAMW_FUSED=1
             assert_info:
                 base_metric: glm5-2-sft-30B/tracker.jsonl
                 check_metrics:
@@ -354,6 +355,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+                    - ADAMW_FUSED=1
             assert_info:
                 base_metric: glm5-2-sft-30B-sp2/tracker.jsonl
                 check_metrics:
