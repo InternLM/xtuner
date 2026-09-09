@@ -196,9 +196,7 @@ class DSAIndexer(nn.Module):
         # q: [bsz, S, Ni, Di]; k: [bsz, S, Di]
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe, k_nope], dim=-1)
-        # Raw LMDeploy head gates.  The BF16 backend applies the head factor
-        # here; the FP8 backend passes the raw gates through so the adapter can
-        # fold both attention scale factors in LMDeploy's multiplication order.
+        # weights: [bsz, S, Ni]
         raw_weights = self.weights_proj(hidden_states).float()
         weights = raw_weights * (self.index_n_heads**-0.5)
 
