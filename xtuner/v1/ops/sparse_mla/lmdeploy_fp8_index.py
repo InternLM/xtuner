@@ -8,6 +8,8 @@ from functools import lru_cache
 
 import torch
 
+from xtuner.v1.data_proto import SequenceContext
+
 
 def _sequence_ranges(cu: torch.Tensor) -> list[tuple[int, int]]:
     """Read packed boundaries once for the correctness adapter.
@@ -248,6 +250,54 @@ def _lmdeploy_fp8_indexer_topk_impl(
     return result
 
 
+def lmdeploy_fp8_dsa_topk_indices(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    weights: torch.Tensor,
+    seq_ctx: SequenceContext,
+    *,
+    index_head_dim: int,
+    index_topk: int,
+) -> torch.Tensor:
+    """Run the LMDeploy-compatible FP8 Indexer through the common DSA seam.
+
+    The public DSA protocol keeps logical BF16 Q/K inputs and raw gates.  FP8 quantization, packed sequence conversion
+    and DeepGEMM invocation stay private to this adapter.
+    """
+    if not q.is_cuda or not k.is_cuda or not weights.is_cuda:
+        raise RuntimeError("LMDeploy FP8 Indexer requires CUDA q, k, and weights")
+    if q.ndim != 4 or q.size(0) != 1 or k.ndim != 3 or k.size(0) != 1:
+        raise RuntimeError("LMDeploy FP8 Indexer expects q=(1,S,H,D) and k=(1,S_k,D)")
+    if index_head_dim != 128 or q.size(-1) != 128 or k.size(-1) != 128:
+        raise RuntimeError("LMDeploy GLM-5.2 FP8 Indexer requires head_dim=128")
+    if weights.shape != q.shape[:-1]:
+        raise RuntimeError("LMDeploy FP8 Indexer expects weights with shape [1, S, H]")
+    # Keep the historical adapter behavior: quantization is defined from a
+    # BF16 logical tensor even when an upstream projection runs in another
+    # floating-point dtype.
+    q = q.to(torch.bfloat16) if q.dtype != torch.bfloat16 else q
+    k = k.to(torch.bfloat16) if k.dtype != torch.bfloat16 else k
+
+    from .indexer_fp8_quant import indexer_fp8_quant
+
+    q_fp8, q_scale = indexer_fp8_quant(q.contiguous())
+    k_fp8, k_scale = indexer_fp8_quant(k.contiguous())
+    cu_seq_lens_q = seq_ctx.cu_seq_lens_q.to(device=q.device, dtype=torch.int32).contiguous()
+    cu_seq_lens_k = seq_ctx.cu_seq_lens_k.to(device=q.device, dtype=torch.int32).contiguous()
+    return lmdeploy_fp8_indexer_topk(
+        q_fp8,
+        q_scale,
+        k_fp8,
+        k_scale,
+        weights.float().contiguous(),
+        cu_seq_lens_q,
+        cu_seq_lens_k,
+        seq_ctx._shard_start,
+        index_head_dim,
+        index_topk,
+    )
+
+
 @torch.library.custom_op("sparse_mla::lmdeploy_fp8_indexer_topk", mutates_args=(), device_types="cuda")
 def lmdeploy_fp8_indexer_topk(
     q_fp8: torch.Tensor,
@@ -291,4 +341,4 @@ def _lmdeploy_fp8_indexer_topk_fake(
     return torch.empty((q_fp8.size(1), 1, index_topk), device=q_fp8.device, dtype=torch.int32)
 
 
-__all__ = ["lmdeploy_fp8_indexer_topk"]
+__all__ = ["lmdeploy_fp8_dsa_topk_indices", "lmdeploy_fp8_indexer_topk"]
