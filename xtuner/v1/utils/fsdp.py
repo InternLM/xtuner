@@ -1,9 +1,20 @@
 import torch
+from torch.distributed.fsdp import FSDPModule
 
 from xtuner.v1.utils.device import get_torch_device_module
 
 
 DEVICE_MODULE = get_torch_device_module()
+
+
+def set_requires_gradient_sync(module: FSDPModule, requires_gradient_sync: bool, *, recurse: bool = True) -> None:
+    """Keep XTuner accumulation in FSDP-owned sharded gradients."""
+    if not requires_gradient_sync:
+        raise ValueError(
+            "XTuner requires gradient ReduceScatter on every backward; "
+            "set_requires_gradient_sync(False) is not supported."
+        )
+    FSDPModule.set_requires_gradient_sync(module, requires_gradient_sync, recurse=recurse)
 
 
 def release_deferred_fsdp_all_gathers(model: torch.nn.Module) -> tuple[int, int]:
