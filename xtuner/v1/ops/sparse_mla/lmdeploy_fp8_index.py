@@ -457,8 +457,6 @@ def _lmdeploy_fp8_indexer_topk_impl(
     active_k_ranges = [k_ranges[seq_id] for seq_id in active_seq_ids]
     if not any(end > start for start, end in active_k_ranges):
         return result
-    k_cache, k_s_cache, k_seqlens, block_offset, _ = _build_paged_k_cache(k_fp8, k_scale, active_k_ranges)
-
     q_lens = [end - start for start, end, _, _ in active_q]
     cu_q = torch.tensor(
         [0, *torch.cumsum(torch.tensor(q_lens, device="cpu"), dim=0).tolist()],
@@ -472,8 +470,6 @@ def _lmdeploy_fp8_indexer_topk_impl(
         device=q_fp8.device,
         dtype=torch.int32,
     )
-    max_q_seqlen = max(q_lens)
-    max_k_seqlen = max(int(k_cache_len) for k_cache_len in k_seqlens.tolist())
     score_scale = (q_fp8.size(1) ** -0.5) * (index_head_dim**-0.5)
     weighted_q_scale = q_s * q_weight * score_scale
     deepgemm_result = _deep_gemm_scores(
@@ -486,6 +482,11 @@ def _lmdeploy_fp8_indexer_topk_impl(
         raw_k_seqlens.tolist(),
     )
     if deepgemm_result is None:
+        k_cache, k_s_cache, k_seqlens, block_offset, _ = _build_paged_k_cache(
+            k_fp8, k_scale, active_k_ranges
+        )
+        max_q_seqlen = max(q_lens)
+        max_k_seqlen = max(int(k_cache_len) for k_cache_len in k_seqlens.tolist())
         scores, row_k_seqlens = fp8_index(
             q_flat,
             weighted_q_scale,
