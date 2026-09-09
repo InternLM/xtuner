@@ -1,14 +1,52 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import sys
+import types
 from collections.abc import Mapping
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import SandboxPool
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import SandboxSpec, StageRecord
+
+def _create_object(config: Any = None) -> Any:
+    if not isinstance(config, dict):
+        return config
+    config = dict(config)
+    obj_type = config.pop("type")
+    return obj_type(**config)
+
+
+class _NoopTokenBucket:
+    async def acquire(self) -> None:
+        return None
+
+
+def _get_shared_async_token_bucket(key: str, rate_limit: float, capacity: float | None = None):
+    del key, rate_limit, capacity
+    return _NoopTokenBucket()
+
+
+# lagent is an optional dependency that the unit-test environment does not
+# install, so register functional stand-ins for the helpers imported by the
+# agent_loop packages. Unlike a ``patch.dict`` context, ``setdefault`` keeps
+# the stubs (and the xtuner modules first imported through them) in
+# ``sys.modules`` for the whole session, so every test patches the same
+# module object.
+_lagent_stub = types.ModuleType("lagent")
+_lagent_utils_stub = types.ModuleType("lagent.utils")
+_lagent_utils_stub.create_object = _create_object
+_lagent_utils_stub.ctx_session_id = contextvars.ContextVar("session_id", default=None)
+_lagent_rate_limiter_stub = types.ModuleType("lagent.utils.rate_limiter")
+_lagent_rate_limiter_stub.get_shared_async_token_bucket = _get_shared_async_token_bucket
+sys.modules.setdefault("lagent", _lagent_stub)
+sys.modules.setdefault("lagent.utils", _lagent_utils_stub)
+sys.modules.setdefault("lagent.utils.rate_limiter", _lagent_rate_limiter_stub)
+
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import SandboxPool  # noqa: E402
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import SandboxSpec, StageRecord  # noqa: E402
 
 
 class FakeClient:
