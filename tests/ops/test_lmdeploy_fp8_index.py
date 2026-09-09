@@ -1,8 +1,8 @@
-"""GPU tests for XTuner's LMDeploy-compatible FP8 Indexer path.
+"""GPU tests for XTuner's DeepGEMM-backed FP8 Indexer path.
 
-The direct kernel test covers the vendored LMDeploy Triton helper.  The
-public XTuner adapter test uses the DeepGEMM contiguous MQA API used by the
-training/prefill path.
+The public XTuner adapter test uses the contiguous DeepGEMM MQA API used by
+the training/prefill path.  Quantization and top-k selector tests exercise
+the surrounding contracts without invoking a Triton score fallback.
 """
 
 from __future__ import annotations
@@ -101,53 +101,6 @@ def test_indexer_fp8_quant_matches_ue8m0_reference():
     torch.testing.assert_close(actual_scale, expected_scale, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not _fp8_index_available(), reason="requires SM90 CUDA and Triton")
-def test_lmdeploy_score_kernel_matches_fp32_reference_on_paged_cache():
-    from xtuner.v1.ops.sparse_mla.lmdeploy_fp8_index import fp8_index
-
-    device = torch.device("cuda")
-    torch.manual_seed(20260907)
-    query_len, key_len, heads, head_dim = 129, 194, 32, 128
-    q = (torch.randn(query_len, heads, head_dim, device=device) * 1.5).to(torch.float8_e4m3fn)
-    k = (torch.randn(key_len, head_dim, device=device) * 1.5).to(torch.float8_e4m3fn)
-    q_scale = torch.rand(query_len, heads, device=device, dtype=torch.float32) + 0.5
-    k_scale = torch.rand(key_len, device=device, dtype=torch.float32) + 0.5
-    weights = torch.rand(query_len, heads, device=device, dtype=torch.float32) + 0.2
-
-    block_size = 128
-    num_blocks = (key_len + block_size - 1) // block_size
-    k_cache = torch.zeros(num_blocks, block_size, head_dim, device=device, dtype=q.dtype)
-    k_s_cache = torch.ones(num_blocks, block_size, device=device, dtype=torch.float32)
-    k_cache.view(-1, head_dim)[:key_len].copy_(k)
-    k_s_cache.view(-1)[:key_len].copy_(k_scale)
-    cu_q = torch.tensor([0, query_len], device=device, dtype=torch.int32)
-    k_lens = torch.tensor([key_len], device=device, dtype=torch.int32)
-    offsets = torch.arange(num_blocks, device=device, dtype=torch.int32).view(1, -1)
-    actual, row_lens = fp8_index(
-        q,
-        q_scale * weights,
-        k_cache,
-        k_s_cache,
-        cu_q,
-        k_lens,
-        offsets,
-        max_q_seqlen=query_len,
-        max_k_seqlen=key_len,
-        causal=True,
-        raw_k_seqlens=k_lens,
-        return_row_k_seqlens=True,
-        trim_causal_tail=True,
-    )
-    starts = torch.zeros(query_len, device=device, dtype=torch.int32)
-    starts.fill_(key_len - query_len)
-    ends = (starts + torch.arange(1, query_len + 1, device=device, dtype=torch.int32)).clamp(max=key_len)
-    expected = _reference_scores(q, q_scale, k, k_scale, weights, starts, ends)
-    key_ids = torch.arange(key_len, device=device)[None, :]
-    valid = (key_ids >= starts[:, None]) & (key_ids < ends[:, None])
-    torch.testing.assert_close(actual[valid], expected[valid], rtol=2e-3, atol=2e-2)
-    torch.testing.assert_close(row_lens, ends, rtol=0, atol=0)
-
-
 @pytest.mark.skipif(not _deepgemm_mqa_available(), reason="requires SM90 CUDA and contiguous DeepGEMM MQA")
 def test_lmdeploy_adapter_preserves_packed_global_topk_ids():
     from xtuner.v1.ops.sparse_mla.lmdeploy_fp8_index import lmdeploy_fp8_indexer_topk
@@ -206,9 +159,9 @@ def test_lmdeploy_sparse_topk_selector_matches_reference_sets():
 
     device = torch.device("cuda")
     torch.manual_seed(20260909)
-    rows, width, topk = 3, 1024, 512
+    rows, width, topk = 3, 4096, 2048
     scores = torch.randn(rows, width, device=device, dtype=torch.float32)
-    seqlens = torch.tensor([1024, 700, 200], device=device, dtype=torch.int32)
+    seqlens = torch.tensor([4096, 2700, 200], device=device, dtype=torch.int32)
     actual = sparse_index_topk(
         scores,
         torch.ones(rows, device=device, dtype=torch.int32),
