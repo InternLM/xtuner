@@ -105,6 +105,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
+                    - ADAMW_FUSED=1
             assert_info:
                 base_metric: glm5-2-rl-lmdeploy-fp8-mtp4-resume/tracker.jsonl
                 check_metrics:
@@ -155,6 +156,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
+                    - ADAMW_FUSED=1
             assert_info:
                 base_metric: glm5-2-rl-lmdeploy-fp8-mtp4-resume/tracker-resume.jsonl
                 check_metrics:
@@ -201,6 +203,7 @@ case:
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
+                    - ADAMW_FUSED=1
             assert_info:
                 base_metric: glm5-2-rl-lmdeploy-grpo/tracker.jsonl
                 check_metrics:
@@ -249,6 +252,7 @@ case:
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
+                    - ADAMW_FUSED=1
             assert_info:
                 base_metric: glm5-2-rl-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
@@ -328,6 +332,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_ACTIVATION_OFFLOAD=1
+                    - ADAMW_FUSED=1
             assert_info:
                 base_metric: glm5-2-sft-30B-mtp-fp8/tracker.jsonl
                 check_metrics:
@@ -383,6 +388,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
+                    - ADAMW_FUSED=1
             assert_info:
                 base_metric: glm5-2-sft-30B-ep2-resume/tracker.jsonl
                 check_metrics:
@@ -413,6 +419,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
+                    - ADAMW_FUSED=1
             assert_info:
                 base_metric: glm5-2-sft-30B-ep2-resume/tracker-resume.jsonl
                 check_metrics:
@@ -442,6 +449,7 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+                    - ADAMW_FUSED=1
             assert_info:
                 base_metric: glm5-2-sft-30B-ep8-sp2-tp2/tracker.jsonl
                 check_metrics:

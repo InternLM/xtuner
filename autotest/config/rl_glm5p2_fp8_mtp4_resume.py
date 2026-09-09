@@ -2,6 +2,11 @@ import os
 from pathlib import Path
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
+
+
+def _get_bool_env(name: str, default: bool = False) -> bool:
+    return os.environ.get(name, str(default)).strip().lower() in ("1", "true", "yes")
+
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
@@ -106,7 +111,9 @@ if hasattr(model_cfg, "z_loss_cfg"):
     model_cfg.z_loss_cfg = None
 if hasattr(model_cfg, "attention") and hasattr(model_cfg.attention, "sparse_mla_backend"):
     model_cfg.attention.sparse_mla_backend = "tilelang"
-optim_cfg = AdamWConfig(lr=1e-6, foreach=False, weight_decay=0.1)
+optim_cfg = AdamWConfig(
+    lr=1e-6, foreach=False, weight_decay=0.1, fused=_get_bool_env("ADAMW_FUSED", False)
+)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(
         cliprange_high=0.28,

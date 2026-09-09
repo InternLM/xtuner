@@ -17,6 +17,11 @@ from xtuner.v1.train import TrainerConfig
 MODEL_PATH = os.environ["MODEL_PATH"]
 ALPACA_PATH = os.environ["ALPACA_PATH"]
 
+
+def _get_bool_env(name: str, default: bool = False) -> bool:
+    return os.environ.get(name, str(default)).strip().lower() in ("1", "true", "yes")
+
+
 ep_size = 1
 
 float8_cfg = Float8Config(
@@ -36,7 +41,7 @@ if hasattr(moe_cfg, "_normalize_physical_mtp_indexer_types"):
 if hasattr(moe_cfg.attention, "sparse_mla_backend"):
     moe_cfg.attention.sparse_mla_backend = "tilelang"
 
-optim_cfg = AdamWConfig(lr=6e-05)
+optim_cfg = AdamWConfig(lr=6e-05, fused=_get_bool_env("ADAMW_FUSED", False))
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
     cpu_offload=False,
