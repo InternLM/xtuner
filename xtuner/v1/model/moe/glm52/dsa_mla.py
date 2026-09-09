@@ -197,8 +197,7 @@ class DSAIndexer(nn.Module):
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe, k_nope], dim=-1)
         # weights: [bsz, S, Ni]
-        raw_weights = self.weights_proj(hidden_states).float()
-        weights = raw_weights * (self.index_n_heads**-0.5)
+        weights = self.weights_proj(hidden_states).float()
 
         # Index Q 按 query token 保持分片，只有 K 需要全局 gather。
         # k: [bsz, S_g, Di]
@@ -220,7 +219,7 @@ class DSAIndexer(nn.Module):
                 q_scale,
                 k_fp8,
                 k_scale,
-                raw_weights,
+                weights,
                 cu_seq_lens_q,
                 cu_seq_lens_k,
                 seq_ctx._shard_start,
@@ -229,6 +228,7 @@ class DSAIndexer(nn.Module):
             )
         else:
             # returns topk_indices: [S, 1, K]
+            weights = weights * (self.index_n_heads**-0.5)
             dsa_topk_ids = self.dsa_topk_indices_func(
                 q,
                 k,
