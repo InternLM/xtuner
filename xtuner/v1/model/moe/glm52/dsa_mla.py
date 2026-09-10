@@ -41,34 +41,6 @@ class DSAIndexerOutput(TypedDict):
     dsa_topk_logits: NotRequired[torch.Tensor]
 
 
-class _ScaledDSATopKIndices:
-    """Adapt the historical backend contract to raw Indexer gates."""
-
-    def __init__(self, backend: DSATopKIndicesProtocol, index_n_heads: int):
-        self.backend = backend
-        self.index_n_heads = index_n_heads
-
-    def __call__(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        weights: torch.Tensor,
-        seq_ctx: SequenceContext,
-        *,
-        index_head_dim: int,
-        index_topk: int,
-    ) -> torch.Tensor:
-        weights = (weights * (self.index_n_heads**-0.5)).contiguous()
-        return self.backend(
-            q,
-            k,
-            weights,
-            seq_ctx,
-            index_head_dim=index_head_dim,
-            index_topk=index_topk,
-        )
-
-
 def _validate_indexer_quant_config(
     indexer_quant_mode: str,
     indexer_backend: str,
@@ -158,7 +130,7 @@ class DSAIndexer(nn.Module):
 
             self.dsa_topk_indices_func: DSATopKIndicesProtocol = lmdeploy_fp8_dsa_topk_indices
         else:
-            self.dsa_topk_indices_func = _ScaledDSATopKIndices(get_dsa_topk_indices(indexer_backend), index_n_heads)
+            self.dsa_topk_indices_func: DSATopKIndicesProtocol = get_dsa_topk_indices(indexer_backend)
         # wq_b.weight: [index_n_heads * index_head_dim, q_lora_rank]
         self.wq_b = build_linear(q_lora_rank, index_n_heads * index_head_dim, bias=False)
         # wk.weight: [index_head_dim, hidden_size]

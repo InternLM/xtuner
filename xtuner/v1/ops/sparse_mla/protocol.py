@@ -37,6 +37,11 @@ class SparseMLAProtocol(Protocol):
 class DSATopKIndicesProtocol(Protocol):
     """Computes GLM-5.2 DSA sparse source indices.
 
+    Inputs use logical tensors: ``q`` is shaped ``(bsz, S, Ni, Di)``, ``k`` is
+    shaped ``(bsz, T, Di)``, and ``weights`` contain raw gates shaped
+    ``(bsz, S, Ni)``. Implementations own the full Indexer score scaling,
+    including ``Ni**-0.5`` and ``Di**-0.5``.
+
     Returns:
         ``torch.int32`` tensor shaped ``(seq_len, kv_group, topk)``. Invalid
         slots are padded with ``-1``. For packed inputs, every valid index stays
