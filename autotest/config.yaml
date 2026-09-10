@@ -56,6 +56,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
+                    - LOSS_MODE=liger
             assert_info:
                 base_metric: qwen3-5-rl-lmdeploy-grpo-sp4/tracker.jsonl
                 check_metrics:
@@ -106,6 +107,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
                     - ADAMW_FUSED=1
+                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-rl-lmdeploy-fp8-mtp4-resume/tracker.jsonl
                 check_metrics:
@@ -157,6 +159,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
                     - ADAMW_FUSED=1
+                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-rl-lmdeploy-fp8-mtp4-resume/tracker-resume.jsonl
                 check_metrics:
@@ -204,6 +207,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - ADAMW_FUSED=1
+                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-rl-lmdeploy-grpo/tracker.jsonl
                 check_metrics:
@@ -253,6 +257,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - ADAMW_FUSED=1
+                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-rl-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
@@ -361,6 +366,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
                     - ADAMW_FUSED=1
+                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-sft-30B-sp2/tracker.jsonl
                 check_metrics:
@@ -450,6 +456,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
                     - ADAMW_FUSED=1
+                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-sft-30B-ep8-sp2-tp2/tracker.jsonl
                 check_metrics:
@@ -463,366 +470,6 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1800
 
-    # Liger CE + SP regression (LOSS_MODE=liger). Separate baselines from chunk-mode cases above.
-    glm5-2-sft-30B-sp2-liger:
-        -
-            type: sft
-            parameters:
-                config: autotest/config/glm5p2_30B_sp2.py
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                cpus_per_task: 120
-                memory_per_task: 1200
-                envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
-                    - XTUNER_DETERMINISTIC=true
-                    - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
-            assert_info:
-                base_metric: glm5-2-sft-30B-sp2-liger/tracker.jsonl
-                check_metrics:
-                    grad_norm: 0.15
-                    loss/local_loss: 0.01
-                    loss/reduced_balancing_loss: 0.01
-                    loss/reduced_llm_loss: 0.01
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.25
-                    runtime_info/text_tokens: 0
-            timeout: 1500
-
-    glm5-2-sft-30B-ep8-sp2-tp2-liger:
-        -
-            type: sft
-            parameters:
-                config: autotest/config/glm5p2_30B_ep8_sp2_tp2.py
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                num_nodes: 2
-                cpus_per_task: 80
-                envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
-                    - XTUNER_DETERMINISTIC=true
-                    - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
-            assert_info:
-                base_metric: glm5-2-sft-30B-ep8-sp2-tp2-liger/tracker.jsonl
-                check_metrics:
-                    grad_norm: 0.35
-                    loss/local_loss: 0.01
-                    loss/reduced_balancing_loss: 0.01
-                    loss/reduced_llm_loss: 0.01
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.10
-                    runtime_info/text_tokens: 0
-            timeout: 1800
-
-    glm5-2-rl-lmdeploy-grpo-liger:
-        -
-            type: rl
-            parameters:
-                config: autotest/config/rl_glm5p2_30B_gsm8k_grpo.py
-                infer_backend: lmdeploy
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
-                memory_per_task: 1200
-                envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
-                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
-                    - XTUNER_USE_LMDEPLOY=1
-                    - XTUNER_DETERMINISTIC=true
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
-            assert_info:
-                base_metric: glm5-2-rl-lmdeploy-grpo-liger/tracker.jsonl
-                check_metrics:
-                    -
-                       metric:  eval/accuracy
-                       threshold: 0.1
-                       method: absolute
-                       operator: <
-                    -
-                       metric: response/rewards/mean
-                       threshold: 0.3
-                       method: absolute
-                       operator: <
-                    -
-                       metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.001
-                       method: absolute
-                       operator: <
-                    -
-                       metric: response/response_len/mean
-                       threshold: 0.25
-                       method: relative
-                       operator: <
-                    -
-                       metric: time/step
-                       threshold: 20
-                       method: absolute
-                       operator: <
-                       skip_steps: 3
-            timeout: 7200
-
-    glm5-2-rl-lmdeploy-dapo-liger:
-        -
-            type: rl
-            parameters:
-                config: autotest/config/rl_glm5p2_30B_gsm8k_dapo.py
-                infer_backend: lmdeploy
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
-                envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
-                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
-                    - XTUNER_USE_LMDEPLOY=1
-                    - XTUNER_DETERMINISTIC=true
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
-            assert_info:
-                base_metric: glm5-2-rl-lmdeploy-dapo-liger/tracker.jsonl
-                check_metrics:
-                    -
-                       metric:  eval/accuracy
-                       threshold: 0.1
-                       method: absolute
-                       operator: <
-                    -
-                       metric: response/rewards/mean
-                       threshold: 0.3
-                       method: absolute
-                       operator: <
-                    -
-                       metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.001
-                       method: absolute
-                       operator: <
-                    -
-                       metric: response/response_len/mean
-                       threshold: 0.25
-                       method: relative
-                       operator: <
-                    -
-                       metric: time/step
-                       threshold: 20
-                       method: slowdown
-                       operator: <
-            timeout: 7200
-
-    glm5-2-rl-lmdeploy-fp8-mtp4-resume-liger:
-        -
-            type: rl
-            phase: first
-            parameters:
-                config: autotest/config/rl_glm5p2_fp8_mtp4_resume.py
-                infer_backend: lmdeploy
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                num_nodes: 2
-                memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
-                envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
-                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
-                    - XTUNER_USE_LMDEPLOY=1
-                    - XTUNER_DETERMINISTIC=true
-                    - XTUNER_GC_ENABLE=1
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
-            assert_info:
-                base_metric: glm5-2-rl-lmdeploy-fp8-mtp4-resume-liger/tracker.jsonl
-                check_metrics:
-                    -
-                       metric:  eval/accuracy
-                       threshold: 0.1
-                       method: absolute
-                       operator: <
-                    -
-                       metric: response/rewards/mean
-                       threshold: 0.3
-                       method: absolute
-                       operator: <
-                    -
-                       metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.001
-                       method: absolute
-                       operator: <
-                    -
-                       metric: response/response_len/mean
-                       threshold: 0.25
-                       method: relative
-                       operator: <
-                    -
-                       metric: time/step
-                       threshold: 45
-                       method: absolute
-                       operator: <
-            timeout: 9600
-
-        -
-            type: rl
-            phase: resume
-            pre_action:
-                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output glm5-2-rl-lmdeploy-fp8-mtp4-resume-liger rl'
-            parameters:
-                config: autotest/config/rl_glm5p2_fp8_mtp4_resume.py
-                infer_backend: lmdeploy
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                num_nodes: 2
-                memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
-                envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
-                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
-                    - XTUNER_USE_LMDEPLOY=1
-                    - XTUNER_DETERMINISTIC=true
-                    - XTUNER_GC_ENABLE=1
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
-            assert_info:
-                base_metric: glm5-2-rl-lmdeploy-fp8-mtp4-resume-liger/tracker-resume.jsonl
-                check_metrics:
-                    -
-                       metric:  eval/accuracy
-                       threshold: 0.1
-                       method: absolute
-                       operator: <
-                    -
-                       metric: response/rewards/mean
-                       threshold: 0.3
-                       method: absolute
-                       operator: <
-                    -
-                       metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.001
-                       method: absolute
-                       operator: <
-                    -
-                       metric: response/response_len/mean
-                       threshold: 0.25
-                       method: relative
-                       operator: <
-                    -
-                       metric: time/step
-                       threshold: 45
-                       method: absolute
-                       operator: <
-            timeout: 7200
-
-    qwen3-sft-30B-sp4-intralayer2-liger:
-        -
-            type: sft
-            parameters:
-                config: autotest/config/qwen3_30B_sp4_intralayer2.py
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                envs:
-                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
-                    - XTUNER_DETERMINISTIC=true
-                    - LOSS_MODE=liger
-            assert_info:
-                base_metric: qwen3-sft-30B-sp4-intralayer2-liger/tracker.jsonl
-                check_metrics:
-                    grad_norm: 0.00001
-                    loss/maxvio: 0.00001
-                    loss/local_loss: 0.00001
-                    loss/reduced_balancing_loss: 0.00001
-                    loss/reduced_llm_loss: 0.00001
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.10
-                    runtime_info/text_tokens: 0
-            timeout: 1080
-
-    qwen3-sft-30B-sp8-intralayer2-liger:
-        -
-            type: sft
-            parameters:
-                config: autotest/config/qwen3_30B_sp8_intralayer2.py
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                envs:
-                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
-                    - XTUNER_DETERMINISTIC=true
-                    - LOSS_MODE=liger
-            assert_info:
-                base_metric: qwen3-sft-30B-sp8-intralayer2-liger/tracker.jsonl
-                check_metrics:
-                    grad_norm: 0.05
-                    loss/maxvio: 0.00001
-                    loss/local_loss: 0.00001
-                    loss/reduced_balancing_loss: 0.00001
-                    loss/reduced_llm_loss: 0.00001
-                    lr: 0
-                    memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.20
-                    runtime_info/text_tokens: 0
-            timeout: 1080
-
-    qwen3-5-rl-lmdeploy-grpo-sp4-liger:
-        -
-            type: rl
-            parameters:
-                config: autotest/config/rl_qwen3p5_35B_grpo_sp4.py
-                infer_backend: lmdeploy
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                num_nodes: 2
-                envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
-                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
-                    - GEO3K_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k/train.jsonl
-                    - GEO3K_EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k/test.jsonl
-                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k
-                    - XTUNER_USE_LMDEPLOY=1
-                    - XTUNER_DETERMINISTIC=true
-                    - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
-                    - LOSS_MODE=liger
-            assert_info:
-                base_metric: qwen3-5-rl-lmdeploy-grpo-sp4-liger/tracker.jsonl
-                check_metrics:
-                    -
-                       metric:  eval/accuracy
-                       threshold: 0.1
-                       method: absolute
-                       operator: <
-                    -
-                       metric: response/rewards/mean
-                       threshold: 0.3
-                       method: absolute
-                       operator: <
-                    -
-                       metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.001
-                       method: absolute
-                       operator: <
-                    -
-                       metric: response/response_len/mean
-                       threshold: 0.25
-                       method: relative
-                       operator: <
-                    -
-                       metric: time/step
-                       threshold: 20
-                       method: absolute
-                       operator: <
-            timeout: 7200
 
     # InternS2-Preview: Qwen3.5-VL-MoE-35B-A3B architecture; MODEL_PATH may need adjust on share.
     s2-preview-rl-vl-lmdeploy-grpo:
@@ -2077,6 +1724,7 @@ case:
                     - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
+                    - LOSS_MODE=liger
             assert_info:
                 base_metric: qwen3-sft-30B-sp4-intralayer2/tracker.jsonl
                 check_metrics:
@@ -2102,6 +1750,7 @@ case:
                     - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
+                    - LOSS_MODE=liger
             assert_info:
                 base_metric: qwen3-sft-30B-sp8-intralayer2/tracker.jsonl
                 check_metrics:
