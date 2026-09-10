@@ -45,7 +45,10 @@ dataloader_config = DataloaderConfig(
     collator="qwen3_vl_sft_collator",
 )
 
-loss_cfg = CELossConfig(mode="chunk", chunk_size=1024)
+loss_cfg = CELossConfig(
+    mode=os.environ.get("LOSS_MODE", "chunk"),
+    chunk_size=int(os.environ.get("LOSS_CHUNK_SIZE", "1024")),
+)
 
 trainer = TrainerConfig(
     load_from=MODEL_PATH,

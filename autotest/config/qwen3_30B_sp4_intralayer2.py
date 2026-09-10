@@ -33,7 +33,10 @@ dataset_config = [
 
 dataloader_config = DataloaderConfig(pack_max_length=16384)
 
-loss_cfg = CELossConfig(mode="chunk", chunk_size=1024)
+loss_cfg = CELossConfig(
+    mode=os.environ.get("LOSS_MODE", "chunk"),
+    chunk_size=int(os.environ.get("LOSS_CHUNK_SIZE", "1024")),
+)
 
 
 trainer = TrainerConfig(
