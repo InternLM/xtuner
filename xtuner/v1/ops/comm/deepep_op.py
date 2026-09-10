@@ -181,7 +181,9 @@ def dispatch_forward(
         hidden_size = x[0].shape[-1]
 
     _buffer = get_low_latency_buffer(group, hidden=hidden_size, num_experts=num_experts)
-
+    topk_idx = topk_idx.contiguous()
+    if topk_weights is not None:
+        topk_weights = topk_weights.contiguous()
     # Calculate layout before actual dispatch
     (
         num_tokens_per_rank,
