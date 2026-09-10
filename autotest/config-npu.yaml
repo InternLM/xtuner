@@ -37,14 +37,16 @@ case:
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
                     - ALPACA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
-                    - LD_LIBRARY_PATH='/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}'
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_ACTIVATION_OFFLOAD=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
                     - TRITON_ALL_BLOCKS_PARALLEL=1
                     - TORCH_NPU_USE_HCCL=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
                     - RANK=0
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
             assert_info:
                 base_metric: npu-qwen3-5-sft/tracker.jsonl
                 check_metrics:
