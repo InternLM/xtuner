@@ -47,6 +47,18 @@ RouterTopKIds: TypeAlias = torch.Tensor
 HiddenStates: TypeAlias = torch.Tensor
 
 
+def _prepare_rollout_routed_experts_for_router(
+    rollout_routed_experts: torch.Tensor,
+    hidden_states: torch.Tensor,
+    *,
+    offload_rollout_routed_experts: bool,
+) -> torch.Tensor:
+    """Move one layer's routed-expert IDs to the router index dtype."""
+    if offload_rollout_routed_experts and rollout_routed_experts.device != hidden_states.device:
+        rollout_routed_experts = rollout_routed_experts.contiguous()
+    return rollout_routed_experts.to(device=hidden_states.device, dtype=torch.long)
+
+
 class MoEDecoderLayerOutput(TypedDict):
     """Per-micro-batch outputs of one :class:`MoEDecoderLayer` forward."""
 
@@ -755,9 +767,11 @@ class MoEDecoderLayer(nn.Module):
             rollout_routed_experts = seq_ctx.rollout_routed_experts[:, self.layer_idx, :]  # seq_l, expert
             # TODO: pin_memory() + to(device, non_blocking=True) on a CUDA stream would allow overlapping the transfer
             # with prior-layer compute
-            if seq_ctx.offload_rollout_routed_experts and rollout_routed_experts.device != hidden_states.device:
-                rollout_routed_experts = rollout_routed_experts.contiguous()
-                rollout_routed_experts = rollout_routed_experts.to(hidden_states.device)
+            rollout_routed_experts = _prepare_rollout_routed_experts_for_router(
+                rollout_routed_experts,
+                hidden_states,
+                offload_rollout_routed_experts=seq_ctx.offload_rollout_routed_experts,
+            )
         else:
             rollout_routed_experts = None
         router_results: RouterResults = self.gate(hidden_states, rollout_routed_experts)
