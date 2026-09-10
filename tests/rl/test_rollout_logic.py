@@ -455,6 +455,14 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(TimeoutError, "rollout worker recovery"):
             controller.pause_generation()
 
+    def test_flush_cache_broadcasts_to_active_workers(self):
+        controller = RolloutController.__new__(RolloutController)
+        controller._broadcast_to_workers = MagicMock(return_value=["cache_flushed"])
+
+        controller.flush_cache()
+
+        controller._broadcast_to_workers.assert_called_once_with("flush_cache", WorkerLifecycleState.ACTIVE)
+
     def test_mark_worker_groups_lifecycle_state_defaults_to_all_source_groups(self):
         controller = RolloutController.__new__(RolloutController)
         controller.registry = self._build_registry((0, 1))
