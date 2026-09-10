@@ -43,7 +43,11 @@ from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.profiler import profiling_memory, profiling_time
-from xtuner.v1.rl.distillation import DistillationConfig, TrainTeacherManager, TrainTeacherTimings
+from xtuner.v1.rl.distillation import (
+    TrainTeacherManager,
+    TrainTeacherManagerConfig,
+    TrainTeacherTimings,
+)
 from xtuner.v1.rl.loss import (
     BaseRLLossConfig,
     BaseRLLossContext,
@@ -163,7 +167,7 @@ class WorkerConfig(BaseModel):
     free_rollout_routed_experts_in_worker: bool = True  # 默认不需要用户配置
     offload_rollout_routed_experts: bool = False
     offload_old_logprobs: bool = False
-    distillation_config: DistillationConfig | None = None
+    train_teacher_manager_config: TrainTeacherManagerConfig | None = None
 
     # sft config
     sft_dataloader_cfg: DataloaderConfig | None = None
@@ -274,10 +278,8 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
 
         self._train_teacher_manager: TrainTeacherManager | None = None
-        distillation_config = worker_cfg.distillation_config
-        if distillation_config is not None and distillation_config.train_teachers:
-            self._train_teacher_manager = TrainTeacherManager(
-                distillation_config,
+        if worker_cfg.train_teacher_manager_config is not None:
+            self._train_teacher_manager = worker_cfg.train_teacher_manager_config.build(
                 chunk_size=worker_cfg.loss_cfg.chunk_size,
             )
 

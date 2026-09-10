@@ -10,11 +10,10 @@ from typing import Any, Literal, cast
 import httpx
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
-from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.rl.utils import create_task
 from xtuner.v1.utils import get_logger
 
-from .config import DistillationConfig, RolloutTeacherConfig
+from .config import RolloutTeacherConfig, RolloutTeacherScorerConfig, TeacherTargetConfig
 
 
 logger = get_logger()
@@ -66,12 +65,12 @@ class RolloutTeacherReplicaRouter:
 class RolloutTeacherClient:
     """Asynchronous teacher client scoped to one AgentLoop."""
 
-    def __init__(self, config: RolloutTeacherConfig, loss_config: DistillationLossConfig) -> None:
+    def __init__(self, config: RolloutTeacherConfig, target_config: TeacherTargetConfig) -> None:
         self.config = config
-        self.loss_config = loss_config
+        self.target_config = target_config
         self.name = config.name
         self.backend = self._resolve_backend_from_env()
-        if self.loss_config.uses_topk_targets and self.backend != "lmdeploy":
+        if self.target_config.uses_topk_targets and self.backend != "lmdeploy":
             raise RuntimeError("Rollout Teacher Top-K targets currently require LMDeploy")
         self.urls = [f"{endpoint.rstrip('/')}/generate" for endpoint in config.endpoints]
         self._semaphores = [asyncio.Semaphore(config.max_concurrency) for _ in self.urls]
@@ -126,7 +125,7 @@ class RolloutTeacherClient:
                         response.raise_for_status()
                     teacher_tokens: list[int] | list[list[int]]
                     teacher_logprobs: list[float] | list[list[float]]
-                    if self.loss_config.uses_topk_targets:
+                    if self.target_config.uses_topk_targets:
                         teacher_tokens, teacher_logprobs = self._parse_topk_response(
                             response,
                             response_ids,
@@ -226,8 +225,8 @@ class RolloutTeacherClient:
             raise RuntimeError(f"Unsupported teacher backend: {self.backend}")
         if image_data:
             payload["image_data"] = image_data
-        if self.loss_config.uses_topk_targets:
-            payload["top_logprobs_num"] = cast(int, self.loss_config.top_k)
+        if self.target_config.uses_topk_targets:
+            payload["top_logprobs_num"] = cast(int, self.target_config.top_k)
         return payload
 
     @staticmethod
@@ -322,7 +321,7 @@ class RolloutTeacherClient:
                 f"{len(raw_topk)} vs {len(response_ids)}"
             )
 
-        top_k = cast(int, self.loss_config.top_k)
+        top_k = cast(int, self.target_config.top_k)
         teacher_tokens: list[list[int]] = []
         teacher_logprobs: list[list[float]] = []
         for row_idx, row in enumerate(raw_topk[-len(response_ids) :]):
@@ -489,24 +488,19 @@ class RolloutTeacherScorer:
         self._closed = False
 
     @classmethod
-    def from_distillation_config(
+    def from_config(
         cls,
-        distillation_config: DistillationConfig | None,
+        config: RolloutTeacherScorerConfig,
         *,
         defers_to_filter: bool,
     ) -> RolloutTeacherScorer:
-        """Build a scorer from the rollout-side portion of distillation
-        config."""
-        if distillation_config is None or not distillation_config.rollout_teachers:
-            return cls.disabled()
-
+        """Build a scorer from its serializable configuration."""
         teacher_clients = {
-            teacher.name: RolloutTeacherClient(teacher, distillation_config.loss_config)
-            for teacher in distillation_config.rollout_teachers
+            teacher.name: RolloutTeacherClient(teacher, config.target_config) for teacher in config.teachers
         }
         return cls(
             teacher_clients=teacher_clients,
-            data_source_teacher_map=dict(distillation_config.data_source_teacher_map),
+            data_source_teacher_map=dict(config.data_source_teacher_map),
             defers_to_filter=defers_to_filter,
         )
 

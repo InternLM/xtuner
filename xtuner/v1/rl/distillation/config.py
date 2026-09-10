@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
@@ -9,6 +9,11 @@ from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.rl.loss.distillation_loss import DistillationLossConfig
+
+
+if TYPE_CHECKING:
+    from .rollout_teacher_manager import RolloutTeacherScorer
+    from .train_teacher_manager import TrainTeacherManager
 
 
 class RolloutTeacherLaunchConfig(BaseModel):
@@ -58,6 +63,91 @@ class TrainTeacherConfig(BaseModel):
 TeacherConfig = RolloutTeacherConfig | TrainTeacherConfig
 
 
+class TeacherTargetConfig(BaseModel):
+    """Configuration for the output protocol requested from a Teacher."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["sampled_token", "topk"]
+    top_k: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_target_config(self) -> TeacherTargetConfig:
+        if self.mode == "topk" and self.top_k is None:
+            raise ValueError("top_k is required for top-k Teacher targets")
+        if self.mode == "sampled_token" and self.top_k is not None:
+            raise ValueError("top_k is only valid for top-k Teacher targets")
+        return self
+
+    @property
+    def uses_sampled_token_targets(self) -> bool:
+        return self.mode == "sampled_token"
+
+    @property
+    def uses_topk_targets(self) -> bool:
+        return self.mode == "topk"
+
+
+class RolloutTeacherScorerConfig(BaseModel):
+    """Serializable configuration used to build a rollout Teacher scorer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    teachers: list[RolloutTeacherConfig] = Field(min_length=1)
+    data_source_teacher_map: dict[str, str] = Field(min_length=1)
+    target_config: TeacherTargetConfig
+
+    @model_validator(mode="after")
+    def validate_config(self) -> RolloutTeacherScorerConfig:
+        teacher_names_list = [teacher.name for teacher in self.teachers]
+        if len(teacher_names_list) != len(set(teacher_names_list)):
+            raise ValueError("Rollout Teacher names must be unique")
+        teacher_names = set(teacher_names_list)
+        unknown_teachers = set(self.data_source_teacher_map.values()) - teacher_names
+        if unknown_teachers:
+            raise ValueError(f"data_source_teacher_map references unknown teachers: {sorted(unknown_teachers)}")
+        return self
+
+    def build(self, *, defers_to_filter: bool) -> RolloutTeacherScorer:
+        from .rollout_teacher_manager import RolloutTeacherScorer
+
+        return RolloutTeacherScorer.from_config(self, defers_to_filter=defers_to_filter)
+
+
+class TrainTeacherManagerConfig(BaseModel):
+    """Serializable configuration used to build a training Teacher manager."""
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    teachers: list[TrainTeacherConfig] = Field(min_length=1)
+    data_source_teacher_map: dict[str, str] = Field(min_length=1)
+    target_config: TeacherTargetConfig
+
+    @model_validator(mode="after")
+    def validate_config(self) -> TrainTeacherManagerConfig:
+        teacher_names_list = [teacher.name for teacher in self.teachers]
+        if len(teacher_names_list) != len(set(teacher_names_list)):
+            raise ValueError("Train Teacher names must be unique")
+        teacher_names = set(teacher_names_list)
+        unknown_teachers = set(self.data_source_teacher_map.values()) - teacher_names
+        if unknown_teachers:
+            raise ValueError(f"data_source_teacher_map references unknown teachers: {sorted(unknown_teachers)}")
+        return self
+
+    @property
+    def teacher_index_by_data_source(self) -> dict[str, int]:
+        teacher_index_by_name = {teacher.name: index for index, teacher in enumerate(self.teachers)}
+        return {
+            data_source: teacher_index_by_name[teacher_name]
+            for data_source, teacher_name in self.data_source_teacher_map.items()
+        }
+
+    def build(self, *, chunk_size: int | None) -> TrainTeacherManager:
+        from .train_teacher_manager import TrainTeacherManager
+
+        return TrainTeacherManager(self, chunk_size=chunk_size)
+
+
 class DistillationConfig(BaseModel):
     """Distillation objective, Teacher runtimes, and data-source routing."""
 
@@ -101,6 +191,33 @@ class DistillationConfig(BaseModel):
     @property
     def teacher_index_by_data_source(self) -> dict[str, int]:
         return self._teacher_index_by_data_source
+
+    @property
+    def teacher_target_config(self) -> TeacherTargetConfig:
+        return TeacherTargetConfig(
+            mode="topk" if self.loss_config.uses_topk_targets else "sampled_token",
+            top_k=self.loss_config.top_k if self.loss_config.uses_topk_targets else None,
+        )
+
+    @property
+    def rollout_teacher_scorer_config(self) -> RolloutTeacherScorerConfig | None:
+        if not self.rollout_teachers:
+            return None
+        return RolloutTeacherScorerConfig(
+            teachers=list(self.rollout_teachers),
+            data_source_teacher_map=dict(self.data_source_teacher_map),
+            target_config=self.teacher_target_config,
+        )
+
+    @property
+    def train_teacher_manager_config(self) -> TrainTeacherManagerConfig | None:
+        if not self.train_teachers:
+            return None
+        return TrainTeacherManagerConfig(
+            teachers=list(self.train_teachers),
+            data_source_teacher_map=dict(self.data_source_teacher_map),
+            target_config=self.teacher_target_config,
+        )
 
     def validate_student_model(self, student_model_cfg: TransformerConfig | BaseComposeConfig) -> None:
         """Validate contracts that require both Student and TrainTeacher

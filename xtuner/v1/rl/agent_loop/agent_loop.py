@@ -12,8 +12,8 @@ from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
 from xtuner.v1.rl.distillation import (
-    DistillationConfig,
     RolloutTeacherScorer,
+    RolloutTeacherScorerConfig,
 )
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
@@ -75,7 +75,7 @@ class AgentLoopConfig(ABC, BaseModel):
         logger=None,
         *,
         is_valid_sample_fn: IsValidSampleFn | None = None,
-        distillation_config: DistillationConfig | None = None,
+        rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
     ) -> AgentLoopSpec:
         if self.cpu_resources is None:
             agent_loop = self.build_local(
@@ -84,7 +84,13 @@ class AgentLoopConfig(ABC, BaseModel):
                 logger=logger,
             )
             agent_loop.is_valid_sample_fn = is_valid_sample_fn
-            agent_loop.configure_distillation(distillation_config)
+            agent_loop._set_teacher_scorer(
+                rollout_teacher_scorer_config.build(
+                    defers_to_filter=is_valid_sample_fn is not None,
+                )
+                if rollout_teacher_scorer_config is not None
+                else RolloutTeacherScorer.disabled(),
+            )
             return agent_loop
 
         concurrency = AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
@@ -102,7 +108,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 judger=judger,
                 logger=logger,
                 is_valid_sample_fn=is_valid_sample_fn,
-                distillation_config=distillation_config,
+                rollout_teacher_scorer_config=rollout_teacher_scorer_config,
             )
         return self._build_ray_actor(
             rollout_controller=rollout_controller,
@@ -111,7 +117,7 @@ class AgentLoopConfig(ABC, BaseModel):
             judger=judger,
             logger=logger,
             is_valid_sample_fn=is_valid_sample_fn,
-            distillation_config=distillation_config,
+            rollout_teacher_scorer_config=rollout_teacher_scorer_config,
         )
 
     @abstractmethod
@@ -131,7 +137,7 @@ class AgentLoopConfig(ABC, BaseModel):
         judger: Judger | None = None,
         logger=None,
         is_valid_sample_fn: IsValidSampleFn | None = None,
-        distillation_config: DistillationConfig | None = None,
+        rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
     ) -> RayAgentLoopProxy:
         ray_agent_loop = ray.remote(
             concurrency_groups={
@@ -151,7 +157,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 actor_memory=cpu_resources.cpu_memory_per_worker,
                 capture_child_tasks=True,
                 is_valid_sample_fn=is_valid_sample_fn,
-                distillation_config=distillation_config,
+                rollout_teacher_scorer_config=rollout_teacher_scorer_config,
             ),
         )
 
@@ -165,7 +171,7 @@ class AgentLoopConfig(ABC, BaseModel):
         logger=None,
         start_bundle_idx: int = 0,
         is_valid_sample_fn: IsValidSampleFn | None = None,
-        distillation_config: DistillationConfig | None = None,
+        rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
     ) -> list[RayAgentLoopProxy]:
         ray_agent_loop = ray.remote(
             concurrency_groups={
@@ -186,7 +192,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 actor_memory_per_worker=cpu_resources.cpu_memory_per_worker,
                 capture_child_tasks=True,
                 is_valid_sample_fn=is_valid_sample_fn,
-                distillation_config=distillation_config,
+                rollout_teacher_scorer_config=rollout_teacher_scorer_config,
             ),
         )
 
@@ -200,7 +206,7 @@ class AgentLoopConfig(ABC, BaseModel):
         logger=None,
         start_bundle_idx: int = 0,
         is_valid_sample_fn: IsValidSampleFn | None = None,
-        distillation_config: DistillationConfig | None = None,
+        rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
     ) -> RouterAgentLoop:
         return RouterAgentLoop(
             workers=self._build_ray_actors(
@@ -212,7 +218,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 logger=logger,
                 start_bundle_idx=start_bundle_idx,
                 is_valid_sample_fn=is_valid_sample_fn,
-                distillation_config=distillation_config,
+                rollout_teacher_scorer_config=rollout_teacher_scorer_config,
             ),
             rollout_ctl=rollout_controller,
         )
@@ -243,13 +249,8 @@ class AgentLoop(ABC):
         self._judger_pause_event = asyncio.Event()
         self._teacher_scorer = RolloutTeacherScorer.disabled()
 
-    def configure_distillation(self, distillation_config: DistillationConfig | None) -> None:
-        if distillation_config is None:
-            return
-        self._teacher_scorer = RolloutTeacherScorer.from_distillation_config(
-            distillation_config,
-            defers_to_filter=self.is_valid_sample_fn is not None,
-        )
+    def _set_teacher_scorer(self, teacher_scorer: RolloutTeacherScorer) -> None:
+        self._teacher_scorer = teacher_scorer
 
     @abstractmethod
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
@@ -393,7 +394,7 @@ class AgentLoopActor:
         logger=None,
         is_valid_sample_fn: IsValidSampleFn | None = None,
         *,
-        distillation_config: DistillationConfig | None = None,
+        rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
     ):
         self.agent_loop = agent_loop_config.build_local(
             rollout_controller=rollout_controller,
@@ -401,7 +402,13 @@ class AgentLoopActor:
             logger=logger,
         )
         self.agent_loop.is_valid_sample_fn = is_valid_sample_fn
-        self.agent_loop.configure_distillation(distillation_config)
+        self.agent_loop._set_teacher_scorer(
+            rollout_teacher_scorer_config.build(
+                defers_to_filter=is_valid_sample_fn is not None,
+            )
+            if rollout_teacher_scorer_config is not None
+            else RolloutTeacherScorer.disabled(),
+        )
 
     @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:

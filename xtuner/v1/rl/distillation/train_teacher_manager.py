@@ -10,11 +10,10 @@ import torch
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.loss import LogProbConfig, LogProbContext, TopKLogProbConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
-from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.rl.model_utils import FrozenModel, build_frozen_model
 from xtuner.v1.utils import get_device, get_torch_device_module
 
-from .config import DistillationConfig
+from .config import TrainTeacherManagerConfig
 
 
 DEVICE = get_device()
@@ -67,14 +66,14 @@ class TrainTeacherManager:
     swapping the Actor and optimizer around the Teacher phase.
     """
 
-    def __init__(self, distillation_config: DistillationConfig, *, chunk_size: int | None) -> None:
-        self.loss_config = cast(DistillationLossConfig, distillation_config.loss_config)
+    def __init__(self, config: TrainTeacherManagerConfig, *, chunk_size: int | None) -> None:
+        self.target_config = config.target_config
         mode = "chunk" if chunk_size is not None else "eager"
         self.logprob_config = LogProbConfig(chunk_size=chunk_size, mode=mode)
         self.topk_logprob_config: TopKLogProbConfig | None = None
-        if self.loss_config.uses_topk_targets:
+        if self.target_config.uses_topk_targets:
             self.topk_logprob_config = TopKLogProbConfig(
-                top_k=cast(int, self.loss_config.top_k),
+                top_k=cast(int, self.target_config.top_k),
                 chunk_size=chunk_size,
                 mode=mode,
             )
@@ -83,7 +82,7 @@ class TrainTeacherManager:
         # errors fail during worker initialization. Each Teacher is offloaded
         # immediately, preventing multiple full models from co-residing on GPU.
         self._teachers: list[FrozenModel] = []
-        for teacher_config in distillation_config.train_teachers:
+        for teacher_config in config.teachers:
             teacher = build_frozen_model(
                 teacher_config.model_cfg,
                 teacher_config.model_path,
@@ -91,14 +90,11 @@ class TrainTeacherManager:
             )
             self._teachers.append(teacher)
 
-        self._teacher_is_composed = [
-            isinstance(teacher.model_cfg, BaseComposeConfig) for teacher in distillation_config.train_teachers
-        ]
+        self._teacher_is_composed = [isinstance(teacher.model_cfg, BaseComposeConfig) for teacher in config.teachers]
         self._teacher_index_by_name = {
-            teacher_config.name: teacher_index
-            for teacher_index, teacher_config in enumerate(distillation_config.train_teachers)
+            teacher_config.name: teacher_index for teacher_index, teacher_config in enumerate(config.teachers)
         }
-        self._teacher_names = [teacher_config.name for teacher_config in distillation_config.train_teachers]
+        self._teacher_names = [teacher_config.name for teacher_config in config.teachers]
 
     def compute_logprobs(
         self,
@@ -108,7 +104,7 @@ class TrainTeacherManager:
         teacher_indices_list: list[torch.Tensor],
     ) -> TrainTeacherOutputs:
         timings = TrainTeacherTimings()
-        if self.loss_config.uses_sampled_token_targets:
+        if self.target_config.uses_sampled_token_targets:
             return TrainTeacherOutputs(
                 teacher_logprobs=self._compute_sampled_logprobs(
                     seq_ctx_list,
@@ -215,7 +211,7 @@ class TrainTeacherManager:
         teacher_indices_list: list[torch.Tensor],
         timings: TrainTeacherTimings,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        top_k = cast(int, self.loss_config.top_k)
+        top_k = cast(int, self.target_config.top_k)
         topk_logprob_config = cast(TopKLogProbConfig, self.topk_logprob_config)
         target_ids = [
             torch.zeros((*teacher_indices.shape, top_k), dtype=torch.long, device=DEVICE)

@@ -2,8 +2,11 @@ from .config import (
     DistillationConfig,
     RolloutTeacherConfig,
     RolloutTeacherLaunchConfig,
+    RolloutTeacherScorerConfig,
     TeacherConfig,
+    TeacherTargetConfig,
     TrainTeacherConfig,
+    TrainTeacherManagerConfig,
 )
 from .rollout_teacher_manager import (
     RolloutTeacherClient,
@@ -18,7 +21,10 @@ __all__ = [
     "DistillationConfig",
     "RolloutTeacherConfig",
     "RolloutTeacherLaunchConfig",
+    "RolloutTeacherScorerConfig",
     "TeacherConfig",
+    "TeacherTargetConfig",
+    "TrainTeacherManagerConfig",
     "TrainTeacherConfig",
     "RolloutTeacherClient",
     "RolloutTeacherReplicaRouter",

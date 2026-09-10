@@ -738,18 +738,14 @@ class BaseRLTrainer:
             cfg.distillation_config = cfg.distillation_config.resolve_teacher_endpoints(endpoint_map)
 
         self._distillation_config = cfg.distillation_config
+        self._rollout_teacher_scorer_config = (
+            self._distillation_config.rollout_teacher_scorer_config if self._distillation_config is not None else None
+        )
+        self._train_teacher_manager_config = (
+            self._distillation_config.train_teacher_manager_config if self._distillation_config is not None else None
+        )
         self._distillation_loss_cfg = (
             self._distillation_config.loss_config if self._distillation_config is not None else None
-        )
-        self._train_teacher_config = (
-            self._distillation_config
-            if self._distillation_config is not None and self._distillation_config.train_teachers
-            else None
-        )
-        self._rollout_teacher_config = (
-            self._distillation_config
-            if self._distillation_config is not None and self._distillation_config.rollout_teachers
-            else None
         )
 
         check_fa3()
@@ -855,7 +851,7 @@ class BaseRLTrainer:
             cfg.train_worker_cfg.free_rollout_routed_experts_in_worker = False
         cfg.train_worker_cfg.load_from = cfg.load_from
         cfg.train_worker_cfg.log_dir = log_dir
-        cfg.train_worker_cfg.distillation_config = cfg.distillation_config
+        cfg.train_worker_cfg.train_teacher_manager_config = self._train_teacher_manager_config
         self._train_worker_cfg = cfg.train_worker_cfg
 
     def _init_rollout_config(self, cfg: BaseRLTrainerConfig, log_dir: Path) -> None:
@@ -889,7 +885,7 @@ class BaseRLTrainer:
             replay_buffer=replay_buffer,
             logger=self.logger,
             sync_weights_interval=cfg.sync_weights_interval,
-            distillation_config=self._rollout_teacher_config,
+            rollout_teacher_scorer_config=self._rollout_teacher_scorer_config,
         )
         self.agent_loop_manager = cast(AgentLoopManager | DisaggAgentLoopManager, agent_loop_manager)
 
@@ -904,7 +900,7 @@ class BaseRLTrainer:
                     replay_buffer=replay_buffer,
                     logger=self.logger,
                     sync_weights_interval=cfg.sync_weights_interval,
-                    distillation_config=None,
+                    rollout_teacher_scorer_config=None,
                 ),
             )
 
@@ -1240,7 +1236,9 @@ class BaseRLTrainer:
 
         data_batches = []
         teacher_index_by_data_source = (
-            self._train_teacher_config.teacher_index_by_data_source if self._train_teacher_config is not None else None
+            self._train_teacher_manager_config.teacher_index_by_data_source
+            if self._train_teacher_manager_config is not None
+            else None
         )
 
         for j, group in enumerate(data_groups):
