@@ -9,11 +9,12 @@ from typing import Any, Literal, cast
 
 import httpx
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
 from xtuner.v1.rl.loss import DistillationLossConfig
+from xtuner.v1.rl.utils import create_task
 from xtuner.v1.utils import get_logger
 
-from .config import RolloutTeacherConfig
+from .config import DistillationConfig, RolloutTeacherConfig
 
 
 logger = get_logger()
@@ -80,6 +81,10 @@ class RolloutTeacherClient:
         if config.api_key is not None:
             headers["Authorization"] = f"Bearer {config.api_key}"
         self._client = httpx.AsyncClient(headers=headers, timeout=config.request_timeout_s)
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client."""
+        await self._client.aclose()
 
     async def compute_logprobs(self, state: RolloutState) -> RolloutState:
         start = time.perf_counter()
@@ -460,12 +465,91 @@ class RolloutTeacherClient:
         return teacher_tokens, teacher_logprobs
 
 
-def route_rollout_teacher_client(
-    state: RolloutState,
-    *,
-    data_source_teacher_map: dict[str, str],
-    teacher_clients: dict[str, RolloutTeacherClient],
-) -> RolloutTeacherClient:
-    data_source = state.extra_fields["origin_data_source"]
-    teacher_name = data_source_teacher_map[data_source]
-    return teacher_clients[teacher_name]
+class RolloutTeacherScorer:
+    """Coordinate rollout-side Teacher routing and asynchronous scoring.
+
+    Args:
+        teacher_clients (dict[str, RolloutTeacherClient]): Teacher clients keyed
+            by configured Teacher name.
+        data_source_teacher_map (dict[str, str]): Mapping from rollout data
+            source to Teacher name.
+        defers_to_filter (bool): Whether scoring waits for group filtering.
+    """
+
+    def __init__(
+        self,
+        teacher_clients: dict[str, RolloutTeacherClient],
+        data_source_teacher_map: dict[str, str],
+        *,
+        defers_to_filter: bool,
+    ) -> None:
+        self._teacher_clients = teacher_clients
+        self._data_source_teacher_map = data_source_teacher_map
+        self._defers_to_filter = defers_to_filter
+        self._closed = False
+
+    @classmethod
+    def from_distillation_config(
+        cls,
+        distillation_config: DistillationConfig | None,
+        *,
+        defers_to_filter: bool,
+    ) -> RolloutTeacherScorer:
+        """Build a scorer from the rollout-side portion of distillation
+        config."""
+        if distillation_config is None or not distillation_config.rollout_teachers:
+            return cls.disabled()
+
+        teacher_clients = {
+            teacher.name: RolloutTeacherClient(teacher, distillation_config.loss_config)
+            for teacher in distillation_config.rollout_teachers
+        }
+        return cls(
+            teacher_clients=teacher_clients,
+            data_source_teacher_map=dict(distillation_config.data_source_teacher_map),
+            defers_to_filter=defers_to_filter,
+        )
+
+    @staticmethod
+    def disabled() -> RolloutTeacherScorer:
+        """Return a scorer that leaves all rollout states unchanged."""
+        return RolloutTeacherScorer({}, {}, defers_to_filter=False)
+
+    async def on_sample_ready(self, state: RolloutState) -> RolloutState:
+        """Score a completed sample when Teacher scoring does not defer to
+        filtering."""
+        if self._closed or self._defers_to_filter or state.status != Status.COMPLETED or not self._teacher_clients:
+            return state
+        return await self._compute_logprobs(state)
+
+    async def on_group_ready(self, group: list[RolloutState]) -> list[RolloutState]:
+        """Score a completed group after validity filtering when configured to
+        defer."""
+        if (
+            self._closed
+            or not self._defers_to_filter
+            or not self._teacher_clients
+            or get_group_status(group) != Status.COMPLETED
+        ):
+            return group
+        return list(
+            await asyncio.gather(
+                *(create_task(self._compute_logprobs(state)) for state in group),
+            )
+        )
+
+    async def aclose(self) -> None:
+        """Close all HTTP clients owned by this scorer."""
+        if self._closed:
+            return
+        self._closed = True
+        await asyncio.gather(*(client.aclose() for client in self._teacher_clients.values()))
+
+    async def _compute_logprobs(self, state: RolloutState) -> RolloutState:
+        teacher = self._route_teacher_client(state)
+        return await teacher.compute_logprobs(state)
+
+    def _route_teacher_client(self, state: RolloutState) -> RolloutTeacherClient:
+        data_source = state.extra_fields["origin_data_source"]
+        teacher_name = self._data_source_teacher_map[data_source]
+        return self._teacher_clients[teacher_name]

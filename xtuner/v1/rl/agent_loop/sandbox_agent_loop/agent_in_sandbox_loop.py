@@ -17,7 +17,7 @@ from xtuner.v1.rl.utils import create_task
 
 from ...rollout.chat_template import canonicalize_messages_for_chat_template
 from ...rollout.trace_store import get_store
-from ..agent_loop import AgentLoop, AgentLoopConfig
+from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
 from .schemas import AgentRolloutItem, RolloutStatus
 
 
@@ -235,7 +235,7 @@ class AgentInSandboxLoop(AgentLoop):
             else:
                 async with self._sample_semaphore:
                     samples = await self.generate_sample(state)
-            samples = [await self._maybe_score_state(sample) for sample in samples]
+            samples = [await self._teacher_scorer.on_sample_ready(sample) for sample in samples]
             return samples
 
         pending_tasks = []
@@ -247,8 +247,8 @@ class AgentInSandboxLoop(AgentLoop):
         sample_groups = await generated_samples
         samples = [sample for sample_group in sample_groups for sample in sample_group]
         samples = _drop_failed_train_samples(samples, self.mode)
-        samples = await self._maybe_filter_group(samples)
-        return await self._maybe_score_filtered_group(samples)
+        samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
+        return await self._teacher_scorer.on_group_ready(samples)
 
     # NOTE: A single sandbox session may yield multiple trainable segments, so this returns a list
     # rather than the base class's single RolloutState. The base contract is never exercised for

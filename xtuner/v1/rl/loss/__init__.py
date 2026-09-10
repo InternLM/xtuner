@@ -14,4 +14,5 @@ from .distillation_loss import (
 )
 from .grpo_loss import GRPOLossConfig, GRPOLossContext, GRPOLossKwargs
 from .loss_fn import check_config, get_policy_loss_fn, kl_penalty, pg_loss_fn, register_policy_loss, sft_loss_fn
+from .metrics import finalize_train_metrics
 from .oreal_loss import OrealLossConfig, OrealLossContext, OrealLossKwargs

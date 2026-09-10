@@ -47,9 +47,7 @@ from xtuner.v1.rl.distillation import DistillationConfig, TrainTeacherManager, T
 from xtuner.v1.rl.loss import (
     BaseRLLossConfig,
     BaseRLLossContext,
-    DistillationLossConfig,
-    finalize_distillation_metrics,
-    finalize_train_policy_metrics,
+    finalize_train_metrics,
     kl_penalty,
 )
 from xtuner.v1.rl.model_utils import build_frozen_model
@@ -961,9 +959,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 for k, v in extra_info_dict.items()
                 if isinstance(v, (torch.Tensor, int, float))
             }
-            extra_info_dict = finalize_train_policy_metrics(extra_info_dict, DEVICE)
-            if isinstance(loss_cfg, DistillationLossConfig):
-                extra_info_dict = finalize_distillation_metrics(extra_info_dict, DEVICE)
+            extra_info_dict = finalize_train_metrics(extra_info_dict, DEVICE, loss_cfg)
             train_step_info.pop("total_loss")  # type: ignore[misc]
             max_memory = DEVICE_MODULE.max_memory_allocated() / (1024**3)  # type: ignore[attr-defined]
             reserved_memory = DEVICE_MODULE.max_memory_reserved() / (1024**3)  # type: ignore[attr-defined]

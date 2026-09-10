@@ -20,7 +20,7 @@ from xtuner.v1.rl.rollout.chat_template import canonicalize_messages_for_chat_te
 from xtuner.v1.rl.rollout.trace_store import get_store
 from xtuner.v1.rl.utils import create_task
 
-from ..agent_loop import AgentLoop, AgentLoopConfig
+from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
 
 
 def _import_from_path(path: str) -> Any:
@@ -140,7 +140,7 @@ class AgentInLocalhostLoop(AgentLoop):
             else:
                 async with self._sample_semaphore:
                     state = await self.generate_sample(state, **kwargs)
-            state = await self._maybe_score_state(state)
+            state = await self._teacher_scorer.on_sample_ready(state)
             return state
 
         tasks: list[asyncio.Task[RolloutState]] = []
@@ -151,8 +151,8 @@ class AgentInLocalhostLoop(AgentLoop):
 
         samples = await asyncio.gather(*tasks)
         samples = _drop_failed_train_samples(samples, self.mode)
-        samples = await self._maybe_filter_group(samples)
-        return await self._maybe_score_filtered_group(samples)
+        samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
+        return await self._teacher_scorer.on_group_ready(samples)
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         try:

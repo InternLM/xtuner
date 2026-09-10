@@ -233,6 +233,9 @@ class TrainTeacherManager:
             with self._teacher_on_device(teacher, timings, teacher_name):
                 # Every rank forwards every local pack before selecting routed
                 # tokens so all ranks enter the same FSDP collective sequence.
+                # TODO(perf): Use a collective-safe compacted-token path to
+                # avoid computing teacher logprobs for tokens routed to other
+                # Teachers.
                 for batch_index, (seq_ctx, teacher_indices) in enumerate(zip(seq_ctx_list, teacher_indices_list)):
                     loss_ctx = topk_logprob_config.build(data={})
                     assert loss_ctx is not None
@@ -267,6 +270,10 @@ class TrainTeacherManager:
         # Keep the Teacher-major schedule identical across ranks for FSDP.
         for teacher_index, (teacher_name, teacher) in enumerate(zip(self._teacher_names, self._teachers)):
             with self._teacher_on_device(teacher, timings, teacher_name):
+                # TODO(perf): Forward only tokens routed to this Teacher once
+                # a collective-safe compacted-token path is available; the
+                # current full-pack forward computes logprobs for other Teachers
+                # as well.
                 for batch_index, (seq_ctx, shifted_labels, teacher_indices) in enumerate(
                     zip(seq_ctx_list, shifted_labels_list, teacher_indices_list)
                 ):

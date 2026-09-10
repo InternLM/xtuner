@@ -13,8 +13,7 @@ from ray.util.placement_group import PlacementGroup
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
 from xtuner.v1.rl.distillation import (
     DistillationConfig,
-    RolloutTeacherClient,
-    route_rollout_teacher_client,
+    RolloutTeacherScorer,
 )
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
@@ -242,57 +241,18 @@ class AgentLoop(ABC):
         else:
             self.logger = logger
         self._judger_pause_event = asyncio.Event()
-        self.teacher_clients: dict[str, RolloutTeacherClient] = {}
-        self.data_source_teacher_map: dict[str, str] = {}
+        self._teacher_scorer = RolloutTeacherScorer.disabled()
 
     def configure_distillation(self, distillation_config: DistillationConfig | None) -> None:
         if distillation_config is None:
             return
-
-        self.teacher_clients = {
-            teacher.name: RolloutTeacherClient(teacher, distillation_config.loss_config)
-            for teacher in distillation_config.rollout_teachers
-        }
-        self.data_source_teacher_map = dict(distillation_config.data_source_teacher_map)
+        self._teacher_scorer = RolloutTeacherScorer.from_distillation_config(
+            distillation_config,
+            defers_to_filter=self.is_valid_sample_fn is not None,
+        )
 
     @abstractmethod
-    async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
-        """Generate one rollout sample without group-level post-processing."""
-
-        ...
-
-    async def maybe_compute_teacher_logprob(self, state: RolloutState) -> RolloutState:
-        if state.status != Status.COMPLETED or not self.teacher_clients:
-            return state
-        teacher = route_rollout_teacher_client(
-            state,
-            data_source_teacher_map=self.data_source_teacher_map,
-            teacher_clients=self.teacher_clients,
-        )
-        return await teacher.compute_logprobs(state)
-
-    async def maybe_compute_teacher_logprobs(self, group: list[RolloutState]) -> list[RolloutState]:
-        return list(await asyncio.gather(*(create_task(self.maybe_compute_teacher_logprob(state)) for state in group)))
-
-    def _should_filter_before_teacher(self) -> bool:
-        return self.is_valid_sample_fn is not None
-
-    async def _maybe_score_state(self, state: RolloutState) -> RolloutState:
-        if not self._should_filter_before_teacher():
-            return await self.maybe_compute_teacher_logprob(state)
-        return state
-
-    async def _maybe_filter_group(self, group: list[RolloutState]) -> list[RolloutState]:
-        if self.is_valid_sample_fn is None:
-            return group
-        return maybe_filter_invalid_sample(group, self.is_valid_sample_fn, self.logger)
-
-    async def _maybe_score_filtered_group(self, group: list[RolloutState]) -> list[RolloutState]:
-        if not self._should_filter_before_teacher():
-            return group
-        if get_group_status(group) != Status.COMPLETED:
-            return group
-        return await self.maybe_compute_teacher_logprobs(group)
+    async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         """Generate one rollout group.
@@ -307,17 +267,16 @@ class AgentLoop(ABC):
         async def generate_one(state: RolloutState) -> RolloutState:
             state.sample_params = self.sample_params
             state = await self.generate_sample(state, **kwargs)
-            state = await self._maybe_score_state(state)
-            if state.status == Status.COMPLETED and self.judger is not None and not self.enable_batch_judge:
-                state = await self.run_judger(state)
+            state = await self._teacher_scorer.on_sample_ready(state)
             return state
 
         group = list(await asyncio.gather(*(create_task(generate_one(state)) for state in rollout_state)))
-        if self.judger is not None and self.enable_batch_judge and get_group_status(group) == Status.COMPLETED:
-            group = await self.run_judger(group)
+        if self.judger is not None and self.enable_batch_judge:
+            if all(sample.status == Status.COMPLETED for sample in group):
+                group = await self.run_judger(group)
 
-        group = await self._maybe_filter_group(group)
-        return await self._maybe_score_filtered_group(group)
+        group = maybe_filter_invalid_sample(group, self.is_valid_sample_fn, self.logger)
+        return await self._teacher_scorer.on_group_ready(group)
 
     @overload
     async def run_judger(self, rollout_state: RolloutState) -> RolloutState: ...

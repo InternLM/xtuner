@@ -5,10 +5,10 @@ from .config import (
     TeacherConfig,
     TrainTeacherConfig,
 )
-from .rollout_teacher_client import (
+from .rollout_teacher_manager import (
     RolloutTeacherClient,
     RolloutTeacherReplicaRouter,
-    route_rollout_teacher_client,
+    RolloutTeacherScorer,
     validate_opd_sample_params,
 )
 from .train_teacher_manager import TrainTeacherManager, TrainTeacherOutputs, TrainTeacherTimings
@@ -22,7 +22,7 @@ __all__ = [
     "TrainTeacherConfig",
     "RolloutTeacherClient",
     "RolloutTeacherReplicaRouter",
-    "route_rollout_teacher_client",
+    "RolloutTeacherScorer",
     "TrainTeacherManager",
     "TrainTeacherOutputs",
     "TrainTeacherTimings",
