@@ -179,6 +179,26 @@ class TestDSAAttention:
         with pytest.raises(ValueError, match="CUDA DSA backend"):
             config.build(hidden_size=32)
 
+    def test_fp8_indexer_rejects_unsupported_head_count(self):
+        # DeepGEMM's contiguous MQA only serves H in {32, 64, 128} at D=128;
+        # fail fast in config validation instead of asserting inside the kernel.
+        config = DSAMLAConfig(
+            num_attention_heads=32,
+            head_dim=128,
+            kv_lora_rank=16,
+            q_lora_rank=16,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=64,
+            v_head_dim=64,
+            index_topk=8,
+            index_head_dim=128,
+            index_n_heads=48,
+            sparse_mla_backend="tilelang",
+            indexer_quant_mode="ue8m0_fp8",
+        )
+        with pytest.raises(ValueError, match="head count"):
+            config.build(hidden_size=32)
+
     def test_packed_inputs_respect_causal_boundaries_and_backward(self):
         # 验证 packed attention 不跨子序列取 key，并能对真实输入完成有限反向传播。
         torch.manual_seed(0)

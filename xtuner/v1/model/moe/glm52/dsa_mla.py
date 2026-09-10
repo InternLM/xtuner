@@ -86,8 +86,13 @@ def _validate_indexer_quant_config(
         raise ValueError("ue8m0_fp8 Indexer mode requires a CUDA DSA backend")
     if index_head_dim != 128:
         raise ValueError(f"ue8m0_fp8 GLM-5.2 Indexer requires index_head_dim=128, got {index_head_dim}")
-    if index_n_heads < 32 or index_n_heads > 128 or index_n_heads % 16:
-        raise ValueError(f"ue8m0_fp8 Indexer requires 32-128 heads in multiples of 16, got {index_n_heads}")
+    from xtuner.v1.ops.sparse_mla.lmdeploy_fp8_index import DEEPGEMM_MQA_SUPPORTED_HEADS
+
+    if index_n_heads not in DEEPGEMM_MQA_SUPPORTED_HEADS:
+        raise ValueError(
+            "ue8m0_fp8 Indexer requires a head count supported by DeepGEMM's contiguous MQA "
+            f"({sorted(DEEPGEMM_MQA_SUPPORTED_HEADS)}), got {index_n_heads}"
+        )
 
 
 class LayerNorm(nn.Module):

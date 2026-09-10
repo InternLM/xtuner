@@ -177,3 +177,23 @@ def test_lmdeploy_sparse_topk_selector_matches_reference_sets():
     actual_set = actual.sort(dim=-1).values
     expected_set = expected.sort(dim=-1).values
     torch.testing.assert_close(actual_set, expected_set)
+
+
+@pytest.mark.skipif(not _deepgemm_mqa_available(), reason="requires SM90 CUDA and contiguous DeepGEMM MQA")
+def test_lmdeploy_adapter_supports_single_token_k():
+    from xtuner.v1.ops.sparse_mla.lmdeploy_fp8_index import lmdeploy_fp8_indexer_topk
+
+    device = torch.device("cuda")
+    torch.manual_seed(20260910)
+    heads, head_dim, topk = 32, 128, 2048
+    q = (torch.randn(1, 1, heads, head_dim, device=device) * 1.5).to(torch.float8_e4m3fn)
+    k = (torch.randn(1, 1, head_dim, device=device) * 1.5).to(torch.float8_e4m3fn)
+    q_scale = torch.rand(1, 1, heads, device=device, dtype=torch.float32) + 0.5
+    k_scale = torch.rand(1, 1, device=device, dtype=torch.float32) + 0.5
+    weights = torch.rand(1, 1, heads, device=device, dtype=torch.float32) + 0.2
+    cu = torch.tensor([0, 1], device=device, dtype=torch.int32)
+    actual = lmdeploy_fp8_indexer_topk(q, q_scale, k, k_scale, weights, cu, cu, 0, head_dim, topk)
+    assert actual.shape == (1, 1, topk)
+    # Decode with a single source: only source 0 is selectable, the rest pads -1.
+    assert actual[0, 0, 0].item() == 0
+    assert (actual[0, 0, 1:] == -1).all()

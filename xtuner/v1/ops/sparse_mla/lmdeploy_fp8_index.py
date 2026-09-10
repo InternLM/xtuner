@@ -11,6 +11,13 @@ import torch
 from xtuner.v1.data_proto import SequenceContext
 
 
+# Head counts accepted by DeepGEMM's contiguous FP8 MQA kernel at
+# ``index_head_dim=128``: the kernel asserts ``block_qh % num_heads == 0``,
+# with block_qh=128 in the pinned DeepGEMM build (H=48/80/96/112 fail in
+# ``smxx_fp8_mqa_logits.hpp``).  Re-verify this allowlist when bumping DeepGEMM.
+DEEPGEMM_MQA_SUPPORTED_HEADS: tuple[int, ...] = (32, 64, 128)
+
+
 def _sequence_ranges(cu: torch.Tensor) -> list[tuple[int, int]]:
     """Read packed boundaries once for the correctness adapter.
 
@@ -183,8 +190,8 @@ def _lmdeploy_fp8_indexer_topk_impl(
     deepgemm_result = _deep_gemm_scores(
         q_flat,
         weighted_q_scale,
-        k_fp8.squeeze(0),
-        k_scale.squeeze(0),
+        k_fp8,
+        k_scale,
         active_k_ranges,
         q_lens,
         raw_k_seqlens.tolist(),
@@ -341,4 +348,4 @@ def _lmdeploy_fp8_indexer_topk_fake(
     return torch.empty((q_fp8.size(1), 1, index_topk), device=q_fp8.device, dtype=torch.int32)
 
 
-__all__ = ["lmdeploy_fp8_dsa_topk_indices", "lmdeploy_fp8_indexer_topk"]
+__all__ = ["DEEPGEMM_MQA_SUPPORTED_HEADS", "lmdeploy_fp8_dsa_topk_indices", "lmdeploy_fp8_indexer_topk"]
