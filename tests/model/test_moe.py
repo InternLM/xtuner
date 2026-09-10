@@ -117,6 +117,7 @@ class TestDistributedMoE(DeterministicDDPTestCase):
         loss_cfg = CELossConfig()
 
         model = MoE(config=config).to(dtype).to(device)
+        model.init_weights()
         parallel_config = deepcopy(config)
         parallel_config.dispatcher = dispatcher
         ep_mesh = init_device_mesh(
@@ -125,6 +126,7 @@ class TestDistributedMoE(DeterministicDDPTestCase):
         )
 
         parallel_model = MoE(config=parallel_config).to(dtype).to(device)
+        parallel_model.load_state_dict(model.state_dict())
 
         input_ids = torch.randint(
             0, config.vocab_size, (1, 128), dtype=torch.int64, device="cuda"
@@ -145,7 +147,7 @@ class TestDistributedMoE(DeterministicDDPTestCase):
 
         loss_expected = model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})["loss"]
 
-        torch.allclose(loss_expected, loss_parallel, atol=1e-6, rtol=1e-4)
+        assert torch.allclose(loss_expected, loss_parallel, atol=1e-6, rtol=1e-4)
 
     @property
     def world_size(self) -> int:

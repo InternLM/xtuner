@@ -55,7 +55,10 @@ def torch_dsa_topk_indices(
     *,
     index_head_dim: int,
     index_topk: int,
+    query_chunk_size: int | None = None,
 ) -> torch.Tensor:
+    if query_chunk_size is not None:
+        raise ValueError("query-chunk Indexer selection requires a TileLang selector")
     _, query_len, _, _ = q.shape
     kv_len = k.shape[1]
     scores = torch.einsum("bshd,btd->bsht", q.float(), k.float()) * (index_head_dim**-0.5)
