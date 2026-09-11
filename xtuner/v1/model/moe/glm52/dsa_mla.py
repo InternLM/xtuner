@@ -49,17 +49,17 @@ def _validate_indexer_backend_config(
     index_head_dim: int,
     index_n_heads: int,
 ) -> None:
-    """Validate the explicit LMDeploy-compatible FP8 Indexer contract."""
+    """Validate the DeepGEMM FP8 contract used to align with LMDeploy."""
 
-    if indexer_backend != "lmdeploy_fp8":
+    if indexer_backend != "deep_gemm_fp8":
         return
     if index_head_dim != 128:
-        raise ValueError(f"lmdeploy_fp8 GLM-5.2 Indexer requires index_head_dim=128, got {index_head_dim}")
+        raise ValueError(f"deep_gemm_fp8 GLM-5.2 Indexer requires index_head_dim=128, got {index_head_dim}")
     from xtuner.v1.ops.sparse_mla.lmdeploy_fp8_index import DEEPGEMM_MQA_SUPPORTED_HEADS
 
     if index_n_heads not in DEEPGEMM_MQA_SUPPORTED_HEADS:
         raise ValueError(
-            "lmdeploy_fp8 Indexer requires a head count supported by DeepGEMM's contiguous MQA "
+            "deep_gemm_fp8 Indexer requires a head count supported by DeepGEMM's contiguous MQA "
             f"({sorted(DEEPGEMM_MQA_SUPPORTED_HEADS)}), got {index_n_heads}"
         )
 
@@ -204,6 +204,7 @@ class DSAMLAConfig(MLAConfig):
     indexer_rope_interleave: bool = True
     indexer_types: list[str] | None = None
     sparse_mla_backend: SparseMLABackend = "torch"
+    # ``deep_gemm_fp8`` uses DeepGEMM while matching LMDeploy's FP8 Indexer path.
     indexer_backend: DSAIndexerBackend | None = None
     freeze_dsa_indexer: bool = True
 

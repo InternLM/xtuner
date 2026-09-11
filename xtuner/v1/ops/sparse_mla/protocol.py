@@ -7,7 +7,9 @@ from xtuner.v1.data_proto import SequenceContext
 
 
 SparseMLABackend = Literal["torch", "tilelang", "cudnn_dsa"]
-DSAIndexerBackend = Literal["torch", "tilelang", "cudnn_dsa", "lmdeploy_fp8"]
+# ``deep_gemm_fp8`` names the runtime dependency; its scoring contract is
+# intentionally aligned with LMDeploy's FP8 Indexer path.
+DSAIndexerBackend = Literal["torch", "tilelang", "cudnn_dsa", "deep_gemm_fp8"]
 
 
 class SparseMLAOutputs(NamedTuple):

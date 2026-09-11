@@ -195,7 +195,7 @@ class TestDSAAttention:
 
         torch.testing.assert_close(actual, expected.squeeze(0).unsqueeze(1).to(torch.int32))
 
-    def test_lmdeploy_fp8_indexer_backend_is_independent(self):
+    def test_deep_gemm_fp8_indexer_backend_is_independent(self):
         config = DSAMLAConfig(
             num_attention_heads=32,
             head_dim=128,
@@ -208,12 +208,12 @@ class TestDSAAttention:
             index_head_dim=128,
             index_n_heads=32,
             sparse_mla_backend="torch",
-            indexer_backend="lmdeploy_fp8",
+            indexer_backend="deep_gemm_fp8",
         )
         attention = config.build(hidden_size=32)
         assert attention.sparse_mla_backend == "torch"
-        assert attention.indexer_backend == "lmdeploy_fp8"
-        assert attention.indexer.indexer_backend == "lmdeploy_fp8"
+        assert attention.indexer_backend == "deep_gemm_fp8"
+        assert attention.indexer.indexer_backend == "deep_gemm_fp8"
 
     def test_fp8_indexer_rejects_unsupported_head_count(self):
         # DeepGEMM's contiguous MQA only serves H in {32, 64, 128} at D=128;
@@ -230,7 +230,7 @@ class TestDSAAttention:
             index_head_dim=128,
             index_n_heads=48,
             sparse_mla_backend="torch",
-            indexer_backend="lmdeploy_fp8",
+            indexer_backend="deep_gemm_fp8",
         )
         with pytest.raises(ValueError, match="head count"):
             config.build(hidden_size=32)

@@ -170,7 +170,7 @@ def _deep_gemm_scores(
     deep_gemm = _get_deep_gemm()
     if deep_gemm is None:
         raise RuntimeError(
-            "indexer_backend='lmdeploy_fp8' requires DeepGEMM's contiguous "
+            "indexer_backend='deep_gemm_fp8' requires DeepGEMM's contiguous "
             "fp8_mqa_logits API; the FP8 Indexer path does not fall back to Triton"
         )
     max_k = max((end - start for start, end in request.k_ranges), default=1)

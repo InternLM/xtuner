@@ -39,7 +39,7 @@ def get_dsa_topk_indices(backend: DSAIndexerBackend) -> DSATopKIndicesProtocol:
         from .tilelang import tilelang_dsa_topk_indices
 
         return tilelang_dsa_topk_indices
-    if backend == "lmdeploy_fp8":
+    if backend == "deep_gemm_fp8":
         from .lmdeploy_fp8_index import lmdeploy_fp8_dsa_topk_indices
 
         return lmdeploy_fp8_dsa_topk_indices
