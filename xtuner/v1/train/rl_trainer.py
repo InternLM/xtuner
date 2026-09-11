@@ -2183,8 +2183,14 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         # TODO: 非共卡需要额外加健康检查恢复worker的逻辑，共卡是在训练之前恢复，但是非共卡不需要在训练之前恢复,挂掉就恢复或者更新权重前恢复，需要评估一下哪种方式更合理。
         with timer("sync_weight", step_timer_dict):
+            # 1) 清 KV + 释放旧权重（sleep level=2 -> meta）
             ray.get(
-                self.rollout_controller.flush_cache.remote(),
+                self.rollout_controller.offload.remote(),
+                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+            )
+            # 2) 只 wakeup weights（empty_init），此时不要 onload_kvcache/warmup
+            ray.get(
+                self.rollout_controller.onload_weights.remote(),
                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
             )
             bind_train_rollout(
@@ -2192,7 +2198,13 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 rollout_controller=self.rollout_controller,
                 rollout_config=self._rollout_config,
             )
+            # 3) 先把权重更新完（含 finished=True finalize）
             self.weight_update()
+            # 4) 最后再 onload_kvcache（这里才会 warmup）
+            ray.get(
+                self.rollout_controller.onload_kvcache.remote(),
+                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+            )
 
     def weight_update(self):
         # rollout 恢复由 AgentLoopManager 控制。
