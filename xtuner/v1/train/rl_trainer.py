@@ -4,7 +4,6 @@ import os
 import random
 import re
 import time
-from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from shutil import rmtree
@@ -33,10 +32,9 @@ from xtuner.v1.rl.agent_loop_manager import (
     ProduceBatchStatus,
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
-from xtuner.v1.rl.distillation import DistillationConfig
+from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.health_manager import RLHealthManager, _NoOpRLHealthManager
-from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.rl.replay_buffer import (
     AsyncReplayBufferConfig,
     SyncReplayBufferConfig,
@@ -76,66 +74,6 @@ def _to_cpu_tensor(value: np.ndarray | None, *, dtype: torch.dtype | None = None
         return None
     assert isinstance(value, np.ndarray), f"Expected np.ndarray, got {type(value)}"
     return torch.as_tensor(value, dtype=dtype, device="cpu")
-
-
-def _align_rollout_teacher_targets(
-    state: RolloutState,
-    loss_config: DistillationLossConfig,
-    *,
-    shifted_labels: Sequence[int],
-    target_start: int,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Left-pad rollout Teacher targets to align with one training sequence."""
-
-    sequence_length = len(shifted_labels)
-    context = f"rollout_id={state.rollout_id}, group_id={state.group_id}"
-    if target_start < 0 or target_start > sequence_length:
-        raise ValueError(
-            f"Teacher target_start must be within the shifted sequence: {target_start} vs {sequence_length}; {context}"
-        )
-    if any(label != loss_config.ignore_idx for label in shifted_labels[:target_start]):
-        raise ValueError(f"Teacher target prefix must contain only ignored labels; {context}")
-
-    expected_target_rows = sequence_length - target_start
-    raw_teacher_logprobs = state.teacher_logprobs
-    if raw_teacher_logprobs is None or len(raw_teacher_logprobs) != expected_target_rows:
-        actual_rows = None if raw_teacher_logprobs is None else len(raw_teacher_logprobs)
-        raise ValueError(
-            "Teacher logprobs must align with the target suffix: "
-            f"expected {expected_target_rows} rows, got {actual_rows}; {context}"
-        )
-
-    if loss_config.uses_sampled_token_targets:
-        sampled_logprobs = cast(list[float], raw_teacher_logprobs)
-        teacher_logprobs = torch.tensor(
-            [0.0] * target_start + sampled_logprobs,
-            dtype=torch.float32,
-        ).unsqueeze(0)
-        return teacher_logprobs, None
-
-    top_k = cast(int, loss_config.top_k)
-    raw_teacher_tokens = state.teacher_tokens
-    if raw_teacher_tokens is None or len(raw_teacher_tokens) != expected_target_rows:
-        actual_rows = None if raw_teacher_tokens is None else len(raw_teacher_tokens)
-        raise ValueError(
-            "Teacher token ids must align with the target suffix: "
-            f"expected {expected_target_rows} rows, got {actual_rows}; {context}"
-        )
-
-    topk_tokens = cast(list[list[int]], raw_teacher_tokens)
-    topk_logprobs = cast(list[list[float]], raw_teacher_logprobs)
-
-    prompt_target_tokens = [[0] * top_k for _ in range(target_start)]
-    prompt_teacher_logprobs = [[0.0] * top_k for _ in range(target_start)]
-    teacher_logprobs = torch.tensor(
-        prompt_teacher_logprobs + topk_logprobs,
-        dtype=torch.float32,
-    ).unsqueeze(0)
-    target_token_ids = torch.tensor(
-        prompt_target_tokens + topk_tokens,
-        dtype=torch.int64,
-    ).unsqueeze(0)
-    return teacher_logprobs, target_token_ids
 
 
 def _agent_loop_manager_requires_rollout_proxy(
@@ -716,22 +654,14 @@ class BaseRLTrainer:
     agent_loop_manager: AgentLoopManager | DisaggAgentLoopManager
     eval_agent_loop_manager: AgentLoopManager
     _debug_train_files: dict[int, Path]
+    _distillation: DistillationTrainerAdapter
 
     def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
         if cfg.distillation_config is not None and cfg.distillation_config.rollout_teachers:
             endpoint_map = json.loads(os.environ.get("XTUNER_OPD_TEACHER_ENDPOINTS_JSON", "{}"))
             cfg.distillation_config = cfg.distillation_config.resolve_teacher_endpoints(endpoint_map)
 
-        self._distillation_config = cfg.distillation_config
-        self._rollout_teacher_scorer_config = (
-            self._distillation_config.rollout_teacher_scorer_config if self._distillation_config is not None else None
-        )
-        self._train_teacher_manager_config = (
-            self._distillation_config.train_teacher_manager_config if self._distillation_config is not None else None
-        )
-        self._distillation_loss_cfg = (
-            self._distillation_config.loss_config if self._distillation_config is not None else None
-        )
+        self._distillation = DistillationTrainerAdapter(cfg.distillation_config)
 
         check_fa3()
         self._init_work_dir_and_meta(cfg, meta_path)
@@ -836,7 +766,7 @@ class BaseRLTrainer:
             cfg.train_worker_cfg.free_rollout_routed_experts_in_worker = False
         cfg.train_worker_cfg.load_from = cfg.load_from
         cfg.train_worker_cfg.log_dir = log_dir
-        cfg.train_worker_cfg.train_teacher_manager_config = self._train_teacher_manager_config
+        cfg.train_worker_cfg.train_teacher_manager_config = self._distillation.train_teacher_manager_config
         self._train_worker_cfg = cfg.train_worker_cfg
 
     def _init_rollout_config(self, cfg: BaseRLTrainerConfig, log_dir: Path) -> None:
@@ -870,7 +800,7 @@ class BaseRLTrainer:
             replay_buffer=replay_buffer,
             logger=self.logger,
             sync_weights_interval=cfg.sync_weights_interval,
-            rollout_teacher_scorer_config=self._rollout_teacher_scorer_config,
+            rollout_teacher_scorer_config=self._distillation.rollout_teacher_scorer_config,
         )
         self.agent_loop_manager = cast(AgentLoopManager | DisaggAgentLoopManager, agent_loop_manager)
 
@@ -1211,7 +1141,7 @@ class BaseRLTrainer:
         # trainable segments that share one reward; counting that reward once per session keeps
         # rewards/* from being weighted by segment count.
         cluster_rewards_list: list[float] = []
-        teacher_rewards: dict[str, list[float]] = {}
+        teacher_reward_observations: list[tuple[RolloutState, float]] = []
         advantages_list = []
         prompt_len_list = []
         response_len_list = []
@@ -1220,11 +1150,7 @@ class BaseRLTrainer:
         training_samples = 0
 
         data_batches = []
-        teacher_index_by_data_source = (
-            self._train_teacher_manager_config.teacher_index_by_data_source
-            if self._train_teacher_manager_config is not None
-            else None
-        )
+        teacher_index_by_data_source = self._distillation.teacher_index_by_data_source
 
         for j, group in enumerate(data_groups):
             if not is_valid_for_training(group, self.logger):
@@ -1232,9 +1158,7 @@ class BaseRLTrainer:
                 continue
             training_samples += len(group)
 
-            task_adv_weight = (
-                self._distillation_loss_cfg.task_adv_weight if self._distillation_loss_cfg is not None else 1.0
-            )
+            task_adv_weight = self._distillation.task_adv_weight
             prompt_ids = None
             if any(data.input_ids is None for data in group):
                 is_vlm_model = "train_prompt_ids" in group[0].extra_fields
@@ -1274,14 +1198,7 @@ class BaseRLTrainer:
                 sample_cluster_indices.append(cluster_index)
 
             cluster_rewards_list.extend(cluster_rewards)
-            if self._distillation_config is not None:
-                for reward, representative in zip(cluster_rewards, cluster_representatives):
-                    data_source = representative.extra_fields.get("origin_data_source")
-                    if not isinstance(data_source, str):
-                        continue
-                    teacher_name = self._distillation_config.data_source_teacher_map.get(data_source)
-                    if teacher_name is not None:
-                        teacher_rewards.setdefault(teacher_name, []).append(reward)
+            teacher_reward_observations.extend(zip(cluster_representatives, cluster_rewards))
 
             if task_adv_weight == 0:
                 sample_advantages = [0.0] * len(group)
@@ -1323,21 +1240,15 @@ class BaseRLTrainer:
                     shifted_labels = labels[1:]
                     teacher_logprobs = None
                     target_token_ids = None
-                    if (
-                        self._distillation_config is not None
-                        and self._distillation_loss_cfg is not None
-                        and self._distillation_config.rollout_teachers
-                    ):
-                        teacher_response_start = next(
-                            (index for index, label in enumerate(shifted_labels) if label != -100),
-                            len(shifted_labels),
-                        )
-                        teacher_logprobs, target_token_ids = _align_rollout_teacher_targets(
-                            group[i],
-                            self._distillation_loss_cfg,
-                            shifted_labels=shifted_labels,
-                            target_start=teacher_response_start,
-                        )
+                    teacher_response_start = next(
+                        (index for index, label in enumerate(shifted_labels) if label != -100),
+                        len(shifted_labels),
+                    )
+                    teacher_logprobs, target_token_ids = self._distillation.rollout_teacher_targets(
+                        group[i],
+                        shifted_labels=shifted_labels,
+                        target_start=teacher_response_start,
+                    )
                     prompt_len = sum(label == -100 for label in shifted_labels)
                     response_len = len(shifted_labels) - prompt_len
                     prompt_len_list.append(prompt_len)
@@ -1461,17 +1372,12 @@ class BaseRLTrainer:
                     "advantage": actual_advantages,
                     "rollout_logprobs": rollout_logprobs,
                 }
-                if (
-                    self._distillation_config is not None
-                    and self._distillation_loss_cfg is not None
-                    and self._distillation_config.rollout_teachers
-                ):
-                    teacher_logprobs, target_token_ids = _align_rollout_teacher_targets(
-                        group[i],
-                        self._distillation_loss_cfg,
-                        shifted_labels=shifted_labels,
-                        target_start=len(prompt_ids) - 1,
-                    )
+                teacher_logprobs, target_token_ids = self._distillation.rollout_teacher_targets(
+                    group[i],
+                    shifted_labels=shifted_labels,
+                    target_start=len(prompt_ids) - 1,
+                )
+                if teacher_logprobs is not None:
                     data_dict["teacher_logprobs"] = teacher_logprobs
                     if target_token_ids is not None:
                         data_dict["target_token_ids"] = target_token_ids
@@ -1514,9 +1420,7 @@ class BaseRLTrainer:
             "prompt_len/min": prompt_len_t.min().item(),
             "prompt_len/max": prompt_len_t.max().item(),
         }
-        for teacher_name, rewards in teacher_rewards.items():
-            if rewards:
-                info_dict[f"rewards/{teacher_name}/mean"] = torch.tensor(rewards, dtype=torch.float32).mean().item()
+        info_dict.update(self._distillation.reward_scalars(teacher_reward_observations))
         if tool_turns_list:
             tool_turns_t = torch.tensor(tool_turns_list, dtype=torch.float32)
             info_dict["tool_turns/mean"] = tool_turns_t.mean().item()
@@ -1641,33 +1545,7 @@ class BaseRLTrainer:
             all_scalars.update({"entropy/rollout": rank0_rollout_entropy})
             all_scalars.update({"entropy/train": rank0_log_item["train_entropy"]})
 
-            teacher_timing_phases = ("compute", "onload", "offload")
-            teacher_timings_by_worker = [log_item.get("teacher_timings", {}) for log_item in worker_log_items]
-            teacher_names = sorted(
-                {teacher_name for teacher_timings in teacher_timings_by_worker for teacher_name in teacher_timings}
-            )
-            for teacher_name in teacher_names:
-                for phase in teacher_timing_phases:
-                    phase_values = [
-                        float(teacher_timings[teacher_name][phase])
-                        for teacher_timings in teacher_timings_by_worker
-                        if teacher_name in teacher_timings
-                    ]
-                    all_scalars[f"time/train_teacher/{teacher_name}/{phase}"] = max(phase_values)
-
-            # Training waits for the slowest worker, so report per-worker Teacher totals and then
-            # take the maximum as the step-level critical-path time.
-            for phase in teacher_timing_phases:
-                worker_totals = [
-                    sum(float(teacher_timing[phase]) for teacher_timing in teacher_timings.values())
-                    for teacher_timings in teacher_timings_by_worker
-                ]
-                if teacher_names:
-                    total = max(worker_totals)
-                else:
-                    continue
-                all_scalars[f"time/train_teacher/total/{phase}"] = total
-                all_scalars[f"time/train_teacher_{phase}"] = total
+            all_scalars.update(self._distillation.timing_scalars(worker_log_items))
 
             for worker_idx, log_item in enumerate(worker_log_items):
                 if not self._display_all_workers_log and worker_idx > 0:
