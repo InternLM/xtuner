@@ -1,8 +1,9 @@
 """GPU tests for XTuner's DeepGEMM-backed FP8 Indexer path.
 
-The public XTuner adapter test uses the contiguous DeepGEMM MQA API used by
-the training/prefill path.  Quantization and top-k selector tests exercise
-the surrounding contracts without invoking a Triton score fallback.
+The public XTuner adapter test uses the contiguous DeepGEMM MQA API used
+by the training/prefill path.  Quantization and top-k selector tests
+exercise the surrounding contracts without invoking a Triton score
+fallback.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from functools import cache
 
 import pytest
 import torch
+
+from xtuner.v1.data_proto import SequenceContext
 
 
 @cache
@@ -86,6 +89,20 @@ def _ue8m0_reference(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return value.to(torch.float8_e4m3fn), scale.float()
 
 
+def _packed_metadata(seq_lens: list[int], device: torch.device) -> tuple[torch.Tensor, ...]:
+    starts: list[torch.Tensor] = []
+    query_ends: list[torch.Tensor] = []
+    k_ends: list[torch.Tensor] = []
+    offset = 0
+    for length in seq_lens:
+        starts.append(torch.full((length,), offset, device=device, dtype=torch.int32))
+        query_ends.append(offset + torch.arange(1, length + 1, device=device, dtype=torch.int32))
+        k_ends.append(torch.full((length,), offset + length, device=device, dtype=torch.int32))
+        offset += length
+    query_starts = torch.cat(starts)
+    return query_starts, torch.cat(query_ends), query_starts, torch.cat(k_ends)
+
+
 @pytest.mark.skipif(not _fp8_index_available(), reason="requires SM90 CUDA and Triton")
 def test_indexer_fp8_quant_matches_ue8m0_reference():
     from xtuner.v1.ops.sparse_mla.indexer_fp8_quant import indexer_fp8_quant
@@ -115,8 +132,8 @@ def test_lmdeploy_adapter_preserves_packed_global_topk_ids():
     q_scale = torch.rand(1, total, heads, device=device, dtype=torch.float32) + 0.5
     k_scale = torch.rand(1, total, device=device, dtype=torch.float32) + 0.5
     weights = torch.rand(1, total, heads, device=device, dtype=torch.float32) + 0.2
-    cu = torch.tensor([0, seq_lens[0], total], device=device, dtype=torch.int32)
-    actual = lmdeploy_fp8_indexer_topk(q, q_scale, k, k_scale, weights, cu, cu, 0, head_dim, topk)
+    metadata = _packed_metadata(seq_lens, device)
+    actual = lmdeploy_fp8_indexer_topk(q, q_scale, k, k_scale, weights, *metadata, head_dim, topk)
 
     starts = torch.cat(
         [
@@ -151,6 +168,37 @@ def test_lmdeploy_adapter_preserves_packed_global_topk_ids():
     valid = expected_set >= 0
     recall = ((actual_set[..., None] == expected_set[..., None, :]).any(dim=-1) & valid).sum() / valid.sum()
     assert float(recall) >= 0.98
+
+
+@pytest.mark.skipif(not _deepgemm_mqa_available(), reason="requires SM90 CUDA and contiguous DeepGEMM MQA")
+def test_lmdeploy_adapter_uses_sequence_context_sp_ranges():
+    from xtuner.v1.ops.sparse_mla.lmdeploy_fp8_index import lmdeploy_fp8_dsa_topk_indices
+
+    device = torch.device("cuda")
+    torch.manual_seed(20260911)
+    total, shard_start = 256, 128
+    local_len = total - shard_start
+    q = torch.randn(1, local_len, 32, 128, device=device, dtype=torch.bfloat16)
+    k = torch.randn(1, total, 128, device=device, dtype=torch.bfloat16)
+    weights = torch.randn(1, local_len, 32, device=device, dtype=torch.float32)
+    cu = torch.tensor([0, total], device=device, dtype=torch.int32)
+    seq_ctx = SequenceContext(
+        input_ids=torch.arange(local_len, device=device).view(1, -1),
+        cu_seq_lens_q=cu,
+        cu_seq_lens_k=cu,
+        max_length_q=total,
+        max_length_k=total,
+        device=device,
+        position_ids=torch.arange(shard_start, total, device=device).view(1, -1),
+        shard_start=shard_start,
+        shard_size=local_len,
+    )
+
+    actual = lmdeploy_fp8_dsa_topk_indices(q, k, weights, seq_ctx, index_head_dim=128, index_topk=8)
+    causal_ends = torch.arange(shard_start + 1, total + 1, device=device, dtype=torch.int32)
+    assert actual.shape == (local_len, 1, 8)
+    assert (actual[:, 0] >= 0).all()
+    assert (actual[:, 0] < causal_ends[:, None]).all()
 
 
 @pytest.mark.skipif(not _lmdeploy_topk_available(), reason="requires SM90 CUDA and TileLang")
@@ -191,8 +239,8 @@ def test_lmdeploy_adapter_supports_single_token_k():
     q_scale = torch.rand(1, 1, heads, device=device, dtype=torch.float32) + 0.5
     k_scale = torch.rand(1, 1, device=device, dtype=torch.float32) + 0.5
     weights = torch.rand(1, 1, heads, device=device, dtype=torch.float32) + 0.2
-    cu = torch.tensor([0, 1], device=device, dtype=torch.int32)
-    actual = lmdeploy_fp8_indexer_topk(q, q_scale, k, k_scale, weights, cu, cu, 0, head_dim, topk)
+    metadata = _packed_metadata([1], device)
+    actual = lmdeploy_fp8_indexer_topk(q, q_scale, k, k_scale, weights, *metadata, head_dim, topk)
     assert actual.shape == (1, 1, topk)
     # Decode with a single source: only source 0 is selectable, the rest pads -1.
     assert actual[0, 0, 0].item() == 0

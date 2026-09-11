@@ -54,7 +54,8 @@ model_cfg.float8_cfg = _get_float8_config()
 model_cfg.lm_loss_cfg = loss_cfg
 if hasattr(model_cfg.attention, "sparse_mla_backend"):
     model_cfg.attention.sparse_mla_backend = os.environ.get("SPARSE_MLA_BACKEND", "tilelang")
-    model_cfg.attention.indexer_quant_mode = os.environ.get("INDEXER_QUANT_MODE", "none")
+    if "INDEXER_BACKEND" in os.environ:
+        model_cfg.attention.indexer_backend = os.environ["INDEXER_BACKEND"]
 
 cache_dir = os.path.join(work_dir, "jsonl_cache")
 cache_tag = os.environ.get("CACHE_TAG", f"glm52_{sample_max_length}")

@@ -7,6 +7,7 @@ from xtuner.v1.data_proto import SequenceContext
 
 
 SparseMLABackend = Literal["torch", "tilelang", "cudnn_dsa"]
+DSAIndexerBackend = Literal["torch", "tilelang", "cudnn_dsa", "lmdeploy_fp8"]
 
 
 class SparseMLAOutputs(NamedTuple):

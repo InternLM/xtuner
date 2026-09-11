@@ -1,9 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """LMDeploy-compatible DeepGEMM FP8 Indexer score path.
 
-The adapter uses dense K tensors and requires DeepGEMM's contiguous prefill MQA API. It does not build a paged cache.
+The adapter uses dense K tensors and requires DeepGEMM's contiguous
+prefill MQA API. It does not build a paged cache.
 """
 
+from dataclasses import dataclass
 from functools import lru_cache
 
 import torch
@@ -18,14 +20,6 @@ from xtuner.v1.data_proto import SequenceContext
 DEEPGEMM_MQA_SUPPORTED_HEADS: tuple[int, ...] = (32, 64, 128)
 
 
-def _sequence_ranges(cu: torch.Tensor) -> list[tuple[int, int]]:
-    """Read packed boundaries once for the correctness adapter.
-
-    XTuner's SFT Indexer receives dense, gathered K tensors. Boundary reads happen once before the DeepGEMM calls.
-    """
-    return [(int(start), int(end)) for start, end in zip(cu[:-1].tolist(), cu[1:].tolist())]
-
-
 @lru_cache(maxsize=1)
 def _get_deep_gemm():
     try:
@@ -36,27 +30,155 @@ def _get_deep_gemm():
     return deep_gemm if has_mqa else None
 
 
+def _packed_query_metadata(
+    seq_ctx: SequenceContext,
+    query_len: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    query_starts, query_ends = seq_ctx.packed_causal_query_ranges(query_len, device)
+    cu_seq_lens_k = seq_ctx.cu_seq_lens_k.to(device=device, dtype=torch.int32).contiguous()
+    sequence_indices = torch.searchsorted(cu_seq_lens_k, query_starts, right=True) - 1
+    sequence_indices = sequence_indices.clamp(min=0, max=cu_seq_lens_k.numel() - 2)
+    k_starts = cu_seq_lens_k[sequence_indices]
+    k_ends = cu_seq_lens_k[sequence_indices + 1]
+    return query_starts, query_ends, k_starts, k_ends
+
+
+def _validate_fp8_indexer_inputs(
+    q_fp8: torch.Tensor,
+    q_scale: torch.Tensor,
+    k_fp8: torch.Tensor,
+    k_scale: torch.Tensor,
+    weights: torch.Tensor,
+    query_starts: torch.Tensor,
+    query_ends: torch.Tensor,
+    k_starts: torch.Tensor,
+    k_ends: torch.Tensor,
+    index_head_dim: int,
+    index_topk: int,
+) -> None:
+    if q_fp8.ndim != 4 or q_fp8.size(0) != 1:
+        raise RuntimeError(f"LMDeploy FP8 Indexer expects q=(1,S,H,D), got {tuple(q_fp8.shape)}")
+    if q_scale.shape != q_fp8.shape[:-1] or weights.shape != q_fp8.shape[:-1]:
+        raise RuntimeError("q_scale and weights must have shape [1, S, H]")
+    if k_fp8.ndim != 3 or k_fp8.size(0) != 1 or k_scale.shape != k_fp8.shape[:2]:
+        raise RuntimeError("LMDeploy FP8 Indexer expects k=(1,S_k,D), k_scale=(1,S_k)")
+    if index_head_dim != 128 or q_fp8.size(-1) != 128 or k_fp8.size(-1) != 128:
+        raise RuntimeError("LMDeploy GLM-5.2 FP8 Indexer requires head_dim=128")
+    if q_fp8.dtype != torch.float8_e4m3fn or k_fp8.dtype != torch.float8_e4m3fn:
+        raise RuntimeError("LMDeploy FP8 Indexer requires E4M3 Q/K")
+    if q_scale.dtype != torch.float32 or k_scale.dtype != torch.float32 or weights.dtype != torch.float32:
+        raise RuntimeError("LMDeploy FP8 Indexer scales and weights must be float32")
+    query_len = q_fp8.size(1)
+    for name, value in (
+        ("query_starts", query_starts),
+        ("query_ends", query_ends),
+        ("k_starts", k_starts),
+        ("k_ends", k_ends),
+    ):
+        if value.ndim != 1 or value.numel() != query_len:
+            raise RuntimeError(f"{name} must have shape [S]")
+        if value.dtype != torch.int32:
+            raise RuntimeError(f"{name} must be int32")
+    if index_topk <= 0:
+        raise ValueError(f"index_topk must be positive, got {index_topk}")
+
+
+@dataclass
+class _LocalIndexerRequest:
+    """Packed query metadata needed by the contiguous DeepGEMM adapter."""
+
+    q_flat: torch.Tensor
+    q_scale: torch.Tensor
+    q_weight: torch.Tensor
+    k_ranges: list[tuple[int, int]]
+    q_lens: list[int]
+    raw_k_seqlens: list[int]
+    row_k_base: torch.Tensor
+    slots: list[tuple[int, int]]
+
+    @classmethod
+    def build(
+        cls,
+        q_fp8: torch.Tensor,
+        q_scale: torch.Tensor,
+        weights: torch.Tensor,
+        query_starts: torch.Tensor,
+        query_ends: torch.Tensor,
+        k_starts: torch.Tensor,
+        k_ends: torch.Tensor,
+    ) -> "_LocalIndexerRequest":
+        q_flat = q_fp8.squeeze(0).contiguous()
+        q_s = q_scale.squeeze(0).contiguous()
+        q_weight = weights.squeeze(0).contiguous()
+        row_k_base = k_starts.contiguous()
+        if q_flat.size(0) == 0:
+            return cls(q_flat, q_s, q_weight, [], [], [], row_k_base, [])
+
+        segment_change = torch.ones(query_starts.numel(), device=query_starts.device, dtype=torch.bool)
+        segment_change[1:] = (query_starts[1:] != query_starts[:-1]) | (k_starts[1:] != k_starts[:-1])
+        slot_starts = torch.nonzero(segment_change).flatten().tolist()
+        slots: list[tuple[int, int]] = []
+        k_ranges: list[tuple[int, int]] = []
+        q_lens: list[int] = []
+        raw_k_seqlens: list[int] = []
+        total = query_starts.numel()
+        for slot_idx, slot_start in enumerate(slot_starts):
+            slot_end = slot_starts[slot_idx + 1] if slot_idx + 1 < len(slot_starts) else total
+            k_start = int(k_starts[slot_start])
+            k_end = int(k_ends[slot_start])
+            slots.append((slot_start, slot_end))
+            k_ranges.append((k_start, k_end))
+            q_lens.append(slot_end - slot_start)
+            raw_k_seqlens.append(int(query_ends[slot_end - 1]) - k_start)
+        return cls(q_flat, q_s, q_weight, k_ranges, q_lens, raw_k_seqlens, row_k_base, slots)
+
+    def to_global_packed_ids(self, local_ids: torch.Tensor, valid: torch.Tensor, index_topk: int) -> torch.Tensor:
+        result = torch.full(
+            (self.q_flat.size(0), 1, index_topk),
+            -1,
+            device=self.q_flat.device,
+            dtype=torch.int32,
+        )
+        if not self.slots:
+            return result
+        global_ids = local_ids.to(torch.int32) + self.row_k_base[:, None].to(torch.int32)
+        global_ids = global_ids.masked_fill(~valid, -1)
+        if global_ids.size(-1) < index_topk:
+            padded = torch.full(
+                (global_ids.size(0), index_topk - global_ids.size(-1)),
+                -1,
+                device=global_ids.device,
+                dtype=torch.int32,
+            )
+            global_ids = torch.cat((global_ids, padded), dim=-1)
+        cursor = 0
+        for local_start, local_end in self.slots:
+            count = local_end - local_start
+            result[local_start:local_end, 0] = global_ids[cursor : cursor + count]
+            cursor += count
+        return result
+
+
 def _deep_gemm_scores(
     q_flat: torch.Tensor,
     q_s: torch.Tensor,
     k_fp8: torch.Tensor,
     k_scale: torch.Tensor,
-    k_ranges: list[tuple[int, int]],
-    q_lens: list[int],
-    raw_k_seqlens: list[int],
+    request: _LocalIndexerRequest,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run LMDeploy's contiguous DeepGEMM MQA Indexer kernel."""
     deep_gemm = _get_deep_gemm()
     if deep_gemm is None:
         raise RuntimeError(
-            "indexer_quant_mode='ue8m0_fp8' requires DeepGEMM's contiguous "
+            "indexer_backend='lmdeploy_fp8' requires DeepGEMM's contiguous "
             "fp8_mqa_logits API; the FP8 Indexer path does not fall back to Triton"
         )
-    max_k = max((end - start for start, end in k_ranges), default=1)
+    max_k = max((end - start for start, end in request.k_ranges), default=1)
     scores = torch.full((q_flat.size(0), max_k), -torch.inf, device=q_flat.device, dtype=torch.float32)
     row_lens = torch.zeros((q_flat.size(0),), device=q_flat.device, dtype=torch.int32)
     q_cursor = 0
-    for (k_start, k_end), q_len, raw_len in zip(k_ranges, q_lens, raw_k_seqlens):
+    for (k_start, k_end), q_len, raw_len in zip(request.k_ranges, request.q_lens, request.raw_k_seqlens):
         k_seq = k_fp8[k_start:k_end].contiguous()
         ks_seq = k_scale[k_start:k_end].contiguous()
         # A contiguous packed slice may still have an unaligned scale pointer.
@@ -96,165 +218,91 @@ def _deep_gemm_scores(
     return scores, row_lens
 
 
+def _select_topk(
+    scores: torch.Tensor,
+    row_k_seqlens: torch.Tensor,
+    index_topk: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Select local top-k IDs and mark rows that are valid under causal
+    lengths."""
+    width = min(index_topk, scores.size(1))
+    if width == index_topk:
+        try:
+            from .lmdeploy_sparse_index_topk import is_sparse_index_topk_supported, sparse_index_topk
+        except ImportError:
+            pass
+        else:
+            if is_sparse_index_topk_supported(index_topk):
+                local_ids = sparse_index_topk(
+                    scores,
+                    torch.ones_like(row_k_seqlens),
+                    row_k_seqlens,
+                    index_topk,
+                    fill=-1,
+                    descending=True,
+                    sorted=False,
+                )
+                return local_ids, local_ids >= 0
+
+    column_ids = torch.arange(scores.size(1), device=scores.device)
+    masked_scores = scores.masked_fill(column_ids[None, :] >= row_k_seqlens[:, None], -torch.inf)
+    values, local_ids = masked_scores.topk(width, dim=-1, sorted=True)
+    valid = (local_ids < row_k_seqlens[:, None]) & torch.isfinite(values)
+    return local_ids, valid
+
+
 def _lmdeploy_fp8_indexer_topk_impl(
     q_fp8: torch.Tensor,
     q_scale: torch.Tensor,
     k_fp8: torch.Tensor,
     k_scale: torch.Tensor,
     weights: torch.Tensor,
-    cu_seq_lens_q: torch.Tensor,
-    cu_seq_lens_k: torch.Tensor,
-    shard_start: int,
+    query_starts: torch.Tensor,
+    query_ends: torch.Tensor,
+    k_starts: torch.Tensor,
+    k_ends: torch.Tensor,
     index_head_dim: int,
     index_topk: int,
 ) -> torch.Tensor:
-    """Dense XTuner input -> LMDeploy DeepGEMM score -> global top-k ids.
-
-    This is a correctness bridge for the current packed SFT path. It uses
-    LMDeploy's contiguous DeepGEMM MQA kernel, while retaining XTuner's public
-    ``[S, 1, K]`` output and packed global K indices. ``weights`` are the raw
-    per-head gates; the head-count and head-dimension factors are folded into
-    one FP32 scale exactly as in LMDeploy's fused Q preprocessing.
-    """
-    if q_fp8.ndim != 4 or q_fp8.size(0) != 1:
-        raise RuntimeError(f"LMDeploy FP8 Indexer expects q=(1,S,H,D), got {tuple(q_fp8.shape)}")
-    if q_scale.shape != q_fp8.shape[:-1] or weights.shape != q_fp8.shape[:-1]:
-        raise RuntimeError("q_scale and weights must have shape [1, S, H]")
-    if k_fp8.ndim != 3 or k_fp8.size(0) != 1 or k_scale.shape != k_fp8.shape[:2]:
-        raise RuntimeError("LMDeploy FP8 Indexer expects k=(1,S_k,D), k_scale=(1,S_k)")
-    if index_head_dim != 128 or q_fp8.size(-1) != 128 or k_fp8.size(-1) != 128:
-        raise RuntimeError("LMDeploy GLM-5.2 FP8 Indexer requires head_dim=128")
-    if q_fp8.dtype != torch.float8_e4m3fn or k_fp8.dtype != torch.float8_e4m3fn:
-        raise RuntimeError("LMDeploy FP8 Indexer requires E4M3 Q/K")
-    if q_scale.dtype != torch.float32 or k_scale.dtype != torch.float32 or weights.dtype != torch.float32:
-        raise RuntimeError("LMDeploy FP8 Indexer scales and weights must be float32")
-    if index_topk <= 0:
-        raise ValueError(f"index_topk must be positive, got {index_topk}")
-
-    q_fp8 = q_fp8.squeeze(0).contiguous()
-    q_scale = q_scale.squeeze(0).contiguous()
-    weights = weights.squeeze(0).contiguous()
-    k_fp8 = k_fp8.squeeze(0).contiguous()
-    k_scale = k_scale.squeeze(0).contiguous()
-
-    q_ranges = _sequence_ranges(cu_seq_lens_q.to(device="cpu"))
-    k_ranges = _sequence_ranges(cu_seq_lens_k.to(device="cpu"))
-    if len(q_ranges) != len(k_ranges):
-        raise RuntimeError("Q/K packed sequence counts must match")
-    q_total = q_fp8.size(0)
-    q_global_begin = int(shard_start)
-    q_global_end = q_global_begin + q_total
-
-    active_q: list[tuple[int, int, int, int]] = []
-    # (local q start, local q end, sequence id, K offset of first query)
-    for seq_id, ((q_start, q_end), (k_start, k_end)) in enumerate(zip(q_ranges, k_ranges)):
-        overlap_start = max(q_start, q_global_begin)
-        overlap_end = min(q_end, q_global_end)
-        if overlap_start >= overlap_end:
-            continue
-        q_len = max(q_end - q_start, 0)
-        k_len = max(k_end - k_start, 0)
-        q_offset = overlap_start - q_start
-        # For prefill q_len == k_len.  For decode, Q is the suffix of K.
-        k_offset = max(k_len - q_len, 0) + q_offset
-        local_start = overlap_start - q_global_begin
-        local_end = overlap_end - q_global_begin
-        active_q.append((local_start, local_end, seq_id, k_offset))
-
-    result = torch.full((q_total, 1, index_topk), -1, device=q_fp8.device, dtype=torch.int32)
-    if not active_q:
-        return result
-
-    # Build the exact LMDeploy argument layout. Q is concatenated in the
-    # active packed order; each DeepGEMM call receives a request-local dense K.
-    q_parts = [q_fp8[start:end] for start, end, _, _ in active_q]
-    qs_parts = [q_scale[start:end] for start, end, _, _ in active_q]
-    weight_parts = [weights[start:end] for start, end, _, _ in active_q]
-    q_flat = torch.cat(q_parts, dim=0).contiguous()
-    q_s = torch.cat(qs_parts, dim=0).contiguous()
-    q_weight = torch.cat(weight_parts, dim=0).contiguous()
-    active_seq_ids = [seq_id for _, _, seq_id, _ in active_q]
-    active_k_ranges = [k_ranges[seq_id] for seq_id in active_seq_ids]
-    if not any(end > start for start, end in active_k_ranges):
-        return result
-    q_lens = [end - start for start, end, _, _ in active_q]
-    # raw_k_seqlens is request-local in LMDeploy's causal formula.  It is the
-    # end position of the current query suffix in that request's K sequence.
-    raw_k_seqlens = torch.tensor(
-        [k_offset + (end - start) for start, end, _, k_offset in active_q],
-        device=q_fp8.device,
-        dtype=torch.int32,
-    )
-    score_scale = (q_fp8.size(1) ** -0.5) * (index_head_dim**-0.5)
-    weighted_q_scale = q_s * q_weight * score_scale
-    deepgemm_result = _deep_gemm_scores(
-        q_flat,
-        weighted_q_scale,
+    """Run the FP8 Indexer score and selection pipeline for packed prefill."""
+    _validate_fp8_indexer_inputs(
+        q_fp8,
+        q_scale,
         k_fp8,
         k_scale,
-        active_k_ranges,
-        q_lens,
-        raw_k_seqlens.tolist(),
+        weights,
+        query_starts,
+        query_ends,
+        k_starts,
+        k_ends,
+        index_head_dim,
+        index_topk,
     )
-    scores, row_k_seqlens = deepgemm_result
-
-    # Mask the causal suffix before top-k. The per-row lengths are passed to
-    # the LMDeploy-compatible selector when it is available.
-    width = min(index_topk, scores.size(1))
-    if width == index_topk:
-        # LMDeploy uses its TileLang byte-radix selector for GLM-5.2's
-        # production K=2048 (and K=512 variants).  Keep the same selector so
-        # near-tied boundary values receive the same deterministic set.  The
-        # per-row lengths are passed explicitly because causal score tails are
-        # padded to -inf before selection.
-        try:
-            from .lmdeploy_sparse_index_topk import (
-                is_sparse_index_topk_supported,
-                sparse_index_topk,
-            )
-        except ImportError:
-
-            def is_sparse_index_topk_supported(k: int) -> bool:
-                return False
-
-        if is_sparse_index_topk_supported(index_topk):
-            local_ids = sparse_index_topk(
-                scores,
-                torch.ones_like(row_k_seqlens),
-                row_k_seqlens,
-                index_topk,
-                fill=-1,
-                descending=True,
-                sorted=False,
-            )
-            valid = local_ids >= 0
-        else:
-            column_ids = torch.arange(scores.size(1), device=scores.device)
-            scores.masked_fill_(column_ids[None, :] >= row_k_seqlens[:, None], -torch.inf)
-            values, local_ids = scores.topk(width, dim=-1, sorted=True)
-            valid = (local_ids < row_k_seqlens[:, None]) & torch.isfinite(values)
-    else:
-        column_ids = torch.arange(scores.size(1), device=scores.device)
-        scores.masked_fill_(column_ids[None, :] >= row_k_seqlens[:, None], -torch.inf)
-        values, local_ids = scores.topk(width, dim=-1, sorted=True)
-        valid = (local_ids < row_k_seqlens[:, None]) & torch.isfinite(values)
-    # Map each request-local page coordinate back to XTuner's packed K space.
-    row_k_base = torch.repeat_interleave(
-        torch.tensor([k_ranges[seq_id][0] for seq_id in active_seq_ids], device=q_fp8.device),
-        torch.tensor(q_lens, device=q_fp8.device),
+    request = _LocalIndexerRequest.build(
+        q_fp8,
+        q_scale,
+        weights,
+        query_starts,
+        query_ends,
+        k_starts,
+        k_ends,
     )
-    global_ids = local_ids.to(torch.int32) + row_k_base[:, None].to(torch.int32)
-    global_ids = global_ids.masked_fill(~valid, -1)
-    if width < index_topk:
-        padded = torch.full((global_ids.size(0), index_topk - width), -1, device=q_fp8.device, dtype=torch.int32)
-        global_ids = torch.cat((global_ids, padded), dim=-1)
-
-    cursor = 0
-    for local_start, local_end, _, _ in active_q:
-        count = local_end - local_start
-        result[local_start:local_end, 0] = global_ids[cursor : cursor + count]
-        cursor += count
-    return result
+    if not request.slots:
+        return request.to_global_packed_ids(
+            torch.empty((0, index_topk), device=q_fp8.device, dtype=torch.int32),
+            torch.empty((0, index_topk), device=q_fp8.device, dtype=torch.bool),
+            index_topk,
+        )
+    score_scale = (request.q_flat.size(1) ** -0.5) * (index_head_dim**-0.5)
+    scores, row_k_seqlens = _deep_gemm_scores(
+        request.q_flat,
+        request.q_scale * request.q_weight * score_scale,
+        k_fp8.squeeze(0),
+        k_scale.squeeze(0),
+        request,
+    )
+    local_ids, valid = _select_topk(scores, row_k_seqlens, index_topk)
+    return request.to_global_packed_ids(local_ids, valid, index_topk)
 
 
 def lmdeploy_fp8_dsa_topk_indices(
@@ -268,8 +316,9 @@ def lmdeploy_fp8_dsa_topk_indices(
 ) -> torch.Tensor:
     """Run the LMDeploy-compatible FP8 Indexer through the common DSA seam.
 
-    The public DSA protocol keeps logical BF16 Q/K inputs and raw gates.  FP8 quantization, packed sequence conversion
-    and DeepGEMM invocation stay private to this adapter.
+    The public DSA protocol keeps logical BF16 Q/K inputs and raw gates.
+    FP8 quantization, packed sequence conversion and DeepGEMM invocation
+    stay private to this adapter.
     """
     if not q.is_cuda or not k.is_cuda or not weights.is_cuda:
         raise RuntimeError("LMDeploy FP8 Indexer requires CUDA q, k, and weights")
@@ -289,17 +338,17 @@ def lmdeploy_fp8_dsa_topk_indices(
 
     q_fp8, q_scale = indexer_fp8_quant(q.contiguous())
     k_fp8, k_scale = indexer_fp8_quant(k.contiguous())
-    cu_seq_lens_q = seq_ctx.cu_seq_lens_q.to(device=q.device, dtype=torch.int32).contiguous()
-    cu_seq_lens_k = seq_ctx.cu_seq_lens_k.to(device=q.device, dtype=torch.int32).contiguous()
+    query_starts, query_ends, k_starts, k_ends = _packed_query_metadata(seq_ctx, q.size(1), q.device)
     return lmdeploy_fp8_indexer_topk(
         q_fp8,
         q_scale,
         k_fp8,
         k_scale,
         weights.float().contiguous(),
-        cu_seq_lens_q,
-        cu_seq_lens_k,
-        seq_ctx._shard_start,
+        query_starts,
+        query_ends,
+        k_starts,
+        k_ends,
         index_head_dim,
         index_topk,
     )
@@ -312,9 +361,10 @@ def lmdeploy_fp8_indexer_topk(
     k_fp8: torch.Tensor,
     k_scale: torch.Tensor,
     weights: torch.Tensor,
-    cu_seq_lens_q: torch.Tensor,
-    cu_seq_lens_k: torch.Tensor,
-    shard_start: int,
+    query_starts: torch.Tensor,
+    query_ends: torch.Tensor,
+    k_starts: torch.Tensor,
+    k_ends: torch.Tensor,
     index_head_dim: int,
     index_topk: int,
 ) -> torch.Tensor:
@@ -324,9 +374,10 @@ def lmdeploy_fp8_indexer_topk(
         k_fp8,
         k_scale,
         weights,
-        cu_seq_lens_q,
-        cu_seq_lens_k,
-        shard_start,
+        query_starts,
+        query_ends,
+        k_starts,
+        k_ends,
         index_head_dim,
         index_topk,
     )
@@ -339,9 +390,10 @@ def _lmdeploy_fp8_indexer_topk_fake(
     k_fp8: torch.Tensor,
     k_scale: torch.Tensor,
     weights: torch.Tensor,
-    cu_seq_lens_q: torch.Tensor,
-    cu_seq_lens_k: torch.Tensor,
-    shard_start: int,
+    query_starts: torch.Tensor,
+    query_ends: torch.Tensor,
+    k_starts: torch.Tensor,
+    k_ends: torch.Tensor,
     index_head_dim: int,
     index_topk: int,
 ) -> torch.Tensor:
