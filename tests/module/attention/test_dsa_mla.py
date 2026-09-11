@@ -9,6 +9,7 @@ TestDSAAttention
 TestAcceleratedSparseMLA
     test_tilelang_forward_backward_matches_torch: TileLang 前反向数值与 PyTorch 后端一致。
     test_compiled_cudnn_backward_matches_tilelang: 编译后的 cuDNN DSA 前反向与 TileLang 一致。
+    test_compiled_flashmla_backward_matches_tilelang: FlashMLA 前向和 TileLang 反向与 TileLang 前反向一致。
 TestDSASequenceParallel
     test_packed_attention_matches_full_sequence: SP2 的输出、top-k 和输入梯度与完整序列一致。
     test_tilelang_indexer_matches_torch: SP2 query shard 的 TileLang indexer 与 PyTorch 一致。
@@ -75,6 +76,20 @@ def _cudnn_dsa_sparse_mla_available() -> bool:
     return result.returncode == 0
 
 
+@cache
+def _flashmla_sparse_mla_available() -> bool:
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 9:
+        return False
+    result = subprocess.run(
+        [sys.executable, "-c", "from flash_mla import flash_mla_sparse_fwd"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 def _sparse_indices(seq_len: int, topk: int) -> torch.Tensor:
     indices = torch.full((seq_len, 1, topk), -1, device="cuda", dtype=torch.int64)
     for token_idx in range(seq_len):
@@ -97,6 +112,14 @@ def _cudnn_dsa_sparse_mla_inputs():
     q = torch.randn(seq_len, 64, 576, device="cuda", dtype=torch.bfloat16)
     kv = torch.randn(seq_len, 1, 576, device="cuda", dtype=torch.bfloat16)
     return q, kv, _sparse_indices(seq_len, topk=64)
+
+
+def _flashmla_sparse_mla_inputs():
+    torch.manual_seed(0)
+    seq_len = 64
+    q = torch.randn(seq_len, 64, 576, device="cuda", dtype=torch.bfloat16)
+    kv = torch.randn(seq_len, 1, 576, device="cuda", dtype=torch.bfloat16)
+    return q, kv, _sparse_indices(seq_len, topk=128)
 
 
 def _tiny_dsa_attention(
@@ -302,6 +325,46 @@ class TestAcceleratedSparseMLA:
         torch.testing.assert_close(actual, expected, atol=BF16_ATOL, rtol=BF16_RTOL)
         torch.testing.assert_close(q_cudnn.grad, q_tilelang.grad, atol=CUDNN_DQ_ATOL, rtol=CUDNN_DQ_RTOL)
         torch.testing.assert_close(kv_cudnn.grad, kv_tilelang.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
+
+    @pytest.mark.skipif(
+        not (_flashmla_sparse_mla_available() and _tilelang_sparse_mla_available()),
+        reason="requires CUDA, FlashMLA, and TileLang runtimes",
+    )
+    def test_compiled_flashmla_backward_matches_tilelang(self):
+        q, kv, indices = _flashmla_sparse_mla_inputs()
+        scaling = 1 / math.sqrt(q.shape[-1])
+
+        def compiled_sparse_mla(
+            q: torch.Tensor, kv: torch.Tensor, backend: str
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            output = sparse_mla(
+                q,
+                kv,
+                indices,
+                scaling=scaling,
+                value_dim=512,
+                backend=backend,
+            )
+            return output.raw_output, output.softmax_lse
+
+        compiled_sparse_mla = torch.compile(compiled_sparse_mla, fullgraph=False)
+        q_tilelang = q.detach().clone().requires_grad_()
+        kv_tilelang = kv.detach().clone().requires_grad_()
+        q_flashmla = q.detach().clone().requires_grad_()
+        kv_flashmla = kv.detach().clone().requires_grad_()
+
+        expected, expected_lse = compiled_sparse_mla(q_tilelang, kv_tilelang, "tilelang")
+        actual, actual_lse = compiled_sparse_mla(q_flashmla, kv_flashmla, "flashmla")
+        grad_output = torch.randn_like(expected)
+        expected.backward(grad_output)
+        actual.backward(grad_output)
+
+        assert torch.equal(actual, expected)
+        assert torch.equal(actual_lse, expected_lse)
+        torch.testing.assert_close(actual, expected, atol=BF16_ATOL, rtol=BF16_RTOL)
+        torch.testing.assert_close(actual_lse, expected_lse, atol=BF16_ATOL, rtol=BF16_RTOL)
+        torch.testing.assert_close(q_flashmla.grad, q_tilelang.grad, atol=BF16_ATOL, rtol=BF16_RTOL)
+        torch.testing.assert_close(kv_flashmla.grad, kv_tilelang.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
 
 
 class TestDSASequenceParallel(DeterministicDDPTestCase):

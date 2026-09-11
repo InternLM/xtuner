@@ -14,6 +14,7 @@ from xtuner.v1.ops.sparse_mla import (
     DSATopKIndicesProtocol,
     SparseMLAProtocol,
     ensure_cudnn_dsa_runtime_available,
+    ensure_flashmla_runtime_available,
     ensure_tilelang_runtime_available,
     get_dsa_topk_indices,
     get_sparse_mla,
@@ -67,7 +68,7 @@ class DSAIndexer(nn.Module):
         index_head_dim: int,
         index_n_heads: int,
         index_topk: int,
-        indexer_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch",
+        indexer_backend: Literal["torch", "tilelang", "cudnn_dsa", "flashmla"] = "torch",
     ):
         super().__init__()
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -175,7 +176,7 @@ class DSAMLAConfig(MLAConfig):
     index_skip_topk_offset: int = 0
     indexer_rope_interleave: bool = True
     indexer_types: list[str] | None = None
-    sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch"
+    sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa", "flashmla"] = "torch"
 
     def build(
         self,
@@ -186,10 +187,12 @@ class DSAMLAConfig(MLAConfig):
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
     ) -> "DSAMultiLatentAttention":
-        if self.sparse_mla_backend in ("tilelang", "cudnn_dsa"):
+        if self.sparse_mla_backend in ("tilelang", "cudnn_dsa", "flashmla"):
             ensure_tilelang_runtime_available()
         if self.sparse_mla_backend == "cudnn_dsa":
             ensure_cudnn_dsa_runtime_available()
+        if self.sparse_mla_backend == "flashmla":
+            ensure_flashmla_runtime_available()
 
         return DSAMultiLatentAttention(
             **self.model_dump(),
@@ -213,7 +216,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         index_skip_topk_offset: int = 0,
         indexer_rope_interleave: bool = True,
         indexer_types: list[str] | None = None,
-        sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch",
+        sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa", "flashmla"] = "torch",
         **kwargs,
     ):
         super().__init__(**kwargs)
