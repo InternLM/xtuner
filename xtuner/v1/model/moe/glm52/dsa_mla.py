@@ -49,7 +49,7 @@ def _validate_indexer_backend_config(
     index_head_dim: int,
     index_n_heads: int,
 ) -> None:
-    """Validate the DeepGEMM FP8 contract used to align with LMDeploy."""
+    """Validate the DeepGEMM FP8 Indexer contract."""
 
     if indexer_backend != "deep_gemm_fp8":
         return
@@ -204,7 +204,7 @@ class DSAMLAConfig(MLAConfig):
     indexer_rope_interleave: bool = True
     indexer_types: list[str] | None = None
     sparse_mla_backend: SparseMLABackend = "torch"
-    # ``deep_gemm_fp8`` uses DeepGEMM while matching LMDeploy's FP8 Indexer path.
+    # ``deep_gemm_fp8`` selects the DeepGEMM FP8 MQA score path.
     indexer_backend: DSAIndexerBackend | None = None
     freeze_dsa_indexer: bool = True
 

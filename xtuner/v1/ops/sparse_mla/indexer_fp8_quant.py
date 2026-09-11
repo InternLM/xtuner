@@ -1,10 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""LMDeploy-compatible FP8 quantization for the GLM-5.2 Indexer.
+"""FP8 quantization for the GLM-5.2 Indexer.
 
-The Indexer has a fixed 128-wide projection dimension.  LMDeploy quantizes each post-RoPE Q head row and each K row
-independently with an E4M3 value and an UE8M0 (power-of-two) scale.  Keep this quantizer next to the Indexer rather
-than extending XTuner's generic Linear/MoE FP8 helper: the generic helper's historical scale contract must remain
-unchanged.
+The Indexer has a fixed 128-wide projection dimension. Quantize each
+post-RoPE Q head row and each K row independently with an E4M3 value and an
+UE8M0 (power-of-two) scale. Keep this quantizer next to the Indexer rather than
+extending XTuner's generic Linear/MoE FP8 helper: the generic helper's
+historical scale contract must remain unchanged.
 """
 
 from __future__ import annotations
@@ -81,9 +82,9 @@ def _indexer_fp8_quant_kernel(
     values = tl.load(input_ptrs, mask=mask, other=0.0).to(tl.float32)
     amax = tl.max(tl.abs(values), axis=1)
     scale = _fast_round_scale(tl.maximum(amax, 1e-6), 1 / fp8_max)
-    # Keep the reciprocal-and-multiply order used by LMDeploy's UE8M0
-    # quantizer.  This avoids a needless division-rounding difference in the
-    # FP8 bytes at the edge of a representable value.
+    # Keep reciprocal-then-multiply order for UE8M0 scales. This avoids a
+    # needless division-rounding difference in FP8 bytes at the edge of a
+    # representable value.
     values = tl.clamp(values * (1.0 / scale[:, None]), fp8_min, fp8_max)
     tl.store(output_ptrs, values.to(output_ptr.dtype.element_ty), mask=mask)
     tl.store(scale_ptr + row_offsets * stride_sm, scale, mask=rows < M)

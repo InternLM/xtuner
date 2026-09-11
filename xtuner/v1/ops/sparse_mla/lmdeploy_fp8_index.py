@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""LMDeploy-compatible DeepGEMM FP8 Indexer score path.
+"""DeepGEMM FP8 Indexer score path.
 
 The adapter uses dense K tensors and requires DeepGEMM's contiguous prefill MQA API. It does not build a paged cache.
 """
@@ -52,17 +52,17 @@ def _validate_fp8_indexer_inputs(
     index_topk: int,
 ) -> None:
     if q_fp8.ndim != 4 or q_fp8.size(0) != 1:
-        raise RuntimeError(f"LMDeploy FP8 Indexer expects q=(1,S,H,D), got {tuple(q_fp8.shape)}")
+        raise RuntimeError(f"DeepGEMM FP8 Indexer expects q=(1,S,H,D), got {tuple(q_fp8.shape)}")
     if q_scale.shape != q_fp8.shape[:-1] or weights.shape != q_fp8.shape[:-1]:
         raise RuntimeError("q_scale and weights must have shape [1, S, H]")
     if k_fp8.ndim != 3 or k_fp8.size(0) != 1 or k_scale.shape != k_fp8.shape[:2]:
-        raise RuntimeError("LMDeploy FP8 Indexer expects k=(1,S_k,D), k_scale=(1,S_k)")
+        raise RuntimeError("DeepGEMM FP8 Indexer expects k=(1,S_k,D), k_scale=(1,S_k)")
     if index_head_dim != 128 or q_fp8.size(-1) != 128 or k_fp8.size(-1) != 128:
-        raise RuntimeError("LMDeploy GLM-5.2 FP8 Indexer requires head_dim=128")
+        raise RuntimeError("DeepGEMM GLM-5.2 FP8 Indexer requires head_dim=128")
     if q_fp8.dtype != torch.float8_e4m3fn or k_fp8.dtype != torch.float8_e4m3fn:
-        raise RuntimeError("LMDeploy FP8 Indexer requires E4M3 Q/K")
+        raise RuntimeError("DeepGEMM FP8 Indexer requires E4M3 Q/K")
     if q_scale.dtype != torch.float32 or k_scale.dtype != torch.float32 or weights.dtype != torch.float32:
-        raise RuntimeError("LMDeploy FP8 Indexer scales and weights must be float32")
+        raise RuntimeError("DeepGEMM FP8 Indexer scales and weights must be float32")
     query_len = q_fp8.size(1)
     for name, value in (
         ("query_starts", query_starts),
@@ -161,7 +161,7 @@ def _deep_gemm_scores(
     k_scale: torch.Tensor,
     request: _LocalIndexerRequest,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run LMDeploy's contiguous DeepGEMM MQA Indexer kernel."""
+    """Run DeepGEMM's contiguous FP8 MQA Indexer kernel."""
     if deep_gemm is None or not (hasattr(deep_gemm, "fp8_mqa_logits") or hasattr(deep_gemm, "fp8_fp4_mqa_logits")):
         raise RuntimeError(
             "indexer_backend='deep_gemm_fp8' requires DeepGEMM's contiguous "
@@ -311,19 +311,19 @@ def lmdeploy_fp8_dsa_topk_indices(
     index_head_dim: int,
     index_topk: int,
 ) -> torch.Tensor:
-    """Run the LMDeploy-compatible FP8 Indexer through the common DSA seam.
+    """Run the DeepGEMM FP8 Indexer through the common DSA seam.
 
     The public DSA protocol keeps logical BF16 Q/K inputs and raw gates. FP8 quantization, packed sequence conversion
     and DeepGEMM invocation stay private to this adapter.
     """
     if not q.is_cuda or not k.is_cuda or not weights.is_cuda:
-        raise RuntimeError("LMDeploy FP8 Indexer requires CUDA q, k, and weights")
+        raise RuntimeError("DeepGEMM FP8 Indexer requires CUDA q, k, and weights")
     if q.ndim != 4 or q.size(0) != 1 or k.ndim != 3 or k.size(0) != 1:
-        raise RuntimeError("LMDeploy FP8 Indexer expects q=(1,S,H,D) and k=(1,S_k,D)")
+        raise RuntimeError("DeepGEMM FP8 Indexer expects q=(1,S,H,D) and k=(1,S_k,D)")
     if index_head_dim != 128 or q.size(-1) != 128 or k.size(-1) != 128:
-        raise RuntimeError("LMDeploy GLM-5.2 FP8 Indexer requires head_dim=128")
+        raise RuntimeError("DeepGEMM GLM-5.2 FP8 Indexer requires head_dim=128")
     if weights.shape != q.shape[:-1]:
-        raise RuntimeError("LMDeploy FP8 Indexer expects weights with shape [1, S, H]")
+        raise RuntimeError("DeepGEMM FP8 Indexer expects weights with shape [1, S, H]")
     # Keep the historical adapter behavior: quantization is defined from a
     # BF16 logical tensor even when an upstream projection runs in another
     # floating-point dtype.

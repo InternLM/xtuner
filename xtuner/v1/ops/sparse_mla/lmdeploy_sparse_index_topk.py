@@ -1,10 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""LMDeploy-compatible sparse-index top-k kernel.
+"""Sparse-index top-k kernel.
 
-This is the selector paired with LMDeploy's FP8 Indexer score kernel.  It is
-kept separate from the score adapter so the LMDeploy-compatible path can
-remain lazy: environments that only use the historical Torch/TileLang
-indexer do not import TileLang at module import time.
+This selector is kept separate from the score adapter so the accelerated path
+remains lazy: environments that only use the historical Torch/TileLang Indexer
+do not import TileLang at module import time.
 """
 
 from __future__ import annotations
@@ -174,7 +173,7 @@ def sparse_index_topk(
     descending: bool = True,
     sorted: bool = False,
 ) -> torch.Tensor:
-    """Return the LMDeploy sparse-index top-k set for padded score rows."""
+    """Return the sparse-index top-k set for padded score rows."""
     if not descending:
         raise ValueError("sparse_index_topk only supports descending=True.")
     if sorted:
