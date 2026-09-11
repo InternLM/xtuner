@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""DeepGEMM FP8 Indexer score path.
+"""DeepGEMM FP8 Indexer score path following LMDeploy's metadata contract.
 
 The adapter uses dense K tensors and requires DeepGEMM's contiguous prefill MQA API. It does not build a paged cache.
 """
@@ -161,7 +161,10 @@ def _deep_gemm_scores(
     k_scale: torch.Tensor,
     request: _LocalIndexerRequest,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run DeepGEMM's contiguous FP8 MQA Indexer kernel."""
+    """Run DeepGEMM's contiguous FP8 MQA Indexer kernel.
+
+    The per-sequence metadata layout follows LMDeploy's FP8 Indexer path.
+    """
     if deep_gemm is None or not (hasattr(deep_gemm, "fp8_mqa_logits") or hasattr(deep_gemm, "fp8_fp4_mqa_logits")):
         raise RuntimeError(
             "indexer_backend='deep_gemm_fp8' requires DeepGEMM's contiguous "
@@ -216,8 +219,10 @@ def _select_topk(
     row_k_seqlens: torch.Tensor,
     index_topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Select local top-k IDs and mark rows that are valid under causal
-    lengths."""
+    """Select local top-k IDs using LMDeploy's selector when supported.
+
+    Other top-k values use the Torch fallback while preserving the same causal-validity semantics.
+    """
     width = min(index_topk, scores.size(1))
     if width == index_topk:
         try:
@@ -314,7 +319,8 @@ def lmdeploy_fp8_dsa_topk_indices(
     """Run the DeepGEMM FP8 Indexer through the common DSA seam.
 
     The public DSA protocol keeps logical BF16 Q/K inputs and raw gates. FP8 quantization, packed sequence conversion
-    and DeepGEMM invocation stay private to this adapter.
+    and DeepGEMM invocation stay private to this adapter. The adapter mirrors LMDeploy's FP8 Indexer preprocessing
+    contract.
     """
     if not q.is_cuda or not k.is_cuda or not weights.is_cuda:
         raise RuntimeError("DeepGEMM FP8 Indexer requires CUDA q, k, and weights")

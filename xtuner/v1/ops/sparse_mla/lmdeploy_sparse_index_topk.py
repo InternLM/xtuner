@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""Sparse-index top-k kernel.
+"""Sparse-index top-k kernel following LMDeploy's byte-radix algorithm.
 
 This selector is kept separate from the score adapter so the accelerated path
 remains lazy: environments that only use the historical Torch/TileLang Indexer
@@ -173,7 +173,8 @@ def sparse_index_topk(
     descending: bool = True,
     sorted: bool = False,
 ) -> torch.Tensor:
-    """Return the sparse-index top-k set for padded score rows."""
+    """Return the LMDeploy-compatible sparse-index top-k set for padded
+    rows."""
     if not descending:
         raise ValueError("sparse_index_topk only supports descending=True.")
     if sorted:

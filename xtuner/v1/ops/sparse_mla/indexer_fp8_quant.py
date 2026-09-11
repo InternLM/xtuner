@@ -1,11 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """FP8 quantization for the GLM-5.2 Indexer.
 
-The Indexer has a fixed 128-wide projection dimension. Quantize each
-post-RoPE Q head row and each K row independently with an E4M3 value and an
-UE8M0 (power-of-two) scale. Keep this quantizer next to the Indexer rather than
-extending XTuner's generic Linear/MoE FP8 helper: the generic helper's
-historical scale contract must remain unchanged.
+The Indexer has a fixed 128-wide projection dimension. Quantize each post-RoPE Q head row and each K row independently
+with an E4M3 value and an UE8M0 (power-of-two) scale. Keep this quantizer next to the Indexer rather than extending
+XTuner's generic Linear/MoE FP8 helper: the generic helper's historical scale contract must remain unchanged. The row-
+wise format follows LMDeploy's FP8 Indexer quantization contract.
 """
 
 from __future__ import annotations
@@ -97,7 +96,8 @@ def indexer_fp8_quant(x: Tensor) -> tuple[Tensor, Tensor]:
     ``x`` may have arbitrary leading dimensions but its final dimension must
     be the GLM-5.2 Indexer width (128).  The returned scale has the same
     leading dimensions as ``x``; one scale is emitted for every final-dim
-    row.  No dequantization is performed here.
+    row.  No dequantization is performed here. The row-wise rule matches the
+    format used by LMDeploy's FP8 Indexer.
     """
 
     if x.ndim < 2 or x.shape[-1] != INDEXER_HEAD_DIM:
