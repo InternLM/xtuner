@@ -25,7 +25,7 @@ class ColateItem(TypedDict):
     rollout_logprobs: torch.Tensor | None
     teacher_logprobs: NotRequired[torch.Tensor | None]
     target_token_ids: NotRequired[torch.Tensor | None]
-    teacher_indices: NotRequired[torch.Tensor]
+    teacher_indices: NotRequired[torch.Tensor | None]
 
 
 def _summarize_process_group_results(results: list[dict[str, Any]]) -> str:

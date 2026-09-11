@@ -1680,28 +1680,7 @@ class BaseRLTrainer:
                 if teacher_names:
                     total = max(worker_totals)
                 else:
-                    legacy_values: list[float] = []
-                    if phase == "compute":
-                        legacy_values = [
-                            float(legacy_time)
-                            for log_item in worker_log_items
-                            if (legacy_time := log_item.get("teacher_compute_time")) is not None
-                        ]
-                    elif phase == "onload":
-                        legacy_values = [
-                            float(legacy_time)
-                            for log_item in worker_log_items
-                            if (legacy_time := log_item.get("teacher_onload_time")) is not None
-                        ]
-                    else:
-                        legacy_values = [
-                            float(legacy_time)
-                            for log_item in worker_log_items
-                            if (legacy_time := log_item.get("teacher_offload_time")) is not None
-                        ]
-                    if not legacy_values:
-                        continue
-                    total = max(legacy_values)
+                    continue
                 all_scalars[f"time/train_teacher/total/{phase}"] = total
                 all_scalars[f"time/train_teacher_{phase}"] = total
 

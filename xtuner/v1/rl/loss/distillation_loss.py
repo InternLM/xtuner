@@ -108,6 +108,11 @@ class DistillationLossConfig(BaseRLLossConfig):
     def _loss_kwargs_cls(self) -> type["DistillationLossKwargs"]:
         return DistillationLossKwargs
 
+    def finalize_metrics(self, extra_info_dict: dict[str, Any], device: str | torch.device) -> dict[str, Any]:
+        """Finalize policy and distillation metrics emitted by this loss."""
+        extra_info_dict = super().finalize_metrics(extra_info_dict, device)
+        return finalize_distillation_metrics(extra_info_dict, device)
+
     def build(
         self,
         data: dict,
@@ -125,6 +130,7 @@ class DistillationLossConfig(BaseRLLossConfig):
             is_weights=data.get("rollout_is_weights"),
             teacher_logprobs=data.get("teacher_logprobs"),
             target_token_ids=data.get("target_token_ids"),
+            teacher_indices=data.get("teacher_indices"),
         )
         # Rollout teacher targets can be large, so shard them before moving the
         # local slice to the accelerator.
@@ -137,6 +143,7 @@ class DistillationLossConfig(BaseRLLossConfig):
 class DistillationLossKwargs(BaseRLLossKwargs):
     teacher_logprobs: torch.Tensor | None = None
     target_token_ids: torch.Tensor | None = None
+    teacher_indices: torch.Tensor | None = None
     distillation_loss_weight: torch.Tensor | None = None
 
     def sp_split(self, sp_mesh: DeviceMesh) -> Self:
@@ -155,6 +162,13 @@ class DistillationLossKwargs(BaseRLLossKwargs):
                 split_dim=1,
                 padding_value=0,
             )
+        if self.teacher_indices is not None:
+            self.teacher_indices = sp_split(
+                self.teacher_indices,
+                sp_mesh=sp_mesh,
+                split_dim=1,
+                padding_value=-1,
+            )
         return self
 
     def to(self, device: torch.device | str) -> Self:
@@ -163,6 +177,8 @@ class DistillationLossKwargs(BaseRLLossKwargs):
             self.teacher_logprobs = self.teacher_logprobs.to(device)
         if self.target_token_ids is not None:
             self.target_token_ids = self.target_token_ids.to(device)
+        if self.teacher_indices is not None:
+            self.teacher_indices = self.teacher_indices.to(device)
         if self.distillation_loss_weight is not None:
             self.distillation_loss_weight = self.distillation_loss_weight.to(device)
         return self

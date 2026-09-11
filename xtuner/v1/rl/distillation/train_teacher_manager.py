@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Iterator, cast
+from typing import TYPE_CHECKING, Any, Iterator, cast
 
 import torch
 
@@ -14,6 +14,10 @@ from xtuner.v1.rl.model_utils import FrozenModel, build_frozen_model
 from xtuner.v1.utils import get_device, get_torch_device_module
 
 from .config import TrainTeacherManagerConfig
+
+
+if TYPE_CHECKING:
+    from xtuner.v1.rl.loss.base_loss import BaseRLLossContext
 
 
 DEVICE = get_device()
@@ -62,8 +66,8 @@ class TrainTeacherManager:
     """Execute training-side Teachers in one TrainingWorker process.
 
     The manager owns Teacher model construction, deterministic Teacher-major scheduling, CPU/device residency, and
-    sampled-token or top-k output calculation. The caller remains responsible for preparing distributed inputs and
-    swapping the Actor and optimizer around the Teacher phase.
+    sampled-token or top-k output calculation. The caller remains responsible for swapping the Actor and optimizer
+    around the Teacher phase.
     """
 
     def __init__(self, config: TrainTeacherManagerConfig, *, chunk_size: int | None) -> None:
@@ -125,6 +129,46 @@ class TrainTeacherManager:
             target_token_ids=target_token_ids,
             timings=timings,
         )
+
+    def compute_teacher_outputs(
+        self,
+        seq_ctx_list: list[SequenceContext],
+        loss_ctx_list: list[BaseRLLossContext],
+    ) -> TrainTeacherTimings:
+        """Compute Teacher outputs for the given loss contexts."""
+        teacher_indices_list: list[torch.Tensor] = []
+        shifted_labels_list: list[torch.Tensor] = []
+        for loss_ctx in loss_ctx_list:
+            loss_kwargs = cast(Any, loss_ctx.loss_kwargs)
+            teacher_indices = loss_kwargs.teacher_indices
+            if teacher_indices is None:
+                raise ValueError("teacher_indices are required when the training Teacher manager is enabled")
+            teacher_indices_list.append(teacher_indices)
+            shifted_labels_list.append(loss_kwargs.shifted_labels)
+
+        try:
+            outputs = self.compute_logprobs(
+                seq_ctx_list=seq_ctx_list,
+                shifted_labels_list=shifted_labels_list,
+                teacher_indices_list=teacher_indices_list,
+            )
+            target_token_ids_list: list[torch.Tensor | None] = (
+                list(outputs.target_token_ids)
+                if outputs.target_token_ids is not None
+                else [None] * len(outputs.teacher_logprobs)
+            )
+            for loss_ctx, teacher_logprobs, target_token_ids in zip(
+                loss_ctx_list,
+                outputs.teacher_logprobs,
+                target_token_ids_list,
+            ):
+                loss_kwargs = cast(Any, loss_ctx.loss_kwargs)
+                loss_kwargs.teacher_logprobs = teacher_logprobs
+                if target_token_ids is not None:
+                    loss_kwargs.target_token_ids = target_token_ids
+            return outputs.timings
+        finally:
+            self.offload_all_to_cpu()
 
     def offload_all_to_cpu(self) -> None:
         for teacher in self._teachers:

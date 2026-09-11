@@ -38,7 +38,6 @@ from xtuner.v1.engine.train_engine import TrainEngine, TrainStepInfo
 from xtuner.v1.loss import BaseLossContext, CELossConfig, LogProbConfig
 from xtuner.v1.loss.ce_loss import CELossContext, LMHeadLossContext
 from xtuner.v1.loss.mtp_loss import MTPLossConfig, MTPLossContext
-from xtuner.v1.loss.utils import sp_split
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
@@ -51,7 +50,6 @@ from xtuner.v1.rl.distillation import (
 from xtuner.v1.rl.loss import (
     BaseRLLossConfig,
     BaseRLLossContext,
-    finalize_train_metrics,
     kl_penalty,
 )
 from xtuner.v1.rl.model_utils import build_frozen_model
@@ -203,7 +201,7 @@ class WorkerInputItem(TypedDict):
     rollout_logprobs: torch.Tensor | None
     teacher_logprobs: NotRequired[torch.Tensor | None]
     target_token_ids: NotRequired[torch.Tensor | None]
-    teacher_indices: NotRequired[torch.Tensor]
+    teacher_indices: NotRequired[torch.Tensor | None]
 
 
 class WorkerTrainLogItem(TypedDict, total=False):
@@ -218,9 +216,6 @@ class WorkerTrainLogItem(TypedDict, total=False):
 class WorkerLogItem(TypedDict):
     train_entropy: float
     teacher_timings: NotRequired[dict[str, dict[str, float]]]
-    teacher_compute_time: NotRequired[float]
-    teacher_onload_time: NotRequired[float]
-    teacher_offload_time: NotRequired[float]
     rollout_entropy: NotRequired[float]
     mismatch_metrics: NotRequired[dict[str, float]]
     rollout_is_metrics: NotRequired[dict[str, float]]
@@ -498,43 +493,27 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._ref_model.to_device("cpu")
         return ref_logprobs_list
 
-    def _compute_train_teacher_outputs(
+    def _maybe_compute_train_teacher_outputs(
         self,
         seq_ctx_list: list[SequenceContext],
-        teacher_indices_list: list[torch.Tensor],
         loss_ctx_list: list[BaseRLLossContext],
-    ) -> TrainTeacherTimings:
+    ) -> TrainTeacherTimings | None:
+        if self._train_teacher_manager is None:
+            return None
+
         self._engine.put_model_to_device("cpu")
         self._engine.put_optimizer_to_device("cpu")
         if hasattr(DEVICE_MODULE, "empty_cache"):
             DEVICE_MODULE.empty_cache()
         try:
-            assert self._train_teacher_manager is not None
-            outputs = self._train_teacher_manager.compute_logprobs(
-                seq_ctx_list=seq_ctx_list,
-                shifted_labels_list=[loss_ctx.loss_kwargs.shifted_labels for loss_ctx in loss_ctx_list],
-                teacher_indices_list=teacher_indices_list,
+            teacher_timings = self._train_teacher_manager.compute_teacher_outputs(
+                seq_ctx_list,
+                loss_ctx_list,
             )
-            if outputs.target_token_ids is None:
-                for loss_ctx, teacher_logprobs in zip(loss_ctx_list, outputs.teacher_logprobs):
-                    loss_ctx.loss_kwargs.teacher_logprobs = teacher_logprobs
-            else:
-                for loss_ctx, token_ids, teacher_logprobs in zip(
-                    loss_ctx_list,
-                    outputs.target_token_ids,
-                    outputs.teacher_logprobs,
-                ):
-                    loss_ctx.loss_kwargs.target_token_ids = token_ids
-                    loss_ctx.loss_kwargs.teacher_logprobs = teacher_logprobs
-            return outputs.timings
+            return teacher_timings
         finally:
-            if self._train_teacher_manager is not None:
-                self._train_teacher_manager.offload_all_to_cpu()
-            self._onload_actor_and_optimizer()
-
-    def _onload_actor_and_optimizer(self) -> None:
-        self._engine.put_model_to_device(DEVICE)
-        self._engine.put_optimizer_to_device(DEVICE)
+            self._engine.put_model_to_device(DEVICE)
+            self._engine.put_optimizer_to_device(DEVICE)
 
     def _add_rollout_routed_experts(
         self, seq_ctx: SequenceContext, rollout_routed_experts: torch.Tensor | list[torch.Tensor | ray.ObjectRef]
@@ -645,8 +624,6 @@ class TrainingWorker(SingleAcceleratorWorker):
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
-        if self._train_teacher_manager is None:
-            self._onload_actor_and_optimizer()
         loss_cfg: BaseRLLossConfig = self.config.loss_cfg
         num_batches = len(data_batches)
         iters_per_step = math.ceil(num_batches / self._optimizer_steps)
@@ -659,7 +636,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         # Init loss_ctx: shifted_labels, advantages, rollout_logprobs
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_list: list[BaseRLLossContext] = []
-        teacher_indices_list: list[torch.Tensor] = []
         mtp_loss_ctx_list: list[list[MTPLossContext]] = []
         prepare_inputs_begin = time.perf_counter()
         for data in data_batches:
@@ -693,18 +669,6 @@ class TrainingWorker(SingleAcceleratorWorker):
             advantages = data["advantages"].to(DEVICE)
             rollout_logprobs = data.get("rollout_logprobs", None)
             rollout_logprobs = rollout_logprobs.to(DEVICE) if rollout_logprobs is not None else None
-            if teacher_indices is not None:
-                # Keep the full indices on the host until each SP rank selects
-                # its local slice.
-                if self.sp_mesh.size() > 1:
-                    teacher_indices = sp_split(
-                        teacher_indices,
-                        sp_mesh=self.sp_mesh,
-                        split_dim=1,
-                        padding_value=-1,
-                    )
-                teacher_indices = teacher_indices.to(DEVICE)
-                teacher_indices_list.append(teacher_indices)
             loss_ctx = loss_cfg.build(
                 data={
                     "shifted_labels": shifted_labels,
@@ -712,6 +676,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     "rollout_logprobs": rollout_logprobs,
                     "teacher_logprobs": data.get("teacher_logprobs", None),
                     "target_token_ids": data.get("target_token_ids", None),
+                    "teacher_indices": teacher_indices,
                 },
                 sp_mesh=self.sp_mesh,
             )
@@ -743,31 +708,18 @@ class TrainingWorker(SingleAcceleratorWorker):
             f"{time.perf_counter() - prepare_inputs_begin:.4f}s"
         )
 
-        del data_batches
-
         # When sp_mesh.size() > 1, get the sp_split shifted_labels and rollout_logprobs
         shifted_labels_list = [loss_ctx.loss_kwargs.shifted_labels for loss_ctx in loss_ctx_list]
         rollout_logprobs_list = [loss_ctx.loss_kwargs.rollout_logprobs for loss_ctx in loss_ctx_list]
 
-        worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
-        if self._train_teacher_manager is not None:
-            # Training-side Teachers share the training workers' devices. Keep
-            # Actor and optimizer on CPU while each frozen Teacher produces its
-            # targets, then restore Actor state for old-logprob and train forward.
-            teacher_timings = self._compute_train_teacher_outputs(
-                seq_ctx_list,
-                teacher_indices_list,
-                loss_ctx_list,
-            )
-            worker_log_item["teacher_timings"] = teacher_timings.to_dict()
-            worker_log_item["teacher_compute_time"] = teacher_timings.compute
-            worker_log_item["teacher_onload_time"] = teacher_timings.onload
-            worker_log_item["teacher_offload_time"] = teacher_timings.offload
+        del data_batches
 
         # compute old logprobs
         old_logprobs_list = self.compute_actor_logprobs(seq_ctx_list, shifted_labels_list)
         for old_logprobs, loss_ctx in zip(old_logprobs_list, loss_ctx_list):
             loss_ctx.loss_kwargs.old_logprobs = old_logprobs
+
+        worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
 
         logger_msg = f"Rollout {rollout_idx}: "
 
@@ -857,6 +809,10 @@ class TrainingWorker(SingleAcceleratorWorker):
         # run, which bounds their GPU residency by the optimizer group size.
         self._maybe_offload_logprob(loss_ctx_list)
         del old_logprobs_list
+        
+        teacher_timings = self._maybe_compute_train_teacher_outputs(seq_ctx_list, loss_ctx_list)
+        if teacher_timings is not None:
+            worker_log_item.update({"teacher_timings": teacher_timings.to_dict()})
 
         # compute batched loss context
         batched_loss_ctx_list: list[BaseRLLossContext] = []
@@ -961,7 +917,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 for k, v in extra_info_dict.items()
                 if isinstance(v, (torch.Tensor, int, float))
             }
-            extra_info_dict = finalize_train_metrics(extra_info_dict, DEVICE, loss_cfg)
+            extra_info_dict = loss_cfg.finalize_metrics(extra_info_dict, DEVICE)
             train_step_info.pop("total_loss")  # type: ignore[misc]
             max_memory = DEVICE_MODULE.max_memory_allocated() / (1024**3)  # type: ignore[attr-defined]
             reserved_memory = DEVICE_MODULE.max_memory_reserved() / (1024**3)  # type: ignore[attr-defined]
