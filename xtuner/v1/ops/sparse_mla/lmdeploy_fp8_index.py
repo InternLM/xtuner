@@ -1,8 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """LMDeploy-compatible DeepGEMM FP8 Indexer score path.
 
-The adapter uses dense K tensors and requires DeepGEMM's contiguous
-prefill MQA API. It does not build a paged cache.
+The adapter uses dense K tensors and requires DeepGEMM's contiguous prefill MQA API. It does not build a paged cache.
 """
 
 from dataclasses import dataclass
@@ -278,6 +277,10 @@ def _lmdeploy_fp8_indexer_topk_impl(
         index_head_dim,
         index_topk,
     )
+    # Remove only the validated singleton batch dimension. Unlike a generic
+    # squeeze, indexing keeps the sequence dimension when K has length one.
+    k_flat = k_fp8[0].contiguous()
+    k_s = k_scale[0].contiguous()
     request = _LocalIndexerRequest.build(
         q_fp8,
         q_scale,
@@ -297,8 +300,8 @@ def _lmdeploy_fp8_indexer_topk_impl(
     scores, row_k_seqlens = _deep_gemm_scores(
         request.q_flat,
         request.q_scale * request.q_weight * score_scale,
-        k_fp8.squeeze(0),
-        k_scale.squeeze(0),
+        k_flat,
+        k_s,
         request,
     )
     local_ids, valid = _select_topk(scores, row_k_seqlens, index_topk)
@@ -316,9 +319,8 @@ def lmdeploy_fp8_dsa_topk_indices(
 ) -> torch.Tensor:
     """Run the LMDeploy-compatible FP8 Indexer through the common DSA seam.
 
-    The public DSA protocol keeps logical BF16 Q/K inputs and raw gates.
-    FP8 quantization, packed sequence conversion and DeepGEMM invocation
-    stay private to this adapter.
+    The public DSA protocol keeps logical BF16 Q/K inputs and raw gates. FP8 quantization, packed sequence conversion
+    and DeepGEMM invocation stay private to this adapter.
     """
     if not q.is_cuda or not k.is_cuda or not weights.is_cuda:
         raise RuntimeError("LMDeploy FP8 Indexer requires CUDA q, k, and weights")
