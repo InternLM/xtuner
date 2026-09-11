@@ -5,11 +5,16 @@ The adapter uses dense K tensors and requires DeepGEMM's contiguous prefill MQA 
 """
 
 from dataclasses import dataclass
-from functools import lru_cache
 
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
+
+
+try:
+    import deep_gemm
+except ImportError:
+    deep_gemm = None
 
 
 # Head counts accepted by DeepGEMM's contiguous FP8 MQA kernel at
@@ -17,16 +22,6 @@ from xtuner.v1.data_proto import SequenceContext
 # with block_qh=128 in the pinned DeepGEMM build (H=48/80/96/112 fail in
 # ``smxx_fp8_mqa_logits.hpp``).  Re-verify this allowlist when bumping DeepGEMM.
 DEEPGEMM_MQA_SUPPORTED_HEADS: tuple[int, ...] = (32, 64, 128)
-
-
-@lru_cache(maxsize=1)
-def _get_deep_gemm():
-    try:
-        import deep_gemm
-    except ImportError:
-        return None
-    has_mqa = hasattr(deep_gemm, "fp8_mqa_logits") or hasattr(deep_gemm, "fp8_fp4_mqa_logits")
-    return deep_gemm if has_mqa else None
 
 
 def _packed_query_metadata(
@@ -167,8 +162,7 @@ def _deep_gemm_scores(
     request: _LocalIndexerRequest,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run LMDeploy's contiguous DeepGEMM MQA Indexer kernel."""
-    deep_gemm = _get_deep_gemm()
-    if deep_gemm is None:
+    if deep_gemm is None or not (hasattr(deep_gemm, "fp8_mqa_logits") or hasattr(deep_gemm, "fp8_fp4_mqa_logits")):
         raise RuntimeError(
             "indexer_backend='deep_gemm_fp8' requires DeepGEMM's contiguous "
             "fp8_mqa_logits API; the FP8 Indexer path does not fall back to Triton"
