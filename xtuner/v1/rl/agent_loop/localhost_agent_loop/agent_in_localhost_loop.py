@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from lagent.utils import create_object, ctx_session_id
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto.rl_data import RolloutMetadata, RolloutState, SampleParams, Status
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
     RolloutStatus,
@@ -140,7 +140,11 @@ class AgentInLocalhostLoop(AgentLoop):
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
         self.mode = mode
 
-    async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
+    async def generate_group(
+        self,
+        rollout_state: list[RolloutState],
+        **kwargs,
+    ) -> list[RolloutMetadata]:
         async def generate_one(state: RolloutState) -> RolloutState:
             if self._sample_semaphore is None:
                 return await self.generate_sample(state, **kwargs)
@@ -160,7 +164,7 @@ class AgentInLocalhostLoop(AgentLoop):
         samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
         if self.mode == "train":
             samples = await asyncio.gather(*(self.prepare_training_artifacts(sample) for sample in samples))
-        return samples
+        return await self._materialize_generated_group(samples)
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         try:
@@ -198,12 +202,12 @@ class AgentInLocalhostLoop(AgentLoop):
         try:
             if rollout_state.status != Status.COMPLETED:
                 return rollout_state
-            validate_training_artifacts(rollout_state)
             rollout_state.response_ids = normalize_token_ids(rollout_state.response_ids)
             rollout_state.input_ids = normalize_token_ids(rollout_state.input_ids)
             rollout_state.labels = normalize_token_ids(rollout_state.labels)
             if rollout_state.logprobs is not None:
                 rollout_state.logprobs = [float(value) for value in rollout_state.logprobs]
+            validate_training_artifacts(rollout_state)
             return rollout_state
         except Exception as exc:
             return mark_training_artifacts_failed(rollout_state, exc, self.logger)

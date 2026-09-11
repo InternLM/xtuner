@@ -11,12 +11,12 @@ import torch
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.rl_data import (
-    RolloutState,
+    RolloutMetadata,
     Status,
     calculate_group_effective_response_masks,
     get_group_status,
     refresh_seq_staleness,
-    reset_rollout_response,
+    reset_rollout_metadata_response,
     update_sample_version,
 )
 from xtuner.v1.rl.rollout.trace_store import release_and_discard_rollout_groups
@@ -40,7 +40,7 @@ logger = get_logger(__name__)
 @dataclass
 class StorageItem:
     # 存储类型
-    item: List[RolloutState]
+    item: list[RolloutMetadata]
     uid: int
     timestamp_id: int
     task_name: str
@@ -147,7 +147,9 @@ class ReplayPolicy(ABC):
     async def put(self, item: StorageItem, storage_backend: StorageBackend) -> None: ...
 
     @abstractmethod
-    async def get(self, count: int, query: QueryType, storage_backend: StorageBackend) -> list[list[RolloutState]]: ...
+    async def get(
+        self, count: int, query: QueryType, storage_backend: StorageBackend
+    ) -> list[list[RolloutMetadata]]: ...
 
     async def count(self, query: QueryType, storage_backend: StorageBackend) -> int:
         return await storage_backend.count(query)
@@ -399,7 +401,12 @@ class FIFOReplayPolicy(ReplayPolicy):
             return
         await storage_backend.put(item)
 
-    async def get(self, count: int, query: QueryType, storage_backend: StorageBackend) -> list[list[RolloutState]]:
+    async def get(
+        self,
+        count: int,
+        query: QueryType,
+        storage_backend: StorageBackend,
+    ) -> list[list[RolloutMetadata]]:
         if count <= 0:
             return []
         records = await storage_backend.get(query)
@@ -416,7 +423,7 @@ class StalenessReplayPolicy(ReplayPolicy):
             return
         await storage_backend.put(item)
 
-    async def get(self, count: int, query: QueryType, storage_backend: StorageBackend) -> list[list[RolloutState]]:
+    async def get(self, count: int, query: QueryType, storage_backend: StorageBackend) -> list[list[RolloutMetadata]]:
         if count <= 0:
             return []
 
@@ -441,7 +448,7 @@ class ReplayBuffer:
 
     def _apply_staleness_lifecycle(
         self,
-        group: list[RolloutState],
+        group: list[RolloutMetadata],
         *,
         current_train_step: int | None,
         stale_threshold: int | None,
@@ -485,7 +492,7 @@ class ReplayBuffer:
             for item, expired in zip(group, expired_mask):
                 if expired:
                     item.status = Status.EXPIRED
-                    reset_rollout_response(item)
+                    reset_rollout_metadata_response(item)
         else:
             for item in group:
                 item.status = Status.EXPIRED
@@ -493,9 +500,8 @@ class ReplayBuffer:
         return Status.EXPIRED
 
     @staticmethod
-    async def _discard_non_retryable_expired_groups(groups: list[list[RolloutState]]) -> None:
-        """Release non-retryable trace sessions in one RPC, then discard
-        groups."""
+    async def _discard_non_retryable_expired_groups(groups: list[list[RolloutMetadata]]) -> None:
+        """Release non-retryable resources, then discard groups."""
         if not groups:
             return
 
@@ -506,7 +512,7 @@ class ReplayBuffer:
 
     async def put(
         self,
-        items: list[RolloutState],
+        items: list[RolloutMetadata],
         task_name: str,
         *,
         model_step: int | None = None,
@@ -542,7 +548,7 @@ class ReplayBuffer:
         async with self._lock:
             await self._policy.put(storage_item, self._storage)
 
-    async def get(self, batch_size: int, task_name: str, group_status: Status) -> list[list[RolloutState]]:
+    async def get(self, batch_size: int, task_name: str, group_status: Status) -> list[list[RolloutMetadata]]:
         # 使用 DSL 字典进行查询
         query_dsl: QueryDict = {"$and": [{"task_name": task_name}, {"status": group_status}]}
         async with self._lock:
@@ -570,7 +576,7 @@ class ReplayBuffer:
         expired_counts: dict[str, int] = {}
         retryable_by_task = expired_groups_retryable_by_task or {}
         token_stale_thresholds = task_token_stale_thresholds or {}
-        non_retryable_expired_groups: list[list[RolloutState]] = []
+        non_retryable_expired_groups: list[list[RolloutMetadata]] = []
         async with self._lock:
             updated_records: list[StorageItem] = []
             deleted_uids: list[int] = []
@@ -626,8 +632,8 @@ class ReplayBuffer:
         task_batch_sizes: dict[str, int],
         *,
         group_status: Status = Status.COMPLETED,
-    ) -> tuple[dict[str, list[list[RolloutState]]], dict[str, int]]:
-        batch_by_task: dict[str, list[list[RolloutState]]] = {}
+    ) -> tuple[dict[str, list[list[RolloutMetadata]]], dict[str, int]]:
+        batch_by_task: dict[str, list[list[RolloutMetadata]]] = {}
         consumed_counts: dict[str, int] = {}
         async with self._lock:
             for task_name, batch_size in task_batch_sizes.items():
