@@ -729,7 +729,7 @@ class NCCLWeightTransport(WeightTransport[NCCLBackendAdapter]):
 
     def send(self, batch: WeightUpdateBatch) -> None:
         state_dict = batch.state_dict
-        if not state_dict:
+        if not state_dict and not batch.finished:
             return
 
         train_sync_group = self.get_train_update_sync_group()
