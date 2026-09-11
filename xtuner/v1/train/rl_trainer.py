@@ -33,7 +33,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     ProduceBatchStatus,
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
-from xtuner.v1.rl.distillation import DistillationConfig, validate_opd_sample_params
+from xtuner.v1.rl.distillation import DistillationConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.health_manager import RLHealthManager, _NoOpRLHealthManager
 from xtuner.v1.rl.loss import DistillationLossConfig
@@ -514,22 +514,7 @@ class BaseRLTrainerConfig(BaseModel):
         if self.total_epochs is not None and self.total_epochs <= 0:
             raise ValueError(f"total_epochs must be positive, got {self.total_epochs}.")
         if self.distillation_config is not None:
-            if self.train_worker_cfg.loss_cfg != self.distillation_config.loss_config:
-                raise ValueError("train_worker_cfg.loss_cfg must be distillation_config.loss_config")
-            self.distillation_config.validate_student_model(self.train_worker_cfg.model_cfg)
-            if self.distillation_config.loss_config.uses_sampled_token_targets:
-                tasks = self.agent_loop_manager_cfg.tasks
-                tasks = tasks if isinstance(tasks, list) else [tasks]
-                for task in tasks:
-                    sample_params = task.agent_loop_config.sample_params
-                    if sample_params is None:
-                        raise ValueError(
-                            f"Task {task.task_name!r} must configure sample_params for sampled-token distillation"
-                        )
-                    try:
-                        validate_opd_sample_params(sample_params)
-                    except ValueError as exc:
-                        raise ValueError(f"Invalid sample_params for task {task.task_name!r}: {exc}") from exc
+            self.distillation_config.validate_trainer(self)
         _validate_sync_intervals(
             sync_weights_interval=self.sync_weights_interval,
             checkpoint_interval=self.checkpoint_interval,

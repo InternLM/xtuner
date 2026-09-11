@@ -7,12 +7,12 @@ from .config import (
     TeacherTargetConfig,
     TrainTeacherConfig,
     TrainTeacherManagerConfig,
+    validate_opd_sample_params,
 )
 from .rollout_teacher_manager import (
     RolloutTeacherClient,
     RolloutTeacherReplicaRouter,
     RolloutTeacherScorer,
-    validate_opd_sample_params,
 )
 from .train_teacher_manager import TrainTeacherManager, TrainTeacherOutputs, TrainTeacherTimings
 

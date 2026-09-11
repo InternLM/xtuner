@@ -1,19 +1,45 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from xtuner.v1.config.fsdp import FSDPConfig
+from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.rl.loss.distillation_loss import DistillationLossConfig
 
 
 if TYPE_CHECKING:
+    from xtuner.v1.train.rl_trainer import BaseRLTrainerConfig
+
     from .rollout_teacher_manager import RolloutTeacherScorer
     from .train_teacher_manager import TrainTeacherManager
+
+
+def validate_opd_sample_params(sample_params: SampleParams) -> None:
+    """Validate Student sampling required by sampled-token PG-OPD."""
+
+    identity_sampling_params: dict[str, Any] = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 0,
+        "repetition_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "min_tokens": 0,
+    }
+    non_identity_params = {
+        name: getattr(sample_params, name)
+        for name, expected in identity_sampling_params.items()
+        if getattr(sample_params, name) != expected
+    }
+    if non_identity_params:
+        raise ValueError(f"PG-OPD requires identity student sampling, got {non_identity_params}")
+    if not sample_params.return_logprob or not sample_params.return_token_ids:
+        raise ValueError("PG-OPD requires return_logprob=True and return_token_ids=True")
 
 
 class RolloutTeacherLaunchConfig(BaseModel):
@@ -240,6 +266,31 @@ class DistillationConfig(BaseModel):
                     f"distillation teacher {teacher.name!r} vocab_size={teacher_vocab_size} does not match "
                     f"student vocab_size={student_vocab_size}"
                 )
+
+    def validate_trainer(self, trainer_cfg: BaseRLTrainerConfig) -> None:
+        """Validate contracts that span the distillation and trainer
+        configs."""
+
+        if trainer_cfg.train_worker_cfg.loss_cfg != self.loss_config:
+            raise ValueError("train_worker_cfg.loss_cfg must be distillation_config.loss_config")
+
+        self.validate_student_model(trainer_cfg.train_worker_cfg.model_cfg)
+
+        if not self.loss_config.uses_sampled_token_targets:
+            return
+
+        tasks = trainer_cfg.agent_loop_manager_cfg.tasks
+        task_configs = tasks if isinstance(tasks, list) else [tasks]
+        for task in task_configs:
+            sample_params = task.agent_loop_config.sample_params
+            if sample_params is None:
+                raise ValueError(
+                    f"Task {task.task_name!r} must configure sample_params for sampled-token distillation"
+                )
+            try:
+                validate_opd_sample_params(sample_params)
+            except ValueError as exc:
+                raise ValueError(f"Invalid sample_params for task {task.task_name!r}: {exc}") from exc
 
     def resolve_teacher_endpoints(
         self,

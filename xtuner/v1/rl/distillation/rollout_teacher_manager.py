@@ -9,7 +9,7 @@ from typing import Any, Literal, cast
 
 import httpx
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, get_group_status
 from xtuner.v1.rl.utils import create_task
 from xtuner.v1.utils import get_logger
 
@@ -17,27 +17,6 @@ from .config import RolloutTeacherConfig, RolloutTeacherScorerConfig, TeacherTar
 
 
 logger = get_logger()
-
-
-def validate_opd_sample_params(sample_params: SampleParams) -> None:
-    identity_sampling_params: dict[str, Any] = {
-        "temperature": 1.0,
-        "top_p": 1.0,
-        "top_k": 0,
-        "repetition_penalty": 1.0,
-        "presence_penalty": 0.0,
-        "frequency_penalty": 0.0,
-        "min_tokens": 0,
-    }
-    non_identity_params = {
-        name: getattr(sample_params, name)
-        for name, expected in identity_sampling_params.items()
-        if getattr(sample_params, name) != expected
-    }
-    if non_identity_params:
-        raise ValueError(f"PG-OPD requires identity student sampling, got {non_identity_params}")
-    if not sample_params.return_logprob or not sample_params.return_token_ids:
-        raise ValueError("PG-OPD requires return_logprob=True and return_token_ids=True")
 
 
 class RolloutTeacherReplicaRouter:
