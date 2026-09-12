@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import random
 import re
 import time
 from dataclasses import asdict, dataclass
@@ -44,8 +43,8 @@ from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.rollout.worker_registry import WorkerLifecycleState
 from xtuner.v1.rl.trace import TraceConfig, close_trace, configure_trace
-from xtuner.v1.rl.trainer.controller import TrainingController
-from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
+from xtuner.v1.rl.trainer.controller import TrainingController, TrainingLogInfo
+from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerInputItem, WorkerLogItem
 from xtuner.v1.rl.utils import (
     AcceleratorResourcesConfig,
     AutoAcceleratorWorkers,
@@ -1042,11 +1041,15 @@ class BaseRLTrainer:
         self.logger.info(f"Prepared {len(data_batches)} training data batches")
 
         with timer("training", step_timer_dict):
-            workers_log_item: list[WorkerLogItem] = self.train_controller.fit(
+            training_log_info: TrainingLogInfo = self.train_controller.fit(
                 data_batches,
                 pack_max_length=self._train_worker_cfg.pack_max_length,
                 rollout_idx=train_step,
             )
+        workers_log_item = training_log_info["worker_log_infos"]
+        step_timer_dict["pack_time"] = training_log_info["pack_time"]
+        step_timer_dict["train_time"] = training_log_info["train_time"]
+        data_info["padding_tokens"] = training_log_info["padding_tokens"]
 
         self._release_trace_sessions_after_train_batch(train_batch)
 
@@ -1228,10 +1231,10 @@ class BaseRLTrainer:
                     multi_info_cast = cast(dict | None, multimodal_train_info)
                     seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multi_info_cast)
 
-                    data_dict = {
+                    data_dict: WorkerInputItem = {
                         "seq_ctx": seq_ctx,
                         "shifted_labels": shifted_labels_t,
-                        "advantage": actual_advantages,
+                        "advantages": torch.tensor(actual_advantages, dtype=torch.float32),
                         "rollout_logprobs": rollout_logprobs,
                     }
 
@@ -1308,19 +1311,16 @@ class BaseRLTrainer:
                 multi_info_cast = cast(dict | None, multimodal_train_info)
                 seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multi_info_cast, len(response_ids) - 1)  # type: ignore[arg-type]
 
-                data_dict = {
+                data_dict: WorkerInputItem = {
                     "seq_ctx": seq_ctx,
                     "shifted_labels": shifted_labels_t,
-                    "advantage": actual_advantages,
+                    "advantages": torch.tensor(actual_advantages[:-1], dtype=torch.float32),
                     "rollout_logprobs": rollout_logprobs,
                 }
 
                 seq_ctx.rollout_routed_experts = group[i].routed_experts  # n,layer*expert
 
                 data_batches.append(data_dict)
-        if not XTUNER_DETERMINISTIC:
-            random.shuffle(data_batches)
-
         # rewards/* report the per-session reward distribution; batch_size/training_samples below
         # still use rewards_list (per-segment) so counts reflect the actual training samples.
         rewards_t = torch.tensor(cluster_rewards_list).float() if cluster_rewards_list else torch.tensor([0.0]).float()

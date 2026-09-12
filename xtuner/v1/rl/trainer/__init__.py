@@ -5,13 +5,13 @@ from ..rollout_is import (
     compute_rollout_importance_weights,
     merge_rollout_is_metrics,
 )
-from .controller import ColateItem, TrainingController
+from .controller import TrainingController, TrainingLogInfo
 from .worker import TrainingWorker, WorkerConfig, WorkerInputItem, WorkerLogItem, WorkerTrainLogItem
 
 
 __all__ = [
-    "ColateItem",
     "TrainingController",
+    "TrainingLogInfo",
     "RolloutImportanceSampling",
     "compute_rollout_importance_weights",
     "compute_is_metrics",
