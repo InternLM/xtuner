@@ -3,7 +3,7 @@ import torch
 
 from xtuner.v1.data_proto import SequenceContext
 
-from .protocol import DSATopKIndicesProtocol, SparseMLABackend, SparseMLAOutputs, SparseMLAProtocol
+from .protocol import DSAIndexerBackend, DSATopKIndicesProtocol, SparseMLABackend, SparseMLAOutputs, SparseMLAProtocol
 from .pytorch import torch_dsa_topk_indices, torch_sparse_mla
 
 
@@ -32,13 +32,17 @@ def sparse_mla(
     return get_sparse_mla(backend)(q, kv, indices, scaling=scaling, value_dim=value_dim)
 
 
-def get_dsa_topk_indices(backend: SparseMLABackend) -> DSATopKIndicesProtocol:
+def get_dsa_topk_indices(backend: DSAIndexerBackend) -> DSATopKIndicesProtocol:
     if backend == "torch":
         return torch_dsa_topk_indices
     if backend in ("tilelang", "cudnn_dsa"):
         from .tilelang import tilelang_dsa_topk_indices
 
         return tilelang_dsa_topk_indices
+    if backend == "deep_gemm_fp8":
+        from .lmdeploy_fp8_index import lmdeploy_fp8_dsa_topk_indices
+
+        return lmdeploy_fp8_dsa_topk_indices
     raise ValueError(f"Unsupported DSA indexer backend: {backend}")
 
 
@@ -50,7 +54,7 @@ def dsa_topk_indices(
     *,
     index_head_dim: int,
     index_topk: int,
-    backend: SparseMLABackend = "torch",
+    backend: DSAIndexerBackend = "torch",
 ) -> torch.Tensor:
     return get_dsa_topk_indices(backend)(
         q,
@@ -93,6 +97,7 @@ def indexer_fwd_interface(*args, **kwargs):
 
 
 __all__ = [
+    "DSAIndexerBackend",
     "DSATopKIndicesProtocol",
     "SparseMLABackend",
     "SparseMLAOutputs",

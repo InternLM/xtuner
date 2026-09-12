@@ -16,7 +16,9 @@ from xtuner.v1.module.linear import build_linear
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
 from xtuner.v1.ops.sparse_mla import (
+    DSAIndexerBackend,
     DSATopKIndicesProtocol,
+    SparseMLABackend,
     SparseMLAProtocol,
     ensure_cudnn_dsa_runtime_available,
     ensure_tilelang_runtime_available,
@@ -39,6 +41,27 @@ class DSAIndexerOutput(TypedDict):
 
     dsa_topk_ids: torch.Tensor
     dsa_topk_logits: NotRequired[torch.Tensor]
+
+
+def _validate_indexer_backend_config(
+    indexer_backend: DSAIndexerBackend,
+    *,
+    index_head_dim: int,
+    index_n_heads: int,
+) -> None:
+    """Validate the DeepGEMM FP8 Indexer contract."""
+
+    if indexer_backend != "deep_gemm_fp8":
+        return
+    if index_head_dim != 128:
+        raise ValueError(f"deep_gemm_fp8 GLM-5.2 Indexer requires index_head_dim=128, got {index_head_dim}")
+    from xtuner.v1.ops.sparse_mla.lmdeploy_fp8_index import DEEPGEMM_MQA_SUPPORTED_HEADS
+
+    if index_n_heads not in DEEPGEMM_MQA_SUPPORTED_HEADS:
+        raise ValueError(
+            "deep_gemm_fp8 Indexer requires a head count supported by DeepGEMM's contiguous MQA "
+            f"({sorted(DEEPGEMM_MQA_SUPPORTED_HEADS)}), got {index_n_heads}"
+        )
 
 
 class LayerNorm(nn.Module):
@@ -83,7 +106,7 @@ class DSAIndexer(nn.Module):
         index_head_dim: int,
         index_n_heads: int,
         index_topk: int,
-        indexer_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch",
+        indexer_backend: DSAIndexerBackend = "torch",
     ):
         super().__init__()
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -154,20 +177,21 @@ class DSAIndexer(nn.Module):
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe, k_nope], dim=-1)
         # weights: [bsz, S, Ni]
-        weights = self.weights_proj(hidden_states).float() * (self.index_n_heads**-0.5)
+        weights = self.weights_proj(hidden_states).float()
 
         # Index Q 按 query token 保持分片，只有 K 需要全局 gather。
         # k: [bsz, S_g, Di]
         k = gather_for_sequence_parallel(k, dim=1, sp_mesh=seq_ctx.sequence_parallel_mesh)
-        # The indexer contract owns dtype/layout so checkpoint reuse never needs
-        # to clone or convert the storage shared with downstream layers.
-        dsa_topk_ids = (
-            self.dsa_topk_indices_func(
-                q, k, weights, seq_ctx, index_head_dim=self.index_head_dim, index_topk=self.index_topk
-            )
-            .to(torch.int32)
-            .contiguous()
+        # returns topk_indices: [S, 1, K]
+        dsa_topk_ids = self.dsa_topk_indices_func(
+            q,
+            k,
+            weights,
+            seq_ctx,
+            index_head_dim=self.index_head_dim,
+            index_topk=self.index_topk,
         )
+        dsa_topk_ids = dsa_topk_ids.to(torch.int32).contiguous()
         return {"dsa_topk_ids": dsa_topk_ids}
 
 
@@ -179,7 +203,9 @@ class DSAMLAConfig(MLAConfig):
     index_skip_topk_offset: int = 0
     indexer_rope_interleave: bool = True
     indexer_types: list[str] | None = None
-    sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch"
+    sparse_mla_backend: SparseMLABackend = "torch"
+    # ``deep_gemm_fp8`` selects the DeepGEMM FP8 MQA score path.
+    indexer_backend: DSAIndexerBackend | None = None
     freeze_dsa_indexer: bool = True
 
     def build(
@@ -193,6 +219,12 @@ class DSAMLAConfig(MLAConfig):
     ) -> "DSAMultiLatentAttention":
         if not self.freeze_dsa_indexer:
             raise ValueError("freeze_dsa_indexer=False is not supported until the indexer has a differentiable output")
+        indexer_backend = self.indexer_backend or self.sparse_mla_backend
+        _validate_indexer_backend_config(
+            indexer_backend,
+            index_head_dim=self.index_head_dim,
+            index_n_heads=self.index_n_heads,
+        )
         if self.sparse_mla_backend in ("tilelang", "cudnn_dsa"):
             ensure_tilelang_runtime_available()
         if self.sparse_mla_backend == "cudnn_dsa":
@@ -220,7 +252,8 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         index_skip_topk_offset: int = 0,
         indexer_rope_interleave: bool = True,
         indexer_types: list[str] | None = None,
-        sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch",
+        sparse_mla_backend: SparseMLABackend = "torch",
+        indexer_backend: DSAIndexerBackend | None = None,
         freeze_dsa_indexer: bool = True,
         **kwargs,
     ):
@@ -248,6 +281,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         self.indexer_rope_interleave = indexer_rope_interleave
         self.indexer_types = indexer_types
         self.sparse_mla_backend = sparse_mla_backend
+        self.indexer_backend = indexer_backend or sparse_mla_backend
         self.freeze_dsa_indexer = freeze_dsa_indexer
         self.sparse_mla_func: SparseMLAProtocol = get_sparse_mla(sparse_mla_backend)
 
@@ -270,7 +304,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             index_head_dim=self.index_head_dim,
             index_n_heads=self.index_n_heads,
             index_topk=self.index_topk,
-            indexer_backend=self.sparse_mla_backend,
+            indexer_backend=self.indexer_backend,
         )
         if self.freeze_dsa_indexer:
             self.indexer.requires_grad_(False)

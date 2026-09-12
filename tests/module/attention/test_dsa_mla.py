@@ -161,6 +161,80 @@ class TestTorchSparseMLA:
 
 
 class TestDSAAttention:
+    def test_torch_indexer_matches_raw_gate_reference(self):
+        # The torch backend owns the full Indexer scaling: callers pass raw
+        # gates, and the causal top-k (including ``-1`` padding for invisible
+        # slots) matches a reference that folds ``Ni**-0.5`` and ``Di**-0.5``
+        # itself. Note top-k is positive-scale equivariant, so the assertion
+        # holds for any positive scaling -- the raw-gate call contract and the
+        # causal semantics are what this test pins down.
+        torch.manual_seed(0)
+        seq_len = 4
+        index_n_heads = 3
+        index_head_dim = 2
+        q = torch.randn(1, seq_len, index_n_heads, index_head_dim)
+        k = torch.randn(1, seq_len, index_head_dim)
+        weights = torch.randn(1, seq_len, index_n_heads)
+        seq_ctx = SequenceContext.from_input_ids(input_ids=(torch.arange(seq_len).view(1, -1),), device="cpu")
+
+        actual = dsa_topk_indices(
+            q,
+            k,
+            weights,
+            seq_ctx,
+            index_head_dim=index_head_dim,
+            index_topk=2,
+            backend="torch",
+        )
+        scores = torch.relu(torch.einsum("bshd,btd->bsht", q.float(), k.float()) * (index_head_dim**-0.5))
+        index_scores = torch.einsum("bsht,bsh->bst", scores, weights * (index_n_heads**-0.5))
+        causal = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
+        index_scores = index_scores.masked_fill(~causal.unsqueeze(0), float("-inf"))
+        expected_scores, expected_indices = index_scores.topk(2, dim=-1)
+        expected = expected_indices.masked_fill(expected_scores == -torch.inf, -1)
+
+        torch.testing.assert_close(actual, expected.squeeze(0).unsqueeze(1).to(torch.int32))
+
+    def test_deep_gemm_fp8_indexer_backend_is_independent(self):
+        config = DSAMLAConfig(
+            num_attention_heads=32,
+            head_dim=128,
+            kv_lora_rank=16,
+            q_lora_rank=16,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=64,
+            v_head_dim=64,
+            index_topk=8,
+            index_head_dim=128,
+            index_n_heads=32,
+            sparse_mla_backend="torch",
+            indexer_backend="deep_gemm_fp8",
+        )
+        attention = config.build(hidden_size=32)
+        assert attention.sparse_mla_backend == "torch"
+        assert attention.indexer_backend == "deep_gemm_fp8"
+        assert attention.indexer.indexer_backend == "deep_gemm_fp8"
+
+    def test_fp8_indexer_rejects_unsupported_head_count(self):
+        # DeepGEMM's contiguous MQA only serves H in {32, 64, 128} at D=128;
+        # fail fast in config validation instead of asserting inside the kernel.
+        config = DSAMLAConfig(
+            num_attention_heads=32,
+            head_dim=128,
+            kv_lora_rank=16,
+            q_lora_rank=16,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=64,
+            v_head_dim=64,
+            index_topk=8,
+            index_head_dim=128,
+            index_n_heads=48,
+            sparse_mla_backend="torch",
+            indexer_backend="deep_gemm_fp8",
+        )
+        with pytest.raises(ValueError, match="head count"):
+            config.build(hidden_size=32)
+
     def test_packed_inputs_respect_causal_boundaries_and_backward(self):
         # 验证 packed attention 不跨子序列取 key，并能对真实输入完成有限反向传播。
         torch.manual_seed(0)
@@ -224,12 +298,8 @@ class TestDSAAttention:
     def test_checkpoint_reuses_source_topk_storage(self):
         # 验证显式 IDs 穿过 checkpoint 且真实 indexer backend 只执行一次。
         torch.manual_seed(0)
-        source_block = apply_activation_checkpointing(
-            _tiny_dsa_decoder(["full", "shared"], layer_idx=0)
-        )
-        shared_block = apply_activation_checkpointing(
-            _tiny_dsa_decoder(["full", "shared"], layer_idx=1)
-        )
+        source_block = apply_activation_checkpointing(_tiny_dsa_decoder(["full", "shared"], layer_idx=0))
+        shared_block = apply_activation_checkpointing(_tiny_dsa_decoder(["full", "shared"], layer_idx=1))
         hidden_states = torch.randn(1, 4, 4, requires_grad=True)
         position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
         seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")

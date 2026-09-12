@@ -56,7 +56,8 @@ def torch_dsa_topk_indices(
     index_head_dim: int,
     index_topk: int,
 ) -> torch.Tensor:
-    _, query_len, _, _ = q.shape
+    _, query_len, index_n_heads, _ = q.shape
+    weights = (weights * (index_n_heads**-0.5)).contiguous()
     kv_len = k.shape[1]
     scores = torch.einsum("bshd,btd->bsht", q.float(), k.float()) * (index_head_dim**-0.5)
     scores = torch.relu(scores)

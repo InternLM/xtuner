@@ -54,6 +54,10 @@ model_cfg.float8_cfg = _get_float8_config()
 model_cfg.lm_loss_cfg = loss_cfg
 if hasattr(model_cfg.attention, "sparse_mla_backend"):
     model_cfg.attention.sparse_mla_backend = os.environ.get("SPARSE_MLA_BACKEND", "tilelang")
+    if "INDEXER_BACKEND" in os.environ:
+        # ``deep_gemm_fp8`` uses DeepGEMM's FP8 MQA path to match LMDeploy's
+        # Indexer scoring contract.
+        model_cfg.attention.indexer_backend = os.environ["INDEXER_BACKEND"]
 
 cache_dir = os.path.join(work_dir, "jsonl_cache")
 cache_tag = os.environ.get("CACHE_TAG", f"glm52_{sample_max_length}")

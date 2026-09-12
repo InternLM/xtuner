@@ -7,6 +7,8 @@ from xtuner.v1.data_proto import SequenceContext
 
 
 SparseMLABackend = Literal["torch", "tilelang", "cudnn_dsa"]
+# ``deep_gemm_fp8`` names the runtime dependency and its FP8 MQA score path.
+DSAIndexerBackend = Literal["torch", "tilelang", "cudnn_dsa", "deep_gemm_fp8"]
 
 
 class SparseMLAOutputs(NamedTuple):
@@ -37,8 +39,13 @@ class SparseMLAProtocol(Protocol):
 class DSATopKIndicesProtocol(Protocol):
     """Computes GLM-5.2 DSA sparse source indices.
 
+    Inputs use logical tensors: ``q`` is shaped ``(bsz, S, Ni, Di)``, ``k`` is
+    shaped ``(bsz, T, Di)``, and ``weights`` contain raw gates shaped
+    ``(bsz, S, Ni)``. Implementations own the full Indexer score scaling,
+    including ``Ni**-0.5`` and ``Di**-0.5``.
+
     Returns:
-        ``torch.int64`` tensor shaped ``(seq_len, kv_group, topk)``. Invalid
+        ``torch.int32`` tensor shaped ``(seq_len, kv_group, topk)``. Invalid
         slots are padded with ``-1``. For packed inputs, every valid index stays
         inside its sequence and respects causal order.
     """
