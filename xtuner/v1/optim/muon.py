@@ -632,6 +632,10 @@ class Muon(Optimizer):
                 sharded_mesh_dim = None
                 sharded_tensor_dim = None
                 ns_num_experts = num_experts
+                # AGRS/all-to-all run inside the FSDP group, so their global
+                # shard dimension must exclude any other mesh dimensions that
+                # shard the same tensor dimension (EP in the MoE case).
+                global_shard_dim_size: int | None = None
 
                 if len(shard_placements) == 1:
                     # Standard case: single shard dim (FSDP only, or FSDP+EP with Replicate on EP)
@@ -657,11 +661,14 @@ class Muon(Optimizer):
                     fsdp_placement = placements[fsdp_mesh_dim]
                     sharded_mesh_dim = fsdp_mesh_dim
                     sharded_tensor_dim = cast(Shard, fsdp_placement).dim
+                    global_shard_dim_size = mesh_params[0].size(sharded_tensor_dim)
 
                     # Newton-Schulz needs the LOCAL number of experts after EP sharding,
                     # so each block corresponds to one complete expert.
                     for i, p in shard_placements:
                         if i != fsdp_mesh_dim and cast(Shard, p).dim == sharded_tensor_dim:
+                            assert global_shard_dim_size % device_mesh.size(i) == 0
+                            global_shard_dim_size //= device_mesh.size(i)
                             assert ns_num_experts % device_mesh.size(i) == 0
                             ns_num_experts = ns_num_experts // device_mesh.size(i)
 
@@ -765,6 +772,7 @@ class Muon(Optimizer):
                                 shard_dim=sharded_tensor_dim,
                                 process_group=group_process_group,
                                 num_experts=ns_num_experts,
+                                global_shard_dim_size=global_shard_dim_size,
                             )
                         )
 
@@ -802,6 +810,7 @@ class Muon(Optimizer):
                                 shard_dim=sharded_tensor_dim,
                                 process_group=comm_pg,
                                 num_experts=ns_num_experts,
+                                global_shard_dim_size=global_shard_dim_size,
                             )
                         )
 
@@ -867,6 +876,7 @@ def muon_update_batch_async(
     process_group: ProcessGroup | None = None,  # Unified process group for communication
     num_experts: int = 1,  # Number of experts for MoE models
     batch_size: int | None = None,  # If set, pad X/G/M to this size with zeros
+    global_shard_dim_size: int | None = None,  # Global shard dim as seen by the FSDP process group
 ) -> Generator[None, None, None]:
     """Batched version of Muon update.
 
@@ -913,7 +923,7 @@ def muon_update_batch_async(
         U = yield from _agrs_orthogonalize(
             U,
             shard_dim,
-            X[0].size(shard_dim),
+            X[0].size(shard_dim) if global_shard_dim_size is None else global_shard_dim_size,
             process_group,
             newton_schulz_func,
             flatten,
@@ -941,7 +951,7 @@ def muon_update_batch_async(
         assert not isinstance(U[0], DTensor), "U should contain local shards"
         U = yield from _all_to_all_orthogonalize(
             U,
-            X[0].size(shard_dim),
+            X[0].size(shard_dim) if global_shard_dim_size is None else global_shard_dim_size,
             shard_dim,
             process_group,
             newton_schulz_func,

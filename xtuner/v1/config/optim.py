@@ -78,6 +78,10 @@ class MuonConfig(OptimConfig):
     enable_all2all: Annotated[
         bool, Parameter(help="Allow all-to-all comm strategy; set False on topologies where all-to-all is unreliable")
     ] = True
+    remainder_strategy: Annotated[
+        Literal["agrs", "pad_all2all"],
+        Parameter(help="Communication strategy for Muon parameter batches smaller than the FSDP group size"),
+    ] = "agrs"
     clip_grad_mode: Annotated[
         Literal["all", "adamw_only"],
         Parameter(help="Gradient clipping policy: clip all parameters or only the AdamW parameter groups"),
@@ -218,6 +222,7 @@ class MuonConfig(OptimConfig):
             use_triton=False,
             epsilon=self.eps,
             enable_all2all=self.enable_all2all,
+            remainder_strategy=self.remainder_strategy,
             muon_split_sizes=muon_split_sizes,
         )
 
