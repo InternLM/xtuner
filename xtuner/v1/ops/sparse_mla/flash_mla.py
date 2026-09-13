@@ -63,16 +63,18 @@ def _flash_mla_sparse_forward(
 ) -> tuple[Tensor, Tensor, Tensor]:
     from flash_mla import flash_mla_sparse_fwd
 
-    raw_output, _, lse_log2 = flash_mla_sparse_fwd(
+    raw_output, _, softmax_lse = flash_mla_sparse_fwd(
         q.contiguous(),
         kv.contiguous(),
         indices.to(torch.int32).contiguous(),
         scaling,
         d_v=512,
     )
-    # FlashMLA exposes its exp2-based LSE, while XTuner's public contract uses
-    # natural-log LSE. Preserve both because the TileLang backward consumes log2.
-    return raw_output, lse_log2 * 0.6931471805599453, lse_log2
+    # FlashMLA returns a natural-log LSE, which is also XTuner's public contract.
+    # The TileLang backward evaluates exp2(qk * scale * log2(e) - Lse), so it needs
+    # the log2-space LSE; feeding it the natural-log one inflates every attention
+    # gradient by Z ** (1 - ln 2) and overflows to NaN on deep models.
+    return raw_output, softmax_lse, softmax_lse * 1.4426950408889634
 
 
 @_flash_mla_sparse_forward.register_fake
