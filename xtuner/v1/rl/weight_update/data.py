@@ -67,10 +67,21 @@ class RolloutWeightUpdateTarget:
     server_url: str
     # Registry lifecycle state value for this endpoint.
     lifecycle_state: str
+    # All rollout ranks belonging to the logical inference engine.
+    inference_engine_ranks: tuple[int, ...] = ()
 
     @property
     def engine_size(self) -> int:
+        return len(self.inference_engine_ranks) or len(self.update_ranks)
+
+    @property
+    def update_size(self) -> int:
         return len(self.update_ranks)
+
+    @property
+    def inference_engine_rank(self) -> int:
+        ranks = self.inference_engine_ranks or self.update_ranks
+        return ranks.index(self.endpoint_rank)
 
 
 @dataclass(frozen=True)
@@ -167,7 +178,20 @@ class RolloutWeightUpdateInfo:
         target = self._ipc_update_target
         if target is None:
             return None
-        return target.engine_size
+        return target.update_size
+
+    @property
+    def inference_engine_parallel_rank(self) -> int | None:
+        target = self._ipc_update_target
+        if target is None:
+            return None
+        ranks = target.inference_engine_ranks or target.update_ranks
+        return ranks.index(self.train_rank)
+
+    @property
+    def inference_engine_parallel_size(self) -> int | None:
+        target = self._ipc_update_target
+        return None if target is None else target.engine_size
 
     @property
     def update_targets(self) -> tuple[RolloutWeightUpdateTarget, ...]:
@@ -181,14 +205,15 @@ class RolloutWeightUpdateInfo:
                 "server_url": target.server_url,
                 "lifecycle_state": target.lifecycle_state,
                 "update_ranks": target.update_ranks,
-                "engine_size": target.engine_size,
+                "update_size": target.update_size,
+                "inference_engine_size": target.engine_size,
             }
             for target in self.update_targets
         ]
 
     @property
     def nccl_engine_infos(self) -> tuple[tuple[int, str, int], ...]:
-        return tuple((target.endpoint_rank, target.server_url, target.engine_size) for target in self.update_targets)
+        return tuple((target.endpoint_rank, target.server_url, target.update_size) for target in self.update_targets)
 
     @property
     def transport_signature(self) -> tuple[Any, ...]:
