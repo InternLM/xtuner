@@ -255,7 +255,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             judger=None,
             logger=None,
             is_valid_sample_fn=is_valid_sample_fn,
-            distillation_config=None,
+            rollout_teacher_scorer_config=None,
         )
         self.assertIs(manager.task_runners[0].agent_loop, built_agent_loop)
 

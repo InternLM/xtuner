@@ -342,7 +342,7 @@ class TestTrainTeacherTimings(unittest.TestCase):
         padding_values = [call.kwargs["padding_value"] for call in split.call_args_list]
         self.assertEqual(padding_values, [0.0, 0, -1])
 
-    def test_finalize_train_metrics_handles_policy_and_distillation_keys(self) -> None:
+    def test_distillation_loss_finalizes_policy_and_distillation_keys(self) -> None:
         loss_cfg = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
         metrics = loss_cfg.finalize_metrics(
             {

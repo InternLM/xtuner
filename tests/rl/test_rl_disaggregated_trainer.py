@@ -35,6 +35,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     ProduceBatchResult,
     ProduceBatchStatus,
 )
+from xtuner.v1.rl.distillation import DistillationTrainerAdapter
 from xtuner.v1.train.rl_trainer import RLDisaggregatedTrainer, _validate_sync_intervals
 
 
@@ -120,6 +121,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._benchmark_training_samples = 0
         trainer._benchmark_training_tokens = 0
         trainer._cpu_resource_manager = None
+        trainer._distillation = DistillationTrainerAdapter(None)
         trainer._train_worker_cfg = SimpleNamespace(pack_max_length=16)
         trainer._rollout_config = SimpleNamespace(weight_update_host=None, weight_update_port=30000)
         trainer._meta = SimpleNamespace(

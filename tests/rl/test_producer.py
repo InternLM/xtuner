@@ -119,7 +119,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
 
         mock_agent_loop.generate_group = mock_gen
         mock_agent_loop.is_valid_sample_fn = is_valid_sample_fn
-        mock_agent_loop.teacher_clients = {}
         return mock_agent_loop
 
     def _build_context(
