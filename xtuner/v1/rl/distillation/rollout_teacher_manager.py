@@ -9,7 +9,7 @@ from typing import Any, Literal, cast
 
 import httpx
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status, get_group_status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets, get_group_status
 from xtuner.v1.rl.utils import create_task
 from xtuner.v1.utils import get_logger
 
@@ -118,8 +118,11 @@ class RolloutTeacherClient:
                             logprob_start_len=logprob_start_len,
                             expanded_prompt_len=expanded_prompt_len,
                         )
-                    state.teacher_tokens = teacher_tokens
-                    state.teacher_logprobs = teacher_logprobs
+                    state.teacher_targets = TeacherTargets(
+                        kind="topk" if self.target_config.uses_topk_targets else "sampled",
+                        tokens=teacher_tokens,
+                        logprobs=teacher_logprobs,
+                    )
                     return state
                 except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as exc:
                     if attempt_idx >= self.config.max_retry_per_sample:

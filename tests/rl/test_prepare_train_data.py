@@ -15,8 +15,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status, reset_rollout_response
-from xtuner.v1.rl.distillation import DistillationConfig, RolloutTeacherConfig
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets, reset_rollout_response
+from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
 from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.train.rl_trainer import BaseRLTrainer
 
@@ -35,9 +35,7 @@ class TestPrepareTrainData(unittest.TestCase):
     def _build_trainer(self, advantages: list[float]):
         trainer = BaseRLTrainer.__new__(BaseRLTrainer)
         trainer._advantage_estimator = _FakeAdvantageEstimator(advantages)
-        trainer._distillation_config = None
-        trainer._distillation_loss_cfg = None
-        trainer._train_teacher_config = None
+        trainer._distillation = DistillationTrainerAdapter(None)
         trainer.tokenizer = MagicMock(return_value={"input_ids": torch.tensor([[999]])})
         trainer.logger = MagicMock()
         return trainer
@@ -81,8 +79,15 @@ class TestPrepareTrainData(unittest.TestCase):
             extra_fields=extra_fields or {},
             input_ids=input_ids,
             labels=labels,
-            teacher_tokens=teacher_tokens,
-            teacher_logprobs=teacher_logprobs,
+            teacher_targets=(
+                TeacherTargets(
+                    kind="topk" if teacher_tokens and isinstance(teacher_tokens[0], list) else "sampled",
+                    tokens=teacher_tokens,
+                    logprobs=teacher_logprobs,
+                )
+                if teacher_tokens is not None and teacher_logprobs is not None
+                else None
+            ),
         )
 
     def _prepare(self, trainer, data_groups, pack_max_length=128):
@@ -91,12 +96,13 @@ class TestPrepareTrainData(unittest.TestCase):
 
     @staticmethod
     def _enable_rollout_distillation(trainer, loss_config: DistillationLossConfig) -> None:
-        trainer._distillation_config = DistillationConfig(
-            loss_config=loss_config,
-            teachers=[RolloutTeacherConfig(name="teacher", endpoints=["http://teacher"])],
-            data_source_teacher_map={"agent_math": "teacher"},
+        trainer._distillation = DistillationTrainerAdapter(
+            DistillationConfig(
+                loss_config=loss_config,
+                teachers=[RolloutTeacherConfig(name="teacher", endpoints=["http://teacher"])],
+                data_source_teacher_map={"agent_math": "teacher"},
+            )
         )
-        trainer._distillation_loss_cfg = loss_config
 
     def test_text_path_builds_shifted_training_tensors(self):
         # 文本主路径固定 token 布局：input_ids 去掉 response 最后一个 token，label/logprob 对齐预测位置。

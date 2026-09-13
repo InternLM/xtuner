@@ -14,12 +14,15 @@ from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.rl.distillation import (
     DistillationConfig,
+    DistillationTrainerAdapter,
     RolloutTeacherClient,
     RolloutTeacherConfig,
+    TeacherTargetConfig,
     TrainTeacherManager,
+    TrainTeacherOutputs,
     TrainTeacherTimings,
 )
-from xtuner.v1.rl.loss import DistillationLossConfig
+from xtuner.v1.rl.loss import DistillationLossConfig, DistillationLossKwargs
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.train.rl_trainer import BaseRLTrainer, BaseRLTrainerConfig
 
@@ -95,9 +98,125 @@ distillation_config = DistillationConfig(
         with self.assertRaisesRegex(ValueError, "Invalid sample_params for task 'math'.*temperature"):
             config._validate_sync_intervals()
 
+    def test_distillation_trainer_validation_handles_multiple_tasks(self) -> None:
+        loss_config = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+        distillation_config = DistillationConfig(
+            loss_config=loss_config,
+            teachers=[RolloutTeacherConfig(name="teacher", endpoints=["http://teacher"])],
+            data_source_teacher_map={"math": "teacher", "code": "teacher"},
+        )
+        trainer_cfg = SimpleNamespace(
+            train_worker_cfg=SimpleNamespace(loss_cfg=loss_config, model_cfg=MagicMock()),
+            agent_loop_manager_cfg=SimpleNamespace(
+                tasks=[
+                    SimpleNamespace(
+                        task_name="math",
+                        agent_loop_config=SimpleNamespace(sample_params=SampleParams()),
+                    ),
+                    SimpleNamespace(
+                        task_name="code",
+                        agent_loop_config=SimpleNamespace(sample_params=SampleParams()),
+                    ),
+                ]
+            ),
+        )
+
+        distillation_config.validate_trainer(trainer_cfg)
+
+    def test_distillation_trainer_validation_rejects_missing_sample_params(self) -> None:
+        loss_config = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+        distillation_config = DistillationConfig(
+            loss_config=loss_config,
+            teachers=[RolloutTeacherConfig(name="teacher", endpoints=["http://teacher"])],
+            data_source_teacher_map={"math": "teacher"},
+        )
+        trainer_cfg = SimpleNamespace(
+            train_worker_cfg=SimpleNamespace(loss_cfg=loss_config, model_cfg=MagicMock()),
+            agent_loop_manager_cfg=SimpleNamespace(
+                tasks=SimpleNamespace(
+                    task_name="math",
+                    agent_loop_config=SimpleNamespace(sample_params=None),
+                )
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "Task 'math' must configure sample_params"):
+            distillation_config.validate_trainer(trainer_cfg)
+
+    def test_distillation_trainer_validation_skips_sampling_constraints_for_topk(self) -> None:
+        loss_config = DistillationLossConfig(
+            policy_loss_cfg={"loss_type": "vanilla"},
+            loss_mode="forward_kl_topk",
+            use_policy_gradient=False,
+            top_k=2,
+        )
+        distillation_config = DistillationConfig(
+            loss_config=loss_config,
+            teachers=[RolloutTeacherConfig(name="teacher", endpoints=["http://teacher"])],
+            data_source_teacher_map={"math": "teacher"},
+        )
+        trainer_cfg = SimpleNamespace(
+            train_worker_cfg=SimpleNamespace(loss_cfg=loss_config, model_cfg=MagicMock()),
+            agent_loop_manager_cfg=SimpleNamespace(
+                tasks=SimpleNamespace(
+                    task_name="math",
+                    agent_loop_config=SimpleNamespace(sample_params=SampleParams(temperature=0.7)),
+                )
+            ),
+        )
+
+        distillation_config.validate_trainer(trainer_cfg)
+
+    def test_distillation_trainer_validation_rejects_mismatched_loss_config(self) -> None:
+        distillation_loss_config = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+        worker_loss_config = DistillationLossConfig(
+            policy_loss_cfg={"loss_type": "vanilla"},
+            task_adv_weight=1.0,
+        )
+        distillation_config = DistillationConfig(
+            loss_config=distillation_loss_config,
+            teachers=[RolloutTeacherConfig(name="teacher", endpoints=["http://teacher"])],
+            data_source_teacher_map={"math": "teacher"},
+        )
+        trainer_cfg = SimpleNamespace(
+            train_worker_cfg=SimpleNamespace(loss_cfg=worker_loss_config, model_cfg=MagicMock()),
+            agent_loop_manager_cfg=SimpleNamespace(tasks=SimpleNamespace()),
+        )
+
+        with self.assertRaisesRegex(ValueError, "train_worker_cfg.loss_cfg must be distillation_config.loss_config"):
+            distillation_config.validate_trainer(trainer_cfg)
+
+    def test_rollout_teacher_scorer_config_is_projected_from_distillation_config(self) -> None:
+        loss_config = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+        distillation_config = DistillationConfig(
+            loss_config=loss_config,
+            teachers=[RolloutTeacherConfig(name="teacher", endpoints=["http://teacher"])],
+            data_source_teacher_map={"math": "teacher"},
+        )
+
+        scorer_config = distillation_config.rollout_teacher_scorer_config
+
+        self.assertIsNotNone(scorer_config)
+        assert scorer_config is not None
+        self.assertEqual(scorer_config.target_config, distillation_config.teacher_target_config)
+        self.assertEqual([teacher.name for teacher in scorer_config.teachers], ["teacher"])
+        self.assertEqual(scorer_config.data_source_teacher_map, {"math": "teacher"})
+        self.assertTrue(scorer_config.target_config.uses_sampled_token_targets)
+        self.assertIsNone(scorer_config.target_config.top_k)
+        self.assertIsNone(distillation_config.train_teacher_manager_config)
+
+    def test_distillation_trainer_adapter_uses_null_defaults_without_config(self) -> None:
+        adapter = DistillationTrainerAdapter(None)
+
+        self.assertIsNone(adapter.rollout_teacher_scorer_config)
+        self.assertIsNone(adapter.train_teacher_manager_config)
+        self.assertEqual(adapter.task_adv_weight, 1.0)
+        self.assertIsNone(adapter.teacher_index_by_data_source)
+        self.assertEqual(adapter.timing_scalars([]), {})
+
     def test_train_teacher_config_is_not_forwarded_to_agent_loop_manager(self) -> None:
         trainer = BaseRLTrainer.__new__(BaseRLTrainer)
-        trainer._rollout_teacher_config = None
+        trainer._distillation = DistillationTrainerAdapter(None)
         trainer._enable_evaluate = False
         trainer._resolve_total_train_steps = MagicMock()
         trainer.rollout_controller = MagicMock()
@@ -115,7 +234,7 @@ distillation_config = DistillationConfig(
             trainer._build_agent_loop_components(config, replay_buffer=MagicMock())
 
         self.assertIs(trainer.agent_loop_manager, built_manager)
-        self.assertIsNone(manager_config.build.call_args.kwargs["distillation_config"])
+        self.assertIsNone(manager_config.build.call_args.kwargs["rollout_teacher_scorer_config"])
 
 
 class TestTrainTeacherTimings(unittest.TestCase):
@@ -147,6 +266,111 @@ class TestTrainTeacherTimings(unittest.TestCase):
         )
         self.assertEqual((timings.compute, timings.onload, timings.offload), (7.0, 5.0, 9.0))
 
+    def test_compute_teacher_outputs_writes_teacher_outputs_to_loss_contexts(self) -> None:
+        manager = TrainTeacherManager.__new__(TrainTeacherManager)
+        teacher_indices = torch.tensor([[0, 1]], dtype=torch.long)
+        shifted_labels = torch.tensor([[-100, 10]], dtype=torch.long)
+        teacher_logprobs = [torch.tensor([[-0.1, -0.2]])]
+        target_token_ids = [torch.tensor([[[1, 2], [3, 4]]], dtype=torch.long)]
+        timings = TrainTeacherTimings()
+        seq_ctx = MagicMock()
+        loss_ctx = SimpleNamespace(
+            loss_kwargs=SimpleNamespace(
+                teacher_indices=teacher_indices,
+                shifted_labels=shifted_labels,
+            )
+        )
+
+        with (
+            patch.object(
+                manager,
+                "compute_logprobs",
+                return_value=TrainTeacherOutputs(
+                    teacher_logprobs=teacher_logprobs,
+                    target_token_ids=target_token_ids,
+                    timings=timings,
+                ),
+            ) as compute_logprobs,
+            patch.object(manager, "offload_all_to_cpu") as offload_all_to_cpu,
+        ):
+            result = manager.compute_teacher_outputs([seq_ctx], [loss_ctx])
+
+        self.assertIs(result, timings)
+        compute_logprobs.assert_called_once_with(
+            seq_ctx_list=[seq_ctx],
+            shifted_labels_list=[shifted_labels],
+            teacher_indices_list=[teacher_indices],
+        )
+        torch.testing.assert_close(loss_ctx.loss_kwargs.teacher_logprobs, teacher_logprobs[0])
+        torch.testing.assert_close(loss_ctx.loss_kwargs.target_token_ids, target_token_ids[0])
+        offload_all_to_cpu.assert_called_once_with()
+
+    def test_distillation_loss_kwargs_carry_teacher_indices(self) -> None:
+        loss_cfg = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+        teacher_indices = torch.tensor([[0, 1]], dtype=torch.long)
+        loss_ctx = loss_cfg.build(
+            data={
+                "shifted_labels": torch.tensor([[-100, 10]], dtype=torch.long),
+                "advantages": torch.ones(1, 2),
+                "teacher_indices": teacher_indices,
+            }
+        )
+
+        assert loss_ctx is not None
+        torch.testing.assert_close(loss_ctx.loss_kwargs.teacher_indices, teacher_indices)
+
+    def test_distillation_loss_kwargs_split_teacher_indices_with_ignore_padding(self) -> None:
+        loss_kwargs = DistillationLossKwargs(
+            shifted_labels=torch.ones(1, 2, dtype=torch.long),
+            advantages=torch.ones(1, 2),
+            teacher_logprobs=torch.ones(1, 2),
+            target_token_ids=torch.ones(1, 2, dtype=torch.long),
+            teacher_indices=torch.tensor([[0, 1]], dtype=torch.long),
+        )
+        sp_mesh = SimpleNamespace(size=lambda: 2)
+
+        with (
+            patch("xtuner.v1.loss.ce_loss.sp_split", side_effect=lambda tensor, **_: tensor),
+            patch("xtuner.v1.rl.loss.base_loss.sp_split", side_effect=lambda tensor, **_: tensor),
+            patch(
+                "xtuner.v1.rl.loss.distillation_loss.sp_split",
+                side_effect=lambda tensor, **_: tensor,
+            ) as split,
+        ):
+            loss_kwargs.sp_split(sp_mesh)
+
+        padding_values = [call.kwargs["padding_value"] for call in split.call_args_list]
+        self.assertEqual(padding_values, [0.0, 0, -1])
+
+    def test_finalize_train_metrics_handles_policy_and_distillation_keys(self) -> None:
+        loss_cfg = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+        metrics = loss_cfg.finalize_metrics(
+            {
+                "reduced_train_policy_ratio_abs_dev_sum": 2.0,
+                "reduced_train_policy_kl1_sum": 4.0,
+                "reduced_train_policy_kl3_sum": 6.0,
+                "reduced_train_policy_valid_count": 2.0,
+                "reduced_train_policy_ratio_max": 1.5,
+                "reduced_train_policy_ratio_min": 0.5,
+                "reduced_distillation_kl_sum": 8.0,
+                "reduced_distillation_abs_loss_sum": 10.0,
+                "reduced_distillation_valid_count": 2.0,
+                "reduced_opd_reverse_kl_sum": 8.0,
+                "reduced_opd_abs_logprob_loss_sum": 10.0,
+            },
+            "cpu",
+        )
+
+        self.assertEqual(metrics["reduced_train_policy_ratio_abs_dev_mean"], 1.0)
+        self.assertEqual(metrics["reduced_train_policy_kl1"], 2.0)
+        self.assertEqual(metrics["reduced_train_policy_kl3"], 3.0)
+        self.assertEqual(metrics["reduced_train_policy_ratio_max"], 1.5)
+        self.assertEqual(metrics["reduced_train_policy_ratio_min"], 0.5)
+        self.assertEqual(metrics["reduced_distillation_kl"], 4.0)
+        self.assertEqual(metrics["reduced_distillation_abs_loss"], 5.0)
+        self.assertEqual(metrics["opd_reverse_kl"], 4.0)
+        self.assertEqual(metrics["opd_abs_logprob_loss"], 5.0)
+
 
 class TestRolloutTeacherClient(unittest.IsolatedAsyncioTestCase):
     @staticmethod
@@ -158,10 +382,8 @@ class TestRolloutTeacherClient(unittest.IsolatedAsyncioTestCase):
         )
 
     def _build_topk_client(self, *, max_retry_per_sample: int = 0) -> RolloutTeacherClient:
-        loss_config = DistillationLossConfig(
-            policy_loss_cfg={"loss_type": "vanilla"},
-            loss_mode="forward_kl_topk",
-            use_policy_gradient=False,
+        target_config = TeacherTargetConfig(
+            mode="topk",
             top_k=2,
         )
         with patch.dict(
@@ -174,7 +396,7 @@ class TestRolloutTeacherClient(unittest.IsolatedAsyncioTestCase):
                     endpoints=["http://teacher"],
                     max_retry_per_sample=max_retry_per_sample,
                 ),
-                loss_config,
+                target_config,
             )
         self.addAsyncCleanup(client._client.aclose)
         return client
@@ -206,14 +428,14 @@ class TestRolloutTeacherClient(unittest.IsolatedAsyncioTestCase):
                 }
             },
         )
-        loss_config = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+        target_config = TeacherTargetConfig(mode="sampled_token")
         with patch.dict(
             "os.environ",
             {"XTUNER_USE_LMDEPLOY": "1", "XTUNER_USE_SGLANG": "0", "XTUNER_USE_VLLM": "0"},
         ):
             client = RolloutTeacherClient(
                 RolloutTeacherConfig(name="teacher", endpoints=["http://teacher"]),
-                loss_config,
+                target_config,
             )
         self.addAsyncCleanup(client._client.aclose)
         client._client.post = AsyncMock(return_value=response)
@@ -229,8 +451,9 @@ class TestRolloutTeacherClient(unittest.IsolatedAsyncioTestCase):
         result = await client.compute_logprobs(state)
 
         self.assertEqual(result.status, Status.COMPLETED)
-        self.assertEqual(result.teacher_tokens, [13, 14])
-        self.assertEqual(result.teacher_logprobs, [-0.3, -0.4])
+        self.assertEqual(result.teacher_targets.kind, "sampled")
+        self.assertEqual(result.teacher_targets.tokens, [13, 14])
+        self.assertEqual(result.teacher_targets.logprobs, [-0.3, -0.4])
         self.assertIn("teacher_score_time_s", result.extra_fields)
 
     async def test_malformed_sampled_response_becomes_failed_state(self) -> None:
@@ -246,7 +469,7 @@ class TestRolloutTeacherClient(unittest.IsolatedAsyncioTestCase):
                 }
             }
         )
-        loss_config = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+        target_config = TeacherTargetConfig(mode="sampled_token")
         with patch.dict(
             "os.environ",
             {"XTUNER_USE_LMDEPLOY": "1", "XTUNER_USE_SGLANG": "0", "XTUNER_USE_VLLM": "0"},
@@ -257,7 +480,7 @@ class TestRolloutTeacherClient(unittest.IsolatedAsyncioTestCase):
                     endpoints=["http://teacher"],
                     max_retry_per_sample=0,
                 ),
-                loss_config,
+                target_config,
             )
         self.addAsyncCleanup(client._client.aclose)
         client._client.post = AsyncMock(return_value=response)
@@ -281,7 +504,7 @@ class TestRolloutTeacherClient(unittest.IsolatedAsyncioTestCase):
                 }
             }
         )
-        loss_config = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+        target_config = TeacherTargetConfig(mode="sampled_token")
         with patch.dict(
             "os.environ",
             {"XTUNER_USE_LMDEPLOY": "1", "XTUNER_USE_SGLANG": "0", "XTUNER_USE_VLLM": "0"},
@@ -292,7 +515,7 @@ class TestRolloutTeacherClient(unittest.IsolatedAsyncioTestCase):
                     endpoints=["http://teacher"],
                     max_retry_per_sample=0,
                 ),
-                loss_config,
+                target_config,
             )
         self.addAsyncCleanup(client._client.aclose)
         client._client.post = AsyncMock(return_value=response)
@@ -331,8 +554,7 @@ class TestRolloutTeacherClient(unittest.IsolatedAsyncioTestCase):
                 result = await client.compute_logprobs(self._state())
 
                 self.assertEqual(result.status, Status.FAILED)
-                self.assertIsNone(result.teacher_tokens)
-                self.assertIsNone(result.teacher_logprobs)
+                self.assertIsNone(result.teacher_targets)
                 self.assertIn("last_error=", result.error_msg or "")
                 client._client.post.assert_awaited_once()
 
@@ -372,12 +594,13 @@ class TestRolloutTeacherClient(unittest.IsolatedAsyncioTestCase):
         client = self._build_topk_client(max_retry_per_sample=1)
         client._client.post = AsyncMock(side_effect=[invalid_response, valid_response])
 
-        with patch("xtuner.v1.rl.distillation.rollout_teacher_client.asyncio.sleep", new=AsyncMock()):
+        with patch("xtuner.v1.rl.distillation.rollout_teacher_manager.asyncio.sleep", new=AsyncMock()):
             result = await client.compute_logprobs(self._state())
 
         self.assertEqual(result.status, Status.COMPLETED)
-        self.assertEqual(result.teacher_tokens, [[5, 6], [7, 8]])
-        self.assertEqual(result.teacher_logprobs, [[-0.5, -0.6], [-0.7, -0.8]])
+        self.assertEqual(result.teacher_targets.kind, "topk")
+        self.assertEqual(result.teacher_targets.tokens, [[5, 6], [7, 8]])
+        self.assertEqual(result.teacher_targets.logprobs, [[-0.5, -0.6], [-0.7, -0.8]])
         self.assertEqual(client._client.post.await_count, 2)
         request_payload = client._client.post.await_args.kwargs["json"]
         self.assertEqual(request_payload["input_ids"], [10, 11, 12, 13, 14])

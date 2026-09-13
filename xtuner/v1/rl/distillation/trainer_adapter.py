@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from xtuner.v1.data_proto.rl_data import RolloutState
+from xtuner.v1.data_proto.rl_data import RolloutState, TeacherTargets
 
 from .config import DistillationConfig, RolloutTeacherScorerConfig, TrainTeacherManagerConfig
 
@@ -64,10 +64,59 @@ class DistillationTrainerAdapter:
 
         if self._config is None or not self._config.rollout_teachers:
             return None, None
+        if state.teacher_targets is None:
+            raise ValueError(f"Rollout state has no Teacher targets: rollout_id={state.rollout_id}")
+        expected_kind = "sampled" if self._config.loss_config.uses_sampled_token_targets else "topk"
+        if state.teacher_targets.kind != expected_kind:
+            raise ValueError(
+                f"Expected {expected_kind} Teacher targets, got {state.teacher_targets.kind}: "
+                f"rollout_id={state.rollout_id}"
+            )
         return self._align_rollout_teacher_targets(
-            state,
+            state.teacher_targets,
             shifted_labels=shifted_labels,
             target_start=target_start,
+            ignore_idx=self._config.loss_config.ignore_idx,
+        )
+
+    @staticmethod
+    def _align_rollout_teacher_targets(
+        targets: TeacherTargets,
+        *,
+        shifted_labels: Sequence[int],
+        target_start: int,
+        ignore_idx: int,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        sequence_length = len(shifted_labels)
+        if target_start < 0 or target_start > sequence_length:
+            raise ValueError(
+                f"Teacher target_start must be within the shifted sequence: {target_start} vs {sequence_length}"
+            )
+        if any(label != ignore_idx for label in shifted_labels[:target_start]):
+            raise ValueError("Teacher target prefix must contain only ignored labels")
+
+        expected_rows = sequence_length - target_start
+        if len(targets.logprobs) != expected_rows:
+            raise ValueError(
+                "Teacher logprobs must align with the target suffix: "
+                f"expected {expected_rows} rows, got {len(targets.logprobs)}"
+            )
+
+        if targets.kind == "sampled":
+            sampled_logprobs = cast(list[float], targets.logprobs)
+            return (
+                torch.tensor([0.0] * target_start + sampled_logprobs, dtype=torch.float32).unsqueeze(0),
+                None,
+            )
+
+        topk_tokens = cast(list[list[int]], targets.tokens)
+        topk_logprobs = cast(list[list[float]], targets.logprobs)
+        top_k = len(topk_logprobs[0])
+        prompt_tokens = [[0] * top_k for _ in range(target_start)]
+        prompt_logprobs = [[0.0] * top_k for _ in range(target_start)]
+        return (
+            torch.tensor(prompt_logprobs + topk_logprobs, dtype=torch.float32).unsqueeze(0),
+            torch.tensor(prompt_tokens + topk_tokens, dtype=torch.int64).unsqueeze(0),
         )
 
     def reward_scalars(
@@ -127,63 +176,3 @@ class DistillationTrainerAdapter:
             scalars[f"time/train_teacher/total/{phase}"] = total
             scalars[f"time/train_teacher_{phase}"] = total
         return scalars
-
-    def _align_rollout_teacher_targets(
-        self,
-        state: RolloutState,
-        *,
-        shifted_labels: Sequence[int],
-        target_start: int,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        assert self._config is not None
-        loss_config = self._config.loss_config
-        sequence_length = len(shifted_labels)
-        context = f"rollout_id={state.rollout_id}, group_id={state.group_id}"
-        if target_start < 0 or target_start > sequence_length:
-            raise ValueError(
-                "Teacher target_start must be within the shifted sequence: "
-                f"{target_start} vs {sequence_length}; {context}"
-            )
-        if any(label != loss_config.ignore_idx for label in shifted_labels[:target_start]):
-            raise ValueError(f"Teacher target prefix must contain only ignored labels; {context}")
-
-        expected_target_rows = sequence_length - target_start
-        raw_teacher_logprobs = state.teacher_logprobs
-        if raw_teacher_logprobs is None or len(raw_teacher_logprobs) != expected_target_rows:
-            actual_rows = None if raw_teacher_logprobs is None else len(raw_teacher_logprobs)
-            raise ValueError(
-                "Teacher logprobs must align with the target suffix: "
-                f"expected {expected_target_rows} rows, got {actual_rows}; {context}"
-            )
-
-        if loss_config.uses_sampled_token_targets:
-            sampled_logprobs = cast(list[float], raw_teacher_logprobs)
-            teacher_logprobs = torch.tensor(
-                [0.0] * target_start + sampled_logprobs,
-                dtype=torch.float32,
-            ).unsqueeze(0)
-            return teacher_logprobs, None
-
-        top_k = cast(int, loss_config.top_k)
-        raw_teacher_tokens = state.teacher_tokens
-        if raw_teacher_tokens is None or len(raw_teacher_tokens) != expected_target_rows:
-            actual_rows = None if raw_teacher_tokens is None else len(raw_teacher_tokens)
-            raise ValueError(
-                "Teacher token ids must align with the target suffix: "
-                f"expected {expected_target_rows} rows, got {actual_rows}; {context}"
-            )
-
-        topk_tokens = cast(list[list[int]], raw_teacher_tokens)
-        topk_logprobs = cast(list[list[float]], raw_teacher_logprobs)
-
-        prompt_target_tokens = [[0] * top_k for _ in range(target_start)]
-        prompt_teacher_logprobs = [[0.0] * top_k for _ in range(target_start)]
-        teacher_logprobs = torch.tensor(
-            prompt_teacher_logprobs + topk_logprobs,
-            dtype=torch.float32,
-        ).unsqueeze(0)
-        target_token_ids = torch.tensor(
-            prompt_target_tokens + topk_tokens,
-            dtype=torch.int64,
-        ).unsqueeze(0)
-        return teacher_logprobs, target_token_ids

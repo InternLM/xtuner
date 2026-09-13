@@ -5,7 +5,7 @@
 - batch judge 只在整组样本全部 COMPLETED 时触发。
 - batch judge 返回结果必须保持输入顺序。
 - rollout group validity check 在 batch judge 之后执行。
-- 没有 validity check 时，每条样本先算 Teacher、再进入 Judger。
+- 没有 validity check 时，每条样本先算 Teacher。
 - 有 validity check 时，只有通过过滤的 rollout group 才进入 Teacher scoring。
 - 被过滤的 rollout group 不进入 Teacher scoring。
 - 组内存在 ABORTED / FAILED 等非 COMPLETED 样本时跳过 judge。
@@ -16,7 +16,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, TeacherTargets, get_group_status
 from xtuner.v1.rl.agent_loop import AgentLoopActor
 from xtuner.v1.rl.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop, SingleTurnAgentLoopConfig
 
@@ -54,20 +54,34 @@ class _BatchJudger:
         return rollout_states
 
 
-class _PerSampleJudger:
-    def __init__(self, events: list[str]):
-        self.events = events
-
-    async def judge(self, rollout_state):
-        self.events.append("judge")
-        rollout_state.reward = {"score": float(rollout_state.rollout_id)}
-        return rollout_state
-
-
 class _SlowJudger:
     async def batch_judge(self, rollout_states):
         await asyncio.sleep(60)
         return rollout_states
+
+
+class _PassthroughTeacherScorer:
+    async def on_sample_ready(self, state):
+        return state
+
+    async def on_group_ready(self, group):
+        return group
+
+
+class _TeacherScorer:
+    def __init__(self, teacher, *, defers_to_filter: bool):
+        self.teacher = teacher
+        self.defers_to_filter = defers_to_filter
+
+    async def on_sample_ready(self, state):
+        if self.defers_to_filter:
+            return state
+        return await self.teacher.compute_logprobs(state)
+
+    async def on_group_ready(self, group):
+        if not self.defers_to_filter or get_group_status(group) != Status.COMPLETED:
+            return group
+        return list(await asyncio.gather(*(self.teacher.compute_logprobs(state) for state in group)))
 
 
 class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
@@ -101,8 +115,7 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         loop.judger = judger
         loop.enable_batch_judge = enable_batch_judge
         loop.is_valid_sample_fn = is_valid_sample_fn
-        loop.teacher_clients = {}
-        loop.data_source_teacher_map = {}
+        loop._teacher_scorer = _PassthroughTeacherScorer()
         loop._judger_pause_event = asyncio.Event()
         loop.logger = MagicMock()
         return loop
@@ -113,12 +126,18 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
 
         async def compute_logprobs(state):
             events.append("teacher")
-            state.teacher_logprobs = [-0.5] * len(state.response_ids or [])
+            state.teacher_targets = TeacherTargets(
+                kind="sampled",
+                tokens=list(state.response_ids or []),
+                logprobs=[-0.5] * len(state.response_ids or []),
+            )
             return state
 
         teacher.compute_logprobs = AsyncMock(side_effect=compute_logprobs)
-        loop.teacher_clients = {"teacher": teacher}
-        loop.data_source_teacher_map = {"math": "teacher"}
+        loop._teacher_scorer = _TeacherScorer(
+            teacher,
+            defers_to_filter=loop.is_valid_sample_fn is not None,
+        )
         return teacher
 
     def test_config_binds_validity_check_to_local_agent_loop_once(self):
@@ -188,8 +207,7 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
             {1: Status.COMPLETED},
             is_valid_sample_fn=lambda _samples: False,
         )
-        loop.teacher_clients = {"teacher": teacher}
-        loop.data_source_teacher_map = {"math": "teacher"}
+        loop._teacher_scorer = _TeacherScorer(teacher, defers_to_filter=True)
         state = self._state(1)
         state.extra_fields["origin_data_source"] = "math"
 
@@ -213,24 +231,9 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events.count("teacher"), 2)
         self.assertEqual(events[-1], "judge")
-        self.assertTrue(all(state.teacher_logprobs == [-0.5] for state in result))
+        self.assertTrue(all(state.teacher_targets is not None for state in result))
+        self.assertTrue(all(state.teacher_targets.logprobs == [-0.5] for state in result))
         self.assertEqual(teacher.compute_logprobs.await_count, 2)
-
-    async def test_teacher_scoring_precedes_per_sample_judge_without_filter(self):
-        events: list[str] = []
-        loop = self._build_loop(
-            {1: Status.COMPLETED},
-            judger=_PerSampleJudger(events),
-            enable_batch_judge=False,
-        )
-        self._bind_teacher(loop, events)
-        state = self._state(1)
-        state.extra_fields["origin_data_source"] = "math"
-
-        result = await loop.generate_group([state])
-
-        self.assertEqual(events, ["teacher", "judge"])
-        self.assertEqual(result[0].reward, {"score": 1.0})
 
     async def test_valid_group_is_scored_after_batch_judge_and_filter(self):
         events: list[str] = []
