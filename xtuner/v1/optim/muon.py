@@ -635,7 +635,7 @@ class Muon(Optimizer):
                 # AGRS/all-to-all run inside the FSDP group, so their global
                 # shard dimension must exclude any other mesh dimensions that
                 # shard the same tensor dimension (EP in the MoE case).
-                global_shard_dim_size: int | None = None
+                non_fsdp_shard_factor = 1
 
                 if len(shard_placements) == 1:
                     # Standard case: single shard dim (FSDP only, or FSDP+EP with Replicate on EP)
@@ -661,14 +661,13 @@ class Muon(Optimizer):
                     fsdp_placement = placements[fsdp_mesh_dim]
                     sharded_mesh_dim = fsdp_mesh_dim
                     sharded_tensor_dim = cast(Shard, fsdp_placement).dim
-                    global_shard_dim_size = mesh_params[0].size(sharded_tensor_dim)
 
                     # Newton-Schulz needs the LOCAL number of experts after EP sharding,
-                    # so each block corresponds to one complete expert.
+                    # so each block corresponds to one complete expert. The factor is
+                    # shape-independent; the DTensor dimension itself is computed per batch below.
                     for i, p in shard_placements:
                         if i != fsdp_mesh_dim and cast(Shard, p).dim == sharded_tensor_dim:
-                            assert global_shard_dim_size % device_mesh.size(i) == 0
-                            global_shard_dim_size //= device_mesh.size(i)
+                            non_fsdp_shard_factor *= device_mesh.size(i)
                             assert ns_num_experts % device_mesh.size(i) == 0
                             ns_num_experts = ns_num_experts // device_mesh.size(i)
 
@@ -723,6 +722,12 @@ class Muon(Optimizer):
                     batch_size=group_world_size,
                     extra_group_key=self._muon_split_sizes.get,
                 ):
+                    global_shard_dim_size: int | None = None
+                    if sharded_tensor_dim is not None and non_fsdp_shard_factor > 1:
+                        full_shard_dim_size = params[0].size(sharded_tensor_dim)
+                        assert full_shard_dim_size % non_fsdp_shard_factor == 0
+                        global_shard_dim_size = full_shard_dim_size // non_fsdp_shard_factor
+
                     gradients: list[Tensor] = [g for p in params if (g := p.grad) is not None]
                     assert len(gradients) == len(params), "Some gradients became None after filtering"
 

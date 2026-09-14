@@ -15,12 +15,13 @@ import math
 from typing import Callable, Literal, overload
 
 import parametrize
+import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import distribute_tensor
 from torch.distributed.tensor.placement_types import Shard
 
 from xtuner._testing.testcase import DeterministicDDPTestCase
@@ -336,6 +337,16 @@ def test_muon_clip_grad_mode_defaults_to_adamw_only():
     assert MuonConfig().clip_grad_mode == "adamw_only"
 
 
+def test_muon_remainder_strategy_validation():
+    param = nn.Parameter(torch.empty(2, 2))
+
+    with pytest.raises(ValueError, match="Invalid remainder_strategy"):
+        Muon([param], remainder_strategy="invalid")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="requires enable_all2all"):
+        Muon([param], enable_all2all=False, remainder_strategy="pad_all2all")
+
+
 class TestMuonSingleGPU(DeterministicDDPTestCase):
     @property
     def world_size(self) -> int:
@@ -568,14 +579,11 @@ class TestMuonFSDP(DeterministicDDPTestCase):
                 msg=f"mismatch on '{name}': max_abs={abs_diff.max().item():.2e}, max_rel={rel_diff.max().item():.2e}",
             )
 
-    def test_muon_ep_fsdp_remainder_uses_fsdp_global_dimension(self):
-        """AGRS must reconstruct the dimension visible inside the FSDP group.
-
-        The parameter is sharded on dim 0 by both EP and FSDP.  With three
-        parameters and a two-rank FSDP group, the final batch takes AGRS.  Its
-        Newton-Schulz input must contain the EP-local global rows (6), not the
-        DTensor's full global rows (12).
-        """
+    @parametrize.parametrize("remainder_strategy", ["agrs", "pad_all2all"])
+    def test_muon_ep_fsdp_uses_batch_specific_fsdp_global_dimension(
+        self, remainder_strategy: Literal["agrs", "pad_all2all"]
+    ):
+        """EP+FSDP must use each batch's FSDP-visible global dimension."""
         self.create_pg("cuda")
         rank = dist.get_rank()
         device = torch.device("cuda", rank % torch.cuda.device_count())
@@ -585,33 +593,68 @@ class TestMuonFSDP(DeterministicDDPTestCase):
             mesh_dim_names=("muon_regression.fsdp", "muon_regression.ep"),
         )
 
-        global_rows, cols, num_experts = 12, 4, 6
-        local_rows = global_rows // (mesh.size(0) * mesh.size(1))
+        fsdp_size, ep_size = mesh.size(0), mesh.size(1)
+        cols, num_experts = 4, 6
         params = []
-        for index in range(3):
-            local = torch.full(
-                (local_rows, cols),
-                float(index + rank),
-                dtype=torch.bfloat16,
-                device=device,
-            )
-            param = nn.Parameter(DTensor.from_local(local, mesh, (Shard(0), Shard(0)), run_check=False))
-            param.grad = DTensor.from_local(torch.ones_like(local), mesh, (Shard(0), Shard(0)), run_check=False)
+        expected_params = []
+        ns_shapes: list[tuple[tuple[int, ...], int]] = []
+        coordinate = mesh.get_coordinate()
+        assert coordinate is not None
+        fsdp_rank, ep_rank = coordinate
+
+        for index, global_rows in enumerate((12, 24)):
+            local_rows = global_rows // (fsdp_size * ep_size)
+            values = torch.arange(global_rows * cols, dtype=torch.float32, device=device).reshape(global_rows, cols)
+            initial = (values / (global_rows * cols) + index * 0.25).to(torch.bfloat16)
+            gradient = torch.sin(values * 0.17 + index).to(torch.bfloat16)
+
+            param = nn.Parameter(distribute_tensor(initial, mesh, (Shard(0), Shard(0))))
+            param.grad = distribute_tensor(gradient, mesh, (Shard(0), Shard(0)))
             params.append(param)
 
-        ns_shapes: list[tuple[int, ...]] = []
+            expected = initial.clone()
+            gradient_by_mesh = gradient.view(fsdp_size, ep_size, local_rows, cols)
+            expected_by_mesh = expected.view(fsdp_size, ep_size, local_rows, cols)
+            for reference_ep_rank in range(ep_size):
+                ep_gradient = gradient_by_mesh[:, reference_ep_rank].reshape(fsdp_size * local_rows, cols)
+                ep_update = zeropower_via_newtonschulz5(
+                    ep_gradient,
+                    epsilon=1e-7,
+                    num_experts=num_experts // ep_size,
+                )
+                expected_by_mesh[:, reference_ep_rank].sub_(ep_update.reshape(fsdp_size, local_rows, cols) * 0.01)
+            expected_params.append(expected)
 
         def track_newton_schulz(x, epsilon, num_experts):
-            ns_shapes.append(tuple(x.shape))
+            ns_shapes.append((tuple(x.shape), num_experts))
             return zeropower_via_newtonschulz5(x, epsilon=epsilon, num_experts=num_experts)
 
         optimizer = Muon(
             [{"params": params, "num_experts": num_experts}],
             lr=0.01,
+            weight_decay=0.0,
+            epsilon=1e-7,
+            adjust_lr="none",
             newton_schulz_func=track_newton_schulz,
             enable_all2all=True,
+            remainder_strategy=remainder_strategy,
         )
         optimizer.step()
 
-        assert ns_shapes
-        assert all(shape == (global_rows // mesh.size(1), cols) for shape in ns_shapes)
+        if remainder_strategy == "agrs" and fsdp_rank == 0:
+            assert sorted(ns_shapes) == [((6, cols), 3), ((12, cols), 3)]
+        elif remainder_strategy == "agrs":
+            assert not ns_shapes
+        else:
+            assert sorted(ns_shapes) == [((6, cols), 3), ((12, cols), 3)]
+
+        for param, expected in zip(params, expected_params):
+            global_rows = expected.size(0)
+            local_rows = global_rows // (fsdp_size * ep_size)
+            expected_local = expected.view(fsdp_size, ep_size, local_rows, cols)[fsdp_rank, ep_rank]
+            torch.testing.assert_close(
+                param.data.to_local(),  # type: ignore[attr-defined]
+                expected_local,
+                atol=1e-2,
+                rtol=1e-2,
+            )
