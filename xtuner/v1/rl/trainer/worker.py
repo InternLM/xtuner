@@ -52,7 +52,7 @@ from xtuner.v1.rl.loss import (
     BaseRLLossContext,
     kl_penalty,
 )
-from xtuner.v1.rl.model_utils import build_frozen_model
+from xtuner.v1.rl.trainer.model_utils import build_frozen_model
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
 from xtuner.v1.rl.weight_update import WeightUpdater
 from xtuner.v1.train.trainer import LoadCheckpointConfig
@@ -707,12 +707,11 @@ class TrainingWorker(SingleAcceleratorWorker):
             f"Rank{self.rank} Rollout {rollout_idx} prepare_inputs elapsed="
             f"{time.perf_counter() - prepare_inputs_begin:.4f}s"
         )
+        del data_batches
 
         # When sp_mesh.size() > 1, get the sp_split shifted_labels and rollout_logprobs
         shifted_labels_list = [loss_ctx.loss_kwargs.shifted_labels for loss_ctx in loss_ctx_list]
         rollout_logprobs_list = [loss_ctx.loss_kwargs.rollout_logprobs for loss_ctx in loss_ctx_list]
-
-        del data_batches
 
         # compute old logprobs
         old_logprobs_list = self.compute_actor_logprobs(seq_ctx_list, shifted_labels_list)
@@ -720,7 +719,6 @@ class TrainingWorker(SingleAcceleratorWorker):
             loss_ctx.loss_kwargs.old_logprobs = old_logprobs
 
         worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
-
         logger_msg = f"Rollout {rollout_idx}: "
 
         # compute entropy
@@ -809,7 +807,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         # run, which bounds their GPU residency by the optimizer group size.
         self._maybe_offload_logprob(loss_ctx_list)
         del old_logprobs_list
-        
+
         teacher_timings = self._maybe_compute_train_teacher_outputs(seq_ctx_list, loss_ctx_list)
         if teacher_timings is not None:
             worker_log_item.update({"teacher_timings": teacher_timings.to_dict()})

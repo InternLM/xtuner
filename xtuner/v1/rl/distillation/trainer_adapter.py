@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, cast
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -46,38 +46,48 @@ class DistillationTrainerAdapter:
             return 1.0
         return self._config.loss_config.task_adv_weight
 
-    @property
-    def teacher_index_by_data_source(self) -> Mapping[str, int] | None:
-        if self._config is None or not self._config.train_teachers:
-            return None
-        return self._config.teacher_index_by_data_source
-
     def rollout_teacher_targets(
         self,
         state: RolloutState,
         *,
         shifted_labels: Sequence[int],
-        target_start: int,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """Return aligned rollout Teacher targets, or no fields when
-        disabled."""
+    ) -> dict[str, torch.Tensor]:
+        """Return all Teacher fields needed to populate one training batch."""
 
-        if self._config is None or not self._config.rollout_teachers:
-            return None, None
-        if state.teacher_targets is None:
-            raise ValueError(f"Rollout state has no Teacher targets: rollout_id={state.rollout_id}")
-        expected_kind = "sampled" if self._config.loss_config.uses_sampled_token_targets else "topk"
-        if state.teacher_targets.kind != expected_kind:
-            raise ValueError(
-                f"Expected {expected_kind} Teacher targets, got {state.teacher_targets.kind}: "
-                f"rollout_id={state.rollout_id}"
+        if self._config is None:
+            return {}
+
+        fields: dict[str, torch.Tensor] = {}
+        if self._config.rollout_teachers:
+            target_start = next(
+                (index for index, label in enumerate(shifted_labels) if label != self._config.loss_config.ignore_idx),
+                len(shifted_labels),
             )
-        return self._align_rollout_teacher_targets(
-            state.teacher_targets,
-            shifted_labels=shifted_labels,
-            target_start=target_start,
-            ignore_idx=self._config.loss_config.ignore_idx,
-        )
+            if state.teacher_targets is None:
+                raise ValueError(f"Rollout state has no Teacher targets: rollout_id={state.rollout_id}")
+            expected_kind = "sampled" if self._config.loss_config.uses_sampled_token_targets else "topk"
+            if state.teacher_targets.kind != expected_kind:
+                raise ValueError(
+                    f"Expected {expected_kind} Teacher targets, got {state.teacher_targets.kind}: "
+                    f"rollout_id={state.rollout_id}"
+                )
+            teacher_logprobs, target_token_ids = self._align_rollout_teacher_targets(
+                state.teacher_targets,
+                shifted_labels=shifted_labels,
+                target_start=target_start,
+                ignore_idx=self._config.loss_config.ignore_idx,
+            )
+            fields["teacher_logprobs"] = teacher_logprobs
+            if target_token_ids is not None:
+                fields["target_token_ids"] = target_token_ids
+
+        if self._config.train_teachers:
+            data_source = state.extra_fields.get("origin_data_source")
+            if not isinstance(data_source, str):
+                raise ValueError(f"Missing origin_data_source for rollout_id={state.rollout_id}")
+            teacher_index = self._config.teacher_index_by_data_source[data_source]
+            fields["teacher_indices"] = torch.full((1, len(shifted_labels)), teacher_index, dtype=torch.long)
+        return fields
 
     @staticmethod
     def _align_rollout_teacher_targets(
@@ -143,6 +153,28 @@ class DistillationTrainerAdapter:
             for teacher_name, rewards in teacher_rewards.items()
             if rewards
         }
+
+    def metric_scalars(self, train_metrics: Sequence[Any]) -> dict[str, float]:
+        """Format rank-zero mini-batch distillation metrics for the trainer
+        log."""
+
+        if self._config is None:
+            return {}
+
+        metric_values: dict[str, list[float]] = {}
+        for mini_batch_metrics in train_metrics:
+            for key, value in mini_batch_metrics.items():
+                metric_values.setdefault(key, []).append(float(value))
+
+        scalars: dict[str, float] = {}
+        for key, values in metric_values.items():
+            if "opd" not in key and "distillation" not in key:
+                continue
+            value = sum(values) / len(values)
+            scalars[f"distillation/{key}"] = float(value)
+            if key in {"opd_reverse_kl", "opd_abs_logprob_loss"}:
+                scalars[key] = float(value)
+        return scalars
 
     def timing_scalars(self, worker_log_items: Sequence[WorkerLogItem]) -> dict[str, float]:
         """Aggregate train Teacher timings across workers on the critical

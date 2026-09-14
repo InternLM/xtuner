@@ -10,8 +10,8 @@ import torch
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.loss import LogProbConfig, LogProbContext, TopKLogProbConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
-from xtuner.v1.rl.model_utils import FrozenModel, build_frozen_model
-from xtuner.v1.utils import get_device, get_torch_device_module
+from xtuner.v1.rl.trainer.model_utils import FrozenModel, build_frozen_model
+from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
 from .config import TrainTeacherManagerConfig
 
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
+logger = get_logger()
 
 
 @dataclass
@@ -226,28 +227,50 @@ class TrainTeacherManager:
                 teacher_timing.offload += offload_elapsed
 
     @staticmethod
-    def _teacher_seq_ctx(seq_ctx: SequenceContext, *, is_composed: bool) -> SequenceContext:
-        overrides = {
-            "rollout_routed_experts": None,
-            "offload_rollout_routed_experts": False,
-        }
-        if not is_composed:
-            # A VLM tokenizer supplies 3D M-RoPE position ids for every sample,
-            # including text-only samples. Plain language-model Teachers need
-            # standard 2D packed positions. Passing ``None`` makes
-            # SequenceContext rebuild them from the packed sequence lengths.
-            # Visual fields are irrelevant to the text Teacher and may refer to
-            # a pack routed to another Teacher, so do not retain them here.
-            overrides.update(
-                position_ids=None,
-                image_grid_thw=None,
-                deepstack_visual_embeds=None,
-                visual_pos_masks=None,
-                pixel_values=None,
-                inputs_embeds=None,
-                num_img_tokens=None,
+    def construct_teacher_seq_ctx(seq_ctx: SequenceContext, *, is_composed: bool) -> SequenceContext:
+        """Construct a Teacher context from the Student rollout context.
+
+        Rollout-only expert-routing metadata must not be reused by the Teacher. A plain language-model Teacher can only
+        score text tokens. Composed/VLM Teachers retain their visual fields and M-RoPE positions; plain-text Teachers
+        require text-only contexts with 2D packed positions.
+        """
+        has_visual_inputs = seq_ctx.pixel_values is not None
+        if not is_composed and has_visual_inputs:
+            logger.warning(
+                "A plain-text Teacher received a multimodal rollout context; "
+                "the sample cannot be scored by this Teacher."
             )
-        return seq_ctx.copy(**overrides)
+            raise ValueError("Plain-text Teacher cannot score a rollout context containing visual inputs")
+
+        position_ids = seq_ctx.position_ids
+        if not is_composed and position_ids is not None and position_ids.ndim == 3:
+            # SequenceContext rebuilds standard 2D packed positions.
+            position_ids = None
+
+        return SequenceContext(
+            input_ids=seq_ctx.input_ids,
+            cu_seq_lens_q=seq_ctx.cu_seq_lens_q,
+            cu_seq_lens_k=seq_ctx.cu_seq_lens_k,
+            max_length_q=seq_ctx.max_length_q,
+            max_length_k=seq_ctx.max_length_k,
+            num_padding=seq_ctx.num_padding,
+            sequence_parallel_mesh=seq_ctx.sequence_parallel_mesh,
+            block_table=seq_ctx.block_table,
+            device=seq_ctx.device,
+            position_ids=position_ids,
+            image_grid_thw=seq_ctx.image_grid_thw if is_composed else None,
+            deepstack_visual_embeds=seq_ctx.deepstack_visual_embeds if is_composed else None,
+            visual_pos_masks=seq_ctx.visual_pos_masks if is_composed else None,
+            pixel_values=seq_ctx.pixel_values if is_composed else None,
+            inputs_embeds=seq_ctx.inputs_embeds if is_composed else None,
+            num_img_tokens=seq_ctx.num_img_tokens if is_composed else None,
+            rollout_routed_experts=None,
+            offload_rollout_routed_experts=False,
+            raw_input_ids=seq_ctx._raw_input_ids,
+            raw_inputs_embeds=seq_ctx._raw_inputs_embeds,
+            shard_start=seq_ctx._shard_start,
+            shard_size=seq_ctx._shard_size,
+        )
 
     def _compute_topk_targets(
         self,
@@ -281,7 +304,7 @@ class TrainTeacherManager:
                     assert loss_ctx is not None
                     with torch.no_grad():
                         output = teacher(
-                            seq_ctx=self._teacher_seq_ctx(
+                            seq_ctx=self.construct_teacher_seq_ctx(
                                 seq_ctx,
                                 is_composed=self._teacher_is_composed[teacher_index],
                             ),
@@ -323,7 +346,7 @@ class TrainTeacherManager:
                     )
                     with torch.no_grad():
                         output = teacher(
-                            seq_ctx=self._teacher_seq_ctx(
+                            seq_ctx=self.construct_teacher_seq_ctx(
                                 seq_ctx,
                                 is_composed=self._teacher_is_composed[teacher_index],
                             ),

@@ -26,12 +26,23 @@ def build_frozen_model(
         model = model_cfg.build()
 
     if isinstance(model_cfg, BaseComposeConfig):
-        assert model_cfg.text_config.float8_cfg is None, "BaseComposeConfig does not support float8"
+        text_float8_cfg = getattr(model_cfg.text_config, "float8_cfg", None)
+        if text_float8_cfg is not None and text_float8_cfg.enable_float8:
+            float8_handler = Float8Handler(
+                scaling_granularity_gemm=text_float8_cfg.scaling_granularity_gemm,
+                scaling_granularity_grouped_gemm=text_float8_cfg.scaling_granularity_grouped_gemm,
+            )
+        else:
+            float8_handler = None
         if fsdp_cfg is None:
             fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
         model = model.fully_shard(fsdp_cfg)
         model.from_hf(hf_path=load_from)
         model.eval()  # type: ignore
+        if float8_handler is not None:
+            # Composed models use FP8 only in the text backbone. The vision
+            # tower and projector remain in BF16.
+            float8_handler.precompute_float8_dynamic_scale_for_fsdp(model.language_model)  # type: ignore
     else:
         model_cfg = cast(TransformerConfig, model_cfg)
         if model_cfg.float8_cfg is not None and model_cfg.float8_cfg.enable_float8:
