@@ -707,6 +707,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             f"Rank{self.rank} Rollout {rollout_idx} prepare_inputs elapsed="
             f"{time.perf_counter() - prepare_inputs_begin:.4f}s"
         )
+
         del data_batches
 
         # When sp_mesh.size() > 1, get the sp_split shifted_labels and rollout_logprobs

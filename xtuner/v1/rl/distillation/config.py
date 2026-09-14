@@ -74,6 +74,12 @@ class RolloutTeacherConfig(BaseModel):
     enable_prefix_caching: bool = False
     launch_config: RolloutTeacherLaunchConfig | None = None
 
+    @model_validator(mode="after")
+    def validate_endpoints(self) -> RolloutTeacherConfig:
+        if self.launch_config is None and not self.endpoints:
+            raise ValueError(f"Rollout Teacher {self.name!r} requires at least one endpoint")
+        return self
+
 
 class TrainTeacherConfig(BaseModel):
     """Frozen Teacher loaded and executed by each training worker."""
@@ -299,7 +305,12 @@ class DistillationConfig(BaseModel):
         teachers = [
             teacher
             if not isinstance(teacher, RolloutTeacherConfig) or teacher.launch_config is None
-            else teacher.model_copy(update={"endpoints": endpoint_map[teacher.name]})
+            else teacher.model_copy(update={"endpoints": endpoint_map.get(teacher.name, [])})
             for teacher in self.teachers
         ]
+        missing_endpoints = [
+            teacher.name for teacher in teachers if isinstance(teacher, RolloutTeacherConfig) and not teacher.endpoints
+        ]
+        if missing_endpoints:
+            raise ValueError(f"Rollout Teachers have no resolved endpoints: {missing_endpoints}")
         return self.model_copy(update={"teachers": teachers})
