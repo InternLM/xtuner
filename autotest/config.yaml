@@ -56,7 +56,6 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - LMDEPLOY_FP32_MAMBA_SSM_DTYPE=1
-                    - LOSS_MODE=liger
             assert_info:
                 base_metric: qwen3-5-rl-lmdeploy-grpo-sp4/tracker.jsonl
                 check_metrics:
@@ -106,8 +105,6 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-rl-lmdeploy-fp8-mtp4-resume/tracker.jsonl
                 check_metrics:
@@ -136,7 +133,7 @@ case:
                        threshold: 45
                        method: absolute
                        operator: <
-            timeout: 9600
+            timeout: 7200
 
         -
             type: rl
@@ -158,8 +155,6 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-rl-lmdeploy-fp8-mtp4-resume/tracker-resume.jsonl
                 check_metrics:
@@ -185,7 +180,7 @@ case:
                        operator: <
                     -
                        metric: time/step
-                       threshold: 45
+                       threshold: 20
                        method: absolute
                        operator: <
             timeout: 7200
@@ -206,8 +201,6 @@ case:
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-rl-lmdeploy-grpo/tracker.jsonl
                 check_metrics:
@@ -232,10 +225,10 @@ case:
                        method: relative
                        operator: <
                     -
-                       # First RL steps include LMDeploy cold start; compare from step 3.
+                       # GRPO steps can be faster than baseline after DeepGEMM; only penalize slowdown.
                        metric: time/step
                        threshold: 20
-                       method: absolute
+                       method: slowdown
                        operator: <
                        skip_steps: 3
             timeout: 7200
@@ -256,8 +249,6 @@ case:
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-rl-lmdeploy-dapo/tracker.jsonl
                 check_metrics:
@@ -306,8 +297,6 @@ case:
                     - XTUNER_ACTIVATION_OFFLOAD=0
                     - XTUNER_USE_CUTLASS_GROUP_GEMM=1
                     - XTUNER_DETERMINISTIC=true
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-sft-30B/tracker.jsonl
                 check_metrics:
@@ -338,8 +327,6 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_ACTIVATION_OFFLOAD=1
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-sft-30B-mtp-fp8/tracker.jsonl
                 check_metrics:
@@ -367,8 +354,6 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-sft-30B-sp2/tracker.jsonl
                 check_metrics:
@@ -396,8 +381,6 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-sft-30B-ep2-resume/tracker.jsonl
                 check_metrics:
@@ -428,8 +411,6 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-sft-30B-ep2-resume/tracker-resume.jsonl
                 check_metrics:
@@ -459,8 +440,6 @@ case:
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-                    - ADAMW_FUSED=1
-                    - LOSS_MODE=liger
             assert_info:
                 base_metric: glm5-2-sft-30B-ep8-sp2-tp2/tracker.jsonl
                 check_metrics:
@@ -473,7 +452,6 @@ case:
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
             timeout: 1800
-
 
     # InternS2-Preview: Qwen3.5-VL-MoE-35B-A3B architecture; MODEL_PATH may need adjust on share.
     s2-preview-rl-vl-lmdeploy-grpo:
@@ -1728,7 +1706,6 @@ case:
                     - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
-                    - LOSS_MODE=liger
             assert_info:
                 base_metric: qwen3-sft-30B-sp4-intralayer2/tracker.jsonl
                 check_metrics:
@@ -1754,7 +1731,6 @@ case:
                     - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
-                    - LOSS_MODE=liger
             assert_info:
                 base_metric: qwen3-sft-30B-sp8-intralayer2/tracker.jsonl
                 check_metrics:
