@@ -514,8 +514,11 @@ class TestMuonFSDP(DeterministicDDPTestCase):
         WD = 0.01
         EPSILON = 1e-8
         BETAS = (0.9, 0.95)
+        PARITY_ATOL = 2e-4
+        PARITY_RTOL = 1e-5
 
         # ── Build model on every rank, then broadcast rank-0 weights ─────────
+        torch.manual_seed(42)
         config = ToyMoEModelConfig(compile_cfg=False)
         model = config.build().to(device)
         for p in model.parameters():
@@ -574,8 +577,10 @@ class TestMuonFSDP(DeterministicDDPTestCase):
             torch.testing.assert_close(
                 full,
                 ref_p.data,
-                atol=1e-6,
-                rtol=1e-5,
+                # FSDP reduction and the single-process reference use different
+                # FP32 reduction orders, then Muon rounds the update to bf16.
+                atol=PARITY_ATOL,
+                rtol=PARITY_RTOL,
                 msg=f"mismatch on '{name}': max_abs={abs_diff.max().item():.2e}, max_rel={rel_diff.max().item():.2e}",
             )
 
