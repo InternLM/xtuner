@@ -225,10 +225,10 @@ case:
                        method: relative
                        operator: <
                     -
-                       # GRPO steps can be faster than baseline after DeepGEMM; only penalize slowdown.
+                       # First RL steps include LMDeploy cold start; compare from step 3.
                        metric: time/step
                        threshold: 20
-                       method: slowdown
+                       method: absolute
                        operator: <
                        skip_steps: 3
             timeout: 7200
