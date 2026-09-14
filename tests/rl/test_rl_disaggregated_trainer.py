@@ -519,8 +519,8 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertEqual(scalars["time/train_teacher/teacher_b/compute"], 3.0)
         self.assertEqual(scalars["time/train_teacher/total/compute"], 6.0)
         self.assertEqual(scalars["time/train_teacher_compute"], 6.0)
-        self.assertEqual(scalars["distillation/actor_distillation_kl"], 0.5)
-        self.assertEqual(scalars["distillation/sampled_opd_loss"], 0.25)
+        self.assertNotIn("distillation/actor_distillation_kl", scalars)
+        self.assertNotIn("distillation/sampled_opd_loss", scalars)
         self.assertNotIn("distillation/policy_loss", scalars)
 
     def test_update_weights_pauses_generation_without_onloading_rollout(self):

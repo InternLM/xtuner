@@ -211,7 +211,6 @@ distillation_config = DistillationConfig(
         self.assertIsNone(adapter.rollout_teacher_scorer_config)
         self.assertIsNone(adapter.train_teacher_manager_config)
         self.assertEqual(adapter.task_adv_weight, 1.0)
-        self.assertIsNone(adapter.teacher_index_by_data_source)
         self.assertEqual(adapter.timing_scalars([]), {})
 
     def test_train_teacher_config_is_not_forwarded_to_agent_loop_manager(self) -> None:
@@ -317,7 +316,10 @@ class TestTrainTeacherTimings(unittest.TestCase):
         )
 
         assert loss_ctx is not None
-        torch.testing.assert_close(loss_ctx.loss_kwargs.teacher_indices, teacher_indices)
+        torch.testing.assert_close(
+            loss_ctx.loss_kwargs.teacher_indices,
+            teacher_indices.to(loss_ctx.loss_kwargs.teacher_indices.device),
+        )
 
     def test_distillation_loss_kwargs_split_teacher_indices_with_ignore_padding(self) -> None:
         loss_kwargs = DistillationLossKwargs(

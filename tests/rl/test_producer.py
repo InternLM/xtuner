@@ -132,7 +132,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         train_step: int = 0,
         model_step: int = 0,
         progress: ProduceProgress | None = None,
-        is_valid_sample_fn=None,
     ) -> ProduceContext:
         # 测试只走新的 ProduceContext 入口，不再覆盖旧散装参数兼容逻辑。
         if progress is None:
@@ -350,7 +349,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self._build_agent_loop(is_valid_sample_fn=is_valid_sample_fn),
             self._build_sampler(),
             batch_size=1,
-            is_valid_sample_fn=is_valid_sample_fn,
         )
 
         completed_group = [make_rollout_state(1, status=Status.COMPLETED)]
@@ -435,7 +433,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self._build_agent_loop(is_valid_sample_fn=is_valid_sample_fn),
             self._build_sampler(),
             batch_size=1,
-            is_valid_sample_fn=is_valid_sample_fn,
         )
 
         completed_group = [
@@ -527,7 +524,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             train_step=4,
             model_step=3,
             progress=self._build_progress(task_name, target=2),
-            is_valid_sample_fn=is_valid_sample_fn,
         )
 
         await strategy.produce_batch(ctx)

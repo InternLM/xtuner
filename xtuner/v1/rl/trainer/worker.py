@@ -52,7 +52,7 @@ from xtuner.v1.rl.loss import (
     BaseRLLossContext,
     kl_penalty,
 )
-from xtuner.v1.rl.trainer.model_utils import build_frozen_model
+from xtuner.v1.rl.model_utils import build_frozen_model
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
 from xtuner.v1.rl.weight_update import WeightUpdater
 from xtuner.v1.train.trainer import LoadCheckpointConfig

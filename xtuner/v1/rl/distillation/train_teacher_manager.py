@@ -10,7 +10,7 @@ import torch
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.loss import LogProbConfig, LogProbContext, TopKLogProbConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
-from xtuner.v1.rl.trainer.model_utils import FrozenModel, build_frozen_model
+from xtuner.v1.rl.model_utils import FrozenModel, build_frozen_model
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
 from .config import TrainTeacherManagerConfig

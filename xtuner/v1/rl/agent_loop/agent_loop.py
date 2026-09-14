@@ -235,6 +235,8 @@ class AgentLoop(ABC):
         logger=None,
         enable_batch_judge: bool = False,
     ) -> None:
+        from xtuner.v1.rl.distillation import RolloutTeacherScorer
+
         self.rollout_ctl = rollout_ctl
         self.hf_checkpoint = hf_checkpoint
         self.tokenizer = load_tokenizer(hf_checkpoint, trust_remote_code=True)

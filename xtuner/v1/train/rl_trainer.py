@@ -1185,8 +1185,13 @@ class BaseRLTrainer:
                 if isinstance(turns, int):
                     tool_turns_list.append(turns)
                 if data.reward is None or "score" not in data.reward:
-                    assert task_adv_weight == 0, f"Reward is missing or does not contain 'score' key in data: {data}"
-                    continue
+                    if task_adv_weight > 0:
+                        raise ValueError(
+                            f"Reward is missing or does not contain 'score' key in data: {data}, "
+                            f"but task_adv_weight={task_adv_weight} > 0"
+                        )
+                    else:
+                        continue
                 reward = float(data.reward["score"])
                 # session_id is only set by agentic loops / XTUNER_DETERMINISTIC; plain RL falls back
                 # to rollout_id, which the sampler always assigns. Segments of one session share a key.
@@ -1205,8 +1210,6 @@ class BaseRLTrainer:
             if task_adv_weight == 0:
                 sample_advantages = [0.0] * len(group)
             else:
-                # Agentic rollouts may split one model session into multiple trainable segments.
-                # Compute the group advantage once per session, then broadcast it back to each segment.
                 rewards_tensor = torch.tensor(cluster_rewards, dtype=torch.float32)
                 cluster_advantages = self._advantage_estimator.compute(rewards_tensor, cluster_representatives)
                 sample_advantages = [
@@ -1328,6 +1331,7 @@ class BaseRLTrainer:
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_labels
                 shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
+                # Keep the advantage layout aligned with input_ids (response excludes EOS).
                 advatnages_val = sample_advantages[i]
                 actual_advantages = [advatnages_val] * len(prompt_ids) + [
                     0.0 if mask == 0 else advatnages_val for mask in response_mask
@@ -1533,6 +1537,7 @@ class BaseRLTrainer:
                 for key, value in mini_batch_metrics.items():
                     avg_value = sum(value) / len(value)
                     all_scalars.update({f"train_metrics/worker_{worker_idx}/step_avg_{key}": avg_value})
+
                 rank_sft_log = log_item["sft_train_metrics"]
                 for k, v in rank_sft_log.items():
                     all_scalars.update({f"sft_train_metrics/worker_{worker_idx}/{k}": v})

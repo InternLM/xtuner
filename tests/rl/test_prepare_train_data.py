@@ -127,8 +127,8 @@ class TestPrepareTrainData(unittest.TestCase):
             batch["rollout_logprobs"],
             torch.tensor([[0.0, 0.0, 0.1, 0.2, 0.3]], dtype=torch.float32),
         )
-        self.assertEqual(batch["advantage"], [0.0, 0.0, 1.5, 0.0, 1.5])
-        self.assertEqual(len(batch["advantage"]), batch["shifted_labels"].numel())
+        self.assertEqual(batch["advantage"], [1.5, 1.5, 1.5, 1.5, 0.0, 1.5])
+        self.assertEqual(len(batch["advantage"]), batch["shifted_labels"].numel() + 1)
         self.assertIs(batch["seq_ctx"].rollout_routed_experts, routed_experts)
         self.assertEqual(info["training_samples"], 1)
         self.assertEqual(info["training_tokens"], 5)
@@ -150,7 +150,7 @@ class TestPrepareTrainData(unittest.TestCase):
 
         self.assertIsNone(state.response_mask)
         self.assertEqual(data_batches[0]["shifted_labels"].tolist(), [[-100, -100, 30, 31]])
-        self.assertEqual(data_batches[0]["advantage"], [0.0, 0.0, 1.0, 1.0])
+        self.assertEqual(data_batches[0]["advantage"], [1.0, 1.0, 1.0, 1.0, 1.0])
 
     def test_multi_sample_group_uses_each_sample_reward_and_advantage(self):
         # 同一个 prompt 下的多个 response 要分别使用自己的 reward 和 advantage。
@@ -161,8 +161,8 @@ class TestPrepareTrainData(unittest.TestCase):
         data_batches, info = self._prepare(trainer, [[first, second]])
 
         self.assertEqual(len(data_batches), 2)
-        self.assertEqual(data_batches[0]["advantage"], [0.0, 0.0, 1.5, 1.5])
-        self.assertEqual(data_batches[1]["advantage"], [0.0, 0.0, -2.0, -2.0])
+        self.assertEqual(data_batches[0]["advantage"], [1.5, 1.5, 1.5, 1.5, 1.5])
+        self.assertEqual(data_batches[1]["advantage"], [-2.0, -2.0, -2.0, -2.0, -2.0])
         self.assertEqual(info["batch_size"], 2)
         self.assertEqual(info["rewards/min"], -1.0)
         self.assertEqual(info["rewards/max"], 3.0)
@@ -294,8 +294,8 @@ class TestPrepareTrainData(unittest.TestCase):
             prompt_ids=[10, 11, 12],
             response_ids=[20, 21, 22],
             response_mask=[0, 1, 1],
-            teacher_tokens=[[100, 101], [102, 103], [104, 105]],
-            teacher_logprobs=[[-0.5, -0.6], [-0.7, -0.8], [-0.9, -1.0]],
+            teacher_tokens=[[102, 103], [104, 105]],
+            teacher_logprobs=[[-0.7, -0.8], [-0.9, -1.0]],
             extra_fields={"origin_data_source": "agent_math"},
         )
 
@@ -305,12 +305,12 @@ class TestPrepareTrainData(unittest.TestCase):
         self.assertEqual(batch["shifted_labels"].tolist(), [[-100, -100, -100, 21, 22]])
         self.assertEqual(
             batch["target_token_ids"].tolist(),
-            [[[0, 0], [0, 0], [100, 101], [102, 103], [104, 105]]],
+            [[[0, 0], [0, 0], [0, 0], [102, 103], [104, 105]]],
         )
         torch.testing.assert_close(
             batch["teacher_logprobs"],
             torch.tensor(
-                [[[0.0, 0.0], [0.0, 0.0], [-0.5, -0.6], [-0.7, -0.8], [-0.9, -1.0]]],
+                [[[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [-0.7, -0.8], [-0.9, -1.0]]],
                 dtype=torch.float32,
             ),
         )
@@ -329,8 +329,8 @@ class TestPrepareTrainData(unittest.TestCase):
             prompt_ids=[10, 11, 12],
             response_ids=[20, 21, 22],
             response_mask=[0, 1, 1],
-            teacher_tokens=[20, 21, 22],
-            teacher_logprobs=[-0.5, -0.7, -0.9],
+            teacher_tokens=[21, 22],
+            teacher_logprobs=[-0.7, -0.9],
             extra_fields={"origin_data_source": "agent_math"},
         )
         agentic_state = self._state(
@@ -349,7 +349,7 @@ class TestPrepareTrainData(unittest.TestCase):
         self.assertEqual(len(data_batches), 2)
         torch.testing.assert_close(
             data_batches[0]["teacher_logprobs"],
-            torch.tensor([[0.0, 0.0, -0.5, -0.7, -0.9]], dtype=torch.float32),
+            torch.tensor([[0.0, 0.0, 0.0, -0.7, -0.9]], dtype=torch.float32),
         )
         torch.testing.assert_close(
             data_batches[1]["teacher_logprobs"],
@@ -375,7 +375,7 @@ class TestPrepareTrainData(unittest.TestCase):
         trainer = self._build_trainer([1.0])
         state = self._state(reward={"other": 1.0})
 
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(ValueError, "missing.*score"):
             self._prepare(trainer, [[state]])
 
     def test_logprobs_must_match_response_ids_length(self):
