@@ -1,9 +1,9 @@
 import os
 
 from xtuner.v1.config import (
-    AdamWConfig,
     FSDPConfig,
     LRConfig,
+    MuonConfig,
 )
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
@@ -24,21 +24,30 @@ moe_cfg.compile_cfg = False
 if hasattr(moe_cfg.attention, "sparse_mla_backend"):
     moe_cfg.attention.sparse_mla_backend = "tilelang"
 
-optim_cfg = AdamWConfig(lr=6e-05)
+optim_cfg = MuonConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
     cpu_offload=False,
     ep_size=ep_size,
+    recompute_ratio=0.25,
 )
 
 dataset_config = [
     {
         "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-        "tokenize_fn": OpenaiTokenizeFunctionConfig(chat_template="glm5.2", max_length=4096),
+        "tokenize_fn": OpenaiTokenizeFunctionConfig(chat_template="glm5.2", max_length=8192),
     },
 ]
 
-dataloader_config = DataloaderConfig(pack_max_length=16384)
+dataloader_config = DataloaderConfig(
+    pack_level="hard",
+    pack_max_length=16384,
+    pack_chunk_size=8192,
+    pack_workers=4,
+    global_pack=True,
+    group_by_length=True,
+    num_workers=4,
+)
 
 loss_cfg = CELossConfig(mode="chunk", chunk_size=1024)
 moe_cfg.lm_loss_cfg = loss_cfg
