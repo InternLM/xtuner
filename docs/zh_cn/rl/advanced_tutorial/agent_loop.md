@@ -108,7 +108,8 @@ generate_sample(state)
   -> await rollout_ctl.generate.remote(state)
   -> PartialRolloutHandler.postprocess(state)
   -> 如果 state.status != COMPLETED，直接返回，不触发 Judger
-  -> 如果配置了 judger，调用 self.run_judger(state)
+  -> 无 validity check：generation 完成后进入 Teacher scorer，再按配置逐条 Judger
+  -> 有 validity check：组级 Judger -> maybe_filter_invalid_sample -> Teacher scorer
 ```
 
 典型配置：
@@ -169,6 +170,11 @@ class CustomAgentLoop(AgentLoop):
         rollout_state.sample_params = rollout_state.sample_params or self.sample_params
         rollout_state = await self.rollout_ctl.generate.remote(rollout_state)
 
+        if rollout_state.status != Status.COMPLETED:
+            return rollout_state
+
+        if self.judger is not None and not self.enable_batch_judge:
+            rollout_state = await self.run_judger(rollout_state)
         return rollout_state
 
 
@@ -239,6 +245,8 @@ class ToolAgentLoop(AgentLoop):
         assert len(rollout_state.response_ids) == len(rollout_state.logprobs)
         assert len(rollout_state.response_ids) == len(rollout_state.response_mask)
 
+        if rollout_state.status == Status.COMPLETED and self.judger is not None and not self.enable_batch_judge:
+            rollout_state = await self.run_judger(rollout_state)
         return rollout_state
 ```
 
