@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Any, TypeAlias, cast, overload
+from typing import TYPE_CHECKING, Any, TypeAlias, cast, overload
 
 import ray
 from pydantic import BaseModel, ConfigDict
@@ -11,10 +11,6 @@ from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
-from xtuner.v1.rl.distillation import (
-    RolloutTeacherScorer,
-    RolloutTeacherScorerConfig,
-)
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.constants import AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
@@ -32,6 +28,9 @@ from xtuner.v1.rl.utils import (
 from xtuner.v1.utils import get_logger, ray_method
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 
+
+if TYPE_CHECKING:
+    from xtuner.v1.rl.distillation import RolloutTeacherScorer, RolloutTeacherScorerConfig
 
 AGENT_LOOP_CONCURRENCY_GROUP_GENERATE = "generate"
 IsValidSampleFn: TypeAlias = Callable[[list[RolloutState]], bool]
@@ -77,6 +76,8 @@ class AgentLoopConfig(ABC, BaseModel):
         is_valid_sample_fn: IsValidSampleFn | None = None,
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
     ) -> AgentLoopSpec:
+        from xtuner.v1.rl.distillation import RolloutTeacherScorer
+
         if self.cpu_resources is None:
             agent_loop = self.build_local(
                 rollout_controller=rollout_controller,
@@ -396,6 +397,8 @@ class AgentLoopActor:
         *,
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
     ):
+        from xtuner.v1.rl.distillation import RolloutTeacherScorer
+
         self.agent_loop = agent_loop_config.build_local(
             rollout_controller=rollout_controller,
             judger=judger,

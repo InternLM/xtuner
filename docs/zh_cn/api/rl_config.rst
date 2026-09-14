@@ -29,7 +29,7 @@ Agent Loop Config
    :toctree: generated
    :nosignatures:
 
-   rl.agent_loop.single_turn_agent_loop.SingleTurnAgentLoopConfig
+   rl.agent_loop.SingleTurnAgentLoopConfig
    rl.agent_loop_manager.AgentLoopManagerConfig
    rl.agent_loop_manager.TaskSpecConfig
    rl.agent_loop_manager.SamplerConfig
