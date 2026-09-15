@@ -140,6 +140,8 @@ def _install_rl_trainer_worker_stubs() -> None:
     class TrainingController:
         pass
 
+    TrainingLogInfo = dict
+
     class WorkerConfig(BaseModel):
         model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
@@ -148,8 +150,8 @@ def _install_rl_trainer_worker_stubs() -> None:
 
     controller_mod = _new_module("xtuner.v1.rl.trainer.controller")
     controller_mod.TrainingController = TrainingController
-    controller_mod.ColateItem = object
-    controller_mod.__all__ = ["TrainingController", "ColateItem"]
+    controller_mod.TrainingLogInfo = TrainingLogInfo
+    controller_mod.__all__ = ["TrainingController", "TrainingLogInfo"]
 
     worker_mod = _new_module("xtuner.v1.rl.trainer.worker")
     worker_mod.TrainingWorker = TrainingWorker
@@ -166,12 +168,12 @@ def _install_rl_trainer_worker_stubs() -> None:
     ]
 
     trainer_pkg.TrainingController = TrainingController
+    trainer_pkg.TrainingLogInfo = TrainingLogInfo
     trainer_pkg.WorkerConfig = WorkerConfig
     trainer_pkg.TrainingWorker = TrainingWorker
     trainer_pkg.WorkerInputItem = dict
     trainer_pkg.WorkerLogItem = dict
     trainer_pkg.WorkerTrainLogItem = dict
-    trainer_pkg.ColateItem = object
 
     sys.modules.setdefault("xtuner.v1.rl.trainer", trainer_pkg)
     sys.modules.setdefault("xtuner.v1.rl.trainer.controller", controller_mod)

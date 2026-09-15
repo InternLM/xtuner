@@ -263,14 +263,13 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
                 shifted_labels_tensor = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
                 adv_val = advantages[i].item()
-                # Controller._packing expects `advantage` as a list and will flatten it.
-                # Keep the length consistent with shifted_labels/input_ids.
                 advantage_list = [adv_val] * (len(prompt_ids) - 1) + [adv_val] * len(response_ids)
 
                 data_batches.append(dict(
                     seq_ctx=SequenceContext.from_input_ids((input_ids_tensor,), device="cpu"),
                     shifted_labels=shifted_labels_tensor,
-                    advantage=advantage_list,
+                    advantages=torch.tensor(advantage_list, dtype=torch.float32),
+                    rollout_logprobs=None,
                 ))
 
         # RLColocateTrainer initializes by offloading train workers to CPU.
@@ -286,7 +285,7 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
         train_controller.onload(target="all")
         log_infos = train_controller.fit(data_batches, pack_max_length=1024, rollout_idx=1)
         efficient_attn_ratio_list = []
-        for log_info in log_infos:
+        for log_info in log_infos["worker_log_infos"]:
             efficient_attn_ratio_list.append(log_info['sft_train_metrics']['efficient_attn_ratio'])
         self.assertTrue(all([ratio > 0 for ratio in efficient_attn_ratio_list]))
 
@@ -316,7 +315,7 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
         train_controller.onload(target="all")
         log_infos = train_controller.fit(data_batches, pack_max_length=1024, rollout_idx=1)
         new_efficient_attn_ratio_list = []
-        for log_info in log_infos:
+        for log_info in log_infos["worker_log_infos"]:
             new_efficient_attn_ratio_list.append(log_info['sft_train_metrics']['efficient_attn_ratio'])
 
         efficient_attn_ratio_list.sort()

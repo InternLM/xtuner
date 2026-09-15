@@ -142,7 +142,14 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._maybe_save_hf = MagicMock()
         trainer._checkpoint_no_save_replay_buffer = False
         trainer.train_controller = SimpleNamespace(
-            fit=MagicMock(return_value=[{"train_metrics": [], "sft_train_metrics": {}}]),
+            fit=MagicMock(
+                return_value={
+                    "worker_log_infos": [{"train_metrics": [], "sft_train_metrics": {}}],
+                    "padding_tokens": 0,
+                    "pack_time": 0.0,
+                    "train_time": 0.0,
+                }
+            ),
             onload=MagicMock(return_value="onload"),
             offload=MagicMock(return_value="offload"),
             weight_update=MagicMock(return_value="update"),
