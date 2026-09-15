@@ -24,6 +24,7 @@
 
 import math
 from collections import defaultdict
+from dataclasses import dataclass
 from functools import partial
 from itertools import chain, product
 from typing import Any, Callable, Generator, Iterator, Literal, Sequence, cast, overload
@@ -34,7 +35,7 @@ from torch import Tensor
 from torch.distributed import ProcessGroup
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.placement_types import Shard
+from torch.distributed.tensor.placement_types import Placement, Shard
 from torch.optim.optimizer import Optimizer, ParamsT
 
 from xtuner.v1.utils.dtensor import group_tensors_by_device_mesh_and_placements
@@ -258,6 +259,21 @@ def adamw_update_foreach(  # type: ignore
     M_div = torch._foreach_div(M, denom)
     torch._foreach_mul_(M_div, adj_lr)
     torch._foreach_sub_(X, M_div)
+
+
+@dataclass(frozen=True)
+class _MuonMeshCommPlan:
+    """Communication plan shared by every shape-homogeneous batch drawn from
+    one (device_mesh, placements) group of Muon parameters."""
+
+    comm_strategy: Literal["agrs", "subgroup_allgather", "all_to_all", "local"]
+    comm_pg: ProcessGroup | None
+    world_size: int
+    sharded_tensor_dim: int | None
+    # Factor by which the DTensor's global size along `sharded_tensor_dim` must be
+    # divided to get the FSDP-visible size (non-1 only when EP shards that same dim).
+    non_fsdp_shard_factor: int
+    num_experts: int  # Local expert count after accounting for EP sharding.
 
 
 class Muon(Optimizer):
@@ -599,7 +615,12 @@ class Muon(Optimizer):
         algo_name: str = "muon",
     ) -> Generator["AsyncTask", None, None]:
         """Helper function to create batches of Muon matrices and generate
-        AsyncTask objects so we can process multiple batches concurrently."""
+        AsyncTask objects so we can process multiple batches concurrently.
+
+        This is the top-level, linear business flow: per param group, split
+        parameters into (device_mesh, placements) groups, resolve each group's
+        communication plan once, then build one task per shape-homogeneous batch.
+        """
         for group in param_groups:
             assert group["algorithm"] == algo_name
             assert all(p.ndim >= 2 for p in group["params"]), "Muon optimizer only supports matrix parameters."
@@ -608,189 +629,196 @@ class Muon(Optimizer):
             if not group_params:
                 continue
 
-            lr = torch.tensor(group["lr"])
-            mu = torch.tensor(group["mu"])
-            weight_decay = torch.tensor(group["weight_decay"])
-            epsilon = torch.tensor(group["epsilon"])
-
-            nesterov = group["nesterov"]
-            flatten = group["flatten"]
-
             num_experts = group.get("num_experts", 1)
-
-            # Process DTensor parameters grouped by (device_mesh, placements)
             mesh_groups = group_tensors_by_device_mesh_and_placements(group_params)
 
             for (device_mesh, placements), mesh_params in mesh_groups.items():
-                # Extract communication primitives from the group's device_mesh
-                # Find the sharded placement and get its mesh and tensor dimensions
-                # Skip any Shard() placements on size-1 mesh dimension = Replicate()
-                shard_placements = [
-                    (i, p) for i, p in enumerate(placements) if p.is_shard() and device_mesh.size(i) > 1
-                ]
+                plan = self._resolve_mesh_comm_plan(device_mesh, placements, num_experts, mesh_params)
 
-                sharded_mesh_dim = None
-                sharded_tensor_dim = None
-                ns_num_experts = num_experts
-                # AGRS/all-to-all run inside the FSDP group, so their global
-                # shard dimension must exclude any other mesh dimensions that
-                # shard the same tensor dimension (EP in the MoE case).
-                non_fsdp_shard_factor = 1
-
-                if len(shard_placements) == 1:
-                    # Standard case: single shard dim (FSDP only, or FSDP+EP with Replicate on EP)
-                    sharded_mesh_dim = shard_placements[0][0]
-                    sharded_tensor_dim = cast(Shard, shard_placements[0][1]).dim
-
-                elif len(shard_placements) > 1:
-                    if len(shard_placements) > 2:
-                        raise NotImplementedError(
-                            f"Muon optimizer supports at most 2 active shard dimensions (EP + FSDP), "
-                            f"got {len(shard_placements)}. Tensor parallelism is not yet supported."
-                        )
-                    # Multi-shard case: FSDP + EP for MoE params
-                    # Identify FSDP mesh dim by name and use it for all-to-all
-                    fsdp_mesh_dim = self._find_fsdp_mesh_dim(device_mesh)
-
-                    if fsdp_mesh_dim is None:
-                        raise RuntimeError(
-                            "Could not identify FSDP mesh dimension for multi-shard DTensor. "
-                            "Ensure the DTensor device mesh has a dimension named 'fsdp'."
-                        )
-
-                    fsdp_placement = placements[fsdp_mesh_dim]
-                    sharded_mesh_dim = fsdp_mesh_dim
-                    sharded_tensor_dim = cast(Shard, fsdp_placement).dim
-
-                    # Newton-Schulz needs the LOCAL number of experts after EP sharding,
-                    # so each block corresponds to one complete expert. The factor is
-                    # shape-independent; the DTensor dimension itself is computed per batch below.
-                    for i, p in shard_placements:
-                        if i != fsdp_mesh_dim and cast(Shard, p).dim == sharded_tensor_dim:
-                            non_fsdp_shard_factor *= device_mesh.size(i)
-                            assert ns_num_experts % device_mesh.size(i) == 0
-                            ns_num_experts = ns_num_experts // device_mesh.size(i)
-
-                # Optimization: if each FSDP rank already holds complete experts,
-                # we can skip all-to-all and orthogonalize locally.
-                skip_communication = False
-                use_subgroup_allgather = False
-                subgroup_process_group: ProcessGroup | None = None
-
-                if sharded_mesh_dim is not None and ns_num_experts > 1:
-                    fsdp_size = device_mesh.size(sharded_mesh_dim)
-
-                    if ns_num_experts % fsdp_size == 0:
-                        # Case A: each rank holds complete experts → zero communication
-                        ns_num_experts = ns_num_experts // fsdp_size
-                        sharded_mesh_dim = None
-                        sharded_tensor_dim = None
-                        skip_communication = True
-
-                    elif fsdp_size % ns_num_experts == 0 and len(mesh_params) < fsdp_size:
-                        # Case B: each expert spans a sub-group of ranks → sub-group all-gather
-                        # Guard: only when params can't fill a batch, otherwise batched all-to-all
-                        # is more efficient (fewer kernel launches, better bandwidth utilization).
-                        sg_size = fsdp_size // ns_num_experts
-                        ns_num_experts = 1  # After all-gather each rank has 1 complete expert
-                        use_subgroup_allgather = True
-                        cache_key = (id(device_mesh), sharded_mesh_dim, sg_size)
-                        subgroup_process_group = self._subgroup_cache[cache_key]
-
-                # Derive process_group from the group's device_mesh
-                if skip_communication or use_subgroup_allgather:
-                    group_process_group = None
-
-                elif sharded_mesh_dim is not None:
-                    group_process_group = device_mesh.get_group(sharded_mesh_dim)
-
-                else:
-                    # Not sharded on any active mesh dim; fall back to FSDP mesh dim
-                    fsdp_dim = self._find_fsdp_mesh_dim(device_mesh)
-
-                    if fsdp_dim is not None:
-                        group_process_group = device_mesh.get_group(fsdp_dim)
-
-                    else:
-                        group_process_group = None
-
-                group_world_size = group_process_group.size() if group_process_group is not None else 1
-
-                if skip_communication:
-                    comm_strategy: Literal["agrs", "subgroup_allgather", "all_to_all", "local"] = "local"
-                    comm_pg: ProcessGroup | None = None
-                elif use_subgroup_allgather:
-                    comm_strategy = "subgroup_allgather"
-                    comm_pg = subgroup_process_group
-                elif sharded_tensor_dim is not None:
-                    comm_strategy = "all_to_all"
-                    comm_pg = group_process_group
-                else:
-                    comm_strategy = "local"
-                    comm_pg = group_process_group
-
-                # Create shape-homogeneous batches and resolve batch-specific metadata.
                 for params in create_param_batches(
                     mesh_params,
-                    batch_size=group_world_size,
+                    batch_size=plan.world_size,
                     extra_group_key=self._muon_split_sizes.get,
                 ):
-                    global_shard_dim_size: int | None = None
-                    if sharded_tensor_dim is not None and non_fsdp_shard_factor > 1:
-                        full_shard_dim_size = params[0].size(sharded_tensor_dim)
-                        assert full_shard_dim_size % non_fsdp_shard_factor == 0
-                        global_shard_dim_size = full_shard_dim_size // non_fsdp_shard_factor
+                    yield self._build_muon_task(group, params, plan, algo_name)
 
-                    gradients: list[Tensor] = [g for p in params if (g := p.grad) is not None]
-                    assert len(gradients) == len(params), "Some gradients became None after filtering"
+    def _resolve_mesh_comm_plan(
+        self,
+        device_mesh: DeviceMesh,
+        placements: tuple[Placement, ...],
+        num_experts: int,
+        mesh_params: Sequence[Tensor],
+    ) -> _MuonMeshCommPlan:
+        """Resolve the sharding topology and communication strategy shared by
+        every batch drawn from this (device_mesh, placements) group.
 
-                    states = [self._get_or_initialize_state(p, algo_name) for p in params]
+        This mesh-topology metadata is independent of parameter shape, so it is
+        resolved once per group; shape-dependent metadata is resolved per batch
+        in `_build_muon_task`.
+        """
+        # Find the sharded placement(s) and their mesh/tensor dimensions.
+        # Skip any Shard() placements on size-1 mesh dimension = Replicate()
+        shard_placements = [(i, p) for i, p in enumerate(placements) if p.is_shard() and device_mesh.size(i) > 1]
 
-                    momentums = [s["momentum"] for s in states]
-                    lr_ratios = [1.0 if p in self._muon_split_sizes else s["lr_ratio"] for p, s in zip(params, states)]
-                    assert len(set(lr_ratios)) == 1, f"Found different lr_ratios: {set(lr_ratios)}"
+        sharded_mesh_dim: int | None = None
+        sharded_tensor_dim: int | None = None
+        ns_num_experts = num_experts
+        # AGRS/all-to-all run inside the FSDP group, so their global shard dimension
+        # must exclude any other mesh dimension that shards the same tensor dimension
+        # (EP in the MoE case).
+        non_fsdp_shard_factor = 1
 
-                    split_sizes = self._muon_split_sizes.get(params[0])
-                    assert all(self._muon_split_sizes.get(p) == split_sizes for p in params)
-                    newton_schulz_func = self._newton_schulz_func
-                    if split_sizes is not None:
-                        newton_schulz_func = partial(
-                            _muonsplit_newton_schulz,
-                            newton_schulz_func=self._newton_schulz_func,
-                            split_sizes=split_sizes,
-                            adjust_lr=group["adjust_lr"],
-                        )
+        if len(shard_placements) == 1:
+            # Standard case: single shard dim (FSDP only, or FSDP+EP with Replicate on EP)
+            sharded_mesh_dim = shard_placements[0][0]
+            sharded_tensor_dim = cast(Shard, shard_placements[0][1]).dim
 
-                    is_remainder = len(params) < group_world_size
-                    batch_comm_strategy = comm_strategy
-                    if comm_strategy == "all_to_all" and (
-                        not self._enable_all2all or (is_remainder and self._remainder_strategy == "agrs")
-                    ):
-                        batch_comm_strategy = "agrs"
+        elif len(shard_placements) > 1:
+            if len(shard_placements) > 2:
+                raise NotImplementedError(
+                    f"Muon optimizer supports at most 2 active shard dimensions (EP + FSDP), "
+                    f"got {len(shard_placements)}. Tensor parallelism is not yet supported."
+                )
+            # Multi-shard case: FSDP + EP for MoE params.
+            # Identify FSDP mesh dim by name and use it for all-to-all.
+            fsdp_mesh_dim = self._find_fsdp_mesh_dim(device_mesh)
+            if fsdp_mesh_dim is None:
+                raise RuntimeError(
+                    "Could not identify FSDP mesh dimension for multi-shard DTensor. "
+                    "Ensure the DTensor device mesh has a dimension named 'fsdp'."
+                )
 
-                    # AGRS accepts a partial batch; other strategies require padding to the group size.
-                    batch_size = None if batch_comm_strategy == "agrs" else group_world_size
-                    yield AsyncTask(
-                        muon_update_batch_async(
-                            X=params,
-                            G=gradients,
-                            M=momentums,
-                            batch_size=batch_size,
-                            lr=lr,
-                            lr_ratio=lr_ratios[0],
-                            momentum=mu,
-                            weight_decay=weight_decay,
-                            epsilon=epsilon,
-                            nesterov=nesterov,
-                            flatten=flatten,
-                            newton_schulz_func=newton_schulz_func,
-                            comm_strategy=batch_comm_strategy,
-                            shard_dim=sharded_tensor_dim,
-                            process_group=comm_pg,
-                            num_experts=ns_num_experts,
-                            global_shard_dim_size=global_shard_dim_size,
-                        )
-                    )
+            sharded_mesh_dim = fsdp_mesh_dim
+            sharded_tensor_dim = cast(Shard, placements[fsdp_mesh_dim]).dim
+
+            # Newton-Schulz needs the LOCAL number of experts after EP sharding, so each
+            # block corresponds to one complete expert. The DTensor dimension itself is
+            # shape-dependent and resolved per batch in `_build_muon_task`.
+            # TODO: 前面已经检查了只能支持 FSDP + EP 的情况， 这里 ns_num_experts 各种操作也是针对EP的，可以针对EP的情况写得更直白易懂一些，去掉循环
+            for i, p in shard_placements:
+                if i != fsdp_mesh_dim and cast(Shard, p).dim == sharded_tensor_dim:
+                    non_fsdp_shard_factor *= device_mesh.size(i)
+                    assert ns_num_experts % device_mesh.size(i) == 0
+                    ns_num_experts = ns_num_experts // device_mesh.size(i)
+
+        # Optimization: if each FSDP rank already holds complete experts, we can skip
+        # all-to-all and orthogonalize locally (or within a sub-group of ranks).
+        skip_communication = False
+        use_subgroup_allgather = False
+        subgroup_process_group: ProcessGroup | None = None
+
+        if sharded_mesh_dim is not None and ns_num_experts > 1:
+            fsdp_size = device_mesh.size(sharded_mesh_dim)
+
+            if ns_num_experts % fsdp_size == 0:
+                # Case A: each rank holds complete experts → zero communication
+                ns_num_experts = ns_num_experts // fsdp_size
+                sharded_mesh_dim = None
+                sharded_tensor_dim = None
+                skip_communication = True
+
+            elif fsdp_size % ns_num_experts == 0 and len(mesh_params) < fsdp_size:
+                # Case B: each expert spans a sub-group of ranks → sub-group all-gather.
+                # Guard: only when params can't fill a batch, otherwise batched all-to-all
+                # is more efficient (fewer kernel launches, better bandwidth utilization).
+                sg_size = fsdp_size // ns_num_experts
+                ns_num_experts = 1  # After all-gather each rank has 1 complete expert
+                use_subgroup_allgather = True
+                subgroup_process_group = self._subgroup_cache[(id(device_mesh), sharded_mesh_dim, sg_size)]
+
+        # Derive the batching world size (also used for the padding target and the
+        # remainder check) and the process group actually used for communication.
+        # These differ only for `subgroup_allgather`: each task still batches a
+        # single param (world_size=1), but communicates within `subgroup_process_group`.
+        comm_strategy: Literal["agrs", "subgroup_allgather", "all_to_all", "local"]
+        if skip_communication:
+            comm_strategy, comm_pg, world_size = "local", None, 1
+        elif use_subgroup_allgather:
+            comm_strategy, comm_pg, world_size = "subgroup_allgather", subgroup_process_group, 1
+        else:
+            if sharded_mesh_dim is not None:
+                comm_pg = device_mesh.get_group(sharded_mesh_dim)
+            else:
+                # Not sharded on any active mesh dim; fall back to the FSDP mesh dim
+                # so batches still follow the FSDP world size.
+                fsdp_dim = self._find_fsdp_mesh_dim(device_mesh)
+                comm_pg = device_mesh.get_group(fsdp_dim) if fsdp_dim is not None else None
+            comm_strategy = "all_to_all" if sharded_tensor_dim is not None else "local"
+            world_size = comm_pg.size() if comm_pg is not None else 1
+
+        return _MuonMeshCommPlan(
+            comm_strategy=comm_strategy,
+            comm_pg=comm_pg,
+            world_size=world_size,
+            sharded_tensor_dim=sharded_tensor_dim,
+            non_fsdp_shard_factor=non_fsdp_shard_factor,
+            num_experts=ns_num_experts,
+        )
+
+    def _build_muon_task(
+        self,
+        group: dict,
+        params: list[Tensor],
+        plan: _MuonMeshCommPlan,
+        algo_name: str,
+    ) -> "AsyncTask":
+        """Resolve batch-specific (shape-dependent) metadata and build the
+        AsyncTask for one shape-homogeneous batch of Muon parameters."""
+        global_shard_dim_size: int | None = None
+        if plan.sharded_tensor_dim is not None and plan.non_fsdp_shard_factor > 1:
+            full_shard_dim_size = params[0].size(plan.sharded_tensor_dim)
+            assert full_shard_dim_size % plan.non_fsdp_shard_factor == 0
+            global_shard_dim_size = full_shard_dim_size // plan.non_fsdp_shard_factor
+
+        gradients: list[Tensor] = [g for p in params if (g := p.grad) is not None]
+        assert len(gradients) == len(params), "Some gradients became None after filtering"
+
+        states = [self._get_or_initialize_state(p, algo_name) for p in params]
+        momentums = [s["momentum"] for s in states]
+        lr_ratios = [1.0 if p in self._muon_split_sizes else s["lr_ratio"] for p, s in zip(params, states)]
+        assert len(set(lr_ratios)) == 1, f"Found different lr_ratios: {set(lr_ratios)}"
+
+        split_sizes = self._muon_split_sizes.get(params[0])
+        assert all(self._muon_split_sizes.get(p) == split_sizes for p in params)
+        newton_schulz_func = self._newton_schulz_func
+        if split_sizes is not None:
+            newton_schulz_func = partial(
+                _muonsplit_newton_schulz,
+                newton_schulz_func=self._newton_schulz_func,
+                split_sizes=split_sizes,
+                adjust_lr=group["adjust_lr"],
+            )
+
+        is_remainder = len(params) < plan.world_size
+        batch_comm_strategy = plan.comm_strategy
+        if plan.comm_strategy == "all_to_all" and (
+            not self._enable_all2all or (is_remainder and self._remainder_strategy == "agrs")
+        ):
+            batch_comm_strategy = "agrs"
+
+        # AGRS accepts a partial batch; other strategies require padding to the group size.
+        batch_size = None if batch_comm_strategy == "agrs" else plan.world_size
+        return AsyncTask(
+            muon_update_batch_async(
+                X=params,
+                G=gradients,
+                M=momentums,
+                batch_size=batch_size,
+                lr=torch.tensor(group["lr"]),
+                lr_ratio=lr_ratios[0],
+                momentum=torch.tensor(group["mu"]),
+                weight_decay=torch.tensor(group["weight_decay"]),
+                epsilon=torch.tensor(group["epsilon"]),
+                nesterov=group["nesterov"],
+                flatten=group["flatten"],
+                newton_schulz_func=newton_schulz_func,
+                comm_strategy=batch_comm_strategy,
+                shard_dim=plan.sharded_tensor_dim,
+                process_group=plan.comm_pg,
+                num_experts=plan.num_experts,
+                global_shard_dim_size=global_shard_dim_size,
+            )
+        )
 
     def _create_adamw_tasks(
         self,
