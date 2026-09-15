@@ -24,6 +24,8 @@ from xtuner.v1.rl.utils import (
 )
 from xtuner.v1.rl.rollout.worker_registry import WorkerLifecycleState
 
+RL_TRAINER_RAY_GET_TIMEOUT = 3600
+
 TEST_TEXT_MESSAGES = [{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
 
@@ -36,6 +38,8 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         # TODO(shipengcheng): SGLang disaggregated weight update cannot use
         # NCCL_CUMEM for now. Remove this after the root cause is fixed.
         os.environ["NCCL_CUMEM_ENABLE"] = "0"
+        if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
+            os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -157,12 +161,28 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         input_state = RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params)
         res_baseline = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
 
+        # 1) 清 KV + 释放旧权重（sleep level=2 -> meta）
+        ray.get(
+            rollout_controller.offload.remote(),
+            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+        )
+        # 2) 只 wakeup weights（empty_init），此时不要 onload_kvcache/warmup
+        ray.get(
+            rollout_controller.onload_weights.remote(),
+            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+        )
         targets = ray.get(rollout_controller.get_weight_update_targets.remote())
         train_controller.bind_rollout_weight_update(
             targets=targets,
             rollout_config=self.rollout_cfg,
         )
+        # 3) 先把权重更新完（含 finished=True finalize）
         train_controller.weight_update()
+        # 4) 最后再 onload_kvcache（这里才会 warmup）
+        ray.get(
+            rollout_controller.onload_kvcache.remote(),
+            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+        )
 
         res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
         self.assertEqual(res_update_weight.response, res_baseline.response)
@@ -206,7 +226,6 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         finally:
             ray.get(rollout_controller.shutdown.remote(), timeout=60)
 
-    @unittest.skip("skip lmdeploy disaggregated update-weight generation test until PR4638 is merged")
     def test_lmdeploy_disaggregated_update_weight_and_generate(self):
         TrainingWorker = ray.remote(
             runtime_env={
@@ -233,12 +252,28 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         input_state = RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params)
         res_baseline = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
 
+        # 1) 清 KV + 释放旧权重（sleep level=2 -> meta）
+        ray.get(
+            rollout_controller.offload.remote(),
+            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+        )
+        # 2) 只 wakeup weights（empty_init），此时不要 onload_kvcache/warmup
+        ray.get(
+            rollout_controller.onload_weights.remote(),
+            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+        )
         targets = ray.get(rollout_controller.get_weight_update_targets.remote())
         train_controller.bind_rollout_weight_update(
             targets=targets,
             rollout_config=self.rollout_cfg,
         )
+        # 3) 先把权重更新完（含 finished=True finalize）
         train_controller.weight_update()
+        # 4) 最后再 onload_kvcache（这里才会 warmup）
+        ray.get(
+            rollout_controller.onload_kvcache.remote(),
+            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+        )
 
         res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
         self.assertEqual(res_update_weight.response, res_baseline.response)
