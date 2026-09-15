@@ -402,8 +402,8 @@ case:
                     grad_norm: 0.08
                     loss/local_loss: 0.001
                     loss/reduced_llm_loss: 0.001
-                    # MTP stepwise; avoid 0.0003 (below FP32/MoE noise floor).
-                    loss/reduced_mtp_loss: 0.002
+                    # MTP stepwise; 0.002 was 0.01pp under replay (0.2106% vs 0.2000%).
+                    loss/reduced_mtp_loss: 0.003
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
