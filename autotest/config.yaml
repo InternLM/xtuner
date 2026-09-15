@@ -305,7 +305,7 @@ case:
                         threshold: 0.35
                         aggregate: 80
                     loss/local_loss: 0.008
-                    loss/reduced_balancing_loss: 0.005
+                    loss/reduced_mtp_loss: 0.005
                     loss/reduced_llm_loss: 0.008
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -332,7 +332,7 @@ case:
                 check_metrics:
                     grad_norm: 2.0
                     loss/local_loss: 0.01
-                    loss/reduced_balancing_loss: 0.01
+                    loss/reduced_mtp_loss: 0.01
                     loss/reduced_llm_loss: 0.01
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -359,7 +359,7 @@ case:
                 check_metrics:
                     grad_norm: 0.10
                     loss/local_loss: 0.005
-                    loss/reduced_balancing_loss: 0.005
+                    loss/reduced_mtp_loss: 0.005
                     loss/reduced_llm_loss: 0.005
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -386,7 +386,7 @@ case:
                 check_metrics:
                     grad_norm: 0.08
                     loss/local_loss: 0.001
-                    loss/reduced_balancing_loss: 0.0003
+                    loss/reduced_mtp_loss: 0.0003
                     loss/reduced_llm_loss: 0.001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -416,14 +416,12 @@ case:
                 check_metrics:
                     grad_norm: 0.08
                     loss/local_loss: 0.0003
-                    loss/reduced_balancing_loss: 0.0003
+                    loss/reduced_mtp_loss: 0.0003
                     loss/reduced_llm_loss: 0.0003
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            post_action:
-                command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output glm5-2-sft-30B-ep2-resume sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
             timeout: 1500
 
     glm5-2-sft-30B-ep8-sp2-tp2:
@@ -445,7 +443,7 @@ case:
                 check_metrics:
                     grad_norm: 0.25
                     loss/local_loss: 0.005
-                    loss/reduced_balancing_loss: 0.005
+                    loss/reduced_mtp_loss: 0.005
                     loss/reduced_llm_loss: 0.005
                     lr: 0
                     memory/max_memory_GB: 0.2

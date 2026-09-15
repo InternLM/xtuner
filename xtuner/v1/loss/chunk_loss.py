@@ -21,7 +21,8 @@ class ChunkLoss(torch.autograd.Function):
         device = hidden_states.device
         accumulated_loss = torch.tensor(0.0, device=device)
         grad_inputs = torch.empty_like(hidden_states)
-        grad_weight = torch.zeros_like(head_weight)
+        weight_requires_grad = head_weight.requires_grad
+        grad_weight = torch.zeros_like(head_weight) if weight_requires_grad else None
 
         grad_inputs_chunks = torch.split(grad_inputs, chunk_size, dim=1)
         hidden_states_chunks = torch.split(hidden_states, chunk_size, dim=1)
@@ -42,28 +43,34 @@ class ChunkLoss(torch.autograd.Function):
                 chunk_loss, (_, extra_info) = loss_forward(
                     hidden_states_chunk, head_weight, None, loss_kwargs_chunks[i]
                 )
-                if head_weight.requires_grad:
+                if weight_requires_grad:
                     chunk_grad_input, chunk_grad_weight = grad(
                         chunk_loss, (hidden_states_chunk, head_weight), allow_unused=True
                     )
                 else:
                     chunk_grad_input = grad(chunk_loss, (hidden_states_chunk,), allow_unused=True)[0]
-                    chunk_grad_weight = torch.zeros_like(head_weight)
 
             accumulated_loss.add_(chunk_loss)
             grad_inputs_chunk.copy_(chunk_grad_input)
-            grad_weight.add_(chunk_grad_weight)
+            if grad_weight is not None:
+                grad_weight.add_(chunk_grad_weight)
 
             chunked_extra_info.append(extra_info)
 
-        ctx.save_for_backward(grad_inputs, grad_weight)
+        ctx.weight_requires_grad = weight_requires_grad
+        if grad_weight is None:
+            ctx.save_for_backward(grad_inputs)
+        else:
+            ctx.save_for_backward(grad_inputs, grad_weight)
         return accumulated_loss, chunked_extra_info
 
     @staticmethod
     def backward(ctx, *grad_output):
-        grad_input, grad_weight = ctx.saved_tensors
+        grad_input = ctx.saved_tensors[0]
+        grad_weight = ctx.saved_tensors[1] if ctx.weight_requires_grad else None
         if torch.ne(grad_output[0], torch.tensor(1.0, device=grad_output[0].device)):
             grad_input = grad_input * grad_output[0]
-            grad_weight = grad_weight * grad_output[0]
+            if grad_weight is not None:
+                grad_weight = grad_weight * grad_output[0]
 
         return grad_input, grad_weight, None, None, None, None
