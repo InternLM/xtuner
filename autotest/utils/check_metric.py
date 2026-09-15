@@ -24,6 +24,10 @@ MEMORY_GRADIENT_MIN_SEGMENT_RANGE_GB = 0.5
 MEMORY_GRADIENT_BASELINE_DRIFT_SKIP_RATIO = 0.05
 MEMORY_GRADIENT_MIN_EXTRA_RANGE_GB = 0.1
 
+# Minimum step count for percentile aggregation to be statistically meaningful.
+# Below this, fall back to stepwise max with a warning (e.g. ep2-resume ~15–18 steps).
+PERCENTILE_MIN_STEPS = 20
+
 # RL tracker lines: mini-batch logs vs per-RL-step summary (see rl_trainer._log_step).
 RL_STEP_SUMMARY_MARKER = "response/rewards/mean"
 RL_PERCENTILE_METRICS: dict[str, int] = {
@@ -35,6 +39,11 @@ RL_PERCENTILE_METRICS: dict[str, int] = {
 #   metric: {threshold: 0.2, aggregate: 80}
 #   metric: {threshold: 5, method: absolute}
 # Without ``aggregate``, behavior stays step-by-step drift vs baseline.
+# Principles for GLM5.2 MoE SFT thresholds:
+#   - MTP threshold = local/llm × 2–3 (compensate 5–12× noise amplification)
+#   - Prefer p80 over stepwise max for noisy metrics (grad_norm, reduced_mtp_loss)
+#   - Don't use thresholds below FP32 reduce + MoE dispatch noise floor (~0.0003)
+#   - Short runs (< PERCENTILE_MIN_STEPS) keep stepwise max; p80 has no statistical meaning
 SFT_METRIC_DEFAULT_METHOD: dict[str, str] = {
     "runtime_info/text_tokens": "absolute",
 }
@@ -422,18 +431,37 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
                     )
         elif percentile is not None:
             agg_method = method if method in ("absolute", "relative") else "relative"
-            check_flag, agg_error, detail = _percentile_error_passes(
-                base_metrics[metric],
-                cur_metrics[metric],
-                method=agg_method,
-                threshold=threshold,
-                operator="<",
-                percentile=percentile,
-            )
-            if not check_flag:
-                fail_metric[metric] = f"{metric} {agg_method} error bigger than {threshold} ({detail})"
+            num_steps = len(base_metrics[metric])
+            if num_steps < PERCENTILE_MIN_STEPS:
+                logger.warning(
+                    f"⚠ {metric}: only {num_steps} steps (< {PERCENTILE_MIN_STEPS}); "
+                    f"p{percentile} has no statistical meaning, falling back to stepwise max."
+                )
+                check_flag, max_error, max_error_idx, failing_error = _check_sft_step_drift(
+                    base_metrics[metric],
+                    cur_metrics[metric],
+                    threshold=threshold,
+                    method=agg_method,
+                )
+                if not check_flag:
+                    old = base_metrics[metric][max_error_idx]
+                    cur = cur_metrics[metric][max_error_idx]
+                    fail_metric[metric] = _format_sft_drift_failure(
+                        metric, max_error_idx, old, cur, failing_error, agg_method, threshold
+                    )
             else:
-                logger.info(f"✓ {metric} check pass，{detail}, threshold={threshold}")
+                check_flag, agg_error, detail = _percentile_error_passes(
+                    base_metrics[metric],
+                    cur_metrics[metric],
+                    method=agg_method,
+                    threshold=threshold,
+                    operator="<",
+                    percentile=percentile,
+                )
+                if not check_flag:
+                    fail_metric[metric] = f"{metric} {agg_method} error bigger than {threshold} ({detail})"
+                else:
+                    logger.info(f"✓ {metric} check pass，{detail}, threshold={threshold}")
             continue
         else:
             check_flag, max_error, max_error_idx, failing_error = _check_sft_step_drift(
