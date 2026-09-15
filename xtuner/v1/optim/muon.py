@@ -716,7 +716,20 @@ class Muon(Optimizer):
 
                 group_world_size = group_process_group.size() if group_process_group is not None else 1
 
-                # Create batches within this mesh group
+                if skip_communication:
+                    comm_strategy: Literal["agrs", "subgroup_allgather", "all_to_all", "local"] = "local"
+                    comm_pg: ProcessGroup | None = None
+                elif use_subgroup_allgather:
+                    comm_strategy = "subgroup_allgather"
+                    comm_pg = subgroup_process_group
+                elif sharded_tensor_dim is not None:
+                    comm_strategy = "all_to_all"
+                    comm_pg = group_process_group
+                else:
+                    comm_strategy = "local"
+                    comm_pg = group_process_group
+
+                # Create shape-homogeneous batches and resolve batch-specific metadata.
                 for params in create_param_batches(
                     mesh_params,
                     batch_size=group_world_size,
@@ -749,75 +762,35 @@ class Muon(Optimizer):
                         )
 
                     is_remainder = len(params) < group_world_size
-                    # When all-to-all is disabled, every sharded batch uses AGRS. Otherwise remainder
-                    # batches follow the configured strategy: current AGRS behavior or the original
-                    # zero-padded all-to-all behavior.
-                    use_agrs = (
-                        (not self._enable_all2all or (is_remainder and self._remainder_strategy == "agrs"))
-                        and sharded_tensor_dim is not None
-                        and group_process_group is not None
+                    batch_comm_strategy = comm_strategy
+                    if comm_strategy == "all_to_all" and (
+                        not self._enable_all2all or (is_remainder and self._remainder_strategy == "agrs")
+                    ):
+                        batch_comm_strategy = "agrs"
+
+                    # AGRS accepts a partial batch; other strategies require padding to the group size.
+                    batch_size = None if batch_comm_strategy == "agrs" else group_world_size
+                    yield AsyncTask(
+                        muon_update_batch_async(
+                            X=params,
+                            G=gradients,
+                            M=momentums,
+                            batch_size=batch_size,
+                            lr=lr,
+                            lr_ratio=lr_ratios[0],
+                            momentum=mu,
+                            weight_decay=weight_decay,
+                            epsilon=epsilon,
+                            nesterov=nesterov,
+                            flatten=flatten,
+                            newton_schulz_func=newton_schulz_func,
+                            comm_strategy=batch_comm_strategy,
+                            shard_dim=sharded_tensor_dim,
+                            process_group=comm_pg,
+                            num_experts=ns_num_experts,
+                            global_shard_dim_size=global_shard_dim_size,
+                        )
                     )
-
-                    if use_agrs:
-                        # AG+RS path: handles remainder batches and all-to-all-disabled clusters
-                        yield AsyncTask(
-                            muon_update_batch_async(
-                                X=params,
-                                G=gradients,
-                                M=momentums,
-                                lr=lr,
-                                lr_ratio=lr_ratios[0],
-                                momentum=mu,
-                                weight_decay=weight_decay,
-                                epsilon=epsilon,
-                                nesterov=nesterov,
-                                flatten=flatten,
-                                newton_schulz_func=newton_schulz_func,
-                                comm_strategy="agrs",
-                                shard_dim=sharded_tensor_dim,
-                                process_group=group_process_group,
-                                num_experts=ns_num_experts,
-                                global_shard_dim_size=global_shard_dim_size,
-                            )
-                        )
-
-                    else:
-                        # Non-AGRS path. Remainder batches using ``pad_all2all`` are padded to
-                        # ``group_world_size`` by ``muon_update_batch_async``.
-                        if skip_communication:
-                            comm_strategy: Literal["agrs", "subgroup_allgather", "all_to_all", "local"] = "local"
-                            comm_pg: ProcessGroup | None = None
-                        elif use_subgroup_allgather:
-                            comm_strategy = "subgroup_allgather"
-                            comm_pg = subgroup_process_group
-                        elif sharded_tensor_dim is not None:
-                            comm_strategy = "all_to_all"
-                            comm_pg = group_process_group
-                        else:
-                            comm_strategy = "local"
-                            comm_pg = group_process_group
-
-                        yield AsyncTask(
-                            muon_update_batch_async(
-                                X=params,
-                                G=gradients,
-                                M=momentums,
-                                batch_size=group_world_size,
-                                lr=lr,
-                                lr_ratio=lr_ratios[0],
-                                momentum=mu,
-                                weight_decay=weight_decay,
-                                epsilon=epsilon,
-                                nesterov=nesterov,
-                                flatten=flatten,
-                                newton_schulz_func=newton_schulz_func,
-                                comm_strategy=comm_strategy,
-                                shard_dim=sharded_tensor_dim,
-                                process_group=comm_pg,
-                                num_experts=ns_num_experts,
-                                global_shard_dim_size=global_shard_dim_size,
-                            )
-                        )
 
     def _create_adamw_tasks(
         self,
