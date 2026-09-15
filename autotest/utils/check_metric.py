@@ -40,13 +40,24 @@ RL_PERCENTILE_METRICS: dict[str, int] = {
 #   metric: {threshold: 5, method: absolute}
 # Without ``aggregate``, behavior stays step-by-step drift vs baseline.
 # Principles for GLM5.2 MoE SFT thresholds:
-#   - MTP threshold = local/llm × 2–3 (compensate 5–12× noise amplification)
-#   - Prefer p80 over stepwise max for noisy metrics (grad_norm, reduced_mtp_loss)
+#   - loss/reduced_llm_loss & loss/local_loss: stable next-token anchors → stepwise max
+#   - loss/reduced_mtp_loss: 5–12× noisier (fewer valid tokens, multi-depth avg) →
+#     threshold ≈ llm × 2–3, prefer p80; short runs keep stepwise max
+#   - Prefer p80 for other noisy metrics (grad_norm) on long runs
 #   - Don't use thresholds below FP32 reduce + MoE dispatch noise floor (~0.0003)
 #   - Short runs (< PERCENTILE_MIN_STEPS) keep stepwise max; p80 has no statistical meaning
+# Real MTP bugs (not threshold noise): NaN/Inf, systematic monotonic drift vs baseline,
+# or llm/local/text_tokens failing together with MTP.
 SFT_METRIC_DEFAULT_METHOD: dict[str, str] = {
     "runtime_info/text_tokens": "absolute",
 }
+
+# Loss metrics that must be finite; NaN/Inf is always a hard failure.
+SFT_FINITE_LOSS_METRICS = (
+    "loss/local_loss",
+    "loss/reduced_llm_loss",
+    "loss/reduced_mtp_loss",
+)
 
 
 def _normalize_sft_metric_cfg(metric: str, value) -> tuple[float, int | None, str]:
@@ -348,6 +359,44 @@ def _check_sft_step_drift(
     return True, max_error, max_error_idx, None
 
 
+def _find_nonfinite(values: list[float]) -> int | None:
+    """Return first index of NaN/Inf, or None if all finite."""
+    for idx, value in enumerate(values):
+        if not np.isfinite(value):
+            return idx
+    return None
+
+
+def _annotate_mtp_only_failure(fail_metric: dict[str, str], metric_list: list[str]) -> None:
+    """Clarify MTP-only failures when llm/local anchors still pass.
+
+    MTP CE is expected to be much noisier than next-token llm/local loss. A lone
+    MTP threshold miss with healthy llm/local is usually pack/noise, not a
+    train-infer bug — unless values are non-finite (already hard-failed above).
+    """
+    mtp_key = "loss/reduced_mtp_loss"
+    if mtp_key not in fail_metric:
+        return
+    llm_ok = "loss/reduced_llm_loss" not in fail_metric
+    local_ok = "loss/local_loss" not in fail_metric
+    # Only annotate when llm/local were part of the check and both passed.
+    if "loss/reduced_llm_loss" in metric_list and not llm_ok:
+        return
+    if "loss/local_loss" in metric_list and not local_ok:
+        return
+    if not (llm_ok and local_ok):
+        return
+    other_fails = {k for k in fail_metric if k != mtp_key}
+    if other_fails:
+        return
+    fail_metric[mtp_key] = (
+        f"{fail_metric[mtp_key]} "
+        "[note: reduced_llm_loss/local_loss passed — MTP-only drift is often "
+        "expected noise (fewer valid tokens / multi-depth avg); escalate only if "
+        "NaN/Inf or systematic monotonic drift]"
+    )
+
+
 def check_result(case_name, base_path, cur_path, check_metric, phase=None):
     fail_metric = {}
     metric_cfgs = {metric: _normalize_sft_metric_cfg(metric, value) for metric, value in check_metric.items()}
@@ -374,6 +423,22 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
         max_error = 0.0
         max_error_idx = 0
         check_flag = True
+
+        # Hard-fail on NaN/Inf for loss metrics (real bug, not threshold noise).
+        if metric in SFT_FINITE_LOSS_METRICS:
+            bad_idx = _find_nonfinite(cur_metrics[metric])
+            if bad_idx is not None:
+                fail_metric[metric] = (
+                    f"{metric} is non-finite at step {bad_idx}: {cur_metrics[metric][bad_idx]!r}"
+                )
+                continue
+            bad_idx = _find_nonfinite(base_metrics[metric])
+            if bad_idx is not None:
+                fail_metric[metric] = (
+                    f"{metric} baseline is non-finite at step {bad_idx}: {base_metrics[metric][bad_idx]!r}"
+                )
+                continue
+
         if metric == "runtime_info/tgs":
             if cur_steps > 10:
                 base_vals = np.array(base_metrics[metric][10:-1], dtype=float)
@@ -485,6 +550,8 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
                 logger.info(
                     f"✓ {metric} check pass，the most relative error is {max_error:.2%} in {max_error_idx} step."
                 )
+
+    _annotate_mtp_only_failure(fail_metric, metric_list)
     result = not fail_metric
     if result:
         return result, "All metrics check passed."
