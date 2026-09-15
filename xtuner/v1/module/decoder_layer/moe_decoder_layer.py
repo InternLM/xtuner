@@ -11,7 +11,7 @@ from torch.nn import functional as F
 
 from xtuner.v1.config.generate import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.float8 import Float8Config
+from xtuner.v1.float8 import Float8Config, TileWiseFloat8GroupedLinear
 from xtuner.v1.module import (
     AttnOutputs,
     GatedDeltaNet,
@@ -182,10 +182,17 @@ class MoEBlock(nn.Module):
             ep_mesh=self.ep_mesh,
             float8_cfg=float8_cfg,
         )
+        self.use_fused_moe_activation = (
+            moe_act_fn_cfg.act_type == "swiglu"
+            and isinstance(self.fused_w2, TileWiseFloat8GroupedLinear)
+            and self.fused_w2.enable_fused_moe_activation
+        )
         self.moe_act = moe_act_fn_cfg.build()
 
     def forward(self, x, tokens_per_expert, decoding):
         gate_up_out = self.fused_w1w3(x, tokens_per_expert, decoding)
+        if self.use_fused_moe_activation:
+            return self.fused_w2.forward_fused_moe_act(gate_up_out, tokens_per_expert)
         out = self.moe_act(gate_up_out, split_dim=-1)
         res = self.fused_w2(out, tokens_per_expert, decoding)
         return res

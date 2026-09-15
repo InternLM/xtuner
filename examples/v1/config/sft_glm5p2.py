@@ -27,6 +27,7 @@ def _get_float8_config() -> Float8Config | None:
     return Float8Config(
         scaling_granularity_gemm=ScalingGranularity.TILEWISE,
         scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
+        enable_fused_moe_activation=_get_bool_env("FUSED_MOE_ACTIVATION", False),
     )
 
 

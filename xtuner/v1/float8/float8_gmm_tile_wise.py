@@ -15,6 +15,10 @@ from xtuner.v1.float8.float8_utils import EPS, to_fp8_saturated
 from xtuner.v1.float8.fsdp_utils import WeightWithDynamicTilewiseFloat8CastTensor
 from xtuner.v1.float8.triton_kernels import (
     per_tile_quant,
+    per_tile_quant_with_trans_per_block,
+    per_tile_quant_with_trans_per_tile,
+    swiglu_backward,
+    swiglu_per_tile_quant_with_trans_per_block,
     trans_per_block_quant_expand_128x,
     trans_per_tile_quant_expand_128x,
 )
@@ -83,57 +87,30 @@ class weight_to_per_block_float8_dynamic(torch.autograd.Function):
         return g, None, None
 
 
-class fp8_gmm_weight_per_block_act_per_tile(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x, w_fp8, tokens_per_expert):
-        seq, din = x.shape
-        ne, dout, din = w_fp8.shape
-        ctx.zero_token_dispatch = seq == 0
-        ctx.input_shape = x.shape
-        ctx.weight_shape = w_fp8.shape
-
-        if ctx.zero_token_dispatch:
-            return x.new_empty((seq, dout))
-
-        x_fp8, x_scale = per_tile_quant(x)
-        (
-            x_trans_quant_fp8,
-            x_trans_quant_scale,
-            _,
-        ) = trans_per_block_quant_expand_128x(x, tokens_per_expert, group_size=128, dtype=torch.float8_e4m3fn)
-
-        out = m_grouped_varlen_gemm_fp8_fp8_bf16_nt_contiguous(
-            (x_fp8, x_scale), (w_fp8._data, w_fp8._scale), tokens_per_expert
-        )
-
-        ctx.save_for_backward(x_trans_quant_fp8, x_trans_quant_scale, w_fp8, tokens_per_expert)
-        return out
-
-    @staticmethod
-    def backward(ctx, grad_output_hp):
-        if ctx.zero_token_dispatch:
-            dx = grad_output_hp.new_empty(ctx.input_shape)
-            dw = grad_output_hp.new_zeros(ctx.weight_shape)
-            return dx, dw, None
-
-        (
-            x_trans_quant_fp8,
-            x_trans_quant_scale,
-            w_fp8,
-            tokens_per_expert,
-        ) = ctx.saved_tensors
-
-        ne, dout, din = w_fp8.shape
-        seq, dout = grad_output_hp.shape
+def _fused_fp8_gmm_backward(
+    grad_output_hp,
+    x_trans_quant_fp8,
+    x_trans_quant_scale,
+    w_fp8,
+    tokens_per_expert,
+):
+    ne, dout, din = w_fp8.shape
+    reuse_wgrad_storage = ne * dout * din * grad_output_hp.element_size() >= 6 * 1024**3
+    if reuse_wgrad_storage:
+        # EP1 W1/W3 has a 12 GiB BF16 wgrad. Keep the fused forward path, but
+        # use the baseline backward lifetime for this shape: create only dY
+        # for dgrad, release its temporary weight transpose, then create dY^T
+        # for wgrad. This avoids holding both dY layouts while requesting the
+        # large wgrad block and leaves the EP4 performance path unchanged.
         grad_out_fp8, grad_out_scale = per_tile_quant(grad_output_hp)
+        w_trans_fp8 = w_fp8._data.transpose(1, 2).contiguous()
+        w_trans_scale = w_fp8._scale.transpose(1, 2).contiguous()
         dx = m_grouped_varlen_gemm_fp8_fp8_bf16_nt_contiguous(
             (grad_out_fp8, grad_out_scale),
-            (
-                w_fp8._data.transpose(1, 2).contiguous(),
-                w_fp8._scale.transpose(1, 2).contiguous(),
-            ),
+            (w_trans_fp8, w_trans_scale),
             tokens_per_expert,
         )
+        del grad_out_fp8, grad_out_scale, w_trans_fp8, w_trans_scale
 
         (
             grad_out_trans_fp8,
@@ -149,8 +126,172 @@ class fp8_gmm_weight_per_block_act_per_tile(torch.autograd.Function):
             dw,
             tokens_per_expert_expand.int(),
         )
+        return dx, dw
 
-        return dx, dw, None
+    w_trans_fp8 = w_fp8._data.transpose(1, 2).contiguous()
+    w_trans_scale = w_fp8._scale.transpose(1, 2).contiguous()
+    (
+        grad_out_fp8,
+        grad_out_scale,
+        grad_out_trans_fp8,
+        grad_out_trans_scale,
+        tokens_per_expert_expand,
+    ) = per_tile_quant_with_trans_per_tile(
+        grad_output_hp, tokens_per_expert, group_size=128, dtype=torch.float8_e4m3fn
+    )
+    dx = m_grouped_varlen_gemm_fp8_fp8_bf16_nt_contiguous(
+        (grad_out_fp8, grad_out_scale),
+        (w_trans_fp8, w_trans_scale),
+        tokens_per_expert,
+    )
+    del grad_out_fp8, grad_out_scale, w_trans_fp8, w_trans_scale
+
+    if not reuse_wgrad_storage:
+        dw = grad_output_hp.new_empty((ne, dout, din))
+    k_grouped_gemm_dw_fp8_fp8_bf16_tn_contiguous(
+        grad_out_trans_fp8,
+        grad_out_trans_scale,
+        x_trans_quant_fp8,
+        x_trans_quant_scale,
+        dw,
+        tokens_per_expert_expand.int(),
+    )
+    return dx, dw
+
+
+class fp8_gmm_weight_per_block_act_per_tile(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, w_fp8, tokens_per_expert, enable_fused_moe_activation):
+        seq, din = x.shape
+        ne, dout, din = w_fp8.shape
+        ctx.zero_token_dispatch = seq == 0
+        ctx.input_shape = x.shape
+        ctx.weight_shape = w_fp8.shape
+        ctx.enable_fused_moe_activation = enable_fused_moe_activation
+
+        if ctx.zero_token_dispatch:
+            return x.new_empty((seq, dout))
+
+        if enable_fused_moe_activation:
+            (
+                x_fp8,
+                x_scale,
+                x_trans_quant_fp8,
+                x_trans_quant_scale,
+                _,
+            ) = per_tile_quant_with_trans_per_block(
+                x, tokens_per_expert, group_size=128, dtype=torch.float8_e4m3fn
+            )
+        else:
+            x_fp8, x_scale = per_tile_quant(x)
+            (
+                x_trans_quant_fp8,
+                x_trans_quant_scale,
+                _,
+            ) = trans_per_block_quant_expand_128x(
+                x, tokens_per_expert, group_size=128, dtype=torch.float8_e4m3fn
+            )
+
+        out = m_grouped_varlen_gemm_fp8_fp8_bf16_nt_contiguous(
+            (x_fp8, x_scale), (w_fp8._data, w_fp8._scale), tokens_per_expert
+        )
+
+        ctx.save_for_backward(x_trans_quant_fp8, x_trans_quant_scale, w_fp8, tokens_per_expert)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output_hp):
+        if ctx.zero_token_dispatch:
+            dx = grad_output_hp.new_empty(ctx.input_shape)
+            dw = grad_output_hp.new_zeros(ctx.weight_shape)
+            return dx, dw, None, None
+
+        x_trans_quant_fp8, x_trans_quant_scale, w_fp8, tokens_per_expert = ctx.saved_tensors
+
+        ne, dout, din = w_fp8.shape
+        if ctx.enable_fused_moe_activation:
+            dx, dw = _fused_fp8_gmm_backward(
+                grad_output_hp,
+                x_trans_quant_fp8,
+                x_trans_quant_scale,
+                w_fp8,
+                tokens_per_expert,
+            )
+        else:
+            grad_out_fp8, grad_out_scale = per_tile_quant(grad_output_hp)
+            w_trans_fp8 = w_fp8._data.transpose(1, 2).contiguous()
+            w_trans_scale = w_fp8._scale.transpose(1, 2).contiguous()
+            dx = m_grouped_varlen_gemm_fp8_fp8_bf16_nt_contiguous(
+                (grad_out_fp8, grad_out_scale),
+                (w_trans_fp8, w_trans_scale),
+                tokens_per_expert,
+            )
+            (
+                grad_out_trans_fp8,
+                grad_out_trans_scale,
+                tokens_per_expert_expand,
+            ) = trans_per_tile_quant_expand_128x(grad_output_hp, tokens_per_expert)
+            dw = grad_output_hp.new_empty((ne, dout, din))
+            k_grouped_gemm_dw_fp8_fp8_bf16_tn_contiguous(
+                grad_out_trans_fp8,
+                grad_out_trans_scale,
+                x_trans_quant_fp8,
+                x_trans_quant_scale,
+                dw,
+                tokens_per_expert_expand.int(),
+            )
+        return dx, dw, None, None
+
+
+class fp8_gmm_weight_per_block_act_per_tile_fused_swiglu(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, gate_up, w_fp8, tokens_per_expert):
+        seq, _ = gate_up.shape
+        _, dout, _ = w_fp8.shape
+        ctx.zero_token_dispatch = seq == 0
+        ctx.input_shape = gate_up.shape
+        ctx.weight_shape = w_fp8.shape
+
+        if ctx.zero_token_dispatch:
+            return gate_up.new_empty((seq, dout))
+
+        (
+            x_fp8,
+            x_scale,
+            x_trans_quant_fp8,
+            x_trans_quant_scale,
+            _,
+        ) = swiglu_per_tile_quant_with_trans_per_block(
+            gate_up, tokens_per_expert, group_size=128, dtype=torch.float8_e4m3fn
+        )
+        out = m_grouped_varlen_gemm_fp8_fp8_bf16_nt_contiguous(
+            (x_fp8, x_scale), (w_fp8._data, w_fp8._scale), tokens_per_expert
+        )
+        ctx.save_for_backward(
+            gate_up,
+            x_trans_quant_fp8,
+            x_trans_quant_scale,
+            w_fp8,
+            tokens_per_expert,
+        )
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output_hp):
+        if ctx.zero_token_dispatch:
+            dgate_up = grad_output_hp.new_empty(ctx.input_shape)
+            dw = grad_output_hp.new_zeros(ctx.weight_shape)
+            return dgate_up, dw, None
+
+        gate_up, x_trans_quant_fp8, x_trans_quant_scale, w_fp8, tokens_per_expert = ctx.saved_tensors
+        dx, dw = _fused_fp8_gmm_backward(
+            grad_output_hp,
+            x_trans_quant_fp8,
+            x_trans_quant_scale,
+            w_fp8,
+            tokens_per_expert,
+        )
+        return swiglu_backward(gate_up, dx), dw, None
 
 
 # Use torch._dynamo.allow_in_graph to allow the fwd out is a Float8Tensor but the
@@ -220,6 +361,7 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
         num_routed_experts: int,
         moe_bias: bool = False,
         ep_mesh: DeviceMesh | None = None,
+        enable_fused_moe_activation: bool = False,
     ) -> None:
         super().__init__()
 
@@ -234,6 +376,7 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.num_routed_experts = num_routed_experts
+        self.enable_fused_moe_activation = enable_fused_moe_activation
         self.ori_shape = (num_routed_experts, out_features, in_features)
         self.ori_local_shape = (
             (num_routed_experts // ep_mesh.size(), out_features, in_features)
@@ -275,9 +418,8 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
                 f"but got {weight.shape}."
             )
 
-    def forward(self, input: torch.Tensor, tokens_per_expert, decoding: bool = False) -> torch.Tensor:
+    def _prepare_weight_fp8(self) -> Float8Tensor:
         weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
-
         self._check_shape(weight)
 
         if tensor_already_casted_to_fp8(weight):
@@ -288,11 +430,28 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
         else:
             weight = weight.view(*self.ori_local_shape)
             weight_fp8 = weight_to_per_block_float8_dynamic.apply(weight, torch.float8_e4m3fn, 128)
+        return weight_fp8
+
+    def forward(self, input: torch.Tensor, tokens_per_expert, decoding: bool = False) -> torch.Tensor:
+        weight_fp8 = self._prepare_weight_fp8()
 
         orig_shape = input.shape
         num_tokens = input.numel() // input.shape[-1]
         input = input.view(num_tokens, input.shape[-1])
-        out = fp8_gmm_weight_per_block_act_per_tile.apply(input, weight_fp8, tokens_per_expert)
+        out = fp8_gmm_weight_per_block_act_per_tile.apply(
+            input, weight_fp8, tokens_per_expert, self.enable_fused_moe_activation
+        )
+        out = out.view(*orig_shape[:-1], self.out_features)
+        return out
+
+    def forward_fused_moe_act(self, gate_up: torch.Tensor, tokens_per_expert) -> torch.Tensor:
+        weight_fp8 = self._prepare_weight_fp8()
+        orig_shape = gate_up.shape
+        num_tokens = gate_up.numel() // gate_up.shape[-1]
+        gate_up = gate_up.view(num_tokens, gate_up.shape[-1])
+        out = fp8_gmm_weight_per_block_act_per_tile_fused_swiglu.apply(
+            gate_up, weight_fp8, tokens_per_expert
+        )
         out = out.view(*orig_shape[:-1], self.out_features)
         return out
 

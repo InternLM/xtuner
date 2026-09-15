@@ -62,7 +62,12 @@ def build_grouped_linear(
         return GroupedLinear(in_features, out_features, num_routed_experts, moe_bias=moe_bias, ep_mesh=ep_mesh)
     elif float8_cfg.scaling_granularity_grouped_gemm == ScalingGranularity.TILEWISE:
         return TileWiseFloat8GroupedLinear(
-            in_features, out_features, num_routed_experts, moe_bias=moe_bias, ep_mesh=ep_mesh
+            in_features,
+            out_features,
+            num_routed_experts,
+            moe_bias=moe_bias,
+            ep_mesh=ep_mesh,
+            enable_fused_moe_activation=float8_cfg.enable_fused_moe_activation,
         )
     else:
         raise NotImplementedError(
