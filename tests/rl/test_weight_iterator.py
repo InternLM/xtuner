@@ -207,6 +207,7 @@ def test_ipc_hf_weight_batches_follow_rollout_expert_topology(
             RolloutWeightUpdateTarget(
                 endpoint_rank=0,
                 update_ranks=tuple(range(max(rollout_ep, rollout_tp))),
+                inference_engine_ranks=tuple(range(max(rollout_ep, rollout_tp))),
                 server_url="http://rollout",
                 lifecycle_state="active",
             ),
