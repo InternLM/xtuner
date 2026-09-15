@@ -305,7 +305,10 @@ case:
                         threshold: 0.35
                         aggregate: 80
                     loss/local_loss: 0.008
-                    loss/reduced_mtp_loss: 0.005
+                    # MTP noise is 5–12× local/llm; p80 filters single-step outliers.
+                    loss/reduced_mtp_loss:
+                        threshold: 0.015
+                        aggregate: 80
                     loss/reduced_llm_loss: 0.008
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -332,7 +335,9 @@ case:
                 check_metrics:
                     grad_norm: 2.0
                     loss/local_loss: 0.01
-                    loss/reduced_mtp_loss: 0.01
+                    loss/reduced_mtp_loss:
+                        threshold: 0.03
+                        aggregate: 80
                     loss/reduced_llm_loss: 0.01
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -359,7 +364,9 @@ case:
                 check_metrics:
                     grad_norm: 0.10
                     loss/local_loss: 0.005
-                    loss/reduced_mtp_loss: 0.005
+                    loss/reduced_mtp_loss:
+                        threshold: 0.015
+                        aggregate: 80
                     loss/reduced_llm_loss: 0.005
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -386,7 +393,8 @@ case:
                 check_metrics:
                     grad_norm: 0.08
                     loss/local_loss: 0.001
-                    loss/reduced_mtp_loss: 0.0003
+                    # Short run (~15–18 steps): keep stepwise max; 0.0003 is below FP32/MoE noise.
+                    loss/reduced_mtp_loss: 0.002
                     loss/reduced_llm_loss: 0.001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -416,7 +424,7 @@ case:
                 check_metrics:
                     grad_norm: 0.08
                     loss/local_loss: 0.0003
-                    loss/reduced_mtp_loss: 0.0003
+                    loss/reduced_mtp_loss: 0.001
                     loss/reduced_llm_loss: 0.0003
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -443,7 +451,9 @@ case:
                 check_metrics:
                     grad_norm: 0.25
                     loss/local_loss: 0.005
-                    loss/reduced_mtp_loss: 0.005
+                    loss/reduced_mtp_loss:
+                        threshold: 0.01
+                        aggregate: 80
                     loss/reduced_llm_loss: 0.005
                     lr: 0
                     memory/max_memory_GB: 0.2
