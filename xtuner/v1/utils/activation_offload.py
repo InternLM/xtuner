@@ -5,6 +5,8 @@ Original License: MIT
 Modifications: To enable compatibility on both GPU and NPU, replace all torch.npu with torch.cuda, and then use the transfer_to_npu interface
 """
 
+from typing import Any
+
 import torch
 from torch.autograd.graph import saved_tensors_hooks
 
@@ -207,6 +209,60 @@ class OffloadManager(metaclass=SingletonMeta):
         # Populated only when async_save_on_cpu is constructed with reserve_pin_memory=True;
         # buffer is reused across iterations as long as shape and dtype still match.
         self.pin_memory_cache: dict = {}
+        # Streams are registered by each saved-tensor hook so a step boundary can
+        # wait for pending asynchronous copies before dropping runtime references.
+        self.offload_streams: dict[str, list[Any]] = {}
+
+    def register_stream(self, group: str, stream: Any) -> None:
+        """Register a stream used by an offload group.
+
+        Args:
+            group (str): Offload group associated with the stream.
+            stream (Any): CUDA stream used for asynchronous copies.
+        """
+        streams = self.offload_streams.setdefault(group, [])
+        if all(stream is not registered_stream for registered_stream in streams):
+            streams.append(stream)
+
+    def has_runtime_state(self, group: str | None = None) -> bool:
+        """Return whether the manager holds live runtime offload entries.
+
+        Args:
+            group (str | None): Optional group to inspect.
+
+        Returns:
+            bool: Whether the selected group has runtime entries.
+        """
+        collections = (self.items, self.may_npu_tensors)
+        if group is None:
+            return any(collections_item for collections_item in collections)
+        prefix = f"{group}_"
+        return any(key.startswith(prefix) for collection in collections for key in collection)
+
+    def synchronize(self, group: str | None = None) -> None:
+        """Wait for asynchronous copies belonging to an offload group.
+
+        Args:
+            group (str | None): Optional group whose streams should be synchronized.
+        """
+        groups = self.offload_streams if group is None else {group: self.offload_streams.get(group, [])}
+        for streams in groups.values():
+            for stream in streams:
+                stream.synchronize()
+
+    def clear_step(self, group: str | None = None) -> None:
+        """Synchronize and clear runtime state at the end of a training step.
+
+        Pinned CPU buffers remain cached unless explicitly cleared, while GPU tensors and per-step counters are
+        released.
+
+        Args:
+            group (str | None): Optional group to clear. If omitted, clear all groups.
+        """
+        if not self.has_runtime_state(group):
+            return
+        self.synchronize(group)
+        self.clear(group=group)
 
     def get_cnt(self, block_idx, group="default"):
         if group not in self.getcnt:
@@ -355,6 +411,9 @@ class async_save_on_cpu(saved_tensors_hooks):
         prefetch=True,
         reserve_pin_memory: bool = False,
     ) -> None:
+        OffloadManager().register_stream(group, h2d_stream)
+        OffloadManager().register_stream(group, d2h_stream)
+
         def _pack_to_cpu(tensor):
             if not base_check_fn(tensor):
                 return tensor

@@ -49,6 +49,7 @@ from xtuner.v1.utils import (
     log_rank0,
     profile_time_and_memory,
 )
+from xtuner.v1.utils.activation_offload import OffloadManager
 from xtuner.v1.utils.grad_norm import cal_grad_norm
 
 
@@ -247,6 +248,10 @@ class TrainEngine:
             ProberList.after_micro_iter_forward()
 
         batch_forward_info = self.model.post_micro_batch_forward(micro_batch_results)
+        # Saved-tensor offload is scoped to one complete optimizer step. All
+        # microbatch backwards are done here, so no saved activation is needed
+        # after this point. Wait for async copies before dropping their references.
+        OffloadManager().clear_step()
         return TrainStepInfo(total_loss=total_loss.item(), **data_batch_info, **batch_forward_info)
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):
