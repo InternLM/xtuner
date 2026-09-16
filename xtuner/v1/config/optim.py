@@ -81,7 +81,7 @@ class MuonConfig(OptimConfig):
     remainder_strategy: Annotated[
         Literal["agrs", "pad_all2all"],
         Parameter(help="Communication strategy for Muon parameter batches smaller than the FSDP group size"),
-    ] = "agrs"
+    ] = "pad_all2all"
     clip_grad_mode: Annotated[
         Literal["all", "adamw_only"],
         Parameter(help="Gradient clipping policy: clip all parameters or only the AdamW parameter groups"),

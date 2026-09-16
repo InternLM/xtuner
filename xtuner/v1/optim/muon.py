@@ -307,8 +307,12 @@ class Muon(Optimizer):
             force the all-gather + reduce-scatter (AGRS) path for all sharded batches. Useful on cluster
             topologies where all-to-all is unreliable.
         remainder_strategy (str): Communication strategy for parameter batches smaller than world size.
-            ``"agrs"`` uses all-gather + reduce-scatter without batch padding. ``"pad_all2all"`` restores
-            the original FSDP2 Muon behavior by zero-padding the batch to world size and using all-to-all.
+            ``"pad_all2all"`` (default) zero-pads the batch to world size and uses all-to-all, so each rank
+            receives exactly one matrix. ``"agrs"`` uses all-gather + reduce-scatter without batch padding,
+            which gathers every matrix of the batch onto every rank: both its time and its peak memory grow
+            linearly with the batch size (measured at world size 8 on 96MB matrices: 14.9ms/624MB at 1
+            param rising to 20.1ms/2016MB at 7, against a flat ~15.2ms/<900MB for ``"pad_all2all"``).
+            Ignored when ``enable_all2all`` is False, where AGRS is the only available path.
         muon_split_sizes (dict[Tensor, tuple[int, ...]] | None): Logical row blocks that Muon should
             orthogonalize and scale independently. Used by GLM MuonSplit attention projections.
 
@@ -330,7 +334,7 @@ class Muon(Optimizer):
         use_triton: bool = False,
         newton_schulz_func: Callable | None = None,
         enable_all2all: bool = True,
-        remainder_strategy: Literal["agrs", "pad_all2all"] = "agrs",
+        remainder_strategy: Literal["agrs", "pad_all2all"] = "pad_all2all",
         muon_split_sizes: dict[Tensor, tuple[int, ...]] | None = None,
     ):
         # Check hyperparameters
@@ -344,8 +348,8 @@ class Muon(Optimizer):
             raise ValueError(f"Invalid adjust_lr value: {adjust_lr}. Must be 'spectral_norm', 'rms_norm', or 'none'.")
         if remainder_strategy not in ("agrs", "pad_all2all"):
             raise ValueError(f"Invalid remainder_strategy: {remainder_strategy!r}; expected 'agrs' or 'pad_all2all'.")
-        if not enable_all2all and remainder_strategy == "pad_all2all":
-            raise ValueError("remainder_strategy='pad_all2all' requires enable_all2all=True.")
+        if not enable_all2all:
+            remainder_strategy = "agrs"
 
         # Default arguments for each param group
         defaults = dict(
