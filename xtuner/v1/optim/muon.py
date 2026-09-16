@@ -633,7 +633,7 @@ class Muon(Optimizer):
             mesh_groups = group_tensors_by_device_mesh_and_placements(group_params)
 
             for (device_mesh, placements), mesh_params in mesh_groups.items():
-                plan = self._resolve_mesh_comm_plan(device_mesh, placements, num_experts, mesh_params)
+                plan = self._resolve_mesh_comm_plan(device_mesh, placements, num_experts)
 
                 for params in create_param_batches(
                     mesh_params,
@@ -647,7 +647,6 @@ class Muon(Optimizer):
         device_mesh: DeviceMesh,
         placements: tuple[Placement, ...],
         num_experts: int,
-        mesh_params: Sequence[Tensor],
     ) -> _MuonMeshCommPlan:
         """Resolve the sharding topology and communication strategy shared by
         every batch drawn from this (device_mesh, placements) group.
@@ -718,6 +717,24 @@ class Muon(Optimizer):
         # Step 2: expert-locality optimizations — when an FSDP rank already holds complete
         # experts (or a whole expert is shared by just a few ranks), the full-group
         # all-to-all of step 3 can be replaced by something cheaper.
+        #
+        # Strategy cost, on GLM-5.2 (78 layers - 3 dense + 1 MTP = 76 fused expert weights,
+        # 256 experts, hidden 6144, moe_intermediate 2048) with fsdp_size=64 and EP=16: the
+        # w1w3 group counts num_experts = 2 * 256, so E = 512 / EP = 32 local experts, hence
+        # sub-groups of sg = fsdp_size / E = 2 ranks, one expert block = 2048x6144 = 25 MB in
+        # bf16 and a full FSDP-visible matrix M = E * block = 806 MB. Each entry is the
+        # transient allocated on *every* rank, and AsyncRuntime keeps 3 tasks in flight:
+        #
+        #   strategy            batch  transient per rank                       GLM-5.2
+        #   agrs (remainder)    R=12   ~4 * R * M (all-gather, reconstruct,     ~30-40 GB
+        #                              zeros_like per non-owned matrix,
+        #                              reduce-scatter copy)
+        #   all_to_all          64     ~4 * M + Newton-Schulz intermediates     ~3.2 GB
+        #   subgroup_allgather  1      ~4 * block                               ~100 MB
+        #
+        # E * sg == fsdp_size, so the sub-group path pays sg x the Newton-Schulz FLOPs
+        # (~0.1 s/step here) to save E x the memory — the compute penalty is smallest exactly
+        # where the memory pressure is highest.
         fsdp_size = device_mesh.size(sharded_mesh_dim)
 
         if ns_num_experts > 1 and ns_num_experts % fsdp_size == 0:
@@ -732,12 +749,13 @@ class Muon(Optimizer):
                 num_experts=ns_num_experts // fsdp_size,
             )
 
-        if ns_num_experts > 1 and fsdp_size % ns_num_experts == 0 and len(mesh_params) < fsdp_size:
+        if ns_num_experts > 1 and fsdp_size % ns_num_experts == 0:
             # Each expert spans a sub-group of ranks → sub-group all-gather, after which
-            # every rank holds exactly 1 complete expert. Guard: only when params can't fill
-            # a batch, otherwise batched all-to-all is more efficient (fewer kernel launches,
-            # better bandwidth utilization). Tasks still batch a single param (world_size=1)
-            # but communicate within the sub-group instead of the whole FSDP group.
+            # every rank holds exactly 1 complete expert. This is the intended MoE path no
+            # matter how many params the group holds: a rank only ever reconstructs a single
+            # expert, so peak memory stays bounded, whereas the step-3 all-to-all would
+            # reconstruct the whole multi-expert matrix. Tasks still batch a single param
+            # (world_size=1) but communicate within the sub-group, not the whole FSDP group.
             subgroup_size = fsdp_size // ns_num_experts
             return _MuonMeshCommPlan(
                 comm_strategy="subgroup_allgather",

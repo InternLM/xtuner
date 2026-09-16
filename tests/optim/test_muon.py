@@ -584,6 +584,66 @@ class TestMuonFSDP(DeterministicDDPTestCase):
                 msg=f"mismatch on '{name}': max_abs={abs_diff.max().item():.2e}, max_rel={rel_diff.max().item():.2e}",
             )
 
+    def test_muon_moe_uses_subgroup_allgather_when_params_fill_a_batch(self):
+        """MoE params whose experts span an FSDP sub-group must take the sub-group
+        all-gather path even when there are enough of them to fill a full batch.
+
+        Regression: the sub-group path used to be gated on ``len(params) < fsdp_size``, so a
+        deep MoE model (many layers -> many same-shape expert params) fell back to the
+        full-group all-to-all, which reconstructs the whole multi-expert matrix on one rank.
+        """
+        self.create_pg("cuda")
+        rank = dist.get_rank()
+        device = torch.device("cuda", rank % torch.cuda.device_count())
+        mesh = init_device_mesh("cuda", (4,), mesh_dim_names=("muon_subgroup.fsdp",))
+
+        fsdp_size = mesh.size(0)
+        num_experts, rows, cols = 2, 8, 4  # 2 experts over 4 ranks -> sub-groups of 2 ranks
+
+        # As many params as ranks: exactly one full batch, which used to force all-to-all.
+        params = []
+        expected_params = []
+        for index in range(fsdp_size):
+            values = torch.arange(rows * cols, dtype=torch.float32, device=device).reshape(rows, cols)
+            initial = (values / (rows * cols) + index * 0.25).to(torch.bfloat16)
+            gradient = torch.sin(values * 0.17 + index).to(torch.bfloat16)
+
+            param = nn.Parameter(distribute_tensor(initial, mesh, (Shard(0),)))
+            param.grad = distribute_tensor(gradient, mesh, (Shard(0),))
+            params.append(param)
+
+            update = zeropower_via_newtonschulz5(gradient, epsilon=1e-7, num_experts=num_experts)
+            expected_params.append(initial - update * 0.01)
+
+        ns_calls: list[tuple[tuple[int, ...], int]] = []
+
+        def track_newton_schulz(x, epsilon, num_experts):
+            ns_calls.append((tuple(x.shape), num_experts))
+            return zeropower_via_newtonschulz5(x, epsilon=epsilon, num_experts=num_experts)
+
+        optimizer = Muon(
+            [{"params": params, "num_experts": num_experts}],
+            lr=0.01,
+            weight_decay=0.0,
+            epsilon=1e-7,
+            adjust_lr="none",
+            newton_schulz_func=track_newton_schulz,
+        )
+        optimizer.step()
+
+        # Sub-group all-gather reconstructs one complete expert per param on every rank;
+        # all-to-all would instead hand a single rank the whole (rows, cols) matrix.
+        assert ns_calls == [((rows // num_experts, cols), 1)] * len(params)
+
+        local_rows = rows // fsdp_size
+        for param, expected in zip(params, expected_params):
+            torch.testing.assert_close(
+                param.data.to_local(),  # type: ignore[attr-defined]
+                expected[rank * local_rows : (rank + 1) * local_rows],
+                atol=1e-2,
+                rtol=1e-2,
+            )
+
     @parametrize.parametrize("remainder_strategy", ["agrs", "pad_all2all"])
     def test_muon_ep_fsdp_uses_batch_specific_fsdp_global_dimension(
         self, remainder_strategy: Literal["agrs", "pad_all2all"]
