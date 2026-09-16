@@ -4,11 +4,40 @@ from __future__ import annotations
 
 import math
 import os
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Protocol
 
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
+
+
+_PHASE_NVTX_ENABLED = (
+    os.getenv("XTUNER_NSYS_PHASE_NVTX", "0") == "1"
+    and torch.cuda.is_available()
+    and hasattr(torch.cuda, "nvtx")
+)
+
+
+class _PhaseNvtxRange:
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __enter__(self):
+        torch.cuda.nvtx.range_push(self.name)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        torch.cuda.nvtx.range_pop()
+
+
+def _phase_nvtx(name: str):
+    """Emit optional CPU-side NVTX ranges for phase-aligned Nsight traces."""
+    if not _PHASE_NVTX_ENABLED:
+        return nullcontext()
+    return _PhaseNvtxRange(name)
 
 
 if TYPE_CHECKING:
@@ -539,18 +568,18 @@ class UltraEPLayerRuntime:
         virtual_layer_id: int,
     ) -> None:
         """Build the replication placement from logical expert IDs."""
-        with torch.profiler.record_function("UltraEP::placement"):
+        with _phase_nvtx("UltraEP::update_placement"), torch.profiler.record_function("UltraEP::placement"):
             self._ensure_manager().update_placement_sparse(virtual_layer_id, logical_topk_ids)
 
     def reroute(self, logical_topk_ids: torch.Tensor, virtual_layer_id: int) -> torch.Tensor:
         """Return a dispatcher-only copy rewritten into physical expert IDs."""
-        with torch.profiler.record_function("UltraEP::reroute"):
+        with _phase_nvtx("UltraEP::reroute"), torch.profiler.record_function("UltraEP::reroute"):
             physical_topk_ids = logical_topk_ids.clone()
             self._ensure_manager().reroute_sparse(virtual_layer_id, physical_topk_ids)
         return physical_topk_ids
 
     def sync_weights(self, virtual_layer_id: int, *, async_finish: bool):
-        with torch.profiler.record_function("UltraEP::weight_sync_launch"):
+        with _phase_nvtx("UltraEP::weight_sync"), torch.profiler.record_function("UltraEP::weight_sync_launch"):
             manager = self._ensure_manager()
             fc1_weight, fc2_weight = self._current_expert_parameters()
             manager.refresh_master_weight_pointers(
@@ -574,7 +603,7 @@ class UltraEPLayerRuntime:
             events = self._weight_restore_events = {}
         if virtual_layer_id in events:
             raise RuntimeError(f"UltraEP weight restore for virtual layer slot {virtual_layer_id} is still in use")
-        with torch.profiler.record_function("UltraEP::restore_start"):
+        with _phase_nvtx("UltraEP::weight_restore_start"), torch.profiler.record_function("UltraEP::restore_start"):
             events[virtual_layer_id] = self.sync_weights(virtual_layer_id, async_finish=True)
 
     def finish_weight_restore(self, virtual_layer_id: int) -> None:
@@ -583,7 +612,7 @@ class UltraEPLayerRuntime:
         if events is None or virtual_layer_id not in events:
             raise RuntimeError(f"UltraEP weight restore for virtual layer slot {virtual_layer_id} was not started")
         event = events.pop(virtual_layer_id)
-        with torch.profiler.record_function("UltraEP::restore_wait"):
+        with _phase_nvtx("UltraEP::weight_restore_join"), torch.profiler.record_function("UltraEP::restore_wait"):
             if event is not None:
                 # The real UltraEP EventHandle exposes ``event=None`` for the
                 # synchronous path. Keep duck-typed fakes used by tests
@@ -618,13 +647,13 @@ class UltraEPLayerRuntime:
                 "the FSDP/autograd hook ordering is incompatible with replica grad-reduce"
             )
         manager = self._ensure_manager()
-        with torch.profiler.record_function("UltraEP::grad_stage"):
+        with _phase_nvtx("UltraEP::grad_stage"), torch.profiler.record_function("UltraEP::grad_stage"):
             manager.stage_master_gradients(
                 virtual_layer_id=virtual_layer_id,
                 fc1_grad=fc1_grad,
                 fc2_grad=fc2_grad,
             )
-        with torch.profiler.record_function("UltraEP::grad_reduce_launch"):
+        with _phase_nvtx("UltraEP::grad_reduce_start"), torch.profiler.record_function("UltraEP::grad_reduce_launch"):
             event = manager.grad_reduce(virtual_layer_id, async_finish=True)
         self._grad_reduce_events[virtual_layer_id] = (event, fc1_grad, fc2_grad)
 
@@ -636,10 +665,10 @@ class UltraEPLayerRuntime:
         if event is not None:
             # The real UltraEP EventHandle exposes ``event=None`` for the
             # synchronous path. Keep duck-typed test fakes working too.
-            with torch.profiler.record_function("UltraEP::grad_reduce_wait"):
+            with _phase_nvtx("UltraEP::grad_reduce_join"), torch.profiler.record_function("UltraEP::grad_reduce_wait"):
                 if not hasattr(event, "event") or event.event is not None:  # type: ignore[attr-defined]
                     event.current_stream_wait()  # type: ignore[attr-defined]
-        with torch.profiler.record_function("UltraEP::grad_bind"):
+        with _phase_nvtx("UltraEP::grad_bind"), torch.profiler.record_function("UltraEP::grad_bind"):
             reduced = self._ensure_manager().restore_master_gradients(
                 virtual_layer_id=virtual_layer_id,
                 fc1_grad=fc1_grad,
