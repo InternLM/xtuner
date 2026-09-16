@@ -1,6 +1,10 @@
-import torch
 import random
+
+import pytest
+import torch
+
 from xtuner.v1.ops.moe import get_group_gemm
+from xtuner.v1.ops.moe.cuda.group_gemm import triton_group_gemm
 
 
 def grouped_gemm_torch(x, w, tokens_per_expert):
@@ -64,3 +68,19 @@ def test_grouped_gemm_triton(monkeypatch):
         assert torch.allclose(out, out_ref, rtol=1e-2, atol=1e-2), "Output mismatch between Triton and PyTorch implementations"
         assert torch.allclose(x.grad, x_ref.grad, rtol=1e-2, atol=1e-2), "Gradient mismatch for input tensor"
         assert torch.allclose(w.grad, w_ref.grad, rtol=1e-2, atol=1e-2), "Gradient mismatch for weight tensor"
+
+
+def test_triton_group_gemm_rejects_weight_list():
+    x = torch.randn(3, 4)
+    weight = torch.randn(2, 6, 4)
+    counts = torch.tensor([1, 2, 1], dtype=torch.int64)
+    replica = torch.randn(6, 4)
+    replica_grad = torch.zeros_like(replica, dtype=torch.float32)
+    with pytest.raises(TypeError, match="TE-only"):
+        triton_group_gemm(
+            x,
+            weight,
+            counts,
+            replica_weight=(replica,),
+            replica_grad=(replica_grad,),
+        )

@@ -43,12 +43,23 @@ class FakeGroupedLinear:
         self.weight = torch.nn.Parameter(torch.zeros(shape, dtype=torch.bfloat16))
         self.configure_calls = []
         self.select_calls = []
+        self._ultra_ep_replica_weight = None
+        self._ultra_ep_replica_grad = None
+        self._ultra_ep_replica_weight_slots = None
+        self._ultra_ep_replica_grad_slots = None
 
     def configure_ultra_ep_buffers(self, replica_weight, replica_grad):
         self.configure_calls.append((replica_weight, replica_grad))
+        self._ultra_ep_replica_weight_slots = replica_weight
+        self._ultra_ep_replica_grad_slots = replica_grad
+        self.select_ultra_ep_slot(0)
 
     def select_ultra_ep_slot(self, slot):
         self.select_calls.append(slot)
+        if self._ultra_ep_replica_weight_slots is None:
+            return
+        self._ultra_ep_replica_weight = self._ultra_ep_replica_weight_slots[slot]
+        self._ultra_ep_replica_grad = self._ultra_ep_replica_grad_slots[slot]
 
 
 class FakeEvent:
@@ -995,6 +1006,38 @@ def test_ultra_ep_configure_buffers_selects_independent_microbatch_slot(monkeypa
         linear.select_ultra_ep_slot(2)
 
 
+def test_grouped_linear_uses_selected_module_slot(monkeypatch):
+    monkeypatch.setenv("XTUNER_GROUP_GEMM", "triton_dual")
+    seen: list[object] = []
+
+    def fake_gemm(
+        x,
+        weight,
+        tokens,
+        tokens_per_expert_cpu=None,
+        replica_weight=None,
+        replica_grad=None,
+    ):
+        seen.append(replica_weight)
+        return x @ weight[0].T
+
+    linear = GroupedLinear(4, 6, 2, group_gemm=fake_gemm)
+    replica_weight = torch.stack(
+        (
+            torch.full((1, 6, 4), 1.0, dtype=torch.bfloat16),
+            torch.full((1, 6, 4), 2.0, dtype=torch.bfloat16),
+        )
+    )
+    replica_grad = torch.zeros_like(replica_weight, dtype=torch.float32)
+    linear.configure_ultra_ep_buffers(replica_weight, replica_grad)
+    linear.select_ultra_ep_slot(1)
+
+    linear(torch.ones(3, 4), torch.tensor([2, 1]))
+    assert seen[0] is linear._ultra_ep_replica_weight
+    torch.testing.assert_close(seen[0], replica_weight[1])
+
+
+
 def test_ultra_ep_configure_buffers_rejects_cutlass_backend(monkeypatch):
     monkeypatch.setenv("XTUNER_GROUP_GEMM", "cutlass")
     linear = GroupedLinear(4, 6, 2)
@@ -1079,6 +1122,7 @@ def test_ultra_ep_layer_runtime_configures_buffers_and_refreshes_weight_pointers
     runtime.bind_virtual_layer_slot(7)
     assert fused_w1w3.select_calls[-1] == 1
     assert fused_w2.select_calls[-1] == 1
+    assert fused_w1w3._ultra_ep_replica_weight.data_ptr() == fused_w1w3._ultra_ep_replica_weight_slots[1].data_ptr()
 
 
 def test_ultra_ep_weight_restore_launch_and_join_are_async():
@@ -1086,13 +1130,13 @@ def test_ultra_ep_weight_restore_launch_and_join_are_async():
 
     runtime.start_weight_restore(7)
     assert manager.weight_sync_calls == [(7, True)]
-    assert fused_w1w3.select_calls == []
-    assert fused_w2.select_calls == []
+    assert fused_w1w3.select_calls == [0]
+    assert fused_w2.select_calls == [0]
 
     runtime.finish_weight_restore(7)
     assert manager.event_calls == [("wait", 7)]
-    assert fused_w1w3.select_calls == [1]
-    assert fused_w2.select_calls == [1]
+    assert fused_w1w3.select_calls == [0, 1]
+    assert fused_w2.select_calls == [0, 1]
     assert runtime._weight_restore_events == {}
 
 

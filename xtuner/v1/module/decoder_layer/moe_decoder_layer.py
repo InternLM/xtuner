@@ -29,6 +29,7 @@ from xtuner.v1.module.dispatcher import (
     CombineResult,
     DispatchResult,
     EPExecutionRuntime,
+    ExpertWeightLayout,
     PostDispatchResult,
     PreCombineResult,
     PreDispatchResult,
@@ -228,10 +229,32 @@ class MoEBlock(nn.Module):
         )
         self.moe_act = moe_act_fn_cfg.build()
 
-    def forward(self, x, tokens_per_expert, decoding, tokens_per_expert_cpu=None):
-        gate_up_out = self.fused_w1w3(x, tokens_per_expert, decoding, tokens_per_expert_cpu)
+    def forward(
+        self,
+        x,
+        tokens_per_expert,
+        decoding,
+        tokens_per_expert_cpu=None,
+        *,
+        weight_layout: ExpertWeightLayout | None = None,
+    ):
+        layout = weight_layout or ExpertWeightLayout()
+        trainable = layout.trainable_weights or (None, None)
+        gate_up_out = self.fused_w1w3(
+            x,
+            tokens_per_expert,
+            decoding,
+            tokens_per_expert_cpu,
+            trainable_weight=trainable[0],
+        )
         out = self.moe_act(gate_up_out, split_dim=-1)
-        res = self.fused_w2(out, tokens_per_expert, decoding, tokens_per_expert_cpu)
+        res = self.fused_w2(
+            out,
+            tokens_per_expert,
+            decoding,
+            tokens_per_expert_cpu,
+            trainable_weight=trainable[1],
+        )
         return res
 
 
@@ -489,6 +512,7 @@ class MoEDecoderLayer(nn.Module):
             post_dispatched["tokens_per_expert"],
             decoding=False,
             tokens_per_expert_cpu=post_dispatched.get("tokens_per_expert_cpu"),
+            weight_layout=post_dispatched.get("expert_weight_layout"),
         )
         # ProberList.before_combine(
         #     self.layer_idx,
@@ -645,6 +669,7 @@ class MoEDecoderLayer(nn.Module):
                 post_dispatched["tokens_per_expert"],
                 decoding=False,
                 tokens_per_expert_cpu=post_dispatched.get("tokens_per_expert_cpu"),
+                weight_layout=post_dispatched.get("expert_weight_layout"),
             )
 
             pre_combined = self.dispatcher.combine_preprocess(

@@ -42,6 +42,27 @@ def test_te_grouped_gemm_ultraep_replica_gradient(monkeypatch):
     assert replica_grad.dtype is torch.float32
 
 
+def test_te_grouped_gemm_accepts_replica_weight_list(monkeypatch):
+    monkeypatch.setenv("XTUNER_GROUP_GEMM", "te")
+    monkeypatch.setenv("XTUNER_TE_GEMM_BACKEND", "torch")
+    counts = torch.tensor([2, 0, 1, 2], dtype=torch.int64)
+    x = torch.randn(5, 4, requires_grad=True)
+    weight = torch.randn(3, 6, 4, requires_grad=True)
+    replica = torch.randn(6, 4)
+    replica_grad = torch.zeros_like(replica, dtype=torch.float32)
+    y = te_grouped_gemm(
+        x,
+        weight,
+        counts,
+        replica_weight=(replica,),
+        replica_grad=(replica_grad,),
+    )
+    reference = torch.cat((x[:2] @ weight[0].T, x[2:3] @ weight[2].T, x[3:] @ replica.T))
+    torch.testing.assert_close(y, reference)
+    y.sum().backward()
+    assert float(replica_grad.abs().sum()) > 0
+
+
 def test_te_grouped_gemm_prefers_host_counts(monkeypatch):
     monkeypatch.setenv("XTUNER_GROUP_GEMM", "te")
     monkeypatch.setenv("XTUNER_TE_GEMM_BACKEND", "torch")

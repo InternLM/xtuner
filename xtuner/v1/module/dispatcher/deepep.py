@@ -20,6 +20,7 @@ from . import XTUNER_DISPATCHER_DEBUG
 from .base import (
     CombineResult,
     DispatchResult,
+    ExpertWeightLayout,
     GenericDispatcher,
     PostCombineResult,
     PostDispatchResult,
@@ -508,6 +509,7 @@ class DeepEPDispatcher(
                 row_ids_map=row_ids_map,
                 tokens_per_expert=tokens_per_expert,
                 tokens_per_expert_cpu=tokens_per_expert_cpu,
+                expert_weight_layout=ExpertWeightLayout(),
             )
 
     @override

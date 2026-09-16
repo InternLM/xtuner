@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Protocol, Tuple
 
 import torch
@@ -10,8 +11,8 @@ class GroupGemmProtocol(Protocol):
         weights: torch.Tensor,
         split_sizes: torch.Tensor,
         tokens_per_expert_cpu: torch.Tensor | None = None,
-        replica_weight: torch.Tensor | None = None,
-        replica_grad: torch.Tensor | None = None,
+        replica_weight: torch.Tensor | Sequence[torch.Tensor] | None = None,
+        replica_grad: torch.Tensor | Sequence[torch.Tensor] | None = None,
     ) -> torch.Tensor: ...
 
 
@@ -37,8 +38,8 @@ def cpu_group_gemm(
     weights: torch.Tensor,
     split_sizes: torch.Tensor,
     tokens_per_expert_cpu: torch.Tensor | None = None,
-    replica_weight: torch.Tensor | None = None,
-    replica_grad: torch.Tensor | None = None,
+    replica_weight: torch.Tensor | Sequence[torch.Tensor] | None = None,
+    replica_grad: torch.Tensor | Sequence[torch.Tensor] | None = None,
 ) -> torch.Tensor:
     if replica_weight is not None:
         raise NotImplementedError("UltraEP grouped GEMM is CUDA-only")
