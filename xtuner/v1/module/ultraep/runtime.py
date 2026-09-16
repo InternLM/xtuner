@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import TYPE_CHECKING, Protocol
 
 import torch
@@ -52,11 +53,12 @@ class UltraEPManager:
             raise ValueError("UltraEP requires an EP process group with size > 1")
         if max_microbatches <= 0:
             raise ValueError("UltraEP requires max_microbatches > 0")
-        if dist.get_world_size() != group.size():
-            raise NotImplementedError(
-                "Xtuner UltraEP currently requires DP=1 (the EP group must cover the world); "
-                "FSDP gradient-reduction ordering for DP>1 is not implemented yet."
+        world_size = dist.get_world_size()
+        if world_size % group.size() != 0:
+            raise ValueError(
+                f"UltraEP EP group size {group.size()} must evenly divide world size {world_size}"
             )
+        self.dp_size = world_size // group.size()
 
         self.group = group
         self.num_layers = num_layers
@@ -65,39 +67,49 @@ class UltraEPManager:
         self.expert_fc1_numel = expert_fc1_numel
         self.expert_fc2_numel = expert_fc2_numel
         self.max_microbatches = max_microbatches
-        self.runtime: Manager = ultra_ep.Manager(
-            group=group,
-            num_layers=num_layers,
-            num_local_master_experts=num_local_master_experts,
-            num_local_redundant_experts=num_local_redundant_experts,
-            expert_fc1_numel=expert_fc1_numel,
-            expert_fc2_numel=expert_fc2_numel,
-            is_train=True,
-            explicitly_destroy=False,
-            max_microbatches=max_microbatches,
-            weight_data_dtype=torch.bfloat16,
-            grad_dtype=torch.float32,
-        )
-        # UltraEP's native grad-reduce kernel is FP32-only, while Xtuner FSDP
-        # keeps BF16 gradients beside BF16 expert parameters.  One staging
-        # pair is sufficient: backward joins each layer's async reduction
-        # before the preceding layer can start its own reduction.  Reusing the
-        # pair avoids allocating FP32 master-grad copies for every layer.
+        try:
+            self.runtime: Manager = ultra_ep.Manager(
+                group=group,
+                num_layers=num_layers,
+                num_local_master_experts=num_local_master_experts,
+                num_local_redundant_experts=num_local_redundant_experts,
+                expert_fc1_numel=expert_fc1_numel,
+                expert_fc2_numel=expert_fc2_numel,
+                is_train=True,
+                explicitly_destroy=False,
+                max_microbatches=max_microbatches,
+                weight_data_dtype=torch.bfloat16,
+                grad_dtype=torch.bfloat16,
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "UltraEP FSDP requires the native BF16 grad-reduce patch; "
+                "the loaded UltraEP extension rejected grad_dtype=torch.bfloat16"
+            ) from exc
+        # FSDP expert gradients and the native UltraEP grad-reduce path use
+        # BF16.  One staging pair is sufficient because the handoff join
+        # completes before the next layer claims the pair.
         device = torch.device("cuda", torch.cuda.current_device())
         self.master_fc1_grad_staging = torch.empty(
             num_local_master_experts,
             expert_fc1_numel,
-            dtype=torch.float32,
+            dtype=torch.bfloat16,
             device=device,
         )
         self.master_fc2_grad_staging = torch.empty(
             num_local_master_experts,
             expert_fc2_numel,
-            dtype=torch.float32,
+            dtype=torch.bfloat16,
             device=device,
         )
         self._staging_owner: int | None = None
         self._master_weight_ptr_hosts: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        # FSDP may call ``sync_weights`` repeatedly while the current
+        # unsharded view is still backed by the same allocation.  Keep the
+        # last addresses so pointer-pool refresh becomes a no-op in that
+        # case.  This does not cache weight contents: ``weight_sync`` still
+        # runs every time and copies the current values to replica slots.
+        self._master_weight_ptr_values: dict[int, tuple[tuple[int, ...], tuple[int, ...]]] = {}
 
     @property
     def local_replica_fc1_weight_buffer(self) -> torch.Tensor:
@@ -139,10 +151,10 @@ class UltraEPManager:
         fc1_grad: torch.Tensor,
         fc2_grad: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Cast Xtuner's local BF16 master grads into shared FP32 staging."""
+        """Copy the current master BF16 gradients into shared staging."""
         if self._staging_owner is not None:
             raise RuntimeError(
-                "UltraEP FP32 master-grad staging is still owned by virtual layer "
+                "UltraEP BF16 master-grad staging is still owned by virtual layer "
                 f"{self._staging_owner}; attempted to start {virtual_layer_id}"
             )
         local_fc1 = self._local(fc1_grad).view(self.num_local_master_experts, -1)
@@ -151,9 +163,10 @@ class UltraEPManager:
             local_fc1.numel() != self.master_fc1_grad_staging.numel()
             or local_fc2.numel() != self.master_fc2_grad_staging.numel()
         ):
-            raise ValueError("Master expert gradient shapes do not match UltraEP FP32 staging")
-        self.master_fc1_grad_staging.copy_(local_fc1)
-        self.master_fc2_grad_staging.copy_(local_fc2)
+            raise ValueError("Master expert gradient shapes do not match UltraEP BF16 staging")
+        with torch.profiler.record_function("UltraEP::staging_copy"):
+            self.master_fc1_grad_staging.copy_(local_fc1)
+            self.master_fc2_grad_staging.copy_(local_fc2)
         self._staging_owner = virtual_layer_id
         return self.master_fc1_grad_staging, self.master_fc2_grad_staging
 
@@ -163,15 +176,13 @@ class UltraEPManager:
         virtual_layer_id: int,
         fc1_grad: torch.Tensor,
         fc2_grad: torch.Tensor,
-    ) -> None:
-        """Cast the reduced FP32 staging tensors back to Xtuner FSDP grads."""
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the completed staging tensors and release the slot."""
         if self._staging_owner != virtual_layer_id:
             raise RuntimeError(f"UltraEP staging owner is {self._staging_owner}, not {virtual_layer_id}")
-        local_fc1 = self._local(fc1_grad).view(self.num_local_master_experts, -1)
-        local_fc2 = self._local(fc2_grad).view(self.num_local_master_experts, -1)
-        local_fc1.copy_(self.master_fc1_grad_staging)
-        local_fc2.copy_(self.master_fc2_grad_staging)
+        result = (self.master_fc1_grad_staging, self.master_fc2_grad_staging)
         self._staging_owner = None
+        return result
 
     def register_master_pointers(
         self,
@@ -189,8 +200,8 @@ class UltraEPManager:
 
         fc1_grad = self._local(fc1_grad).view(self.num_local_master_experts, -1)
         fc2_grad = self._local(fc2_grad).view(self.num_local_master_experts, -1)
-        if fc1_grad.dtype != torch.float32 or fc2_grad.dtype != torch.float32:
-            raise TypeError(f"UltraEP requires FP32 master grads, got {fc1_grad.dtype} and {fc2_grad.dtype}")
+        if fc1_grad.dtype != torch.bfloat16 or fc2_grad.dtype != torch.bfloat16:
+            raise TypeError(f"UltraEP requires BF16 master grads, got {fc1_grad.dtype} and {fc2_grad.dtype}")
         fc1_grads = list(fc1_grad.unbind(0))
         fc2_grads = list(fc2_grad.unbind(0))
 
@@ -219,6 +230,7 @@ class UltraEPManager:
                 pin_memory=True,
             ),
         )
+        self._master_weight_ptr_values.pop(layer_id, None)
 
     def refresh_master_weight_pointers(
         self,
@@ -229,22 +241,33 @@ class UltraEPManager:
     ) -> None:
         """Refresh only FSDP-movable master-weight addresses in cached
         pools."""
-        hosts = self._master_weight_ptr_hosts.get(layer_id)
-        if hosts is None:
-            raise RuntimeError(f"UltraEP master pointer pool for layer {layer_id} is not registered")
-        fc1_weight = self._local(fc1_weight).view(self.num_local_master_experts, -1)
-        fc2_weight = self._local(fc2_weight).view(self.num_local_master_experts, -1)
-        fc1_host, fc2_host = hosts
-        for expert_idx in range(self.num_local_master_experts):
-            fc1_host[expert_idx] = fc1_weight[expert_idx].data_ptr()
-            fc2_host[expert_idx] = fc2_weight[expert_idx].data_ptr()
+        with torch.profiler.record_function("UltraEP::pointer_refresh"):
+            hosts = self._master_weight_ptr_hosts.get(layer_id)
+            if hosts is None:
+                raise RuntimeError(f"UltraEP master pointer pool for layer {layer_id} is not registered")
+            fc1_weight = self._local(fc1_weight).view(self.num_local_master_experts, -1)
+            fc2_weight = self._local(fc2_weight).view(self.num_local_master_experts, -1)
+            fc1_ptrs = tuple(weight.data_ptr() for weight in fc1_weight.unbind(0))
+            fc2_ptrs = tuple(weight.data_ptr() for weight in fc2_weight.unbind(0))
+            if self._master_weight_ptr_values.get(layer_id) == (fc1_ptrs, fc2_ptrs):
+                # Keep a distinct range so Nsight can report the cache hit
+                # rate without counting this fast path as a device copy.
+                if os.getenv("XTUNER_NSYS_POINTER_NVTX", "0") == "1" and torch.cuda.is_available():
+                    torch.cuda.nvtx.range_push("UltraEP::pointer_refresh_skip")
+                    torch.cuda.nvtx.range_pop()
+                return
+            fc1_host, fc2_host = hosts
+            for expert_idx, (fc1_ptr, fc2_ptr) in enumerate(zip(fc1_ptrs, fc2_ptrs, strict=True)):
+                fc1_host[expert_idx] = fc1_ptr
+                fc2_host[expert_idx] = fc2_ptr
 
-        fc1_device = self.runtime.local_master_fc1_weight_ptr_pool[layer_id]
-        fc2_device = self.runtime.local_master_fc2_weight_ptr_pool[layer_id]
-        if fc1_device is None or fc2_device is None:
-            raise RuntimeError(f"UltraEP device pointer pool for layer {layer_id} is unavailable")
-        fc1_device.copy_(fc1_host, non_blocking=True)
-        fc2_device.copy_(fc2_host, non_blocking=True)
+            fc1_device = self.runtime.local_master_fc1_weight_ptr_pool[layer_id]
+            fc2_device = self.runtime.local_master_fc2_weight_ptr_pool[layer_id]
+            if fc1_device is None or fc2_device is None:
+                raise RuntimeError(f"UltraEP device pointer pool for layer {layer_id} is unavailable")
+            fc1_device.copy_(fc1_host, non_blocking=True)
+            fc2_device.copy_(fc2_host, non_blocking=True)
+            self._master_weight_ptr_values[layer_id] = (fc1_ptrs, fc2_ptrs)
 
     def weight_sync(self, layer_id: int, *, async_finish: bool) -> EventHandle:
         return self.runtime.weight_sync(layer_id=layer_id, async_finish=async_finish)
@@ -284,6 +307,8 @@ class UltraEPManagerProvider:
         self.num_redundant_experts_per_rank = num_redundant_experts_per_rank
         self.max_microbatches = max_microbatches
         self._manager: UltraEPManager | None = None
+        self._state = "CREATED"
+        self._fsdp_root = None
 
     @classmethod
     def from_xtuner_config(
@@ -315,6 +340,93 @@ class UltraEPManagerProvider:
             max_microbatches=max_microbatches,
         )
 
+    def _requires_reshard_after_forward(self, fsdp_config) -> bool:
+        """Return whether UltraEP needs a closed FSDP unshard window.
+
+        EP4×DP2 (and HSDP) shards the same local expert across a DP mesh.
+        That path was only validated with ``reshard_after_forward=True``.
+        EP-only (``world_size == ep_size``) historically keeps parameters
+        unsharded after forward; UltraEP refreshes FSDP-movable master
+        pointers instead of requiring a reshard.
+        """
+        if getattr(fsdp_config, "hsdp_sharding_size", None):
+            return True
+        ep_size = int(getattr(fsdp_config, "ep_size", 0) or 0)
+        if ep_size <= 0 or not (dist.is_available() and dist.is_initialized()):
+            return False
+        world_size = dist.get_world_size()
+        if world_size % ep_size != 0:
+            raise ValueError(
+                f"UltraEP FSDP ep_size={ep_size} must evenly divide world_size={world_size}"
+            )
+        return world_size > ep_size
+
+    def validate_before_fsdp(self, fsdp_config) -> None:
+        """Validate the FSDP settings required by the BF16 handoff path."""
+        if fsdp_config.param_dtype is not torch.bfloat16 or fsdp_config.reduce_dtype is not torch.bfloat16:
+            raise ValueError("UltraEP FSDP requires param_dtype=reduce_dtype=torch.bfloat16")
+        if fsdp_config.cpu_offload:
+            raise ValueError("UltraEP FSDP does not support CPU offload")
+        if not getattr(fsdp_config, "requires_grad", True):
+            raise ValueError("UltraEP FSDP requires requires_grad=True")
+        if self._requires_reshard_after_forward(fsdp_config) and not getattr(
+            fsdp_config, "reshard_after_forward", True
+        ):
+            ep_size = int(getattr(fsdp_config, "ep_size", 0) or 0)
+            world = dist.get_world_size() if dist.is_available() and dist.is_initialized() else "<unknown>"
+            raise ValueError(
+                "UltraEP FSDP with DP>1 requires reshard_after_forward=True "
+                f"(ep_size={ep_size}, world_size={world})"
+            )
+        if getattr(fsdp_config, "recompute_ratio", 0) > 0:
+            raise ValueError("UltraEP FSDP does not support activation recompute")
+
+    def install_after_fsdp(self, *, fsdp_root, targets) -> None:
+        """Install the FSDP identity seam before exposing native resources.
+
+        Binding and state transition are transactional: a failed binding leaves
+        the provider in CREATED, so a later retry cannot observe a half-installed
+        provider or materialize a manager against stale parameter identities.
+        """
+        if self._state == "CLOSED":
+            raise RuntimeError("UltraEP provider is closed")
+        if self._state == "CREATED":
+            from .fsdp_expert_binding import install_ultraep_fsdp_binding
+
+            binding = install_ultraep_fsdp_binding(fsdp_root=fsdp_root, targets=targets)
+            self._fsdp_root = fsdp_root
+            self.fsdp_binding = binding
+            self._state = "INSTALLED"
+        elif self._fsdp_root is not fsdp_root:
+            raise RuntimeError("UltraEP provider was installed on a different FSDP root")
+
+    def ensure_materialized(self) -> UltraEPManager:
+        if self._state == "CLOSED":
+            raise RuntimeError("UltraEP provider is closed")
+        if self._state == "CREATED":
+            raise RuntimeError(
+                "UltraEP provider must be installed after FSDP setup before materialization"
+            )
+        manager = self.get_manager()
+        if self._state == "INSTALLED":
+            self._state = "MATERIALIZED"
+        return manager
+
+    def close(self) -> None:
+        if self._state == "CLOSED":
+            return
+        # Remove only the XTuner/FSDP identity seam.  Native UltraEP owns a
+        # process-level NVSHMEM singleton, so its manager, registry entry and
+        # staging tensors must stay alive until process teardown.
+        binding = getattr(self, "fsdp_binding", None)
+        if binding is not None:
+            from .fsdp_expert_binding import uninstall_ultraep_fsdp_binding
+
+            uninstall_ultraep_fsdp_binding(binding)
+            self.fsdp_binding = None
+        self._state = "CLOSED"
+        self._fsdp_root = None
+
     def configure_max_microbatches(self, requested: int) -> None:
         """Set the native virtual-layer capacity before materialization.
 
@@ -340,6 +452,12 @@ class UltraEPManagerProvider:
         return self.num_logical_experts + self.group.size() * self.num_redundant_experts_per_rank
 
     def get_manager(self) -> UltraEPManager:
+        if self._state == "CLOSED":
+            raise RuntimeError("UltraEP provider is closed")
+        if self._state == "CREATED":
+            raise RuntimeError(
+                "UltraEP provider must be installed after FSDP setup before materialization"
+            )
         if self._manager is None:
             self._manager = get_or_create_ultra_ep_manager(
                 group=self.group,
@@ -434,10 +552,11 @@ class UltraEPLayerRuntime:
     def sync_weights(self, virtual_layer_id: int, *, async_finish: bool):
         with torch.profiler.record_function("UltraEP::weight_sync_launch"):
             manager = self._ensure_manager()
+            fc1_weight, fc2_weight = self._current_expert_parameters()
             manager.refresh_master_weight_pointers(
                 layer_id=self.layer_id,
-                fc1_weight=self.fused_w1w3.weight,
-                fc2_weight=self.fused_w2.weight,
+                fc1_weight=fc1_weight,
+                fc2_weight=fc2_weight,
             )
             return manager.weight_sync(virtual_layer_id, async_finish=async_finish)
 
@@ -475,11 +594,24 @@ class UltraEPLayerRuntime:
             # ensures the following grouped GEMM DGrad reads this vid's data.
             self.bind_virtual_layer_slot(virtual_layer_id)
 
+    @staticmethod
+    def _bind_staging_grad(parameter: torch.Tensor, staging: torch.Tensor) -> None:
+        """Bind a BF16 staging view as the parameter gradient for FSDP."""
+        local_parameter = parameter.to_local() if isinstance(parameter, DTensor) else parameter
+        local_grad = staging.view_as(local_parameter)
+        if isinstance(parameter, DTensor):
+            parameter.grad = DTensor.from_local(
+                local_grad, parameter.device_mesh, parameter.placements, run_check=False
+            )
+        else:
+            parameter.grad = local_grad
+
     def start_grad_reduce(self, virtual_layer_id: int) -> None:
         if virtual_layer_id in self._grad_reduce_events:
             raise RuntimeError(f"UltraEP virtual layer slot {virtual_layer_id} is still in use")
-        fc1_grad = self.fused_w1w3.weight.grad
-        fc2_grad = self.fused_w2.weight.grad
+        fc1_weight, fc2_weight = self._current_expert_parameters()
+        fc1_grad = fc1_weight.grad
+        fc2_grad = fc2_weight.grad
         if fc1_grad is None or fc2_grad is None:
             raise RuntimeError(
                 f"UltraEP master gradients are unavailable at layer {self.layer_id}; "
@@ -503,17 +635,37 @@ class UltraEPLayerRuntime:
         event, fc1_grad, fc2_grad = state
         if event is not None:
             # The real UltraEP EventHandle exposes ``event=None`` for the
-            # synchronous path.  Keep the small duck-typed fake used by the
-            # unit tests (which only has ``current_stream_wait``) working too.
+            # synchronous path. Keep duck-typed test fakes working too.
             with torch.profiler.record_function("UltraEP::grad_reduce_wait"):
                 if not hasattr(event, "event") or event.event is not None:  # type: ignore[attr-defined]
                     event.current_stream_wait()  # type: ignore[attr-defined]
-            with torch.profiler.record_function("UltraEP::grad_restore"):
-                self._ensure_manager().restore_master_gradients(
-                    virtual_layer_id=virtual_layer_id,
-                    fc1_grad=fc1_grad,
-                    fc2_grad=fc2_grad,
-                )
+        with torch.profiler.record_function("UltraEP::grad_bind"):
+            reduced = self._ensure_manager().restore_master_gradients(
+                virtual_layer_id=virtual_layer_id,
+                fc1_grad=fc1_grad,
+                fc2_grad=fc2_grad,
+            )
+            # Legacy test doubles may perform the in-place copy and return None.
+            if reduced is not None:
+                fc1_staging, fc2_staging = reduced
+                from .fsdp_expert_binding import fsdp_binding_installed
+
+                if fsdp_binding_installed((self.fused_w1w3, self.fused_w2)):
+                    from .fsdp_expert_binding import (
+                        fsdp_current_unsharded_expert_parameters,
+                        writeback_fsdp_unsharded_expert_gradients,
+                    )
+
+                    parameters = fsdp_current_unsharded_expert_parameters(
+                        (self.fused_w1w3, self.fused_w2)
+                    )
+                    writeback_fsdp_unsharded_expert_gradients(
+                        parameters,
+                        (fc1_staging, fc2_staging),
+                    )
+                else:
+                    self._bind_staging_grad(self.fused_w1w3.weight, fc1_staging)
+                    self._bind_staging_grad(self.fused_w2.weight, fc2_staging)
 
     def _ensure_manager(self) -> UltraEPManager:
         manager = self.manager_provider.get_manager()
@@ -557,15 +709,27 @@ class UltraEPLayerRuntime:
             self._buffers_configured = True
 
         if not self._master_pointers_registered:
+            fc1_weight, fc2_weight = self._current_expert_parameters()
             manager.register_master_pointers(
                 layer_id=self.layer_id,
-                fc1_weight=self.fused_w1w3.weight,
-                fc2_weight=self.fused_w2.weight,
+                fc1_weight=fc1_weight,
+                fc2_weight=fc2_weight,
                 fc1_grad=manager.master_fc1_grad_staging,
                 fc2_grad=manager.master_fc2_grad_staging,
             )
             self._master_pointers_registered = True
         return manager
+
+    def _current_expert_parameters(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Resolve the current FSDP views when the optional seam is installed."""
+        try:
+            from .fsdp_expert_binding import fsdp_current_unsharded_expert_parameters
+
+            return fsdp_current_unsharded_expert_parameters((self.fused_w1w3, self.fused_w2))
+        except RuntimeError as exc:
+            if "binding is not installed" not in str(exc):
+                raise
+            return self.fused_w1w3.weight, self.fused_w2.weight
 
     def bind_virtual_layer_slot(self, virtual_layer_id: int) -> None:
         """Select the replica slices used by this virtual layer's GEMMs."""
