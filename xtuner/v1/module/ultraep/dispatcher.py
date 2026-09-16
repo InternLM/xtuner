@@ -9,7 +9,7 @@ import torch
 from torch.autograd.function import Function
 from typing_extensions import override
 
-from xtuner.v1.module.dispatcher.base import GenericDispatcher
+from xtuner.v1.module.dispatcher.base import ExpertWeightLayout, GenericDispatcher
 
 from .runtime import UltraEPLayerRuntime, UltraEPModelRuntime
 
@@ -234,6 +234,9 @@ class UltraEPDispatcher(
             with torch.profiler.record_function("UltraEP::forward_weight_sync_wait"):
                 call.weight_sync_event.current_stream_wait()  # type: ignore[attr-defined]
         self._layer.bind_virtual_layer_slot(call.virtual_layer_id)
+        post_dispatched = dict(post_dispatched)
+        # Empty envelope: replica slots stay on the module after bind.
+        post_dispatched["expert_weight_layout"] = ExpertWeightLayout()
         return post_dispatched
 
     @override

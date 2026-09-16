@@ -19,6 +19,7 @@ from . import XTUNER_DISPATCHER_DEBUG
 from .base import (
     CombineResult,
     DispatchResult,
+    ExpertWeightLayout,
     GenericDispatcher,
     PostCombineResult,
     PostDispatchResult,
@@ -398,6 +399,7 @@ class MoEAGRSDispatcher(
             hidden_states=permuted_hidden_states,
             row_ids_map=row_ids_map,
             tokens_per_expert=tokens_per_expert,
+            expert_weight_layout=ExpertWeightLayout(),
         )
 
     @override

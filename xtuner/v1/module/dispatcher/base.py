@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import (
     Generic,
     Literal,
+    NamedTuple,
     TypeAlias,
     TypeVar,
 )
@@ -15,6 +16,21 @@ from .expert_tp import ExpertTP
 
 
 HiddenStates: TypeAlias = torch.Tensor
+ProjectionPair: TypeAlias = tuple[torch.Tensor, torch.Tensor]
+
+
+class ExpertWeightLayout(NamedTuple):
+    """Optional call-local master-weight alias at the dispatcher/MLP seam.
+
+    MoonEP fills ``trainable_weights`` with a packed ``[2B]`` alias; dW
+    returns through autograd. UltraEP, DeepEP and the other transports leave
+    it ``None``: inherent weights stay on the FSDP Parameter, and UltraEP
+    replica slots stay on the Manager / ``GroupedLinear`` module attributes.
+    Those live buffers must not cross into compiled ``MoEBlock`` as layout
+    tensors.
+    """
+
+    trainable_weights: ProjectionPair | None = None
 
 
 def _get_backward_pre_hook(backward_previous_event: torch.cuda.Event):
@@ -56,6 +72,9 @@ class PostDispatchResult(TypedDict):
             that already knows the routed counts on the host should publish them here so that
             expert kernels needing host-side group sizes can read them without a device-to-host
             copy and the stream synchronization it implies.
+        expert_weight_layout: Optional call-local master alias (MoonEP). Always
+            present because torch.compile does not support optional TypedDict keys.
+            UltraEP publishes an empty envelope.
         topk_weights: Expert routing weights used for scaling hidden states when combining results.
         handle: An object that facilitates the combination of expert outputs after processing.
     """
@@ -64,6 +83,7 @@ class PostDispatchResult(TypedDict):
     hidden_states: torch.Tensor
     tokens_per_expert: torch.Tensor
     tokens_per_expert_cpu: NotRequired[torch.Tensor]
+    expert_weight_layout: ExpertWeightLayout
 
 
 class PreCombineResult(TypedDict):
@@ -429,6 +449,7 @@ class NaiveDispatcher(
                 hidden_states=hidden_states,
                 row_ids_map=row_id_maps,
                 tokens_per_expert=tokens_per_expert,
+                expert_weight_layout=ExpertWeightLayout(),
             )
 
     @override

@@ -225,9 +225,15 @@ class GroupedLinear(nn.Module):
         tokens_per_expert: torch.Tensor,
         decoding: bool = False,
         tokens_per_expert_cpu: torch.Tensor | None = None,
+        *,
+        trainable_weight: torch.Tensor | None = None,
     ):
-        weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
-        weight = weight.view(-1, self.local_out_features, self.local_in_features)
+        if trainable_weight is None:
+            weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
+            weight = weight.view(-1, self.local_out_features, self.local_in_features)
+        else:
+            weight = trainable_weight
+
         out = self.group_gemm(
             x,
             weight,

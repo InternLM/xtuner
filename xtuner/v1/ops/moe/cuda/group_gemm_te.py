@@ -22,6 +22,7 @@ Environment variables:
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from typing import List
 
 import torch
@@ -60,14 +61,23 @@ def _require_package() -> None:
         raise ImportError(_INSTALL_HINT) from _IMPORT_ERROR
 
 
+def _replica_as_list(replica_weight: torch.Tensor | Sequence[torch.Tensor] | None) -> list[torch.Tensor]:
+    if replica_weight is None:
+        return []
+    if isinstance(replica_weight, torch.Tensor):
+        if replica_weight.ndim != 3:
+            raise ValueError("replica_weight tensor must have shape [R,N,K]")
+        return list(replica_weight.unbind(0))
+    return list(replica_weight)
+
+
 def _physical_weights(
-    master_weight: torch.Tensor, replica_weight: torch.Tensor | None
+    master_weight: torch.Tensor, replica_weight: torch.Tensor | Sequence[torch.Tensor] | None
 ) -> list[torch.Tensor]:
-    if replica_weight is not None:
-        if replica_weight.ndim != 3 or replica_weight.shape[1:] != master_weight.shape[1:]:
-            raise ValueError("replica_weight must have shape [R,N,K] matching master weights")
-        return list(master_weight.unbind(0)) + list(replica_weight.unbind(0))
-    return list(master_weight.unbind(0))
+    replicas = _replica_as_list(replica_weight)
+    if replicas and replicas[0].shape != master_weight.shape[1:]:
+        raise ValueError("replica_weight must have shape [R,N,K] or a list of [N,K] matching master weights")
+    return list(master_weight.unbind(0)) + replicas
 
 
 def _counts_list(m_splits: torch.Tensor | list[int], groups: int) -> list[int]:
@@ -171,8 +181,8 @@ class TEGroupedGemm(torch.autograd.Function):
         master_weight: torch.Tensor,
         tokens_per_expert: torch.Tensor,
         tokens_per_expert_cpu: torch.Tensor | None = None,
-        replica_weight: torch.Tensor | None = None,
-        replica_grad: torch.Tensor | None = None,
+        replica_weight: torch.Tensor | Sequence[torch.Tensor] | None = None,
+        replica_grad: torch.Tensor | Sequence[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         if master_weight.ndim != 3:
             raise ValueError("master_weight must have shape [E,N,K]")
@@ -198,7 +208,7 @@ class TEGroupedGemm(torch.autograd.Function):
         master_dw = torch.empty_like(master_weight)
         wgrad_list = list(master_dw.unbind(0))
         if ctx.replica_grad is not None:
-            wgrad_list.extend(ctx.replica_grad.unbind(0))
+            wgrad_list.extend(_replica_as_list(ctx.replica_grad))
         _native_wgrad_op(x.contiguous(), grad_output.contiguous(), counts, wgrad_list)
         return dx, master_dw, None, None, None, None
 
@@ -208,8 +218,8 @@ def te_grouped_gemm(
     master_weight: torch.Tensor,
     tokens_per_expert: torch.Tensor,
     tokens_per_expert_cpu: torch.Tensor | None = None,
-    replica_weight: torch.Tensor | None = None,
-    replica_grad: torch.Tensor | None = None,
+    replica_weight: torch.Tensor | Sequence[torch.Tensor] | None = None,
+    replica_grad: torch.Tensor | Sequence[torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Compute one TE-style grouped GEMM over master and optional replica weights."""
 
