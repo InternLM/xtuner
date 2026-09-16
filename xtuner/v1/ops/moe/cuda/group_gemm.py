@@ -20,7 +20,14 @@ class GroupedGemm(torch.autograd.Function):
         return dx, dw, None
 
 
-def triton_group_gemm(x, w, tokens_per_expert):
+def triton_group_gemm(
+    x,
+    w,
+    tokens_per_expert,
+    tokens_per_expert_cpu=None,
+    replica_weight=None,
+    replica_grad=None,
+):
     """Grouped matrix multiplication (GMM) for expert models.
 
     Args:
@@ -31,6 +38,16 @@ def triton_group_gemm(x, w, tokens_per_expert):
     Returns:
         Tensor: Output tensor of shape (batch_size, seq_len, dout).
     """
+    if (replica_weight is None) != (replica_grad is None):
+        raise ValueError("UltraEP replica_weight and replica_grad must be provided together")
+    if replica_weight is not None:
+        return ultra_ep_group_gemm(
+            x,
+            w,
+            replica_weight,
+            replica_grad,
+            tokens_per_expert,
+        )
     if x.shape[0] == 0:
         # put x and w to the pytorch graph
         return torch.matmul(x, w[0].T)
@@ -50,7 +67,7 @@ class UltraEPGroupedGemm(torch.autograd.Function):
     allocation per physical expert while retaining one persistent GMM launch.
     Replica slots are shared by all MoE layers and can be overwritten by a
     later layer after this forward has finished.  The MoE decoder must place
-    ``_UltraEPWeightSyncForBackward`` on the expert output: its backward
+    ``_UltraEPWeightRestoreJoin`` on the expert output: its backward
     restores this virtual layer's replica slots before this Function performs
     DGrad.  The replica tensor intentionally stays outside
     ``save_for_backward`` so that refresh is not treated as an invalid in-place

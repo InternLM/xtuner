@@ -482,7 +482,7 @@ class DeepEPDispatcher(
         # is safe because the caching allocator refuses to recycle a pinned
         # block until the CUDA events referencing it have completed — a
         # guarantee a manually held buffer does not get.
-        tokens_per_expert = torch.tensor(
+        tokens_per_expert_cpu = torch.tensor(
             num_recv_tokens_per_expert_list,
             dtype=torch.long,
             pin_memory=True,
@@ -492,15 +492,20 @@ class DeepEPDispatcher(
         # the current CUDA stream, so stream ordering covers the H2D. If
         # consumption moves to a different stream, the consumer must wait on an
         # event recorded after this copy.
-        tokens_per_expert = tokens_per_expert.to(dispatched["topk_weights"].device, non_blocking=True)
+        tokens_per_expert = tokens_per_expert_cpu.to(dispatched["topk_weights"].device, non_blocking=True)
 
         if decoding:
             raise NotImplementedError
         else:
+            # The host copy is published alongside the device one because DeepEP
+            # already returns the routed counts as host integers. Consumers that
+            # need group sizes on the host (TE grouped GEMM builds one descriptor
+            # per expert) can then avoid copying them back and blocking the stream.
             return DeepEPPostDispatchResult(
                 hidden_states=permuted_hidden_states,
                 row_ids_map=row_ids_map,
                 tokens_per_expert=tokens_per_expert,
+                tokens_per_expert_cpu=tokens_per_expert_cpu,
             )
 
     @override

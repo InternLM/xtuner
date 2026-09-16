@@ -132,7 +132,7 @@ class _UltraEPWeightSyncForBackward(Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):  # type: ignore[override]
         # The blocking form establishes the compute-stream dependency before
-        # UltraEPGroupedGemm reads the mutable slots for DGrad.
+        # TE grouped GEMM reads the mutable slots for DGrad.
         ctx.runtime.sync_weights(ctx.virtual_layer_id, async_finish=False)
         return grad_output, None, None
 
@@ -283,10 +283,10 @@ class MoEBlock(nn.Module):
         )
         self.moe_act = moe_act_fn_cfg.build()
 
-    def forward(self, x, tokens_per_expert, decoding):
-        gate_up_out = self.fused_w1w3(x, tokens_per_expert, decoding)
+    def forward(self, x, tokens_per_expert, decoding, tokens_per_expert_cpu=None):
+        gate_up_out = self.fused_w1w3(x, tokens_per_expert, decoding, tokens_per_expert_cpu)
         out = self.moe_act(gate_up_out, split_dim=-1)
-        res = self.fused_w2(out, tokens_per_expert, decoding)
+        res = self.fused_w2(out, tokens_per_expert, decoding, tokens_per_expert_cpu)
         return res
 
 
@@ -570,6 +570,7 @@ class MoEDecoderLayer(nn.Module):
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
             decoding=False,
+            tokens_per_expert_cpu=post_dispatched.get("tokens_per_expert_cpu"),
         )
         if ultraep is not None:
             assert virtual_layer_id is not None
@@ -724,6 +725,7 @@ class MoEDecoderLayer(nn.Module):
                 post_dispatched["hidden_states"],
                 post_dispatched["tokens_per_expert"],
                 decoding=False,
+                tokens_per_expert_cpu=post_dispatched.get("tokens_per_expert_cpu"),
             )
 
             pre_combined = self.dispatcher.combine_preprocess(

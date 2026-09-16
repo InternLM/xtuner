@@ -34,22 +34,22 @@ from .test_moe_train_engine_tpep import (
 
 BF16_RTOL, BF16_ATOL = default_tolerances(torch.bfloat16)
 BF16_GRAD_ATOL = BF16_ATOL * 2
-_original_cutlass_group_gemm: str | None = None
+_original_group_gemm: str | None = None
 
 
 def setup_module() -> None:
     # 本测试关注 DeepEP Virtual-expert ETP 的真实 grouped-GEMM 训练路径；
     # 父进程在 spawn 前设置 Cutlass，子进程会继承该环境并在导入算子时选中对应实现。
-    global _original_cutlass_group_gemm
-    _original_cutlass_group_gemm = os.environ.get("XTUNER_USE_CUTLASS_GROUP_GEMM")
-    os.environ["XTUNER_USE_CUTLASS_GROUP_GEMM"] = "1"
+    global _original_group_gemm
+    _original_group_gemm = os.environ.get("XTUNER_GROUP_GEMM")
+    os.environ["XTUNER_GROUP_GEMM"] = "cutlass"
 
 
 def teardown_module() -> None:
-    if _original_cutlass_group_gemm is None:
-        os.environ.pop("XTUNER_USE_CUTLASS_GROUP_GEMM", None)
+    if _original_group_gemm is None:
+        os.environ.pop("XTUNER_GROUP_GEMM", None)
     else:
-        os.environ["XTUNER_USE_CUTLASS_GROUP_GEMM"] = _original_cutlass_group_gemm
+        os.environ["XTUNER_GROUP_GEMM"] = _original_group_gemm
 
 
 def _assert_bf16_training_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
