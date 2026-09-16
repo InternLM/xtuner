@@ -1,23 +1,32 @@
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 import torch
 import torch.nn as nn
 
 from xtuner.v1.config import FSDPConfig
+from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.float8.config import Float8Config, ScalingGranularity
+from xtuner.v1.model.base import BaseModel
 from xtuner.v1.model.moe.moe import MoE
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
-from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
-    MoEDecoderLayer,
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayer
+from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
+from xtuner.v1.module.mtp import MTPConfig
+from xtuner.v1.module.ultraep import UltraEPConfig
+from xtuner.v1.module.ultraep import runtime as ultraep_runtime
+from xtuner.v1.module.dispatcher import ExpertWeightLayout, NoEPExecutionRuntime, build_ep_execution_runtime
+from xtuner.v1.module.ultraep.dispatcher import (
+    UltraEPDispatcher,
     _UltraEPGradReduceJoin,
     _UltraEPGradReduceStart,
     _UltraEPWeightRestoreJoin,
     _UltraEPWeightRestoreStart,
 )
-from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
-from xtuner.v1.module.mtp import MTPConfig
-from xtuner.v1.module.ultraep import UltraEPConfig
-from xtuner.v1.module.ultraep import runtime as ultraep_runtime
-from xtuner.v1.module.ultraep.runtime import UltraEPLayerRuntime, UltraEPManagerProvider
+from xtuner.v1.module.ultraep.runtime import UltraEPLayerRuntime, UltraEPModelRuntime
 from xtuner.v1.ops.moe.cuda import group_gemm as group_gemm_module
 
 
@@ -91,9 +100,29 @@ class FakeLayerManager:
         self.grad_reduce_calls = []
         self.restore_calls = []
         self.event_calls = []
+        self.allocate_calls = []
+        self.placement_calls = []
+        self.reroute_calls = []
+        self.control_calls = []
+        self._next_vid = 0
 
     def replica_slot(self, virtual_layer_id):
         return virtual_layer_id // self.real_num_alloc_layers
+
+    def allocate_microbatch_slot(self, layer_id):
+        vid = self._next_vid
+        self._next_vid += 1
+        self.allocate_calls.append((layer_id, vid))
+        return vid
+
+    def update_placement_sparse(self, layer_id, logical_topk_ids):
+        self.control_calls.append("placement")
+        self.placement_calls.append((layer_id, logical_topk_ids.clone()))
+
+    def reroute_sparse(self, layer_id, physical_topk_ids):
+        self.control_calls.append("reroute")
+        self.reroute_calls.append(layer_id)
+        physical_topk_ids.add_(1)
 
     def register_master_pointers(self, **kwargs):
         self.register_calls.append(kwargs)
@@ -102,6 +131,7 @@ class FakeLayerManager:
         self.refresh_calls.append(kwargs)
 
     def weight_sync(self, layer_id, *, async_finish):
+        self.control_calls.append("sync")
         self.weight_sync_calls.append((layer_id, async_finish))
         return FakeEvent(self.event_calls, layer_id)
 
@@ -122,13 +152,16 @@ class FakeLayerManager:
         return self.master_fc1_grad_staging, self.master_fc2_grad_staging
 
 
-class FakeManagerProvider:
+class FakeModelRuntime:
     num_model_layers = 4
     num_logical_experts = 16
     hidden_size = 4
     expert_intermediate_size = 3
     num_redundant_experts_per_rank = 1
     max_microbatches = 1
+    inner_dispatcher = "deepep"
+    training_dtype = "bf16"
+    generate_dtype = "bf16"
 
     def __init__(self, manager):
         self.manager = manager
@@ -142,18 +175,15 @@ class FakeManagerProvider:
         self.get_manager_calls += 1
         return self.manager
 
-    def configure_max_microbatches(self, requested):
-        self.max_microbatches = max(self.max_microbatches, int(requested))
-
 
 def make_fake_layer_runtime():
     manager = FakeLayerManager()
-    provider = FakeManagerProvider(manager)
+    model_runtime = FakeModelRuntime(manager)
     fused_w1w3 = FakeGroupedLinear((2, 6, 4))
     fused_w2 = FakeGroupedLinear((2, 4, 3))
     runtime = UltraEPLayerRuntime(
         layer_id=2,
-        manager_provider=provider,  # type: ignore[arg-type]
+        model_runtime=model_runtime,  # type: ignore[arg-type]
         fused_w1w3=fused_w1w3,
         fused_w2=fused_w2,
     )
@@ -166,6 +196,82 @@ def test_ultra_ep_is_opt_in():
     assert config.ultraep_cfg is None
 
 
+def test_disabled_ultra_ep_does_not_import_optional_backend():
+    repo = Path(__file__).resolve().parents[2]
+    source = """
+import sys
+sys.modules["ultra_ep"] = None
+from xtuner.v1.module.dispatcher import (
+    NaiveDispatcher,
+    NoEPExecutionRuntime,
+    build_dispatcher,
+    build_ep_execution_runtime,
+)
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
+
+dispatcher = build_dispatcher(None, n_routed_experts=4)
+assert isinstance(dispatcher, NaiveDispatcher)
+runtime = build_ep_execution_runtime(Qwen3MoE235BA22Config(), None)
+assert type(runtime) is NoEPExecutionRuntime
+assert sys.modules.get("ultra_ep") is None
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join([str(repo), env.get("PYTHONPATH", "")])
+    completed = subprocess.run(
+        [sys.executable, "-c", source],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=str(repo),
+        env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_enabled_ultra_ep_reports_missing_optional_package(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "ultra_ep" or name.startswith("ultra_ep."):
+            raise ImportError("No module named 'ultra_ep'")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _import)
+    sys.modules.pop("ultra_ep", None)
+
+    runtime = UltraEPModelRuntime.from_xtuner_config(
+        group=FakeGroup(),  # type: ignore[arg-type]
+        config=Qwen3MoE235BA22Config(
+            ep_size=8,
+            ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
+        ),
+    )
+    runtime.bind_layer(
+        layer_id=0,
+        projections=(nn.Linear(4, 4, bias=False), nn.Linear(4, 4, bias=False)),
+    )
+    import xtuner.v1.module.ultraep.fsdp_expert_binding as binding
+
+    monkeypatch.setattr(binding, "install_ultraep_fsdp_binding", lambda **kwargs: ())
+    runtime.install_after_fsdp(fsdp_root=nn.Linear(1, 1), execution_order=[])
+
+    with pytest.raises(ImportError, match="Python package/CUDA extension is unavailable"):
+        runtime.get_manager()
+
+
+def test_ultra_ep_fsdp_private_api_is_isolated_to_binding_module():
+    ultraep_dir = Path(__file__).resolve().parents[2] / "xtuner" / "v1" / "module" / "ultraep"
+    users = [
+        path.name
+        for path in ultraep_dir.glob("*.py")
+        if "torch.distributed.fsdp._fully_shard" in path.read_text()
+    ]
+
+    assert users == ["fsdp_expert_binding.py"]
+
+
 def test_ultra_ep_requires_redundant_experts():
     with pytest.raises(ValueError, match="num_redundant_experts_per_rank"):
         UltraEPConfig(num_redundant_experts_per_rank=0)
@@ -176,7 +282,6 @@ def test_ultra_ep_requires_redundant_experts():
     [
         ({"n_routed_experts": 33}, "n_routed_experts"),
         ({"ep_size": 1}, "ep_size"),
-        ({"dispatcher": "all2all"}, "dispatcher='deepep'"),
         (
             {"float8_cfg": Float8Config(scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE)},
             "BF16",
@@ -184,6 +289,7 @@ def test_ultra_ep_requires_redundant_experts():
         ({"moe_bias": True}, "expert bias"),
         ({"expert_tp_size": 2}, "expert_tp_size == 1"),
         ({"mtp_config": MTPConfig(num_layers=1)}, "MTP expert layers"),
+        ({"intra_layer_micro_batch": 0}, "intra_layer_micro_batch must be positive"),
     ],
 )
 def test_ultra_ep_rejects_unsupported_model_config(overrides, match):
@@ -200,69 +306,313 @@ def test_ultra_ep_rejects_unsupported_model_config(overrides, match):
         config.build()
 
 
-def test_ultra_ep_rejects_activation_recompute():
-    model = object.__new__(MoE)
-    model.config = Qwen3MoE235BA22Config(
+def test_ultra_ep_rejects_unimplemented_inner_dispatcher():
+    config = Qwen3MoE235BA22Config(
         ep_size=8,
+        n_routed_experts=32,
+        dispatcher="all2all",
         ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
     )
 
+    with pytest.raises(NotImplementedError, match="inner dispatcher"):
+        config.build()
+
+
+def test_ultra_ep_rejects_activation_recompute():
+    runtime = UltraEPModelRuntime.from_xtuner_config(
+        group=FakeGroup(),  # type: ignore[arg-type]
+        config=Qwen3MoE235BA22Config(
+            ep_size=8,
+            ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
+        ),
+    )
+
     with pytest.raises(ValueError, match="activation recompute"):
-        MoE.fully_shard(model, FSDPConfig(ep_size=8, recompute_ratio=0.5))
+        runtime.validate_before_fsdp(FSDPConfig(ep_size=8, recompute_ratio=0.5))
 
 
-def test_ultra_ep_manager_provider_derives_shape_from_xtuner_config():
+class _CaptureDecoderLayer(nn.Module):
+    last_kwargs: dict | None = None
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        type(self).last_kwargs = kwargs
+
+
+def test_moe_init_creates_and_passes_ultraep_runtime(monkeypatch):
+    class FakeMesh:
+        def __getitem__(self, name):
+            return self
+
+        def get_group(self):
+            return FakeGroup()
+
+    _CaptureDecoderLayer.last_kwargs = None
+    created = []
+    real_from_config = UltraEPModelRuntime.from_xtuner_config
+
+    @classmethod
+    def _count(cls, **kwargs):
+        runtime = real_from_config(**kwargs)
+        created.append(runtime)
+        return runtime
+
+    monkeypatch.setattr(UltraEPModelRuntime, "from_xtuner_config", _count)
+    monkeypatch.setattr("xtuner.v1.model.moe.moe.dist.get_world_size", lambda: 8)
+    monkeypatch.setattr("xtuner.v1.model.moe.moe.init_device_mesh", lambda *args, **kwargs: FakeMesh())
+    monkeypatch.setattr(MoE, "moe_decoder_layer_cls", _CaptureDecoderLayer)
+    monkeypatch.setattr(MoE, "build_rotary_embedding", lambda self, config: nn.Identity())
+    monkeypatch.setattr(MoE, "build_embeddings", lambda self, config: nn.Embedding(32, 8))
+    monkeypatch.setattr(MoE, "_init_load_spec", lambda self: None)
+    monkeypatch.setattr(MoE, "_maybe_enable_compile", lambda self, cfg: None)
+    monkeypatch.setattr(torch.cuda, "Stream", lambda *args, **kwargs: object())
+
+    config = Qwen3MoE235BA22Config(
+        ep_size=8,
+        n_routed_experts=32,
+        dispatcher="deepep",
+        ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
+        num_hidden_layers=1,
+        hidden_size=8,
+        vocab_size=32,
+        intermediate_size=16,
+        moe_intermediate_size=16,
+    )
+    model = MoE(config)
+    assert len(created) == 1
+    assert model._ep_runtime is created[0]
+
+    assert isinstance(model._ep_runtime, UltraEPModelRuntime)
+    assert model._ep_runtime.num_logical_experts == 32
+    assert model._ep_runtime.num_redundant_experts_per_rank == 1
+    assert _CaptureDecoderLayer.last_kwargs is not None
+    assert _CaptureDecoderLayer.last_kwargs["ep_runtime"] is model._ep_runtime
+    assert _CaptureDecoderLayer.last_kwargs["layer_idx"] == 0
+    assert "layer_fqn" not in _CaptureDecoderLayer.last_kwargs
+    assert _CaptureDecoderLayer.last_kwargs["ep_mesh"] is model.ep_mesh
+    assert not hasattr(model, "ultraep_manager_provider")
+    assert not hasattr(model._ep_runtime, "provider")
+
+
+def test_build_ep_execution_runtime_creates_ultraep_once(monkeypatch):
+    created = []
+    real_from_config = UltraEPModelRuntime.from_xtuner_config
+
+    @classmethod
+    def _capture(cls, **kwargs):
+        runtime = real_from_config(**kwargs)
+        created.append(runtime)
+        return runtime
+
+    monkeypatch.setattr(UltraEPModelRuntime, "from_xtuner_config", _capture)
+
+    class FakeMesh:
+        def get_group(self):
+            return FakeGroup()
+
+    config = Qwen3MoE235BA22Config(
+        ep_size=8,
+        n_routed_experts=32,
+        dispatcher="deepep",
+        ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
+    )
+    runtime = build_ep_execution_runtime(config, FakeMesh())
+    assert runtime is created[0]
+    assert isinstance(runtime, UltraEPModelRuntime)
+    assert build_ep_execution_runtime(Qwen3MoE235BA22Config(), None).__class__ is NoEPExecutionRuntime
+
+
+def test_ultra_ep_model_runtime_bind_layer_returns_dispatcher():
+    config = Qwen3MoE235BA22Config(
+        ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
+    )
+    runtime = UltraEPModelRuntime.from_xtuner_config(
+        group=FakeGroup(),  # type: ignore[arg-type]
+        config=config,
+    )
+    w1 = nn.Linear(4, 4, bias=False)
+    w2 = nn.Linear(4, 4, bias=False)
+
+    dispatcher = runtime.bind_layer(layer_id=0, projections=(w1, w2))
+    assert isinstance(dispatcher, UltraEPDispatcher)
+    assert dispatcher._layer.layer_id == 0
+    assert dispatcher._layer.model_runtime is runtime
+    assert dispatcher._inner is None
+    assert runtime._layers == [(0, (w1, w2))]
+    with pytest.raises(ValueError, match="duplicate UltraEP expert projections"):
+        runtime.bind_layer(layer_id=0, projections=(w1, w2))
+    with pytest.raises(ValueError, match="needs a model layer id"):
+        runtime.bind_layer(projections=(w1, w2))
+
+
+def test_ultra_ep_install_without_fsdp_keeps_created_state():
+    runtime = UltraEPModelRuntime.from_xtuner_config(
+        group=FakeGroup(),  # type: ignore[arg-type]
+        config=Qwen3MoE235BA22Config(
+            ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
+        ),
+    )
+    experts = nn.Module()
+    experts.fused_w1w3 = nn.Linear(4, 4, bias=False)
+    experts.fused_w2 = nn.Linear(4, 4, bias=False)
+    runtime.bind_layer(layer_id=0, projections=(experts.fused_w1w3, experts.fused_w2))
+
+    with pytest.raises(RuntimeError, match="could not find FSDPParam"):
+        runtime.install_after_fsdp(fsdp_root=experts, execution_order=[])
+
+    assert runtime._state == "CREATED"
+    assert runtime._fsdp_root is None
+    assert not hasattr(runtime, "fsdp_binding")
+
+
+def test_ultra_ep_get_inner_builds_named_transport(monkeypatch):
+    config = Qwen3MoE235BA22Config(
+        dispatcher="deepep",
+        ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
+    )
+    runtime = UltraEPModelRuntime.from_xtuner_config(
+        group=FakeGroup(),  # type: ignore[arg-type]
+        config=config,
+    )
+    dispatcher = runtime.bind_layer(
+        layer_id=0,
+        projections=(nn.Linear(4, 4, bias=False), nn.Linear(4, 4, bias=False)),
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_transport(name, n_routed_experts, **kwargs):
+        captured["name"] = name
+        captured["n_routed_experts"] = n_routed_experts
+        captured["ep_group"] = kwargs.get("ep_group")
+        captured["training_dtype"] = kwargs.get("training_dtype")
+        return object()
+
+    monkeypatch.setattr("xtuner.v1.module.dispatcher.build_dispatcher", _fake_transport)
+    inner = dispatcher._get_inner()
+    assert inner is dispatcher._inner
+    assert captured["name"] == "deepep"
+    assert captured["n_routed_experts"] == runtime.num_dispatch_experts
+    assert captured["ep_group"] is runtime.group
+    assert captured["training_dtype"] == "bf16"
+
+
+def test_ultra_ep_model_runtime_install_uses_bind_layer_targets(monkeypatch):
+    config = Qwen3MoE235BA22Config(
+        ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
+    )
+    runtime = UltraEPModelRuntime.from_xtuner_config(
+        group=FakeGroup(),  # type: ignore[arg-type]
+        config=config,
+    )
+    w1 = nn.Linear(4, 4, bias=False)
+    w2 = nn.Linear(4, 4, bias=False)
+    runtime.bind_layer(layer_id=0, projections=(w1, w2))
+
+    installed = {}
+
+    def _install(*, fsdp_root, targets):
+        installed["fsdp_root"] = fsdp_root
+        installed["targets"] = targets
+        return ("binding",)
+
+    import xtuner.v1.module.ultraep.fsdp_expert_binding as binding
+
+    monkeypatch.setattr(binding, "install_ultraep_fsdp_binding", _install)
+    root = object()
+    runtime.install_after_fsdp(fsdp_root=root, execution_order=["layers.0.experts"])
+    assert installed["fsdp_root"] is root
+    assert installed["targets"] == [("layer_0", (w1, w2))]
+    assert runtime._state == "INSTALLED"
+
+
+def test_moe_close_ep_runtime_closes_runtime():
+    class _Runtime:
+        def __init__(self):
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    model = object.__new__(MoE)
+    model._ep_runtime = _Runtime()  # type: ignore[assignment]
+    model.close_ep_runtime()
+    assert model._ep_runtime.closed == 1
+
+
+def test_base_model_close_ep_runtime_is_noop():
+    object.__new__(BaseModel).close_ep_runtime()
+
+
+def test_train_engine_close_releases_ep_and_async_resources():
+    calls = []
+
+    class _Model:
+        def close_ep_runtime(self):
+            calls.append("ep")
+
+        def destroy_async_hf_resources(self):
+            calls.append("hf")
+
+    engine = object.__new__(TrainEngine)
+    engine.model = _Model()  # type: ignore[assignment]
+    engine.destroy_async_checkpoint_pg = lambda: calls.append("ckpt")  # type: ignore[method-assign]
+    engine.close()
+    assert calls == ["ep", "hf", "ckpt"]
+
+
+def test_ultra_ep_model_runtime_derives_shape_from_xtuner_config():
     config = Qwen3MoE235BA22Config(
         ultraep_cfg=UltraEPConfig(
             num_redundant_experts_per_rank=2,
         )
     )
 
-    provider = UltraEPManagerProvider.from_xtuner_config(
+    model_runtime = UltraEPModelRuntime.from_xtuner_config(
         group=FakeGroup(),  # type: ignore[arg-type]
         config=config,
     )
 
-    assert provider.num_model_layers == config.num_hidden_layers
-    assert provider.num_logical_experts == config.n_routed_experts
-    assert provider.hidden_size == config.hidden_size
-    assert provider.expert_intermediate_size == config.moe_intermediate_size
-    assert provider.num_redundant_experts_per_rank == config.ultraep_cfg.num_redundant_experts_per_rank
-    assert provider.max_microbatches == 1
+    assert model_runtime.num_model_layers == config.num_hidden_layers
+    assert model_runtime.num_logical_experts == config.n_routed_experts
+    assert model_runtime.hidden_size == config.hidden_size
+    assert model_runtime.expert_intermediate_size == config.moe_intermediate_size
+    assert model_runtime.num_redundant_experts_per_rank == config.ultraep_cfg.num_redundant_experts_per_rank
+    assert model_runtime.inner_dispatcher == "deepep"
+    assert model_runtime.training_dtype == "bf16"
+    assert model_runtime.generate_dtype == "bf16"
+    assert model_runtime.max_microbatches == config.intra_layer_micro_batch == 1
     assert (
-        provider.num_dispatch_experts
+        model_runtime.num_dispatch_experts
         == config.n_routed_experts + 8 * config.ultraep_cfg.num_redundant_experts_per_rank
     )
-    assert provider._manager is None
+    assert model_runtime._manager is None
 
     with pytest.raises(RuntimeError, match="installed after FSDP setup"):
-        provider.ensure_materialized()
-    with pytest.raises(RuntimeError, match="installed after FSDP setup"):
-        provider.get_manager()
+        model_runtime.get_manager()
 
-    runtime = UltraEPLayerRuntime(
+    layer_runtime = UltraEPLayerRuntime(
         layer_id=config.num_hidden_layers - 1,
-        manager_provider=provider,
+        model_runtime=model_runtime,
         fused_w1w3=object(),  # type: ignore[arg-type]
         fused_w2=object(),  # type: ignore[arg-type]
     )
-    assert runtime.manager_provider is provider
-    assert provider._manager is None
+    assert layer_runtime.model_runtime is model_runtime
+    assert model_runtime._manager is None
 
     with pytest.raises(ValueError, match="layer_id"):
         UltraEPLayerRuntime(
             layer_id=config.num_hidden_layers,
-            manager_provider=provider,
+            model_runtime=model_runtime,
             fused_w1w3=object(),  # type: ignore[arg-type]
             fused_w2=object(),  # type: ignore[arg-type]
         )
 
 
-def test_ultra_ep_provider_binding_install_is_transactional(monkeypatch):
+def test_ultra_ep_runtime_binding_install_is_transactional(monkeypatch):
     config = Qwen3MoE235BA22Config(
         ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
     )
-    provider = UltraEPManagerProvider.from_xtuner_config(
+    runtime = UltraEPModelRuntime.from_xtuner_config(
         group=FakeGroup(),  # type: ignore[arg-type]
         config=config,
     )
@@ -274,17 +624,17 @@ def test_ultra_ep_provider_binding_install_is_transactional(monkeypatch):
         lambda **kwargs: ("binding",),
     )
     root = object()
-    provider.install_after_fsdp(fsdp_root=root, targets=[])
-    assert provider._state == "INSTALLED"
-    assert provider._fsdp_root is root
-    assert provider.fsdp_binding == ("binding",)
+    runtime.install_after_fsdp(fsdp_root=root, execution_order=[])
+    assert runtime._state == "INSTALLED"
+    assert runtime._fsdp_root is root
+    assert runtime.fsdp_binding == ("binding",)
 
 
-def test_ultra_ep_provider_failed_binding_does_not_publish_installed_state(monkeypatch):
+def test_ultra_ep_runtime_failed_binding_does_not_publish_installed_state(monkeypatch):
     config = Qwen3MoE235BA22Config(
         ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
     )
-    provider = UltraEPManagerProvider.from_xtuner_config(
+    runtime = UltraEPModelRuntime.from_xtuner_config(
         group=FakeGroup(),  # type: ignore[arg-type]
         config=config,
     )
@@ -295,17 +645,17 @@ def test_ultra_ep_provider_failed_binding_does_not_publish_installed_state(monke
 
     monkeypatch.setattr(binding, "install_ultraep_fsdp_binding", fail)
     with pytest.raises(RuntimeError, match="binding failed"):
-        provider.install_after_fsdp(fsdp_root=object(), targets=[])
-    assert provider._state == "CREATED"
-    assert provider._fsdp_root is None
-    assert not hasattr(provider, "fsdp_binding")
+        runtime.install_after_fsdp(fsdp_root=object(), execution_order=[])
+    assert runtime._state == "CREATED"
+    assert runtime._fsdp_root is None
+    assert not hasattr(runtime, "fsdp_binding")
 
 
-def test_ultra_ep_provider_requires_reshard_and_grad(monkeypatch):
+def test_ultra_ep_runtime_requires_reshard_and_grad(monkeypatch):
     config = Qwen3MoE235BA22Config(
         ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
     )
-    provider = UltraEPManagerProvider.from_xtuner_config(
+    runtime = UltraEPModelRuntime.from_xtuner_config(
         group=FakeGroup(),  # type: ignore[arg-type]
         config=config,
     )
@@ -314,40 +664,70 @@ def test_ultra_ep_provider_requires_reshard_and_grad(monkeypatch):
     monkeypatch.setattr(ultraep_runtime.dist, "get_world_size", lambda: 8)
 
     # EP8×DP1: historical subexperiment-8 path keeps params unsharded.
-    provider.validate_before_fsdp(
+    runtime.validate_before_fsdp(
         FSDPConfig(recompute_ratio=0, ep_size=8, reshard_after_forward=False)
     )
     # EP4×DP2: closed unshard window is required.
     with pytest.raises(ValueError, match="reshard_after_forward"):
-        provider.validate_before_fsdp(
+        runtime.validate_before_fsdp(
             FSDPConfig(recompute_ratio=0, ep_size=4, reshard_after_forward=False)
         )
     with pytest.raises(ValueError, match="reshard_after_forward"):
-        provider.validate_before_fsdp(
+        runtime.validate_before_fsdp(
             FSDPConfig(recompute_ratio=0, hsdp_sharding_size=2, reshard_after_forward=False)
         )
     with pytest.raises(ValueError, match="requires_grad"):
-        provider.validate_before_fsdp(FSDPConfig(recompute_ratio=0, ep_size=8, requires_grad=False))
+        runtime.validate_before_fsdp(FSDPConfig(recompute_ratio=0, ep_size=8, requires_grad=False))
 
 
-def test_ultra_ep_provider_configures_virtual_layer_capacity_before_materialization():
+def test_ultra_ep_runtime_capacity_is_fixed_from_config():
     config = Qwen3MoE235BA22Config(
         ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
+        intra_layer_micro_batch=2,
     )
-    provider = UltraEPManagerProvider.from_xtuner_config(
+    runtime = UltraEPModelRuntime.from_xtuner_config(
         group=FakeGroup(),  # type: ignore[arg-type]
         config=config,
     )
-    provider.configure_max_microbatches(2)
 
-    assert provider.max_microbatches == 2
+    assert runtime.max_microbatches == 2
+    assert not hasattr(runtime, "configure_max_microbatches")
 
-    # Native Manager capacity is immutable once materialized; decreasing the
-    # requested count is harmless, while an increase must fail loudly.
-    provider._manager = object()  # type: ignore[assignment]
-    provider.configure_max_microbatches(1)
-    with pytest.raises(RuntimeError, match="already materialized"):
-        provider.configure_max_microbatches(3)
+    layer_runtime = UltraEPLayerRuntime(
+        layer_id=0,
+        model_runtime=runtime,
+        fused_w1w3=object(),  # type: ignore[arg-type]
+        fused_w2=object(),  # type: ignore[arg-type]
+    )
+    layer_runtime.validate_microbatch_capacity(2)
+    with pytest.raises(ValueError, match="exceeds the configured microbatch slots"):
+        layer_runtime.validate_microbatch_capacity(3)
+
+
+def test_prepare_layer_inputs_rejects_width_above_configured_slots():
+    layer_runtime, _manager, _w1, _w2 = make_fake_layer_runtime()
+    layer_runtime.model_runtime.group = FakeGroup()
+    assert layer_runtime.model_runtime.max_microbatches == 1
+    dispatcher = UltraEPDispatcher(
+        model_runtime=layer_runtime.model_runtime,  # type: ignore[arg-type]
+        layer_runtime=layer_runtime,
+        inner=object(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ValueError, match="exceeds the configured microbatch slots"):
+        dispatcher.prepare_layer_inputs([torch.ones(2, 4), torch.ones(2, 4)])
+
+
+def test_moe_list_forward_rejects_a_different_width():
+    model = object.__new__(MoE)
+    model.config = Qwen3MoE235BA22Config(
+        ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
+        intra_layer_micro_batch=2,
+    )
+    contexts = [object(), object(), object()]
+
+    with pytest.raises(ValueError, match="width 3 does not match configured width 2"):
+        model.forward(seq_ctx=contexts, loss_ctx=[{} for _ in contexts])
 
 
 def test_ultra_ep_microbatch_pipeline_scales_beyond_two():
@@ -358,41 +738,17 @@ def test_ultra_ep_microbatch_pipeline_scales_beyond_two():
     or accidental hard-coded-two changes.
     """
 
-    class FakeRuntime:
-        def __init__(self):
-            self.next_virtual_layer_id = 0
-            self.configured = []
-            self.calls = []
-
-        def configure_max_microbatches(self, requested):
-            self.configured.append(requested)
-
-        def allocate_virtual_layer_id(self):
-            virtual_layer_id = self.next_virtual_layer_id
-            self.next_virtual_layer_id += 1
-            self.calls.append(("allocate", virtual_layer_id))
-            return virtual_layer_id
-
-        def update_placement(self, topk_ids, virtual_layer_id):
-            self.calls.append(("placement", virtual_layer_id))
-
-        def sync_weights(self, virtual_layer_id, *, async_finish):
-            self.calls.append(("sync", virtual_layer_id, async_finish))
-            return FakeEvent(self.calls, virtual_layer_id)
-
-        def reroute(self, topk_ids, virtual_layer_id):
-            self.calls.append(("reroute", virtual_layer_id))
-            return topk_ids
-
-        def bind_virtual_layer_slot(self, virtual_layer_id):
-            self.calls.append(("bind", virtual_layer_id))
-
     class FakeDispatcher:
         def __init__(self, calls):
             self.calls = calls
+            self.prepared = []
 
-        def dispatch_preprocess(self, *, hidden_states, topk_ids, topk_weights, async_op):
-            self.calls.append("preprocess")
+        def prepare_layer_inputs(self, layer_inputs):
+            self.prepared.append(len(layer_inputs))
+            return layer_inputs, [f"state-{i}" for i in range(len(layer_inputs))]
+
+        def dispatch_preprocess(self, *, hidden_states, topk_ids, topk_weights, layer_state=None, async_op=False):
+            self.calls.append(("preprocess", layer_state))
             return {"hidden_states": hidden_states, "topk_ids": topk_ids}
 
         def dispatch(self, *, pre_dispatched, topk_weights, async_op):
@@ -421,7 +777,6 @@ def test_ultra_ep_microbatch_pipeline_scales_beyond_two():
 
     layer = object.__new__(MoEDecoderLayer)
     nn.Module.__init__(layer)
-    layer._ultraep = FakeRuntime()
     layer.n_shared_experts = 0
     layer.ep_mesh = None
     calls = []
@@ -447,11 +802,16 @@ def test_ultra_ep_microbatch_pipeline_scales_beyond_two():
         position_embeddings_list=[(None, None), (None, None), (None, None)],  # type: ignore[list-item]
     )
 
-    assert layer._ultraep.configured == [3]
-    assert [call[1] for call in layer._ultraep.calls if call[0] == "allocate"] == [0, 1, 2]
+    assert layer.dispatcher.prepared == [3]
+    assert [call[1] for call in calls if isinstance(call, tuple) and call[0] == "preprocess"] == [
+        "state-0",
+        "state-1",
+        "state-2",
+    ]
     assert len(output["hidden_states"]) == 3
-    assert calls[:3] == ["preprocess", "preprocess", "preprocess"]
-    assert calls[3:12] == [
+    stage_names = [call if isinstance(call, str) else call[0] for call in calls]
+    assert stage_names[:3] == ["preprocess", "preprocess", "preprocess"]
+    assert stage_names[3:12] == [
         "dispatch",
         "postprocess",
         "combine_preprocess",
@@ -462,7 +822,108 @@ def test_ultra_ep_microbatch_pipeline_scales_beyond_two():
         "postprocess",
         "combine_preprocess",
     ]
-    assert calls[12:15] == ["combine", "combine", "combine"]
+    assert stage_names[12:15] == ["combine", "combine", "combine"]
+
+
+def test_ultra_ep_dispatcher_maps_control_plane_onto_six_stages():
+    layer_runtime, manager, fused_w1w3, fused_w2 = make_fake_layer_runtime()
+    model_runtime = layer_runtime.model_runtime
+    model_runtime.group = FakeGroup()
+
+    inner_calls: list[object] = []
+
+    class FakeInner:
+        def dispatch_preprocess(self, *, hidden_states, topk_ids, topk_weights, async_op=False, layer_state=None):
+            inner_calls.append(("preprocess", int(topk_ids[0, 0]), hidden_states.shape))
+            return {"hidden_states": hidden_states, "topk_ids": topk_ids}
+
+        def dispatch(self, *, pre_dispatched, topk_weights, async_op=False, decoding=False):
+            inner_calls.append("dispatch")
+            return {"hidden_states": pre_dispatched["hidden_states"]}
+
+        def dispatch_postprocess(self, *, pre_dispatched, dispatched, async_op=False):
+            inner_calls.append("postprocess")
+            return {
+                "hidden_states": dispatched["hidden_states"],
+                "tokens_per_expert": torch.tensor([1]),
+            }
+
+        def combine_preprocess(self, *, hidden_states, **kwargs):
+            inner_calls.append(("combine_preprocess", hidden_states.shape))
+            return {"hidden_states": hidden_states}
+
+        def combine(self, *, pre_combined, **kwargs):
+            inner_calls.append("combine")
+            return pre_combined
+
+        def combine_postprocess(self, *, combined, **kwargs):
+            inner_calls.append("combine_postprocess")
+            return {"hidden_states": combined["hidden_states"]}
+
+    dispatcher = UltraEPDispatcher(
+        model_runtime=model_runtime,  # type: ignore[arg-type]
+        layer_runtime=layer_runtime,
+        inner=FakeInner(),  # type: ignore[arg-type]
+    )
+    hidden = torch.ones(2, 4, requires_grad=True)
+    prepared, states = dispatcher.prepare_layer_inputs([hidden])
+    assert layer_runtime.model_runtime.max_microbatches == 1
+    assert manager.allocate_calls == [(2, 0)]
+    assert len(fused_w1w3.configure_calls) == 1
+    assert len(fused_w2.configure_calls) == 1
+    assert states[0] is not None
+    assert states[0].virtual_layer_id == 0
+
+    topk_ids = torch.zeros(2, 1, dtype=torch.long)
+    pre = dispatcher.dispatch_preprocess(
+        hidden_states=prepared[0],
+        topk_ids=topk_ids,
+        topk_weights=torch.ones(2, 1),
+        layer_state=states[0],
+    )
+    assert manager.control_calls == ["placement", "sync", "reroute"]
+    assert manager.weight_sync_calls == [(0, True)]
+    assert inner_calls[0][0] == "preprocess"
+    assert inner_calls[0][1] == 1
+
+    dispatched = dispatcher.dispatch(pre_dispatched=pre, topk_weights=torch.ones(2, 1))
+    post = dispatcher.dispatch_postprocess(pre_dispatched=pre, dispatched=dispatched)
+    assert manager.event_calls == [("wait", 0)]
+    layout = post["expert_weight_layout"]
+    assert isinstance(layout, ExpertWeightLayout)
+    assert layout.trainable_weights is None
+    assert fused_w1w3.select_calls[-1] == 0
+    assert fused_w2.select_calls[-1] == 0
+
+    experts_out = post["hidden_states"]
+    pre_combined = dispatcher.combine_preprocess(
+        hidden_states=experts_out,
+        pre_dispatched=pre,
+        dispatched=dispatched,
+        post_dispatched=post,
+    )
+    combined = dispatcher.combine(
+        pre_dispatched=pre,
+        dispatched=dispatched,
+        post_dispatched=post,
+        pre_combined=pre_combined,
+    )
+    post_combined = dispatcher.combine_postprocess(
+        pre_dispatched=pre,
+        dispatched=dispatched,
+        post_dispatched=post,
+        pre_combined=pre_combined,
+        combined=combined,
+    )
+    assert inner_calls[-3:] == [("combine_preprocess", experts_out.shape), "combine", "combine_postprocess"]
+    assert post_combined["hidden_states"].shape == hidden.shape
+
+    with pytest.raises(RuntimeError, match="requires layer_state from prepare_layer_inputs"):
+        dispatcher.dispatch_preprocess(
+            hidden_states=hidden,
+            topk_ids=topk_ids,
+            topk_weights=torch.ones(2, 1),
+        )
 
 
 def test_ultra_ep_manager_registry_reuses_group_and_rejects_shape_mismatch(monkeypatch):
@@ -532,7 +993,6 @@ def test_ultra_ep_configure_buffers_selects_independent_microbatch_slot(monkeypa
 
     with pytest.raises(IndexError, match="outside the configured range"):
         linear.select_ultra_ep_slot(2)
-
 
 
 def test_ultra_ep_configure_buffers_rejects_cutlass_backend(monkeypatch):
@@ -637,20 +1097,16 @@ def test_ultra_ep_weight_restore_launch_and_join_are_async():
 
 
 def test_ultra_ep_weight_restore_autograd_nodes_launch_before_join():
-    runtime = object.__new__(UltraEPLayerRuntime)
     calls = []
-    runtime._weight_restore_events = {11: object()}
 
-    def start_weight_restore(virtual_layer_id):
-        calls.append(("start", virtual_layer_id))
+    class _RestoreOrderRuntime:
+        def start_weight_restore(self, virtual_layer_id):
+            calls.append(("start", virtual_layer_id))
 
-    def finish_weight_restore(virtual_layer_id):
-        calls.append(("finish", virtual_layer_id))
-        runtime._weight_restore_events.pop(virtual_layer_id)
+        def finish_weight_restore(self, virtual_layer_id):
+            calls.append(("finish", virtual_layer_id))
 
-    runtime.start_weight_restore = start_weight_restore
-    runtime.finish_weight_restore = finish_weight_restore
-
+    runtime = _RestoreOrderRuntime()
     x = torch.ones(2, requires_grad=True)
     joined = _UltraEPWeightRestoreJoin.apply(x, runtime, 11)
     started = _UltraEPWeightRestoreStart.apply(joined, runtime, 11)
@@ -688,7 +1144,6 @@ def test_ultra_ep_grad_reduce_lifecycle_stages_reduces_and_restores():
 
 def test_ultra_ep_multi_microbatch_grad_reduce_remains_async():
     runtime, manager, fused_w1w3, fused_w2 = make_fake_layer_runtime()
-    runtime.configure_max_microbatches(2)
     fused_w1w3.weight.grad = torch.full_like(fused_w1w3.weight, 1.0)
     fused_w2.weight.grad = torch.full_like(fused_w2.weight, 3.0)
 
@@ -733,18 +1188,16 @@ def test_ultra_ep_grad_reduce_writes_back_through_fsdp_binding(monkeypatch):
 
 
 def test_ultra_ep_grad_reduce_autograd_nodes_start_before_join():
-    runtime = object.__new__(UltraEPLayerRuntime)
     calls = []
 
-    def start_grad_reduce(virtual_layer_id):
-        calls.append(("start", virtual_layer_id))
+    class _GradReduceOrderRuntime:
+        def start_grad_reduce(self, virtual_layer_id):
+            calls.append(("start", virtual_layer_id))
 
-    def finish_grad_reduce(virtual_layer_id):
-        calls.append(("finish", virtual_layer_id))
+        def finish_grad_reduce(self, virtual_layer_id):
+            calls.append(("finish", virtual_layer_id))
 
-    runtime.start_grad_reduce = start_grad_reduce
-    runtime.finish_grad_reduce = finish_grad_reduce
-
+    runtime = _GradReduceOrderRuntime()
     x = torch.ones(2, requires_grad=True)
     joined = _UltraEPGradReduceJoin.apply(x, runtime, 11)
     output = _UltraEPGradReduceStart.apply(joined, runtime, 11)
@@ -785,8 +1238,7 @@ def test_ultra_ep_output_wrapper_restores_replica_weight_before_te_grouped_gemm_
     replica_grad = torch.empty_like(replica_weight, dtype=torch.float32)
     tokens_per_expert = torch.tensor([1, 1])
 
-    runtime = object.__new__(UltraEPLayerRuntime)
-    runtime._weight_restore_events = {}
+    runtime, _, _, _ = make_fake_layer_runtime()
     sync_calls = []
 
     def fake_sync_weights(virtual_layer_id, *, async_finish):
@@ -801,12 +1253,6 @@ def test_ultra_ep_output_wrapper_restores_replica_weight_before_te_grouped_gemm_
 
     runtime.sync_weights = fake_sync_weights
     runtime.bind_virtual_layer_slot = lambda virtual_layer_id: None
-    runtime.start_weight_restore = UltraEPLayerRuntime.start_weight_restore.__get__(
-        runtime, UltraEPLayerRuntime
-    )
-    runtime.finish_weight_restore = UltraEPLayerRuntime.finish_weight_restore.__get__(
-        runtime, UltraEPLayerRuntime
-    )
 
     output = te_grouped_gemm(
         x,
@@ -868,8 +1314,7 @@ def test_dual_base_group_gemm_restores_replica_weight_before_backward(monkeypatc
     replica_grad = torch.empty_like(replica_weight, dtype=torch.float32)
     tokens_per_expert = torch.tensor([1, 1])
 
-    runtime = object.__new__(UltraEPLayerRuntime)
-    runtime._weight_restore_events = {}
+    runtime, _, _, _ = make_fake_layer_runtime()
     hook_calls = []
 
     def fake_sync_weights(virtual_layer_id, *, async_finish):
@@ -884,12 +1329,6 @@ def test_dual_base_group_gemm_restores_replica_weight_before_backward(monkeypatc
 
     runtime.bind_virtual_layer_slot = lambda virtual_layer_id: hook_calls.append(("bind", virtual_layer_id))
     runtime.sync_weights = fake_sync_weights
-    runtime.start_weight_restore = UltraEPLayerRuntime.start_weight_restore.__get__(
-        runtime, UltraEPLayerRuntime
-    )
-    runtime.finish_weight_restore = UltraEPLayerRuntime.finish_weight_restore.__get__(
-        runtime, UltraEPLayerRuntime
-    )
 
     output = group_gemm_module.triton_group_gemm(
         x,
