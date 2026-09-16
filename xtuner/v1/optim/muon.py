@@ -632,9 +632,8 @@ class Muon(Optimizer):
         """Helper function to create batches of Muon matrices and generate
         AsyncTask objects so we can process multiple batches concurrently.
 
-        This is the top-level, linear business flow: per param group, split
-        parameters into (device_mesh, placements) groups, resolve each group's
-        communication plan once, then build one task per shape-homogeneous batch.
+        This is the top-level, linear business flow: per param group, split parameters into (device_mesh, placements)
+        groups, resolve each group's communication plan once, then build one task per shape-homogeneous batch.
         """
         for group in param_groups:
             assert group["algorithm"] == algo_name
