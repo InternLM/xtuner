@@ -343,8 +343,14 @@ def test_muon_remainder_strategy_validation():
     with pytest.raises(ValueError, match="Invalid remainder_strategy"):
         Muon([param], remainder_strategy="invalid")  # type: ignore[arg-type]
 
-    with pytest.raises(ValueError, match="requires enable_all2all"):
-        Muon([param], enable_all2all=False, remainder_strategy="pad_all2all")
+
+def test_muon_remainder_strategy_defaults_to_pad_all2all():
+    param = nn.Parameter(torch.empty(2, 2))
+
+    assert MuonConfig().remainder_strategy == "pad_all2all"
+    assert Muon([param])._remainder_strategy == "pad_all2all"
+    # Without all-to-all, AGRS is the only remainder path available.
+    assert Muon([param], enable_all2all=False)._remainder_strategy == "agrs"
 
 
 class TestMuonSingleGPU(DeterministicDDPTestCase):
