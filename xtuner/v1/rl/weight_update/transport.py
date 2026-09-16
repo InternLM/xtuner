@@ -483,7 +483,6 @@ class IPCWeightTransport(WeightTransport[IPCBackendAdapter]):
         assert ipc_update_target is not None, "IPC rollout target for current train rank is not resolved."
         rollout_url = ipc_update_target.server_url
 
-        DEVICE_MODULE.empty_cache()
         try:
             serialized_data = self._adapter.serialize(
                 batch,
