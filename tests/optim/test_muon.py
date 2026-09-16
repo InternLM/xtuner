@@ -498,10 +498,10 @@ class TestMuonFSDP(DeterministicDDPTestCase):
 
     @parametrize.parametrize(
         "enable_all2all,remainder_strategy",
-        [(True, "agrs"), (False, "agrs"), (True, "pad_all2all")],
+        [(True, "agrs"), (False, "agrs"), (True, "pad_all2all"), (True, "ragged_all_to_all")],
     )
     def test_muon_fsdp_matches_reference(
-        self, enable_all2all: bool, remainder_strategy: Literal["agrs", "pad_all2all"]
+        self, enable_all2all: bool, remainder_strategy: Literal["agrs", "pad_all2all", "ragged_all_to_all"]
     ):
         """One Muon step on a fully-sharded model must match the single-process
         reference for every parameter, across all param categories.
@@ -636,6 +636,7 @@ class TestMuonFSDP(DeterministicDDPTestCase):
             epsilon=1e-7,
             adjust_lr="none",
             newton_schulz_func=track_newton_schulz,
+            remainder_strategy="ragged_all_to_all",
         )
         optimizer.step()
 
@@ -711,9 +712,9 @@ class TestMuonFSDP(DeterministicDDPTestCase):
                 rtol=1e-2,
             )
 
-    @parametrize.parametrize("remainder_strategy", ["agrs", "pad_all2all"])
+    @parametrize.parametrize("remainder_strategy", ["agrs", "pad_all2all", "ragged_all_to_all"])
     def test_muon_ep_fsdp_uses_batch_specific_fsdp_global_dimension(
-        self, remainder_strategy: Literal["agrs", "pad_all2all"]
+        self, remainder_strategy: Literal["agrs", "pad_all2all", "ragged_all_to_all"]
     ):
         """EP+FSDP must use each batch's FSDP-visible global dimension."""
         self.create_pg("cuda")
@@ -773,9 +774,9 @@ class TestMuonFSDP(DeterministicDDPTestCase):
         )
         optimizer.step()
 
-        # Both remainder strategies leave the batch to the rank that assembles it: AGRS through
-        # selective Newton-Schulz, ragged all-to-all by sending the idle rank nothing at all.
-        if fsdp_rank == 0:
+        # AGRS (selective Newton-Schulz) and the ragged exchange (nothing sent to the idle rank)
+        # leave the batch to the rank that assembles it; padding hands every rank a matrix.
+        if remainder_strategy == "pad_all2all" or fsdp_rank == 0:
             assert sorted(ns_shapes) == [((6, cols), 3), ((12, cols), 3)]
         else:
             assert not ns_shapes
