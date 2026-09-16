@@ -262,6 +262,8 @@ case:
                     - XTUNER_ACTIVATION_OFFLOAD=1
                     - VLLM_VERSION=0.11.0
                     - VLLM_USE_V1=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
                 base_metric: npu-qwen3-rl-vllm/tracker.jsonl
                 check_metrics:
