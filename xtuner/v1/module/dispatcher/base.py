@@ -7,7 +7,7 @@ from typing import (
 )
 
 import torch
-from typing_extensions import TypedDict, override
+from typing_extensions import NotRequired, TypedDict, override
 
 from xtuner.v1.ops import permute, unpermute
 
@@ -52,6 +52,10 @@ class PostDispatchResult(TypedDict):
     Attributes:
         hidden_states: The hidden states after expert token routing and dispatching.
         tokens_per_expert: Count of tokens assigned to each expert in the current batch.
+        tokens_per_expert_cpu: Optional host-resident copy of `tokens_per_expert`. A dispatcher
+            that already knows the routed counts on the host should publish them here so that
+            expert kernels needing host-side group sizes can read them without a device-to-host
+            copy and the stream synchronization it implies.
         topk_weights: Expert routing weights used for scaling hidden states when combining results.
         handle: An object that facilitates the combination of expert outputs after processing.
     """
@@ -59,6 +63,7 @@ class PostDispatchResult(TypedDict):
     # TODO:
     hidden_states: torch.Tensor
     tokens_per_expert: torch.Tensor
+    tokens_per_expert_cpu: NotRequired[torch.Tensor]
 
 
 class PreCombineResult(TypedDict):

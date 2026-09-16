@@ -265,14 +265,25 @@ def test_ultra_ep_manager_registry_reuses_group_and_rejects_shape_mismatch(monke
         )
 
 
+def test_ultra_ep_configure_buffers_rejects_cutlass_backend(monkeypatch):
+    monkeypatch.setenv("XTUNER_GROUP_GEMM", "cutlass")
+    linear = GroupedLinear(4, 6, 2)
+
+    with pytest.raises(RuntimeError, match="Triton dual-base or TE"):
+        linear.configure_ultra_ep_buffers(
+            torch.empty(1, 1, 6, 4, dtype=torch.bfloat16),
+            torch.empty(1, 1, 6, 4, dtype=torch.float32),
+        )
+
+
 def test_ultra_ep_buffers_are_not_parameters_or_state_dict_entries():
     linear = GroupedLinear(4, 6, 2)
     parameter_names_before = tuple(name for name, _ in linear.named_parameters())
     state_dict_names_before = tuple(linear.state_dict())
 
     linear.configure_ultra_ep_buffers(
-        torch.empty(1, 6, 4, dtype=torch.bfloat16),
-        torch.empty(1, 6, 4, dtype=torch.float32),
+        torch.empty(1, 1, 6, 4, dtype=torch.bfloat16),
+        torch.empty(1, 1, 6, 4, dtype=torch.float32),
     )
 
     assert tuple(name for name, _ in linear.named_parameters()) == parameter_names_before
@@ -283,9 +294,9 @@ def test_ultra_ep_buffers_are_not_parameters_or_state_dict_entries():
 @pytest.mark.parametrize(
     ("replica_weight_shape", "replica_grad_shape", "replica_grad_dtype", "match"),
     [
-        ((1, 5, 4), (1, 5, 4), torch.float32, "Unexpected UltraEP replica weight shape"),
-        ((1, 6, 4), (2, 6, 4), torch.float32, "FP32 tensor matching replica weight shape"),
-        ((1, 6, 4), (1, 6, 4), torch.bfloat16, "FP32 tensor matching replica weight shape"),
+        ((1, 1, 5, 4), (1, 1, 5, 4), torch.float32, "Unexpected UltraEP replica weight shape"),
+        ((1, 1, 6, 4), (1, 2, 6, 4), torch.float32, "FP32 tensor matching replica weight shape"),
+        ((1, 1, 6, 4), (1, 1, 6, 4), torch.bfloat16, "FP32 tensor matching replica weight shape"),
     ],
 )
 def test_ultra_ep_rejects_invalid_replica_buffers(
@@ -308,8 +319,8 @@ def test_ultra_ep_rejects_replica_buffers_when_expert_bias_is_enabled():
 
     with pytest.raises(NotImplementedError, match="expert bias"):
         linear.configure_ultra_ep_buffers(
-            torch.empty(1, 6, 4, dtype=torch.bfloat16),
-            torch.empty(1, 6, 4, dtype=torch.float32),
+            torch.empty(1, 1, 6, 4, dtype=torch.bfloat16),
+            torch.empty(1, 1, 6, 4, dtype=torch.float32),
         )
 
 
@@ -382,19 +393,81 @@ def test_ultra_ep_grad_reduce_autograd_nodes_start_before_join():
     torch.testing.assert_close(x.grad, torch.ones_like(x))
 
 
-def test_ultra_ep_output_wrapper_restores_replica_weight_before_group_gemm_backward(monkeypatch):
+def test_ultra_ep_output_wrapper_restores_replica_weight_before_te_grouped_gemm_backward(monkeypatch):
+    """Later layers overwrite the shared replica slot after this forward.
+
+    ``_UltraEPWeightSyncForBackward`` must restore it before TE DGrad reads the
+    same tensor.  The torch TE backend keeps this test off CUDA.
+    """
+
+    monkeypatch.setenv("XTUNER_GROUP_GEMM", "te")
+    monkeypatch.setenv("XTUNER_TE_GEMM_BACKEND", "torch")
+
+    import xtuner.v1.ops.moe.cuda.group_gemm_te as adapter
+    from xtuner.v1.ops.moe.cuda.group_gemm_te import te_grouped_gemm
+
+    replica_seen_in_gemm = []
+    real_physical_weights = adapter._physical_weights
+
+    def spy_physical_weights(master_weight, replica_weight):
+        if replica_weight is not None:
+            replica_seen_in_gemm.append(replica_weight.detach().clone())
+        return real_physical_weights(master_weight, replica_weight)
+
+    monkeypatch.setattr(adapter, "_physical_weights", spy_physical_weights)
+
+    x = torch.tensor([[1.0, 1.0], [2.0, 1.0]], requires_grad=True)
+    master_weight = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]], requires_grad=True)
+    replica_weight = torch.tensor([[[5.0, 6.0], [7.0, 8.0]]])
+    original_replica_weight = replica_weight.clone()
+    replica_ptr = replica_weight.data_ptr()
+    replica_grad = torch.empty_like(replica_weight, dtype=torch.float32)
+    tokens_per_expert = torch.tensor([1, 1])
+
+    runtime = object.__new__(UltraEPLayerRuntime)
+    sync_calls = []
+
+    def fake_sync_weights(virtual_layer_id, *, async_finish):
+        sync_calls.append((virtual_layer_id, async_finish))
+        replica_weight.copy_(original_replica_weight)
+
+    runtime.sync_weights = fake_sync_weights
+
+    output = te_grouped_gemm(
+        x,
+        master_weight,
+        tokens_per_expert,
+        replica_weight=replica_weight,
+        replica_grad=replica_grad,
+    )
+    # UltraEP reuses its persistent slots for the next layer before this
+    # layer's backward.  The output-side node restores them before DGrad.
+    replica_weight.fill_(100.0)
+    _UltraEPWeightSyncForBackward.apply(output, runtime, 7).sum().backward()
+
+    assert sync_calls == [(7, False)]
+    assert replica_weight.data_ptr() == replica_ptr
+    assert len(replica_seen_in_gemm) == 2
+    torch.testing.assert_close(replica_seen_in_gemm[0], original_replica_weight)
+    torch.testing.assert_close(replica_seen_in_gemm[1], original_replica_weight)
+    torch.testing.assert_close(x.grad, torch.tensor([[4.0, 6.0], [12.0, 14.0]]))
+    torch.testing.assert_close(master_weight.grad, torch.tensor([[[1.0, 1.0], [1.0, 1.0]]]))
+    torch.testing.assert_close(replica_grad, torch.tensor([[[2.0, 1.0], [2.0, 1.0]]]))
+
+def test_dual_base_group_gemm_restores_replica_weight_before_backward(monkeypatch):
+    """The dual-base DGrad must read the replica slot restored by its hook."""
+
     dual_gemm_calls = []
 
-    def fake_m_grouped_gemm_dual_weight(x, master_weight, replica_weight, tokens_per_expert, *, trans_b):
-        dual_gemm_calls.append(
-            (master_weight.shape[0], replica_weight.shape[0], trans_b, replica_weight.data_ptr())
-        )
+    def fake_dual_gemm(x, master_weight, replica_weight, tokens_per_expert, *, trans_b):
+        dual_gemm_calls.append((trans_b, replica_weight.detach().clone()))
         weight = torch.cat((master_weight, replica_weight), dim=0)
         chunks = []
         offset = 0
         for expert_idx, count in enumerate(tokens_per_expert.tolist()):
             x_chunk = x[offset : offset + count]
-            chunks.append(x_chunk @ (weight[expert_idx].T if trans_b else weight[expert_idx]))
+            rhs = weight[expert_idx].T if trans_b else weight[expert_idx]
+            chunks.append(x_chunk @ rhs)
             offset += count
         return torch.cat(chunks)
 
@@ -408,7 +481,7 @@ def test_ultra_ep_output_wrapper_restores_replica_weight_before_group_gemm_backw
             offset += count
         return torch.stack(chunks)
 
-    monkeypatch.setattr(group_gemm_module, "m_grouped_gemm_dual_weight", fake_m_grouped_gemm_dual_weight)
+    monkeypatch.setattr(group_gemm_module, "m_grouped_gemm_dual_weight", fake_dual_gemm)
     monkeypatch.setattr(group_gemm_module, "k_grouped_gemm", fake_k_grouped_gemm)
 
     x = torch.tensor([[1.0, 1.0], [2.0, 1.0]], requires_grad=True)
@@ -418,51 +491,46 @@ def test_ultra_ep_output_wrapper_restores_replica_weight_before_group_gemm_backw
     replica_grad = torch.empty_like(replica_weight, dtype=torch.float32)
     tokens_per_expert = torch.tensor([1, 1])
 
-    # The production wrapper invokes Manager.weight_sync during backward.
-    # A bare runtime instance is sufficient to validate autograd ordering.
     runtime = object.__new__(UltraEPLayerRuntime)
-    sync_calls = []
+    hook_calls = []
 
     def fake_sync_weights(virtual_layer_id, *, async_finish):
-        sync_calls.append((virtual_layer_id, async_finish))
+        hook_calls.append(("sync", virtual_layer_id, async_finish))
         replica_weight.copy_(original_replica_weight)
 
     runtime.sync_weights = fake_sync_weights
 
-    output = group_gemm_module.ultra_ep_group_gemm(
+    output = group_gemm_module.triton_group_gemm(
         x,
         master_weight,
-        replica_weight,
-        replica_grad,
         tokens_per_expert,
+        replica_weight=replica_weight,
+        replica_grad=replica_grad,
     )
-    # UltraEP reuses its persistent slots for the next layer before this
-    # layer's backward.  The output-side node restores them before DGrad.
     replica_weight.fill_(100.0)
     _UltraEPWeightSyncForBackward.apply(output, runtime, 7).sum().backward()
 
-    assert sync_calls == [(7, False)]
+    assert hook_calls == [("sync", 7, False)]
+    assert [call[0] for call in dual_gemm_calls] == [True, False]
+    torch.testing.assert_close(dual_gemm_calls[0][1], original_replica_weight)
+    torch.testing.assert_close(dual_gemm_calls[1][1], original_replica_weight)
     torch.testing.assert_close(x.grad, torch.tensor([[4.0, 6.0], [12.0, 14.0]]))
     torch.testing.assert_close(master_weight.grad, torch.tensor([[[1.0, 1.0], [1.0, 1.0]]]))
     torch.testing.assert_close(replica_grad, torch.tensor([[[2.0, 1.0], [2.0, 1.0]]]))
-    assert dual_gemm_calls == [
-        (1, 1, True, replica_weight.data_ptr()),
-        (1, 1, False, replica_weight.data_ptr()),
-    ]
 
 
-def test_ultra_ep_group_gemm_supports_empty_local_dispatch():
+def test_dual_base_group_gemm_supports_empty_local_dispatch():
     x = torch.empty(0, 2, requires_grad=True)
     master_weight = torch.ones(1, 3, 2, requires_grad=True)
     replica_weight = torch.ones(1, 3, 2)
     replica_grad = torch.full_like(replica_weight, torch.nan, dtype=torch.float32)
 
-    output = group_gemm_module.ultra_ep_group_gemm(
+    output = group_gemm_module.triton_group_gemm(
         x,
         master_weight,
-        replica_weight,
-        replica_grad,
         torch.tensor([0, 0]),
+        replica_weight=replica_weight,
+        replica_grad=replica_grad,
     )
     output.sum().backward()
 
@@ -474,18 +542,17 @@ def test_ultra_ep_group_gemm_supports_empty_local_dispatch():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA/Triton")
 @pytest.mark.parametrize("trans_b", [True, False])
-def test_dual_weight_group_gemm_matches_contiguous_reference(trans_b):
+def test_dual_base_kernel_matches_contiguous_reference(trans_b):
     torch.manual_seed(0)
-    device = torch.device("cuda")
-    counts = torch.tensor([128, 128, 128], device=device, dtype=torch.int64)
+    counts = torch.tensor([128, 128, 128], device="cuda", dtype=torch.int64)
     num_master, num_replica, n, k = 2, 1, 256, 256
-    x = torch.randn(int(counts.sum()), k, device=device, dtype=torch.bfloat16)
+    x = torch.randn(int(counts.sum()), k, device="cuda", dtype=torch.bfloat16)
     if trans_b:
-        master = torch.randn(num_master, n, k, device=device, dtype=torch.bfloat16)
-        replica = torch.randn(num_replica, n, k, device=device, dtype=torch.bfloat16)
+        master = torch.randn(num_master, n, k, device="cuda", dtype=torch.bfloat16)
+        replica = torch.randn(num_replica, n, k, device="cuda", dtype=torch.bfloat16)
     else:
-        master = torch.randn(num_master, k, n, device=device, dtype=torch.bfloat16)
-        replica = torch.randn(num_replica, k, n, device=device, dtype=torch.bfloat16)
+        master = torch.randn(num_master, k, n, device="cuda", dtype=torch.bfloat16)
+        replica = torch.randn(num_replica, k, n, device="cuda", dtype=torch.bfloat16)
 
     actual = group_gemm_module.m_grouped_gemm_dual_weight(
         x,
@@ -512,41 +579,20 @@ def test_dual_weight_group_gemm_backward_matches_contiguous_reference(counts_val
     device = torch.device("cuda")
     counts = torch.tensor(counts_values, device=device, dtype=torch.int64)
     out_features, in_features = shape
-    num_master, num_replica = 2, 1
-
-    x = torch.randn(int(counts.sum()), in_features, device=device, dtype=torch.bfloat16, requires_grad=True)
-    master = torch.randn(
-        num_master,
-        out_features,
-        in_features,
-        device=device,
-        dtype=torch.bfloat16,
-        requires_grad=True,
-    )
-    replica = torch.randn(num_replica, out_features, in_features, device=device, dtype=torch.bfloat16)
+    master = torch.randn(2, out_features, in_features, device=device, dtype=torch.bfloat16, requires_grad=True)
+    replica = torch.randn(1, out_features, in_features, device=device, dtype=torch.bfloat16)
     replica_grad = torch.full_like(replica, torch.nan, dtype=torch.float32)
-
-    actual = group_gemm_module.ultra_ep_group_gemm(
-        x,
-        master,
-        replica,
-        replica_grad,
-        counts,
+    x = torch.randn(int(counts.sum()), in_features, device=device, dtype=torch.bfloat16, requires_grad=True)
+    actual = group_gemm_module.triton_group_gemm(
+        x, master, counts, replica_weight=replica, replica_grad=replica_grad
     )
-
     ref_x = x.detach().clone().requires_grad_(True)
     ref_master = master.detach().clone().requires_grad_(True)
     ref_replica = replica.detach().clone().requires_grad_(True)
-    expected = group_gemm_module.triton_group_gemm(
-        ref_x,
-        torch.cat((ref_master, ref_replica), dim=0),
-        counts,
-    )
-
+    expected = group_gemm_module.triton_group_gemm(ref_x, torch.cat((ref_master, ref_replica)), counts)
     grad_output = torch.randn_like(actual)
     actual.backward(grad_output)
     expected.backward(grad_output)
-
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(x.grad, ref_x.grad, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(master.grad, ref_master.grad, rtol=2e-2, atol=2e-2)

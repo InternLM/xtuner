@@ -1,6 +1,6 @@
 import torch
 import random
-from xtuner.v1.ops import group_gemm
+from xtuner.v1.ops.moe import get_group_gemm
 
 
 def grouped_gemm_torch(x, w, tokens_per_expert):
@@ -45,7 +45,9 @@ def row_max_normalization(tensor):
     return tensor_normalized
 
 
-def test_grouped_gemm_triton():
+def test_grouped_gemm_triton(monkeypatch):
+    monkeypatch.setenv("XTUNER_GROUP_GEMM", "triton")
+    group_gemm = get_group_gemm()
     groups = 128
     tokens_per_expert = torch.Tensor(generate_random_list(groups, groups * 4096)).cuda().to(torch.int64).abs()
     seqlen = tokens_per_expert.sum().item()
