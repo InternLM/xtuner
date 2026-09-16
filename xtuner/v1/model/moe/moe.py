@@ -527,6 +527,14 @@ class MoE(BaseModel):
             )
             if loss_ctx is None:
                 raise NotImplementedError("loss_ctx must be provided for intra-layer bsz > 1")
+            if self.config.ultraep_cfg is not None:
+                assert self.ultraep_manager_provider is not None
+                # Resolve native placement capacity once per model call,
+                # before the first decoder layer can lazily materialize the
+                # Manager.  Decoder layers repeat this call as a direct-layer
+                # safeguard, but the model-level update also keeps all layers
+                # on one shared virtual-layer capacity.
+                self.ultraep_manager_provider.configure_max_microbatches(len(seq_ctx))
 
             return self._micro_batch_forward(
                 seq_ctx_list=seq_ctx,

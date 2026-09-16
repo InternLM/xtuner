@@ -110,12 +110,40 @@ class _UltraEPGradReduceJoin(Function):
         return grad_output, None, None
 
 
-class _UltraEPWeightSyncForBackward(Function):
-    """Restore Manager-owned replica slots before expert DGrad runs.
+class _UltraEPWeightRestoreStart(Function):
+    """Launch mutable replica-weight restore at combine-backward entry.
 
-    Replica weights are reusable communication buffers, not model parameters. A later virtual layer can overwrite them
-    after this layer's forward.  This identity node sits immediately after expert compute, so its backward runs after
-    combine backward but before the grouped-GEMM backward that needs the replica weights for DGrad.
+    The identity is attached to the combined MoE output, after combine
+    forward has completed but before the residual/post-MoE path. During
+    backward its callback therefore runs before DeepEP combine backward and
+    can overlap the restore copy/communication with that work.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        combined_hidden_states: torch.Tensor,
+        runtime: UltraEPLayerRuntime,
+        virtual_layer_id: int,
+    ) -> torch.Tensor:
+        ctx.runtime = runtime
+        ctx.virtual_layer_id = virtual_layer_id
+        return combined_hidden_states
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):  # type: ignore[override]
+        ctx.runtime.start_weight_restore(ctx.virtual_layer_id)
+        return grad_output, None, None
+
+
+class _UltraEPWeightRestoreJoin(Function):
+    """Join a restore immediately before expert DGrad runs.
+
+    Replica weights are reusable communication buffers, not model parameters.
+    A later layer can overwrite them after this layer's forward. This identity
+    node sits immediately after expert compute, so its backward waits for the
+    restore launched at combine-backward entry before grouped-GEMM DGrad reads
+    the mutable slots.
     """
 
     @staticmethod
@@ -131,9 +159,7 @@ class _UltraEPWeightSyncForBackward(Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):  # type: ignore[override]
-        # The blocking form establishes the compute-stream dependency before
-        # TE grouped GEMM reads the mutable slots for DGrad.
-        ctx.runtime.sync_weights(ctx.virtual_layer_id, async_finish=False)
+        ctx.runtime.finish_weight_restore(ctx.virtual_layer_id)
         return grad_output, None, None
 
 
@@ -563,9 +589,13 @@ class MoEDecoderLayer(nn.Module):
             # Keep the dynamic-token compile contract for the shared MoEBlock.
             torch._dynamo.mark_dynamic(post_dispatched["hidden_states"], 0)
         if weight_sync_event is not None:
-            # Replica slots are first used by expert GEMMs.  Deferring this wait
-            # overlaps their async refresh with DeepEP dispatch work.
-            weight_sync_event.current_stream_wait()
+            # Replica slots are first used by expert GEMMs.  Deferring this
+            # wait overlaps their async refresh with DeepEP dispatch work.
+            with torch.profiler.record_function("UltraEP::forward_weight_sync_wait"):
+                weight_sync_event.current_stream_wait()
+        if ultraep is not None:
+            assert virtual_layer_id is not None
+            ultraep.bind_virtual_layer_slot(virtual_layer_id)
         experts_out = self.experts(
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
@@ -574,7 +604,7 @@ class MoEDecoderLayer(nn.Module):
         )
         if ultraep is not None:
             assert virtual_layer_id is not None
-            experts_out = _UltraEPWeightSyncForBackward.apply(experts_out, ultraep, virtual_layer_id)
+            experts_out = _UltraEPWeightRestoreJoin.apply(experts_out, ultraep, virtual_layer_id)
         # ProberList.before_combine(
         #     self.layer_idx,
         #     experts_out,
@@ -604,6 +634,16 @@ class MoEDecoderLayer(nn.Module):
             combined=combined,
         )
         combined_hidden_states = post_combined["hidden_states"]
+        if ultraep is not None:
+            assert virtual_layer_id is not None
+            # Start restoring this vid before combine backward.  The join
+            # attached to ``experts_out`` below still waits immediately before
+            # expert DGrad, preserving correctness for mutable replica slots.
+            combined_hidden_states = _UltraEPWeightRestoreStart.apply(
+                combined_hidden_states,
+                ultraep,
+                virtual_layer_id,
+            )
         combined_hidden_states = combined_hidden_states.view(*origin_shape)
 
         # debug for aligning with hf implementation.
@@ -654,6 +694,15 @@ class MoEDecoderLayer(nn.Module):
             "All hidden states should have the same shape"
         )
         intra_layer_micro_batch = len(hidden_states_list)
+        ultraep = self._ultraep
+        virtual_layer_ids: list[int | None] = []
+        if ultraep is not None:
+            # The native manager uses ``virtual_layer_id`` to keep placement
+            # and reroute metadata associated with the correct micro-batch.
+            # Configure the capacity before the first lazy manager access;
+            # ``allocate_virtual_layer_id`` below then returns a distinct vid
+            # for each in-flight micro-batch.
+            ultraep.configure_max_microbatches(intra_layer_micro_batch)
         residual_list: list[torch.Tensor] = []
         router_results_list: list[RouterResults] = []
         attn_outputs_list: list[AttnOutputs] = []
@@ -662,6 +711,7 @@ class MoEDecoderLayer(nn.Module):
         assert len(attention_kwargs_list) == intra_layer_micro_batch
 
         pre_dispatched_list: list[PreDispatchResult] = []
+        weight_sync_events: list[object | None] = []
         dispatched_list: list[DispatchResult] = []
         pre_moe_forward_out_list: list[torch.Tensor] = []
 
@@ -677,6 +727,14 @@ class MoEDecoderLayer(nn.Module):
             seq_ctx_list,
             position_embeddings_list,
         ):
+            virtual_layer_id: int | None = None
+            if ultraep is not None:
+                virtual_layer_id = ultraep.allocate_virtual_layer_id()
+                # Place the join node at the layer input.  Its backward is
+                # intentionally later than the expert/attention graph and
+                # closes this vid's grad-reduce lifetime before FSDP consumes
+                # the parameter gradient.
+                hidden_states = _UltraEPGradReduceJoin.apply(hidden_states, ultraep, virtual_layer_id)
             residual, hidden_states, router_results, attn_outputs = self._pre_moe_forward(
                 hidden_states=hidden_states,
                 seq_ctx=seq_ctx,
@@ -686,16 +744,27 @@ class MoEDecoderLayer(nn.Module):
             )
             pre_moe_forward_out_list.append(hidden_states)
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+            dispatch_hidden_states = hidden_states
+            dispatch_topk_ids = router_results["topk_ids"]
+            weight_sync_event = None
+            if ultraep is not None:
+                assert virtual_layer_id is not None
+                ultraep.update_placement(dispatch_topk_ids, virtual_layer_id)
+                weight_sync_event = ultraep.sync_weights(virtual_layer_id, async_finish=True)
+                dispatch_topk_ids = ultraep.reroute(dispatch_topk_ids, virtual_layer_id)
+                dispatch_hidden_states = _UltraEPGradReduceStart.apply(hidden_states, ultraep, virtual_layer_id)
             pre_dispatched = self.dispatcher.dispatch_preprocess(
-                hidden_states=hidden_states,
-                topk_ids=router_results["topk_ids"],
+                hidden_states=dispatch_hidden_states,
+                topk_ids=dispatch_topk_ids,
                 topk_weights=router_results["topk_weights"],
                 async_op=True,
             )
             pre_dispatched_list.append(pre_dispatched)
+            weight_sync_events.append(weight_sync_event)
             residual_list.append(residual)
             router_results_list.append(router_results)
             attn_outputs_list.append(attn_outputs)
+            virtual_layer_ids.append(virtual_layer_id)
 
         post_dispatched_list: list[PostDispatchResult] = []
         experts_out_list: list[torch.Tensor] = []
@@ -703,9 +772,11 @@ class MoEDecoderLayer(nn.Module):
         combined_list: list[CombineResult] = []
 
         # dispatch + experts + pre-combine
-        for router_results, pre_dispatched in zip(
+        for router_results, pre_dispatched, virtual_layer_id, weight_sync_event in zip(
             router_results_list,
             pre_dispatched_list,
+            virtual_layer_ids,
+            weight_sync_events,
         ):
             dispatched = self.dispatcher.dispatch(
                 pre_dispatched=pre_dispatched,
@@ -718,6 +789,12 @@ class MoEDecoderLayer(nn.Module):
                 dispatched=dispatched,
                 async_op=True,
             )
+            if weight_sync_event is not None:
+                with torch.profiler.record_function("UltraEP::forward_weight_sync_wait"):
+                    weight_sync_event.current_stream_wait()
+            if ultraep is not None:
+                assert virtual_layer_id is not None
+                ultraep.bind_virtual_layer_slot(virtual_layer_id)
             if self.ep_mesh is not None:
                 # Preserve the same dynamic-token compile contract for every in-layer micro-batch.
                 torch._dynamo.mark_dynamic(post_dispatched["hidden_states"], 0)
@@ -727,6 +804,9 @@ class MoEDecoderLayer(nn.Module):
                 decoding=False,
                 tokens_per_expert_cpu=post_dispatched.get("tokens_per_expert_cpu"),
             )
+            if ultraep is not None:
+                assert virtual_layer_id is not None
+                experts_out = _UltraEPWeightRestoreJoin.apply(experts_out, ultraep, virtual_layer_id)
 
             pre_combined = self.dispatcher.combine_preprocess(
                 hidden_states=experts_out,
@@ -778,9 +858,17 @@ class MoEDecoderLayer(nn.Module):
                 combined=combined_list[i],
                 async_op=True,
             )
+            combined_hidden_states = post_combined["hidden_states"]
+            if ultraep is not None:
+                assert virtual_layer_ids[i] is not None
+                combined_hidden_states = _UltraEPWeightRestoreStart.apply(
+                    combined_hidden_states,
+                    ultraep,
+                    virtual_layer_ids[i],
+                )
             hidden_states = self._post_moe_forward(
                 # hidden_states=pre_moe_forward_out_list[i],
-                combined_hidden_states=post_combined["hidden_states"].view(*pre_moe_forward_out_list[i].shape),
+                combined_hidden_states=combined_hidden_states.view(*pre_moe_forward_out_list[i].shape),
                 residual=residual_list[i],
                 shared_experts_out=shared_experts_out_list[i],
             )

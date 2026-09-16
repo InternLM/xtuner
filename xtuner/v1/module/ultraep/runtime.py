@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Protocol
 
 import torch
@@ -21,6 +22,8 @@ class UltraEPGroupedLinear(Protocol):
     weight: torch.Tensor
 
     def configure_ultra_ep_buffers(self, replica_weight: torch.Tensor, replica_grad: torch.Tensor) -> None: ...
+
+    def select_ultra_ep_slot(self, slot: int) -> None: ...
 
 
 class UltraEPManager:
@@ -45,6 +48,10 @@ class UltraEPManager:
                 "Build UltraEP outside the Xtuner environment and prepend its build/lib.* directory to PYTHONPATH."
             ) from exc
 
+        if group.size() <= 1:
+            raise ValueError("UltraEP requires an EP process group with size > 1")
+        if max_microbatches <= 0:
+            raise ValueError("UltraEP requires max_microbatches > 0")
         if dist.get_world_size() != group.size():
             raise NotImplementedError(
                 "Xtuner UltraEP currently requires DP=1 (the EP group must cover the world); "
@@ -110,6 +117,10 @@ class UltraEPManager:
 
     def allocate_microbatch_slot(self, layer_id: int) -> int:
         return self.runtime.allocate_microbatch_slot(layer_id)
+
+    def replica_slot(self, virtual_layer_id: int) -> int:
+        """Return the buffer slot encoded by a native virtual layer id."""
+        return int(self.runtime.microbatch_slot(virtual_layer_id))
 
     def update_placement_sparse(self, layer_id: int, logical_topk_ids: torch.Tensor) -> None:
         self.runtime.update_placement_sparse(layer_id, logical_topk_ids)
@@ -262,6 +273,8 @@ class UltraEPManagerProvider:
             raise ValueError("UltraEP requires logical experts to be evenly sharded by EP")
         if num_model_layers <= 0:
             raise ValueError("UltraEP requires num_model_layers > 0")
+        if max_microbatches <= 0:
+            raise ValueError("UltraEP requires max_microbatches > 0")
 
         self.group = group
         self.num_model_layers = num_model_layers
@@ -278,9 +291,16 @@ class UltraEPManagerProvider:
         *,
         group: dist.ProcessGroup,
         config: MoEConfig,
+        max_microbatches: int = 1,
     ) -> UltraEPManagerProvider:
-        """Build a provider from Xtuner's model config for the single-
-        microbatch path."""
+        """Build a provider from Xtuner's model config.
+
+        The native manager allocates placement/virtual-layer slots at
+        construction time.  Xtuner normally does not know the requested
+        intra-layer micro-batch count until the :class:`TrainEngine` starts a
+        model call, so callers may increase the capacity with
+        :meth:`configure_max_microbatches` before the first manager access.
+        """
         ultraep_cfg = config.ultraep_cfg
         if ultraep_cfg is None:
             raise ValueError("UltraEP manager provider requires config.ultraep_cfg")
@@ -292,8 +312,27 @@ class UltraEPManagerProvider:
             hidden_size=config.hidden_size,
             expert_intermediate_size=config.moe_intermediate_size,
             num_redundant_experts_per_rank=ultraep_cfg.num_redundant_experts_per_rank,
-            max_microbatches=1,
+            max_microbatches=max_microbatches,
         )
+
+    def configure_max_microbatches(self, requested: int) -> None:
+        """Set the native virtual-layer capacity before materialization.
+
+        A manager owns one shared replica weight/gradient buffer.  Its native
+        placement tables nevertheless need one virtual id per in-flight
+        micro-batch.  Capacity is therefore fixed once the manager is created;
+        changing it afterwards would invalidate already allocated ids.
+        """
+        if requested <= 0:
+            raise ValueError(f"UltraEP microbatch capacity must be > 0, got {requested}")
+        requested = max(1, int(requested))
+        if self._manager is not None and requested > self.max_microbatches:
+            raise RuntimeError(
+                "UltraEP manager was already materialized with insufficient virtual-layer capacity: "
+                f"existing={self.max_microbatches}, requested={requested}. "
+                "Configure intra_layer_micro_batch before the first UltraEP forward."
+            )
+        self.max_microbatches = max(self.max_microbatches, requested)
 
     @property
     def num_dispatch_experts(self) -> int:
@@ -345,6 +384,11 @@ class UltraEPLayerRuntime:
         self._buffers_configured = False
         self._master_pointers_registered = False
         self._grad_reduce_events: dict[int, tuple[object, torch.Tensor, torch.Tensor]] = {}
+        # Restore is deliberately split into a launch and a join.  Replica
+        # slots are mutable communication buffers, so the launch can safely
+        # overlap combine backward while the join remains immediately before
+        # expert DGrad (the first consumer of the restored weights).
+        self._weight_restore_events: dict[int, object | None] = {}
 
     @property
     def num_dispatch_experts(self) -> int:
@@ -361,6 +405,11 @@ class UltraEPLayerRuntime:
                 "UltraEP capacity is resolved from Trainer/TrainEngine.intra_layer_micro_batch."
             )
 
+    def configure_max_microbatches(self, requested_microbatches: int) -> None:
+        """Propagate call capacity to this layer and its shared provider."""
+        self.manager_provider.configure_max_microbatches(requested_microbatches)
+        self.max_microbatches = self.manager_provider.max_microbatches
+
     def allocate_virtual_layer_id(self) -> int:
         """Allocate the UltraEP virtual-layer slot for this forward
         microbatch."""
@@ -372,22 +421,59 @@ class UltraEPLayerRuntime:
         virtual_layer_id: int,
     ) -> None:
         """Build the replication placement from logical expert IDs."""
-        self._ensure_manager().update_placement_sparse(virtual_layer_id, logical_topk_ids)
+        with torch.profiler.record_function("UltraEP::placement"):
+            self._ensure_manager().update_placement_sparse(virtual_layer_id, logical_topk_ids)
 
     def reroute(self, logical_topk_ids: torch.Tensor, virtual_layer_id: int) -> torch.Tensor:
         """Return a dispatcher-only copy rewritten into physical expert IDs."""
-        physical_topk_ids = logical_topk_ids.clone()
-        self._ensure_manager().reroute_sparse(virtual_layer_id, physical_topk_ids)
+        with torch.profiler.record_function("UltraEP::reroute"):
+            physical_topk_ids = logical_topk_ids.clone()
+            self._ensure_manager().reroute_sparse(virtual_layer_id, physical_topk_ids)
         return physical_topk_ids
 
     def sync_weights(self, virtual_layer_id: int, *, async_finish: bool):
-        manager = self._ensure_manager()
-        manager.refresh_master_weight_pointers(
-            layer_id=self.layer_id,
-            fc1_weight=self.fused_w1w3.weight,
-            fc2_weight=self.fused_w2.weight,
-        )
-        return manager.weight_sync(virtual_layer_id, async_finish=async_finish)
+        with torch.profiler.record_function("UltraEP::weight_sync_launch"):
+            manager = self._ensure_manager()
+            manager.refresh_master_weight_pointers(
+                layer_id=self.layer_id,
+                fc1_weight=self.fused_w1w3.weight,
+                fc2_weight=self.fused_w2.weight,
+            )
+            return manager.weight_sync(virtual_layer_id, async_finish=async_finish)
+
+    def start_weight_restore(self, virtual_layer_id: int) -> None:
+        """Launch backward weight restore without waiting on the compute stream.
+
+        The restore must happen after FSDP has materialized this layer's
+        current master parameters, but it does not need to block combine
+        backward: that path only consumes activations and routing metadata.
+        The matching :meth:`finish_weight_restore` waits just before the
+        grouped GEMM DGrad node reads the mutable replica slot.
+        """
+        events = getattr(self, "_weight_restore_events", None)
+        if events is None:
+            events = self._weight_restore_events = {}
+        if virtual_layer_id in events:
+            raise RuntimeError(f"UltraEP weight restore for virtual layer slot {virtual_layer_id} is still in use")
+        with torch.profiler.record_function("UltraEP::restore_start"):
+            events[virtual_layer_id] = self.sync_weights(virtual_layer_id, async_finish=True)
+
+    def finish_weight_restore(self, virtual_layer_id: int) -> None:
+        """Wait for a previously launched restore and select its replica slot."""
+        events = getattr(self, "_weight_restore_events", None)
+        if events is None or virtual_layer_id not in events:
+            raise RuntimeError(f"UltraEP weight restore for virtual layer slot {virtual_layer_id} was not started")
+        event = events.pop(virtual_layer_id)
+        with torch.profiler.record_function("UltraEP::restore_wait"):
+            if event is not None:
+                # The real UltraEP EventHandle exposes ``event=None`` for the
+                # synchronous path. Keep duck-typed fakes used by tests
+                # working when they only provide ``current_stream_wait``.
+                if not hasattr(event, "event") or event.event is not None:  # type: ignore[attr-defined]
+                    event.current_stream_wait()  # type: ignore[attr-defined]
+            # Selecting the slot only after the event dependency is installed
+            # ensures the following grouped GEMM DGrad reads this vid's data.
+            self.bind_virtual_layer_slot(virtual_layer_id)
 
     def start_grad_reduce(self, virtual_layer_id: int) -> None:
         if virtual_layer_id in self._grad_reduce_events:
@@ -400,12 +486,14 @@ class UltraEPLayerRuntime:
                 "the FSDP/autograd hook ordering is incompatible with replica grad-reduce"
             )
         manager = self._ensure_manager()
-        manager.stage_master_gradients(
-            virtual_layer_id=virtual_layer_id,
-            fc1_grad=fc1_grad,
-            fc2_grad=fc2_grad,
-        )
-        event = manager.grad_reduce(virtual_layer_id, async_finish=True)
+        with torch.profiler.record_function("UltraEP::grad_stage"):
+            manager.stage_master_gradients(
+                virtual_layer_id=virtual_layer_id,
+                fc1_grad=fc1_grad,
+                fc2_grad=fc2_grad,
+            )
+        with torch.profiler.record_function("UltraEP::grad_reduce_launch"):
+            event = manager.grad_reduce(virtual_layer_id, async_finish=True)
         self._grad_reduce_events[virtual_layer_id] = (event, fc1_grad, fc2_grad)
 
     def finish_grad_reduce(self, virtual_layer_id: int) -> None:
@@ -413,37 +501,55 @@ class UltraEPLayerRuntime:
         if state is None:
             raise RuntimeError(f"UltraEP grad-reduce event for virtual layer {virtual_layer_id} was not started")
         event, fc1_grad, fc2_grad = state
-        event.current_stream_wait()  # type: ignore[attr-defined]
-        self._ensure_manager().restore_master_gradients(
-            virtual_layer_id=virtual_layer_id,
-            fc1_grad=fc1_grad,
-            fc2_grad=fc2_grad,
-        )
+        if event is not None:
+            # The real UltraEP EventHandle exposes ``event=None`` for the
+            # synchronous path.  Keep the small duck-typed fake used by the
+            # unit tests (which only has ``current_stream_wait``) working too.
+            with torch.profiler.record_function("UltraEP::grad_reduce_wait"):
+                if not hasattr(event, "event") or event.event is not None:  # type: ignore[attr-defined]
+                    event.current_stream_wait()  # type: ignore[attr-defined]
+            with torch.profiler.record_function("UltraEP::grad_restore"):
+                self._ensure_manager().restore_master_gradients(
+                    virtual_layer_id=virtual_layer_id,
+                    fc1_grad=fc1_grad,
+                    fc2_grad=fc2_grad,
+                )
 
     def _ensure_manager(self) -> UltraEPManager:
         manager = self.manager_provider.get_manager()
         if not self._buffers_configured:
             redundant = manager.num_local_redundant_experts
+            slots = int(getattr(manager, "max_microbatches", self.max_microbatches))
+
+            def slot_view(buffer: torch.Tensor, *shape: int) -> torch.Tensor:
+                expected = slots * redundant
+                if buffer.numel() != expected * math.prod(shape):
+                    raise ValueError(
+                        "UltraEP replica buffer capacity does not match the configured micro-batch slots: "
+                        f"slots={slots}, redundant={redundant}, shape={shape}, numel={buffer.numel()}"
+                    )
+                return buffer.reshape(slots, redundant, *shape)
+
             self.fused_w1w3.configure_ultra_ep_buffers(
-                manager.local_replica_fc1_weight_buffer.view(
-                    redundant,
+                slot_view(
+                    manager.local_replica_fc1_weight_buffer,
                     2 * self.expert_intermediate_size,
                     self.hidden_size,
                 ),
-                manager.local_replica_fc1_grad_buffer.view(
-                    redundant,
+                slot_view(
+                    manager.local_replica_fc1_grad_buffer,
                     2 * self.expert_intermediate_size,
                     self.hidden_size,
                 ),
             )
             self.fused_w2.configure_ultra_ep_buffers(
-                manager.local_replica_fc2_weight_buffer.view(
-                    redundant,
+                slot_view(
+                    manager.local_replica_fc2_weight_buffer,
                     self.hidden_size,
                     self.expert_intermediate_size,
                 ),
-                manager.local_replica_fc2_grad_buffer.view(
-                    redundant,
+                slot_view(
+                    manager.local_replica_fc2_grad_buffer,
                     self.hidden_size,
                     self.expert_intermediate_size,
                 ),
@@ -460,6 +566,13 @@ class UltraEPLayerRuntime:
             )
             self._master_pointers_registered = True
         return manager
+
+    def bind_virtual_layer_slot(self, virtual_layer_id: int) -> None:
+        """Select the replica slices used by this virtual layer's GEMMs."""
+        manager = self._ensure_manager()
+        slot = manager.replica_slot(virtual_layer_id)
+        self.fused_w1w3.select_ultra_ep_slot(slot)
+        self.fused_w2.select_ultra_ep_slot(slot)
 
 
 _MANAGERS: dict[int, tuple[tuple[int, ...], UltraEPManager]] = {}
