@@ -590,18 +590,26 @@ class TestMuonFSDP(DeterministicDDPTestCase):
                 msg=f"mismatch on '{name}': max_abs={abs_diff.max().item():.2e}, max_rel={rel_diff.max().item():.2e}",
             )
 
-    def test_muon_remainder_batch_skips_idle_ranks(self):
-        """An evenly sharded remainder batch exchanges only its real matrices: the ranks that
-        assemble one orthogonalize it, the rest stay idle instead of running Newton-Schulz on
-        zero padding."""
+    @parametrize.parametrize("rows", [8, 6])
+    def test_muon_remainder_batch_skips_idle_ranks(self, rows: int):
+        """A remainder batch exchanges only its real matrices: the ranks that assemble one
+        orthogonalize it, the rest stay idle instead of running Newton-Schulz on zero padding.
+
+        rows=8 shards evenly over 4 ranks; rows=6 shards as 2/2/2/0, so the split sizes carry
+        both a short batch and a rank with no shard at all.
+        """
         self.create_pg("cuda")
         rank = dist.get_rank()
         device = torch.device("cuda", rank % torch.cuda.device_count())
         mesh = init_device_mesh("cuda", (4,), mesh_dim_names=("muon_ragged.fsdp",))
 
         world_size = mesh.size(0)
-        rows, cols = 8, 4  # evenly sharded: 8 % 4 == 0
+        cols = 4
         remainder = 2  # fewer params than ranks -> a remainder batch
+        # DTensor chunks dim 0 into ceil(rows / world_size) pieces.
+        chunk = -(-rows // world_size)
+        start = min(rank * chunk, rows)
+        stop = min(start + chunk, rows)
 
         params = []
         expected_params = []
@@ -635,11 +643,10 @@ class TestMuonFSDP(DeterministicDDPTestCase):
         # rank orthogonalize one, two of them all zeros.
         assert ns_calls == ([(rows, cols)] if rank < remainder else [])
 
-        local_rows = rows // world_size
         for param, expected in zip(params, expected_params):
             torch.testing.assert_close(
                 param.data.to_local(),  # type: ignore[attr-defined]
-                expected[rank * local_rows : (rank + 1) * local_rows],
+                expected[start:stop],
                 atol=1e-2,
                 rtol=1e-2,
             )
