@@ -78,6 +78,19 @@ from xtuner.v1.utils.internal_metrics import (
     flatten_internal_metrics_for_logs,
 )
 
+@contextmanager
+def _nsys_step_range(step: int):
+    """Optional low-overhead NVTX boundaries for step-level Nsight traces."""
+    enabled = os.getenv("XTUNER_NSYS_STEP_NVTX", "0") == "1" and torch.cuda.is_available()
+    if enabled:
+        torch.cuda.nvtx.range_push(f"xtuner_step_{step}")
+    try:
+        yield
+    finally:
+        if enabled:
+            torch.cuda.nvtx.range_pop()
+
+
 from .toy_tokenizer import UTF8ByteTokenizer
 
 
@@ -860,7 +873,7 @@ class Trainer:
             ProberList.set_step(self._cur_step + 1)
             DEVICE_MODULE.reset_peak_memory_stats()
 
-            with self._maybe_profiling():
+            with _nsys_step_range(self._cur_step + 1), self._maybe_profiling():
                 engine_input = self._prepare_model_input(data_batch)
                 train_step_info = self._engine.train_step(engine_input)
                 hooks = self.hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)
