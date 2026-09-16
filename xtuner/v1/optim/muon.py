@@ -312,9 +312,9 @@ class Muon(Optimizer):
             force the all-gather + reduce-scatter (AGRS) path for all sharded batches. Useful on cluster
             topologies where all-to-all is unreliable.
         remainder_strategy (str): Communication strategy for parameter batches smaller than world size.
-            ``"pad_all2all"`` (default) uses all-to-all, so each rank receives exactly one matrix; evenly
-            sharded remainders are exchanged with split sizes instead of zero padding, leaving the ranks
-            without a matrix idle rather than orthogonalizing zeros. ``"agrs"`` uses all-gather + reduce-scatter without batch padding,
+            ``"pad_all2all"`` (default) uses all-to-all, so each rank receives exactly one matrix; remainder
+            batches are exchanged with split sizes instead of zero padding, leaving the ranks without a
+            matrix idle rather than orthogonalizing zeros. ``"agrs"`` uses all-gather + reduce-scatter without batch padding,
             which gathers every matrix of the batch onto every rank: both its time and its peak memory grow
             linearly with the batch size (measured at world size 8 on 96MB matrices: 14.9ms/624MB at 1
             param rising to 20.1ms/2016MB at 7, against a flat ~15.2ms/<900MB for ``"pad_all2all"``).
@@ -838,9 +838,9 @@ class Muon(Optimizer):
         if plan.comm_strategy == "all_to_all":
             if not self._enable_all2all or (is_remainder and self._remainder_strategy == "agrs"):
                 batch_comm_strategy = "agrs"
-            elif is_remainder and global_shard_dim_size is not None and global_shard_dim_size % plan.world_size == 0:
-                # Evenly sharded remainder: exchange only the real matrices instead of padding
-                # the batch out to the group size.
+            elif is_remainder:
+                # Exchange only the real matrices instead of padding the batch out to the group
+                # size; uneven shards are carried by the split sizes.
                 batch_comm_strategy = "ragged_all_to_all"
         batch_size = None if batch_comm_strategy in ("agrs", "ragged_all_to_all") else plan.world_size
 
@@ -1008,6 +1008,7 @@ def muon_update_batch_async(
         U = yield from _ragged_all_to_all_orthogonalize(
             U,
             shard_dim,
+            global_shard_dim_size,
             process_group,
             newton_schulz_func,
             flatten,
@@ -1051,6 +1052,13 @@ def muon_update_batch_async(
         adjusted_lr=adjusted_lr,
         weight_decay=weight_decay,
     )
+
+
+def _shard_sizes(global_shard_dim_size: int, world_size: int) -> list[int]:
+    # DTensor splits a dimension into chunks of ceil(size / world_size), so trailing ranks can
+    # own a short shard or none at all.
+    chunk = (global_shard_dim_size + world_size - 1) // world_size
+    return [max(0, min((r + 1) * chunk, global_shard_dim_size) - r * chunk) for r in range(world_size)]
 
 
 def _agrs_orthogonalize(
@@ -1304,12 +1312,7 @@ def _all_to_all_orthogonalize(
         # Calculate padded shard size (ceil division) so all ranks have same-sized tensors
         padded_shard_size = (global_shard_dim_size + world_size - 1) // world_size
 
-        # Compute true local sizes for each rank using DTensor's sharding logic
-        local_sizes = []
-        for r in range(world_size):
-            start = r * padded_shard_size
-            end = min((r + 1) * padded_shard_size, global_shard_dim_size)
-            local_sizes.append(max(0, end - start))
+        local_sizes = _shard_sizes(global_shard_dim_size, world_size)
 
         # Pad all local shards to the same size for uniform all-to-all
         U_padded = []
@@ -1444,56 +1447,56 @@ def _all_to_all_orthogonalize(
 def _ragged_all_to_all_orthogonalize(
     U: list[Tensor],
     shard_dim: int,
+    global_shard_dim_size: int,
     process_group: ProcessGroup,
     newton_schulz_func: Callable,
     flatten: bool,
     epsilon: Tensor,
     num_experts: int,
 ) -> Generator[None, None, list[Tensor]]:
-    # Remainder batch of R < world_size evenly sharded matrices. Split sizes send each rank's
-    # shards to the R ranks that assemble a matrix, so — unlike the padded all-to-all — no zero
-    # shards are exchanged and the idle ranks neither allocate a full matrix nor orthogonalize
-    # one. Every rank must still enter both collectives; idle ranks do so with empty buffers.
+    # Remainder batch of R < world_size matrices. The split sizes route every rank's shards to
+    # the R ranks that assemble a matrix, so — unlike the padded all-to-all — no zero shards are
+    # exchanged and the remaining ranks neither hold a full matrix nor orthogonalize one. Every
+    # rank still enters both collectives, the idle ones with empty buffers. Uneven sharding needs
+    # no special case either: the split sizes carry each rank's true shard length.
     world_size = process_group.size()
     busy = process_group.rank() < len(U)
+    shard_sizes = _shard_sizes(global_shard_dim_size, world_size)
+    my_shard_size = shard_sizes[process_group.rank()]
 
-    U_packed = torch.stack(U)  # (R, *shard_shape)
-    shard_shape = U_packed.shape[1:]
-    send_splits = [1] * len(U) + [0] * (world_size - len(U))
-    recv_splits = [1] * world_size if busy else [0] * world_size
+    # all_to_all_single splits along dim 0, so the sharded dimension has to lead. FSDP shards
+    # dim 0, which makes every movedim here a no-op view.
+    send = torch.cat([u.movedim(shard_dim, 0) for u in U]).contiguous()
+    tail_shape = send.shape[1:]
+    send_splits = [my_shard_size] * len(U) + [0] * (world_size - len(U))
+    recv_splits = shard_sizes if busy else [0] * world_size
 
-    parts = torch.empty((world_size if busy else 0, *shard_shape), dtype=U_packed.dtype, device=U_packed.device)
-    work = dist.all_to_all_single(parts, U_packed, recv_splits, send_splits, group=process_group, async_op=True)
+    recv = torch.empty((global_shard_dim_size if busy else 0, *tail_shape), dtype=send.dtype, device=send.device)
+    work = dist.all_to_all_single(recv, send, recv_splits, send_splits, group=process_group, async_op=True)
     yield
     work.wait()  # type: ignore[union-attr]
 
     if busy:
-        if shard_dim == 0:
-            single_matrix = parts.flatten(0, 1)
-        else:
-            single_matrix = torch.cat(parts.unbind(0), dim=shard_dim)
-
+        # Shards arrive in rank order, which is exactly their order along the sharded dimension.
         single_matrix = muon_update_newton_schulz(
-            single_matrix,
+            recv.movedim(0, shard_dim).contiguous(),
             newton_schulz_func=newton_schulz_func,
             flatten=flatten,
             epsilon=epsilon,
             num_experts=num_experts,
         )
+        send_back = single_matrix.movedim(shard_dim, 0).contiguous()
+    else:
+        send_back = recv
 
-        if shard_dim == 0:
-            parts = single_matrix.view(world_size, *shard_shape)
-        else:
-            parts = torch.stack(single_matrix.chunk(world_size, dim=shard_dim))
-        parts = parts.contiguous()
-
-    result = torch.empty_like(U_packed)
     # Mirror image of the forward exchange: what each rank received it now sends back.
-    work = dist.all_to_all_single(result, parts, send_splits, recv_splits, group=process_group, async_op=True)
+    result = torch.empty_like(send)
+    work = dist.all_to_all_single(result, send_back, send_splits, recv_splits, group=process_group, async_op=True)
     yield
     work.wait()  # type: ignore[union-attr]
 
-    return list(result.unbind(0))
+    shards = result.view(len(U), my_shard_size, *tail_shape).unbind(0)
+    return [shard.movedim(0, shard_dim) for shard in shards]
 
 
 def _local_orthogonalize(
