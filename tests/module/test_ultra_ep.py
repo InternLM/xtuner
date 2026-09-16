@@ -31,7 +31,7 @@ class FakeGroup:
 
 class FakeGroupedLinear:
     def __init__(self, shape):
-        self.weight = torch.nn.Parameter(torch.zeros(shape))
+        self.weight = torch.nn.Parameter(torch.zeros(shape, dtype=torch.bfloat16))
         self.configure_calls = []
         self.select_calls = []
 
@@ -72,8 +72,18 @@ class FakeLayerManager:
             redundant * hidden_size * intermediate_size,
             dtype=torch.float32,
         )
-        self.master_fc1_grad_staging = torch.empty(num_master_experts, 2 * intermediate_size, hidden_size)
-        self.master_fc2_grad_staging = torch.empty(num_master_experts, hidden_size, intermediate_size)
+        self.master_fc1_grad_staging = torch.empty(
+            num_master_experts,
+            2 * intermediate_size,
+            hidden_size,
+            dtype=torch.bfloat16,
+        )
+        self.master_fc2_grad_staging = torch.empty(
+            num_master_experts,
+            hidden_size,
+            intermediate_size,
+            dtype=torch.bfloat16,
+        )
         self.register_calls = []
         self.refresh_calls = []
         self.weight_sync_calls = []
@@ -107,9 +117,9 @@ class FakeLayerManager:
         return FakeEvent(self.event_calls, layer_id)
 
     def restore_master_gradients(self, *, virtual_layer_id, fc1_grad, fc2_grad):
+        del fc1_grad, fc2_grad
         self.restore_calls.append(virtual_layer_id)
-        fc1_grad.copy_(self.master_fc1_grad_staging)
-        fc2_grad.copy_(self.master_fc2_grad_staging)
+        return self.master_fc1_grad_staging, self.master_fc2_grad_staging
 
 
 class FakeManagerProvider:
@@ -225,6 +235,11 @@ def test_ultra_ep_manager_provider_derives_shape_from_xtuner_config():
     )
     assert provider._manager is None
 
+    with pytest.raises(RuntimeError, match="installed after FSDP setup"):
+        provider.ensure_materialized()
+    with pytest.raises(RuntimeError, match="installed after FSDP setup"):
+        provider.get_manager()
+
     runtime = UltraEPLayerRuntime(
         layer_id=config.num_hidden_layers - 1,
         manager_provider=provider,
@@ -241,6 +256,78 @@ def test_ultra_ep_manager_provider_derives_shape_from_xtuner_config():
             fused_w1w3=object(),  # type: ignore[arg-type]
             fused_w2=object(),  # type: ignore[arg-type]
         )
+
+
+def test_ultra_ep_provider_binding_install_is_transactional(monkeypatch):
+    config = Qwen3MoE235BA22Config(
+        ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
+    )
+    provider = UltraEPManagerProvider.from_xtuner_config(
+        group=FakeGroup(),  # type: ignore[arg-type]
+        config=config,
+    )
+    import xtuner.v1.module.ultraep.fsdp_expert_binding as binding
+
+    monkeypatch.setattr(
+        binding,
+        "install_ultraep_fsdp_binding",
+        lambda **kwargs: ("binding",),
+    )
+    root = object()
+    provider.install_after_fsdp(fsdp_root=root, targets=[])
+    assert provider._state == "INSTALLED"
+    assert provider._fsdp_root is root
+    assert provider.fsdp_binding == ("binding",)
+
+
+def test_ultra_ep_provider_failed_binding_does_not_publish_installed_state(monkeypatch):
+    config = Qwen3MoE235BA22Config(
+        ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
+    )
+    provider = UltraEPManagerProvider.from_xtuner_config(
+        group=FakeGroup(),  # type: ignore[arg-type]
+        config=config,
+    )
+    import xtuner.v1.module.ultraep.fsdp_expert_binding as binding
+
+    def fail(**kwargs):
+        raise RuntimeError("binding failed")
+
+    monkeypatch.setattr(binding, "install_ultraep_fsdp_binding", fail)
+    with pytest.raises(RuntimeError, match="binding failed"):
+        provider.install_after_fsdp(fsdp_root=object(), targets=[])
+    assert provider._state == "CREATED"
+    assert provider._fsdp_root is None
+    assert not hasattr(provider, "fsdp_binding")
+
+
+def test_ultra_ep_provider_requires_reshard_and_grad(monkeypatch):
+    config = Qwen3MoE235BA22Config(
+        ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
+    )
+    provider = UltraEPManagerProvider.from_xtuner_config(
+        group=FakeGroup(),  # type: ignore[arg-type]
+        config=config,
+    )
+    monkeypatch.setattr(ultraep_runtime.dist, "is_available", lambda: True)
+    monkeypatch.setattr(ultraep_runtime.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(ultraep_runtime.dist, "get_world_size", lambda: 8)
+
+    # EP8×DP1: historical subexperiment-8 path keeps params unsharded.
+    provider.validate_before_fsdp(
+        FSDPConfig(recompute_ratio=0, ep_size=8, reshard_after_forward=False)
+    )
+    # EP4×DP2: closed unshard window is required.
+    with pytest.raises(ValueError, match="reshard_after_forward"):
+        provider.validate_before_fsdp(
+            FSDPConfig(recompute_ratio=0, ep_size=4, reshard_after_forward=False)
+        )
+    with pytest.raises(ValueError, match="reshard_after_forward"):
+        provider.validate_before_fsdp(
+            FSDPConfig(recompute_ratio=0, hsdp_sharding_size=2, reshard_after_forward=False)
+        )
+    with pytest.raises(ValueError, match="requires_grad"):
+        provider.validate_before_fsdp(FSDPConfig(recompute_ratio=0, ep_size=8, requires_grad=False))
 
 
 def test_ultra_ep_provider_configures_virtual_layer_capacity_before_materialization():
@@ -336,6 +423,7 @@ def test_ultra_ep_microbatch_pipeline_scales_beyond_two():
     nn.Module.__init__(layer)
     layer._ultraep = FakeRuntime()
     layer.n_shared_experts = 0
+    layer.ep_mesh = None
     calls = []
     layer.dispatcher = FakeDispatcher(calls)
     layer.experts = lambda hidden_states, *args, **kwargs: hidden_states
@@ -348,6 +436,7 @@ def test_ultra_ep_microbatch_pipeline_scales_beyond_two():
             "topk_ids": torch.zeros((*hidden_states.shape[:-1], 1), dtype=torch.long),
             "topk_weights": torch.ones((*hidden_states.shape[:-1], 1)),
         },
+        None,
     )
     layer._post_moe_forward = lambda *, combined_hidden_states, residual, shared_experts_out: combined_hidden_states
 
@@ -360,7 +449,7 @@ def test_ultra_ep_microbatch_pipeline_scales_beyond_two():
 
     assert layer._ultraep.configured == [3]
     assert [call[1] for call in layer._ultraep.calls if call[0] == "allocate"] == [0, 1, 2]
-    assert len(output) == 3 * 4
+    assert len(output["hidden_states"]) == 3
     assert calls[:3] == ["preprocess", "preprocess", "preprocess"]
     assert calls[3:12] == [
         "dispatch",
@@ -476,8 +565,8 @@ def test_ultra_ep_buffers_are_not_parameters_or_state_dict_entries():
     ("replica_weight_shape", "replica_grad_shape", "replica_grad_dtype", "match"),
     [
         ((1, 1, 5, 4), (1, 1, 5, 4), torch.float32, "Unexpected UltraEP replica weight shape"),
-        ((1, 1, 6, 4), (1, 2, 6, 4), torch.float32, "FP32 tensor matching replica weight shape"),
-        ((1, 1, 6, 4), (1, 1, 6, 4), torch.bfloat16, "FP32 tensor matching replica weight shape"),
+        ((1, 1, 6, 4), (1, 2, 6, 4), torch.float32, "FP32 or BF16 tensor matching replica weight shape"),
+        ((1, 1, 6, 4), (1, 1, 6, 4), torch.float16, "FP32 or BF16 tensor matching replica weight shape"),
     ],
 )
 def test_ultra_ep_rejects_invalid_replica_buffers(
@@ -590,6 +679,8 @@ def test_ultra_ep_grad_reduce_lifecycle_stages_reduces_and_restores():
     runtime.finish_grad_reduce(3)
     assert manager.event_calls == [("wait", 3)]
     assert manager.restore_calls == [3]
+    assert fused_w1w3.weight.grad.data_ptr() == manager.master_fc1_grad_staging.data_ptr()
+    assert fused_w2.weight.grad.data_ptr() == manager.master_fc2_grad_staging.data_ptr()
     torch.testing.assert_close(fused_w1w3.weight.grad, torch.full_like(fused_w1w3.weight, 2.0))
     torch.testing.assert_close(fused_w2.weight.grad, torch.full_like(fused_w2.weight, 5.0))
     assert runtime._grad_reduce_events == {}
@@ -609,6 +700,36 @@ def test_ultra_ep_multi_microbatch_grad_reduce_remains_async():
     assert manager.event_calls == [("wait", 17)]
     assert manager.restore_calls == [17]
     assert runtime._grad_reduce_events == {}
+
+
+def test_ultra_ep_grad_reduce_writes_back_through_fsdp_binding(monkeypatch):
+    runtime, manager, fused_w1w3, fused_w2 = make_fake_layer_runtime()
+    fused_w1w3.weight.grad = torch.full_like(fused_w1w3.weight, 1.0)
+    fused_w2.weight.grad = torch.full_like(fused_w2.weight, 3.0)
+    fused_w1w3._xtuner_ultraep_fsdp_param = object()
+    fused_w2._xtuner_ultraep_fsdp_param = object()
+    current_w1 = torch.nn.Parameter(torch.zeros_like(fused_w1w3.weight))
+    current_w2 = torch.nn.Parameter(torch.zeros_like(fused_w2.weight))
+    current_w1.grad = torch.full_like(current_w1, 1.0)
+    current_w2.grad = torch.full_like(current_w2, 3.0)
+
+    import xtuner.v1.module.ultraep.fsdp_expert_binding as binding
+
+    monkeypatch.setattr(
+        binding,
+        "fsdp_current_unsharded_expert_parameters",
+        lambda projections: (current_w1, current_w2),
+    )
+
+    runtime.start_grad_reduce(19)
+    runtime.finish_grad_reduce(19)
+
+    assert current_w1.grad.data_ptr() == manager.master_fc1_grad_staging.data_ptr()
+    assert current_w2.grad.data_ptr() == manager.master_fc2_grad_staging.data_ptr()
+    torch.testing.assert_close(current_w1.grad, torch.full_like(current_w1, 2.0))
+    torch.testing.assert_close(current_w2.grad, torch.full_like(current_w2, 5.0))
+    torch.testing.assert_close(fused_w1w3.weight.grad, torch.full_like(fused_w1w3.weight, 1.0))
+    torch.testing.assert_close(fused_w2.weight.grad, torch.full_like(fused_w2.weight, 3.0))
 
 
 def test_ultra_ep_grad_reduce_autograd_nodes_start_before_join():

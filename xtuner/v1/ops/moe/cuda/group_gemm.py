@@ -60,7 +60,7 @@ class UltraEPGroupedGemm(torch.autograd.Function):
     Replica weights and gradients are runtime-owned, cross-layer buffers.  They
     must not become model parameters or optimizer state.  This bridge therefore
     returns only the inherent-expert weight gradient to autograd and writes the
-    replica Wgrad into UltraEP's FP32 buffer as a side effect.
+    replica Wgrad into UltraEP's BF16 buffer as a side effect.
 
     Xtuner's FSDP-managed master weights and UltraEP's shared replica slots live
     in separate allocations. A dual-base Triton kernel selects the right weight
@@ -124,7 +124,7 @@ class UltraEPGroupedGemm(torch.autograd.Function):
             )
             physical_dw = k_grouped_gemm(grad_output, x, tokens_per_expert)
             master_dw = physical_dw[:num_master_experts]
-            replica_grad.copy_(physical_dw[num_master_experts:].float())
+            replica_grad.copy_(physical_dw[num_master_experts:])
         return dx, master_dw, None, None, None
 
 

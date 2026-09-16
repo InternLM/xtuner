@@ -192,8 +192,15 @@ class GroupedLinear(nn.Module):
                 "Unexpected UltraEP replica weight shape: "
                 f"expected [S, R, {self.out_features}, {self.in_features}], got {tuple(replica_weight.shape)}"
             )
-        if replica_grad.shape != replica_weight.shape or replica_grad.dtype != torch.float32:
-            raise ValueError("UltraEP replica grad must be an FP32 tensor matching replica weight shape")
+        # Native UltraEP uses BF16 replica-grad storage so that the GR_EP
+        # kernel can reduce directly into the runtime-owned buffer.  Keep
+        # accepting FP32 here for compatibility with older non-FSDP callers;
+        # the FSDP/UltraEP runtime itself always provisions BF16 buffers.
+        if replica_grad.shape != replica_weight.shape or replica_grad.dtype not in (
+            torch.bfloat16,
+            torch.float32,
+        ):
+            raise ValueError("UltraEP replica grad must be an FP32 or BF16 tensor matching replica weight shape")
         # Tensor attributes are intentionally plain references: Manager owns
         # their storage and they must stay out of state_dict()/parameters().
         self._ultra_ep_replica_weight_slots = replica_weight
