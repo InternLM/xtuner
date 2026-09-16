@@ -261,12 +261,17 @@ def adamw_update_foreach(  # type: ignore
     torch._foreach_sub_(X, M_div)
 
 
+# "ragged_all_to_all" is chosen per batch, not per mesh group; every other value can come
+# from either the mesh plan or a per-batch override.
+MuonCommStrategy = Literal["agrs", "subgroup_allgather", "all_to_all", "ragged_all_to_all", "local"]
+
+
 @dataclass(frozen=True)
 class _MuonMeshCommPlan:
     """Communication plan shared by every shape-homogeneous batch drawn from
     one (device_mesh, placements) group of Muon parameters."""
 
-    comm_strategy: Literal["agrs", "subgroup_allgather", "all_to_all", "local"]
+    comm_strategy: MuonCommStrategy
     comm_pg: ProcessGroup | None
     world_size: int
     sharded_tensor_dim: int | None
@@ -307,8 +312,9 @@ class Muon(Optimizer):
             force the all-gather + reduce-scatter (AGRS) path for all sharded batches. Useful on cluster
             topologies where all-to-all is unreliable.
         remainder_strategy (str): Communication strategy for parameter batches smaller than world size.
-            ``"pad_all2all"`` (default) zero-pads the batch to world size and uses all-to-all, so each rank
-            receives exactly one matrix. ``"agrs"`` uses all-gather + reduce-scatter without batch padding,
+            ``"pad_all2all"`` (default) uses all-to-all, so each rank receives exactly one matrix; evenly
+            sharded remainders are exchanged with split sizes instead of zero padding, leaving the ranks
+            without a matrix idle rather than orthogonalizing zeros. ``"agrs"`` uses all-gather + reduce-scatter without batch padding,
             which gathers every matrix of the batch onto every rank: both its time and its peak memory grow
             linearly with the batch size (measured at world size 8 on 96MB matrices: 14.9ms/624MB at 1
             param rising to 20.1ms/2016MB at 7, against a flat ~15.2ms/<900MB for ``"pad_all2all"``).
@@ -824,16 +830,19 @@ class Muon(Optimizer):
                 adjust_lr=group["adjust_lr"],
             )
 
-        # Step 4: fall back a remainder (or all-to-all-disabled) batch from all_to_all
-        # to AGRS, and pick the padding target — AGRS accepts a partial batch, other
-        # strategies require padding to the group size.
+        # Step 4: re-route a remainder (or all-to-all-disabled) batch away from all_to_all,
+        # and pick the padding target — only strategies that map one matrix onto every rank
+        # need the batch padded up to the group size.
         is_remainder = len(params) < plan.world_size
-        batch_comm_strategy = plan.comm_strategy
-        if plan.comm_strategy == "all_to_all" and (
-            not self._enable_all2all or (is_remainder and self._remainder_strategy == "agrs")
-        ):
-            batch_comm_strategy = "agrs"
-        batch_size = None if batch_comm_strategy == "agrs" else plan.world_size
+        batch_comm_strategy: MuonCommStrategy = plan.comm_strategy
+        if plan.comm_strategy == "all_to_all":
+            if not self._enable_all2all or (is_remainder and self._remainder_strategy == "agrs"):
+                batch_comm_strategy = "agrs"
+            elif is_remainder and global_shard_dim_size is not None and global_shard_dim_size % plan.world_size == 0:
+                # Evenly sharded remainder: exchange only the real matrices instead of padding
+                # the batch out to the group size.
+                batch_comm_strategy = "ragged_all_to_all"
+        batch_size = None if batch_comm_strategy in ("agrs", "ragged_all_to_all") else plan.world_size
 
         # Step 5: assemble the AsyncTask, which starts running immediately up to its
         # first yielded communication point (see `AsyncTask.__init__`).
@@ -916,7 +925,7 @@ def muon_update_batch_async(
     nesterov: bool,  # Whether to use Nesterov momentum
     flatten: bool,  # Whether to flatten 3D+ tensors to 2D
     newton_schulz_func: Callable,  # Newton-Schulz function for orthogonalization
-    comm_strategy: Literal["agrs", "subgroup_allgather", "all_to_all", "local"],
+    comm_strategy: MuonCommStrategy,
     shard_dim: int | None = None,  # Shard dimension for DTensor (if applicable)
     process_group: ProcessGroup | None = None,  # Unified process group for communication
     num_experts: int = 1,  # Number of experts for MoE models
@@ -944,8 +953,8 @@ def muon_update_batch_async(
 
     assert len(X) == len(G)
     assert len(X) == len(M)
-    if comm_strategy == "agrs":
-        assert len(X) <= world_size, f"AGRS requires batch size <= world_size, got {len(X)} > {world_size}"
+    if comm_strategy in ("agrs", "ragged_all_to_all"):
+        assert len(X) <= world_size, f"{comm_strategy} requires batch size <= world_size, got {len(X)} > {world_size}"
     elif comm_strategy == "subgroup_allgather":
         assert len(X) == 1, "subgroup_allgather expects a single-element batch"
     else:
@@ -982,6 +991,21 @@ def muon_update_batch_async(
         assert isinstance(X[0], DTensor), "X should contain DTensors"
         assert not isinstance(U[0], DTensor), "U should contain local shards"
         U = yield from _subgroup_orthogonalize(
+            U,
+            shard_dim,
+            process_group,
+            newton_schulz_func,
+            flatten,
+            epsilon,
+            num_experts,
+        )
+    elif comm_strategy == "ragged_all_to_all":
+        assert shard_dim is not None, "shard_dim must be provided for ragged_all_to_all path"
+        assert process_group is not None, "process_group must be provided for ragged_all_to_all path"
+        assert global_shard_dim_size is not None, "global_shard_dim_size must be provided for ragged_all_to_all path"
+        assert isinstance(X[0], DTensor), "X should contain DTensors"
+        assert not isinstance(U[0], DTensor), "U should contain local shards"
+        U = yield from _ragged_all_to_all_orthogonalize(
             U,
             shard_dim,
             process_group,
@@ -1415,6 +1439,61 @@ def _all_to_all_orthogonalize(
             U_result.append(shard)
 
         return U_result
+
+
+def _ragged_all_to_all_orthogonalize(
+    U: list[Tensor],
+    shard_dim: int,
+    process_group: ProcessGroup,
+    newton_schulz_func: Callable,
+    flatten: bool,
+    epsilon: Tensor,
+    num_experts: int,
+) -> Generator[None, None, list[Tensor]]:
+    # Remainder batch of R < world_size evenly sharded matrices. Split sizes send each rank's
+    # shards to the R ranks that assemble a matrix, so — unlike the padded all-to-all — no zero
+    # shards are exchanged and the idle ranks neither allocate a full matrix nor orthogonalize
+    # one. Every rank must still enter both collectives; idle ranks do so with empty buffers.
+    world_size = process_group.size()
+    busy = process_group.rank() < len(U)
+
+    U_packed = torch.stack(U)  # (R, *shard_shape)
+    shard_shape = U_packed.shape[1:]
+    send_splits = [1] * len(U) + [0] * (world_size - len(U))
+    recv_splits = [1] * world_size if busy else [0] * world_size
+
+    parts = torch.empty((world_size if busy else 0, *shard_shape), dtype=U_packed.dtype, device=U_packed.device)
+    work = dist.all_to_all_single(parts, U_packed, recv_splits, send_splits, group=process_group, async_op=True)
+    yield
+    work.wait()  # type: ignore[union-attr]
+
+    if busy:
+        if shard_dim == 0:
+            single_matrix = parts.flatten(0, 1)
+        else:
+            single_matrix = torch.cat(parts.unbind(0), dim=shard_dim)
+
+        single_matrix = muon_update_newton_schulz(
+            single_matrix,
+            newton_schulz_func=newton_schulz_func,
+            flatten=flatten,
+            epsilon=epsilon,
+            num_experts=num_experts,
+        )
+
+        if shard_dim == 0:
+            parts = single_matrix.view(world_size, *shard_shape)
+        else:
+            parts = torch.stack(single_matrix.chunk(world_size, dim=shard_dim))
+        parts = parts.contiguous()
+
+    result = torch.empty_like(U_packed)
+    # Mirror image of the forward exchange: what each rank received it now sends back.
+    work = dist.all_to_all_single(result, parts, send_splits, recv_splits, group=process_group, async_op=True)
+    yield
+    work.wait()  # type: ignore[union-attr]
+
+    return list(result.unbind(0))
 
 
 def _local_orthogonalize(
