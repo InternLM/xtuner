@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
@@ -143,52 +143,234 @@ class RolloutState(BaseModel):
             self.uid = self.rollout_id
 
 
-def free_rollout_state_refs(rollout_state: RolloutState) -> None:
+class RolloutMetadata(BaseModel):
+    """Small rollout descriptor passed through the trainer pipeline.
+
+    Large prepared training fields and agentic segment details remain in
+    ``storage``.
+    """
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    rollout_id: int | None = None
+    group_id: int | None = None
+    session_id: int | None = None
+    task_name: str | None = None
+    status: Status = Status.INIT
+    finish_reason: str | None = None
+    reward: dict[str, Any] | None = None
+
+    response_mask: list[int] | None = None
+    token_staleness_mask: list[int] | None = None
+    prompt_len: int | None = None
+    response_len: int | None = None
+    response_model_steps: list[int] | None = None
+    total_len: int | None = None
+    seq_staleness: int = 0
+    tool_turns: int | None = None
+    generate_time_s: float | None = None
+    # ObjectRef to one complete prepared RolloutState in the Ray Object Store.
+    storage: RayObjectRef | None = None
+
+    @classmethod
+    def from_rollout_state(
+        cls,
+        rollout_state: RolloutState,
+        *,
+        storage: RayObjectRef | None = None,
+    ) -> RolloutMetadata:
+        """Build metadata without copying large prepared training fields."""
+        prompt_ids = rollout_state.prompt_ids
+        if prompt_ids is None:
+            prompt_ids = rollout_state.extra_fields.get("train_prompt_ids")
+
+        response_ids = rollout_state.response_ids
+        response_len = len(response_ids) if response_ids is not None else None
+        response_model_steps = (
+            list(rollout_state.response_model_steps) if rollout_state.response_model_steps is not None else None
+        )
+        input_ids = rollout_state.input_ids
+        total_len = len(input_ids) if input_ids is not None else None
+        if total_len is None and prompt_ids is not None and response_len is not None:
+            total_len = len(prompt_ids) + max(response_len - 1, 0)
+
+        extra_fields = rollout_state.extra_fields
+        tool_turns = extra_fields.get("agent_tool_turns")
+        if not isinstance(tool_turns, int):
+            tool_turns = None
+        generate_time_s = extra_fields.get("group_generate_time_s")
+        if not isinstance(generate_time_s, (int, float)):
+            generate_time_s = None
+        return cls(
+            rollout_id=rollout_state.rollout_id,
+            group_id=rollout_state.group_id,
+            session_id=rollout_state.session_id,
+            task_name=rollout_state.task_name,
+            status=rollout_state.status,
+            finish_reason=rollout_state.finish_reason,
+            reward=rollout_state.reward,
+            response_mask=list(rollout_state.response_mask) if rollout_state.response_mask is not None else None,
+            prompt_len=len(prompt_ids) if prompt_ids is not None else None,
+            response_len=response_len,
+            response_model_steps=response_model_steps,
+            total_len=total_len,
+            seq_staleness=rollout_state.seq_staleness,
+            tool_turns=tool_turns,
+            generate_time_s=float(generate_time_s) if generate_time_s is not None else None,
+            storage=storage,
+        )
+
+    def to_rollout_state(self) -> RolloutState:
+        """Restore and update the rollout state referenced by this metadata.
+
+        ``RolloutMetadata`` is the authoritative owner of replay lifecycle
+        fields after a state is inserted into the replay buffer. The complete
+        state is fetched from the Object Store through ``storage`` and then
+        updated locally; mutating it does not modify the Object Store
+        snapshot.
+        """
+        if self.storage is None:
+            raise ValueError(f"Rollout metadata {self.rollout_id} has no storage reference.")
+
+        from ray import get as ray_get
+
+        rollout_state = ray_get(self.storage)
+        if not isinstance(rollout_state, RolloutState):
+            raise TypeError("Rollout metadata storage must resolve to a RolloutState object.")
+
+        rollout_state.response_model_steps = (
+            [] if self.status == Status.EXPIRED else list(self.response_model_steps or [])
+        )
+        rollout_state.response_mask = list(self.response_mask) if self.response_mask is not None else None
+        rollout_state.seq_staleness = self.seq_staleness
+        rollout_state.status = self.status
+        if self.status == Status.EXPIRED:
+            reset_rollout_response(rollout_state)
+        return rollout_state
+
+
+def _release_object_refs(
+    value: Any,
+    *,
+    clear: bool = False,
+    best_effort: bool = False,
+) -> Any:
+    """Release ObjectRefs recursively and optionally clear them in-place.
+
+    ``best_effort`` is used for routed experts because the TraceStore may have
+    already released some of the same references.  The normal rollout-state
+    path keeps the existing batch-release behavior.
+    """
     from ray import ObjectRef
 
     from xtuner.v1.rl.utils.ray_utils import free_object_refs
 
-    refs: list[ObjectRef] = []
+    refs: list[Any] = []
 
-    def clear_object_refs(value: Any) -> Any:
-        if isinstance(value, ObjectRef):
-            refs.append(value)
-            return None
-        if isinstance(value, BaseModel):
-            for field_name in type(value).model_fields:
-                field_value = getattr(value, field_name)
-                cleared_value = clear_object_refs(field_value)
-                if cleared_value is not field_value:
-                    setattr(value, field_name, cleared_value)
-            return value
-        if isinstance(value, dict):
-            for key, item in value.items():
-                value[key] = clear_object_refs(item)
-            return value
-        if isinstance(value, list):
-            for index, item in enumerate(value):
-                value[index] = clear_object_refs(item)
-            return value
-        if isinstance(value, tuple):
-            return tuple(clear_object_refs(item) for item in value)
-        if isinstance(value, set):
-            return {clear_object_refs(item) for item in value}
-        return value
+    def visit(item: Any) -> Any:
+        if isinstance(item, ObjectRef):
+            refs.append(item)
+            return None if clear else item
+        if isinstance(item, BaseModel):
+            for field_name in type(item).model_fields:
+                field_value = getattr(item, field_name)
+                cleared_value = visit(field_value)
+                if clear and cleared_value is not field_value:
+                    setattr(item, field_name, cleared_value)
+            return item
+        if isinstance(item, dict):
+            for key, child in item.items():
+                cleared_value = visit(child)
+                if clear and cleared_value is not child:
+                    item[key] = cleared_value
+            return item
+        if isinstance(item, list):
+            for index, child in enumerate(item):
+                cleared_value = visit(child)
+                if clear and cleared_value is not child:
+                    item[index] = cleared_value
+            return item
+        if isinstance(item, tuple):
+            if clear:
+                return tuple(visit(child) for child in item)
+            for child in item:
+                visit(child)
+            return item
+        if isinstance(item, set):
+            if clear:
+                return {visit(child) for child in item}
+            for child in item:
+                visit(child)
+            return item
+        return item
 
-    clear_object_refs(rollout_state)
-    free_object_refs(refs)
+    result = visit(value)
+    if not best_effort:
+        free_object_refs(refs)
+        return result
+
+    seen: set[str] = set()
+    for ref in refs:
+        ref_key = ref.hex()
+        if ref_key in seen:
+            continue
+        seen.add(ref_key)
+        try:
+            free_object_refs(ref)
+        except Exception as exc:
+            # A routed-expert ref may already have been released by the
+            # TraceStore. Cleanup remains idempotent for the other refs.
+            logger.debug("ObjectRef %s was already released: %s", ref_key, exc)
+    return result
 
 
 def discard_rollout_state(rollout_state: RolloutState) -> RolloutState:
     """Release heavy references and clear fields before dropping a rollout."""
 
-    free_rollout_state_refs(rollout_state)
+    _release_object_refs(rollout_state, clear=True)
 
     for field_name, field in type(rollout_state).model_fields.items():
         if field.is_required():
             continue
         setattr(rollout_state, field_name, field.get_default(call_default_factory=True))
     return rollout_state
+
+
+def discard_rollout_state_from_metadata(rollout_metadata: RolloutMetadata) -> RolloutMetadata:
+    """Release a metadata-owned complete state and its Object Store ref.
+
+    The complete state is fetched only for cleanup.  Routed-expert refs are
+    detached before the generic state cleanup so they can be released
+    independently and tolerantly: TraceStore may already have released the
+    same refs when its session is discarded.
+    """
+    storage = rollout_metadata.storage
+    if storage is None:
+        return rollout_metadata
+
+    # TODO: Replace this synchronous full-state fetch with a storage-side
+    # deletion API when shared storage is available. Besides copying the state
+    # header, ray.get can block the async cleanup caller while the object is
+    # being resolved.
+    from ray import get as ray_get
+
+    rollout_state: RolloutState | None = None
+    try:
+        rollout_state = ray_get(storage)
+        if not isinstance(rollout_state, RolloutState):
+            raise TypeError("Rollout metadata storage must resolve to a RolloutState object.")
+
+        routed_experts = rollout_state.routed_experts
+        rollout_state.routed_experts = None
+        _release_object_refs(routed_experts, best_effort=True)
+        discard_rollout_state(rollout_state)
+    finally:
+        try:
+            _release_object_refs(storage)
+        finally:
+            rollout_metadata.storage = None
+            del rollout_state
+    return rollout_metadata
 
 
 def update_status_from_finish_reason(finish_reason: str | None) -> Status:
@@ -229,7 +411,47 @@ def update_status_from_finish_reason(finish_reason: str | None) -> Status:
         return Status.FAILED
 
 
+def reset_rollout_metadata_response(rollout_metadata: RolloutMetadata) -> RolloutMetadata:
+    """Clear response fields while preserving the prompt for rerollout.
+
+    The complete state referenced by ``storage`` is reset and stored under a
+    new ObjectRef; the old outer reference is then released. This keeps the
+    replay-buffer metadata-only contract while preserving the original
+    retryable-expiry cleanup semantics.
+    """
+    storage = rollout_metadata.storage
+    if storage is not None:
+        from ray import get as ray_get
+        from ray import put as ray_put
+
+        from xtuner.v1.rl.utils.ray_utils import free_object_refs
+
+        stored_state = ray_get(storage)
+        stored_state.status = rollout_metadata.status
+        stored_state.seq_staleness = rollout_metadata.seq_staleness
+        reset_rollout_response(stored_state)
+        rollout_metadata.storage = ray_put(stored_state)
+        free_object_refs(storage)
+
+    rollout_metadata.finish_reason = None
+    rollout_metadata.reward = None
+    rollout_metadata.response_mask = None
+    rollout_metadata.token_staleness_mask = None
+    rollout_metadata.response_len = 0
+    rollout_metadata.response_model_steps = []
+    rollout_metadata.total_len = rollout_metadata.prompt_len
+    return rollout_metadata
+
+
 def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
+    """Clear response fields while preserving the prompt for rerollout.
+
+    ``RolloutState`` is reset in place. For ``RolloutMetadata``, the complete
+    state referenced by ``storage`` is reset and stored under a new ObjectRef;
+    the old outer reference is then released. This keeps the replay-buffer
+    metadata-only contract while preserving the original retryable-expiry
+    cleanup semantics.
+    """
     routed_experts = getattr(rollout_state, "routed_experts", None)
     if routed_experts is not None:
         from ray import ObjectRef
@@ -253,7 +475,7 @@ def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
     return rollout_state
 
 
-def get_group_status(rollout_states: list[RolloutState]) -> Status:
+def get_group_status(rollout_states: list[RolloutState | RolloutMetadata]) -> Status:
     """Get the group status based on the individual rollout states.
 
     Group Status Logic:
@@ -276,7 +498,8 @@ def get_group_status(rollout_states: list[RolloutState]) -> Status:
     5. COMPLETED
 
     Args:
-        rollout_states (list[RolloutState]): A list of individual rollout states.
+        rollout_states (list[RolloutState | RolloutMetadata]): A list of
+            individual rollout states or metadata descriptors.
 
     Returns:
         Status: The aggregated group status based on the individual states.
@@ -297,32 +520,51 @@ def get_group_status(rollout_states: list[RolloutState]) -> Status:
         return Status.COMPLETED
 
 
-def update_sample_version(rollout_state: RolloutState, model_step: int) -> RolloutState:
-    """Append token source model version for newly generated response
-    tokens."""
-    response_len = len(rollout_state.response_ids or [])
-    response_model_steps = list(rollout_state.response_model_steps or [])
+def update_sample_version(
+    rollout_metadata: RolloutMetadata,
+    model_step: int,
+) -> RolloutMetadata:
+    """Append token source model versions for newly generated response tokens.
+
+    Replay-buffer lifecycle bookkeeping operates on metadata only. The
+    prepared ``RolloutState`` in the Object Store is immutable and must not be
+    fetched or modified here.
+    """
+    response_len = rollout_metadata.response_len or 0
+    response_model_steps = list(rollout_metadata.response_model_steps or [])
     missing_response_steps = max(0, response_len - len(response_model_steps))
     if missing_response_steps:
         response_model_steps.extend([model_step] * missing_response_steps)
-    rollout_state.response_model_steps = response_model_steps
-    return rollout_state
+    rollout_metadata.response_model_steps = response_model_steps
+    return rollout_metadata
 
 
-def refresh_seq_staleness(group: list[RolloutState], current_train_step: int) -> list[RolloutState]:
-    for rollout_state in group:
+def refresh_seq_staleness(
+    group: list[RolloutMetadata],
+    current_train_step: int,
+) -> list[RolloutMetadata]:
+    """Refresh sequence staleness on a metadata-only rollout group.
+
+    The complete prepared rollout states remain immutable in the Object Store; only their lightweight metadata
+    projections are updated.
+    """
+    for rollout_metadata in group:
         # response_model_steps 记录每个 response token 的模型版本；
         # 最早版本决定整条样本的滞后程度。
-        response_model_steps = rollout_state.response_model_steps or []
-        if response_model_steps:
-            rollout_state.seq_staleness = calculate_seq_staleness(min(response_model_steps), current_train_step)
+        response_model_steps = rollout_metadata.response_model_steps or []
+        oldest_response_model_step = min(response_model_steps) if response_model_steps else None
+        if oldest_response_model_step is not None:
+            rollout_metadata.seq_staleness = calculate_seq_staleness(
+                oldest_response_model_step,
+                current_train_step,
+            )
         else:
-            rollout_state.seq_staleness = 0
+            rollout_metadata.seq_staleness = 0
     return group
 
 
 def _calculate_effective_response_mask(
-    rollout_state: RolloutState,
+    rollout_metadata: RolloutMetadata,
     *,
     current_train_step: int,
     token_stale_threshold: int,
@@ -330,20 +572,22 @@ def _calculate_effective_response_mask(
     """Calculate the response mask after applying token staleness.
 
     Args:
-        rollout_state (RolloutState): Rollout sample whose response token provenance is evaluated.
+        rollout_metadata (RolloutMetadata): Rollout metadata whose response
+            token provenance and semantic mask are evaluated.
         current_train_step (int): Trainer step that will consume the sample.
         token_stale_threshold (int): Maximum token staleness, measured in trainer steps, allowed for training.
 
     Returns:
         list[int]: The semantic response mask intersected with the token-staleness mask.
     """
-    response_ids = cast(list[int], rollout_state.response_ids)
-    response_model_steps = cast(list[int], rollout_state.response_model_steps)
+    response_model_steps = list(rollout_metadata.response_model_steps or [])
 
     # semantic mask: 在 agent_loop 中根据是否是 LLM 产生的 token 来 mask 的结果
-    semantic_mask = rollout_state.response_mask
+    semantic_mask = rollout_metadata.response_mask
     if semantic_mask is None:
-        semantic_mask = [1] * len(response_ids)
+        # Every token reaching this helper has a model-step entry, so its
+        # length is the authoritative response-mask length.
+        semantic_mask = [1] * len(response_model_steps)
 
     # token_staleness_mask: 根据 token 的新鲜程度来 mask
     token_staleness_mask = [
@@ -358,25 +602,25 @@ def _calculate_effective_response_mask(
 
 
 def calculate_group_effective_response_masks(
-    group: list[RolloutState],
+    group: list[RolloutMetadata],
     *,
     current_train_step: int,
     token_stale_threshold: int | None,
 ) -> list[list[int] | None]:
-    """Calculate token-staleness masks for the applicable states in a group.
+    """Calculate effective response masks for a rollout group.
 
-    Each ``None`` means that token staleness is disabled or does not apply to
-    that state. Agentic groups currently return one ``None`` per state.
+    Return the semantic response mask intersected with token freshness.
+    ``response_ids`` is not needed here and remains in the Object Store.
     """
     if token_stale_threshold is None:
-        return [None] * len(group)
-    if any(item.input_ids is not None or item.labels is not None for item in group):
         return [None] * len(group)
 
     return [
         (
             None
-            if not item.response_ids or (item.response_mask is not None and not any(item.response_mask))
+            if not item.response_model_steps
+            or (item.response_len is not None and item.response_len == 0)
+            or (item.response_mask is not None and not any(item.response_mask))
             else _calculate_effective_response_mask(
                 item,
                 current_train_step=current_train_step,

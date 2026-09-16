@@ -13,6 +13,7 @@ import tqdm
 from mmengine.dist import get_rank
 
 from xtuner.v1.data_proto.rl_data import (
+    RolloutMetadata,
     RolloutState,
     Status,
     calculate_group_effective_response_masks,
@@ -132,12 +133,13 @@ class BaseProduceContext:
         rollout_state: list[RolloutState],
         *,
         enable_partial_rollout: bool = False,
-    ) -> list[RolloutState]:
+    ) -> list[RolloutMetadata]:
         # strategy 不关心 agent_loop 是 ray actor 还是本地对象。
         # Trace viewer uses this producer-side future step to group samples by
         # the training step they are being generated for.
         for item in rollout_state:
             item.extra_fields["producer_future_step"] = self.train_step
+            item.task_name = self.task_name
 
         start = time.perf_counter()
         if isinstance(self.agent_loop, ray.actor.ActorHandle):
@@ -151,16 +153,15 @@ class BaseProduceContext:
                 enable_partial_rollout=enable_partial_rollout,
             )
         elapsed = time.perf_counter() - start
+        # Generation timing is a producer metric, not part of the rollout
+        # staleness lifecycle. Keep it on the lightweight metadata so the
+        # existing group timing aggregation remains available.
         for item in result:
-            extra_fields = getattr(item, "extra_fields", None)
-            if extra_fields is None:
-                extra_fields = {}
-                setattr(item, "extra_fields", extra_fields)
-            extra_fields[GROUP_GENERATE_TIME_KEY] = elapsed
+            item.generate_time_s = elapsed
         return result
 
-    async def put_generated_group(self, group: list[RolloutState]) -> bool:
-        produced_tokens = sum(len(item.response_ids or []) - len(item.response_model_steps or []) for item in group)
+    async def put_generated_group(self, group: list[RolloutMetadata]) -> bool:
+        produced_tokens = sum(item.response_len or 0 for item in group)
         initial_status = get_group_status(group)
 
         if initial_status in (Status.COMPLETED, Status.FILTERED):
@@ -178,7 +179,8 @@ class BaseProduceContext:
             self.progress.add_raw_rewards(self.task_name, rewards_sum, rewards_count)
 
         if initial_status in (Status.FAILED, Status.FILTERED):
-            # 失败样本和业务过滤样本都不进入 replay buffer。
+            # 失败样本和业务过滤样本都不进入 replay buffer。它们已经
+            # 物化为 metadata，因此只释放 trace session，不再按 raw state 清理。
             self.progress.add_produced(self.task_name, samples=len(group), tokens=produced_tokens)
             self.progress.add_discarded(self.task_name, initial_status, samples=len(group))
             await release_and_discard_rollout_groups([group])
@@ -204,7 +206,8 @@ class ProduceBatchResult:
     """Result of a single ``produce_batch`` call.
 
     Args:
-        rollout_states (list[list[RolloutState]]): Completed rollout groups retrieved from the replay buffer for training.
+        rollout_states (list[list[RolloutMetadata]]): Completed rollout metadata
+            groups retrieved from the replay buffer for training.
         group_gen_count (int | None): Number of generate-group calls finished in this batch (None if no generations ran).
         group_gen_mean_s (float | None): Mean wall-clock time per generate-group call, in seconds.
         group_gen_p50_s (float | None): Median (p50) generate-group time, in seconds.
@@ -224,7 +227,7 @@ class ProduceBatchResult:
         produce_time_s (float): Wall-clock production time consumed by the current produce window.
     """
 
-    rollout_states: list[list[RolloutState]]
+    rollout_states: list[list[RolloutMetadata]]
     status: ProduceBatchStatus = ProduceBatchStatus.NORMAL
     # per-group generation timing stats (all None if no generations occurred)
     group_gen_count: int | None = None
@@ -303,13 +306,13 @@ def _fill_produce_timing_stats(
 
 
 def _fill_group_timing_stats(
-    result: ProduceBatchResult, rollout_states: list[list[RolloutState]], pause_time_s: float = 0.0
+    result: ProduceBatchResult, rollout_states: list[list[RolloutMetadata]], pause_time_s: float = 0.0
 ) -> None:
     generate_times: list[float] = []
     for group in rollout_states:
         if not group:
             continue
-        group_time = getattr(group[0], "extra_fields", {}).get(GROUP_GENERATE_TIME_KEY)
+        group_time = group[0].generate_time_s
         if group_time is not None:
             generate_times.append(group_time)
 
@@ -438,7 +441,7 @@ async def refresh_for_all_tasks(
 def aggregate_task_results(
     ordered_tasks: list[_TaskRunner], task_results: dict[str, ProduceBatchResult]
 ) -> ProduceBatchResult:
-    rollout_states: list[list[RolloutState]] = []
+    rollout_states: list[list[RolloutMetadata]] = []
     leftover_init = 0
     leftover_completed = 0
     leftover_aborted = 0
@@ -510,7 +513,7 @@ def log_buffer_counts(
     manager_name: str,
     task_runners: list[_TaskRunner],
     task_batch_sizes: dict[str, int],
-    batch_by_task: dict[str, list[list[RolloutState]]],
+    batch_by_task: dict[str, list[list[RolloutMetadata]]],
     leftover_counts: dict[str, dict[Status, int]],
 ) -> None:
     for task in task_runners:
@@ -532,7 +535,7 @@ def build_produce_batch_result(
     *,
     task_runners: list[_TaskRunner],
     task_batch_sizes: dict[str, int],
-    batch_by_task: dict[str, list[list[RolloutState]]],
+    batch_by_task: dict[str, list[list[RolloutMetadata]]],
     leftover_counts: dict[str, dict[Status, int]],
     progress: ProduceProgress | DisaggProduceProgress,
     pause_time_s: float,
@@ -592,18 +595,21 @@ async def take_train_batch(
 ) -> ProduceBatchResult:
     batch_by_task, consumed_counts = await replay_buffer.take_batch(task_batch_sizes)
 
+    # Recompute token freshness at the actual consumption step. A metadata
+    # group may have waited in the replay buffer after insertion, especially in
+    # disaggregated training, so the mask computed during put() can be stale.
     for task in task_runners:
         if task.token_stale_threshold is None:
             continue
         for group in batch_by_task.get(task.task_name, []):
-            effective_masks = calculate_group_effective_response_masks(
+            effective_response_masks = calculate_group_effective_response_masks(
                 group,
                 current_train_step=current_train_step,
                 token_stale_threshold=task.token_stale_threshold,
             )
-            for rollout_state, effective_mask in zip(group, effective_masks):
-                if effective_mask is not None:
-                    rollout_state.response_mask = effective_mask
+            for metadata, effective_response_mask in zip(group, effective_response_masks):
+                if effective_response_mask is not None:
+                    metadata.response_mask = effective_response_mask
 
     if hasattr(progress, "mark_consumed"):
         progress.mark_consumed(consumed_counts)

@@ -129,9 +129,13 @@ class Sampler(_DatasetSampler):
 
     async def sample(self, task_name: str, group_status: list[Status] | None = None) -> list[RolloutState]:
         for status in group_status or []:
-            buffer_data = await self.replay_buffer.get(1, task_name=task_name, group_status=status)
-            if buffer_data:
-                return buffer_data[0]
+            metadata_groups = await self.replay_buffer.get(1, task_name=task_name, group_status=status)
+            if metadata_groups:
+                # TODO: Each metadata currently resolves its ObjectRef
+                # independently. For larger groups, batch the Object Store
+                # fetch and move the blocking operation off the async loop to
+                # avoid serial wait and sampler scheduling delays.
+                return [metadata.to_rollout_state() for metadata in metadata_groups[0]]
         return self.sample_from_dataloader()
 
     def save(self, checkpoint_path: Path | str) -> None:

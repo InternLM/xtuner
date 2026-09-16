@@ -5,8 +5,14 @@ from typing import cast
 
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
-from xtuner.v1.rl.agent_loop import AgentLoop, AgentLoopConfig
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.rl.agent_loop.agent_loop import (
+    AgentLoop,
+    AgentLoopConfig,
+    mark_training_artifacts_failed,
+    normalize_token_ids,
+    validate_training_artifacts,
+)
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.utils import get_logger
@@ -162,3 +168,29 @@ class GSM8KToolAgentLoop(AgentLoop):
         if self.judger is not None and not self.enable_batch_judge:
             rollout_state = await self.run_judger(rollout_state)
         return rollout_state
+
+    async def prepare_training_artifacts(self, rollout_state: RolloutState) -> RolloutState:
+        """Prepare list-based training artifacts for a completed tool
+        rollout."""
+        try:
+            if rollout_state.status != Status.COMPLETED:
+                return rollout_state
+            prompt_ids = rollout_state.prompt_ids or rollout_state.extra_fields.get("train_prompt_ids")
+            prompt_ids = normalize_token_ids(prompt_ids)
+            response_ids = normalize_token_ids(rollout_state.response_ids)
+            response_mask = rollout_state.response_mask or [1] * len(response_ids)
+            rollout_state.input_ids = prompt_ids + response_ids[:-1]
+            rollout_state.labels = [-100] * (len(prompt_ids) - 1) + [
+                response_id if mask_id != 0 else -100 for response_id, mask_id in zip(response_ids, response_mask)
+            ]
+            if rollout_state.logprobs is not None:
+                rollout_state.logprobs = [0.0] * (len(prompt_ids) - 1) + [
+                    float(value) for value in rollout_state.logprobs
+                ]
+            validate_training_artifacts(rollout_state)
+            rollout_state.response_ids = response_ids
+            rollout_state.input_ids = normalize_token_ids(rollout_state.input_ids)
+            rollout_state.labels = normalize_token_ids(rollout_state.labels)
+            return rollout_state
+        except Exception as exc:
+            return mark_training_artifacts_failed(rollout_state, exc, self.logger)
