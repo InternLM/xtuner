@@ -367,6 +367,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         return self.update_weighter.weight_update(**kwargs)
 
     @ray_method
+    def get_ep_gather_count(self) -> int:
+        iterator = self.update_weighter.weight_iterator
+        return 0 if iterator is None else iterator.ep_gather_count
+
+    @ray_method
     def has_registered_weight_checkpoint(self) -> bool:
         return self.update_weighter.has_registered_weight_checkpoint()
 
