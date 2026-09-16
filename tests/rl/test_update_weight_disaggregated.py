@@ -226,7 +226,9 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         finally:
             ray.get(rollout_controller.shutdown.remote(), timeout=60)
 
+    @unittest.skip("skip lmdeploy disaggregated update-weight generation test until PR4638 is merged")
     def test_lmdeploy_disaggregated_update_weight_and_generate(self):
+        # TODO(shipengcheng): Remove skip when CI update lmdeploy.
         TrainingWorker = ray.remote(
             runtime_env={
                 "env_vars": {
