@@ -78,6 +78,10 @@ class MuonConfig(OptimConfig):
     enable_all2all: Annotated[
         bool, Parameter(help="Allow all-to-all comm strategy; set False on topologies where all-to-all is unreliable")
     ] = True
+    clip_grad_mode: Annotated[
+        Literal["all", "adamw_only"],
+        Parameter(help="Gradient clipping policy: clip all parameters or only the AdamW parameter groups"),
+    ] = "adamw_only"
 
     def build(self, model):
         trainable_parameters_names = model.trainable_parameters()
@@ -153,15 +157,22 @@ class MuonConfig(OptimConfig):
                 untrainable_names.append(name)
 
         # Build parameter groups
+        clip_muon_grad = self.clip_grad_mode == "all"
         param_groups = []
         if muon_params_regular:
-            param_groups.append(dict(params=muon_params_regular, clip_grad=False))
+            param_groups.append(dict(params=muon_params_regular, clip_grad=clip_muon_grad))
         # fused_w1w3: w1 and w3 are fused, so num_experts = 2 * n_routed_experts
         if muon_params_moe_fused_w1w3:
-            param_groups.append(dict(params=muon_params_moe_fused_w1w3, num_experts=2 * num_experts, clip_grad=False))
+            param_groups.append(
+                dict(
+                    params=muon_params_moe_fused_w1w3,
+                    num_experts=2 * num_experts,
+                    clip_grad=clip_muon_grad,
+                )
+            )
         # Other expert params: num_experts = n_routed_experts
         if muon_params_moe_other:
-            param_groups.append(dict(params=muon_params_moe_other, num_experts=num_experts, clip_grad=False))
+            param_groups.append(dict(params=muon_params_moe_other, num_experts=num_experts, clip_grad=clip_muon_grad))
         param_groups.append(dict(params=adamw_params, algorithm="adamw", clip_grad=True))
 
         # Sanity check: ensure all trainable parameters are assigned to optimizer

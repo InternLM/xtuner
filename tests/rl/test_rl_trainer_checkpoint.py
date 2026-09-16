@@ -100,12 +100,14 @@ class _FakeRolloutController:
         self.generate = _RemoteMethod(self._generate, async_result=True)
         self.pause_generation = _RemoteMethod(async_result=True)
         self.continue_generation = _RemoteMethod(async_result=True)
+        self.flush_cache = _RemoteMethod(return_value="cache_flushed")
         self.offload = _RemoteMethod(return_value="rollout_offloaded")
-        self.check_and_shutdown_inactive_workers = _RemoteMethod(return_value="rollout_inactive_workers_shutdown")
+        self.shutdown_inactive_workers = _RemoteMethod(return_value="rollout_inactive_workers_shutdown")
         self.restart_inactive_workers = _RemoteMethod(return_value="rollout_restarted")
         self.onload_weights = _RemoteMethod(return_value="weights_loaded")
         self.onload_kvcache = _RemoteMethod(return_value="kvcache_loaded")
         self.get_weight_update_targets = _RemoteMethod(return_value=())
+        self.mark_worker_groups_lifecycle_state = _RemoteMethod(return_value=None)
         self.set_enable_partial_rollout = _RemoteMethod(return_value=None)
         self.validate_registered_workers_to_proxy = _RemoteMethod(return_value=_AwaitableValue(None))
 
@@ -133,17 +135,11 @@ class _FakeTrainController:
         *,
         targets,
         rollout_config,
-        weight_transport_type,
-        weight_update_host=None,
-        weight_update_port=None,
     ):
         self.rollout_info = {
             "targets": targets,
             "rollout_config": rollout_config,
         }
-        self.weight_transport_type = weight_transport_type
-        self.weight_update_host = weight_update_host
-        self.weight_update_port = weight_update_port
 
     def onload(self, target="all"):
         return f"onload:{target}"
@@ -151,7 +147,7 @@ class _FakeTrainController:
     def offload(self, target="all"):
         return f"offload:{target}"
 
-    def update_weights(self):
+    def weight_update(self):
         self.update_weights_count += 1
         return "updated"
 

@@ -46,7 +46,7 @@ from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, finalize_train_policy_metrics, kl_penalty
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
-from xtuner.v1.rl.weight_update import UpdateWeighter
+from xtuner.v1.rl.weight_update import WeightUpdater
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
@@ -66,6 +66,32 @@ from ..rollout_is import merge_rollout_is_metrics
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
+_UINT16_CAPACITY = 1 << 16
+
+
+def _rollout_routed_experts_storage_dtype(n_routed_experts: int) -> torch.dtype:
+    """Choose a compact lossless dtype for stored routed-expert IDs."""
+    if n_routed_experts <= _UINT16_CAPACITY:
+        return torch.uint16
+    return torch.long
+
+
+def _as_rollout_routed_experts_tensor(
+    rollout_routed_experts: np.ndarray,
+    *,
+    n_routed_experts: int,
+) -> torch.Tensor:
+    """Convert finalized routed-expert IDs to their CPU storage dtype."""
+    storage_dtype = _rollout_routed_experts_storage_dtype(n_routed_experts)
+    if storage_dtype == torch.uint16 and rollout_routed_experts.dtype != np.uint16:
+        if rollout_routed_experts.size > 0:
+            min_expert_id = rollout_routed_experts.min()
+            max_expert_id = rollout_routed_experts.max()
+            if min_expert_id < 0 or max_expert_id >= _UINT16_CAPACITY:
+                raise ValueError(
+                    f"Routed-expert IDs cannot be represented as uint16: min={min_expert_id}, max={max_expert_id}"
+                )
+    return torch.as_tensor(rollout_routed_experts, dtype=storage_dtype)
 
 
 def calculate_entropy(
@@ -114,6 +140,8 @@ class WorkerConfig(BaseModel):
             trainer seed is used. Defaults to None.
         offload_rollout_routed_experts (bool): Keep rollout routed experts on
             CPU and move each layer's slice to device during forward. Defaults to False.
+        offload_old_logprobs (bool): Keep actor old log probabilities on CPU between
+            metric computation and the optimizer step. Defaults to False.
 
     **Examples:**
 
@@ -154,6 +182,7 @@ class WorkerConfig(BaseModel):
     profile_memory: bool = False
     free_rollout_routed_experts_in_worker: bool = True  # 默认不需要用户配置
     offload_rollout_routed_experts: bool = False
+    offload_old_logprobs: bool = False
 
     # sft config
     sft_dataloader_cfg: DataloaderConfig | None = None
@@ -193,6 +222,7 @@ class WorkerTrainLogItem(TypedDict, total=False):
     step_consumed_tokens: int
     efficient_attn_ratio: float
     grad_norm: float
+    mtp_grad_parameter_coverage: float
     max_memory: float
     reserved_memory: float
 
@@ -276,8 +306,13 @@ class TrainingWorker(SingleAcceleratorWorker):
         elif hasattr(worker_cfg.model_cfg, "mtp_config"):
             # 非 compose 模型的 mtp_config 直接放在了 model_cfg 中
             self.mtp_config = worker_cfg.model_cfg.mtp_config
+        self._mtp_trainable_parameters = (
+            [parameter for name, parameter in self._engine.model.trainable_parameters() if "mtp_block" in name]
+            if self.mtp_config is not None
+            else []
+        )
 
-        self.update_weighter = UpdateWeighter(
+        self.update_weighter = WeightUpdater(
             rank=self.rank,
             logger=self.logger,
             config=self.config,
@@ -328,8 +363,17 @@ class TrainingWorker(SingleAcceleratorWorker):
         return self.update_weighter.bind_rollout_weight_update(*args, **kwargs)
 
     @ray_method
-    def update_weights(self):
-        return self.update_weighter.update_weights()
+    def weight_update(self, **kwargs):
+        return self.update_weighter.weight_update(**kwargs)
+
+    @ray_method
+    def get_ep_gather_count(self) -> int:
+        iterator = self.update_weighter.weight_iterator
+        return 0 if iterator is None else iterator.ep_gather_count
+
+    @ray_method
+    def has_registered_weight_checkpoint(self) -> bool:
+        return self.update_weighter.has_registered_weight_checkpoint()
 
     def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
@@ -458,6 +502,34 @@ class TrainingWorker(SingleAcceleratorWorker):
             old_logprobs_list.append(output["loss"])
         return old_logprobs_list
 
+    def _maybe_offload_logprob(self, loss_ctx_list: Sequence[BaseRLLossContext]) -> None:
+        """Keep old policy logprobs on CPU between their metric and train
+        uses."""
+        if not self.config.offload_old_logprobs:
+            return
+        for loss_ctx in loss_ctx_list:
+            old_logprobs = loss_ctx.loss_kwargs.old_logprobs
+            if old_logprobs is not None:
+                loss_ctx.loss_kwargs.old_logprobs = old_logprobs.cpu()
+
+    def _maybe_onload_logprob(self, loss_ctx_list: Sequence[BaseRLLossContext]) -> None:
+        """Load old policy logprobs to the training device for one optimizer
+        group."""
+        if not self.config.offload_old_logprobs:
+            return
+        for loss_ctx in loss_ctx_list:
+            old_logprobs = loss_ctx.loss_kwargs.old_logprobs
+            if old_logprobs is not None:
+                loss_ctx.loss_kwargs.old_logprobs = old_logprobs.to(DEVICE)
+
+    def _maybe_clear_logprob(self, loss_ctx_list: Sequence[BaseRLLossContext]) -> None:
+        """Release old policy logprobs after their optimizer group is
+        consumed."""
+        if not self.config.offload_old_logprobs:
+            return
+        for loss_ctx in loss_ctx_list:
+            loss_ctx.loss_kwargs.old_logprobs = None
+
     def compute_ref_logprobs(
         self, seq_ctx_list: list[SequenceContext], shifted_labels_list: list[torch.Tensor]
     ) -> list[torch.Tensor]:
@@ -481,6 +553,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             if isinstance(self.config.model_cfg, BaseComposeConfig)
             else self.config.model_cfg
         )
+        storage_dtype = _rollout_routed_experts_storage_dtype(language_cfg.n_routed_experts)
 
         to_free_routed_expert_refs: list[ray.ObjectRef] = []
         if isinstance(rollout_routed_experts, list):
@@ -496,6 +569,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                             language_cfg.num_hidden_layers,
                             language_cfg.num_experts_per_tok,
                         ),
+                        dtype=storage_dtype,
                     )
                     out_rollout_routed_expert.append(rollout_routed_experts_tensor)
                 else:
@@ -525,7 +599,10 @@ class TrainingWorker(SingleAcceleratorWorker):
                             if self.sp_mesh.get_local_rank() == 0:
                                 # only free once of sp mesh
                                 to_free_routed_expert_refs.append(rollout_routed_expert_refs)
-                    rollout_routed_expert = torch.as_tensor(rollout_routed_expert, dtype=torch.long)
+                    rollout_routed_expert = _as_rollout_routed_experts_tensor(
+                        rollout_routed_expert,
+                        n_routed_experts=language_cfg.n_routed_experts,
+                    )
                     rollout_routed_expert = rollout_routed_expert.reshape(
                         -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
                     )
@@ -544,6 +621,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     language_cfg.num_hidden_layers,
                     language_cfg.num_experts_per_tok,
                 ),
+                dtype=storage_dtype,
             )
             seq_ctx.rollout_routed_experts = rollout_routed_experts_tensor
 
@@ -757,6 +835,12 @@ class TrainingWorker(SingleAcceleratorWorker):
             avg_kl_div = kl_div_sum / global_grad_tokens if global_grad_tokens > 0 else 0
             self.logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
 
+        # Keep old logprobs on CPU once all rollout-level metrics have consumed
+        # them.  They are loaded back only for the train group that is about to
+        # run, which bounds their GPU residency by the optimizer group size.
+        self._maybe_offload_logprob(loss_ctx_list)
+        del old_logprobs_list
+
         # compute batched loss context
         batched_loss_ctx_list: list[BaseRLLossContext] = []
         batched_mtp_loss_ctx_list: list[list[MTPLossContext]] = []
@@ -819,6 +903,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                     )
                 ]
 
+            self._maybe_onload_logprob(batches_loss_ctx)
+
             train_step_begin = time.perf_counter()
             with self._maybe_profiling(global_train_step, "train_step"):
                 train_step_info = self._engine.train_step(
@@ -829,8 +915,21 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f"Rank{self.rank} Rollout {rollout_idx} GlobalStep {global_train_step} "
                 f"train_step[{i}].engine_train_step elapsed={time.perf_counter() - train_step_begin:.4f}s"
             )
+            mtp_grad_metrics: dict[str, float] = {}
+            if self._mtp_trainable_parameters:
+                # `grad is None` is a structural signal: unlike a zero-valued grad,
+                # it means the MTP loss never reached that trainable parameter.
+                present_grad_count = sum(parameter.grad is not None for parameter in self._mtp_trainable_parameters)
+                mtp_grad_metrics = {
+                    "mtp_grad_parameter_coverage": present_grad_count / len(self._mtp_trainable_parameters),
+                }
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
+
+            # The current group will not be revisited in this fit call.
+            # Release its old-logprob references after backward and the
+            # optimizer update have both completed.
+            self._maybe_clear_logprob(batches_loss_ctx)
 
             engine_logs_info = cast(dict[str, float], train_step_info.pop("logs_info"))  # type: ignore[misc]
             engine_extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]
@@ -854,6 +953,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 **engine_logs_info,  # type: ignore[typeddict-item]
                 **train_step_info,
                 **extra_info_dict,
+                **mtp_grad_metrics,  # type: ignore[typeddict-item]
                 grad_norm=grad_norm.item(),
                 max_memory=max_memory,
                 reserved_memory=reserved_memory,

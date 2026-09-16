@@ -22,6 +22,7 @@ from xtuner.v1.rl.utils import (
     clear_cpu_resource_manager,
     set_cpu_resource_manager,
 )
+from xtuner.v1.rl.rollout.worker_registry import WorkerLifecycleState
 
 TEST_TEXT_MESSAGES = [{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
@@ -85,6 +86,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
             expert_parallel_size=1,
             gpus_per_node=int(os.environ.get("GPUS_PER_NODE", "8")),
             dtype="bfloat16",
+            weight_transport_type="nccl",
             skip_load_weights=True,
             context_length=256,
             worker_log_dir=self.worker_log_dir,
@@ -119,7 +121,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
 
     def _check_sglang_weights(self, rollout_controller, action):
         targets = ray.get(rollout_controller.get_weight_update_targets.remote())
-        active_urls = [target.server_url for target in targets if target.is_active]
+        active_urls = [target.server_url for target in targets if target.lifecycle_state == WorkerLifecycleState.ACTIVE.value]
         self.assertGreater(len(active_urls), 0)
         results = []
         for url in active_urls:
@@ -159,9 +161,8 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         train_controller.bind_rollout_weight_update(
             targets=targets,
             rollout_config=self.rollout_cfg,
-            weight_transport_type="nccl",
         )
-        train_controller.update_weights()
+        train_controller.weight_update()
 
         res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
         self.assertEqual(res_update_weight.response, res_baseline.response)
@@ -198,9 +199,8 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
             train_controller.bind_rollout_weight_update(
                 targets=targets,
                 rollout_config=self.rollout_cfg,
-                weight_transport_type="nccl",
             )
-            train_controller.update_weights()
+            train_controller.weight_update()
 
             self._check_sglang_weights(rollout_controller, action="compare_parameters")
         finally:
@@ -237,9 +237,8 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         train_controller.bind_rollout_weight_update(
             targets=targets,
             rollout_config=self.rollout_cfg,
-            weight_transport_type="nccl",
         )
-        train_controller.update_weights()
+        train_controller.weight_update()
 
         res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
         self.assertEqual(res_update_weight.response, res_baseline.response)

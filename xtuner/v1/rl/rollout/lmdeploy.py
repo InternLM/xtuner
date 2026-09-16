@@ -178,6 +178,7 @@ class LMDeployWorker(RolloutWorker):
                                 worker_rank=engine_ranks[0],
                                 placement_group_bundle_idxs=engine_bundle_idxs,
                                 weight_update_ranks=engine_ranks,
+                                inference_engine_ranks=engine_ranks,
                             ),
                         ),
                     )
@@ -201,6 +202,7 @@ class LMDeployWorker(RolloutWorker):
                                 worker_rank=server_rank,
                                 placement_group_bundle_idxs=(bundle_idx,),
                                 weight_update_ranks=(server_rank,),
+                                inference_engine_ranks=engine_ranks,
                             )
                             for server_rank, bundle_idx in engine_meta
                         ),
@@ -212,6 +214,12 @@ class LMDeployWorker(RolloutWorker):
     def offload(self):
         """Offloads the model weights and KV cache."""
         return self._sleep(level=2)
+
+    def flush_cache(self):
+        """Flushes cache through LMDeploy sleep/wakeup lifecycle."""
+        self.offload()
+        self.onload_weights()
+        return self.onload_kvcache()
 
     def onload_weights(self):
         """Onloads the model weights by waking up the model."""
@@ -398,6 +406,8 @@ class LMDeployWorker(RolloutWorker):
             hf_overrides.update(fp32_lm_head=self.config.fp32_lm_head)
         if backend == "pytorch" and self.config.max_prefill_token_num:
             extra_engine_config["max_prefill_token_num"] = self.config.max_prefill_token_num
+        if backend == "pytorch" and self.config.enable_prefix_caching:
+            extra_engine_config["enable_prefix_caching"] = True
 
         assert self.server_launch_spec is not None
         dp_rank = 0

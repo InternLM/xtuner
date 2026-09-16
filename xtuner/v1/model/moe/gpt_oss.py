@@ -40,22 +40,8 @@ class GptOss(MoE):
         else:
             return [key]
 
-    def safetensors_to_params(
-        self,
-        safetensors: list[torch.Tensor],
-        local_tensor: torch.Tensor,
-        param_name: str,
-        start: int | None,
-        end: int | None,
-        dim: int | None,
-    ):
-        if len(safetensors) > 1:
-            assert dim is not None, "Internal Error dim must not be None when len(safetensors) > 1"
-            loaded_tensor = torch.cat(safetensors, dim=dim)
-        else:
-            loaded_tensor = safetensors[0]
-
-        if "fused_w1w3.weight" in param_name:
+    def hf_tensor_to_canonical(self, name: str, loaded_tensor: torch.Tensor) -> torch.Tensor:
+        if "fused_w1w3.weight" in name:
             # hf: num_experts, hidden_size, expert_dim * 2
             # xtuner: num_experts * 2 * expert_dim, hidden_size
             num_experts, hidden_size = loaded_tensor.shape[:2]
@@ -64,32 +50,19 @@ class GptOss(MoE):
             # # num_experts *2 * expert_dim, hidden_size
             loaded_tensor = loaded_tensor.transpose(1, 2).reshape(-1, hidden_size)
 
-        elif "fused_w2.weight" in param_name:
+        elif "fused_w2.weight" in name:
             # hf: num_experts, expert_dim, hidden_size
             # xtuner: num_experts * hidden_size, expert_dim
             loaded_tensor = loaded_tensor.transpose(1, 2).flatten(0, 1)
 
-        if "fused_w1w3.bias" in param_name:
+        if "fused_w1w3.bias" in name:
             # hf: num_experts, expert_dim * 2
-            # xtuner: num_experts, 2 * expert_dim
+            # xtuner: num_experts * 2 * expert_dim (flattened so Expert TP can shard each projection stripe)
             num_experts = loaded_tensor.size(0)
             loaded_tensor = loaded_tensor.reshape(num_experts, -1, 2)
-            loaded_tensor = loaded_tensor.transpose(1, 2).reshape(num_experts, -1)
+            loaded_tensor = loaded_tensor.transpose(1, 2).reshape(-1)
 
-        if start is not None and end is not None:
-            start = min(start, loaded_tensor.shape[self.FSDP_SHARD_DIM])
-            end = min(end, loaded_tensor.shape[self.FSDP_SHARD_DIM])
-            loaded_tensor_slice = loaded_tensor.index_select(
-                dim=self.FSDP_SHARD_DIM, index=torch.arange(start, end, dtype=torch.int64, device=loaded_tensor.device)
-            )
-            non_pad_len = end - start
-            local_tensor[:non_pad_len].copy_(loaded_tensor_slice)
-
-            if non_pad_len < local_tensor.shape[self.FSDP_SHARD_DIM]:
-                assert self.config.float8_cfg is not None
-                local_tensor[non_pad_len:].copy_(0.0)  # type: ignore  # padded part must be set to 0
-        else:
-            local_tensor.copy_(loaded_tensor)
+        return loaded_tensor
 
     def param_to_safetensor(
         self,

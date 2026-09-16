@@ -42,6 +42,11 @@ DeepEPHandle = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, tor
 # DeepEP handle include 6 tensor:
 # (rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, is_token_in_rank, send_head)
 class DeepEPPreDispatchResult(PreDispatchResult):
+    # Final ``topk_weights`` fed to DeepEP. Equal to the caller's ``topk_weights`` for ep-only
+    # routing; for virtual expert TP (``tp_size > 1``) it is ``repeat_interleave``'d here in
+    # ``dispatch_preprocess`` so the expand kernel runs on the compute stream during Loop A
+    # (overlapping the next microbatch's attention/gate) instead of inside ``dispatch``.
+    topk_weights: torch.Tensor
     backward_previous_event: EventOverlap | None
     forward_finished_event: EventOverlap | None
 
@@ -258,9 +263,32 @@ class DeepEPDispatcher(
         *,
         n_routed_experts: int,
         process_group: torch.distributed.ProcessGroup,
+        tp_size: int = 1,
         training_dtype: Literal["fp8", "bf16"] = "bf16",
         generate_dtype: Literal["fp8", "bf16"] = "bf16",
     ):
+        """DeepEP-backed MoE dispatcher.
+
+        When ``tp_size > 1`` the dispatcher fuses expert-parallel dispatch and tensor-parallel
+        token replication into a single DeepEP collective. The caller must:
+
+          * Build the combined ``(ep × tp)`` process group via ``ep_tp_mesh._flatten().get_group()``
+            (mesh dims ordered with ``tp`` as the inner/fastest dim) and pass it as
+            ``process_group``. ``process_group.size() == ep_size * tp_size``.
+          * Pass ``tp_size`` so this class can:
+              - Treat the expert space as ``n_routed_experts * tp_size`` *virtual* experts.
+                Each physical expert ``e`` gets ``tp_size`` virtual copies, one owned by each
+                TP rank in the EP group ``e`` belongs to.
+              - Expand caller-supplied ``topk_ids`` so a token routed to physical expert ``e``
+                lands on **both** TP ranks within EP rank ``ep(e)`` — exactly what
+                column-parallel ``fused_w1w3`` needs.
+
+        DeepEP's NVL+RDMA path encodes destination as
+        ``(rdma_rank, is_token_in_nvl_rank_bits)`` (see ``DeepEP/csrc/kernels/internode.cu``),
+        so duplicated routings landing on the same node are sent as a single RDMA transfer
+        with the appropriate NVL bitmask. Cross-node bandwidth therefore matches the
+        ep-only case; only the local intra-node fan-out is doubled.
+        """
         if not is_installed("deep_ep"):
             raise RuntimeError("`DeepEP` is not installed!")
         super().__init__(
@@ -273,6 +301,21 @@ class DeepEPDispatcher(
             "Process group must be provided for `DeepEPDispatcher`. "
             "If you are training a MoE model, it means that `expert parallel` is not enabled in the config."
         )
+        self._tp_size = tp_size
+        assert process_group.size() % tp_size == 0, (
+            f"process_group size {process_group.size()} must be a multiple of tp_size {tp_size}; "
+            f"the caller is expected to pass the combined (ep × tp) group."
+        )
+        self._ep_size = process_group.size() // tp_size
+        assert n_routed_experts % self._ep_size == 0, (
+            f"n_routed_experts {n_routed_experts} must be divisible by ep_size {self._ep_size}"
+        )
+        self._local_experts = n_routed_experts // self._ep_size
+        # Virtual expert count seen by DeepEP. Per-rank count
+        # (= virtual_n_experts / process_group.size()) stays equal to ``_local_experts`` —
+        # downstream ``permute`` / ``group_gemm`` consume ``num_recv_tokens_per_expert_list`` of
+        # that fixed length and no aggregation is needed.
+        self._virtual_n_experts = n_routed_experts * tp_size
 
     @override
     def dispatch_preprocess(
@@ -280,39 +323,96 @@ class DeepEPDispatcher(
         *,
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
         async_op: bool = False,
     ) -> DeepEPPreDispatchResult:
         if async_op:
             backward_previous_event = EventOverlap(None)
-            forward_finished_event = buffer_capture()
             if hidden_states.grad_fn is not None:
                 hidden_states.grad_fn.register_prehook(
                     get_backward_pre_hook(
                         backward_previous_event=backward_previous_event,
-                        name="TorchAll2AllDispatcher.dispatch_preprocess",
+                        name="DeepEPDispatcher.dispatch_preprocess.hidden_states",
                         debug=XTUNER_DISPATCHER_DEBUG,
                     )
                 )
         else:
-            forward_finished_event = None
             backward_previous_event = None
+
+        topk_ids = topk_ids.to(torch.int64)
+        if self._tp_size > 1:
+            topk_ids = self._expand_topk_ids_for_tp(topk_ids)
+            # ``topk_ids`` was duplicated tp_size× above; ``topk_weights`` must follow with
+            # the SAME value per duplicate. No 1/tp scaling — the two TP partial outputs sum
+            # to the full expert output, so weighting both by ``w_k`` already gives
+            # ``w_k * full`` after combine.
+            topk_weights = topk_weights.repeat_interleave(self._tp_size, dim=-1).contiguous()
+            if async_op and topk_weights.grad_fn is not None:
+                # Symmetric to the ``hidden_states`` prehook: the grad for ``topk_weights``
+                # flows back through ``repeat_interleave_backward`` on the compute stream,
+                # while DeepEP's dispatch backward writes that grad on the comm stream and
+                # stamps the event into ``backward_previous_event``. Without this prehook
+                # the compute-stream backward starts before that event fires and reads
+                # stale grad memory — observed as ``grad_norm=NaN``.
+                topk_weights.grad_fn.register_prehook(
+                    get_backward_pre_hook(
+                        backward_previous_event=backward_previous_event,
+                        name="DeepEPDispatcher.dispatch_preprocess.topk_weights",
+                        debug=XTUNER_DISPATCHER_DEBUG,
+                    )
+                )
+
+        # Capture AFTER all compute-stream work above (topk_ids expand, topk_weights
+        # repeat_interleave) so DeepEP's ``stream_wait(previous_event)`` covers those
+        # kernels. Capturing before them leaves their writes outside the event, and
+        # DeepEP's comm-stream dispatch may read stale memory — observed as NaN /
+        # divergent loss under ``intra_layer_micro_batch>1`` with virtual expert TP.
+        forward_finished_event = buffer_capture() if async_op else None
 
         return DeepEPPreDispatchResult(
             hidden_states=hidden_states,
-            topk_ids=topk_ids.to(torch.int64),
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
             backward_previous_event=backward_previous_event,
             forward_finished_event=forward_finished_event,
         )
+
+    def _expand_topk_ids_for_tp(self, topk_ids: torch.Tensor) -> torch.Tensor:
+        """Map physical-expert ids to virtual-expert ids so DeepEP routes each
+        token to every TP rank within its owning EP group.
+
+        Virtual id layout (rank ``r = ep * tp + t`` owns ids ``[r * local, (r + 1) * local)``)::
+
+            virtual_id(e, t) = (ep(e) * tp + t) * local_experts + (e mod local_experts)
+
+        The two virtuals for the same physical expert sit on adjacent ranks (same EP, t=0/t=1),
+        so DeepEP's NUMA layout collapses the cross-node copy to a single RDMA transfer with a
+        2-bit NVL bitmask. ``-1`` (padding) is preserved.
+        """
+        local_experts = self._local_experts
+        tp = self._tp_size
+
+        ep_e = topk_ids // local_experts
+        local_idx = topk_ids % local_experts
+        tp_offsets = torch.arange(tp, device=topk_ids.device, dtype=topk_ids.dtype)
+        virtual = (ep_e.unsqueeze(-1) * tp + tp_offsets) * local_experts + local_idx.unsqueeze(-1)
+        # Preserve sentinel (-1) for padded slots after expansion.
+        virtual = torch.where(topk_ids.unsqueeze(-1) < 0, topk_ids.unsqueeze(-1), virtual)
+        out = virtual.reshape(*topk_ids.shape[:-1], topk_ids.shape[-1] * tp)
+        return out.contiguous()
 
     @override
     def dispatch(
         self,
         *,
         pre_dispatched: DeepEPPreDispatchResult,
-        topk_weights: torch.Tensor,
+        topk_weights: torch.Tensor,  # noqa: ARG002 — already expanded and stashed in pre_dispatched
         async_op: bool = False,
         decoding: bool = False,
     ) -> DeepEPDispatchResult:
+        # ``topk_ids`` / ``topk_weights`` expansion and the cross-stream sync setup live in
+        # ``dispatch_preprocess`` so they run on Loop A's compute stream and overlap with the
+        # next microbatch's attention/gate. ``dispatch`` itself only kicks off DeepEP.
         (
             dispatched_hidden_states,
             dispatched_topk_idx,
@@ -323,8 +423,8 @@ class DeepEPDispatcher(
         ) = _async_dispatch(
             pre_dispatched["hidden_states"],
             pre_dispatched["topk_ids"],
-            topk_weights,
-            self._n_routed_experts,
+            pre_dispatched["topk_weights"],
+            self._virtual_n_experts,
             self._process_group,
             pre_dispatched["forward_finished_event"],
             pre_dispatched["backward_previous_event"],
@@ -464,7 +564,7 @@ class DeepEPDispatcher(
 
         combined_hidden_states, event = _async_combine(
             pre_combined["hidden_states"],
-            self._n_routed_experts,
+            self._virtual_n_experts,
             dispatched["handle"],
             self._process_group,
             pre_combined["forward_finished_event"],
@@ -494,6 +594,7 @@ class DeepEPDispatcher(
         combined: DeepEPCombineResult,
         async_op: bool = False,
     ) -> PostCombineResult:
+        # Restored original wait order (after view_as) to test torch_compile interaction
         hidden_states = combined["hidden_states"]
         forward_previous_event = combined["forward_finished_event"]
 

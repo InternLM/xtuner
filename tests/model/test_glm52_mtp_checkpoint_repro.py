@@ -1,7 +1,8 @@
-"""GLM-5.2 MTP reentrant checkpoint 的真实训练回归测试。
+"""GLM-5.2 MTP checkpoint 的真实训练回归测试。
 
 TestGlm52CompiledMTPCheckpoint
-    test_shared_mtp_depths_train_with_compile_and_topk_offload: 共享 MTP 深度可在 compile/offload 下训练。
+    test_shared_mtp_depths_train_with_compile_and_topk_offload: 全 detach 的共享 MTP 可训练且 source 不重算。
+    test_topk_offload_uses_pinned_memory_and_restores_ids: top-k IDs 真实 D2H 并在 backward 恢复。
 TestGlm52MicroBatchMTPCheckpoint
     test_nested_micro_batch_inputs_preserve_gradients: EP2 micro2 的嵌套 embedding 梯度可正确反传。
 """
@@ -12,6 +13,7 @@ import unittest
 from unittest import mock
 
 import torch
+from torch.distributed.tensor import DTensor
 
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.config import AdamWConfig, FSDPConfig
@@ -19,13 +21,20 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.base import ModelItem
-from xtuner.v1.model.moe.glm52 import Glm52MoEConfig
-from xtuner.v1.module.attention import DSAMLAConfig
+from xtuner.v1.model.moe.glm52 import DSAMLAConfig, Glm52MoEConfig
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
+from xtuner.v1.utils.activation_offload import OffloadManager
 
 
-def _tiny_mtp_config(ep_size: int, mtp_num_layers: int, compile_model: bool) -> Glm52MoEConfig:
+def _tiny_mtp_config(
+    ep_size: int,
+    mtp_num_layers: int,
+    compile_model: bool,
+    *,
+    detach_mtp_inputs: bool = False,
+    detach_mtp_lm_head_weight: bool = False,
+) -> Glm52MoEConfig:
     return Glm52MoEConfig(
         vocab_size=32,
         max_position_embeddings=64,
@@ -63,7 +72,12 @@ def _tiny_mtp_config(ep_size: int, mtp_num_layers: int, compile_model: bool) -> 
             router_scaling_factor=2.5,
         ),
         mlp_layer_types=["sparse", "sparse"],
-        mtp_config=MTPConfig(num_layers=mtp_num_layers, share_weights=True),
+        mtp_config=MTPConfig(
+            num_layers=mtp_num_layers,
+            share_weights=True,
+            detach_mtp_inputs=detach_mtp_inputs,
+            detach_mtp_lm_head_weight=detach_mtp_lm_head_weight,
+        ),
         lm_loss_cfg=CELossConfig(mode="eager"),
         compile_cfg=None if compile_model else False,
         dispatcher="all2all" if ep_size > 1 else None,
@@ -77,14 +91,23 @@ def _build_engine(
     ep_size: int,
     mtp_num_layers: int,
     compile_model: bool,
+    detach_mtp_inputs: bool = False,
+    detach_mtp_lm_head_weight: bool = False,
+    recompute_ratio: float = 0.0,
 ) -> TrainEngine:
     engine = TrainEngine(
-        model_cfg=_tiny_mtp_config(ep_size, mtp_num_layers, compile_model),
+        model_cfg=_tiny_mtp_config(
+            ep_size,
+            mtp_num_layers,
+            compile_model,
+            detach_mtp_inputs=detach_mtp_inputs,
+            detach_mtp_lm_head_weight=detach_mtp_lm_head_weight,
+        ),
         optim_cfg=AdamWConfig(lr=1e-3, foreach=False),
         fsdp_cfg=FSDPConfig(
             ep_size=ep_size,
             cpu_offload=False,
-            recompute_ratio=0.0,
+            recompute_ratio=recompute_ratio,
             torch_compile=compile_model,
         ),
         intra_layer_micro_batch=intra_layer_micro_batch,
@@ -104,13 +127,24 @@ def _model_item(engine: TrainEngine, start: int) -> ModelItem:
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class TestGlm52CompiledMTPCheckpoint(DeterministicDDPTestCase):
     def test_shared_mtp_depths_train_with_compile_and_topk_offload(self):
-        # 验证默认 reentrant checkpoint 可训练共享 MTP 深度且 loss 有限。
+        # 验证全 detach 的共享 MTP 在 compile/offload 下训练，且首个 logical depth 的 source 不重算。
         self.create_pg("cuda")
         engine = _build_engine(
             intra_layer_micro_batch=1,
             ep_size=1,
             mtp_num_layers=2,
             compile_model=True,
+            detach_mtp_inputs=True,
+            detach_mtp_lm_head_weight=True,
+        )
+        mtp_indexer_calls = 0
+
+        def count_mtp_indexer(*_args):
+            nonlocal mtp_indexer_calls
+            mtp_indexer_calls += 1
+
+        mtp_hook = engine.model.mtp_block.layers[0].decoder_layer.self_attn.indexer.register_forward_hook(
+            count_mtp_indexer
         )
         try:
             with mock.patch.dict(
@@ -121,7 +155,62 @@ class TestGlm52CompiledMTPCheckpoint(DeterministicDDPTestCase):
 
             assert math.isfinite(step_info["total_loss"])
             assert math.isfinite(step_info["logs_info"]["reduced_mtp_loss"])
+            mtp_projection_grads = [
+                parameter.grad
+                for name, parameter in engine.model.named_parameters()
+                if "mtp_block" in name and name.endswith("eh_proj.weight")
+            ]
+            assert len(mtp_projection_grads) == 1
+            projection_grad = mtp_projection_grads[0]
+            assert projection_grad is not None
+            local_grad = projection_grad.to_local() if isinstance(projection_grad, DTensor) else projection_grad
+            assert torch.isfinite(local_grad).all()
+            assert local_grad.norm() > 0
+            assert mtp_indexer_calls == 1
         finally:
+            mtp_hook.remove()
+            del engine
+            torch.cuda.empty_cache()
+
+    def test_topk_offload_uses_pinned_memory_and_restores_ids(self):
+        # 主层 checkpoint 会将显式 IDs 作为 SavedVariable；验证 D2H 真实命中并在 backward 恢复。
+        self.create_pg("cuda")
+        engine = _build_engine(
+            intra_layer_micro_batch=1,
+            ep_size=1,
+            mtp_num_layers=1,
+            compile_model=False,
+            recompute_ratio=1.0,
+        )
+        offload_manager = OffloadManager()
+        offload_manager.clear(group="text", clear_pin_memory_cache=True)
+        source_ids: list[torch.Tensor] = []
+
+        def record_source_ids(_module, _inputs, output):
+            source_ids.append(output["dsa_topk_ids"])
+
+        hook = engine.model.layers["0"].self_attn.indexer.register_forward_hook(record_source_ids)
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {"XTUNER_ACTIVATION_OFFLOAD": "0", "XTUNER_DSA_TOPK_OFFLOAD": "1"},
+            ):
+                step_info = engine.train_step([_model_item(engine, 2)])
+
+            assert math.isfinite(step_info["total_loss"])
+            assert len(source_ids) == 1
+            torch.cuda.synchronize()
+            expected_ids = source_ids[0].detach().cpu()
+            pinned_ids = [
+                tensor
+                for key, tensor in offload_manager.pin_memory_cache.items()
+                if key.startswith("text_") and tensor.dtype == torch.int32
+            ]
+            assert pinned_ids and all(tensor.is_pinned() for tensor in pinned_ids)
+            assert any(torch.equal(tensor, expected_ids) for tensor in pinned_ids)
+        finally:
+            hook.remove()
+            offload_manager.clear(group="text", clear_pin_memory_cache=True)
             del engine
             torch.cuda.empty_cache()
 
@@ -141,6 +230,15 @@ class TestGlm52MicroBatchMTPCheckpoint(DeterministicDDPTestCase):
             mtp_num_layers=1,
             compile_model=False,
         )
+        mtp_indexer_calls = 0
+
+        def count_mtp_indexer(*_args):
+            nonlocal mtp_indexer_calls
+            mtp_indexer_calls += 1
+
+        hook = engine.model.mtp_block.layers[0].decoder_layer.self_attn.indexer.register_forward_hook(
+            count_mtp_indexer
+        )
         try:
             with mock.patch.dict(
                 os.environ,
@@ -155,7 +253,9 @@ class TestGlm52MicroBatchMTPCheckpoint(DeterministicDDPTestCase):
 
             assert math.isfinite(step_info["total_loss"])
             assert math.isfinite(step_info["logs_info"]["reduced_mtp_loss"])
+            assert mtp_indexer_calls == 2
         finally:
+            hook.remove()
             del engine
             torch.cuda.empty_cache()
 

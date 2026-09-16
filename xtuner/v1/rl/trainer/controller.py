@@ -321,28 +321,26 @@ class TrainingController:
         *,
         targets,
         rollout_config,
-        weight_transport_type,
-        weight_update_host=None,
-        weight_update_port=None,
     ):
         ray.get(
             [
                 worker.bind_rollout_weight_update.remote(
                     targets=targets,
                     rollout_config=rollout_config,
-                    weight_transport_type=weight_transport_type,
-                    weight_update_host=weight_update_host,
-                    weight_update_port=weight_update_port,
                 )
                 for worker in self.workers
             ]
         )
 
-    def update_weights(self):
-        """Update the weights of the training workers."""
-        handles = [worker.update_weights.remote() for worker in self.workers]
+    def weight_update(self, **kwargs):
+        """Update the weights from the training workers."""
+        handles = [worker.weight_update.remote(**kwargs) for worker in self.workers]
         ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
+
+    def has_registered_weight_checkpoint(self) -> bool:
+        handles = [worker.has_registered_weight_checkpoint.remote() for worker in self.workers]
+        return all(ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT))
 
     def suspend_train_nccl_process_groups(self):
         """Suspend train-side NCCL process groups after weight sync."""

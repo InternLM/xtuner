@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any, TypeAlias, cast, overload
 
 import ray
@@ -9,7 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.constants import AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
@@ -29,6 +30,37 @@ from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 
 
 AGENT_LOOP_CONCURRENCY_GROUP_GENERATE = "generate"
+IsValidSampleFn: TypeAlias = Callable[[list[RolloutState]], bool]
+
+
+def maybe_filter_invalid_sample(
+    group: list[RolloutState],
+    is_valid_sample_fn: IsValidSampleFn | None,
+    logger,
+) -> list[RolloutState]:
+    """Finalize rollout-group validity after all generation post-processing.
+
+    Every custom ``AgentLoop.generate_group`` implementation must return through
+    this helper after generation, judging, flattening, and failure cleanup::
+
+        # Keep sample validation as the final group-generation step.
+        return maybe_filter_invalid_sample(
+            samples,
+            self.is_valid_sample_fn,
+            self.logger,
+        )
+    """
+    if get_group_status(group) != Status.COMPLETED:
+        return group
+    if is_valid_sample_fn is None or is_valid_sample_fn(group):
+        return group
+
+    for state in group:
+        state.status = Status.FILTERED
+    group_id = group[0].group_id if group else None
+    rollout_ids = [state.rollout_id for state in group]
+    logger.info(f"Filtered invalid rollout group: group_id={group_id}, rollout_ids={rollout_ids}.")
+    return group
 
 
 class AgentLoopConfig(ABC, BaseModel):
@@ -39,13 +71,22 @@ class AgentLoopConfig(ABC, BaseModel):
     enable_batch_judge: bool = False
     requires_rollout_proxy: bool = False
 
-    def build(self, rollout_controller, judger: Judger | None = None, logger=None) -> AgentLoopSpec:
+    def build(
+        self,
+        rollout_controller,
+        judger: Judger | None = None,
+        logger=None,
+        *,
+        is_valid_sample_fn: IsValidSampleFn | None = None,
+    ) -> AgentLoopSpec:
         if self.cpu_resources is None:
-            return self.build_local(
+            agent_loop = self.build_local(
                 rollout_controller=rollout_controller,
                 judger=judger,
                 logger=logger,
             )
+            agent_loop.is_valid_sample_fn = is_valid_sample_fn
+            return agent_loop
 
         concurrency = AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
 
@@ -61,6 +102,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 concurrency=concurrency,
                 judger=judger,
                 logger=logger,
+                is_valid_sample_fn=is_valid_sample_fn,
             )
         return self._build_ray_actor(
             rollout_controller=rollout_controller,
@@ -68,6 +110,7 @@ class AgentLoopConfig(ABC, BaseModel):
             concurrency=concurrency,
             judger=judger,
             logger=logger,
+            is_valid_sample_fn=is_valid_sample_fn,
         )
 
     @abstractmethod
@@ -86,6 +129,7 @@ class AgentLoopConfig(ABC, BaseModel):
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
+        is_valid_sample_fn: IsValidSampleFn | None = None,
     ) -> RayAgentLoopProxy:
         ray_agent_loop = ray.remote(
             concurrency_groups={
@@ -104,6 +148,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 actor_num_cpus=cpu_resources.num_cpus_per_worker,
                 actor_memory=cpu_resources.cpu_memory_per_worker,
                 capture_child_tasks=True,
+                is_valid_sample_fn=is_valid_sample_fn,
             ),
         )
 
@@ -116,6 +161,7 @@ class AgentLoopConfig(ABC, BaseModel):
         judger: Judger | None = None,
         logger=None,
         start_bundle_idx: int = 0,
+        is_valid_sample_fn: IsValidSampleFn | None = None,
     ) -> list[RayAgentLoopProxy]:
         ray_agent_loop = ray.remote(
             concurrency_groups={
@@ -135,6 +181,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 actor_num_cpus_per_worker=cpu_resources.num_cpus_per_worker,
                 actor_memory_per_worker=cpu_resources.cpu_memory_per_worker,
                 capture_child_tasks=True,
+                is_valid_sample_fn=is_valid_sample_fn,
             ),
         )
 
@@ -147,6 +194,7 @@ class AgentLoopConfig(ABC, BaseModel):
         judger: Judger | None = None,
         logger=None,
         start_bundle_idx: int = 0,
+        is_valid_sample_fn: IsValidSampleFn | None = None,
     ) -> RouterAgentLoop:
         return RouterAgentLoop(
             workers=self._build_ray_actors(
@@ -157,6 +205,7 @@ class AgentLoopConfig(ABC, BaseModel):
                 judger=judger,
                 logger=logger,
                 start_bundle_idx=start_bundle_idx,
+                is_valid_sample_fn=is_valid_sample_fn,
             ),
             rollout_ctl=rollout_controller,
         )
@@ -179,6 +228,7 @@ class AgentLoop(ABC):
         self.sample_params: SampleParams = sample_params if sample_params is not None else SampleParams()
         self.judger = judger
         self.enable_batch_judge = enable_batch_judge
+        self.is_valid_sample_fn: IsValidSampleFn | None = None
         if logger is None:
             self.logger = get_logger()
         else:
@@ -189,6 +239,13 @@ class AgentLoop(ABC):
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
+        """Generate one rollout group.
+
+        Warning:
+            Subclasses overriding this method MUST call
+            ``maybe_filter_invalid_sample`` as the final step before returning.
+            Otherwise ``TaskSpecConfig.is_valid_sample_fn`` will be silently ignored.
+        """
         pending_tasks = []
         for state in rollout_state:
             state.sample_params = self.sample_params
@@ -199,7 +256,8 @@ class AgentLoop(ABC):
         if self.judger is not None and self.enable_batch_judge:
             if all(sample.status == Status.COMPLETED for sample in group_samples):
                 group_samples = await self.run_judger(group_samples)
-        return group_samples
+        # Keep sample validation as the final group-generation step.
+        return maybe_filter_invalid_sample(group_samples, self.is_valid_sample_fn, self.logger)
 
     @overload
     async def run_judger(self, rollout_state: RolloutState) -> RolloutState: ...
@@ -314,12 +372,14 @@ class AgentLoopActor:
         rollout_controller: RolloutController,
         judger: Judger | None = None,
         logger=None,
+        is_valid_sample_fn: IsValidSampleFn | None = None,
     ):
         self.agent_loop = agent_loop_config.build_local(
             rollout_controller=rollout_controller,
             judger=judger,
             logger=logger,
         )
+        self.agent_loop.is_valid_sample_fn = is_valid_sample_fn
 
     @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:

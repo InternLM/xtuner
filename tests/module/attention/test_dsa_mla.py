@@ -4,8 +4,9 @@ TestTorchSparseMLA
     test_padded_indices_support_int32_and_backward: PyTorch 后端处理 padding、int32 和反向传播。
 TestDSAAttention
     test_packed_inputs_respect_causal_boundaries_and_backward: packed attention 遵守分段因果边界并可反传。
-    test_shared_layers_reuse_topk_without_cross_context_leak: shared layer 复用当前样本 top-k 且不跨样本泄漏。
-    test_reentrant_checkpoint_reuses_and_releases_topk: checkpoint 重算复用并最终释放 top-k。
+    test_indexer_freeze_contract: indexer 默认冻结，未实现的可训练模式在 build 时拒绝。
+    test_shared_layer_consumes_explicit_topk_ids: shared layer 复用显式 top-k IDs，漏传时立即报错。
+    test_checkpoint_reuses_source_topk_storage: 显式 IDs 穿过 checkpoint，source indexer 不重算。
 TestAcceleratedSparseMLA
     test_tilelang_forward_backward_matches_torch: TileLang 前反向数值与 PyTorch 后端一致。
     test_compiled_cudnn_backward_matches_tilelang: 编译后的 cuDNN DSA 前反向与 TileLang 一致。
@@ -23,14 +24,12 @@ from functools import cache
 import pytest
 import torch
 import torch.distributed as dist
-import torch.nn as nn
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.model.utils import checkpoint_wrapper
-from xtuner.v1.module.attention import DSAMLAConfig
-from xtuner.v1.module.attention.dsa_topk_sharing import register_dsa_topk_decoder_lifecycle_hooks
+from xtuner.v1.model.moe.glm52 import DSAMLAConfig
+from xtuner.v1.model.moe.glm52.decoder_layer import GLM52DenseDecoderLayer
+from xtuner.v1.model.utils import apply_activation_checkpointing
 from xtuner.v1.ops.sparse_mla import dsa_topk_indices, sparse_mla
 from xtuner.v1.utils.test_utils import init_data_mesh
 
@@ -103,6 +102,10 @@ def _tiny_dsa_attention(
     indexer_types: list[str] | None = None,
     layer_idx: int = 0,
 ):
+    return _tiny_dsa_config(indexer_types).build(hidden_size=4, layer_idx=layer_idx)
+
+
+def _tiny_dsa_config(indexer_types: list[str] | None = None) -> DSAMLAConfig:
     return DSAMLAConfig(
         num_attention_heads=2,
         head_dim=2,
@@ -116,26 +119,17 @@ def _tiny_dsa_attention(
         index_n_heads=2,
         indexer_types=indexer_types,
         sparse_mla_backend="torch",
-    ).build(hidden_size=4, layer_idx=layer_idx)
+    )
 
 
-class _TinyDsaDecoderBlock(nn.Module):
-    def __init__(self, attention: nn.Module) -> None:
-        super().__init__()
-        self.self_attn = attention
-        register_dsa_topk_decoder_lifecycle_hooks(self)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        seq_ctx: SequenceContext,
-    ) -> torch.Tensor:
-        return self.self_attn(
-            hidden_states=hidden_states,
-            position_embeddings=position_embeddings,
-            seq_ctx=seq_ctx,
-        )["projected_output"]
+def _tiny_dsa_decoder(indexer_types: list[str], layer_idx: int) -> GLM52DenseDecoderLayer:
+    return GLM52DenseDecoderLayer(
+        hidden_size=4,
+        intermediate_size=8,
+        hidden_act="silu",
+        attention_config=_tiny_dsa_config(indexer_types),
+        layer_idx=layer_idx,
+    )
 
 
 class TestTorchSparseMLA:
@@ -167,6 +161,80 @@ class TestTorchSparseMLA:
 
 
 class TestDSAAttention:
+    def test_torch_indexer_matches_raw_gate_reference(self):
+        # The torch backend owns the full Indexer scaling: callers pass raw
+        # gates, and the causal top-k (including ``-1`` padding for invisible
+        # slots) matches a reference that folds ``Ni**-0.5`` and ``Di**-0.5``
+        # itself. Note top-k is positive-scale equivariant, so the assertion
+        # holds for any positive scaling -- the raw-gate call contract and the
+        # causal semantics are what this test pins down.
+        torch.manual_seed(0)
+        seq_len = 4
+        index_n_heads = 3
+        index_head_dim = 2
+        q = torch.randn(1, seq_len, index_n_heads, index_head_dim)
+        k = torch.randn(1, seq_len, index_head_dim)
+        weights = torch.randn(1, seq_len, index_n_heads)
+        seq_ctx = SequenceContext.from_input_ids(input_ids=(torch.arange(seq_len).view(1, -1),), device="cpu")
+
+        actual = dsa_topk_indices(
+            q,
+            k,
+            weights,
+            seq_ctx,
+            index_head_dim=index_head_dim,
+            index_topk=2,
+            backend="torch",
+        )
+        scores = torch.relu(torch.einsum("bshd,btd->bsht", q.float(), k.float()) * (index_head_dim**-0.5))
+        index_scores = torch.einsum("bsht,bsh->bst", scores, weights * (index_n_heads**-0.5))
+        causal = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
+        index_scores = index_scores.masked_fill(~causal.unsqueeze(0), float("-inf"))
+        expected_scores, expected_indices = index_scores.topk(2, dim=-1)
+        expected = expected_indices.masked_fill(expected_scores == -torch.inf, -1)
+
+        torch.testing.assert_close(actual, expected.squeeze(0).unsqueeze(1).to(torch.int32))
+
+    def test_deep_gemm_fp8_indexer_backend_is_independent(self):
+        config = DSAMLAConfig(
+            num_attention_heads=32,
+            head_dim=128,
+            kv_lora_rank=16,
+            q_lora_rank=16,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=64,
+            v_head_dim=64,
+            index_topk=8,
+            index_head_dim=128,
+            index_n_heads=32,
+            sparse_mla_backend="torch",
+            indexer_backend="deep_gemm_fp8",
+        )
+        attention = config.build(hidden_size=32)
+        assert attention.sparse_mla_backend == "torch"
+        assert attention.indexer_backend == "deep_gemm_fp8"
+        assert attention.indexer.indexer_backend == "deep_gemm_fp8"
+
+    def test_fp8_indexer_rejects_unsupported_head_count(self):
+        # DeepGEMM's contiguous MQA only serves H in {32, 64, 128} at D=128;
+        # fail fast in config validation instead of asserting inside the kernel.
+        config = DSAMLAConfig(
+            num_attention_heads=32,
+            head_dim=128,
+            kv_lora_rank=16,
+            q_lora_rank=16,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=64,
+            v_head_dim=64,
+            index_topk=8,
+            index_head_dim=128,
+            index_n_heads=48,
+            sparse_mla_backend="torch",
+            indexer_backend="deep_gemm_fp8",
+        )
+        with pytest.raises(ValueError, match="head count"):
+            config.build(hidden_size=32)
+
     def test_packed_inputs_respect_causal_boundaries_and_backward(self):
         # 验证 packed attention 不跨子序列取 key，并能对真实输入完成有限反向传播。
         torch.manual_seed(0)
@@ -185,15 +253,27 @@ class TestDSAAttention:
         assert outputs["raw_output"].shape == (1, 5, 6)
         assert torch.isfinite(outputs["projected_output"]).all()
         assert torch.isfinite(hidden_states.grad).all()
-        topk = seq_ctx.dsa_topk_cache.indices[0]
+        topk = outputs["dsa_topk_ids"]
+        assert topk.dtype == torch.int32
+        assert topk.is_contiguous()
         for token_idx, seq_start in [(0, 0), (1, 0), (2, 2), (3, 2), (4, 2)]:
             valid_indices = topk[token_idx, 0][topk[token_idx, 0] != -1]
             assert valid_indices.numel() == token_idx - seq_start + 1
             assert valid_indices.min().item() >= seq_start
             assert valid_indices.max().item() <= token_idx
 
-    def test_shared_layers_reuse_topk_without_cross_context_leak(self):
-        # 验证 shared attention 复用同一 SequenceContext 的 source top-k，其他 context 保持独立。
+    def test_indexer_freeze_contract(self):
+        attention = _tiny_dsa_attention(indexer_types=["full"], layer_idx=0)
+
+        assert all(not parameter.requires_grad for parameter in attention.indexer.parameters())
+
+        config = _tiny_dsa_config(["full"])
+        config.freeze_dsa_indexer = False
+        with pytest.raises(ValueError, match="freeze_dsa_indexer=False"):
+            config.build(hidden_size=4, layer_idx=0)
+
+    def test_shared_layer_consumes_explicit_topk_ids(self):
+        # 验证 shared attention 复用显式 IDs，并在漏传时立即报错。
         torch.manual_seed(0)
         source_attention = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0)
         shared_attention = _tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1)
@@ -201,109 +281,63 @@ class TestDSAAttention:
         hidden_states = torch.randn(1, 4, 4)
         seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
 
-        source_attention(hidden_states, position_embeddings, seq_ctx)
-        source_topk = seq_ctx.dsa_topk_cache.indices[0]
-        shared_output = shared_attention(hidden_states, position_embeddings, seq_ctx)["projected_output"]
+        source_outputs = source_attention(hidden_states, position_embeddings, seq_ctx)
+        dsa_topk_ids = source_outputs["dsa_topk_ids"]
+        shared_outputs = shared_attention(
+            hidden_states,
+            position_embeddings,
+            seq_ctx,
+            dsa_topk_ids=dsa_topk_ids,
+        )
 
-        other_seq_ctx = SequenceContext.from_input_ids((torch.tensor([[5, 6, 7, 8]]),), device="cpu")
-        source_attention(torch.randn(1, 4, 4), position_embeddings, other_seq_ctx)
+        assert torch.isfinite(shared_outputs["projected_output"]).all()
+        assert shared_outputs["dsa_topk_ids"] is dsa_topk_ids
+        with pytest.raises(RuntimeError, match="requires dsa_topk_ids"):
+            shared_attention(hidden_states, position_embeddings, seq_ctx)
 
-        assert torch.isfinite(shared_output).all()
-        assert seq_ctx.dsa_topk_cache.indices[0] is source_topk
-        assert other_seq_ctx.dsa_topk_cache.indices[0] is not source_topk
-
-    def test_reentrant_checkpoint_reuses_and_releases_topk(self):
-        # 验证真实 source/shared decoder 经 reentrant checkpoint 重算后梯度有限且缓存释放。
+    def test_checkpoint_reuses_source_topk_storage(self):
+        # 验证显式 IDs 穿过 checkpoint 且真实 indexer backend 只执行一次。
         torch.manual_seed(0)
-        source_block = checkpoint_wrapper(
-            _TinyDsaDecoderBlock(_tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=0)),
-            checkpoint_impl=CheckpointImpl.REENTRANT,
-        )
-        shared_block = checkpoint_wrapper(
-            _TinyDsaDecoderBlock(_tiny_dsa_attention(indexer_types=["full", "shared"], layer_idx=1)),
-            checkpoint_impl=CheckpointImpl.REENTRANT,
-        )
+        source_block = apply_activation_checkpointing(_tiny_dsa_decoder(["full", "shared"], layer_idx=0))
+        shared_block = apply_activation_checkpointing(_tiny_dsa_decoder(["full", "shared"], layer_idx=1))
         hidden_states = torch.randn(1, 4, 4, requires_grad=True)
         position_embeddings = (torch.ones(1, 4, 2), torch.zeros(1, 4, 2))
         seq_ctx = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3, 4]]),), device="cpu")
+        indexer_calls = 0
 
-        output = source_block(hidden_states, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
-        output = shared_block(output, position_embeddings=position_embeddings, seq_ctx=seq_ctx)
-        output.square().mean().backward()
+        def count_indexer_call(*_args):
+            nonlocal indexer_calls
+            indexer_calls += 1
+
+        hook = source_block.self_attn.indexer.register_forward_hook(count_indexer_call)
+
+        try:
+            source_outputs = source_block(
+                hidden_states,
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+            )
+            source_ids = source_outputs["dsa_topk_ids"]
+            shared_outputs = shared_block(
+                source_outputs["hidden_states"],
+                position_embeddings=position_embeddings,
+                seq_ctx=seq_ctx,
+                dsa_topk_ids=source_ids,
+            )
+            shared_ids = shared_outputs["dsa_topk_ids"]
+            assert shared_ids.untyped_storage().data_ptr() == source_ids.untyped_storage().data_ptr()
+            shared_outputs["hidden_states"].square().mean().backward()
+        finally:
+            hook.remove()
 
         assert torch.isfinite(hidden_states.grad).all()
-        assert seq_ctx.dsa_topk_cache.indices == {}
-        assert seq_ctx.dsa_topk_cache.offloaded == {}
+        assert source_ids.dtype == torch.int32
+        assert indexer_calls == 1
 
 
-class TestAcceleratedSparseMLA:
-    @pytest.mark.skipif(
-        not _tilelang_sparse_mla_available(),
-        reason="requires CUDA and importable TileLang runtime",
-    )
-    def test_tilelang_forward_backward_matches_torch(self):
-        # 验证 TileLang SparseMLA 的输出、LSE、dQ 和 dKV 与 PyTorch oracle 一致。
-        q, kv, indices = _tilelang_sparse_mla_inputs()
-        scaling = 1 / math.sqrt(q.shape[-1])
-        q_ref = q.detach().clone().requires_grad_()
-        kv_ref = kv.detach().clone().requires_grad_()
-        q_tilelang = q.detach().clone().requires_grad_()
-        kv_tilelang = kv.detach().clone().requires_grad_()
-
-        expected = sparse_mla(q_ref, kv_ref, indices, scaling=scaling, value_dim=512, backend="torch")
-        actual = sparse_mla(
-            q_tilelang,
-            kv_tilelang,
-            indices.to(torch.int32),
-            scaling=scaling,
-            value_dim=512,
-            backend="tilelang",
-        )
-        grad_output = torch.randn_like(expected.raw_output)
-        expected.raw_output.backward(grad_output)
-        actual.raw_output.backward(grad_output)
-
-        torch.testing.assert_close(actual.raw_output, expected.raw_output, atol=BF16_ATOL, rtol=BF16_RTOL)
-        torch.testing.assert_close(actual.softmax_lse, expected.softmax_lse, atol=BF16_ATOL, rtol=BF16_RTOL)
-        torch.testing.assert_close(q_tilelang.grad, q_ref.grad, atol=BF16_ATOL, rtol=BF16_RTOL)
-        torch.testing.assert_close(kv_tilelang.grad, kv_ref.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
-
-    @pytest.mark.skipif(
-        not (_tilelang_sparse_mla_available() and _cudnn_dsa_sparse_mla_available()),
-        reason="requires CUDA, TileLang, and cuDNN DSA sparse attention backward",
-    )
-    def test_compiled_cudnn_backward_matches_tilelang(self):
-        # 验证 torch.compile 下 cuDNN DSA 的输出与梯度仍和 TileLang oracle 一致。
-        q, kv, indices = _cudnn_dsa_sparse_mla_inputs()
-        scaling = 1 / math.sqrt(q.shape[-1])
-
-        def compiled_sparse_mla(q: torch.Tensor, kv: torch.Tensor, backend: str) -> torch.Tensor:
-            return sparse_mla(
-                q,
-                kv,
-                indices,
-                scaling=scaling,
-                value_dim=512,
-                backend=backend,
-            ).raw_output
-
-        compiled_sparse_mla = torch.compile(compiled_sparse_mla, fullgraph=False)
-        q_tilelang = q.detach().clone().requires_grad_()
-        kv_tilelang = kv.detach().clone().requires_grad_()
-        q_cudnn = q.detach().clone().requires_grad_()
-        kv_cudnn = kv.detach().clone().requires_grad_()
-
-        expected = compiled_sparse_mla(q_tilelang, kv_tilelang, "tilelang")
-        actual = compiled_sparse_mla(q_cudnn, kv_cudnn, "cudnn_dsa")
-        grad_output = torch.randn_like(expected)
-        expected.backward(grad_output)
-        actual.backward(grad_output)
-
-        torch.testing.assert_close(actual, expected, atol=BF16_ATOL, rtol=BF16_RTOL)
-        torch.testing.assert_close(q_cudnn.grad, q_tilelang.grad, atol=CUDNN_DQ_ATOL, rtol=CUDNN_DQ_RTOL)
-        torch.testing.assert_close(kv_cudnn.grad, kv_tilelang.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
-
-
+# The multiprocess cases must run before TileLang JIT is initialized in the
+# pytest parent. With TileLang 0.1.11, spawning them afterwards crashes rank 0
+# during child-process bootstrap, before the indexer kernel is invoked.
 class TestDSASequenceParallel(DeterministicDDPTestCase):
     def test_packed_attention_matches_full_sequence(self):
         # 验证 SP2 packed attention 的输出、top-k 与输入梯度拼回后等同完整序列。
@@ -322,12 +356,13 @@ class TestDSASequenceParallel(DeterministicDDPTestCase):
         full_output_grad = torch.randn(1, 8, 4, device="cuda")
 
         full_seq_ctx = SequenceContext.from_input_ids(packed_input_ids, device="cuda")
-        expected_output = attention(
+        expected_outputs = attention(
             full_hidden_states,
             position_embeddings=full_position_embeddings,
             seq_ctx=full_seq_ctx,
-        )["projected_output"]
-        expected_topk = full_seq_ctx.dsa_topk_cache.indices[0].clone()
+        )
+        expected_output = expected_outputs["projected_output"]
+        expected_topk = expected_outputs["dsa_topk_ids"].clone()
         expected_output.backward(full_output_grad)
         expected_input_grad = full_hidden_states.grad.clone()
         attention.zero_grad(set_to_none=True)
@@ -338,12 +373,13 @@ class TestDSASequenceParallel(DeterministicDDPTestCase):
         shard_start = sp_seq_ctx.sp_rank * shard_size
         shard_end = shard_start + shard_size
         local_hidden_states = full_hidden_states.detach()[:, shard_start:shard_end].clone().requires_grad_()
-        local_output = attention(
+        local_outputs = attention(
             local_hidden_states,
             position_embeddings=tuple(x[:, shard_start:shard_end] for x in full_position_embeddings),
             seq_ctx=sp_seq_ctx,
-        )["projected_output"]
-        local_topk = sp_seq_ctx.dsa_topk_cache.indices[0]
+        )
+        local_output = local_outputs["projected_output"]
+        local_topk = local_outputs["dsa_topk_ids"]
         local_output.backward(full_output_grad[:, shard_start:shard_end])
 
         gathered_output = [torch.empty_like(local_output) for _ in range(2)]
@@ -446,3 +482,71 @@ class TestDSASequenceParallel(DeterministicDDPTestCase):
     @property
     def world_size(self) -> int:
         return 2
+
+
+class TestAcceleratedSparseMLA:
+    @pytest.mark.skipif(
+        not _tilelang_sparse_mla_available(),
+        reason="requires CUDA and importable TileLang runtime",
+    )
+    def test_tilelang_forward_backward_matches_torch(self):
+        # 验证 TileLang SparseMLA 的输出、LSE、dQ 和 dKV 与 PyTorch oracle 一致。
+        q, kv, indices = _tilelang_sparse_mla_inputs()
+        scaling = 1 / math.sqrt(q.shape[-1])
+        q_ref = q.detach().clone().requires_grad_()
+        kv_ref = kv.detach().clone().requires_grad_()
+        q_tilelang = q.detach().clone().requires_grad_()
+        kv_tilelang = kv.detach().clone().requires_grad_()
+
+        expected = sparse_mla(q_ref, kv_ref, indices, scaling=scaling, value_dim=512, backend="torch")
+        actual = sparse_mla(
+            q_tilelang,
+            kv_tilelang,
+            indices.to(torch.int32),
+            scaling=scaling,
+            value_dim=512,
+            backend="tilelang",
+        )
+        grad_output = torch.randn_like(expected.raw_output)
+        expected.raw_output.backward(grad_output)
+        actual.raw_output.backward(grad_output)
+
+        torch.testing.assert_close(actual.raw_output, expected.raw_output, atol=BF16_ATOL, rtol=BF16_RTOL)
+        torch.testing.assert_close(actual.softmax_lse, expected.softmax_lse, atol=BF16_ATOL, rtol=BF16_RTOL)
+        torch.testing.assert_close(q_tilelang.grad, q_ref.grad, atol=BF16_ATOL, rtol=BF16_RTOL)
+        torch.testing.assert_close(kv_tilelang.grad, kv_ref.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
+
+    @pytest.mark.skipif(
+        not (_tilelang_sparse_mla_available() and _cudnn_dsa_sparse_mla_available()),
+        reason="requires CUDA, TileLang, and cuDNN DSA sparse attention backward",
+    )
+    def test_compiled_cudnn_backward_matches_tilelang(self):
+        # 验证 torch.compile 下 cuDNN DSA 的输出与梯度仍和 TileLang oracle 一致。
+        q, kv, indices = _cudnn_dsa_sparse_mla_inputs()
+        scaling = 1 / math.sqrt(q.shape[-1])
+
+        def compiled_sparse_mla(q: torch.Tensor, kv: torch.Tensor, backend: str) -> torch.Tensor:
+            return sparse_mla(
+                q,
+                kv,
+                indices,
+                scaling=scaling,
+                value_dim=512,
+                backend=backend,
+            ).raw_output
+
+        compiled_sparse_mla = torch.compile(compiled_sparse_mla, fullgraph=False)
+        q_tilelang = q.detach().clone().requires_grad_()
+        kv_tilelang = kv.detach().clone().requires_grad_()
+        q_cudnn = q.detach().clone().requires_grad_()
+        kv_cudnn = kv.detach().clone().requires_grad_()
+
+        expected = compiled_sparse_mla(q_tilelang, kv_tilelang, "tilelang")
+        actual = compiled_sparse_mla(q_cudnn, kv_cudnn, "cudnn_dsa")
+        grad_output = torch.randn_like(expected)
+        expected.backward(grad_output)
+        actual.backward(grad_output)
+
+        torch.testing.assert_close(actual, expected, atol=BF16_ATOL, rtol=BF16_RTOL)
+        torch.testing.assert_close(q_cudnn.grad, q_tilelang.grad, atol=CUDNN_DQ_ATOL, rtol=CUDNN_DQ_RTOL)
+        torch.testing.assert_close(kv_cudnn.grad, kv_tilelang.grad, atol=DKV_ATOL, rtol=DKV_RTOL)

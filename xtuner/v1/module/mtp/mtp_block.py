@@ -1,18 +1,26 @@
 """Multi-Token Prediction (MTP) Block implementation."""
 
-from typing import Callable
+from typing import Callable, cast
 
 import torch
 import torch.nn as nn
 
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
+    MoEDecoderLayerMicroBatchOutput,
+    MoEDecoderLayerOutput,
+)
 
 from .config import MTPConfig
 from .mtp_layer import MTPLayer
 from .utils import roll_sequence_context
 
 
-MTPDepthOutput = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+MTPDepthOutput = MoEDecoderLayerOutput
+"""One MTP depth produces the same keyed outputs as the decoder layer it
+wraps."""
+
+MTPInternalOutput = MoEDecoderLayerOutput | MoEDecoderLayerMicroBatchOutput
 
 
 class MTPBlock(nn.Module):
@@ -62,12 +70,12 @@ class MTPBlock(nn.Module):
         >>>
         >>> # Multi-microbatch (domino EP) forward
         >>> outputs_per_mb = mtp_block(
-        ...     h0, h1,
+        ...     [h0, h1],
         ...     embed_tokens_fn=embed_fn,
         ...     position_embeddings=[pos_emb_0, pos_emb_1],
         ...     seq_ctx=[ctx_0, ctx_1],
         ... )
-        >>> # outputs_per_mb[mb_idx][depth_idx] -> (hidden, router_logits, router_weights, router_topk_ids)
+        >>> # outputs_per_mb[mb_idx][depth_idx] -> MTPDepthOutput
     """
 
     def __init__(self, *, mtp_config: MTPConfig, mtp_layers: list[MTPLayer]):
@@ -84,7 +92,8 @@ class MTPBlock(nn.Module):
 
     def forward(
         self,
-        *hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | list[torch.Tensor],
+        *,
         embed_tokens_fn: Callable[[torch.Tensor], torch.Tensor],
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
         seq_ctx: SequenceContext | list[SequenceContext],
@@ -97,9 +106,8 @@ class MTPBlock(nn.Module):
         the wrapped decoder layer can be overlapped across micro-batches (domino EP).
 
         Args:
-            hidden_states (torch.Tensor): One or more hidden state tensors from the main
-                model, shape ``[batch, seq_len, hidden_size]`` each. Single tensor → single-
-                microbatch path; multiple tensors → multi-microbatch (domino EP) path.
+            hidden_states (torch.Tensor | list[torch.Tensor]): Hidden states from the main model,
+                shape ``[batch, seq_len, hidden_size]`` each, one tensor per micro-batch.
             embed_tokens_fn (Callable): Function to embed tokens. Takes token IDs and returns
                 embeddings. Should have signature ``embed_tokens_fn(token_ids: Tensor) -> Tensor``.
             position_embeddings (tuple | list[tuple]): Rotary position embeddings (cos, sin),
@@ -107,14 +115,11 @@ class MTPBlock(nn.Module):
             seq_ctx (SequenceContext | list[SequenceContext]): Sequence context per micro-batch.
 
         Returns:
-            list: For single-microbatch input,
-                ``list[(hidden, router_logits, router_weights, router_topk_ids)]``
-                of length ``D``, where ``outputs[k]`` is the prediction for token ``i+k+1``.
-                For ``N`` micro-batches,
-                ``list[list[(hidden, router_logits, router_weights, router_topk_ids)]]``
-                with outer length ``N`` and inner length ``D``: ``outputs[mb_idx][depth_idx]``.
+            list[MTPDepthOutput] | list[list[MTPDepthOutput]]: For a single ``hidden_states``
+            tensor, one entry per MTP depth ``D``, where ``outputs[k]`` is the prediction for
+            token ``i+k+1``. For ``N`` micro-batches, ``outputs[mb_idx][depth_idx]``.
         """
-        if len(hidden_states) == 1:
+        if not isinstance(hidden_states, list):
             assert isinstance(seq_ctx, SequenceContext), (
                 "seq_ctx should be a SequenceContext instance in single-microbatch mode"
             )
@@ -122,7 +127,7 @@ class MTPBlock(nn.Module):
                 "position_embeddings should be a (cos, sin) tuple in single-microbatch mode"
             )
             return self._forward(
-                hidden_states=hidden_states[0],
+                hidden_states=hidden_states,
                 embed_tokens_fn=embed_tokens_fn,
                 position_embeddings=position_embeddings,
                 seq_ctx=seq_ctx,
@@ -136,7 +141,7 @@ class MTPBlock(nn.Module):
             "position_embeddings should be a list aligned with hidden_states in multi-microbatch mode"
         )
         return self._micro_batch_forward(
-            hidden_states_list=list(hidden_states),
+            hidden_states_list=hidden_states,
             embed_tokens_fn=embed_tokens_fn,
             position_embeddings_list=position_embeddings,
             seq_ctx_list=seq_ctx,
@@ -164,9 +169,7 @@ class MTPBlock(nn.Module):
                 attention mask, etc.
 
         Returns:
-            list[MTPDepthOutput]: List of 4-tuples
-                (hidden_states, router_logits, router_weights, router_topk_ids)
-                for each MTP depth.
+            list[MTPDepthOutput]: One entry per MTP depth.
                 Length equals num_layers.
                 - outputs[0]: Outputs for predicting token at position (i+1)
                 - outputs[k]: Outputs for predicting token at position (i+k+1)
@@ -174,10 +177,11 @@ class MTPBlock(nn.Module):
         mtp_outputs: list[MTPDepthOutput] = []
         current_hidden_states = hidden_states.detach() if self.mtp_config.detach_mtp_inputs else hidden_states
         current_seq_ctx = seq_ctx
+        previous_layer_results: MTPInternalOutput | None = None
 
         num_steps = self.mtp_config.num_layers
         for step in range(num_steps):
-            layer = self.layers[0] if self.mtp_config.share_weights else self.layers[step]
+            layer = cast(MTPLayer, self.layers[0] if self.mtp_config.share_weights else self.layers[step])
             # Roll each packed sequence independently so we get the (i+k)-th token while
             # respecting per-sequence boundaries inside the packed batch.
             current_seq_ctx = roll_sequence_context(current_seq_ctx, shifts=-1)
@@ -186,15 +190,51 @@ class MTPBlock(nn.Module):
             if self.mtp_config.detach_mtp_inputs:
                 future_embeddings = future_embeddings.detach()
 
-            current_hidden_states, router_logits, router_weights, router_topk_ids = layer(
-                current_hidden_states,
-                future_embeddings=future_embeddings,
-                position_embeddings=position_embeddings,
-                seq_ctx=current_seq_ctx,
+            layer_results = cast(
+                MoEDecoderLayerOutput,
+                self._call_decoder_layer(
+                    layer,
+                    current_hidden_states,
+                    previous_layer_results=previous_layer_results,
+                    future_embeddings=future_embeddings,
+                    position_embeddings=position_embeddings,
+                    seq_ctx=current_seq_ctx,
+                ),
             )
-            mtp_outputs.append((current_hidden_states, router_logits, router_weights, router_topk_ids))
+            previous_layer_results = layer_results
+            current_hidden_states = layer_results["hidden_states"]
+            mtp_outputs.append(
+                {
+                    "hidden_states": current_hidden_states,
+                    "router_logits": layer_results["router_logits"],
+                    "router_weights": layer_results["router_weights"],
+                    "router_topk_ids": layer_results["router_topk_ids"],
+                }
+            )
 
         return mtp_outputs
+
+    def _call_decoder_layer(
+        self,
+        layer: MTPLayer,
+        hidden_states: torch.Tensor | list[torch.Tensor],
+        *,
+        previous_layer_results: MTPInternalOutput | None,
+        future_embeddings: torch.Tensor | list[torch.Tensor],
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
+        seq_ctx: SequenceContext | list[SequenceContext],
+    ) -> MTPInternalOutput:
+        """Call one MTP decoder layer.
+
+        Subclasses can consume model-specific fields from ``previous_layer_results`` while the
+        generic MTP input and public output stay model-agnostic.
+        """
+        return layer(
+            hidden_states,
+            future_embeddings=future_embeddings,
+            position_embeddings=position_embeddings,
+            seq_ctx=seq_ctx,
+        )
 
     def _micro_batch_forward(
         self,
@@ -210,35 +250,39 @@ class MTPBlock(nn.Module):
         outputs_per_mb: list[list[MTPDepthOutput]] = [[] for _ in range(n)]
         current_hidden_states_list = list(hidden_states_list)
         current_seq_ctx_list = list(seq_ctx_list)
+        previous_layer_results: MTPInternalOutput | None = None
 
         num_steps = self.mtp_config.num_layers
         for step in range(num_steps):
-            layer = self.layers[0] if self.mtp_config.share_weights else self.layers[step]
+            layer = cast(MTPLayer, self.layers[0] if self.mtp_config.share_weights else self.layers[step])
 
             current_seq_ctx_list = [roll_sequence_context(ctx, shifts=-1) for ctx in current_seq_ctx_list]
             future_embeddings_list = [self._embed_future(ctx, embed_tokens_fn) for ctx in current_seq_ctx_list]
 
-            layer_results = layer(
-                *current_hidden_states_list,
-                future_embeddings=future_embeddings_list,
-                position_embeddings=position_embeddings_list,
-                seq_ctx=current_seq_ctx_list,
+            layer_results = cast(
+                MoEDecoderLayerMicroBatchOutput,
+                self._call_decoder_layer(
+                    layer,
+                    current_hidden_states_list,
+                    previous_layer_results=previous_layer_results,
+                    future_embeddings=future_embeddings_list,
+                    position_embeddings=position_embeddings_list,
+                    seq_ctx=current_seq_ctx_list,
+                ),
             )
-            assert isinstance(layer_results, tuple) and len(layer_results) == 4 * n, (
-                f"MTPLayer multi-microbatch forward should return a flat tuple of length {4 * n}, "
-                f"got {len(layer_results) if isinstance(layer_results, tuple) else type(layer_results)}"
-            )
-            new_hidden = list(layer_results[:n])
-            router_logits = list(layer_results[n : 2 * n])
-            router_weights = list(layer_results[2 * n : 3 * n])
-            router_topk_ids = list(layer_results[3 * n :])
+            previous_layer_results = layer_results
 
             for mb_idx in range(n):
                 outputs_per_mb[mb_idx].append(
-                    (new_hidden[mb_idx], router_logits[mb_idx], router_weights[mb_idx], router_topk_ids[mb_idx])
+                    {
+                        "hidden_states": layer_results["hidden_states"][mb_idx],
+                        "router_logits": layer_results["router_logits"][mb_idx],
+                        "router_weights": layer_results["router_weights"][mb_idx],
+                        "router_topk_ids": layer_results["router_topk_ids"][mb_idx],
+                    }
                 )
 
-            current_hidden_states_list = new_hidden
+            current_hidden_states_list = layer_results["hidden_states"]
 
         return outputs_per_mb
 

@@ -14,6 +14,7 @@ from xtuner.v1.float8.fsdp_utils import (
     precompute_tilewise_float8_scale_for_fsdp,
 )
 from xtuner.v1.utils import get_logger, is_evenly_distributed, log_rank0
+from xtuner.v1.utils.interleaved_shard import RuntimeLayout
 
 from .fsdp_utils import WeightWithDynamicTensorWiseFloat8CastTensor, WeightWithDynamicTilewiseFloat8CastTensor
 
@@ -106,6 +107,12 @@ class Float8Handler:
         return chunk_size * num_chunks
 
     @staticmethod
+    def get_shard_size_on_dim(tensor: torch.Tensor | DTensor, dim: int) -> int:
+        if not isinstance(tensor, DTensor):
+            return 1
+        return RuntimeLayout.from_dtensor(tensor).shard_size(dim)
+
+    @staticmethod
     def pad_for_fsdp(model: nn.Module, fsdp_mesh: DeviceMesh, callback_after_pad: Callable | None = None):
         from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
         from xtuner.v1.float8.float8_linear_tensor_wise import TensorWiseFloat8Linear
@@ -120,7 +127,7 @@ class Float8Handler:
                         "Currently only support even distributed TP or EP weight for float8 training."
                     )
                     tensor_size = module.weight._local_tensor.size()
-                    parallel_size = module.weight.device_mesh.size()
+                    parallel_size = Float8Handler.get_shard_size_on_dim(module.weight, dim=0)
                 else:
                     tensor_size = module.weight.size()
                     parallel_size = 1
