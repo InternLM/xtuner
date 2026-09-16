@@ -1,14 +1,17 @@
 import pytest
 import torch
+import torch.nn as nn
 
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.model.moe.moe import MoE
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
+    MoEDecoderLayer,
     _UltraEPGradReduceJoin,
     _UltraEPGradReduceStart,
-    _UltraEPWeightSyncForBackward,
+    _UltraEPWeightRestoreJoin,
+    _UltraEPWeightRestoreStart,
 )
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
 from xtuner.v1.module.mtp import MTPConfig
@@ -30,9 +33,13 @@ class FakeGroupedLinear:
     def __init__(self, shape):
         self.weight = torch.nn.Parameter(torch.zeros(shape))
         self.configure_calls = []
+        self.select_calls = []
 
     def configure_ultra_ep_buffers(self, replica_weight, replica_grad):
         self.configure_calls.append((replica_weight, replica_grad))
+
+    def select_ultra_ep_slot(self, slot):
+        self.select_calls.append(slot)
 
 
 class FakeEvent:
@@ -47,13 +54,21 @@ class FakeEvent:
 class FakeLayerManager:
     def __init__(self, *, num_master_experts=2, redundant=1, hidden_size=4, intermediate_size=3):
         self.num_local_redundant_experts = redundant
-        self.local_replica_fc1_weight_buffer = torch.empty(redundant * 2 * intermediate_size * hidden_size)
-        self.local_replica_fc2_weight_buffer = torch.empty(redundant * hidden_size * intermediate_size)
+        self.max_microbatches = 2
+        self.real_num_alloc_layers = 4
+        self.local_replica_fc1_weight_buffer = torch.empty(
+            self.max_microbatches, redundant * 2 * intermediate_size * hidden_size
+        )
+        self.local_replica_fc2_weight_buffer = torch.empty(
+            self.max_microbatches, redundant * hidden_size * intermediate_size
+        )
         self.local_replica_fc1_grad_buffer = torch.empty(
+            self.max_microbatches,
             redundant * 2 * intermediate_size * hidden_size,
             dtype=torch.float32,
         )
         self.local_replica_fc2_grad_buffer = torch.empty(
+            self.max_microbatches,
             redundant * hidden_size * intermediate_size,
             dtype=torch.float32,
         )
@@ -66,6 +81,9 @@ class FakeLayerManager:
         self.grad_reduce_calls = []
         self.restore_calls = []
         self.event_calls = []
+
+    def replica_slot(self, virtual_layer_id):
+        return virtual_layer_id // self.real_num_alloc_layers
 
     def register_master_pointers(self, **kwargs):
         self.register_calls.append(kwargs)
@@ -113,6 +131,9 @@ class FakeManagerProvider:
     def get_manager(self):
         self.get_manager_calls += 1
         return self.manager
+
+    def configure_max_microbatches(self, requested):
+        self.max_microbatches = max(self.max_microbatches, int(requested))
 
 
 def make_fake_layer_runtime():
@@ -198,7 +219,10 @@ def test_ultra_ep_manager_provider_derives_shape_from_xtuner_config():
     assert provider.expert_intermediate_size == config.moe_intermediate_size
     assert provider.num_redundant_experts_per_rank == config.ultraep_cfg.num_redundant_experts_per_rank
     assert provider.max_microbatches == 1
-    assert provider.num_dispatch_experts == config.n_routed_experts + 8 * config.ultraep_cfg.num_redundant_experts_per_rank
+    assert (
+        provider.num_dispatch_experts
+        == config.n_routed_experts + 8 * config.ultraep_cfg.num_redundant_experts_per_rank
+    )
     assert provider._manager is None
 
     runtime = UltraEPLayerRuntime(
@@ -217,6 +241,139 @@ def test_ultra_ep_manager_provider_derives_shape_from_xtuner_config():
             fused_w1w3=object(),  # type: ignore[arg-type]
             fused_w2=object(),  # type: ignore[arg-type]
         )
+
+
+def test_ultra_ep_provider_configures_virtual_layer_capacity_before_materialization():
+    config = Qwen3MoE235BA22Config(
+        ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
+    )
+    provider = UltraEPManagerProvider.from_xtuner_config(
+        group=FakeGroup(),  # type: ignore[arg-type]
+        config=config,
+    )
+    provider.configure_max_microbatches(2)
+
+    assert provider.max_microbatches == 2
+
+    # Native Manager capacity is immutable once materialized; decreasing the
+    # requested count is harmless, while an increase must fail loudly.
+    provider._manager = object()  # type: ignore[assignment]
+    provider.configure_max_microbatches(1)
+    with pytest.raises(RuntimeError, match="already materialized"):
+        provider.configure_max_microbatches(3)
+
+
+def test_ultra_ep_microbatch_pipeline_scales_beyond_two():
+    """Exercise the generic MB-N forward schedule without a CUDA dispatcher.
+
+    All preprocesses complete before any dispatch; all expert pre_combines
+    complete before any combine.  This also protects MB>2 from list-length
+    or accidental hard-coded-two changes.
+    """
+
+    class FakeRuntime:
+        def __init__(self):
+            self.next_virtual_layer_id = 0
+            self.configured = []
+            self.calls = []
+
+        def configure_max_microbatches(self, requested):
+            self.configured.append(requested)
+
+        def allocate_virtual_layer_id(self):
+            virtual_layer_id = self.next_virtual_layer_id
+            self.next_virtual_layer_id += 1
+            self.calls.append(("allocate", virtual_layer_id))
+            return virtual_layer_id
+
+        def update_placement(self, topk_ids, virtual_layer_id):
+            self.calls.append(("placement", virtual_layer_id))
+
+        def sync_weights(self, virtual_layer_id, *, async_finish):
+            self.calls.append(("sync", virtual_layer_id, async_finish))
+            return FakeEvent(self.calls, virtual_layer_id)
+
+        def reroute(self, topk_ids, virtual_layer_id):
+            self.calls.append(("reroute", virtual_layer_id))
+            return topk_ids
+
+        def bind_virtual_layer_slot(self, virtual_layer_id):
+            self.calls.append(("bind", virtual_layer_id))
+
+    class FakeDispatcher:
+        def __init__(self, calls):
+            self.calls = calls
+
+        def dispatch_preprocess(self, *, hidden_states, topk_ids, topk_weights, async_op):
+            self.calls.append("preprocess")
+            return {"hidden_states": hidden_states, "topk_ids": topk_ids}
+
+        def dispatch(self, *, pre_dispatched, topk_weights, async_op):
+            self.calls.append("dispatch")
+            return {"pre_dispatched": pre_dispatched}
+
+        def dispatch_postprocess(self, *, pre_dispatched, dispatched, async_op):
+            self.calls.append("postprocess")
+            hidden_states = pre_dispatched["hidden_states"]
+            return {
+                "hidden_states": hidden_states,
+                "tokens_per_expert": torch.tensor([hidden_states.shape[0]]),
+            }
+
+        def combine_preprocess(self, *, hidden_states, **kwargs):
+            self.calls.append("combine_preprocess")
+            return {"hidden_states": hidden_states}
+
+        def combine(self, *, pre_combined, **kwargs):
+            self.calls.append("combine")
+            return pre_combined
+
+        def combine_postprocess(self, *, combined, **kwargs):
+            self.calls.append("combine_postprocess")
+            return combined
+
+    layer = object.__new__(MoEDecoderLayer)
+    nn.Module.__init__(layer)
+    layer._ultraep = FakeRuntime()
+    layer.n_shared_experts = 0
+    calls = []
+    layer.dispatcher = FakeDispatcher(calls)
+    layer.experts = lambda hidden_states, *args, **kwargs: hidden_states
+    layer._pre_moe_forward = lambda hidden_states, **kwargs: (
+        hidden_states,
+        hidden_states,
+        {
+            "logits": hidden_states[..., :1],
+            "router_weights": hidden_states[..., :1],
+            "topk_ids": torch.zeros((*hidden_states.shape[:-1], 1), dtype=torch.long),
+            "topk_weights": torch.ones((*hidden_states.shape[:-1], 1)),
+        },
+    )
+    layer._post_moe_forward = lambda *, combined_hidden_states, residual, shared_experts_out: combined_hidden_states
+
+    hidden_states = [torch.zeros(1, 2, 4) for _ in range(3)]
+    output = layer._micro_batch_forward(
+        hidden_states,
+        seq_ctx_list=[None, None, None],  # type: ignore[list-item]
+        position_embeddings_list=[(None, None), (None, None), (None, None)],  # type: ignore[list-item]
+    )
+
+    assert layer._ultraep.configured == [3]
+    assert [call[1] for call in layer._ultraep.calls if call[0] == "allocate"] == [0, 1, 2]
+    assert len(output) == 3 * 4
+    assert calls[:3] == ["preprocess", "preprocess", "preprocess"]
+    assert calls[3:12] == [
+        "dispatch",
+        "postprocess",
+        "combine_preprocess",
+        "dispatch",
+        "postprocess",
+        "combine_preprocess",
+        "dispatch",
+        "postprocess",
+        "combine_preprocess",
+    ]
+    assert calls[12:15] == ["combine", "combine", "combine"]
 
 
 def test_ultra_ep_manager_registry_reuses_group_and_rejects_shape_mismatch(monkeypatch):
@@ -263,6 +420,30 @@ def test_ultra_ep_manager_registry_reuses_group_and_rejects_shape_mismatch(monke
             expert_fc2_numel=12,
             max_microbatches=1,
         )
+
+
+def test_ultra_ep_configure_buffers_selects_independent_microbatch_slot(monkeypatch):
+    monkeypatch.setenv("XTUNER_GROUP_GEMM", "triton_dual")
+    linear = GroupedLinear(4, 6, 2)
+    replica_weight = torch.stack(
+        (
+            torch.full((1, 6, 4), 1.0, dtype=torch.bfloat16),
+            torch.full((1, 6, 4), 2.0, dtype=torch.bfloat16),
+        )
+    )
+    replica_grad = torch.zeros_like(replica_weight, dtype=torch.float32)
+
+    linear.configure_ultra_ep_buffers(replica_weight, replica_grad)
+    torch.testing.assert_close(linear._ultra_ep_replica_weight, replica_weight[0])
+
+    linear.select_ultra_ep_slot(1)
+    torch.testing.assert_close(linear._ultra_ep_replica_weight, replica_weight[1])
+    assert linear._ultra_ep_replica_weight.data_ptr() == replica_weight[1].data_ptr()
+    assert linear._ultra_ep_replica_grad.data_ptr() == replica_grad[1].data_ptr()
+
+    with pytest.raises(IndexError, match="outside the configured range"):
+        linear.select_ultra_ep_slot(2)
+
 
 
 def test_ultra_ep_configure_buffers_rejects_cutlass_backend(monkeypatch):
@@ -330,9 +511,9 @@ def test_ultra_ep_layer_runtime_configures_buffers_and_refreshes_weight_pointers
     runtime.sync_weights(7, async_finish=True)
     assert len(fused_w1w3.configure_calls) == 1
     assert len(fused_w2.configure_calls) == 1
-    assert fused_w1w3.configure_calls[0][0].shape == (1, 6, 4)
+    assert fused_w1w3.configure_calls[0][0].shape == (2, 1, 6, 4)
     assert fused_w1w3.configure_calls[0][1].dtype == torch.float32
-    assert fused_w2.configure_calls[0][0].shape == (1, 4, 3)
+    assert fused_w2.configure_calls[0][0].shape == (2, 1, 4, 3)
     assert fused_w2.configure_calls[0][1].dtype == torch.float32
     assert len(manager.register_calls) == 1
     assert manager.register_calls[0]["layer_id"] == 2
@@ -345,6 +526,49 @@ def test_ultra_ep_layer_runtime_configures_buffers_and_refreshes_weight_pointers
     assert len(manager.register_calls) == 1
     assert [call["layer_id"] for call in manager.refresh_calls] == [2, 2]
     assert manager.weight_sync_calls == [(7, True), (8, False)]
+
+    runtime.bind_virtual_layer_slot(7)
+    assert fused_w1w3.select_calls[-1] == 1
+    assert fused_w2.select_calls[-1] == 1
+
+
+def test_ultra_ep_weight_restore_launch_and_join_are_async():
+    runtime, manager, fused_w1w3, fused_w2 = make_fake_layer_runtime()
+
+    runtime.start_weight_restore(7)
+    assert manager.weight_sync_calls == [(7, True)]
+    assert fused_w1w3.select_calls == []
+    assert fused_w2.select_calls == []
+
+    runtime.finish_weight_restore(7)
+    assert manager.event_calls == [("wait", 7)]
+    assert fused_w1w3.select_calls == [1]
+    assert fused_w2.select_calls == [1]
+    assert runtime._weight_restore_events == {}
+
+
+def test_ultra_ep_weight_restore_autograd_nodes_launch_before_join():
+    runtime = object.__new__(UltraEPLayerRuntime)
+    calls = []
+    runtime._weight_restore_events = {11: object()}
+
+    def start_weight_restore(virtual_layer_id):
+        calls.append(("start", virtual_layer_id))
+
+    def finish_weight_restore(virtual_layer_id):
+        calls.append(("finish", virtual_layer_id))
+        runtime._weight_restore_events.pop(virtual_layer_id)
+
+    runtime.start_weight_restore = start_weight_restore
+    runtime.finish_weight_restore = finish_weight_restore
+
+    x = torch.ones(2, requires_grad=True)
+    joined = _UltraEPWeightRestoreJoin.apply(x, runtime, 11)
+    started = _UltraEPWeightRestoreStart.apply(joined, runtime, 11)
+    started.sum().backward()
+
+    assert calls == [("start", 11), ("finish", 11)]
+    torch.testing.assert_close(x.grad, torch.ones_like(x))
 
 
 def test_ultra_ep_grad_reduce_lifecycle_stages_reduces_and_restores():
@@ -368,6 +592,22 @@ def test_ultra_ep_grad_reduce_lifecycle_stages_reduces_and_restores():
     assert manager.restore_calls == [3]
     torch.testing.assert_close(fused_w1w3.weight.grad, torch.full_like(fused_w1w3.weight, 2.0))
     torch.testing.assert_close(fused_w2.weight.grad, torch.full_like(fused_w2.weight, 5.0))
+    assert runtime._grad_reduce_events == {}
+
+
+def test_ultra_ep_multi_microbatch_grad_reduce_remains_async():
+    runtime, manager, fused_w1w3, fused_w2 = make_fake_layer_runtime()
+    runtime.configure_max_microbatches(2)
+    fused_w1w3.weight.grad = torch.full_like(fused_w1w3.weight, 1.0)
+    fused_w2.weight.grad = torch.full_like(fused_w2.weight, 3.0)
+
+    runtime.start_grad_reduce(17)
+
+    assert manager.grad_reduce_calls == [(17, True)]
+    assert manager.restore_calls == []
+    runtime.finish_grad_reduce(17)
+    assert manager.event_calls == [("wait", 17)]
+    assert manager.restore_calls == [17]
     assert runtime._grad_reduce_events == {}
 
 
@@ -396,8 +636,8 @@ def test_ultra_ep_grad_reduce_autograd_nodes_start_before_join():
 def test_ultra_ep_output_wrapper_restores_replica_weight_before_te_grouped_gemm_backward(monkeypatch):
     """Later layers overwrite the shared replica slot after this forward.
 
-    ``_UltraEPWeightSyncForBackward`` must restore it before TE DGrad reads the
-    same tensor.  The torch TE backend keeps this test off CUDA.
+    ``_UltraEPWeightRestoreJoin`` must restore it before TE DGrad reads the
+    same tensor. The torch TE backend keeps this test off CUDA.
     """
 
     monkeypatch.setenv("XTUNER_GROUP_GEMM", "te")
@@ -425,13 +665,27 @@ def test_ultra_ep_output_wrapper_restores_replica_weight_before_te_grouped_gemm_
     tokens_per_expert = torch.tensor([1, 1])
 
     runtime = object.__new__(UltraEPLayerRuntime)
+    runtime._weight_restore_events = {}
     sync_calls = []
 
     def fake_sync_weights(virtual_layer_id, *, async_finish):
         sync_calls.append((virtual_layer_id, async_finish))
         replica_weight.copy_(original_replica_weight)
 
+        class _RestoreEvent:
+            def current_stream_wait(self):
+                return None
+
+        return _RestoreEvent()
+
     runtime.sync_weights = fake_sync_weights
+    runtime.bind_virtual_layer_slot = lambda virtual_layer_id: None
+    runtime.start_weight_restore = UltraEPLayerRuntime.start_weight_restore.__get__(
+        runtime, UltraEPLayerRuntime
+    )
+    runtime.finish_weight_restore = UltraEPLayerRuntime.finish_weight_restore.__get__(
+        runtime, UltraEPLayerRuntime
+    )
 
     output = te_grouped_gemm(
         x,
@@ -441,11 +695,12 @@ def test_ultra_ep_output_wrapper_restores_replica_weight_before_te_grouped_gemm_
         replica_grad=replica_grad,
     )
     # UltraEP reuses its persistent slots for the next layer before this
-    # layer's backward.  The output-side node restores them before DGrad.
+    # layer's backward. Start launches the restore; Join waits before DGrad.
     replica_weight.fill_(100.0)
-    _UltraEPWeightSyncForBackward.apply(output, runtime, 7).sum().backward()
+    joined = _UltraEPWeightRestoreJoin.apply(output, runtime, 7)
+    _UltraEPWeightRestoreStart.apply(joined, runtime, 7).sum().backward()
 
-    assert sync_calls == [(7, False)]
+    assert sync_calls == [(7, True)]
     assert replica_weight.data_ptr() == replica_ptr
     assert len(replica_seen_in_gemm) == 2
     torch.testing.assert_close(replica_seen_in_gemm[0], original_replica_weight)
@@ -453,6 +708,7 @@ def test_ultra_ep_output_wrapper_restores_replica_weight_before_te_grouped_gemm_
     torch.testing.assert_close(x.grad, torch.tensor([[4.0, 6.0], [12.0, 14.0]]))
     torch.testing.assert_close(master_weight.grad, torch.tensor([[[1.0, 1.0], [1.0, 1.0]]]))
     torch.testing.assert_close(replica_grad, torch.tensor([[[2.0, 1.0], [2.0, 1.0]]]))
+
 
 def test_dual_base_group_gemm_restores_replica_weight_before_backward(monkeypatch):
     """The dual-base DGrad must read the replica slot restored by its hook."""
@@ -492,13 +748,27 @@ def test_dual_base_group_gemm_restores_replica_weight_before_backward(monkeypatc
     tokens_per_expert = torch.tensor([1, 1])
 
     runtime = object.__new__(UltraEPLayerRuntime)
+    runtime._weight_restore_events = {}
     hook_calls = []
 
     def fake_sync_weights(virtual_layer_id, *, async_finish):
         hook_calls.append(("sync", virtual_layer_id, async_finish))
         replica_weight.copy_(original_replica_weight)
 
+        class _RestoreEvent:
+            def current_stream_wait(self):
+                hook_calls.append(("wait", virtual_layer_id))
+
+        return _RestoreEvent()
+
+    runtime.bind_virtual_layer_slot = lambda virtual_layer_id: hook_calls.append(("bind", virtual_layer_id))
     runtime.sync_weights = fake_sync_weights
+    runtime.start_weight_restore = UltraEPLayerRuntime.start_weight_restore.__get__(
+        runtime, UltraEPLayerRuntime
+    )
+    runtime.finish_weight_restore = UltraEPLayerRuntime.finish_weight_restore.__get__(
+        runtime, UltraEPLayerRuntime
+    )
 
     output = group_gemm_module.triton_group_gemm(
         x,
@@ -508,9 +778,10 @@ def test_dual_base_group_gemm_restores_replica_weight_before_backward(monkeypatc
         replica_grad=replica_grad,
     )
     replica_weight.fill_(100.0)
-    _UltraEPWeightSyncForBackward.apply(output, runtime, 7).sum().backward()
+    joined = _UltraEPWeightRestoreJoin.apply(output, runtime, 7)
+    _UltraEPWeightRestoreStart.apply(joined, runtime, 7).sum().backward()
 
-    assert hook_calls == [("sync", 7, False)]
+    assert hook_calls == [("sync", 7, True), ("wait", 7), ("bind", 7)]
     assert [call[0] for call in dual_gemm_calls] == [True, False]
     torch.testing.assert_close(dual_gemm_calls[0][1], original_replica_weight)
     torch.testing.assert_close(dual_gemm_calls[1][1], original_replica_weight)
