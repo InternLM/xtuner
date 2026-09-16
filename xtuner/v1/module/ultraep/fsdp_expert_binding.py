@@ -49,23 +49,23 @@ def _resolve_targets(
                 by_identity[key] = fsdp_param, owner
 
     selected: list[tuple[FSDPParam, nn.Module, nn.Module]] = []
-    for layer_fqn, projections in targets:
+    for layer_label, projections in targets:
         for projection_name, projection in zip(("fused_w1w3", "fused_w2"), projections, strict=True):
             if hasattr(projection, _FSDP_PARAM_ATTR):
-                raise RuntimeError(f"UltraEP FSDP binding is already installed for {layer_fqn}.{projection_name}")
+                raise RuntimeError(f"UltraEP FSDP binding is already installed for {layer_label}.{projection_name}")
             match = by_identity.get((id(projection), "weight"))
             if match is None:
-                raise RuntimeError(f"UltraEP could not find FSDPParam for {layer_fqn}.{projection_name}.weight")
+                raise RuntimeError(f"UltraEP could not find FSDPParam for {layer_label}.{projection_name}.weight")
             fsdp_param, owner = match
             if fsdp_param.fsdp_placement.dim != 0:
-                raise RuntimeError(f"UltraEP requires dim-0 FSDP sharding for {layer_fqn}.{projection_name}")
+                raise RuntimeError(f"UltraEP requires dim-0 FSDP sharding for {layer_label}.{projection_name}")
             if fsdp_param.sharded_state is not ShardedState.SHARDED or fsdp_param.all_gather_outputs:
-                raise RuntimeError(f"UltraEP binding must be installed before AllGather for {layer_fqn}")
+                raise RuntimeError(f"UltraEP binding must be installed before AllGather for {layer_label}")
             expected_dtype = fsdp_param.mp_policy.param_dtype or fsdp_param.sharded_param.dtype
             if expected_dtype is not torch.bfloat16:
-                raise RuntimeError(f"UltraEP FSDP binding requires BF16 parameters for {layer_fqn}.{projection_name}")
+                raise RuntimeError(f"UltraEP FSDP binding requires BF16 parameters for {layer_label}.{projection_name}")
             if hasattr(fsdp_param._sharded_local_tensor, "fsdp_post_all_gather"):
-                raise RuntimeError(f"UltraEP does not support FSDP post-AllGather extensions for {layer_fqn}")
+                raise RuntimeError(f"UltraEP does not support FSDP post-AllGather extensions for {layer_label}")
             selected.append((fsdp_param, owner, projection))
 
     if len({id(item[0]) for item in selected}) != len(selected):

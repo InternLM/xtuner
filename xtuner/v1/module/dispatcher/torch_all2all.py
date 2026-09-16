@@ -332,8 +332,10 @@ class TorchAll2AllDispatcher(
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,  # noqa: ARG002 — kept for interface compatibility; not used here
+        layer_state: object | None = None,
         async_op: bool = False,
     ) -> TorchAll2AllPreDispatchResult:
+        del layer_state
         permuted_hidden_states, row_ids_map = permute(hidden_states, topk_ids.to(torch.int32))
 
         if async_op:

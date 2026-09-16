@@ -937,11 +937,9 @@ class Trainer:
 
         if self._async_hf_export:
             self._wait_for_pending_async_hf()
-            self._engine.model.destroy_async_hf_resources()
 
         if self._async_checkpoint:
             self._wait_for_pending_checkpoint()
-            self._engine.destroy_async_checkpoint_pg()
 
         # TODO: Should use flush rather than close
         if self._async_hf_export or self._async_checkpoint:
@@ -950,7 +948,10 @@ class Trainer:
         if self._metrics_recorder:
             self._metrics_recorder.close()
         log_rank0.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
+        # Engine teardown may include EP-group work. Enter it only after
+        # every rank has finished training and async saves are quiescent.
         dist.barrier()
+        self._engine.close()
 
     def _prepare_model_input(self, data_batch) -> list[ModelItem]:
         seq_ctx_list: list[SequenceContext] = []

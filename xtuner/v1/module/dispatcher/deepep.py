@@ -324,8 +324,10 @@ class DeepEPDispatcher(
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        layer_state: object | None = None,
         async_op: bool = False,
     ) -> DeepEPPreDispatchResult:
+        del layer_state
         if async_op:
             backward_previous_event = EventOverlap(None)
             if hidden_states.grad_fn is not None:

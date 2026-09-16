@@ -115,6 +115,18 @@ class GenericDispatcher(
         self._training_dtype = training_dtype
         self._generate_dtype = generate_dtype
 
+    def prepare_layer_inputs(
+        self,
+        layer_inputs: list[torch.Tensor],
+    ) -> tuple[list[torch.Tensor], list[object | None]]:
+        """Prepare all inputs of one FSDP layer call before branching.
+
+        Most dispatchers have no work before attention, so they keep the
+        identity. A backend that needs an autograd ordering seam may return
+        an opaque token for ``dispatch_preprocess``.
+        """
+        return layer_inputs, [None] * len(layer_inputs)
+
     @abstractmethod
     def dispatch(
         self,
@@ -141,6 +153,7 @@ class GenericDispatcher(
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        layer_state: object | None = None,
         async_op: bool = False,
     ) -> PreDispatch: ...
 
@@ -264,8 +277,10 @@ class NaiveDispatcher(
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        layer_state: object | None = None,
         async_op: bool = False,
     ) -> NaivePreDispatchResult:
+        del layer_state
         if async_op:
             if self._expert_tp is None:
                 raise NotImplementedError("Naive dispatcher async_op=True requires ExpertTP.")

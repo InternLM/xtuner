@@ -74,8 +74,9 @@ from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
     MoEGate,
 )
 from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
+from xtuner.v1.module.dispatcher import EPExecutionRuntime, build_ep_execution_runtime
 from xtuner.v1.module.ultraep import UltraEPConfig
-from xtuner.v1.module.ultraep.runtime import UltraEPManagerProvider
+from xtuner.v1.module.ultraep.config import IMPLEMENTED_INNER_DISPATCHERS
 from xtuner.v1.utils import (
     get_device,
     get_logger,
@@ -161,6 +162,9 @@ class MoEConfig(TransformerConfig):
     moe_intermediate_size: Annotated[int, Parameter(group="moe")]
     ep_size: Annotated[int, Parameter(group="moe")] = 1
     ultraep_cfg: UltraEPConfig | None = None
+    # TrainEngine writes this before build_model. UltraEP sizes replica slots
+    # from it; the value is the number of forwards co-scheduled in one layer.
+    intra_layer_micro_batch: int = 1
     expert_tp_size: Annotated[int, Parameter(group="moe")] = 1
     dispatcher: Annotated[Literal["deepep", "all2all", "agrs"] | None, Parameter(group="moe")] = None
     router: GreedyRouterConfig | NoAuxRouterConfig
@@ -203,14 +207,20 @@ def _validate_ultraep_model_config(config: MoEConfig, *, ep_size: int, expert_tp
         raise ValueError("UltraEP requires at least one master expert per EP rank")
     if config.n_routed_experts % ep_size != 0:
         raise ValueError("UltraEP requires n_routed_experts to be divisible by ep_size")
-    if config.dispatcher != "deepep":
-        raise ValueError("Xtuner UltraEP currently supports dispatcher='deepep' only")
+    inner_dispatcher = config.dispatcher or "deepep"
+    if inner_dispatcher not in IMPLEMENTED_INNER_DISPATCHERS:
+        raise NotImplementedError(
+            f"UltraEP inner dispatcher {inner_dispatcher!r} is not implemented yet; "
+            f"implemented: {sorted(IMPLEMENTED_INNER_DISPATCHERS)}"
+        )
     if config.float8_cfg is not None:
         raise ValueError("Xtuner UltraEP currently supports BF16 grouped experts only")
     if config.moe_bias:
         raise ValueError("Xtuner UltraEP does not currently support expert bias")
     if config.mtp_config is not None:
         raise ValueError("Xtuner UltraEP does not currently support MTP expert layers")
+    if config.intra_layer_micro_batch < 1:
+        raise ValueError("intra_layer_micro_batch must be positive")
 
 
 class MoE(BaseModel):
@@ -229,7 +239,6 @@ class MoE(BaseModel):
     moe_decoder_layer_cls = MoEDecoderLayer
     mtp_layer_cls = MTPLayer
     mtp_block_cls = MTPBlock
-    ultraep_manager_provider: UltraEPManagerProvider | None = None
 
     def __init__(self, config: MoEConfig):
         # Concrete MoE configs override build(), so validate dispatcher support
@@ -279,6 +288,12 @@ class MoE(BaseModel):
             self.ep_mesh = None
             self.expert_tp_mesh = None
             self.ep_tp_mesh = None
+
+        # Optional model-scoped EP execution runtime (UltraEP today, a no-op
+        # Adapter otherwise). Its four lifecycle boundaries are called
+        # unconditionally below. The factory is the only UltraEP ModelRuntime
+        # construction site.
+        self._ep_runtime: EPExecutionRuntime = build_ep_execution_runtime(config, self.ep_mesh)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, type=config.rms_norm_type)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
@@ -550,15 +565,11 @@ class MoE(BaseModel):
             )
             if loss_ctx is None:
                 raise NotImplementedError("loss_ctx must be provided for intra-layer bsz > 1")
-            if self.config.ultraep_cfg is not None:
-                assert self.ultraep_manager_provider is not None
-                # Resolve native placement capacity once per model call,
-                # before the first decoder layer can lazily materialize the
-                # Manager.  Decoder layers repeat this call as a direct-layer
-                # safeguard, but the model-level update also keeps all layers
-                # on one shared virtual-layer capacity.
-                self.ultraep_manager_provider.configure_max_microbatches(len(seq_ctx))
-                self.ultraep_manager_provider.ensure_materialized()
+            if len(seq_ctx) != self.config.intra_layer_micro_batch:
+                raise ValueError(
+                    f"intra-layer micro-batch width {len(seq_ctx)} does not match "
+                    f"configured width {self.config.intra_layer_micro_batch}"
+                )
 
             return self._micro_batch_forward(
                 seq_ctx_list=seq_ctx,
@@ -913,9 +924,6 @@ class MoE(BaseModel):
         nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
         non_pad_token = nonpad_indices.numel()
         num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
-        if self.ultraep_manager_provider is not None:
-            self.ultraep_manager_provider.ensure_materialized()
-
         hidden_states = self._decoder_stack(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
@@ -1193,6 +1201,7 @@ class MoE(BaseModel):
                     ep_mesh=self.ep_mesh,
                     expert_tp_mesh=self.expert_tp_mesh,
                     ep_tp_mesh=self.ep_tp_mesh,
+                    ep_runtime=self._ep_runtime,
                 )
                 if self.config.freeze_routers:
                     layers[str(layer_idx)].gate.requires_grad_(False)
@@ -1301,15 +1310,7 @@ class MoE(BaseModel):
         if fsdp_config.hsdp_sharding_size is not None and self.config.expert_tp_size > 1:
             raise NotImplementedError("HSDP with ExpertTP is not supported")
 
-        if self.config.ultraep_cfg is not None:
-            if fsdp_config.recompute_ratio > 0:
-                raise ValueError(
-                    "Xtuner UltraEP does not support FSDP activation recompute yet; "
-                    "set fsdp_config.recompute_ratio=0 or disable ultraep"
-                )
-            provider = getattr(self, "ultraep_manager_provider", None)
-            if provider is not None:
-                provider.validate_before_fsdp(fsdp_config)
+        self._ep_runtime.validate_before_fsdp(fsdp_config)
         self.fsdp_config = fsdp_config
         assert self.fsdp_config.ep_size == self.config.ep_size
         self.mp_policy = MixedPrecisionPolicy(
@@ -1456,22 +1457,13 @@ class MoE(BaseModel):
 
         self._init_load_spec()
         self._to_empty_meta()
-        provider = getattr(self, "ultraep_manager_provider", None)
-        if provider is not None:
-            targets = [
-                (
-                    f"layers.{layer_idx}",
-                    (layer.experts.fused_w1w3, layer.experts.fused_w2),
-                )
-                for layer_idx, layer in self.layers.items()
-                if hasattr(layer, "experts")
-            ]
-            provider.install_after_fsdp(fsdp_root=self, targets=targets)
+        # Protocol keeps ``execution_order`` for the MoonEP-shaped signature.
+        # UltraEP binds by module identity and ignores this list.
+        self._ep_runtime.install_after_fsdp(fsdp_root=self, execution_order=[])
         return self
 
     def close_ep_runtime(self) -> None:
-        if self.ultraep_manager_provider is not None:
-            self.ultraep_manager_provider.close()
+        self._ep_runtime.close()
 
     @property
     @override

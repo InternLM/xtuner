@@ -5,17 +5,16 @@ from __future__ import annotations
 import math
 import os
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import torch
 import torch.distributed as dist
+from torch import nn
 from torch.distributed.tensor import DTensor
 
 
 _PHASE_NVTX_ENABLED = (
-    os.getenv("XTUNER_NSYS_PHASE_NVTX", "0") == "1"
-    and torch.cuda.is_available()
-    and hasattr(torch.cuda, "nvtx")
+    os.getenv("XTUNER_NSYS_PHASE_NVTX", "0") == "1" and torch.cuda.is_available() and hasattr(torch.cuda, "nvtx")
 )
 
 
@@ -44,6 +43,7 @@ if TYPE_CHECKING:
     from ultra_ep import EventHandle, Manager
 
     from xtuner.v1.model.moe.moe import MoEConfig
+    from xtuner.v1.module.ultraep.dispatcher import UltraEPDispatcher
 
 
 class UltraEPGroupedLinear(Protocol):
@@ -84,9 +84,7 @@ class UltraEPManager:
             raise ValueError("UltraEP requires max_microbatches > 0")
         world_size = dist.get_world_size()
         if world_size % group.size() != 0:
-            raise ValueError(
-                f"UltraEP EP group size {group.size()} must evenly divide world size {world_size}"
-            )
+            raise ValueError(f"UltraEP EP group size {group.size()} must evenly divide world size {world_size}")
         self.dp_size = world_size // group.size()
 
         self.group = group
@@ -305,8 +303,14 @@ class UltraEPManager:
         return self.runtime.grad_reduce(layer_id=layer_id, async_finish=async_finish)
 
 
-class UltraEPManagerProvider:
-    """Lazy process-group-level owner of one shared UltraEP Manager."""
+class UltraEPModelRuntime:
+    """Model-scoped UltraEP owner: ``EPExecutionRuntime`` hooks plus one shared Manager.
+
+    Construction takes no CUDA resources. ``bind_layer`` records expert
+    projections, builds the layer runtime, and returns ``UltraEPDispatcher``.
+    ``install_after_fsdp`` binds FSDP by ``id(projection)``. The native
+    Manager is created lazily on first ``get_manager``.
+    """
 
     def __init__(
         self,
@@ -318,6 +322,9 @@ class UltraEPManagerProvider:
         expert_intermediate_size: int,
         num_redundant_experts_per_rank: int,
         max_microbatches: int,
+        inner_dispatcher: Literal["deepep", "all2all", "agrs"] = "deepep",
+        training_dtype: Literal["bf16", "fp8"] = "bf16",
+        generate_dtype: Literal["bf16", "fp8"] = "bf16",
     ) -> None:
         if group.size() <= 1:
             raise ValueError("UltraEP requires an EP process group with size > 1")
@@ -335,9 +342,13 @@ class UltraEPManagerProvider:
         self.expert_intermediate_size = expert_intermediate_size
         self.num_redundant_experts_per_rank = num_redundant_experts_per_rank
         self.max_microbatches = max_microbatches
+        self.inner_dispatcher = inner_dispatcher
+        self.training_dtype = training_dtype
+        self.generate_dtype = generate_dtype
         self._manager: UltraEPManager | None = None
         self._state = "CREATED"
         self._fsdp_root = None
+        self._layers: list[tuple[int, tuple[nn.Module, nn.Module]]] = []
 
     @classmethod
     def from_xtuner_config(
@@ -345,20 +356,22 @@ class UltraEPManagerProvider:
         *,
         group: dist.ProcessGroup,
         config: MoEConfig,
-        max_microbatches: int = 1,
-    ) -> UltraEPManagerProvider:
-        """Build a provider from Xtuner's model config.
+    ) -> UltraEPModelRuntime:
+        """Build the model runtime from Xtuner's model config.
 
-        The native manager allocates placement/virtual-layer slots at
-        construction time.  Xtuner normally does not know the requested
-        intra-layer micro-batch count until the :class:`TrainEngine` starts a
-        model call, so callers may increase the capacity with
-        :meth:`configure_max_microbatches` before the first manager access.
+        Replica-slot capacity is ``config.intra_layer_micro_batch``.
+        ``TrainEngine`` writes that field before ``build_model``; the value is
+        fixed for the lifetime of this runtime.
         """
         ultraep_cfg = config.ultraep_cfg
         if ultraep_cfg is None:
-            raise ValueError("UltraEP manager provider requires config.ultraep_cfg")
+            raise ValueError("UltraEP model runtime requires config.ultraep_cfg")
+        max_microbatches = int(getattr(config, "intra_layer_micro_batch", 1))
+        if max_microbatches < 1:
+            raise ValueError("intra_layer_micro_batch must be positive")
 
+        generate_config = getattr(config, "generate_config", None)
+        generate_dtype = generate_config.dtype if generate_config is not None else "bf16"
         return cls(
             group=group,
             num_model_layers=config.num_hidden_layers,
@@ -367,7 +380,35 @@ class UltraEPManagerProvider:
             expert_intermediate_size=config.moe_intermediate_size,
             num_redundant_experts_per_rank=ultraep_cfg.num_redundant_experts_per_rank,
             max_microbatches=max_microbatches,
+            inner_dispatcher=config.dispatcher or "deepep",
+            training_dtype="fp8" if getattr(config, "float8_cfg", None) is not None else "bf16",
+            generate_dtype=generate_dtype,
         )
+
+    def bind_layer(
+        self,
+        *,
+        projections: tuple[nn.Module, nn.Module],
+        layer_id: int | None = None,
+    ) -> UltraEPDispatcher:
+        """Register one routed layer and return its composite dispatcher."""
+        from .dispatcher import UltraEPDispatcher
+
+        if layer_id is None:
+            raise ValueError("UltraEP bind_layer needs a model layer id")
+
+        bound_ids = {id(module) for _, pair in self._layers for module in pair}
+        if id(projections[0]) in bound_ids or id(projections[1]) in bound_ids:
+            raise ValueError("duplicate UltraEP expert projections")
+
+        layer_runtime = UltraEPLayerRuntime(
+            layer_id=layer_id,
+            model_runtime=self,
+            fused_w1w3=projections[0],  # type: ignore[arg-type]
+            fused_w2=projections[1],  # type: ignore[arg-type]
+        )
+        self._layers.append((layer_id, projections))
+        return UltraEPDispatcher(model_runtime=self, layer_runtime=layer_runtime)
 
     def _requires_reshard_after_forward(self, fsdp_config) -> bool:
         """Return whether UltraEP needs a closed FSDP unshard window.
@@ -385,9 +426,7 @@ class UltraEPManagerProvider:
             return False
         world_size = dist.get_world_size()
         if world_size % ep_size != 0:
-            raise ValueError(
-                f"UltraEP FSDP ep_size={ep_size} must evenly divide world_size={world_size}"
-            )
+            raise ValueError(f"UltraEP FSDP ep_size={ep_size} must evenly divide world_size={world_size}")
         return world_size > ep_size
 
     def validate_before_fsdp(self, fsdp_config) -> None:
@@ -404,42 +443,36 @@ class UltraEPManagerProvider:
             ep_size = int(getattr(fsdp_config, "ep_size", 0) or 0)
             world = dist.get_world_size() if dist.is_available() and dist.is_initialized() else "<unknown>"
             raise ValueError(
-                "UltraEP FSDP with DP>1 requires reshard_after_forward=True "
-                f"(ep_size={ep_size}, world_size={world})"
+                f"UltraEP FSDP with DP>1 requires reshard_after_forward=True (ep_size={ep_size}, world_size={world})"
             )
         if getattr(fsdp_config, "recompute_ratio", 0) > 0:
             raise ValueError("UltraEP FSDP does not support activation recompute")
 
-    def install_after_fsdp(self, *, fsdp_root, targets) -> None:
+    def install_after_fsdp(self, *, fsdp_root: nn.Module, execution_order: list[str]) -> None:
         """Install the FSDP identity seam before exposing native resources.
 
+        Binding uses projections recorded by ``bind_layer`` and matches
+        ``FSDPParam`` by module identity.
+
         Binding and state transition are transactional: a failed binding leaves
-        the provider in CREATED, so a later retry cannot observe a half-installed
-        provider or materialize a manager against stale parameter identities.
+        the runtime in CREATED, so a later retry cannot observe a half-installed
+        runtime or materialize a manager against stale parameter identities.
         """
+        # Protocol keeps ``execution_order`` for the MoonEP-shaped signature.
+        # UltraEP binds by module identity and does not cross-check FQNs.
+        del execution_order
         if self._state == "CLOSED":
-            raise RuntimeError("UltraEP provider is closed")
+            raise RuntimeError("UltraEP runtime is closed")
         if self._state == "CREATED":
             from .fsdp_expert_binding import install_ultraep_fsdp_binding
 
+            targets = [(f"layer_{layer_id}", projections) for layer_id, projections in self._layers]
             binding = install_ultraep_fsdp_binding(fsdp_root=fsdp_root, targets=targets)
             self._fsdp_root = fsdp_root
             self.fsdp_binding = binding
             self._state = "INSTALLED"
         elif self._fsdp_root is not fsdp_root:
-            raise RuntimeError("UltraEP provider was installed on a different FSDP root")
-
-    def ensure_materialized(self) -> UltraEPManager:
-        if self._state == "CLOSED":
-            raise RuntimeError("UltraEP provider is closed")
-        if self._state == "CREATED":
-            raise RuntimeError(
-                "UltraEP provider must be installed after FSDP setup before materialization"
-            )
-        manager = self.get_manager()
-        if self._state == "INSTALLED":
-            self._state = "MATERIALIZED"
-        return manager
+            raise RuntimeError("UltraEP runtime was installed on a different FSDP root")
 
     def close(self) -> None:
         if self._state == "CLOSED":
@@ -456,25 +489,6 @@ class UltraEPManagerProvider:
         self._state = "CLOSED"
         self._fsdp_root = None
 
-    def configure_max_microbatches(self, requested: int) -> None:
-        """Set the native virtual-layer capacity before materialization.
-
-        A manager owns one shared replica weight/gradient buffer.  Its native
-        placement tables nevertheless need one virtual id per in-flight
-        micro-batch.  Capacity is therefore fixed once the manager is created;
-        changing it afterwards would invalidate already allocated ids.
-        """
-        if requested <= 0:
-            raise ValueError(f"UltraEP microbatch capacity must be > 0, got {requested}")
-        requested = max(1, int(requested))
-        if self._manager is not None and requested > self.max_microbatches:
-            raise RuntimeError(
-                "UltraEP manager was already materialized with insufficient virtual-layer capacity: "
-                f"existing={self.max_microbatches}, requested={requested}. "
-                "Configure intra_layer_micro_batch before the first UltraEP forward."
-            )
-        self.max_microbatches = max(self.max_microbatches, requested)
-
     @property
     def num_dispatch_experts(self) -> int:
         """Global physical-expert count expected by the dispatcher."""
@@ -482,11 +496,9 @@ class UltraEPManagerProvider:
 
     def get_manager(self) -> UltraEPManager:
         if self._state == "CLOSED":
-            raise RuntimeError("UltraEP provider is closed")
+            raise RuntimeError("UltraEP runtime is closed")
         if self._state == "CREATED":
-            raise RuntimeError(
-                "UltraEP provider must be installed after FSDP setup before materialization"
-            )
+            raise RuntimeError("UltraEP runtime must be installed after FSDP setup before materialization")
         if self._manager is None:
             self._manager = get_or_create_ultra_ep_manager(
                 group=self.group,
@@ -511,20 +523,15 @@ class UltraEPLayerRuntime:
         self,
         *,
         layer_id: int,
-        manager_provider: UltraEPManagerProvider,
+        model_runtime: UltraEPModelRuntime,
         fused_w1w3: UltraEPGroupedLinear,
         fused_w2: UltraEPGroupedLinear,
     ) -> None:
-        if layer_id < 0 or layer_id >= manager_provider.num_model_layers:
-            raise ValueError(f"UltraEP layer_id must be in [0, {manager_provider.num_model_layers}), got {layer_id}")
+        if layer_id < 0 or layer_id >= model_runtime.num_model_layers:
+            raise ValueError(f"UltraEP layer_id must be in [0, {model_runtime.num_model_layers}), got {layer_id}")
 
         self.layer_id = layer_id
-        self.manager_provider = manager_provider
-        self.num_logical_experts = manager_provider.num_logical_experts
-        self.hidden_size = manager_provider.hidden_size
-        self.expert_intermediate_size = manager_provider.expert_intermediate_size
-        self.num_redundant_experts_per_rank = manager_provider.num_redundant_experts_per_rank
-        self.max_microbatches = manager_provider.max_microbatches
+        self.model_runtime = model_runtime
         self.fused_w1w3 = fused_w1w3
         self.fused_w2 = fused_w2
 
@@ -540,22 +547,15 @@ class UltraEPLayerRuntime:
     @property
     def num_dispatch_experts(self) -> int:
         """Global physical-expert count expected by the dispatcher."""
-        return self.manager_provider.num_dispatch_experts
+        return self.model_runtime.num_dispatch_experts
 
     def validate_microbatch_capacity(self, requested_microbatches: int) -> None:
-        """Fail before allocation rather than silently reusing a virtual
-        slot."""
-        if requested_microbatches > self.max_microbatches:
+        """Reject a layer call wider than the constructor-time slot ring."""
+        if requested_microbatches > self.model_runtime.max_microbatches:
             raise ValueError(
-                "UltraEP virtual-layer capacity is too small for this layer call: "
-                f"requested={requested_microbatches}, max_microbatches={self.max_microbatches}. "
-                "UltraEP capacity is resolved from Trainer/TrainEngine.intra_layer_micro_batch."
+                "UltraEP layer width exceeds the configured microbatch slots: "
+                f"requested={requested_microbatches}, slots={self.model_runtime.max_microbatches}"
             )
-
-    def configure_max_microbatches(self, requested_microbatches: int) -> None:
-        """Propagate call capacity to this layer and its shared provider."""
-        self.manager_provider.configure_max_microbatches(requested_microbatches)
-        self.max_microbatches = self.manager_provider.max_microbatches
 
     def allocate_virtual_layer_id(self) -> int:
         """Allocate the UltraEP virtual-layer slot for this forward
@@ -598,20 +598,16 @@ class UltraEPLayerRuntime:
         The matching :meth:`finish_weight_restore` waits just before the
         grouped GEMM DGrad node reads the mutable replica slot.
         """
-        events = getattr(self, "_weight_restore_events", None)
-        if events is None:
-            events = self._weight_restore_events = {}
-        if virtual_layer_id in events:
+        if virtual_layer_id in self._weight_restore_events:
             raise RuntimeError(f"UltraEP weight restore for virtual layer slot {virtual_layer_id} is still in use")
         with _phase_nvtx("UltraEP::weight_restore_start"), torch.profiler.record_function("UltraEP::restore_start"):
-            events[virtual_layer_id] = self.sync_weights(virtual_layer_id, async_finish=True)
+            self._weight_restore_events[virtual_layer_id] = self.sync_weights(virtual_layer_id, async_finish=True)
 
     def finish_weight_restore(self, virtual_layer_id: int) -> None:
         """Wait for a previously launched restore and select its replica slot."""
-        events = getattr(self, "_weight_restore_events", None)
-        if events is None or virtual_layer_id not in events:
+        if virtual_layer_id not in self._weight_restore_events:
             raise RuntimeError(f"UltraEP weight restore for virtual layer slot {virtual_layer_id} was not started")
-        event = events.pop(virtual_layer_id)
+        event = self._weight_restore_events.pop(virtual_layer_id)
         with _phase_nvtx("UltraEP::weight_restore_join"), torch.profiler.record_function("UltraEP::restore_wait"):
             if event is not None:
                 # The real UltraEP EventHandle exposes ``event=None`` for the
@@ -622,18 +618,6 @@ class UltraEPLayerRuntime:
             # Selecting the slot only after the event dependency is installed
             # ensures the following grouped GEMM DGrad reads this vid's data.
             self.bind_virtual_layer_slot(virtual_layer_id)
-
-    @staticmethod
-    def _bind_staging_grad(parameter: torch.Tensor, staging: torch.Tensor) -> None:
-        """Bind a BF16 staging view as the parameter gradient for FSDP."""
-        local_parameter = parameter.to_local() if isinstance(parameter, DTensor) else parameter
-        local_grad = staging.view_as(local_parameter)
-        if isinstance(parameter, DTensor):
-            parameter.grad = DTensor.from_local(
-                local_grad, parameter.device_mesh, parameter.placements, run_check=False
-            )
-        else:
-            parameter.grad = local_grad
 
     def start_grad_reduce(self, virtual_layer_id: int) -> None:
         if virtual_layer_id in self._grad_reduce_events:
@@ -676,31 +660,27 @@ class UltraEPLayerRuntime:
             )
             # Legacy test doubles may perform the in-place copy and return None.
             if reduced is not None:
-                fc1_staging, fc2_staging = reduced
-                from .fsdp_expert_binding import fsdp_binding_installed
+                from .fsdp_expert_binding import (
+                    fsdp_binding_installed,
+                    fsdp_current_unsharded_expert_parameters,
+                    writeback_fsdp_unsharded_expert_gradients,
+                )
 
-                if fsdp_binding_installed((self.fused_w1w3, self.fused_w2)):
-                    from .fsdp_expert_binding import (
-                        fsdp_current_unsharded_expert_parameters,
-                        writeback_fsdp_unsharded_expert_gradients,
-                    )
-
-                    parameters = fsdp_current_unsharded_expert_parameters(
-                        (self.fused_w1w3, self.fused_w2)
-                    )
-                    writeback_fsdp_unsharded_expert_gradients(
-                        parameters,
-                        (fc1_staging, fc2_staging),
-                    )
-                else:
-                    self._bind_staging_grad(self.fused_w1w3.weight, fc1_staging)
-                    self._bind_staging_grad(self.fused_w2.weight, fc2_staging)
+                projections = (self.fused_w1w3, self.fused_w2)
+                parameters = (
+                    fsdp_current_unsharded_expert_parameters(projections)
+                    if fsdp_binding_installed(projections)
+                    else (self.fused_w1w3.weight, self.fused_w2.weight)
+                )
+                writeback_fsdp_unsharded_expert_gradients(parameters, reduced)
 
     def _ensure_manager(self) -> UltraEPManager:
-        manager = self.manager_provider.get_manager()
+        manager = self.model_runtime.get_manager()
         if not self._buffers_configured:
             redundant = manager.num_local_redundant_experts
-            slots = int(getattr(manager, "max_microbatches", self.max_microbatches))
+            slots = int(getattr(manager, "max_microbatches", self.model_runtime.max_microbatches))
+            hidden_size = self.model_runtime.hidden_size
+            expert_intermediate_size = self.model_runtime.expert_intermediate_size
 
             def slot_view(buffer: torch.Tensor, *shape: int) -> torch.Tensor:
                 expected = slots * redundant
@@ -714,25 +694,25 @@ class UltraEPLayerRuntime:
             self.fused_w1w3.configure_ultra_ep_buffers(
                 slot_view(
                     manager.local_replica_fc1_weight_buffer,
-                    2 * self.expert_intermediate_size,
-                    self.hidden_size,
+                    2 * expert_intermediate_size,
+                    hidden_size,
                 ),
                 slot_view(
                     manager.local_replica_fc1_grad_buffer,
-                    2 * self.expert_intermediate_size,
-                    self.hidden_size,
+                    2 * expert_intermediate_size,
+                    hidden_size,
                 ),
             )
             self.fused_w2.configure_ultra_ep_buffers(
                 slot_view(
                     manager.local_replica_fc2_weight_buffer,
-                    self.hidden_size,
-                    self.expert_intermediate_size,
+                    hidden_size,
+                    expert_intermediate_size,
                 ),
                 slot_view(
                     manager.local_replica_fc2_grad_buffer,
-                    self.hidden_size,
-                    self.expert_intermediate_size,
+                    hidden_size,
+                    expert_intermediate_size,
                 ),
             )
             self._buffers_configured = True

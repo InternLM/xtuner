@@ -150,12 +150,18 @@ class TrainEngine:
         fsdp_cfg: FSDPConfig,
         intra_layer_micro_batch: int = 1,
     ) -> None:
+        if intra_layer_micro_batch < 1:
+            raise ValueError("intra_layer_micro_batch must be positive")
+        self.intra_layer_micro_batch = intra_layer_micro_batch
+        execution_cfg = getattr(model_cfg, "text_config", model_cfg)
+        if hasattr(execution_cfg, "intra_layer_micro_batch"):
+            # Number of forwards issued consecutively inside one layer call.
+            setattr(execution_cfg, "intra_layer_micro_batch", intra_layer_micro_batch)
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
         self.fsdp_cfg = fsdp_cfg
         self.model = self.build_model()
         self.optimizer = self.build_optimizer(optim_cfg)
-        self.intra_layer_micro_batch = intra_layer_micro_batch
         self._count = 0
         self.has_freeze_params = self.__has_freeze_params()
         self._async_checkpoint_pg: dist.ProcessGroup | None = None
@@ -499,6 +505,18 @@ class TrainEngine:
             if dist.is_available() and dist.is_initialized():
                 dist.destroy_process_group(self._async_checkpoint_pg)
             self._async_checkpoint_pg = None
+
+    def close(self) -> None:
+        """Release model-adjacent resources at a coordinated boundary.
+
+        Trainer calls this after async waits and a training-group barrier.
+        ``destroy_async_*`` is already idempotent; ``close_ep_runtime`` is a
+        no-op on models without a dynamic EP backend. ``__del__`` must not
+        enter this method.
+        """
+        self.model.close_ep_runtime()
+        self.model.destroy_async_hf_resources()
+        self.destroy_async_checkpoint_pg()
 
     def __del__(self) -> None:
         try:
