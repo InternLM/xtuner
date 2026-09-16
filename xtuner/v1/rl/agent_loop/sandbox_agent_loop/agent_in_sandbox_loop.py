@@ -231,9 +231,12 @@ class AgentInSandboxLoop(AgentLoop):
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> list[RolloutState]:
             if self._sample_semaphore is None:
-                return await self.generate_sample(state)
-            async with self._sample_semaphore:
-                return await self.generate_sample(state)
+                samples = await self.generate_sample(state)
+            else:
+                async with self._sample_semaphore:
+                    samples = await self.generate_sample(state)
+            samples = [await self._teacher_scorer.on_sample_ready(sample) for sample in samples]
+            return samples
 
         pending_tasks = []
         for state in rollout_state:
@@ -244,8 +247,8 @@ class AgentInSandboxLoop(AgentLoop):
         sample_groups = await generated_samples
         samples = [sample for sample_group in sample_groups for sample in sample_group]
         samples = _drop_failed_train_samples(samples, self.mode)
-        # Keep sample validation as the final group-generation step.
-        return maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
+        samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
+        return await self._teacher_scorer.on_group_ready(samples)
 
     # NOTE: A single sandbox session may yield multiple trainable segments, so this returns a list
     # rather than the base class's single RolloutState. The base contract is never exercised for
@@ -289,6 +292,7 @@ class AgentInSandboxLoop(AgentLoop):
             response_message.get("finish_reason") or ("stop" if item.status == RolloutStatus.COMPLETED else "error")
         )
         rollout_state.reward = _extract_reward_payload(item)
+        rollout_state.extra_fields["origin_data_source"] = item.data_source
         rollout_state.extra_fields["agent_status"] = item.status.value
         selected_agent = _selected_agent(item)
         if selected_agent is not None:
@@ -368,6 +372,7 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.routed_experts = None
         rollout_state.response_mask = None
         rollout_state.response_model_steps = None
+        rollout_state.extra_fields["origin_data_source"] = item.data_source
         rollout_state.extra_fields["agent_status"] = item.status.value
         selected_agent = _selected_agent(item)
         if selected_agent is not None:
