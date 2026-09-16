@@ -79,7 +79,7 @@ class MuonConfig(OptimConfig):
         bool, Parameter(help="Allow all-to-all comm strategy; set False on topologies where all-to-all is unreliable")
     ] = True
     remainder_strategy: Annotated[
-        Literal["agrs", "pad_all2all"],
+        Literal["agrs", "pad_all2all", "ragged_all_to_all"],
         Parameter(help="Communication strategy for Muon parameter batches smaller than the FSDP group size"),
     ] = "pad_all2all"
     clip_grad_mode: Annotated[

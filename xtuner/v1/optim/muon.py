@@ -312,12 +312,14 @@ class Muon(Optimizer):
             force the all-gather + reduce-scatter (AGRS) path for all sharded batches. Useful on cluster
             topologies where all-to-all is unreliable.
         remainder_strategy (str): Communication strategy for parameter batches smaller than world size.
-            ``"pad_all2all"`` (default) uses all-to-all, so each rank receives exactly one matrix; remainder
-            batches are exchanged with split sizes instead of zero padding, leaving the ranks without a
-            matrix idle rather than orthogonalizing zeros. ``"agrs"`` uses all-gather + reduce-scatter without batch padding,
-            which gathers every matrix of the batch onto every rank: both its time and its peak memory grow
-            linearly with the batch size (measured at world size 8 on 96MB matrices: 14.9ms/624MB at 1
-            param rising to 20.1ms/2016MB at 7, against a flat ~15.2ms/<900MB for ``"pad_all2all"``).
+            ``"pad_all2all"`` (default) zero-pads the batch up to world size and uses a uniform all-to-all,
+            so every rank receives one matrix and the padded ranks orthogonalize zeros.
+            ``"ragged_all_to_all"`` sends only the real matrices, using all-to-all split sizes: the ranks
+            without a matrix stay idle instead of orthogonalizing zeros, and uneven shards need no padding.
+            ``"agrs"`` uses all-gather + reduce-scatter, which gathers every matrix of the batch onto every
+            rank, so both its time and its peak memory grow linearly with the batch size (measured at world
+            size 8 on 96MB matrices: 14.9ms/624MB at 1 param rising to 20.1ms/2016MB at 7, against a flat
+            ~15.2ms for the all-to-all strategies).
             Ignored when ``enable_all2all`` is False, where AGRS is the only available path.
         muon_split_sizes (dict[Tensor, tuple[int, ...]] | None): Logical row blocks that Muon should
             orthogonalize and scale independently. Used by GLM MuonSplit attention projections.
@@ -340,7 +342,7 @@ class Muon(Optimizer):
         use_triton: bool = False,
         newton_schulz_func: Callable | None = None,
         enable_all2all: bool = True,
-        remainder_strategy: Literal["agrs", "pad_all2all"] = "pad_all2all",
+        remainder_strategy: Literal["agrs", "pad_all2all", "ragged_all_to_all"] = "pad_all2all",
         muon_split_sizes: dict[Tensor, tuple[int, ...]] | None = None,
     ):
         # Check hyperparameters
@@ -352,8 +354,11 @@ class Muon(Optimizer):
             raise ValueError(f"Invalid betas: {betas}")
         if adjust_lr not in ("spectral_norm", "rms_norm", "none"):
             raise ValueError(f"Invalid adjust_lr value: {adjust_lr}. Must be 'spectral_norm', 'rms_norm', or 'none'.")
-        if remainder_strategy not in ("agrs", "pad_all2all"):
-            raise ValueError(f"Invalid remainder_strategy: {remainder_strategy!r}; expected 'agrs' or 'pad_all2all'.")
+        if remainder_strategy not in ("agrs", "pad_all2all", "ragged_all_to_all"):
+            raise ValueError(
+                f"Invalid remainder_strategy: {remainder_strategy!r}; "
+                f"expected 'agrs', 'pad_all2all' or 'ragged_all_to_all'."
+            )
         if not enable_all2all:
             remainder_strategy = "agrs"
 
@@ -836,12 +841,12 @@ class Muon(Optimizer):
         is_remainder = len(params) < plan.world_size
         batch_comm_strategy: MuonCommStrategy = plan.comm_strategy
         if plan.comm_strategy == "all_to_all":
-            if not self._enable_all2all or (is_remainder and self._remainder_strategy == "agrs"):
+            if not self._enable_all2all:
                 batch_comm_strategy = "agrs"
-            elif is_remainder:
-                # Exchange only the real matrices instead of padding the batch out to the group
-                # size; uneven shards are carried by the split sizes.
-                batch_comm_strategy = "ragged_all_to_all"
+            elif is_remainder and self._remainder_strategy != "pad_all2all":
+                # Only "pad_all2all" pads a partial batch out to the group size; the other two
+                # strategies name a batch strategy that takes the batch as it stands.
+                batch_comm_strategy = self._remainder_strategy
         batch_size = None if batch_comm_strategy in ("agrs", "ragged_all_to_all") else plan.world_size
 
         # Step 5: assemble the AsyncTask, which starts running immediately up to its
