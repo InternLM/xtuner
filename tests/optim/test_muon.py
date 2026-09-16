@@ -590,6 +590,60 @@ class TestMuonFSDP(DeterministicDDPTestCase):
                 msg=f"mismatch on '{name}': max_abs={abs_diff.max().item():.2e}, max_rel={rel_diff.max().item():.2e}",
             )
 
+    def test_muon_remainder_batch_skips_idle_ranks(self):
+        """An evenly sharded remainder batch exchanges only its real matrices: the ranks that
+        assemble one orthogonalize it, the rest stay idle instead of running Newton-Schulz on
+        zero padding."""
+        self.create_pg("cuda")
+        rank = dist.get_rank()
+        device = torch.device("cuda", rank % torch.cuda.device_count())
+        mesh = init_device_mesh("cuda", (4,), mesh_dim_names=("muon_ragged.fsdp",))
+
+        world_size = mesh.size(0)
+        rows, cols = 8, 4  # evenly sharded: 8 % 4 == 0
+        remainder = 2  # fewer params than ranks -> a remainder batch
+
+        params = []
+        expected_params = []
+        for index in range(remainder):
+            values = torch.arange(rows * cols, dtype=torch.float32, device=device).reshape(rows, cols)
+            initial = (values / (rows * cols) + index * 0.25).to(torch.bfloat16)
+            gradient = torch.sin(values * 0.17 + index).to(torch.bfloat16)
+
+            param = nn.Parameter(distribute_tensor(initial, mesh, (Shard(0),)))
+            param.grad = distribute_tensor(gradient, mesh, (Shard(0),))
+            params.append(param)
+            expected_params.append(initial - zeropower_via_newtonschulz5(gradient, epsilon=1e-7) * 0.01)
+
+        ns_calls: list[tuple[int, ...]] = []
+
+        def track_newton_schulz(x, epsilon, num_experts):
+            ns_calls.append(tuple(x.shape))
+            return zeropower_via_newtonschulz5(x, epsilon=epsilon, num_experts=num_experts)
+
+        optimizer = Muon(
+            params,
+            lr=0.01,
+            weight_decay=0.0,
+            epsilon=1e-7,
+            adjust_lr="none",
+            newton_schulz_func=track_newton_schulz,
+        )
+        optimizer.step()
+
+        # One whole matrix per assembling rank; the padded exchange would instead have every
+        # rank orthogonalize one, two of them all zeros.
+        assert ns_calls == ([(rows, cols)] if rank < remainder else [])
+
+        local_rows = rows // world_size
+        for param, expected in zip(params, expected_params):
+            torch.testing.assert_close(
+                param.data.to_local(),  # type: ignore[attr-defined]
+                expected[rank * local_rows : (rank + 1) * local_rows],
+                atol=1e-2,
+                rtol=1e-2,
+            )
+
     def test_muon_moe_uses_subgroup_allgather_when_params_fill_a_batch(self):
         """MoE params whose experts span an FSDP sub-group must take the sub-group
         all-gather path even when there are enough of them to fill a full batch.
@@ -712,12 +766,12 @@ class TestMuonFSDP(DeterministicDDPTestCase):
         )
         optimizer.step()
 
-        if remainder_strategy == "agrs" and fsdp_rank == 0:
+        # Both remainder strategies leave the batch to the rank that assembles it: AGRS through
+        # selective Newton-Schulz, ragged all-to-all by sending the idle rank nothing at all.
+        if fsdp_rank == 0:
             assert sorted(ns_shapes) == [((6, cols), 3), ((12, cols), 3)]
-        elif remainder_strategy == "agrs":
-            assert not ns_shapes
         else:
-            assert sorted(ns_shapes) == [((6, cols), 3), ((12, cols), 3)]
+            assert not ns_shapes
 
         for param, expected in zip(params, expected_params):
             global_rows = expected.size(0)
