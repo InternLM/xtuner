@@ -74,6 +74,8 @@ from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
     MoEGate,
 )
 from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
+from xtuner.v1.module.ultraep import UltraEPConfig
+from xtuner.v1.module.ultraep.runtime import UltraEPManagerProvider
 from xtuner.v1.utils import (
     get_device,
     get_logger,
@@ -205,6 +207,7 @@ class MoE(BaseModel):
     moe_decoder_layer_cls = MoEDecoderLayer
     mtp_layer_cls = MTPLayer
     mtp_block_cls = MTPBlock
+    ultraep_manager_provider: UltraEPManagerProvider | None = None
 
     def __init__(self, config: MoEConfig):
         # Concrete MoE configs override build(), so validate dispatcher support

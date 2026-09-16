@@ -2,7 +2,7 @@
 
 import torch
 
-from .triton_kernels import k_grouped_gemm, m_grouped_gemm
+from .triton_kernels import k_grouped_gemm, m_grouped_gemm, m_grouped_gemm_dual_weight
 
 
 class GroupedGemm(torch.autograd.Function):
@@ -35,3 +35,94 @@ def triton_group_gemm(x, w, tokens_per_expert):
         # put x and w to the pytorch graph
         return torch.matmul(x, w[0].T)
     return GroupedGemm.apply(x, w, tokens_per_expert)
+
+
+class UltraEPGroupedGemm(torch.autograd.Function):
+    """Grouped GEMM over inherent and UltraEP replica experts in one launch.
+
+    Replica weights and gradients are runtime-owned, cross-layer buffers.  They
+    must not become model parameters or optimizer state.  This bridge therefore
+    returns only the inherent-expert weight gradient to autograd and writes the
+    replica Wgrad into UltraEP's FP32 buffer as a side effect.
+
+    Xtuner's FSDP-managed master weights and UltraEP's shared replica slots live
+    in separate allocations. A dual-base Triton kernel selects the right weight
+    allocation per physical expert while retaining one persistent GMM launch.
+    Replica slots are shared by all MoE layers and can be overwritten by a
+    later layer after this forward has finished.  The MoE decoder must place
+    ``_UltraEPWeightSyncForBackward`` on the expert output: its backward
+    restores this virtual layer's replica slots before this Function performs
+    DGrad.  The replica tensor intentionally stays outside
+    ``save_for_backward`` so that refresh is not treated as an invalid in-place
+    mutation, and so no full replica-buffer snapshot is required per forward.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        master_weight: torch.Tensor,
+        replica_weight: torch.Tensor,
+        replica_grad: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        empty_input = x.shape[0] == 0
+        if empty_input:
+            out = torch.matmul(x, master_weight[0].T)
+        else:
+            out = m_grouped_gemm_dual_weight(
+                x,
+                master_weight,
+                replica_weight,
+                tokens_per_expert,
+                trans_b=True,
+            )
+        ctx.save_for_backward(x, master_weight, tokens_per_expert)
+        # This is a Manager-owned mutable buffer.  The output-side autograd
+        # node restores it before DGrad reads it in backward.
+        ctx.replica_weight = replica_weight
+        ctx.num_master_experts = master_weight.shape[0]
+        ctx.replica_grad = replica_grad
+        ctx.empty_input = empty_input
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):  # type: ignore[override]
+        x, master_weight, tokens_per_expert = ctx.saved_tensors
+        replica_weight = ctx.replica_weight
+        num_master_experts = ctx.num_master_experts
+        replica_grad = ctx.replica_grad
+
+        if ctx.empty_input:
+            dx = torch.matmul(grad_output, master_weight[0])
+            master_dw = torch.zeros_like(master_weight)
+            replica_grad.zero_()
+        else:
+            dx = m_grouped_gemm_dual_weight(
+                grad_output,
+                master_weight,
+                replica_weight,
+                tokens_per_expert,
+                trans_b=False,
+            )
+            physical_dw = k_grouped_gemm(grad_output, x, tokens_per_expert)
+            master_dw = physical_dw[:num_master_experts]
+            replica_grad.copy_(physical_dw[num_master_experts:].float())
+        return dx, master_dw, None, None, None
+
+
+def ultra_ep_group_gemm(
+    x: torch.Tensor,
+    master_weight: torch.Tensor,
+    replica_weight: torch.Tensor,
+    replica_grad: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    """Run one grouped GEMM over inherent and redundant physical experts."""
+    return UltraEPGroupedGemm.apply(
+        x,
+        master_weight,
+        replica_weight,
+        replica_grad,
+        tokens_per_expert,
+    )

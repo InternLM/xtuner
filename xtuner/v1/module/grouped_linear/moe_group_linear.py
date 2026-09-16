@@ -8,6 +8,7 @@ from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tenso
 from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
 from xtuner.v1.ops import group_gemm
+from xtuner.v1.ops.moe.cuda.group_gemm import ultra_ep_group_gemm
 from xtuner.v1.utils.interleaved_shard import InterleavedShard
 
 
@@ -114,6 +115,8 @@ class GroupedLinear(nn.Module):
                 self.weight = nn.Parameter(weight)
 
         self.moe_bias = moe_bias
+        self._ultra_ep_replica_weight: torch.Tensor | None = None
+        self._ultra_ep_replica_grad: torch.Tensor | None = None
         if self.moe_bias:
             if self.parallel_style == "column":
                 # Keep column-parallel bias flattened like the weight's output dimension. This lets EP and Expert TP
@@ -159,10 +162,41 @@ class GroupedLinear(nn.Module):
                 else:
                     self.bias = nn.Parameter(bias)
 
+    def configure_ultra_ep_buffers(
+        self,
+        replica_weight: torch.Tensor,
+        replica_grad: torch.Tensor,
+    ) -> None:
+        """Attach Manager-owned replica buffers without registering
+        parameters."""
+        if self.moe_bias:
+            raise NotImplementedError("UltraEP does not currently support grouped expert bias")
+        if replica_weight.ndim != 3 or replica_weight.shape[1:] != (self.out_features, self.in_features):
+            raise ValueError(
+                "Unexpected UltraEP replica weight shape: "
+                f"expected [R, {self.out_features}, {self.in_features}], got {tuple(replica_weight.shape)}"
+            )
+        if replica_grad.shape != replica_weight.shape or replica_grad.dtype != torch.float32:
+            raise ValueError("UltraEP replica grad must be an FP32 tensor matching replica weight shape")
+        # Tensor attributes are intentionally plain references: Manager owns
+        # their storage and they must stay out of state_dict()/parameters().
+        self._ultra_ep_replica_weight = replica_weight
+        self._ultra_ep_replica_grad = replica_grad
+
     def forward(self, x: torch.Tensor, tokens_per_expert: torch.Tensor, decoding: bool = False):
         weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
         weight = weight.view(-1, self.local_out_features, self.local_in_features)
-        out = group_gemm(x, weight, tokens_per_expert)
+        if self._ultra_ep_replica_weight is None:
+            out = group_gemm(x, weight, tokens_per_expert)
+        else:
+            assert self._ultra_ep_replica_grad is not None
+            out = ultra_ep_group_gemm(
+                x,
+                weight,
+                self._ultra_ep_replica_weight,
+                self._ultra_ep_replica_grad,
+                tokens_per_expert,
+            )
 
         if self.moe_bias:
             bias = self.bias.to_local() if isinstance(self.bias, DTensor) else self.bias
