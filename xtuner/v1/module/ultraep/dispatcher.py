@@ -16,7 +16,10 @@ from .runtime import UltraEPLayerRuntime, UltraEPModelRuntime
 
 @dataclass
 class _UltraEPLayerCallState:
-    """Per layer × microbatch token. Decoder treats this as opaque."""
+    """Per layer × microbatch token.
+
+    Decoder treats this as opaque.
+    """
 
     virtual_layer_id: int
     weight_sync_event: object | None = None
@@ -55,10 +58,9 @@ class _UltraEPGradReduceJoin(Function):
 class _UltraEPWeightRestoreStart(Function):
     """Launch mutable replica-weight restore at combine-backward entry.
 
-    The identity is attached to the combined MoE output, after combine
-    forward has completed but before the residual/post-MoE path. During
-    backward its callback therefore runs before DeepEP combine backward and
-    can overlap the restore copy/communication with that work.
+    The identity is attached to the combined MoE output, after combine forward has completed but before the
+    residual/post-MoE path. During backward its callback therefore runs before DeepEP combine backward and can overlap
+    the restore copy/communication with that work.
     """
 
     @staticmethod
@@ -81,11 +83,9 @@ class _UltraEPWeightRestoreStart(Function):
 class _UltraEPWeightRestoreJoin(Function):
     """Join a restore immediately before expert DGrad runs.
 
-    Replica weights are reusable communication buffers, not model parameters.
-    A later layer can overwrite them after this layer's forward. This identity
-    node sits immediately after expert compute, so its backward waits for the
-    restore launched at combine-backward entry before grouped-GEMM DGrad reads
-    the mutable slots.
+    Replica weights are reusable communication buffers, not model parameters. A later layer can overwrite them after
+    this layer's forward. This identity node sits immediately after expert compute, so its backward waits for the
+    restore launched at combine-backward entry before grouped-GEMM DGrad reads the mutable slots.
     """
 
     @staticmethod

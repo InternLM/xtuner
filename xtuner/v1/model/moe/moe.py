@@ -73,8 +73,8 @@ from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
     MoEDecoderLayerOutput,
     MoEGate,
 )
-from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
 from xtuner.v1.module.dispatcher import EPExecutionRuntime, build_ep_execution_runtime
+from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
 from xtuner.v1.module.ultraep import UltraEPConfig
 from xtuner.v1.module.ultraep.config import IMPLEMENTED_INNER_DISPATCHERS
 from xtuner.v1.utils import (
@@ -162,8 +162,9 @@ class MoEConfig(TransformerConfig):
     moe_intermediate_size: Annotated[int, Parameter(group="moe")]
     ep_size: Annotated[int, Parameter(group="moe")] = 1
     ultraep_cfg: UltraEPConfig | None = None
-    # TrainEngine writes this before build_model. UltraEP sizes replica slots
-    # from it; the value is the number of forwards co-scheduled in one layer.
+    # TrainEngine writes this before build_model so UltraEP can size replica
+    # slots. List forward uses the incoming list length; overflow is rejected
+    # only by UltraEPLayerRuntime.validate_microbatch_capacity.
     intra_layer_micro_batch: int = 1
     expert_tp_size: Annotated[int, Parameter(group="moe")] = 1
     dispatcher: Annotated[Literal["deepep", "all2all", "agrs"] | None, Parameter(group="moe")] = None
@@ -565,11 +566,6 @@ class MoE(BaseModel):
             )
             if loss_ctx is None:
                 raise NotImplementedError("loss_ctx must be provided for intra-layer bsz > 1")
-            if len(seq_ctx) != self.config.intra_layer_micro_batch:
-                raise ValueError(
-                    f"intra-layer micro-batch width {len(seq_ctx)} does not match "
-                    f"configured width {self.config.intra_layer_micro_batch}"
-                )
 
             return self._micro_batch_forward(
                 seq_ctx_list=seq_ctx,

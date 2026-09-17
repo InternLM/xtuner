@@ -176,10 +176,7 @@ class GroupedLinear(nn.Module):
 
         backend = selected_group_gemm_backend()
         if backend not in {"triton", "triton_dual", "te"}:
-            raise RuntimeError(
-                "UltraEP requires the Triton dual-base or TE grouped GEMM "
-                f"backend, got {backend!r}"
-            )
+            raise RuntimeError(f"UltraEP requires the Triton dual-base or TE grouped GEMM backend, got {backend!r}")
         if self.moe_bias:
             raise NotImplementedError("UltraEP does not currently support grouped expert bias")
         # Native UltraEP exposes one leading dimension per in-flight

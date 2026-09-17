@@ -1,17 +1,16 @@
 """Read-only FSDP2 binding for UltraEP expert projections.
 
-This module is the only UltraEP integration layer that imports private FSDP2
-types.  UltraEP does not own FSDP's all-gather storage: native weight sync
-reads the current unsharded parameter view and refreshes its pointer pool.
-Consequently the binding records identity and validates the view, while
-leaving FSDP allocation and resharding methods untouched.
+This module is the only UltraEP integration layer that imports private FSDP2 types.  UltraEP does not own FSDP's all-
+gather storage: native weight sync reads the current unsharded parameter view and refreshes its pointer pool.
+Consequently the binding records identity and validates the view, while leaving FSDP allocation and resharding methods
+untouched.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any, TypeAlias, cast
 
 import torch
 from torch import nn
@@ -24,6 +23,7 @@ _LOG = logging.getLogger(__name__)
 _FSDP_PARAM_ATTR = "_xtuner_ultraep_fsdp_param"
 _OWNER_ATTR = "_xtuner_ultraep_fsdp_owner"
 _PROJECTION_ATTR = "_xtuner_ultraep_projection"
+UltraEPFSDPBinding: TypeAlias = tuple[FSDPParam, ...]
 
 
 def _resolve_targets(
@@ -63,7 +63,9 @@ def _resolve_targets(
                 raise RuntimeError(f"UltraEP binding must be installed before AllGather for {layer_label}")
             expected_dtype = fsdp_param.mp_policy.param_dtype or fsdp_param.sharded_param.dtype
             if expected_dtype is not torch.bfloat16:
-                raise RuntimeError(f"UltraEP FSDP binding requires BF16 parameters for {layer_label}.{projection_name}")
+                raise RuntimeError(
+                    f"UltraEP FSDP binding requires BF16 parameters for {layer_label}.{projection_name}"
+                )
             if hasattr(fsdp_param._sharded_local_tensor, "fsdp_post_all_gather"):
                 raise RuntimeError(f"UltraEP does not support FSDP post-AllGather extensions for {layer_label}")
             selected.append((fsdp_param, owner, projection))
@@ -80,9 +82,8 @@ def install_ultraep_fsdp_binding(
 ) -> tuple[FSDPParam, ...]:
     """Record FSDP parameter identities for the routed expert projections.
 
-    Unlike MoonEP this function does not replace FSDP's allocation methods or
-    force a landing address.  UltraEP refreshes native pointers from the
-    current parameter view on every weight-sync call.
+    Unlike MoonEP this function does not replace FSDP's allocation methods or force a landing address.  UltraEP
+    refreshes native pointers from the current parameter view on every weight-sync call.
     """
     if not (torch.__version__.startswith("2.9.") or torch.__version__.startswith("2.12.")):
         _LOG.warning("UltraEP FSDP binding is untested with torch %s", torch.__version__)
@@ -94,8 +95,9 @@ def install_ultraep_fsdp_binding(
     return tuple(item[0] for item in selected)
 
 
-def fsdp_binding_installed(projections: tuple[nn.Module, nn.Module]) -> bool:
-    """Return whether both expert projections have the identity seam installed."""
+def fsdp_binding_installed(projections: tuple[object, object]) -> bool:
+    """Return whether both expert projections have the identity seam
+    installed."""
     states = tuple(hasattr(projection, _FSDP_PARAM_ATTR) for projection in projections)
     if any(states) and not all(states):
         raise RuntimeError("UltraEP FSDP binding is only partially installed for an expert layer")
@@ -103,7 +105,7 @@ def fsdp_binding_installed(projections: tuple[nn.Module, nn.Module]) -> bool:
 
 
 def fsdp_current_unsharded_expert_parameters(
-    projections: tuple[nn.Module, nn.Module],
+    projections: tuple[object, object],
 ) -> tuple[nn.Parameter, nn.Parameter]:
     """Return the two current FSDP Parameters inside their unsharded window."""
     result: list[nn.Parameter] = []

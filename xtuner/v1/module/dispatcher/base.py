@@ -154,8 +154,8 @@ class GenericDispatcher(
     ) -> torch.Tensor:
         """Prepare one branch immediately before its attention forward.
 
-        Keep per-branch autograd nodes here when their creation order must
-        follow the microbatch loop, rather than preparing all nodes upfront.
+        Keep per-branch autograd nodes here when their creation order must follow the microbatch loop, rather than
+        preparing all nodes upfront.
         """
         return hidden_states
 

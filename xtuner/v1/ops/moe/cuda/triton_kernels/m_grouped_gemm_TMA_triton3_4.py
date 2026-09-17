@@ -339,12 +339,7 @@ def m_grouped_gemm_dual_bKmajor_kernel(
                 else:
                     b_n = offs_bn + tl.arange(0, BLOCK_N)[:, None]
                     b_k = offs_k + tl.arange(0, BLOCK_K)[None, :]
-                    b_ptrs = (
-                        replica_ptr
-                        + replica_group * REPLICA_EXPERT_STRIDE
-                        + b_n * K
-                        + b_k
-                    )
+                    b_ptrs = replica_ptr + replica_group * REPLICA_EXPERT_STRIDE + b_n * K + b_k
                     b = tl.load(b_ptrs, mask=(b_n < N) & (b_k < K), other=0.0)
                 accumulator = tl.dot(a, b.T, acc=accumulator, input_precision="tf32x3")
                 offs_k += BLOCK_K
@@ -452,12 +447,7 @@ def m_grouped_gemm_dual_bNmajor_kernel(
                 else:
                     b_k = offs_k + tl.arange(0, BLOCK_K)[:, None]
                     b_n = offs_bn + tl.arange(0, BLOCK_N)[None, :]
-                    b_ptrs = (
-                        replica_ptr
-                        + replica_group * REPLICA_EXPERT_STRIDE
-                        + b_k * N
-                        + b_n
-                    )
+                    b_ptrs = replica_ptr + replica_group * REPLICA_EXPERT_STRIDE + b_k * N + b_n
                     b = tl.load(b_ptrs, mask=(b_k < K) & (b_n < N), other=0.0)
                 accumulator = tl.dot(a, b, acc=accumulator, input_precision="tf32x3")
                 offs_k += BLOCK_K

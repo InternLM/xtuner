@@ -42,14 +42,10 @@ def triton_group_gemm(
         raise ValueError("UltraEP replica_weight and replica_grad must be provided together")
     if replica_weight is not None and not isinstance(replica_weight, torch.Tensor):
         raise TypeError(
-            "Triton grouped GEMM expects replica_weight as a [R,N,K] tensor; "
-            "per-expert Sequence is TE-only"
+            "Triton grouped GEMM expects replica_weight as a [R,N,K] tensor; per-expert Sequence is TE-only"
         )
     if replica_grad is not None and not isinstance(replica_grad, torch.Tensor):
-        raise TypeError(
-            "Triton grouped GEMM expects replica_grad as a [R,N,K] tensor; "
-            "per-expert Sequence is TE-only"
-        )
+        raise TypeError("Triton grouped GEMM expects replica_grad as a [R,N,K] tensor; per-expert Sequence is TE-only")
     if replica_weight is not None:
         return ultra_ep_group_gemm(
             x,

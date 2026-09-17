@@ -729,16 +729,23 @@ def test_prepare_layer_inputs_rejects_width_above_configured_slots():
         dispatcher.prepare_layer_inputs([torch.ones(2, 4), torch.ones(2, 4)])
 
 
-def test_moe_list_forward_rejects_a_different_width():
+def test_moe_list_forward_uses_incoming_width_when_ultraep_is_off():
     model = object.__new__(MoE)
-    model.config = Qwen3MoE235BA22Config(
-        ultraep_cfg=UltraEPConfig(num_redundant_experts_per_rank=1),
-        intra_layer_micro_batch=2,
-    )
-    contexts = [object(), object(), object()]
+    model.config = Qwen3MoE235BA22Config(intra_layer_micro_batch=1)
+    captured: dict[str, object] = {}
 
-    with pytest.raises(ValueError, match="width 3 does not match configured width 2"):
-        model.forward(seq_ctx=contexts, loss_ctx=[{} for _ in contexts])
+    def _fake_micro_batch_forward(*, seq_ctx_list, loss_ctx_list, return_router_logits=False):
+        captured["seq_ctx_list"] = seq_ctx_list
+        captured["loss_ctx_list"] = loss_ctx_list
+        return "ok"
+
+    model._micro_batch_forward = _fake_micro_batch_forward  # type: ignore[method-assign]
+    contexts = [object(), object()]
+    losses = [{}, {}]
+
+    assert model.forward(seq_ctx=contexts, loss_ctx=losses) == "ok"
+    assert captured["seq_ctx_list"] is contexts
+    assert captured["loss_ctx_list"] is losses
 
 
 def test_ultra_ep_microbatch_pipeline_scales_beyond_two():
@@ -1369,6 +1376,9 @@ def test_ultra_ep_output_wrapper_restores_replica_weight_before_te_grouped_gemm_
 
     import xtuner.v1.ops.moe.cuda.group_gemm_te as adapter
     from xtuner.v1.ops.moe.cuda.group_gemm_te import te_grouped_gemm
+
+    if not adapter.TE_GROUPED_GEMM_INSTALLED:
+        pytest.skip("te_grouped_gemm is not installed (UltraEP TE extra, not in .[all])")
 
     replica_seen_in_gemm = []
     real_physical_weights = adapter._physical_weights
