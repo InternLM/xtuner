@@ -7,6 +7,8 @@
 - VLM 样本使用 train_prompt_ids，并保留 multimodal 训练字段。
 - 无效 rollout group 会被跳过。
 - 缺失 reward、logprob/mask 长度不一致、pack_max_length 过小时 fail fast。
+- 多条样本 pack 成一条序列后，input_ids/shifted_labels/advantages/rollout_logprobs（及 teacher 字段）
+  与输入位置逐一对齐（regression: advantage 曾比 input_ids 长 1 导致 pack 后整体错位）。
 """
 
 import unittest
@@ -18,6 +20,7 @@ import torch
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets, reset_rollout_response
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
 from xtuner.v1.rl.loss import DistillationLossConfig
+from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.train.rl_trainer import BaseRLTrainer
 
 
@@ -127,8 +130,9 @@ class TestPrepareTrainData(unittest.TestCase):
             batch["rollout_logprobs"],
             torch.tensor([[0.0, 0.0, 0.1, 0.2, 0.3]], dtype=torch.float32),
         )
-        self.assertEqual(batch["advantage"], [1.5, 1.5, 1.5, 1.5, 0.0, 1.5])
-        self.assertEqual(len(batch["advantage"]), batch["shifted_labels"].numel() + 1)
+        # advantage 与 shifted_labels 逐位置对齐: prompt 段为 0, mask=0 处为 0。
+        self.assertEqual(batch["advantage"], [0.0, 0.0, 1.5, 0.0, 1.5])
+        self.assertEqual(len(batch["advantage"]), batch["shifted_labels"].numel())
         self.assertIs(batch["seq_ctx"].rollout_routed_experts, routed_experts)
         self.assertEqual(info["training_samples"], 1)
         self.assertEqual(info["training_tokens"], 5)
@@ -150,7 +154,7 @@ class TestPrepareTrainData(unittest.TestCase):
 
         self.assertIsNone(state.response_mask)
         self.assertEqual(data_batches[0]["shifted_labels"].tolist(), [[-100, -100, 30, 31]])
-        self.assertEqual(data_batches[0]["advantage"], [1.0, 1.0, 1.0, 1.0, 1.0])
+        self.assertEqual(data_batches[0]["advantage"], [0.0, 0.0, 1.0, 1.0])
 
     def test_multi_sample_group_uses_each_sample_reward_and_advantage(self):
         # 同一个 prompt 下的多个 response 要分别使用自己的 reward 和 advantage。
@@ -161,8 +165,8 @@ class TestPrepareTrainData(unittest.TestCase):
         data_batches, info = self._prepare(trainer, [[first, second]])
 
         self.assertEqual(len(data_batches), 2)
-        self.assertEqual(data_batches[0]["advantage"], [1.5, 1.5, 1.5, 1.5, 1.5])
-        self.assertEqual(data_batches[1]["advantage"], [-2.0, -2.0, -2.0, -2.0, -2.0])
+        self.assertEqual(data_batches[0]["advantage"], [0.0, 0.0, 1.5, 1.5])
+        self.assertEqual(data_batches[1]["advantage"], [0.0, 0.0, -2.0, -2.0])
         self.assertEqual(info["batch_size"], 2)
         self.assertEqual(info["rewards/min"], -1.0)
         self.assertEqual(info["rewards/max"], 3.0)
@@ -401,6 +405,169 @@ class TestPrepareTrainData(unittest.TestCase):
 
         with self.assertRaises(AssertionError):
             self._prepare(trainer, [[state]], pack_max_length=4)
+
+
+class TestPrepareTrainDataPackAlignment(unittest.TestCase):
+    """多条样本 pack 成一条序列后, pg_loss 消费前的张量逐位置对齐。
+
+    regression: advantage 曾按 `[adv]*len(prompt_ids) + [mask处理]` 构造, 比 input_ids 长 1,
+    pack 拼接后 advantages 与 shifted_labels/rollout_logprobs 整体错位或形状不匹配。
+    """
+
+    def _make_trainer(self, with_teacher_fields: bool = False) -> BaseRLTrainer:
+        trainer = BaseRLTrainer.__new__(BaseRLTrainer)
+        trainer.logger = MagicMock()
+        distillation = MagicMock()
+        distillation.task_adv_weight = 1.0
+        if with_teacher_fields:
+            # 与真实批次一致的逐位置 teacher 字段形状 (1, seq_len, k) / (1, seq_len)。
+            distillation.rollout_teacher_targets.side_effect = lambda state, shifted_labels: {
+                "teacher_logprobs": torch.zeros(1, len(shifted_labels), 2),
+                "target_token_ids": torch.zeros(1, len(shifted_labels), 2),
+                "teacher_indices": torch.full((1, len(shifted_labels)), -1, dtype=torch.int64),
+            }
+        else:
+            distillation.rollout_teacher_targets.return_value = {}
+        distillation.reward_scalars.return_value = {}
+        trainer._distillation = distillation
+        trainer._advantage_estimator = MagicMock()
+        # 确定性 advantage: advantage = reward - 0.5, 每个样本值唯一且 float32 精确。
+        trainer._advantage_estimator.compute.side_effect = lambda rewards, representatives: rewards - 0.5
+        return trainer
+
+    def _make_sample(
+        self,
+        rollout_id: int,
+        prompt_ids: list[int],
+        response_ids: list[int],
+        response_mask: list[int],
+        logprobs: list[float],
+        reward: float,
+    ) -> RolloutState:
+        return RolloutState(
+            rollout_id=rollout_id,
+            message=[],
+            prompt_ids=prompt_ids,
+            response_ids=response_ids,
+            response_mask=response_mask,
+            logprobs=logprobs,
+            response="ok",
+            reward={"score": reward},
+            status=Status.COMPLETED,
+        )
+
+    @staticmethod
+    def _expected_segment(
+        sample: RolloutState, adv_val: float
+    ) -> tuple[list[int], list[int], list[float], list[float]]:
+        """单个样本 pack 前的正确布局: input_ids 去掉 response 末位(EOS 只作 label)。"""
+        assert sample.prompt_ids is not None
+        assert sample.response_ids is not None
+        assert sample.response_mask is not None
+        assert sample.logprobs is not None
+        prompt_len = len(sample.prompt_ids)
+        input_ids = list(sample.prompt_ids) + list(sample.response_ids)[:-1]
+        labels = [-100] * (prompt_len - 1) + [
+            resp_id if mask != 0 else -100 for resp_id, mask in zip(sample.response_ids, sample.response_mask)
+        ]
+        advantages = [0.0] * (prompt_len - 1) + [0.0 if mask == 0 else adv_val for mask in sample.response_mask]
+        logprobs = [0.0] * (prompt_len - 1) + list(sample.logprobs)
+        return input_ids, labels, advantages, logprobs
+
+    @staticmethod
+    def _pack_and_extract(data_batches: list[dict], pack_max_length: int) -> dict:
+        controller = TrainingController.__new__(TrainingController)
+        packed_batches = controller._packing(data_batches, pack_max_length, None)
+        assert len(packed_batches) == 1, "all samples are expected to fit into a single pack"
+        packed = packed_batches[0]
+        result = {
+            "input_ids": packed["seq_ctx"].input_ids.squeeze(0).tolist(),
+            "labels": packed["shifted_labels"].squeeze(0).tolist(),
+            "advantages": packed["advantages"].squeeze(0).tolist(),
+            "rollout_logprobs": packed["rollout_logprobs"].squeeze(0).tolist(),
+        }
+        for key in ("teacher_logprobs", "target_token_ids", "teacher_indices"):
+            if packed.get(key) is not None:
+                result[key] = packed[key].squeeze(0).tolist()
+        return result
+
+    def _build_data_groups(self) -> list[list[RolloutState]]:
+        """两组样本; 组内共享 prompt(与真实 RL 组一致), 长度/mask/advantage 刻意互不相同。"""
+        s1 = self._make_sample(
+            0, [101, 102, 103, 104], [1001, 1002, 1003, 1004, 1005], [1, 1, 0, 1, 1], [-0.5, -1.0, -1.5, -2.0, -2.5], 1.0
+        )
+        s2 = self._make_sample(1, [101, 102, 103, 104], [2001, 2002, 2003], [1, 0, 1], [-0.5, -1.0, -1.5], 2.0)
+        s3 = self._make_sample(2, [301, 302, 303, 304, 305], [3001, 3002, 3003, 3004], [1, 1, 1, 0], [-0.5, -1.0, -1.5, -2.0], 4.0)
+        s4 = self._make_sample(3, [301, 302, 303, 304, 305], [4001, 4002], [1, 0], [-0.5, -1.0], 8.0)
+        return [[s1, s2], [s3, s4]]
+
+    def _prepare(self, trainer, data_groups, pack_max_length: int):
+        with patch("xtuner.v1.train.rl_trainer.XTUNER_DETERMINISTIC", True):
+            return trainer._prepare_train_data(data_groups, pack_max_length=pack_max_length)
+
+    def _assert_real_token_alignment(
+        self, samples: list[RolloutState], packed: dict, total_len: int, packed_len: int
+    ) -> None:
+        self.assertEqual(len(packed["input_ids"]), packed_len)
+        self.assertEqual(len(packed["labels"]), packed_len)
+        self.assertEqual(len(packed["advantages"]), packed_len)
+        self.assertEqual(len(packed["rollout_logprobs"]), packed_len)
+
+        offset = 0
+        for sample in samples:
+            adv_val = sample.reward["score"] - 0.5
+            exp_ids, exp_labels, exp_advs, exp_logprobs = self._expected_segment(sample, adv_val)
+            seg = slice(offset, offset + len(exp_ids))
+            self.assertEqual(packed["input_ids"][seg], exp_ids)
+            self.assertEqual(packed["labels"][seg], exp_labels)
+            self.assertEqual(packed["advantages"][seg], exp_advs)
+            self.assertEqual(packed["rollout_logprobs"][seg], exp_logprobs)
+            offset += len(exp_ids)
+        self.assertEqual(offset, total_len)
+
+    def test_packed_fields_align_without_padding(self) -> None:
+        trainer = self._make_trainer()
+        data_groups = self._build_data_groups()
+        samples = [sample for group in data_groups for sample in group]
+        total_len = sum(len(s.prompt_ids) + len(s.response_ids) - 1 for s in samples)
+
+        data_batches, _ = self._prepare(trainer, data_groups, pack_max_length=total_len)
+
+        self.assertEqual(len(data_batches), len(samples))
+        for item in data_batches:
+            self.assertEqual(len(item["advantage"]), item["shifted_labels"].numel())
+
+        packed = self._pack_and_extract(data_batches, total_len)
+        self._assert_real_token_alignment(samples, packed, total_len, total_len)
+
+    def test_packed_fields_align_with_padding(self) -> None:
+        trainer = self._make_trainer()
+        data_groups = self._build_data_groups()
+        samples = [sample for group in data_groups for sample in group]
+        total_len = sum(len(s.prompt_ids) + len(s.response_ids) - 1 for s in samples)
+        pack_max_length = (total_len // 16 + 1) * 16
+
+        data_batches, _ = self._prepare(trainer, data_groups, pack_max_length=pack_max_length)
+        packed = self._pack_and_extract(data_batches, pack_max_length)
+
+        self._assert_real_token_alignment(samples, packed, total_len, pack_max_length)
+        # pad 区: label 为 -100, advantage 为 controller 的 pad 值 -100。
+        self.assertTrue(all(label == -100 for label in packed["labels"][total_len:]))
+        self.assertTrue(all(adv == -100 for adv in packed["advantages"][total_len:]))
+
+    def test_packed_fields_align_with_teacher_fields(self) -> None:
+        trainer = self._make_trainer(with_teacher_fields=True)
+        data_groups = self._build_data_groups()
+        samples = [sample for group in data_groups for sample in group]
+        total_len = sum(len(s.prompt_ids) + len(s.response_ids) - 1 for s in samples)
+
+        data_batches, _ = self._prepare(trainer, data_groups, pack_max_length=total_len)
+        packed = self._pack_and_extract(data_batches, total_len)
+
+        self._assert_real_token_alignment(samples, packed, total_len, total_len)
+        self.assertEqual(len(packed["teacher_logprobs"]), total_len)
+        self.assertEqual(len(packed["target_token_ids"]), total_len)
+        self.assertEqual(len(packed["teacher_indices"]), total_len)
 
 
 if __name__ == "__main__":

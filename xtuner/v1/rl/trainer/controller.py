@@ -28,6 +28,19 @@ class ColateItem(TypedDict):
     teacher_indices: NotRequired[torch.Tensor | None]
 
 
+class PackedBatch(TypedDict):
+    """Output of ``TrainingController._packing``: samples concatenated into one
+    sequence."""
+
+    seq_ctx: SequenceContext
+    shifted_labels: torch.Tensor
+    advantages: torch.Tensor
+    rollout_logprobs: torch.Tensor | None
+    teacher_logprobs: torch.Tensor | None
+    target_token_ids: torch.Tensor | None
+    teacher_indices: torch.Tensor | None
+
+
 def _summarize_process_group_results(results: list[dict[str, Any]]) -> str:
     if not results:
         return "ranks=0"
@@ -49,6 +62,25 @@ def _summarize_process_group_results(results: list[dict[str, Any]]) -> str:
     if result_errors:
         summary += f", errors={len(result_errors)}, first_error={result_errors[0]}"
     return summary
+
+
+def _verify_packed_alignment(packed_batch: PackedBatch) -> None:
+    # Position-wise fields must stay aligned with input_ids; a mismatch would silently shift
+    # the element-wise policy loss or crash on shape mismatch in the loss function.
+    assert packed_batch["seq_ctx"].input_ids is not None
+    seq_len = packed_batch["seq_ctx"].input_ids.shape[1]
+    shifted_labels = packed_batch["shifted_labels"]
+    advantages = packed_batch["advantages"]
+    assert shifted_labels.shape[1] == seq_len, f"{shifted_labels.shape[1]} vs {seq_len}"
+    assert advantages.shape[1] == seq_len, f"{advantages.shape[1]} vs {seq_len}"
+    for field_name, optional_field in (
+        ("rollout_logprobs", packed_batch["rollout_logprobs"]),
+        ("teacher_logprobs", packed_batch["teacher_logprobs"]),
+        ("target_token_ids", packed_batch["target_token_ids"]),
+        ("teacher_indices", packed_batch["teacher_indices"]),
+    ):
+        if optional_field is not None:
+            assert optional_field.shape[1] == seq_len, f"{field_name}: {optional_field.shape[1]} vs {seq_len}"
 
 
 class TrainingController:
@@ -222,17 +254,17 @@ class TrainingController:
             if teacher_indices_list is not None:
                 teacher_indices = torch.cat(teacher_indices_list, dim=1)  # (1, max_len)
 
-            packed_data_batches.append(
-                {
-                    "seq_ctx": seq_ctx,
-                    "shifted_labels": shifted_labels,
-                    "advantages": advantages,
-                    "rollout_logprobs": rollout_logprobs,
-                    "teacher_logprobs": teacher_logprobs,
-                    "target_token_ids": target_token_ids,
-                    "teacher_indices": teacher_indices,
-                }
-            )
+            packed_batch = {
+                "seq_ctx": seq_ctx,
+                "shifted_labels": shifted_labels,
+                "advantages": advantages,
+                "rollout_logprobs": rollout_logprobs,
+                "teacher_logprobs": teacher_logprobs,
+                "target_token_ids": target_token_ids,
+                "teacher_indices": teacher_indices,
+            }
+            _verify_packed_alignment(packed_batch)
+            packed_data_batches.append(packed_batch)
         return packed_data_batches
 
     def _grouped_by_max_length(self, packed_data_batches):
