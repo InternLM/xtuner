@@ -24,7 +24,6 @@ Environment variables:
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import List
 
 import torch
 
@@ -97,7 +96,7 @@ def _counts_list(m_splits: torch.Tensor | list[int], groups: int) -> list[int]:
 
 @torch.library.custom_op("xtuner_te::grouped_gemm", mutates_args=())
 def _native_grouped_op(
-    weights: List[torch.Tensor], tokens: torch.Tensor, counts: torch.Tensor, layout: int
+    weights: list[torch.Tensor], tokens: torch.Tensor, counts: torch.Tensor, layout: int
 ) -> torch.Tensor:
     layout_name = "TN" if layout == 0 else "NN"
     return _grouped_tn_nn(weights, tokens.contiguous(), counts, layout_name, grad=layout == 1)
@@ -105,7 +104,7 @@ def _native_grouped_op(
 
 @_native_grouped_op.register_fake
 def _native_grouped_fake(
-    weights: List[torch.Tensor], tokens: torch.Tensor, counts: torch.Tensor, layout: int
+    weights: list[torch.Tensor], tokens: torch.Tensor, counts: torch.Tensor, layout: int
 ) -> torch.Tensor:
     out_features = weights[0].shape[0] if layout == 0 else weights[0].shape[1]
     return torch.empty((tokens.shape[0], out_features), device=tokens.device, dtype=tokens.dtype)
@@ -116,7 +115,7 @@ def _native_wgrad_op(
     input_act: torch.Tensor,
     grad_output: torch.Tensor,
     counts: torch.Tensor,
-    out: List[torch.Tensor],
+    out: list[torch.Tensor],
 ) -> None:
     _grouped_nt(input_act, grad_output, counts, out)
 
@@ -126,13 +125,13 @@ def _native_wgrad_fake(
     input_act: torch.Tensor,
     grad_output: torch.Tensor,
     counts: torch.Tensor,
-    out: List[torch.Tensor],
+    out: list[torch.Tensor],
 ) -> None:
     return None
 
 
 def _grouped_tn_nn(
-    weights: List[torch.Tensor],
+    weights: list[torch.Tensor],
     tokens: torch.Tensor,
     counts: torch.Tensor,
     layout: str,
@@ -158,7 +157,7 @@ def _grouped_nt(
     input_act: torch.Tensor,
     grad_output: torch.Tensor,
     counts: torch.Tensor,
-    out: List[torch.Tensor],
+    out: list[torch.Tensor],
 ) -> None:
     _require_package()
     m_splits = _counts_list(counts, len(out))
