@@ -147,6 +147,18 @@ class GenericDispatcher(
         """
         return layer_inputs, [None] * len(layer_inputs)
 
+    def prepare_microbatch_input(
+        self,
+        hidden_states: torch.Tensor,
+        layer_state: object | None,
+    ) -> torch.Tensor:
+        """Prepare one branch immediately before its attention forward.
+
+        Keep per-branch autograd nodes here when their creation order must
+        follow the microbatch loop, rather than preparing all nodes upfront.
+        """
+        return hidden_states
+
     @abstractmethod
     def dispatch(
         self,

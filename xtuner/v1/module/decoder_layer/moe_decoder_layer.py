@@ -468,6 +468,7 @@ class MoEDecoderLayer(nn.Module):
     ) -> MoEDecoderLayerOutput:
         layer_inputs, layer_states = self.dispatcher.prepare_layer_inputs([hidden_states])
         hidden_states, layer_state = layer_inputs[0], layer_states[0]
+        hidden_states = self.dispatcher.prepare_microbatch_input(hidden_states, layer_state)
         residual, hidden_states, router_results, attn_outputs = self._pre_moe_forward(
             hidden_states=hidden_states,
             seq_ctx=seq_ctx,
@@ -619,6 +620,7 @@ class MoEDecoderLayer(nn.Module):
             seq_ctx_list,
             position_embeddings_list,
         ):
+            hidden_states = self.dispatcher.prepare_microbatch_input(hidden_states, layer_state)
             residual, hidden_states, router_results, attn_outputs = self._pre_moe_forward(
                 hidden_states=hidden_states,
                 seq_ctx=seq_ctx,
