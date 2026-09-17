@@ -158,6 +158,7 @@ class SGLangWorker(RolloutWorker):
                         placement_group_bundle_idxs=engine_bundle_idxs[node_bundle_start:node_bundle_end],
                         accepts_rollout_requests=node_rank == 0,
                         weight_update_ranks=engine_ranks if node_rank == 0 else (),
+                        inference_engine_ranks=engine_ranks,
                         node_rank=node_rank,
                         nnodes=nnodes,
                     )

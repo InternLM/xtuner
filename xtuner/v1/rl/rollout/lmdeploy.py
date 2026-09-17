@@ -178,6 +178,7 @@ class LMDeployWorker(RolloutWorker):
                                 worker_rank=engine_ranks[0],
                                 placement_group_bundle_idxs=engine_bundle_idxs,
                                 weight_update_ranks=engine_ranks,
+                                inference_engine_ranks=engine_ranks,
                             ),
                         ),
                     )
@@ -201,6 +202,7 @@ class LMDeployWorker(RolloutWorker):
                                 worker_rank=server_rank,
                                 placement_group_bundle_idxs=(bundle_idx,),
                                 weight_update_ranks=(server_rank,),
+                                inference_engine_ranks=engine_ranks,
                             )
                             for server_rank, bundle_idx in engine_meta
                         ),
