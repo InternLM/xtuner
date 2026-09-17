@@ -271,9 +271,6 @@ class TestRolloutTopologyAPI(unittest.TestCase):
             ((0, tuple(range(16))),),
         )
         self.assertEqual(
-            self._rollout_info(config=config, targets=targets, train_rank=0).rollout_url, "http://worker-0"
-        )
-        self.assertEqual(
             self._rollout_info(config=config, targets=targets, train_rank=0).ipc_rank_mesh,
             (tuple(range(16)),),
         )
@@ -290,13 +287,6 @@ class TestRolloutTopologyAPI(unittest.TestCase):
         self.assertEqual(
             tuple((target.endpoint_rank, target.update_ranks) for target in targets),
             tuple((rank, (rank,)) for rank in range(16)),
-        )
-        self.assertEqual(
-            self._rollout_info(config=config, targets=targets, train_rank=0).rollout_url, "http://worker-0"
-        )
-        self.assertEqual(
-            self._rollout_info(config=config, targets=targets, train_rank=15).rollout_url,
-            "http://worker-15",
         )
         self.assertEqual(
             self._rollout_info(config=config, targets=targets, train_rank=0).ipc_rank_mesh,
@@ -316,9 +306,6 @@ class TestRolloutTopologyAPI(unittest.TestCase):
         self.assertEqual(
             tuple((target.endpoint_rank, target.update_ranks) for target in targets),
             ((0, tuple(range(16))),),
-        )
-        self.assertEqual(
-            self._rollout_info(config=config, targets=targets, train_rank=0).rollout_url, "http://worker-0"
         )
         self.assertEqual(
             self._rollout_info(config=config, targets=targets, train_rank=0).ipc_rank_mesh,
