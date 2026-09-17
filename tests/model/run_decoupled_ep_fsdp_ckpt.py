@@ -11,102 +11,35 @@ For every mode:
 Optionally the step-5 DCP checkpoint of one layout is loaded into another layout
 (``--cross-load SRC:DST``) to check DCP resharding across the switch.
 
+The pytest gate for these checks lives in ``tests/engine/test_decoupled_ep_fsdp_train_engine.py``;
+this script writes the JSON behind the markdown report.
+
     torchrun --nproc-per-node 8 tests/model/run_decoupled_ep_fsdp_ckpt.py \\
         --modes A:ep=1 C:ep=8,decouple=1 C4:ep=4,decouple=1 H41:ep=4,decouple=1,hsdp=4 --out /tmp/l3
 """
 
 import argparse
-import gc
 import json
 import os
 import shutil
-import sys
 from pathlib import Path
 from typing import Any
 
 import torch
 import torch.distributed as dist
-from safetensors.torch import load_file
+from safetensors.torch import save_file
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run_decoupled_ep_fsdp_numerics import build_hf_checkpoint, make_batch, parse_mode  # noqa: E402
-
-from xtuner.v1.config import AdamWConfig, FSDPConfig  # noqa: E402
-from xtuner.v1.engine.train_engine import TrainEngine  # noqa: E402
-from xtuner.v1.model.moe.qwen3 import Qwen3MoEConfig  # noqa: E402
-
-
-def build_engine(mode: dict[str, Any], hf_path: Path, tag: str) -> TrainEngine:
-    model_cfg = Qwen3MoEConfig.from_hf(hf_path)
-    model_cfg.ep_size = mode["ep"]
-    model_cfg.dispatcher = "all2all"
-    model_cfg.compile_cfg = False
-    model_cfg.mesh_prefix = f"ckpt_{mode['name']}_{tag}"
-    fsdp_cfg = FSDPConfig(
-        ep_size=mode["ep"],
-        decouple_ep_fsdp=mode["decouple"],
-        hsdp_sharding_size=mode["hsdp"],
-        torch_compile=False,
-    )
-    return TrainEngine(model_cfg=model_cfg, optim_cfg=AdamWConfig(lr=1e-4), fsdp_cfg=fsdp_cfg)
-
-
-def train(engine: TrainEngine, steps: range, vocab_size: int, seq_len: int) -> list[float]:
-    losses = []
-    for step in steps:
-        info = engine.train_step([make_batch(step, dist.get_rank(), vocab_size, seq_len)])
-        grad_norm = engine.clip_grad_norm()
-        engine.step_optimizer(grad_norm)
-        losses.append(float(info["logs_info"]["reduced_llm_loss"]))
-    return losses
-
-
-def load_hf_dir(path: Path) -> dict[str, torch.Tensor]:
-    tensors: dict[str, torch.Tensor] = {}
-    for file in sorted(path.glob("*.safetensors")):
-        tensors.update(load_file(str(file)))
-    return tensors
-
-
-def compare_hf(lhs: Path, rhs: Path) -> dict[str, Any]:
-    a = load_hf_dir(lhs)
-    b = load_hf_dir(rhs)
-    missing = sorted(set(a) - set(b))
-    extra = sorted(set(b) - set(a))
-    max_abs = 0.0
-    max_rel = 0.0
-    mismatched = 0
-    total = 0
-    worst = ""
-    for key in sorted(set(a) & set(b)):
-        x = a[key].to(torch.float32)
-        y = b[key].to(torch.float32)
-        if x.shape != y.shape:
-            return {"error": f"shape mismatch for {key}: {tuple(x.shape)} vs {tuple(y.shape)}"}
-        diff = (x - y).abs()
-        cur = float(diff.max())
-        if cur > max_abs:
-            max_abs, worst = cur, key
-        max_rel = max(max_rel, float((diff / x.abs().clamp_min(1e-6)).max()))
-        mismatched += int((diff > 0).sum())
-        total += diff.numel()
-    return {
-        "keys": len(set(a) & set(b)),
-        "missing_in_rhs": missing[:5],
-        "extra_in_rhs": extra[:5],
-        "max_abs_diff": max_abs,
-        "max_rel_diff": max_rel,
-        "mismatched_elements": mismatched,
-        "total_elements": total,
-        "worst_key": worst,
-    }
-
-
-def release(engine: TrainEngine) -> None:
-    del engine
-    gc.collect()
-    torch.cuda.empty_cache()
+from xtuner._testing.decoupled_ep_fsdp import (
+    build_engine,
+    build_hf_checkpoint,
+    compare_hf,
+    load_hf_dir,
+    max_rel_diff,
+    parse_mode,
+    release,
+    train,
+)
+from xtuner.v1.model.moe.qwen3 import Qwen3MoEConfig
 
 
 def main() -> None:
@@ -134,8 +67,6 @@ def main() -> None:
     src_bf16 = out / "source_bf16"
     if rank == 0:
         src_bf16.mkdir(exist_ok=True)
-        from safetensors.torch import save_file
-
         tensors = {k: v.to(torch.bfloat16).contiguous() for k, v in load_hf_dir(hf_dir).items()}
         save_file(tensors, str(src_bf16 / "model.safetensors"))
     dist.barrier()
@@ -152,7 +83,7 @@ def main() -> None:
         if rank == 0:
             print(f"===== {mode}", flush=True)
 
-        engine = build_engine(mode, hf_dir, "main")
+        engine = build_engine(mode, hf_dir, "ckpt_main")
         engine.from_hf(hf_path=hf_dir, strict=True)
         engine.save_hf(str(mode_dir / "hf_step0"))
         dist.barrier()
@@ -168,7 +99,7 @@ def main() -> None:
         dist.barrier()
         release(engine)
 
-        resumed = build_engine(mode, hf_dir, "resume")
+        resumed = build_engine(mode, hf_dir, "ckpt_resume")
         resumed.load_dcp(mode_dir / "dcp_step5")
         losses_resumed = train(resumed, range(5, 10), vocab_size, args.seq_len)
         resumed.save_hf(str(mode_dir / "hf_step10_resumed"))
@@ -178,9 +109,7 @@ def main() -> None:
         entry["losses_steps_0_4"] = losses_first
         entry["losses_steps_5_9_continuous"] = losses_cont
         entry["losses_steps_5_9_resumed"] = losses_resumed
-        entry["resume_max_rel_loss_diff"] = max(
-            abs(a - b) / abs(b) for a, b in zip(losses_resumed, losses_cont, strict=True)
-        )
+        entry["resume_max_rel_loss_diff"] = max_rel_diff(losses_resumed, losses_cont)
         if rank == 0:
             entry["hf_step10_resumed_vs_continuous"] = compare_hf(
                 mode_dir / "hf_step10", mode_dir / "hf_step10_resumed"
@@ -200,14 +129,14 @@ def main() -> None:
         dst_mode = next(m for m in modes if m["name"] == dst)
         if rank == 0:
             print(f"===== cross load {src} -> {dst}", flush=True)
-        engine = build_engine(dst_mode, hf_dir, f"cross_{src}")
+        engine = build_engine(dst_mode, hf_dir, f"ckpt_cross_{src}")
         engine.load_dcp(out / src / "dcp_step5")
         losses = train(engine, range(5, 10), vocab_size, args.seq_len)
         release(engine)
         ref = report["modes"][src]["losses_steps_5_9_continuous"]
         report["cross_load"][pair] = {
             "losses_steps_5_9": losses,
-            "max_rel_loss_diff_vs_src_continuous": max(abs(a - b) / abs(b) for a, b in zip(losses, ref, strict=True)),
+            "max_rel_loss_diff_vs_src_continuous": max_rel_diff(losses, ref),
         }
 
     if rank == 0:
