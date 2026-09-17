@@ -18,7 +18,7 @@ flowchart LR
 |---|---|---|
 | routed expert | `Shard(0)` on `ep`，再 FSDP over `fsdp` | 正确，且与新路径数学同构 |
 | dense（attention / router / shared expert / embedding / lm_head） | `Replicate()` on `ep`（`_replicate_other_params`），再 FSDP over `fsdp` | 参数、梯度、优化器状态在 EP 维复制 `ep` 份；每步一次额外的 coalesced all-reduce 补梯度 |
-| HSDP | `assert ep_size == 1` | HSDP 与 EP 不能共存 |
+| HSDP | 要求 `ep_size == 1`（`FSDPConfig` 校验） | HSDP 与 EP 不能共存 |
 
 EP 越大，dense 侧越亏。以 GLM-5.2-30B 单机 8 卡为例，EP=8 时每卡保存一份完整的 dense 参数与 fp32 优化器状态，legacy 路径 EP=8 的 reserved 显存顶到约 132 GiB 的 allocator 上限（allocated 峰值 120 GiB），每步触发 allocator 释放重试，步时退化到 EP=4 的 7 倍（见 §5）。
 
@@ -50,29 +50,34 @@ expert    : Shard(0) over ep  +  FSDP over efsdp             (+ replicate 上 HS
 
 ## 3. 实现
 
-各小节的"位置"行给出文件与行号，行号对应分支 `feat/decouple-ep-fsdp` 的代码提交 `5923dc1d`（2026-09-03）。
+各小节的"位置"行给出文件与行号，行号对应分支 `feat/decouple-ep-fsdp` 的代码提交 `0a7c6523`（2026-09-17，基于 upstream/main `6c06f96e`）。
 
 ### 3.1 配置与校验
 
-位置：`xtuner/v1/config/fsdp.py` 48–65，`xtuner/v1/model/moe/moe.py` 1665–1678。
+位置：`xtuner/v1/config/fsdp.py` 44–73，`xtuner/v1/model/moe/moe.py` 1764–1771。
 
 ```python
 # xtuner/v1/config/fsdp.py
 decouple_ep_fsdp: bool = False          # 默认关闭，旧路径不受影响
 
-def model_post_init(self, __context):
+@model_validator(mode="after")
+def _validate_ep_fsdp_topology(self):
+    # ValueError（pydantic 包装为 ValidationError），不是 assert：python -O 下同样生效
+    if self.ep_size < 1 or (self.hsdp_sharding_size is not None and self.hsdp_sharding_size < 1):
+        raise ValueError(...)                                    # 必须是正整数
     if self.hsdp_sharding_size is not None:
         if self.decouple_ep_fsdp:
-            assert self.hsdp_sharding_size % self.ep_size == 0   # 必须存在整数 efsdp
-        else:
-            assert self.ep_size == 1                             # 旧断言只在旧路径保留
+            if self.hsdp_sharding_size % self.ep_size != 0:      # 必须存在整数 efsdp
+                raise ValueError(...)
+        elif self.ep_size != 1:                                  # 旧约束只在旧路径保留
+            raise ValueError(...)
 ```
 
-`MoE._init_decoupled_device_mesh` 再次校验 `world_size % dp_shard == 0` 与 `dp_shard % ep_size == 0`。ExpertTP（`expert_tp_size > 1`）与解耦同时开启时抛 `NotImplementedError`，ETP 的 `(Shard, InterleavedShard)` 二维 placement 需要单独设计 mesh 维。
+`MoE._init_decoupled_device_mesh` 再次校验 `world_size % dp_shard == 0` 与 `dp_shard % ep_size == 0`，同样抛 `ValueError`。ExpertTP（`expert_tp_size > 1`）与解耦同时开启时抛 `NotImplementedError`，ETP 的 `(Shard, InterleavedShard)` 二维 placement 需要单独设计 mesh 维。
 
 ### 3.2 单一 root mesh
 
-位置：`xtuner/v1/model/moe/moe.py` 1651–1716（`_init_decoupled_device_mesh`），1486–1492（分流）。
+位置：`xtuner/v1/model/moe/moe.py` 1743–1808（`_init_decoupled_device_mesh`），1576–1581（分流）。
 
 ```python
 # xtuner/v1/model/moe/moe.py::_init_decoupled_device_mesh（节选）
@@ -107,7 +112,7 @@ else:
 
 ### 3.3 两级 `fully_shard`
 
-位置：`xtuner/v1/model/moe/moe.py` 1194–1225（decoder layer），1250–1260（prefetch），1328–1360（MTP），1631–1649（helper）。
+位置：`xtuner/v1/model/moe/moe.py` 1310–1342（decoder layer），1370–1380（prefetch），1419–1451（MTP），1723–1741（helper）。
 
 ```python
 # xtuner/v1/model/moe/moe.py::fully_shard（节选）
@@ -140,7 +145,7 @@ def _fully_shard_expert_blocks(self, module, mp_policy, reshard_after_forward):
 
 ### 3.4 梯度归约
 
-位置：`xtuner/v1/model/moe/moe.py` 1392–1396（分流），1583–1629（`_scale_and_reduce_grad_decoupled`）。
+位置：`xtuner/v1/model/moe/moe.py` 1482–1486（分流），1673–1722（`_scale_and_reduce_grad_decoupled`）。
 
 不变式：每个参数的最终梯度等于全 data-parallel world 上的均值，与 `ep` / `efsdp` 取值无关。
 
@@ -178,7 +183,7 @@ for group, grads in grads_by_group.items():   # 每个 group 一次 coalesced al
 
 ### 3.5 FP8
 
-位置：`xtuner/v1/float8/float8_handler.py` 121–161、166–239、316–335；`xtuner/v1/float8/fsdp_utils.py` 127–137；`xtuner/v1/model/moe/moe.py` 1165–1176；`xtuner/v1/model/base.py` 1015。
+位置：`xtuner/v1/float8/float8_handler.py` 121–164、166–238、316–335；`xtuner/v1/float8/fsdp_utils.py` 127–137；`xtuner/v1/model/moe/moe.py` 1281–1292；`xtuner/v1/model/base.py` 1015。
 
 tile-wise FP8 需要知道每个本地权重会被多少个 FSDP rank 切分（决定 padding），以及 scale 的 reduce-max 应跨哪些 rank。解耦后 dense 与 expert 的答案不同：
 
@@ -207,7 +212,7 @@ self.expert_tilewise_reduce_mesh_mapping = self._build_strided_reduce_mesh_mappi
 
 ### 3.6 HF 权重与 DCP
 
-位置：无代码改动。依赖 `xtuner/v1/utils/load_spec.py` 的 `LoadSpec.from_tensor`、`RuntimeLayout.from_dtensor`、`plan_hf_save`；验证脚本 `tests/model/run_decoupled_ep_fsdp_ckpt.py`。
+位置：无代码改动。依赖 `xtuner/v1/utils/load_spec.py` 的 `LoadSpec.from_tensor`、`RuntimeLayout.from_dtensor`、`plan_hf_save`；验证用例 `tests/engine/test_decoupled_ep_fsdp_train_engine.py::TestDecoupledEpFsdpCheckpoint`，实验脚本 `tests/model/run_decoupled_ep_fsdp_ckpt.py`。
 
 `LoadSpec.from_tensor` 直接从 DTensor placement 记录 shard 历史，新 placement 无需特殊处理：
 
@@ -224,7 +229,7 @@ dense（解耦 + HSDP）
 
 ### 3.7 RL 权重同步
 
-位置：`xtuner/v1/model/base.py` 1916–1947；`xtuner/v1/rl/weight_update/weight_iterator.py` 140–149、196–208、236–247；测试 `tests/rl/test_weight_iterator.py` 234–418。
+位置：`xtuner/v1/model/base.py` 1916–1947；`xtuner/v1/rl/weight_update/weight_iterator.py` 142–151、198、207–230、240–249；测试 `tests/rl/test_weight_iterator.py` 237–427。
 
 Turbomind 的 layer-wise 更新只 gather FSDP shard、保留 EP-local 的 expert 切片。`BaseModel._fsdp_foreach_allgather` 按每个 `LoadSpec` 选择 gather group：
 
@@ -267,13 +272,13 @@ def _param_owner(model, name):
 
 | 项目 | 证据 | 边界 | 链接 |
 |---|---|---|---|
-| mesh / placement / 两级 FSDP（L0） | fake-PG 下 8/16/64 rank 共 29 例；旧布局在开关关闭时逐项固定 | 需要一张空闲 GPU 建 CUDA context，不通信 | [test_decoupled_ep_fsdp_mesh.py](../../tests/model/test_decoupled_ep_fsdp_mesh.py)、[baseline.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/baseline.md) |
-| BF16 训练语义（L1） | tiny Qwen3-MoE 50 步：解耦 EP8 vs 旧 EP8 loss 最大相对差 `1.9e-5`（旧 EP8 vs EP1 为 `2.5e-5`）；3.4B 模型每卡 dense 参数 836 → 105 MiB，峰值 allocated 11861 → 8203 MiB，步时 170 → 158 ms | 单机；reduction order 不同，不是逐 bit 相同 | [L1.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/L1.md)、[run_decoupled_ep_fsdp_numerics.py](../../tests/model/run_decoupled_ep_fsdp_numerics.py) |
-| `efsdp > 1`、HSDP + EP（L2） | 单机缩比拓扑 `(1,2,4)`、`(2,1,4)`、`(2,2,2)` 均在噪声内；16/64 rank 形状由 L0 固定 | 真正的双节点 collective 未跑 | [L2.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/L2.md)、[decisions.md D10](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/decisions.md) |
-| HF / DCP（L3） | 刚 `from_hf` 后导出 807 个 key 全部 bit-exact；DCP 同布局 resume 与跨布局 reshard 后 loss 连续 | 未覆盖 async save、FP8 checkpoint、GLM/MTP 导出、world size 变化 | [L3.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/L3.md)、[run_decoupled_ep_fsdp_ckpt.py](../../tests/model/run_decoupled_ep_fsdp_ckpt.py) |
+| mesh / placement / 两级 FSDP（L0） | fake-PG 下 8/16/64 rank 共 31 例（含配置校验与运行时校验的回归）；旧布局在开关关闭时逐项固定 | 需要一张空闲 GPU 建 CUDA context，不通信 | [test_decoupled_ep_fsdp_mesh.py](../../tests/model/test_decoupled_ep_fsdp_mesh.py)、[baseline.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/baseline.md) |
+| BF16 训练语义（L1） | tiny Qwen3-MoE 50 步：解耦 EP8 vs 旧 EP8 loss 最大相对差 `1.9e-5`（旧 EP8 vs EP1 为 `2.5e-5`）；3.4B 模型每卡 dense 参数 836 → 105 MiB，峰值 allocated 11861 → 8203 MiB，步时 170 → 158 ms | 单机；reduction order 不同，不是逐 bit 相同 | [test_decoupled_ep_fsdp_train_engine.py](../../tests/engine/test_decoupled_ep_fsdp_train_engine.py)（8 卡 gate：loss 相对差 ≤ 1e-3、总/逐参数梯度范数 ≤ 1e-2、每卡参数显存 ±25%）、[L1.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/L1.md)、[run_decoupled_ep_fsdp_numerics.py](../../tests/model/run_decoupled_ep_fsdp_numerics.py) |
+| `efsdp > 1`、HSDP + EP（L2） | 单机缩比拓扑 `(1,2,4)`、`(2,1,4)`、`(2,2,2)` 均在噪声内；16/64 rank 形状由 L0 固定 | 真正的双节点 collective 未跑 | [test_decoupled_ep_fsdp_train_engine.py](../../tests/engine/test_decoupled_ep_fsdp_train_engine.py)（同上阈值，拓扑 `(1,2,4)`、`(2,1,4)`、`(2,2,2)`）、[L2.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/L2.md)、[decisions.md D10](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/decisions.md) |
+| HF / DCP（L3） | 刚 `from_hf` 后导出 807 个 key 全部 bit-exact；DCP 同布局 resume 与跨布局 reshard 后 loss 连续 | 未覆盖 async save、FP8 checkpoint、GLM/MTP 导出、world size 变化 | [test_decoupled_ep_fsdp_train_engine.py](../../tests/engine/test_decoupled_ep_fsdp_train_engine.py)（8 卡 gate：step-0 导出逐 bit 相同、resume 与跨布局 loss 相对差 ≤ 1e-3、导出差异 ≤ 数个 bf16 ulp）、[L3.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/L3.md)、[run_decoupled_ep_fsdp_ckpt.py](../../tests/model/run_decoupled_ep_fsdp_ckpt.py) |
 | FP8 | 3.4B 与 GLM-5.2 tile-wise FP8 训练 20 步稳定，差异量级接近同配置重复噪声 | FP8 + HSDP、FP8 + checkpoint 未测 | [L3.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/L3.md)、[GLM52.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/GLM52.md) |
 | GLM-5.2-30B，8×H200 目标配方 | EP4：1.688 s / 99.5 GiB → 1.658 s / 83.5 GiB；EP8：11.8 s / 120.0 GiB → 1.64 s / 76.3 GiB | EP8 的加速来自离开 allocator 上限（legacy 每步 2–3 次 alloc retry，解耦为 0），不是 collective 本身快 7 倍 | [GLM52.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/GLM52.md) |
-| RL 权重同步 | plain MoE 的 per-spec gather 逻辑成立；compose 的 owner 错误已修复并有单测 | 未做真实 Turbomind 端到端对拍 | [test_weight_iterator.py](../../tests/rl/test_weight_iterator.py#L234-L418) |
+| RL 权重同步 | plain MoE 的 per-spec gather 逻辑成立；compose 的 owner 错误已修复并有单测 | 未做真实 Turbomind 端到端对拍 | [test_weight_iterator.py](../../tests/rl/test_weight_iterator.py#L237-L427) |
 | legacy 兼容 | 开关默认关闭，旧分支执行逻辑未改动，L0 旧布局回归通过 | 未做 base-vs-branch 端到端逐 tensor 对照 | [baseline.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/baseline.md)、[decisions.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/decisions.md) |
 
 `reports/` 下的报告不随代码 PR 合入，链接指向 fork 分支 `feat/decouple-ep-fsdp` 上的固定地址；测试与脚本是仓库内相对链接。
@@ -311,9 +316,7 @@ def _param_owner(model, name):
 
 ### 6.3 其它
 
-- 新拓扑约束目前用 `assert`，应改为 Pydantic validator + `ValueError`。
 - 两次不同 mesh 的 `fully_shard` 与 `DeviceMesh._flatten(name)` 只在 torch 2.8 / 2.9 验证；`pyproject.toml` 声明 `torch>=2.6`，需要补 CI 或为该开关声明更高的最低版本。
-- L1–L3 是人工实验脚本（写 JSON、打印统计），不是会失败的 pytest gate。
 - ExpertTP 与解耦互斥；expert dim-1 分片、`shard_placement_fn` 单次包装留作优化。
 
 ## 7. 开放问题（请架构师决策）
@@ -343,10 +346,10 @@ expert_fsdp = False（新增）: Shard(0) on ep + Replicate on (replicate, efsdp
 
 ## 8. 合入建议
 
-按 torchtitan 的演进顺序拆分：
+PR 的提交按 torchtitan 的演进顺序排列，维护者若希望拆分，可按同一顺序切分：
 
 1. 基础解耦：配置开关、root mesh、两级 `fully_shard`、梯度归约、L0 fake-PG 测试；
 2. 生态：FP8 per-class padding / reduce mesh、`LoadSpec` 驱动的 HF / DCP、RL per-spec gather 与 compose owner 修复；
 3. 文档与后续：本文、§6 的限制项。
 
-`decouple_ep_fsdp` 默认 `False`，两个代码 PR 都不改动旧路径的执行逻辑，出问题时一键回退。
+`decouple_ep_fsdp` 默认 `False`，所有代码提交都不改动旧路径的执行逻辑，出问题时一键回退。
