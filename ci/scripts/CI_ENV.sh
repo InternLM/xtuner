@@ -46,4 +46,5 @@ if [[ $TORCH_VERSION == "2.9.1" ]]; then
     pip install nvidia-cudnn-cu12==9.15.1.9
 fi
 
+LM_DEPLOY=/mnt/shared-storage-user/llmrazor-share/shipengcheng/dev/lmdeploy
 export PYTHONPATH=${LM_DEPLOY}:$PYTHONPATH
