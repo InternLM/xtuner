@@ -4,6 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
+from xtuner.v1.float8.triton_kernels.quantization import quantize_per_block, quantize_per_row
+
 from .dual_layout_quant import _group_metadata
 
 
@@ -72,11 +74,8 @@ def _swiglu_per_tile_quant_with_trans_per_block_kernel(
     silu = (gate * tl.sigmoid(gate)).to(tl.bfloat16)
     act = (silu.to(tl.float32) * up).to(tl.bfloat16).to(tl.float32)
 
-    reciprocal_fp8_max = 1.0 / FP8_MAX
-    row_scale = tl.max(tl.abs(act), axis=1) * reciprocal_fp8_max
-    row_scale = tl.clamp(row_scale, 1e-12, 3e38)
-    row_output = act / row_scale[:, None]
-    row_output = tl.clamp(row_output, FP8_MIN, FP8_MAX).to(row_output_ptr.dtype.element_ty)
+    row_output, row_scale = quantize_per_row(act, FP8_MIN, FP8_MAX)
+    row_output = row_output.to(row_output_ptr.dtype.element_ty)
 
     row_output_offsets = (
         row_output_ptr
@@ -91,10 +90,8 @@ def _swiglu_per_tile_quant_with_trans_per_block_kernel(
     tl.store(row_output_offsets, row_output, mask=input_mask)
     tl.store(row_scale_offsets, row_scale, mask=token_mask)
 
-    trans_scale = tl.max(tl.max(tl.abs(act), axis=0), axis=0) / FP8_MAX
-    trans_scale = tl.clamp(trans_scale, 1e-12, 3e38)
-    trans_output = act / trans_scale
-    trans_output = tl.clamp(trans_output, FP8_MIN, FP8_MAX).trans(1, 0).to(trans_output_ptr.dtype.element_ty)
+    trans_output, trans_scale = quantize_per_block(act, FP8_MIN, FP8_MAX)
+    trans_output = trans_output.trans(1, 0).to(trans_output_ptr.dtype.element_ty)
 
     trans_output_offsets = (
         trans_output_ptr
@@ -179,4 +176,3 @@ def _(
     trans_scales = gate_up.new_empty((n // group_size, m_expand // group_size), dtype=torch.float32)
     size_per_group_expand = torch.empty_like(size_per_group)
     return row_output, row_scales, trans_output, trans_scales, size_per_group_expand
-

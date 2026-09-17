@@ -30,12 +30,6 @@ from xtuner.v1.ops.act_fn import native_swiglu
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
-def _assert_equal(actual: torch.Tensor, expected: torch.Tensor, name: str) -> None:
-    assert actual.shape == expected.shape, f"{name}: shape {actual.shape} != {expected.shape}"
-    assert actual.dtype == expected.dtype, f"{name}: dtype {actual.dtype} != {expected.dtype}"
-    assert torch.equal(actual, expected), f"{name}: values differ"
-
-
 def _assert_bitwise_equal(actual: torch.Tensor, expected: torch.Tensor, name: str) -> None:
     assert actual.shape == expected.shape, f"{name}: shape {actual.shape} != {expected.shape}"
     assert actual.dtype == expected.dtype, f"{name}: dtype {actual.dtype} != {expected.dtype}"
@@ -113,11 +107,11 @@ def test_swiglu_dual_layout_quant_matches_independent_kernels(
     trans_reference = trans_per_block_quant_expand_128x(act_reference, sizes)
     actual = swiglu_per_tile_quant_with_trans_per_block(gate_up, sizes)
 
-    _assert_equal(actual[0], row_reference[0], "row fp8")
-    _assert_equal(actual[1], row_reference[1], "row scales")
-    _assert_equal(actual[2], trans_reference[0], "transposed fp8")
-    _assert_equal(actual[3], trans_reference[1], "transposed scales")
-    _assert_equal(actual[4], trans_reference[2], "expanded expert sizes")
+    _assert_bitwise_equal(actual[0], row_reference[0], "row fp8")
+    _assert_bitwise_equal(actual[1], row_reference[1], "row scales")
+    _assert_bitwise_equal(actual[2], trans_reference[0], "transposed fp8")
+    _assert_bitwise_equal(actual[3], trans_reference[1], "transposed scales")
+    _assert_bitwise_equal(actual[4], trans_reference[2], "expanded expert sizes")
 
 
 @pytest.mark.parametrize(("tokens", "intermediate_size"), [(1, 128), (257, 256), (1024, 2048)])
@@ -162,8 +156,7 @@ def test_moe_block_fused_swiglu_matches_original_path() -> None:
     output_actual = block(x_actual, sizes, decoding=False)
     output_actual.backward(grad_output)
 
-    _assert_equal(output_actual, output_reference, "MoEBlock output")
-    _assert_equal(x_actual.grad, dx_reference, "MoEBlock input gradient")
-    _assert_equal(block.fused_w1w3.weight.grad, dw1w3_reference, "MoEBlock W1W3 gradient")
-    _assert_equal(block.fused_w2.weight.grad, dw2_reference, "MoEBlock W2 gradient")
-
+    _assert_bitwise_equal(output_actual, output_reference, "MoEBlock output")
+    _assert_bitwise_equal(x_actual.grad, dx_reference, "MoEBlock input gradient")
+    _assert_bitwise_equal(block.fused_w1w3.weight.grad, dw1w3_reference, "MoEBlock W1W3 gradient")
+    _assert_bitwise_equal(block.fused_w2.weight.grad, dw2_reference, "MoEBlock W2 gradient")

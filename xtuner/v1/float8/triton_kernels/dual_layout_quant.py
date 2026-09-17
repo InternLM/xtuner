@@ -4,6 +4,12 @@ import torch
 import triton
 import triton.language as tl
 
+from xtuner.v1.float8.triton_kernels.quantization import (
+    quantize_per_block,
+    quantize_per_column,
+    quantize_per_row,
+)
+
 
 @triton.jit
 def _group_metadata_kernel(
@@ -128,11 +134,8 @@ def _per_tile_quant_with_trans_per_block_kernel(
     )
     input_block = tl.load(input_offsets, mask=input_mask, other=0.0).to(tl.float32)
 
-    reciprocal_fp8_max = 1.0 / FP8_MAX
-    row_scale = tl.max(tl.abs(input_block), axis=1) * reciprocal_fp8_max
-    row_scale = tl.clamp(row_scale, 1e-12, 3e38)
-    row_output = input_block / row_scale[:, None]
-    row_output = tl.clamp(row_output, FP8_MIN, FP8_MAX).to(row_output_ptr.dtype.element_ty)
+    row_output, row_scale = quantize_per_row(input_block, FP8_MIN, FP8_MAX)
+    row_output = row_output.to(row_output_ptr.dtype.element_ty)
 
     row_output_offsets = (
         row_output_ptr
@@ -147,10 +150,8 @@ def _per_tile_quant_with_trans_per_block_kernel(
     tl.store(row_output_offsets, row_output, mask=input_mask)
     tl.store(row_scale_offsets, row_scale, mask=token_mask)
 
-    trans_scale = tl.max(tl.max(tl.abs(input_block), axis=0), axis=0) / FP8_MAX
-    trans_scale = tl.clamp(trans_scale, 1e-12, 3e38)
-    trans_output = input_block / trans_scale
-    trans_output = tl.clamp(trans_output, FP8_MIN, FP8_MAX).trans(1, 0).to(trans_output_ptr.dtype.element_ty)
+    trans_output, trans_scale = quantize_per_block(input_block, FP8_MIN, FP8_MAX)
+    trans_output = trans_output.trans(1, 0).to(trans_output_ptr.dtype.element_ty)
 
     trans_output_offsets = (
         trans_output_ptr
@@ -207,11 +208,8 @@ def _per_tile_quant_with_trans_per_tile_kernel(
     )
     input_block = tl.load(input_offsets, mask=token_mask[:, None] & hidden_mask[None, :], other=0.0).to(tl.float32)
 
-    reciprocal_fp8_max = 1.0 / FP8_MAX
-    row_scale = tl.max(tl.abs(input_block), axis=1) * reciprocal_fp8_max
-    row_scale = tl.clamp(row_scale, 1e-12, 3e38)
-    row_output = input_block / row_scale[:, None]
-    row_output = tl.clamp(row_output, FP8_MIN, FP8_MAX).to(row_output_ptr.dtype.element_ty)
+    row_output, row_scale = quantize_per_row(input_block, FP8_MIN, FP8_MAX)
+    row_output = row_output.to(row_output_ptr.dtype.element_ty)
     row_output_offsets = (
         row_output_ptr
         + token_offsets[:, None].to(tl.int64) * stride_row_output_m
@@ -225,10 +223,8 @@ def _per_tile_quant_with_trans_per_tile_kernel(
     tl.store(row_output_offsets, row_output, mask=token_mask[:, None] & hidden_mask[None, :])
     tl.store(row_scale_offsets, row_scale, mask=token_mask)
 
-    trans_scale = tl.max(tl.abs(input_block), axis=0) / FP8_MAX
-    trans_scale = tl.clamp(trans_scale, 1e-12, 3e38)
-    trans_output = input_block / trans_scale[None, :]
-    trans_output = tl.clamp(trans_output, FP8_MIN, FP8_MAX).to(trans_output_ptr.dtype.element_ty)
+    trans_output, trans_scale = quantize_per_column(input_block, FP8_MIN, FP8_MAX)
+    trans_output = trans_output.to(trans_output_ptr.dtype.element_ty)
     trans_output_offsets = (
         trans_output_ptr
         + hidden_offsets[None, :].to(tl.int64) * M_EXPAND
