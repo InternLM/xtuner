@@ -34,7 +34,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools triton
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 num_nodes: 1
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
