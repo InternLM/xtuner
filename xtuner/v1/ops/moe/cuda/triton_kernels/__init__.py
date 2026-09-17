@@ -1,9 +1,18 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from collections.abc import Callable
+
+from torch import Tensor
+
 from xtuner.v1.utils.env_check import (
     check_torch_accelerator_available,
     check_triton_available,
     get_env_not_available_func,
 )
+
+
+k_grouped_gemm: Callable[..., Tensor]
+m_grouped_gemm: Callable[..., Tensor]
+m_grouped_gemm_dual_weight: Callable[..., Tensor]
 
 
 if check_torch_accelerator_available() and check_triton_available():

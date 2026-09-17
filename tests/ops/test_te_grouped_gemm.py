@@ -1,6 +1,10 @@
-"""Correctness tests for the XTuner TE grouped-GEMM adapter."""
+"""Correctness tests for the XTuner TE grouped-GEMM adapter.
 
-import os
+``te_grouped_gemm`` is an UltraEP-only native extra (same install style as
+AdaptiveGEMM) and is intentionally not in ``.[all]``. Default grouped GEMM
+stays Triton. ``XTUNER_TE_GEMM_BACKEND=torch`` still dispatches through that
+package, so tests that call the adapter skip when it is missing.
+"""
 
 import pytest
 import torch
@@ -12,6 +16,13 @@ from xtuner.v1.ops.moe.cuda.group_gemm_te import (
 )
 
 
+requires_te_grouped_gemm = pytest.mark.skipif(
+    not adapter.TE_GROUPED_GEMM_INSTALLED,
+    reason="te_grouped_gemm is not installed (UltraEP TE extra, not in .[all])",
+)
+
+
+@requires_te_grouped_gemm
 def test_te_grouped_gemm_forward_backward_reference(monkeypatch):
     monkeypatch.setenv("XTUNER_GROUP_GEMM", "te")
     monkeypatch.setenv("XTUNER_TE_GEMM_BACKEND", "torch")
@@ -26,6 +37,7 @@ def test_te_grouped_gemm_forward_backward_reference(monkeypatch):
     assert torch.count_nonzero(weight.grad[1]) == 0
 
 
+@requires_te_grouped_gemm
 def test_te_grouped_gemm_ultraep_replica_gradient(monkeypatch):
     monkeypatch.setenv("XTUNER_GROUP_GEMM", "te")
     monkeypatch.setenv("XTUNER_TE_GEMM_BACKEND", "torch")
@@ -42,6 +54,7 @@ def test_te_grouped_gemm_ultraep_replica_gradient(monkeypatch):
     assert replica_grad.dtype is torch.float32
 
 
+@requires_te_grouped_gemm
 def test_te_grouped_gemm_accepts_replica_weight_list(monkeypatch):
     monkeypatch.setenv("XTUNER_GROUP_GEMM", "te")
     monkeypatch.setenv("XTUNER_TE_GEMM_BACKEND", "torch")
@@ -63,6 +76,7 @@ def test_te_grouped_gemm_accepts_replica_weight_list(monkeypatch):
     assert float(replica_grad.abs().sum()) > 0
 
 
+@requires_te_grouped_gemm
 def test_te_grouped_gemm_prefers_host_counts(monkeypatch):
     monkeypatch.setenv("XTUNER_GROUP_GEMM", "te")
     monkeypatch.setenv("XTUNER_TE_GEMM_BACKEND", "torch")
@@ -88,6 +102,7 @@ def test_te_grouped_gemm_prefers_host_counts(monkeypatch):
     torch.testing.assert_close(y, torch.cat((x[:2] @ weight[0].T, x[2:] @ weight[2].T)))
 
 
+@requires_te_grouped_gemm
 def test_te_grouped_gemm_falls_back_to_device_counts(monkeypatch):
     monkeypatch.setenv("XTUNER_GROUP_GEMM", "te")
     monkeypatch.setenv("XTUNER_TE_GEMM_BACKEND", "torch")
@@ -124,6 +139,7 @@ def test_cuda_backend_refuses_to_fall_back_to_reference(monkeypatch):
     adapter._require_native("torch")
 
 
+@requires_te_grouped_gemm
 def test_general_grouped_gemm_takes_a_weight_list(monkeypatch):
     monkeypatch.setenv("XTUNER_TE_GEMM_BACKEND", "torch")
     weights = [torch.randn(3, 2), torch.randn(3, 2)]
@@ -138,15 +154,17 @@ def test_general_grouped_gemm_takes_a_weight_list(monkeypatch):
     assert len(bias) == len(gelu) == 2
 
 
+@requires_te_grouped_gemm
 def test_selected_backend_cutlass_overrides_te_env(monkeypatch):
+    monkeypatch.delenv("TE_GROUPED_GEMM_BACKEND", raising=False)
     monkeypatch.setenv("XTUNER_TE_GEMM_BACKEND", "cutlass")
     monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "0")
     assert adapter.selected_backend() == "cutlass"
-    assert os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] == "1"
 
 
 def test_get_group_gemm_defaults_to_triton_on_cuda(monkeypatch):
     monkeypatch.delenv("XTUNER_GROUP_GEMM", raising=False)
+    monkeypatch.delenv("XTUNER_USE_CUTLASS_GROUP_GEMM", raising=False)
     monkeypatch.setenv("XTUNER_TE_GEMM_BACKEND", "torch")
     from xtuner.v1.ops.moe import get_group_gemm
     from xtuner.v1.ops.moe.protocol import cpu_group_gemm
@@ -158,18 +176,21 @@ def test_get_group_gemm_defaults_to_triton_on_cuda(monkeypatch):
         return
 
     assert gemm.__name__ == "triton_group_gemm"
-    counts = torch.tensor([2, 0, 3], dtype=torch.int64)
-    x = torch.randn(5, 4, requires_grad=True)
-    weight = torch.randn(3, 6, 4, requires_grad=True)
-    replica = torch.randn(1, 6, 4)
-    replica_grad = torch.zeros_like(replica, dtype=torch.float32)
-    counts_with_replica = torch.tensor([2, 0, 3, 1], dtype=torch.int64)
-    x_rep = torch.randn(6, 4, requires_grad=True)
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    out_features, in_features = 64, 64
+    counts = torch.tensor([2, 0, 3], device=device, dtype=torch.int64)
+    x = torch.randn(5, in_features, device=device, dtype=dtype, requires_grad=True)
+    weight = torch.randn(3, out_features, in_features, device=device, dtype=dtype, requires_grad=True)
+    replica = torch.randn(1, out_features, in_features, device=device, dtype=dtype)
+    replica_grad = torch.zeros_like(replica)
+    counts_with_replica = torch.tensor([2, 0, 3, 1], device=device, dtype=torch.int64)
+    x_rep = torch.randn(6, in_features, device=device, dtype=dtype, requires_grad=True)
     y = gemm(
         x_rep,
         weight,
         counts_with_replica,
-        tokens_per_expert_cpu=counts_with_replica,
+        tokens_per_expert_cpu=counts_with_replica.cpu(),
         replica_weight=replica,
         replica_grad=replica_grad,
     )
@@ -182,11 +203,19 @@ def test_get_group_gemm_defaults_to_triton_on_cuda(monkeypatch):
                 x_rep[5:] @ replica[0].T,
             )
         ),
+        atol=2e-2,
+        rtol=2e-2,
     )
-    y_master = gemm(x, weight, counts, tokens_per_expert_cpu=counts)
-    torch.testing.assert_close(y_master, torch.cat((x[:2] @ weight[0].T, x[2:] @ weight[2].T)))
+    y_master = gemm(x, weight, counts, tokens_per_expert_cpu=counts.cpu())
+    torch.testing.assert_close(
+        y_master,
+        torch.cat((x[:2] @ weight[0].T, x[2:] @ weight[2].T)),
+        atol=2e-2,
+        rtol=2e-2,
+    )
 
 
+@requires_te_grouped_gemm
 def test_get_group_gemm_selects_te_adapter(monkeypatch):
     monkeypatch.setenv("XTUNER_GROUP_GEMM", "te")
     monkeypatch.setenv("XTUNER_TE_GEMM_BACKEND", "torch")

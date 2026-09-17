@@ -4,14 +4,16 @@ Kernel work lives in :mod:`te_grouped_gemm`.  This module keeps the FSDP
 ``[E,N,K]`` unbind, UltraEP replica weight / FP32 grad views, host
 ``tokens_per_expert_cpu`` → ``m_splits``, and Dynamo custom ops.
 
-Install the package the same way as AdaptiveGEMM::
+This extra is UltraEP-only and is not part of ``.[all]``. Install it the
+same way as AdaptiveGEMM::
 
     pip install --no-build-isolation --no-deps git+https://github.com/ShilohYu/TEGroupedGEMM.git@8661ef18465241439b9c61470cf2445844d52dfc
 
 Environment variables:
 
 ``XTUNER_GROUP_GEMM=te|triton|triton_dual|cutlass``
-    Default ``te``: select this adapter from :func:`xtuner.v1.ops.moe.get_group_gemm`.
+    Default grouped GEMM is Triton. This adapter is selected only when
+    ``XTUNER_GROUP_GEMM=te`` (UltraEP production path).
 ``XTUNER_TE_GEMM_BACKEND=auto|cublas|cutlass|torch``
     Forwarded to the ``te_grouped_gemm`` package (also accepts
     ``TE_GROUPED_GEMM_BACKEND``).
@@ -21,7 +23,6 @@ Environment variables:
 
 from __future__ import annotations
 
-import os
 from collections.abc import Sequence
 from typing import List
 
@@ -40,8 +41,8 @@ _INSTALL_HINT = (
 )
 
 try:
-    from te_grouped_gemm import general_grouped_gemm, selected_backend
     from te_grouped_gemm import gemm as _te_pkg
+    from te_grouped_gemm import general_grouped_gemm, selected_backend
 
     TE_GROUPED_GEMM_INSTALLED = True
     _IMPORT_ERROR: BaseException | None = None
@@ -221,7 +222,8 @@ def te_grouped_gemm(
     replica_weight: torch.Tensor | Sequence[torch.Tensor] | None = None,
     replica_grad: torch.Tensor | Sequence[torch.Tensor] | None = None,
 ) -> torch.Tensor:
-    """Compute one TE-style grouped GEMM over master and optional replica weights."""
+    """Compute one TE-style grouped GEMM over master and optional replica
+    weights."""
 
     _require_package()
     return TEGroupedGemm.apply(

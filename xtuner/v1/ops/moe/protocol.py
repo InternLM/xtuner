@@ -10,6 +10,7 @@ class GroupGemmProtocol(Protocol):
         x: torch.Tensor,
         weights: torch.Tensor,
         split_sizes: torch.Tensor,
+        /,
         tokens_per_expert_cpu: torch.Tensor | None = None,
         replica_weight: torch.Tensor | Sequence[torch.Tensor] | None = None,
         replica_grad: torch.Tensor | Sequence[torch.Tensor] | None = None,

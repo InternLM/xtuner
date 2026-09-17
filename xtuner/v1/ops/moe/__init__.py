@@ -43,10 +43,7 @@ def selected_group_gemm_backend() -> str:
     else:
         backend = "triton"
     if backend not in _GROUP_GEMM_BACKENDS:
-        raise ValueError(
-            f"Unsupported XTUNER_GROUP_GEMM={backend!r}; "
-            "expected te, triton, triton_dual, or cutlass"
-        )
+        raise ValueError(f"Unsupported XTUNER_GROUP_GEMM={backend!r}; expected te, triton, triton_dual, or cutlass")
     return backend
 
 

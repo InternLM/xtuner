@@ -44,12 +44,13 @@ if TYPE_CHECKING:
 
     from xtuner.v1.model.moe.moe import MoEConfig
     from xtuner.v1.module.ultraep.dispatcher import UltraEPDispatcher
+    from xtuner.v1.module.ultraep.fsdp_expert_binding import UltraEPFSDPBinding
 
 
 class UltraEPGroupedLinear(Protocol):
     """The small grouped-linear surface owned by one UltraEP layer binding."""
 
-    weight: torch.Tensor
+    weight: nn.Parameter
 
     def configure_ultra_ep_buffers(self, replica_weight: torch.Tensor, replica_grad: torch.Tensor) -> None: ...
 
@@ -347,7 +348,8 @@ class UltraEPModelRuntime:
         self.generate_dtype = generate_dtype
         self._manager: UltraEPManager | None = None
         self._state = "CREATED"
-        self._fsdp_root = None
+        self._fsdp_root: nn.Module | None = None
+        self.fsdp_binding: UltraEPFSDPBinding | None
         self._layers: list[tuple[int, tuple[nn.Module, nn.Module]]] = []
 
     @classmethod
@@ -371,7 +373,7 @@ class UltraEPModelRuntime:
             raise ValueError("intra_layer_micro_batch must be positive")
 
         generate_config = getattr(config, "generate_config", None)
-        generate_dtype = generate_config.dtype if generate_config is not None else "bf16"
+        generate_dtype: Literal["bf16", "fp8"] = generate_config.dtype if generate_config is not None else "bf16"
         return cls(
             group=group,
             num_model_layers=config.num_hidden_layers,
@@ -590,7 +592,8 @@ class UltraEPLayerRuntime:
             return manager.weight_sync(virtual_layer_id, async_finish=async_finish)
 
     def start_weight_restore(self, virtual_layer_id: int) -> None:
-        """Launch backward weight restore without waiting on the compute stream.
+        """Launch backward weight restore without waiting on the compute
+        stream.
 
         The restore must happen after FSDP has materialized this layer's
         current master parameters, but it does not need to block combine
@@ -604,7 +607,8 @@ class UltraEPLayerRuntime:
             self._weight_restore_events[virtual_layer_id] = self.sync_weights(virtual_layer_id, async_finish=True)
 
     def finish_weight_restore(self, virtual_layer_id: int) -> None:
-        """Wait for a previously launched restore and select its replica slot."""
+        """Wait for a previously launched restore and select its replica
+        slot."""
         if virtual_layer_id not in self._weight_restore_events:
             raise RuntimeError(f"UltraEP weight restore for virtual layer slot {virtual_layer_id} was not started")
         event = self._weight_restore_events.pop(virtual_layer_id)
@@ -729,8 +733,9 @@ class UltraEPLayerRuntime:
             self._master_pointers_registered = True
         return manager
 
-    def _current_expert_parameters(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Resolve the current FSDP views when the optional seam is installed."""
+    def _current_expert_parameters(self) -> tuple[nn.Parameter, nn.Parameter]:
+        """Resolve the current FSDP views when the optional seam is
+        installed."""
         try:
             from .fsdp_expert_binding import fsdp_current_unsharded_expert_parameters
 
