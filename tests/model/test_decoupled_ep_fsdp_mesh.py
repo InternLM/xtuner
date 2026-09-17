@@ -315,6 +315,22 @@ class TestDecoupledMoEMeshShapes:
         with pytest.raises(ValidationError, match="divisible by `ep_size`"):
             FSDPConfig(ep_size=3, hsdp_sharding_size=8, decouple_ep_fsdp=True)
 
+    def test_config_rejects_non_positive_sizes(self) -> None:
+        # The checks are pydantic validators raising `ValueError`, not `assert`s that `python -O`
+        # would drop; `ValidationError` is the `ValueError` subclass pydantic wraps them in.
+        with pytest.raises(ValidationError, match="`ep_size` must be a positive integer"):
+            FSDPConfig(ep_size=0)
+        with pytest.raises(ValidationError, match="`hsdp_sharding_size` must be a positive integer"):
+            FSDPConfig(hsdp_sharding_size=0, decouple_ep_fsdp=True)
+        assert issubclass(ValidationError, ValueError)
+
+    def test_runtime_rejects_shard_size_not_dividing_world_size(self) -> None:
+        # `hsdp_sharding_size=3` passes the config validator (3 % ep_size == 0) but cannot tile
+        # an 8-rank world; the mesh construction must fail loudly instead of asserting.
+        with _fake_world(8, 0):
+            with pytest.raises(ValueError, match=r"world_size \(8\) must be divisible by hsdp_sharding_size \(3\)"):
+                _shard_model(1, hsdp_sharding_size=3, decouple_ep_fsdp=True)
+
 
 class TestDecoupledMoEParamPlacements:
     """DTensor placements after the two-level ``fully_shard`` of the decoupled path."""

@@ -1697,8 +1697,10 @@ class MoE(BaseModel):
                 # FSDP-managed (`_StridedShard` is a `Shard` subclass).
                 continue
 
+            mesh_dim_names = param.device_mesh.mesh_dim_names
+            assert mesh_dim_names is not None  # every mesh of this model is built with named dims
             replicate_dim_names = tuple(
-                param.device_mesh.mesh_dim_names[i] for i, p in enumerate(param.placements) if isinstance(p, Replicate)
+                mesh_dim_names[i] for i, p in enumerate(param.placements) if isinstance(p, Replicate)
             )
             if not replicate_dim_names:
                 continue
@@ -1759,12 +1761,13 @@ class MoE(BaseModel):
         world_size = dist.get_world_size()
         ep_size = fsdp_config.ep_size
         dp_shard = fsdp_config.hsdp_sharding_size if fsdp_config.hsdp_sharding_size is not None else world_size
-        assert world_size % dp_shard == 0, (
-            f"world_size ({world_size}) must be divisible by hsdp_sharding_size ({dp_shard})"
-        )
-        assert dp_shard % ep_size == 0, (
-            f"`decouple_ep_fsdp` requires the FSDP shard size ({dp_shard}) to be divisible by ep_size ({ep_size})"
-        )
+        # Explicit exceptions (not `assert`): the mesh shape below is only valid with these.
+        if world_size % dp_shard != 0:
+            raise ValueError(f"world_size ({world_size}) must be divisible by hsdp_sharding_size ({dp_shard})")
+        if dp_shard % ep_size != 0:
+            raise ValueError(
+                f"`decouple_ep_fsdp` requires the FSDP shard size ({dp_shard}) to be divisible by ep_size ({ep_size})"
+            )
         replicate_size = world_size // dp_shard
         efsdp_size = dp_shard // ep_size
 
