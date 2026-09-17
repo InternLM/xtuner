@@ -728,10 +728,6 @@ class NCCLWeightTransport(WeightTransport[NCCLBackendAdapter]):
         self.engine_urls = [url for _, url, _ in engine_info]
 
     def send(self, batch: WeightUpdateBatch) -> None:
-        state_dict = batch.state_dict
-        if not state_dict:
-            return
-
         train_sync_group = self.get_train_update_sync_group()
         head_rank = 0
         # Only train rank 0 drives the disaggregated NCCL update. Other train
