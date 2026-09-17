@@ -484,7 +484,6 @@ class IPCWeightTransport(WeightTransport[IPCBackendAdapter]):
 
     def after_update_all_groups(self) -> None:
         self._adapter.after_update_all_groups()
-        DEVICE_MODULE.empty_cache()
 
     def after_update_per_group(self) -> None:
         dist.barrier()
@@ -965,6 +964,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineAdapter]):
         """Collect all train weights from the iterator onto CPU."""
         named: dict[str, torch.Tensor] = {}
         named_total_bytes = 0
+        DEVICE_MODULE.empty_cache()
         for batches in weight_iterator.iter_batch_groups():
             for batch in batches:
                 sd = batch.state_dict
@@ -974,7 +974,6 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineAdapter]):
                 if sd.keys().isdisjoint(local_keys):
                     sd.clear()
                     del sd, batch
-                    DEVICE_MODULE.empty_cache()
                     continue
                 for key, tensor in list(sd.items()):
                     if key not in local_keys:
@@ -988,8 +987,8 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineAdapter]):
                     named_total_bytes += named[key].numel() * named[key].element_size()
                 sd.clear()
                 del sd, batch
-                DEVICE_MODULE.empty_cache()
             DEVICE_MODULE.empty_cache()
+        DEVICE_MODULE.empty_cache()
         self.logger.info(
             f"[checkpoint_engine] collect matched local keys rank={self.rank} "
             f"parameter server shard total={named_total_bytes / 1024**3:.3f}GiB "
