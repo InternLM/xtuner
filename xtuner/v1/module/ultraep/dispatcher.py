@@ -162,13 +162,24 @@ class UltraEPDispatcher(
         layer_inputs: list[torch.Tensor],
     ) -> tuple[list[torch.Tensor], list[object | None]]:
         self._layer.validate_microbatch_capacity(len(layer_inputs))
-        prepared: list[torch.Tensor] = []
         states: list[object | None] = []
-        for hidden_states in layer_inputs:
+        for _ in layer_inputs:
             virtual_layer_id = self._layer.allocate_virtual_layer_id()
-            prepared.append(_UltraEPGradReduceJoin.apply(hidden_states, self._layer, virtual_layer_id))
             states.append(_UltraEPLayerCallState(virtual_layer_id=virtual_layer_id))
-        return prepared, states
+        return layer_inputs, states
+
+    @override
+    def prepare_microbatch_input(
+        self,
+        hidden_states: torch.Tensor,
+        layer_state: object | None,
+    ) -> torch.Tensor:
+        if not isinstance(layer_state, _UltraEPLayerCallState):
+            raise RuntimeError("UltraEP microbatch input requires layer_state from prepare_layer_inputs")
+        # Match the original decoder schedule: create each Join immediately
+        # before that microbatch's attention/Start nodes. Hoisting every Join
+        # before the loop lets two Starts claim the shared staging pair.
+        return _UltraEPGradReduceJoin.apply(hidden_states, self._layer, layer_state.virtual_layer_id)
 
     @override
     def dispatch_preprocess(

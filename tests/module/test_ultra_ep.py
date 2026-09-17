@@ -14,11 +14,11 @@ from xtuner.v1.model.base import BaseModel
 from xtuner.v1.model.moe.moe import MoE
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayer
+from xtuner.v1.module.dispatcher import ExpertWeightLayout, NoEPExecutionRuntime, build_ep_execution_runtime
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.ultraep import UltraEPConfig
 from xtuner.v1.module.ultraep import runtime as ultraep_runtime
-from xtuner.v1.module.dispatcher import ExpertWeightLayout, NoEPExecutionRuntime, build_ep_execution_runtime
 from xtuner.v1.module.ultraep.dispatcher import (
     UltraEPDispatcher,
     _UltraEPGradReduceJoin,
@@ -758,6 +758,10 @@ def test_ultra_ep_microbatch_pipeline_scales_beyond_two():
             self.prepared.append(len(layer_inputs))
             return layer_inputs, [f"state-{i}" for i in range(len(layer_inputs))]
 
+        def prepare_microbatch_input(self, hidden_states, layer_state):
+            self.calls.append(("prepare_input", layer_state))
+            return hidden_states
+
         def dispatch_preprocess(self, *, hidden_states, topk_ids, topk_weights, layer_state=None, async_op=False):
             self.calls.append(("preprocess", layer_state))
             return {"hidden_states": hidden_states, "topk_ids": topk_ids}
@@ -820,7 +824,16 @@ def test_ultra_ep_microbatch_pipeline_scales_beyond_two():
         "state-2",
     ]
     assert len(output["hidden_states"]) == 3
-    stage_names = [call if isinstance(call, str) else call[0] for call in calls]
+    assert calls[:6] == [
+        item
+        for i in range(3)
+        for item in (("prepare_input", f"state-{i}"), ("preprocess", f"state-{i}"))
+    ]
+    stage_names = [
+        call if isinstance(call, str) else call[0]
+        for call in calls
+        if isinstance(call, str) or call[0] != "prepare_input"
+    ]
     assert stage_names[:3] == ["preprocess", "preprocess", "preprocess"]
     assert stage_names[3:12] == [
         "dispatch",
@@ -834,6 +847,97 @@ def test_ultra_ep_microbatch_pipeline_scales_beyond_two():
         "combine_preprocess",
     ]
     assert stage_names[12:15] == ["combine", "combine", "combine"]
+
+
+@pytest.mark.parametrize("microbatches", [1, 2])
+def test_ultra_ep_decoder_joins_each_reduce_before_next_start(monkeypatch, microbatches):
+    """Run the real decoder/dispatcher graph with a strict staging owner.
+
+    Hoisting all Join nodes before attention reproduces start(1), start(0)
+    and fails the owner check even without CUDA or torch.compile.
+    """
+    runtime, manager, _, _ = make_fake_layer_runtime()
+    runtime.model_runtime.group = FakeGroup()
+    runtime.model_runtime.max_microbatches = microbatches
+    events = []
+    owner = None
+
+    def start(vid):
+        nonlocal owner
+        assert owner is None, f"staging still owned by {owner}; attempted to start {vid}"
+        owner = vid
+        events.append(("start", vid))
+
+    def finish(vid):
+        nonlocal owner
+        assert owner == vid
+        owner = None
+        events.append(("join", vid))
+
+    monkeypatch.setattr(runtime, "start_grad_reduce", start)
+    monkeypatch.setattr(runtime, "finish_grad_reduce", finish)
+
+    class IdentityTransport:
+        def dispatch_preprocess(self, *, hidden_states, **kwargs):
+            return {"hidden_states": hidden_states}
+
+        def dispatch(self, *, pre_dispatched, **kwargs):
+            return pre_dispatched
+
+        def dispatch_postprocess(self, *, dispatched, **kwargs):
+            return {"hidden_states": dispatched["hidden_states"], "tokens_per_expert": torch.tensor([2])}
+
+        def combine_preprocess(self, *, hidden_states, **kwargs):
+            return {"hidden_states": hidden_states}
+
+        def combine(self, *, pre_combined, **kwargs):
+            return pre_combined
+
+        def combine_postprocess(self, *, combined, **kwargs):
+            return combined
+
+    layer = object.__new__(MoEDecoderLayer)
+    nn.Module.__init__(layer)
+    layer.n_shared_experts = 0
+    layer.ep_mesh = None
+    layer.dispatcher = UltraEPDispatcher(
+        model_runtime=runtime.model_runtime,
+        layer_runtime=runtime,
+        inner=IdentityTransport(),
+    )
+    attention_weight = nn.Parameter(torch.tensor(0.5))
+    expert_weight = nn.Parameter(torch.tensor(0.25))
+
+    def pre_moe(hidden_states, **kwargs):
+        residual = hidden_states
+        hidden_states = hidden_states * attention_weight
+        router = {
+            "logits": hidden_states[..., :1],
+            "router_weights": hidden_states[..., :1],
+            "topk_ids": torch.zeros((2, 1), dtype=torch.long),
+            "topk_weights": torch.ones(2, 1),
+        }
+        return residual, hidden_states, router, None
+
+    layer._pre_moe_forward = pre_moe
+    layer.experts = lambda hidden_states, *args, **kwargs: hidden_states * expert_weight
+    layer._post_moe_forward = lambda *, combined_hidden_states, residual, shared_experts_out: (
+        combined_hidden_states + residual
+    )
+    inputs = [torch.ones(1, 2, 4, requires_grad=True) for _ in range(microbatches)]
+    if microbatches == 1:
+        outputs = [layer._forward(inputs[0], None, (None, None))["hidden_states"]]
+    else:
+        outputs = layer._micro_batch_forward(
+            inputs, [None] * microbatches, [(None, None)] * microbatches
+        )["hidden_states"]
+    sum(x.sum() for x in outputs).backward()
+
+    vids = [vid for _, vid in manager.allocate_calls]
+    assert events == [event for vid in reversed(vids) for event in (("start", vid), ("join", vid))]
+    assert owner is None
+    torch.testing.assert_close(expert_weight.grad, torch.tensor(4.0 * microbatches))
+    torch.testing.assert_close(attention_weight.grad, torch.tensor(2.0 * microbatches))
 
 
 def test_ultra_ep_dispatcher_maps_control_plane_onto_six_stages():
@@ -878,6 +982,8 @@ def test_ultra_ep_dispatcher_maps_control_plane_onto_six_stages():
     )
     hidden = torch.ones(2, 4, requires_grad=True)
     prepared, states = dispatcher.prepare_layer_inputs([hidden])
+    assert prepared[0] is hidden
+    prepared[0] = dispatcher.prepare_microbatch_input(prepared[0], states[0])
     assert layer_runtime.model_runtime.max_microbatches == 1
     assert manager.allocate_calls == [(2, 0)]
     assert len(fused_w1w3.configure_calls) == 1
