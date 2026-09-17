@@ -39,8 +39,13 @@ case:
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
@@ -66,9 +71,14 @@ case:
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
-                    - XTUNER_USE_FA3=1
                     - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - XTUNER_USE_FA3=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
@@ -96,7 +106,12 @@ case:
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
                     - XTUNER_ACTIVATION_OFFLOAD=1
                     - TORCH_NPU_USE_HCCL=1
                     - TORCH_HCCL_ZERO_COPY=1
@@ -126,9 +141,14 @@ case:
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
-                    - XTUNER_GC_ENABLE=1
                     - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - XTUNER_GC_ENABLE=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
@@ -156,9 +176,14 @@ case:
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
-                    - XTUNER_GC_ENABLE=1
                     - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - XTUNER_GC_ENABLE=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
@@ -186,8 +211,13 @@ case:
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
@@ -210,8 +240,13 @@ case:
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
@@ -239,8 +274,12 @@ case:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
                     - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
@@ -268,8 +307,12 @@ case:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
                     - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
@@ -297,9 +340,13 @@ case:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
                     - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
-                    - XTUNER_GC_ENABLE=1
                     - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_GC_ENABLE=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
@@ -328,9 +375,13 @@ case:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
                     - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
-                    - XTUNER_GC_ENABLE=1
                     - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_GC_ENABLE=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
@@ -358,8 +409,12 @@ case:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
                     - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
@@ -387,8 +442,12 @@ case:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
                     - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
@@ -416,9 +475,12 @@ case:
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
-                    - XTUNER_ACTIVATION_OFFLOAD=1
                     - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
@@ -446,9 +508,13 @@ case:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
                     - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
-                    - XTUNER_ACTIVATION_OFFLOAD=1
                     - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
