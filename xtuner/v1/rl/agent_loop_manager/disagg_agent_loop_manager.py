@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import time
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -41,6 +43,10 @@ from .produce_utils import (
 from .sampler import Sampler, SamplerConfig
 
 
+if TYPE_CHECKING:
+    from xtuner.v1.rl.distillation import RolloutTeacherScorerConfig
+
+
 class DisaggTaskSpecConfig(BaseModel):
     """单个非共卡 RL 数据源配置。"""
 
@@ -69,7 +75,8 @@ class DisaggAgentLoopManagerConfig(BaseModel):
         replay_buffer: ReplayBuffer,
         logger=None,
         sync_weights_interval: int = 1,
-    ) -> "DisaggAgentLoopManager":
+        rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
+    ) -> DisaggAgentLoopManager:
         tasks = self.tasks if isinstance(self.tasks, list) else [self.tasks]
         if not tasks:
             raise ValueError("DisaggAgentLoopManagerConfig requires at least one task config.")
@@ -86,6 +93,7 @@ class DisaggAgentLoopManagerConfig(BaseModel):
                 judger=build_judger(task_cfg.judger_config) if task_cfg.judger_config is not None else None,
                 logger=logger,
                 is_valid_sample_fn=task_cfg.is_valid_sample_fn,
+                rollout_teacher_scorer_config=rollout_teacher_scorer_config,
             )
             produce_strategy = task_cfg.produce_strategy_config.build(
                 sync_weights_interval=sync_weights_interval,

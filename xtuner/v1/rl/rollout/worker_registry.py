@@ -297,6 +297,7 @@ class RolloutWorkerRegistry:
                     RolloutWeightUpdateTarget(
                         endpoint_rank=server.worker_rank,
                         update_ranks=server.weight_update_ranks,
+                        inference_engine_ranks=server.inference_engine_ranks,
                         server_url=worker.url,
                         lifecycle_state=worker.lifecycle_state.value,
                     )

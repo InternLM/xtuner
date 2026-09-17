@@ -257,7 +257,7 @@ class TestRolloutTopologyAPI(unittest.TestCase):
             ((0, (0, 1)),),
         )
 
-    def test_lmdeploy_tp16_weight_update_targets_match_legacy_mesh_and_url_semantics(self):
+    def test_lmdeploy_tp16_weight_update_targets_match_topology(self):
         config = self._rollout_config(tp=16, ep=1, num_gpus_per_engine=16)
         topology = LMDeployWorker.build_rollout_topology(
             config,
@@ -273,9 +273,8 @@ class TestRolloutTopologyAPI(unittest.TestCase):
         self.assertEqual(
             self._rollout_info(config=config, targets=targets, train_rank=0).rollout_url, "http://worker-0"
         )
-        self.assertIsNone(self._rollout_info(config=config, targets=targets, train_rank=1).rollout_url)
         self.assertEqual(
-            self._rollout_info(config=config, targets=targets, train_rank=1).ipc_rank_mesh,
+            self._rollout_info(config=config, targets=targets, train_rank=0).ipc_rank_mesh,
             (tuple(range(16)),),
         )
 
@@ -304,7 +303,7 @@ class TestRolloutTopologyAPI(unittest.TestCase):
             tuple((rank,) for rank in range(16)),
         )
 
-    def test_sglang_tp16_cross_node_weight_update_targets_match_legacy_mesh_and_url_semantics(self):
+    def test_sglang_tp16_cross_node_weight_update_targets_match_topology(self):
         config = self._rollout_config(tp=16, ep=1, num_gpus_per_engine=16, gpus_per_node=8)
         topology = SGLangWorker.build_rollout_topology(
             config,
@@ -321,9 +320,8 @@ class TestRolloutTopologyAPI(unittest.TestCase):
         self.assertEqual(
             self._rollout_info(config=config, targets=targets, train_rank=0).rollout_url, "http://worker-0"
         )
-        self.assertIsNone(self._rollout_info(config=config, targets=targets, train_rank=8).rollout_url)
         self.assertEqual(
-            self._rollout_info(config=config, targets=targets, train_rank=8).ipc_rank_mesh,
+            self._rollout_info(config=config, targets=targets, train_rank=0).ipc_rank_mesh,
             (tuple(range(16)),),
         )
 
@@ -638,6 +636,7 @@ class TestRolloutWorkerRegistry(unittest.TestCase):
                     placement_group_bundle_idxs=tuple(range(len(engine_ranks))),
                     accepts_rollout_requests=True,
                     weight_update_ranks=tuple(engine_ranks),
+                    inference_engine_ranks=tuple(engine_ranks),
                 ),
             )
         dist_init_addr_owner_rank = server_processes[0].worker_rank

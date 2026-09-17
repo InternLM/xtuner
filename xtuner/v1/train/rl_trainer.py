@@ -32,6 +32,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     ProduceBatchStatus,
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
+from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.health_manager import RLHealthManager, _NoOpRLHealthManager
 from xtuner.v1.rl.replay_buffer import (
@@ -412,6 +413,7 @@ class BaseRLTrainerConfig(BaseModel):
     total_epochs: int | None = None
     train_batch_size: int
     advantage_estimator_config: BaseAdvantageConfig = Field(default_factory=GRPOAdvantageConfig)
+    distillation_config: DistillationConfig | None = None
     sync_weights_interval: int = 1
 
     enable_evaluate: bool = True
@@ -449,6 +451,8 @@ class BaseRLTrainerConfig(BaseModel):
             raise ValueError(f"total_train_steps must be positive, got {self.total_train_steps}.")
         if self.total_epochs is not None and self.total_epochs <= 0:
             raise ValueError(f"total_epochs must be positive, got {self.total_epochs}.")
+        if self.distillation_config is not None:
+            self.distillation_config.validate_trainer(self)
         _validate_sync_intervals(
             sync_weights_interval=self.sync_weights_interval,
             checkpoint_interval=self.checkpoint_interval,
@@ -650,8 +654,16 @@ class BaseRLTrainer:
     agent_loop_manager: AgentLoopManager | DisaggAgentLoopManager
     eval_agent_loop_manager: AgentLoopManager
     _debug_train_files: dict[int, Path]
+    _distillation: DistillationTrainerAdapter
 
     def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
+        distillation_config = cfg.distillation_config
+        if distillation_config is not None and distillation_config.rollout_teachers:
+            endpoint_map = json.loads(os.environ.get("XTUNER_OPD_TEACHER_ENDPOINTS_JSON", "{}"))
+            distillation_config = distillation_config.resolve_teacher_endpoints(endpoint_map)
+
+        self._distillation = DistillationTrainerAdapter(distillation_config)
+
         check_fa3()
         self._init_work_dir_and_meta(cfg, meta_path)
         self._init_load_source(cfg)
@@ -755,6 +767,7 @@ class BaseRLTrainer:
             cfg.train_worker_cfg.free_rollout_routed_experts_in_worker = False
         cfg.train_worker_cfg.load_from = cfg.load_from
         cfg.train_worker_cfg.log_dir = log_dir
+        cfg.train_worker_cfg.train_teacher_manager_config = self._distillation.train_teacher_manager_config
         self._train_worker_cfg = cfg.train_worker_cfg
 
     def _init_rollout_config(self, cfg: BaseRLTrainerConfig, log_dir: Path) -> None:
@@ -788,6 +801,7 @@ class BaseRLTrainer:
             replay_buffer=replay_buffer,
             logger=self.logger,
             sync_weights_interval=cfg.sync_weights_interval,
+            rollout_teacher_scorer_config=self._distillation.rollout_teacher_scorer_config,
         )
         self.agent_loop_manager = cast(AgentLoopManager | DisaggAgentLoopManager, agent_loop_manager)
 
@@ -802,6 +816,7 @@ class BaseRLTrainer:
                     replay_buffer=replay_buffer,
                     logger=self.logger,
                     sync_weights_interval=cfg.sync_weights_interval,
+                    rollout_teacher_scorer_config=None,
                 ),
             )
 
@@ -1118,16 +1133,25 @@ class BaseRLTrainer:
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ):
-        rewards_list = []
+        has_agentic_data = any(state.input_ids is not None for group in data_groups for state in group)
+        has_3d_reasoning_data = any(
+            state.input_ids is None and state.position_ids is not None and state.position_ids.ndim == 3
+            for group in data_groups
+            for state in group
+        )
+        use_3d_agentic_position_ids = has_agentic_data and has_3d_reasoning_data
+
         # Per-session rewards for distribution metrics. Agentic sessions may split into several
         # trainable segments that share one reward; counting that reward once per session keeps
-        # rewards/* from being weighted by segment count. rewards_list stays per-segment for counts.
+        # rewards/* from being weighted by segment count.
         cluster_rewards_list: list[float] = []
+        distillation_reward_observations: list[tuple[RolloutState, float]] = []
         advantages_list = []
         prompt_len_list = []
         response_len_list = []
         tool_turns_list: list[int] = []
         training_tokens = 0
+        training_samples = 0
 
         data_batches = []
 
@@ -1135,7 +1159,9 @@ class BaseRLTrainer:
             if not is_valid_for_training(group, self.logger):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
+            training_samples += len(group)
 
+            task_adv_weight = self._distillation.task_adv_weight
             prompt_ids = None
             if any(data.input_ids is None for data in group):
                 is_vlm_model = "train_prompt_ids" in group[0].extra_fields
@@ -1147,19 +1173,26 @@ class BaseRLTrainer:
                 assert prompt_ids is not None and len(prompt_ids) > 0, (
                     f"Prompt ids cannot be None or empty in data: {group[0]}"
                 )
-            rewards = []
-            # Agentic rollouts may split one model session into multiple trainable segments.
-            # Compute the group advantage once per session, then broadcast it back to each segment.
+            # Collect rewards independently from task-advantage computation. Pure OPD may omit
+            # rewards entirely; when rewards are present they remain useful observability signals.
             cluster_index_by_key: dict[Any, int] = {}
             cluster_rewards: list[float] = []
             cluster_representatives: list[RolloutState] = []
             sample_cluster_indices: list[int] = []
             for data in group:
-                assert data.reward is not None and "score" in data.reward, (
-                    f"Reward is missing or does not contain 'score' key in data: {data}"
-                )
+                # 有可能有重复，但是没有其他更好办法
+                turns = data.extra_fields.get("agent_tool_turns")
+                if isinstance(turns, int):
+                    tool_turns_list.append(turns)
+                if data.reward is None or "score" not in data.reward:
+                    if task_adv_weight > 0:
+                        raise ValueError(
+                            f"Reward is missing or does not contain 'score' key in data: {data}, "
+                            f"but task_adv_weight={task_adv_weight} > 0"
+                        )
+                    else:
+                        continue
                 reward = float(data.reward["score"])
-                rewards.append(reward)
                 # session_id is only set by agentic loops / XTUNER_DETERMINISTIC; plain RL falls back
                 # to rollout_id, which the sampler always assigns. Segments of one session share a key.
                 cluster_key = data.session_id if data.session_id is not None else data.rollout_id
@@ -1170,16 +1203,18 @@ class BaseRLTrainer:
                     cluster_rewards.append(reward)
                     cluster_representatives.append(data)
                 sample_cluster_indices.append(cluster_index)
-                # 有可能有重复，但是没有其他更好办法
-                turns = data.extra_fields.get("agent_tool_turns")
-                if isinstance(turns, int):
-                    tool_turns_list.append(turns)
 
-            rewards_list.extend(rewards)
             cluster_rewards_list.extend(cluster_rewards)
-            rewards_tensor = torch.tensor(cluster_rewards, dtype=torch.float32)
-            cluster_advantages = self._advantage_estimator.compute(rewards_tensor, cluster_representatives)
-            sample_advantages = [cluster_advantages[cluster_index].item() for cluster_index in sample_cluster_indices]
+            distillation_reward_observations.extend(zip(cluster_representatives, cluster_rewards))
+
+            if task_adv_weight == 0:
+                sample_advantages = [0.0] * len(group)
+            else:
+                rewards_tensor = torch.tensor(cluster_rewards, dtype=torch.float32)
+                cluster_advantages = self._advantage_estimator.compute(rewards_tensor, cluster_representatives)
+                sample_advantages = [
+                    cluster_advantages[cluster_index].item() for cluster_index in sample_cluster_indices
+                ]
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
@@ -1204,6 +1239,10 @@ class BaseRLTrainer:
 
                     input_ids = raw_input_ids[:-1]
                     shifted_labels = labels[1:]
+                    teacher_fields = self._distillation.rollout_teacher_targets(
+                        group[i],
+                        shifted_labels=shifted_labels,
+                    )
                     prompt_len = sum(label == -100 for label in shifted_labels)
                     response_len = len(shifted_labels) - prompt_len
                     prompt_len_list.append(prompt_len)
@@ -1224,6 +1263,13 @@ class BaseRLTrainer:
                         )
 
                     position_ids = group[i].position_ids
+                    if use_3d_agentic_position_ids:
+                        seq_len = input_ids_t.size(-1)
+                        text_position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, 1, -1)
+                        # Mixed agentic/VLM batches use three-axis MRoPE position IDs. Repeat the
+                        # normal text positions on every axis so agentic samples have the same rank
+                        # as the VLM samples when their sequence contexts are packed together.
+                        position_ids = np.broadcast_to(text_position_ids, (3, 1, seq_len)).copy()
                     multimodal_train_info = group[i].mm_info
                     multi_info_cast = cast(dict | None, multimodal_train_info)
                     seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multi_info_cast)
@@ -1234,6 +1280,7 @@ class BaseRLTrainer:
                         "advantage": actual_advantages,
                         "rollout_logprobs": rollout_logprobs,
                     }
+                    data_dict.update(teacher_fields)
 
                     seq_ctx.rollout_routed_experts = group[i].routed_experts
                     data_batches.append(data_dict)
@@ -1284,7 +1331,7 @@ class BaseRLTrainer:
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_labels
                 shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
-                # 根据 response_mask 计算新的 advantages
+                # Keep the advantage layout aligned with input_ids (response excludes EOS).
                 advatnages_val = sample_advantages[i]
                 actual_advantages = [advatnages_val] * len(prompt_ids) + [
                     0.0 if mask == 0 else advatnages_val for mask in response_mask
@@ -1314,6 +1361,11 @@ class BaseRLTrainer:
                     "advantage": actual_advantages,
                     "rollout_logprobs": rollout_logprobs,
                 }
+                teacher_fields = self._distillation.rollout_teacher_targets(
+                    group[i],
+                    shifted_labels=shifted_labels,
+                )
+                data_dict.update(teacher_fields)
 
                 seq_ctx.rollout_routed_experts = group[i].routed_experts  # n,layer*expert
 
@@ -1321,8 +1373,8 @@ class BaseRLTrainer:
         if not XTUNER_DETERMINISTIC:
             random.shuffle(data_batches)
 
-        # rewards/* report the per-session reward distribution; batch_size/training_samples below
-        # still use rewards_list (per-segment) so counts reflect the actual training samples.
+        # rewards/* report the per-session reward distribution; batch_size/training_samples
+        # count the valid rollout segments included in training.
         rewards_t = torch.tensor(cluster_rewards_list).float() if cluster_rewards_list else torch.tensor([0.0]).float()
         advantages_t = torch.tensor(advantages_list).float() if advantages_list else torch.tensor([0.0]).float()
         prompt_len_t = torch.tensor(prompt_len_list).float() if prompt_len_list else torch.tensor([0.0]).float()
@@ -1330,8 +1382,8 @@ class BaseRLTrainer:
 
         raw_rewards_mean = raw_rewards_sum / raw_rewards_count if raw_rewards_count > 0 else rewards_t.mean().item()
         info_dict = {
-            "batch_size": len(rewards_list),
-            "training_samples": len(rewards_list),
+            "batch_size": training_samples,
+            "training_samples": training_samples,
             "training_tokens": training_tokens,
             "rewards/mean": rewards_t.mean().item(),
             "rewards/min": rewards_t.min().item(),
@@ -1348,6 +1400,7 @@ class BaseRLTrainer:
             "prompt_len/min": prompt_len_t.min().item(),
             "prompt_len/max": prompt_len_t.max().item(),
         }
+        info_dict.update(self._distillation.reward_scalars(distillation_reward_observations))
         if tool_turns_list:
             tool_turns_t = torch.tensor(tool_turns_list, dtype=torch.float32)
             info_dict["tool_turns/mean"] = tool_turns_t.mean().item()
@@ -1462,7 +1515,8 @@ class BaseRLTrainer:
                 )
             trajectory_str = f"\nTrain step {train_step} data statistics:\n"
             trajectory_str += "\n".join([f"- {k:<25}: {v:.4f}" for k, v in response_data_info.items()])
-            rank0_log_item = train_info["workers_log_item"][0]
+            worker_log_items = train_info["workers_log_item"]
+            rank0_log_item = worker_log_items[0]
             rank0_rollout_is_metrics = rank0_log_item.get("rollout_is_metrics", {})
             rank0_mismatch_metrics = rank0_log_item.get("mismatch_metrics", {})
             rank0_rollout_entropy = rank0_log_item.get("rollout_entropy", 0.0)
@@ -1470,7 +1524,9 @@ class BaseRLTrainer:
             all_scalars.update({f"{k}": v for k, v in rank0_mismatch_metrics.items()})
             all_scalars.update({"entropy/rollout": rank0_rollout_entropy})
             all_scalars.update({"entropy/train": rank0_log_item["train_entropy"]})
-            for worker_idx, log_item in enumerate(train_info["workers_log_item"]):
+
+            all_scalars.update(self._distillation.timing_scalars(worker_log_items))
+            for worker_idx, log_item in enumerate(worker_log_items):
                 if not self._display_all_workers_log and worker_idx > 0:
                     break
                 mini_batch_metrics: dict[str, List[float]] = {}
@@ -1485,6 +1541,8 @@ class BaseRLTrainer:
                 rank_sft_log = log_item["sft_train_metrics"]
                 for k, v in rank_sft_log.items():
                     all_scalars.update({f"sft_train_metrics/worker_{worker_idx}/{k}": v})
+
+            all_scalars.update(self._distillation.metric_scalars(rank0_log_item["train_metrics"]))
 
             self._log_mini_batch_metrics(train_info["workers_log_item"])
 
@@ -1509,8 +1567,9 @@ class BaseRLTrainer:
                 continue
             valid_groups.append(group)
             for data in group:
-                assert data.reward is not None
-                rewards.append(data.reward["score"])
+                reward = data.reward.get("score") if data.reward is not None else None
+                if reward is not None:
+                    rewards.append(reward)
                 response_ids = self._get_trajectory_response_ids(data)
                 response_len_list.append(len(response_ids))
 
@@ -1533,7 +1592,7 @@ class BaseRLTrainer:
             f.write("\n")
             for group in valid_groups:
                 for data in group:
-                    assert data.reward is not None
+                    reward = data.reward.get("score") if data.reward is not None else None
                     response_ids = self._get_trajectory_response_ids(data)
                     response = data.response
                     if response is None and response_ids:
@@ -1553,7 +1612,7 @@ class BaseRLTrainer:
                         "prompt": data.message,
                         "label": ground_truth,
                         "response": response,
-                        "reward": data.reward["score"],
+                        "reward": reward,
                         "prompt_len": data.num_tokens,
                         "response_len": len(response_ids),
                         "reward_payload": data.reward,
@@ -2183,8 +2242,14 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         # TODO: 非共卡需要额外加健康检查恢复worker的逻辑，共卡是在训练之前恢复，但是非共卡不需要在训练之前恢复,挂掉就恢复或者更新权重前恢复，需要评估一下哪种方式更合理。
         with timer("sync_weight", step_timer_dict):
+            # 1) 清 KV + 释放旧权重（sleep level=2 -> meta）
             ray.get(
-                self.rollout_controller.flush_cache.remote(),
+                self.rollout_controller.offload.remote(),
+                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+            )
+            # 2) 只 wakeup weights（empty_init），此时不要 onload_kvcache/warmup
+            ray.get(
+                self.rollout_controller.onload_weights.remote(),
                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
             )
             bind_train_rollout(
@@ -2192,7 +2257,13 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 rollout_controller=self.rollout_controller,
                 rollout_config=self._rollout_config,
             )
+            # 3) 先把权重更新完（含 finished=True finalize）
             self.weight_update()
+            # 4) 最后再 onload_kvcache（这里才会 warmup）
+            ray.get(
+                self.rollout_controller.onload_kvcache.remote(),
+                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+            )
 
     def weight_update(self):
         # rollout 恢复由 AgentLoopManager 控制。
