@@ -147,7 +147,7 @@ def build_dispatcher(
         dispatcher = "all2all"
 
     if dispatcher == "deepep":
-        # TODO: remove ignore
+        # TODO: remove type ignore here
         from .deepep import DeepEPDispatcher  # type: ignore[attr-defined]
 
         assert ep_group is not None, "DeepEPDispatcher requires a non-null process group."
