@@ -160,6 +160,7 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
         self._assert_step_metrics(step_metrics)
         self._assert_async_produce_results()
         self._assert_weight_sync()
+        self._assert_ep_gather_skipped(trainer)
         self._assert_vlm_rollout_states()
         self._assert_trajectory_artifacts(work_dir)
 
@@ -199,7 +200,11 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
             },
         )
 
-        model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
+        model_cfg = Qwen3_5_VLMoE35BA3Config(
+            freeze_vision=True,
+            freeze_projector=True,
+            text_config={"ep_size": 2},
+        )
         optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False)
         loss_cfg = GRPOLossConfig(
             policy_loss_cfg=dict(
@@ -225,7 +230,7 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
             ),
         )
         lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
-        fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1, fp32_lm_head=True)
+        fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=2, fp32_lm_head=True)
         train_worker_cfg = WorkerConfig(
             model_cfg=model_cfg,
             load_from=str(MODEL_PATH),
@@ -417,6 +422,16 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
     def _assert_weight_sync(self) -> None:
         self.assertEqual(self.update_weight_calls, TOTAL_TRAIN_STEPS - 1)
         self.assertEqual([call["model_step"] for call in self.produce_calls], [0, 1])
+
+    def _assert_ep_gather_skipped(self, trainer) -> None:
+        gather_counts = ray.get(
+            [worker.get_ep_gather_count.remote() for worker in trainer.train_controller.workers]
+        )
+        self.assertEqual(
+            sum(gather_counts),
+            0,
+            f"EP gather must be skipped when train and rollout EP sizes match: {gather_counts}",
+        )
 
     def _assert_vlm_rollout_states(self) -> None:
         for result in self.produce_results:

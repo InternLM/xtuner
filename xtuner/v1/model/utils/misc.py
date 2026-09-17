@@ -108,6 +108,17 @@ class ModelForwardExtraLogInfo(dict):
             "reduced_train_policy_kl1_sum",
             "reduced_train_policy_kl3_sum",
             "reduced_train_policy_valid_count",
+            "reduced_distillation_kl_sum",
+            "reduced_distillation_abs_loss_sum",
+            "reduced_distillation_valid_count",
+            "reduced_opd_reverse_kl_sum",
+            "reduced_opd_abs_logprob_loss_sum",
+            "reduced_topk_opd_kl_sum",
+            "reduced_topk_opd_loss_sum",
+            "reduced_topk_opd_student_selected_mass_sum",
+            "reduced_topk_opd_teacher_selected_mass_sum",
+            "reduced_topk_opd_overlap_fraction_sum",
+            "reduced_topk_opd_valid_count",
         )
         max_keys = ("max_ratio", "reduced_train_policy_ratio_max")
         min_keys = ("reduced_train_policy_ratio_min",)

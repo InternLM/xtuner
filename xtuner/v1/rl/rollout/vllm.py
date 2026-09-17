@@ -172,6 +172,7 @@ class vLLMWorker(RolloutWorker):
                             worker_rank=server_rank,
                             placement_group_bundle_idxs=engine_bundle_idxs,
                             weight_update_ranks=engine_ranks,
+                            inference_engine_ranks=engine_ranks,
                         ),
                     ),
                 )
