@@ -12,7 +12,9 @@
   与输入位置逐一对齐（regression: advantage 曾比 input_ids 长 1 导致 pack 后整体错位）。
 """
 
+import importlib.util
 import unittest
+from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -24,6 +26,18 @@ from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAda
 from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.train.rl_trainer import BaseRLTrainer, get_train_seq_ctx
+
+
+def _load_get_rope_index_3():
+    """Load get_rope_index_3 without going through xtuner.v1.datasets (lightweight stub)."""
+    rope2d_path = (
+        Path(__file__).resolve().parents[2] / "xtuner" / "v1" / "datasets" / "mllm_tokenize_fn" / "qwenvl_rope2d.py"
+    )
+    spec = importlib.util.spec_from_file_location("_qwenvl_rope2d_for_test", rope2d_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.get_rope_index_3
 
 
 class _FakeAdvantageEstimator:
@@ -229,44 +243,39 @@ class TestPrepareTrainData(unittest.TestCase):
         self.assertEqual(seq_ctx.image_grid_thw.tolist(), [[1, 2, 3]])
 
     def test_get_train_seq_ctx_mrope_continues_from_global_amax(self):
-        """RL 只拿 prompt 的 3D position，续写 response 须用 global amax（对齐 SFT get_rope_index_3）。
+        """RL 只拿 prompt 的 3D position，续写 response 后须与 SFT get_rope_index_3 一致。
 
-        Fixture 等价于：prompt 以 image tokens 结尾（grid 1x4x4, merge=2 → 2x2），
-        此时 T 轴 max=2、H/W 轴 max=3，per-axis max 会在 T 轴分叉；SFT 用 max(T,H,W)+1 续写。
-        不直接 import get_rope_index_3：本文件走 lightweight datasets stub。
+        Fixture：prompt 以 image tokens 结尾（grid 1x4x4, merge=2 → 2x2），使 per-axis max
+        与 global amax 分叉。get_rope_index_3 经文件路径加载，绕过 lightweight datasets stub。
         """
-        # prompt positions from get_rope_index_3([text, vision_start, 4 img tokens])
-        prompt_position_ids = np.array(
-            [
-                [[0, 1, 2, 2, 2, 2]],  # T
-                [[0, 1, 2, 2, 3, 3]],  # H
-                [[0, 1, 2, 3, 2, 3]],  # W
-            ],
-            dtype=np.int64,
-        )
+        get_rope_index_3 = _load_get_rope_index_3()
+        image_token_id = 151655
+        vision_start_token_id = 151652
+        prompt_ids = [10, vision_start_token_id, image_token_id, image_token_id, image_token_id, image_token_id]
         response_ids = [20, 21, 22]
-        full_ids = torch.tensor([[10, 11, 12, 13, 14, 15] + response_ids], dtype=torch.long)
-        # SFT get_rope_index_3 整段结果：response 从 global amax(=3)+1 起
-        expected = torch.tensor(
-            [
-                [[0, 1, 2, 2, 2, 2, 4, 5, 6]],
-                [[0, 1, 2, 2, 3, 3, 4, 5, 6]],
-                [[0, 1, 2, 3, 2, 3, 4, 5, 6]],
-            ],
-            dtype=torch.long,
+        full_ids = torch.tensor([prompt_ids + response_ids], dtype=torch.long)
+        image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long)
+
+        sft_position_ids = get_rope_index_3(
+            full_ids,
+            image_grid_thw=image_grid_thw,
+            spatial_merge_size=2,
+        )
+        prompt_position_ids = get_rope_index_3(
+            torch.tensor([prompt_ids], dtype=torch.long),
+            image_grid_thw=image_grid_thw,
+            spatial_merge_size=2,
         )
 
         seq_ctx = get_train_seq_ctx(
             cast(torch.LongTensor, full_ids),
-            prompt_position_ids,
+            prompt_position_ids.numpy(),
             len_response_ids=len(response_ids),
         )
         rl_position_ids = seq_ctx.position_ids
         assert rl_position_ids is not None
-        self.assertEqual(tuple(rl_position_ids.shape), (3, 1, 9))
-        torch.testing.assert_close(rl_position_ids, expected)
-        # 回归：若误用 per-axis max，T 轴会变成 3,4,5 而非 4,5,6
-        self.assertFalse(torch.equal(rl_position_ids[0, 0, -3:], torch.tensor([3, 4, 5])))
+        self.assertEqual(tuple(rl_position_ids.shape), tuple(sft_position_ids.shape))
+        torch.testing.assert_close(rl_position_ids, sft_position_ids)
 
     def test_mixed_agentic_and_vlm_reasoning_use_3d_position_ids(self):
         trainer = self._build_trainer([0.5])
