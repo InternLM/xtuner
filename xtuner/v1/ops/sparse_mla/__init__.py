@@ -55,6 +55,7 @@ def dsa_topk_indices(
     index_head_dim: int,
     index_topk: int,
     backend: DSAIndexerBackend = "torch",
+    query_chunk_size: int | None = None,
 ) -> torch.Tensor:
     return get_dsa_topk_indices(backend)(
         q,
@@ -63,6 +64,7 @@ def dsa_topk_indices(
         seq_ctx,
         index_head_dim=index_head_dim,
         index_topk=index_topk,
+        query_chunk_size=query_chunk_size,
     )
 
 

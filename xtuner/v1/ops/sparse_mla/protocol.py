@@ -59,4 +59,5 @@ class DSATopKIndicesProtocol(Protocol):
         *,
         index_head_dim: int,
         index_topk: int,
+        query_chunk_size: int | None = None,
     ) -> torch.Tensor: ...
