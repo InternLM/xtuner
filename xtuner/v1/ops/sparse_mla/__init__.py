@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from functools import partial
+
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
@@ -32,12 +34,14 @@ def sparse_mla(
     return get_sparse_mla(backend)(q, kv, indices, scaling=scaling, value_dim=value_dim)
 
 
-def get_dsa_topk_indices(backend: SparseMLABackend) -> DSATopKIndicesProtocol:
+def get_dsa_topk_indices(backend: SparseMLABackend, use_tilelang_topk: bool = False) -> DSATopKIndicesProtocol:
     if backend == "torch":
         return torch_dsa_topk_indices
     if backend in ("tilelang", "cudnn_dsa"):
         from .tilelang import tilelang_dsa_topk_indices
 
+        if use_tilelang_topk:
+            return partial(tilelang_dsa_topk_indices, use_tilelang_topk=True)
         return tilelang_dsa_topk_indices
     raise ValueError(f"Unsupported DSA indexer backend: {backend}")
 
@@ -51,8 +55,9 @@ def dsa_topk_indices(
     index_head_dim: int,
     index_topk: int,
     backend: SparseMLABackend = "torch",
+    use_tilelang_topk: bool = False,
 ) -> torch.Tensor:
-    return get_dsa_topk_indices(backend)(
+    return get_dsa_topk_indices(backend, use_tilelang_topk)(
         q,
         k,
         weights,

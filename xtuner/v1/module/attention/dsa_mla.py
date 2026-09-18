@@ -68,6 +68,7 @@ class DSAIndexer(nn.Module):
         index_n_heads: int,
         index_topk: int,
         indexer_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch",
+        use_tilelang_topk: bool = False,
     ):
         super().__init__()
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -75,7 +76,7 @@ class DSAIndexer(nn.Module):
         self.index_n_heads = index_n_heads
         self.index_topk = index_topk
         self.indexer_backend = indexer_backend
-        self.dsa_topk_indices_func: DSATopKIndicesProtocol = get_dsa_topk_indices(indexer_backend)
+        self.dsa_topk_indices_func: DSATopKIndicesProtocol = get_dsa_topk_indices(indexer_backend, use_tilelang_topk)
         # wq_b.weight: [index_n_heads * index_head_dim, q_lora_rank]
         self.wq_b = build_linear(q_lora_rank, index_n_heads * index_head_dim, bias=False)
         # wk.weight: [index_head_dim, hidden_size]
@@ -176,6 +177,7 @@ class DSAMLAConfig(MLAConfig):
     indexer_rope_interleave: bool = True
     indexer_types: list[str] | None = None
     sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch"
+    use_tilelang_topk: bool = False
 
     def build(
         self,
@@ -214,6 +216,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         indexer_rope_interleave: bool = True,
         indexer_types: list[str] | None = None,
         sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch",
+        use_tilelang_topk: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -240,6 +243,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         self.indexer_rope_interleave = indexer_rope_interleave
         self.indexer_types = indexer_types
         self.sparse_mla_backend = sparse_mla_backend
+        self.use_tilelang_topk = use_tilelang_topk
         self.sparse_mla_func: SparseMLAProtocol = get_sparse_mla(sparse_mla_backend)
         if indexer_types is None:
             self.dsa_topk_last_use, self.dsa_topk_recompute_release = {}, {}
@@ -274,6 +278,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             index_n_heads=self.index_n_heads,
             index_topk=self.index_topk,
             indexer_backend=self.sparse_mla_backend,
+            use_tilelang_topk=self.use_tilelang_topk,
         )
 
     def get_muon_split_sizes(self) -> dict[nn.Parameter, tuple[int, ...]]:
