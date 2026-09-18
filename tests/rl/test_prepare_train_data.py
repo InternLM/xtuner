@@ -175,6 +175,32 @@ class TestPrepareTrainData(unittest.TestCase):
         self.assertEqual(info["advantages/max"], 1.5)
         self.assertEqual(trainer._advantage_estimator.calls[0][0].tolist(), [3.0, -1.0])
 
+    def test_advantage_stats_count_only_loss_active_tokens(self):
+        # advantages/mean|min|max 只统计 loss-active token: prompt 占位与 mask=0 的 token 不参与。
+        trainer = self._build_trainer([2.0, -1.0])
+        plain = self._state(
+            uid=1,
+            prompt_ids=[10, 11, 12],
+            response_ids=[20, 21, 22, 23],
+            logprobs=[0.1, 0.2, 0.3, 0.4],
+            response_mask=[1, 0, 1, 0],
+            reward={"score": 2.0},
+        )
+        agentic = self._state(
+            uid=2,
+            input_ids=[30, 31, 40, 41, 42],
+            labels=[-100, -100, 40, -100, 42],
+            logprobs=[0.0, -0.1, -0.2, -0.3, -0.4],
+            reward={"score": -1.0},
+        )
+
+        _, info = self._prepare(trainer, [[plain, agentic]])
+
+        # plain: 2 个 mask!=0 token 计入 2.0; agentic: 2 个 label!=-100 token 计入 -1.0。
+        self.assertEqual(info["advantages/mean"], 0.5)
+        self.assertEqual(info["advantages/min"], -1.0)
+        self.assertEqual(info["advantages/max"], 2.0)
+
     def test_vlm_path_uses_train_prompt_ids_and_preserves_multimodal_fields(self):
         # VLM 分支使用 extra_fields["train_prompt_ids"] 作为训练 prompt，并把图像字段带进 SequenceContext。
         trainer = self._build_trainer([0.25])
@@ -494,10 +520,17 @@ class TestPrepareTrainDataPackAlignment(unittest.TestCase):
     def _build_data_groups(self) -> list[list[RolloutState]]:
         """两组样本; 组内共享 prompt(与真实 RL 组一致), 长度/mask/advantage 刻意互不相同。"""
         s1 = self._make_sample(
-            0, [101, 102, 103, 104], [1001, 1002, 1003, 1004, 1005], [1, 1, 0, 1, 1], [-0.5, -1.0, -1.5, -2.0, -2.5], 1.0
+            0,
+            [101, 102, 103, 104],
+            [1001, 1002, 1003, 1004, 1005],
+            [1, 1, 0, 1, 1],
+            [-0.5, -1.0, -1.5, -2.0, -2.5],
+            1.0,
         )
         s2 = self._make_sample(1, [101, 102, 103, 104], [2001, 2002, 2003], [1, 0, 1], [-0.5, -1.0, -1.5], 2.0)
-        s3 = self._make_sample(2, [301, 302, 303, 304, 305], [3001, 3002, 3003, 3004], [1, 1, 1, 0], [-0.5, -1.0, -1.5, -2.0], 4.0)
+        s3 = self._make_sample(
+            2, [301, 302, 303, 304, 305], [3001, 3002, 3003, 3004], [1, 1, 1, 0], [-0.5, -1.0, -1.5, -2.0], 4.0
+        )
         s4 = self._make_sample(3, [301, 302, 303, 304, 305], [4001, 4002], [1, 0], [-0.5, -1.0], 8.0)
         return [[s1, s2], [s3, s4]]
 
