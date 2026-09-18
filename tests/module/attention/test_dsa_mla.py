@@ -10,7 +10,7 @@ TestDSAAttention
 TestAcceleratedSparseMLA
     test_tilelang_forward_backward_matches_torch: TileLang 前反向数值与 PyTorch 后端一致。
     test_compiled_cudnn_backward_matches_tilelang: 编译后的 cuDNN DSA 前反向与 TileLang 一致。
-    test_compiled_flashmla_backward_matches_tilelang: FlashMLA 前向和 TileLang 反向与 TileLang 前反向一致。
+    test_compiled_flashmla_backward_matches_tilelang: FlashMLA output/LSE 与 TileLang 逐 bit 一致，反向满足容差。
 TestDSASequenceParallel
     test_packed_attention_matches_full_sequence: SP2 的输出、top-k 和输入梯度与完整序列一致。
     test_tilelang_indexer_matches_torch: SP2 query shard 的 TileLang indexer 与 PyTorch 一致。
@@ -41,6 +41,14 @@ DKV_ATOL = 1e-1
 DKV_RTOL = 1e-1
 CUDNN_DQ_ATOL = 5e-2
 CUDNN_DQ_RTOL = 5e-2
+
+
+def _assert_bitwise_equal(actual: torch.Tensor, expected: torch.Tensor, name: str) -> None:
+    assert actual.shape == expected.shape, f"{name}: shape {actual.shape} != {expected.shape}"
+    assert actual.dtype == expected.dtype, f"{name}: dtype {actual.dtype} != {expected.dtype}"
+    assert torch.equal(actual.contiguous().view(torch.uint8), expected.contiguous().view(torch.uint8)), (
+        f"{name}: bits differ"
+    )
 
 
 @cache
@@ -388,10 +396,8 @@ class TestDSAAttention:
         expected.backward(grad_output)
         actual.backward(grad_output)
 
-        assert torch.equal(actual, expected)
-        assert torch.equal(actual_lse, expected_lse)
-        torch.testing.assert_close(actual, expected, atol=BF16_ATOL, rtol=BF16_RTOL)
-        torch.testing.assert_close(actual_lse, expected_lse, atol=BF16_ATOL, rtol=BF16_RTOL)
+        _assert_bitwise_equal(actual, expected, "output")
+        _assert_bitwise_equal(actual_lse, expected_lse, "softmax_lse")
         torch.testing.assert_close(q_flashmla.grad, q_tilelang.grad, atol=BF16_ATOL, rtol=BF16_RTOL)
         torch.testing.assert_close(kv_flashmla.grad, kv_tilelang.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
 
