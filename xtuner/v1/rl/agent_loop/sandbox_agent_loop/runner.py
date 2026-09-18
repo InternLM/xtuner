@@ -83,10 +83,10 @@ class Runner:
         t_infer: float | None = None
         t_validate: float | None = None
         try:
-            with span(uid_obs, "run_total", task_id=tid) as total_span:
+            with span(uid_obs, "run_total", task_id=tid, group_id=item.group_id) as total_span:
                 # ─── acquire infer sandbox ───────────────────────────────
                 t0 = time.monotonic()
-                with span(uid_obs, "acquire", task_id=tid) as acquire_span:
+                with span(uid_obs, "acquire", task_id=tid, group_id=item.group_id) as acquire_span:
                     infer_client = await pool.get(infer_sandbox, record=item.infer)
                     item.infer.sandbox_env_id = pool.env_id(infer_sandbox)
                     sandbox_url = pool.url(infer_sandbox)
@@ -97,12 +97,13 @@ class Runner:
                         sandbox_env_id=item.infer.sandbox_env_id,
                         sandbox_url=sandbox_url,
                         sandbox_image=infer_spec.image,
+                        sandbox_create_attempts=item.infer.metadata.get("sandbox_create_attempts"),
                     )
                 t_acquire = time.monotonic() - t0
 
                 # ─── infer ──────────────────────────────────────────────
                 t1 = time.monotonic()
-                with span(uid_obs, "infer", task_id=tid) as infer_span:
+                with span(uid_obs, "infer", task_id=tid, group_id=item.group_id) as infer_span:
                     infer_result = await self.infer.run(infer_client, item, item.infer)
                     if not infer_result.ok:
                         infer_span.mark_error(_format_error(item.infer.error))
@@ -113,17 +114,23 @@ class Runner:
 
                 # ─── validate ───────────────────────────────────────────
                 t2 = time.monotonic()
-                with span(uid_obs, "validate", task_id=tid):
+                with span(uid_obs, "validate", task_id=tid, group_id=item.group_id) as validate_span:
                     validate_name = self.validate.name
                     validate_record = item.judgers.setdefault(
                         validate_name,
                         StageRecord(judger_name=validate_name),
                     )
                     score = float(await self.validate.run(item, pool, validate_record))
+                    validate_span.annotate(reward=score)
                 t_validate = time.monotonic() - t2
                 item.reward = score
 
                 item.status = RolloutStatus.COMPLETED
+                total_span.annotate(
+                    status=item.status.value,
+                    reward=score,
+                    agent_name=item.infer.agent.name if item.infer.agent is not None else None,
+                )
                 return item
         except Exception as exc:
             promoted = (
@@ -140,7 +147,8 @@ class Runner:
             return self._fail(item, promoted)
         finally:
             self._log_final(tid, item, t_acquire, t_infer, t_validate)
-            await pool.release_all()
+            with span(uid_obs, "release", task_id=tid, group_id=item.group_id):
+                await pool.release_all()
 
     def _log_final(
         self,

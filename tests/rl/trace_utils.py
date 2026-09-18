@@ -9,6 +9,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 
+
 try:
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 except ImportError:
@@ -72,7 +73,10 @@ def record_span() -> None:
 
 
 def child_span() -> None:
-    carrier = json.loads(os.environ["XTUNER_TEST_TRACE_CARRIER"])
+    from multidict import CIMultiDict
+
+    serialized_carrier = json.loads(os.environ["XTUNER_TEST_TRACE_CARRIER"])
+    carrier = CIMultiDict({key.title(): value for key, value in serialized_carrier.items()})
     exporter = _install_in_memory_exporter()
 
     with (
@@ -89,6 +93,7 @@ def child_span() -> None:
             "span_id": f"{span.context.span_id:016x}",
             "parent_span_id": f"{span.parent.span_id:016x}" if span.parent else None,
             "span_name_path": list(span.attributes.get("xtuner.span_name_path") or []),
+            "carrier_keys": list(carrier),
         }
     )
 

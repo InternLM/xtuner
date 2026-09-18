@@ -21,6 +21,8 @@ from xtuner.v1.data_proto.rl_data import (
 from xtuner.v1.rl.agent_loop import AgentLoopSpec
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout.trace_store import release_and_discard_rollout_groups
+from xtuner.v1.rl.trace import trace_span
+from xtuner.v1.rl.trace.rollout_api import trace_rollout_remote
 from xtuner.v1.rl.utils import (
     AGENT_LOOP_PAUSE_REQUEST_TIMEOUT_S,
     PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S,
@@ -140,16 +142,27 @@ class BaseProduceContext:
             item.extra_fields["producer_future_step"] = self.train_step
 
         start = time.perf_counter()
-        if isinstance(self.agent_loop, ray.actor.ActorHandle):
-            result = await self.agent_loop.generate_group.remote(
-                rollout_state,
-                enable_partial_rollout=enable_partial_rollout,
-            )
-        else:
-            result = await self.agent_loop.generate_group(
-                rollout_state,
-                enable_partial_rollout=enable_partial_rollout,
-            )
+        with trace_span(
+            "agent_loop_manager.generate_group",
+            attributes={
+                "xtuner.stage": "agent_loop.generate_group",
+                "xtuner.task_name": self.task_name,
+                "xtuner.producer_future_step": self.train_step,
+                "rollout.group_size": len(rollout_state),
+            },
+        ):
+            if isinstance(self.agent_loop, ray.actor.ActorHandle):
+                result = await trace_rollout_remote(
+                    self.agent_loop.generate_group,
+                    rollout_state,
+                    enable_partial_rollout=enable_partial_rollout,
+                    target=rollout_state,
+                )
+            else:
+                result = await self.agent_loop.generate_group(
+                    rollout_state,
+                    enable_partial_rollout=enable_partial_rollout,
+                )
         elapsed = time.perf_counter() - start
         for item in result:
             extra_fields = getattr(item, "extra_fields", None)

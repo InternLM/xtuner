@@ -1,5 +1,6 @@
 import copy
 import json
+from contextlib import asynccontextmanager
 from functools import reduce
 from http import HTTPStatus
 from operator import add
@@ -10,6 +11,12 @@ import ray
 from aiohttp import ClientConnectionResetError, ClientSession, ClientTimeout, web
 
 from transformers import AutoTokenizer
+from xtuner.v1.rl.trace import (
+    inject_trace_context,
+    set_trace_attributes,
+    trace_function,
+    trace_span,
+)
 from xtuner.v1.utils import get_logger
 
 from .chat_template import canonicalize_messages_for_chat_template
@@ -73,6 +80,26 @@ def _request_uses_trace_store(req_body: dict) -> bool:
     if req_body.get("session_id") is None or "messages" not in req_body:
         return False
     return _bool_request_value(req_body.get("return_token_ids"), True)
+
+
+def _response_usage_attributes(payload: dict) -> dict[str, int]:
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return {}
+    attributes = {}
+    prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+    completion_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+    if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool):
+        attributes["prompt.tokens"] = prompt_tokens
+    if isinstance(completion_tokens, int) and not isinstance(completion_tokens, bool):
+        attributes["completion.tokens"] = completion_tokens
+    return attributes
+
+
+def _session_trace_attributes(session_id: Any) -> dict[str, Any]:
+    if session_id is None:
+        return {}
+    return {"xtuner.session_id": session_id}
 
 
 def _extract_output_logprobs(output_token_logprobs: Optional[list], output_token_ids: list[int]) -> list[float]:
@@ -276,6 +303,7 @@ class SessionServer:
         self._site: Optional[web.TCPSite] = None
         self._lmdeploy_actor: Optional[ray.actor.ActorHandle] = None
 
+    @trace_function("session_server.prepare_request", attributes={"xtuner.stage": "llm_prepare"})
     async def on_request(self, req_body: dict, fmt: str, *, trace_enabled: bool = True) -> dict:
         """Normalize the request to drive the prefix cache + inject extension
         fields.
@@ -297,6 +325,9 @@ class SessionServer:
             matches ``fmt``; in trace mode it carries ``input_ids`` plus the
             ``return_*`` extension flags.
         """
+        session_id = req_body.get("session_id")
+        set_trace_attributes(_session_trace_attributes(session_id))
+
         # Evaluate path: forward unchanged except for the legacy ``logprobs``
         # → ``return_logprob`` rename and stripping the SessionServer-only
         # ``session_id`` field.
@@ -377,6 +408,7 @@ class SessionServer:
 
         return worker_req
 
+    @trace_function("session_server.record_response", attributes={"xtuner.stage": "llm_record"})
     async def on_response(self, worker_resp: dict, fmt: str, orig_req_body: dict) -> dict:
         """Trace the assistant turn into ``trace_store`` (always in OpenAI
         shape).
@@ -396,6 +428,7 @@ class SessionServer:
             caller but kept for symmetry.
         """
         session_id = orig_req_body["session_id"]
+        set_trace_attributes(_session_trace_attributes(session_id))
 
         if fmt == FMT_ANTHROPIC:
             output_token_ids = worker_resp.get("output_ids")
@@ -530,6 +563,27 @@ class SessionServer:
         get_logger().info("SessionServer stopped.")
 
     async def _handle_request(self, request: web.Request) -> web.Response:
+        req_path = request.match_info["path"]
+        with trace_span(
+            "session_server.request",
+            attributes={
+                "xtuner.stage": "llm_generate",
+                "http.request.method": request.method,
+                "http.route": f"/{req_path.lstrip('/')}",
+                "session.format": _detect_format(req_path),
+            },
+            parent_carrier=request.headers,
+        ):
+            response = await self._handle_request_impl(request)
+            set_trace_attributes(
+                {
+                    "http.response.status_code": response.status,
+                    "error": response.status >= HTTPStatus.BAD_REQUEST,
+                }
+            )
+            return response
+
+    async def _handle_request_impl(self, request: web.Request) -> web.Response:
         """Proxy handler: detect format, run hooks, forward, stream back."""
 
         req_path = request.match_info["path"]
@@ -551,6 +605,7 @@ class SessionServer:
         request_body = await request.read()
         request_data = None
         orig_req_body: Optional[dict] = None
+        session_id = None
         trace_enabled = False
         orig_return_logprob = orig_return_token_ids = False
         orig_return_routed_experts = True
@@ -568,6 +623,9 @@ class SessionServer:
                     else:
                         request_data.pop("tools", None)
                 orig_req_body = copy.deepcopy(request_data)
+
+                session_id = request_data.get("session_id")
+                set_trace_attributes(_session_trace_attributes(session_id))
 
                 trace_enabled = _request_uses_trace_store(request_data)
                 # Accept either ``return_logprob`` (canonical) or the legacy
@@ -603,6 +661,12 @@ class SessionServer:
             target_url += f"?{request.query_string}"
 
         is_stream = request_data.get("stream", False) if request_data else False
+        set_trace_attributes(
+            {
+                "session.stream": bool(is_stream),
+                "session.trace_store_enabled": trace_enabled,
+            }
+        )
 
         # Build the per-format stream cleaner (strips lmdeploy-injected
         # extension fields that the client didn't ask for, and removes the
@@ -616,8 +680,13 @@ class SessionServer:
 
         timeout = ClientTimeout(total=self.request_timeout, sock_connect=30)
         async with ClientSession(read_bufsize=self.read_bufsize, timeout=timeout) as client:
-            async with client.request(
-                method=request.method, url=target_url, headers=forward_headers, data=request_body
+            async with self._backend_request(
+                client,
+                method=request.method,
+                url=target_url,
+                headers=forward_headers,
+                data=request_body,
+                trace_session_id=session_id,
             ) as resp:
                 if is_stream:
                     response_chunks: list[bytes] = []
@@ -707,12 +776,14 @@ class SessionServer:
                     response_data = None
 
             if response_data is not None:
+                set_trace_attributes(_response_usage_attributes(response_data))
                 try:
                     await self.on_response(response_data, fmt, orig_req_body)
                 except Exception as exc:
                     session_error_msg = f"SessionServer response hook failed: {type(exc).__name__}: {exc}"
 
         if session_error_msg:
+            set_trace_attributes({"error": True, "error.type": "session_server_trace_hook"})
             get_logger().error(session_error_msg)
 
         if is_stream:
@@ -735,6 +806,28 @@ class SessionServer:
             return web.json_response(_error_payload(fmt, session_error_msg), status=500)
 
         return response
+
+    @asynccontextmanager
+    async def _backend_request(self, client: ClientSession, *, trace_session_id=None, **kwargs):
+        """Trace the complete upstream request and response-body lifecycle."""
+        with trace_span(
+            "session_server.backend_roundtrip",
+            attributes={
+                "xtuner.stage": "llm_backend_roundtrip",
+                **_session_trace_attributes(trace_session_id),
+            },
+        ):
+            headers = kwargs.get("headers")
+            if isinstance(headers, dict):
+                inject_trace_context(headers)
+            async with client.request(**kwargs) as response:
+                set_trace_attributes(
+                    {
+                        "http.upstream.status_code": response.status,
+                        "error": response.status >= HTTPStatus.BAD_REQUEST,
+                    }
+                )
+                yield response
 
     async def _decode_routed_experts(self, routed_experts: Any) -> np.ndarray:
         if isinstance(routed_experts, str):
