@@ -88,7 +88,7 @@ if hasattr(model_cfg, "balancing_loss_cfg"):
 if hasattr(model_cfg, "z_loss_cfg"):
     model_cfg.z_loss_cfg = None
 if hasattr(model_cfg, "attention") and hasattr(model_cfg.attention, "sparse_mla_backend"):
-    model_cfg.attention.sparse_mla_backend = "tilelang"
+    model_cfg.attention.sparse_mla_backend = "flashmla"
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False, weight_decay=0.1)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(

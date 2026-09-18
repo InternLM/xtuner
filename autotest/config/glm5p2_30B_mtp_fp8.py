@@ -34,7 +34,7 @@ moe_cfg.num_nextn_predict_layers = 4
 if hasattr(moe_cfg, "_normalize_physical_mtp_indexer_types"):
     moe_cfg._normalize_physical_mtp_indexer_types()
 if hasattr(moe_cfg.attention, "sparse_mla_backend"):
-    moe_cfg.attention.sparse_mla_backend = "tilelang"
+    moe_cfg.attention.sparse_mla_backend = "flashmla"
 
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)

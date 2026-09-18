@@ -289,6 +289,7 @@ case:
             resource:
                 cpus_per_task: 120
                 memory_per_task: 1200
+                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
@@ -326,6 +327,7 @@ case:
             resource:
                 cpus_per_task: 120
                 memory_per_task: 1200
+                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
@@ -359,6 +361,7 @@ case:
             resource:
                 cpus_per_task: 120
                 memory_per_task: 1200
+                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
@@ -390,6 +393,7 @@ case:
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 num_nodes: 2
+                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
@@ -422,6 +426,7 @@ case:
                 num_nodes: 2
                 cpus_per_task: 80
                 memory_per_task: 1200
+                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
@@ -450,6 +455,7 @@ case:
             resource:
                 num_nodes: 2
                 cpus_per_task: 80
+                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca

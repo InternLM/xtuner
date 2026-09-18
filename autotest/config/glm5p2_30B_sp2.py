@@ -22,7 +22,7 @@ moe_cfg.dispatcher = "all2all"
 moe_cfg.ep_size = ep_size
 moe_cfg.compile_cfg = False
 if hasattr(moe_cfg.attention, "sparse_mla_backend"):
-    moe_cfg.attention.sparse_mla_backend = "tilelang"
+    moe_cfg.attention.sparse_mla_backend = "flashmla"
 
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
