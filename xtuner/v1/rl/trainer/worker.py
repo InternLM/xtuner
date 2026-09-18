@@ -65,7 +65,6 @@ from xtuner.v1.utils import (
     ray_method,
     set_deterministic,
 )
-from xtuner.v1.utils.activation_offload import OffloadManager
 from xtuner.v1.utils.fsdp import release_deferred_fsdp_all_gathers
 from xtuner.v1.utils.nccl_process_group import resume_nccl_process_groups, suspend_nccl_process_groups
 
@@ -919,7 +918,6 @@ class TrainingWorker(SingleAcceleratorWorker):
                 train_step_info = self._engine.train_step(
                     data_batches=engine_input,
                 )
-                OffloadManager().clear()
             self.logger.debug(
                 f"Rank{self.rank} Rollout {rollout_idx} GlobalStep {global_train_step} "
                 f"train_step[{i}].engine_train_step elapsed={time.perf_counter() - train_step_begin:.4f}s"
