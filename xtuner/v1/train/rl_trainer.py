@@ -1146,7 +1146,7 @@ class BaseRLTrainer:
         # rewards/* from being weighted by segment count.
         cluster_rewards_list: list[float] = []
         distillation_reward_observations: list[tuple[RolloutState, float]] = []
-        advantages_list = []
+        advantages_list: list[float] = []
         prompt_len_list = []
         response_len_list = []
         tool_turns_list: list[int] = []
@@ -1250,7 +1250,7 @@ class BaseRLTrainer:
 
                     advatnages_val = sample_advantages[i]
                     actual_advantages = [0.0 if label == -100 else advatnages_val for label in shifted_labels]
-                    advantages_list.extend(actual_advantages)
+                    advantages_list.extend(advatnages_val for label in shifted_labels if label != -100)
 
                     assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                     training_tokens += len(input_ids)
@@ -1332,11 +1332,13 @@ class BaseRLTrainer:
                 shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
                 # Keep the advantage layout aligned with input_ids (response excludes EOS).
+                # Prompt positions predict prompt tokens whose shifted labels are -100, so their
+                # advantage is 0; the last entry of response_ids (EOS) is only a label, never an input.
                 advatnages_val = sample_advantages[i]
-                actual_advantages = [advatnages_val] * len(prompt_ids) + [
+                actual_advantages = [0.0] * (len(prompt_ids) - 1) + [
                     0.0 if mask == 0 else advatnages_val for mask in response_mask
                 ]
-                advantages_list.extend(actual_advantages[:-1])
+                advantages_list.extend(advatnages_val for mask in response_mask if mask != 0)
 
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 training_tokens += len(input_ids)
