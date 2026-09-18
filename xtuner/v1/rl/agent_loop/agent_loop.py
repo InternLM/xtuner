@@ -418,7 +418,7 @@ class RouterAgentLoop:
         finally:
             await self._release_worker(worker)
 
-    async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
+    async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutMetadata]:
         worker = await self._pick_worker()
         try:
             return await worker.generate_group.remote(rollout_state, **kwargs)

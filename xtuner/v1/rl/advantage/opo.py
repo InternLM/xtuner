@@ -43,6 +43,8 @@ class OPOEstimator(AdvantageEstimator):
 
 
 def _response_len(data: Any) -> int:
+    if hasattr(data, "response_len"):
+        return int(data.response_len or 0)
     if hasattr(data, "response_ids"):
         return len(data.response_ids or [])
     return len(data.env.rollout.response_ids or [])

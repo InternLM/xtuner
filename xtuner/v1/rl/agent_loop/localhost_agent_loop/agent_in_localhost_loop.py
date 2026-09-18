@@ -202,11 +202,21 @@ class AgentInLocalhostLoop(AgentLoop):
         try:
             if rollout_state.status != Status.COMPLETED:
                 return rollout_state
-            rollout_state.response_ids = normalize_token_ids(rollout_state.response_ids)
-            rollout_state.input_ids = normalize_token_ids(rollout_state.input_ids)
-            rollout_state.labels = normalize_token_ids(rollout_state.labels)
+            response_ids = normalize_token_ids(rollout_state.response_ids)
+            raw_input_ids = normalize_token_ids(rollout_state.input_ids)
+            raw_labels = normalize_token_ids(rollout_state.labels)
             if rollout_state.logprobs is not None:
-                rollout_state.logprobs = [float(value) for value in rollout_state.logprobs]
+                raw_logprobs = [float(value) for value in rollout_state.logprobs]
+            else:
+                raw_logprobs = None
+
+            # Trace export stores the unshifted token stream. Convert it once
+            # in the agent loop so the trainer receives the same final layout
+            # as the single-turn and GSM8K loops.
+            rollout_state.response_ids = response_ids
+            rollout_state.input_ids = raw_input_ids[:-1]
+            rollout_state.labels = raw_labels[1:]
+            rollout_state.logprobs = raw_logprobs[1:] if raw_logprobs is not None else None
             validate_training_artifacts(rollout_state)
             return rollout_state
         except Exception as exc:

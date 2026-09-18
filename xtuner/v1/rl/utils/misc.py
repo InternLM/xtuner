@@ -9,12 +9,12 @@ import urllib.request
 import uuid
 from abc import ABC
 from pathlib import Path
-from typing import Any, List, Literal, Union
+from typing import Any, List, Literal, TypeVar, Union
 
 import requests
 import torch.nn.functional as F
 
-from xtuner.v1.data_proto.rl_data import RolloutState
+from xtuner.v1.data_proto.rl_data import RolloutMetadata, RolloutState
 from xtuner.v1.data_proto.utils import calculate_seq_staleness as calculate_seq_staleness
 from xtuner.v1.utils.logger import get_logger
 
@@ -119,8 +119,13 @@ def gather_logprobs(logits, shifted_labels):
     return logprobs
 
 
-def sort_rollout_state_for_deterministic(data_groups: list[list[RolloutState]]) -> list[list[RolloutState]]:
-    def sort_key(sample: RolloutState) -> tuple[int, int]:
+RolloutItem = TypeVar("RolloutItem", RolloutState, RolloutMetadata)
+
+
+def sort_rollout_state_for_deterministic(
+    data_groups: list[list[RolloutItem]],
+) -> list[list[RolloutItem]]:
+    def sort_key(sample: RolloutItem) -> tuple[int, int]:
         return (sample.group_id or 0, sample.rollout_id or 0)
 
     sorted_groups = [sorted(group, key=sort_key) for group in data_groups]

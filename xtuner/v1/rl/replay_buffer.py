@@ -523,6 +523,11 @@ class ReplayBuffer:
     ) -> None:
         if not items:
             return
+        if not all(isinstance(item, RolloutMetadata) for item in items):
+            raise TypeError("ReplayBuffer.put expects a list of RolloutMetadata.")
+        for item in items:
+            if item.status == Status.COMPLETED and item.storage is None:
+                raise ValueError(f"Rollout metadata {item.rollout_id} has no storage reference.")
         if model_step is not None:
             for item in items:
                 update_sample_version(item, model_step)

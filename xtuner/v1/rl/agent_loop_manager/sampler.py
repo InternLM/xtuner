@@ -135,7 +135,7 @@ class Sampler(_DatasetSampler):
                 # independently. For larger groups, batch the Object Store
                 # fetch and move the blocking operation off the async loop to
                 # avoid serial wait and sampler scheduling delays.
-                return [metadata.to_rollout_state() for metadata in metadata_groups[0]]
+                return [metadata.to_rollout_state(release_storage=True) for metadata in metadata_groups[0]]
         return self.sample_from_dataloader()
 
     def save(self, checkpoint_path: Path | str) -> None:

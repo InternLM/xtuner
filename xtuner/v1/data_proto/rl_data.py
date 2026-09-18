@@ -220,7 +220,7 @@ class RolloutMetadata(BaseModel):
             storage=storage,
         )
 
-    def to_rollout_state(self) -> RolloutState:
+    def to_rollout_state(self, *, release_storage: bool = False) -> RolloutState:
         """Restore and update the rollout state referenced by this metadata.
 
         ``RolloutMetadata`` is the authoritative owner of replay lifecycle
@@ -228,6 +228,13 @@ class RolloutMetadata(BaseModel):
         state is fetched from the Object Store through ``storage`` and then
         updated locally; mutating it does not modify the Object Store
         snapshot.
+
+        Args:
+            release_storage: Release this metadata's outer ObjectRef after the
+                state has been restored successfully. Sampler retry paths use
+                this because ownership moves to the returned local state;
+                training paths keep the default so their existing cleanup can
+                release nested references before dropping the outer ref.
         """
         if self.storage is None:
             raise ValueError(f"Rollout metadata {self.rollout_id} has no storage reference.")
@@ -246,6 +253,8 @@ class RolloutMetadata(BaseModel):
         rollout_state.status = self.status
         if self.status == Status.EXPIRED:
             reset_rollout_response(rollout_state)
+        if release_storage:
+            release_rollout_metadata_storage(self)
         return rollout_state
 
 
@@ -324,10 +333,14 @@ def _release_object_refs(
     return result
 
 
-def discard_rollout_state(rollout_state: RolloutState) -> RolloutState:
+def discard_rollout_state(
+    rollout_state: RolloutState,
+    *,
+    best_effort: bool = False,
+) -> RolloutState:
     """Release heavy references and clear fields before dropping a rollout."""
 
-    _release_object_refs(rollout_state, clear=True)
+    _release_object_refs(rollout_state, clear=True, best_effort=best_effort)
 
     for field_name, field in type(rollout_state).model_fields.items():
         if field.is_required():
@@ -336,13 +349,22 @@ def discard_rollout_state(rollout_state: RolloutState) -> RolloutState:
     return rollout_state
 
 
+def release_rollout_metadata_storage(rollout_metadata: RolloutMetadata) -> RolloutMetadata:
+    """Release only the outer ObjectRef owned by rollout metadata."""
+
+    storage = rollout_metadata.storage
+    if storage is not None:
+        _release_object_refs(storage)
+        rollout_metadata.storage = None
+    return rollout_metadata
+
+
 def discard_rollout_state_from_metadata(rollout_metadata: RolloutMetadata) -> RolloutMetadata:
     """Release a metadata-owned complete state and its Object Store ref.
 
-    The complete state is fetched only for cleanup.  Routed-expert refs are
-    detached before the generic state cleanup so they can be released
-    independently and tolerantly: TraceStore may already have released the
-    same refs when its session is discarded.
+    This function owns the metadata-only cleanup path. Callers that already
+    have a materialized local state should release that state themselves and
+    call ``release_rollout_metadata_storage`` separately.
     """
     storage = rollout_metadata.storage
     if storage is None:
@@ -354,22 +376,16 @@ def discard_rollout_state_from_metadata(rollout_metadata: RolloutMetadata) -> Ro
     # being resolved.
     from ray import get as ray_get
 
-    rollout_state: RolloutState | None = None
+    materialized_state: RolloutState | None = None
     try:
-        rollout_state = ray_get(storage)
-        if not isinstance(rollout_state, RolloutState):
+        materialized_state = ray_get(storage)
+        if not isinstance(materialized_state, RolloutState):
             raise TypeError("Rollout metadata storage must resolve to a RolloutState object.")
 
-        routed_experts = rollout_state.routed_experts
-        rollout_state.routed_experts = None
-        _release_object_refs(routed_experts, best_effort=True)
-        discard_rollout_state(rollout_state)
+        discard_rollout_state(materialized_state, best_effort=True)
     finally:
-        try:
-            _release_object_refs(storage)
-        finally:
-            rollout_metadata.storage = None
-            del rollout_state
+        release_rollout_metadata_storage(rollout_metadata)
+        del materialized_state
     return rollout_metadata
 
 

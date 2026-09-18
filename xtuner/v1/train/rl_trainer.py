@@ -19,7 +19,14 @@ from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import (
+    RolloutMetadata,
+    RolloutState,
+    Status,
+    discard_rollout_state,
+    discard_rollout_state_from_metadata,
+    release_rollout_metadata_storage,
+)
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
@@ -160,7 +167,7 @@ def _migrate_legacy_is_valid_sample_fn(cfg: "BaseRLTrainerConfig", logger) -> No
     )
 
 
-def _trace_session_ids(rollout_batches: list[list[RolloutState]]) -> list[str]:
+def _trace_session_ids(rollout_batches: list[list[RolloutState | RolloutMetadata]]) -> list[str]:
     """Return stable, unique trace session ids owned by rollout batches."""
     return list(
         dict.fromkeys(
@@ -676,6 +683,82 @@ class BaseRLTrainer:
         self._exp_tracker = get_writer(writer_type=cfg.exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = False
 
+    def _restore_rollout_batch(
+        self,
+        data_groups: list[list[RolloutMetadata | RolloutState]],
+    ) -> tuple[list[list[RolloutMetadata]], list[list[RolloutState]]]:
+        """Restore complete states while preserving metadata as the owner.
+
+        Normal training receives metadata-only groups and resolves each
+        ``storage`` reference once. Debug-training inputs may still contain
+        serialized ``RolloutState`` objects, so they are wrapped in metadata
+        without creating a second Object Store entry.
+        """
+        if not data_groups:
+            return [], []
+
+        flattened = [item for group in data_groups for item in group]
+        if not flattened:
+            return [[] for _ in data_groups], [[] for _ in data_groups]
+
+        if all(isinstance(item, RolloutState) for item in flattened):
+            state_groups = cast(list[list[RolloutState]], data_groups)
+            metadata_groups = [
+                [RolloutMetadata.from_rollout_state(rollout_state) for rollout_state in group]
+                for group in state_groups
+            ]
+            return metadata_groups, state_groups
+
+        if not all(isinstance(item, RolloutMetadata) for item in flattened):
+            raise TypeError("A rollout batch must contain either RolloutMetadata or RolloutState.")
+
+        metadata_groups = cast(list[list[RolloutMetadata]], data_groups)
+        restored_state_groups: list[list[RolloutState]] = [[] for _ in metadata_groups]
+        try:
+            for metadata_group, state_group in zip(metadata_groups, restored_state_groups):
+                for rollout_metadata in metadata_group:
+                    state_group.append(rollout_metadata.to_rollout_state())
+        except Exception:
+            # A failed restore must not leave already-consumed or pending
+            # ObjectRefs in the Object Store. Successful states are released
+            # with their local copy; the remaining metadata is released by
+            # resolving its storage reference only for cleanup.
+            try:
+                self._release_restored_rollout_batch(metadata_groups, restored_state_groups)
+            except Exception:
+                # Continue releasing unmaterialized metadata below and keep
+                # the original restore failure as the exception we surface.
+                pass
+            for metadata_group in metadata_groups:
+                for rollout_metadata in metadata_group:
+                    if rollout_metadata.storage is None:
+                        continue
+                    try:
+                        discard_rollout_state_from_metadata(rollout_metadata)
+                    except Exception:
+                        # Preserve the original restore error. The cleanup
+                        # helper clears ``storage`` in its finally block.
+                        pass
+            raise
+        return metadata_groups, restored_state_groups
+
+    def _release_restored_rollout_batch(
+        self,
+        metadata_groups: list[list[RolloutMetadata]],
+        state_groups: list[list[RolloutState]],
+    ) -> None:
+        """Release nested artifact refs and every metadata storage ref."""
+        for metadata_group, state_group in zip(metadata_groups, state_groups):
+            for rollout_metadata, rollout_state in zip(metadata_group, state_group):
+                if rollout_metadata.storage is None:
+                    discard_rollout_state(rollout_state)
+                else:
+                    # The complete state has already been materialized by
+                    # ``_restore_rollout_batch``. Release its nested refs
+                    # locally, then release only the outer metadata ref.
+                    discard_rollout_state(rollout_state, best_effort=True)
+                    release_rollout_metadata_storage(rollout_metadata)
+
     def _init_work_dir_and_meta(self, cfg: BaseRLTrainerConfig, meta_path: str) -> None:
         work_dir = Path(cfg.work_dir) if cfg.work_dir else Path.cwd() / "work_dirs"
         if get_rank() == 0:
@@ -939,6 +1022,7 @@ class BaseRLTrainer:
             self.tokenizer.save_pretrained(str(save_hf_path))
 
     async def _run_initial_evaluate(self) -> None:
+        eval_metadata: list[list[RolloutMetadata]] = []
         eval_batch: list[list[RolloutState]] = []
         try:
             eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
@@ -946,11 +1030,10 @@ class BaseRLTrainer:
                 train_step=1,
                 model_step=0,
             )
+            rollout_groups = eval_produce_result.rollout_states
             if XTUNER_DETERMINISTIC:
-                eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
-                    eval_produce_result.rollout_states
-                )
-            eval_batch = eval_produce_result.rollout_states
+                rollout_groups = sort_rollout_state_for_deterministic(rollout_groups)
+            eval_metadata, eval_batch = self._restore_rollout_batch(rollout_groups)
             eval_metrics = self.evaluator.run(eval_batch)
             eval_trajectory_dir = self.exp_dir / "eval_rollout"
             eval_trajectory_dir.mkdir(parents=True, exist_ok=True)
@@ -961,7 +1044,10 @@ class BaseRLTrainer:
             tb_scores = {f"eval/{k}": v for k, v in eval_metrics.items()}
             self._exp_tracker.add_scalars(tag_scalar_dict=tb_scores, global_step=0)
         finally:
-            self._release_trace_sessions(_trace_session_ids(eval_batch))
+            try:
+                self._release_trace_sessions(_trace_session_ids(eval_batch))
+            finally:
+                self._release_restored_rollout_batch(eval_metadata, eval_batch)
 
     def _release_trace_sessions(self, session_ids: list[str]) -> set[str]:
         from xtuner.v1.rl.rollout.trace_store import get_existing_store
@@ -1002,7 +1088,7 @@ class BaseRLTrainer:
 
     def _train_one_batch(
         self,
-        train_batch: list[list[RolloutState]],
+        train_batch: list[list[RolloutMetadata | RolloutState]],
         train_step: int,
         step_timer_dict: dict,
         *,
@@ -1011,51 +1097,62 @@ class BaseRLTrainer:
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ) -> TrainInfo:
-        train_sample_count = sum(len(group) for group in train_batch)
+        metadata_groups, state_groups = self._restore_rollout_batch(train_batch)
+        train_sample_count = sum(len(group) for group in metadata_groups)
         self.logger.info(f"generate {train_sample_count} samples for training")
 
-        train_trajectory_dir = self.exp_dir / "train_rollout"
-        train_trajectory_dir.mkdir(parents=True, exist_ok=True)
-        train_trajectory_path = train_trajectory_dir / f"train_rollout_{train_step}.jsonl"
-        self._save_trajectories(train_batch, train_trajectory_path)
-        self.logger.info(f"Train step {train_step} train trajectories saved to {train_trajectory_path}")
+        try:
+            train_trajectory_dir = self.exp_dir / "train_rollout"
+            train_trajectory_dir.mkdir(parents=True, exist_ok=True)
+            train_trajectory_path = train_trajectory_dir / f"train_rollout_{train_step}.jsonl"
+            self._save_trajectories(state_groups, train_trajectory_path)
+            self.logger.info(f"Train step {train_step} train trajectories saved to {train_trajectory_path}")
 
-        # 共卡训练前切换资源：检查 rollout -> offload rollout -> onload train。
-        if offload_rollout_before_train:
-            ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
-        if onload_train_before_train:
-            if getattr(self, "_train_nccl_suspended", False):
-                with timer("resume_train_nccl", step_timer_dict):
-                    self.train_controller.resume_train_nccl_process_groups()
-                self._train_nccl_suspended = False
-            with timer("onload", step_timer_dict):
-                self.train_controller.onload(target="all")
-                self.logger.info("Training controller loaded")
+            # 共卡训练前切换资源：检查 rollout -> offload rollout -> onload train。
+            if offload_rollout_before_train:
+                ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+            if onload_train_before_train:
+                if getattr(self, "_train_nccl_suspended", False):
+                    with timer("resume_train_nccl", step_timer_dict):
+                        self.train_controller.resume_train_nccl_process_groups()
+                    self._train_nccl_suspended = False
+                with timer("onload", step_timer_dict):
+                    self.train_controller.onload(target="all")
+                    self.logger.info("Training controller loaded")
 
-        with timer("prepare_data", step_timer_dict):
-            data_batches, data_info = self._prepare_train_data(
-                train_batch,
-                self._train_worker_cfg.pack_max_length,
-                raw_rewards_sum=raw_rewards_sum,
-                raw_rewards_count=raw_rewards_count,
-            )
-        self.logger.info(f"Prepared {len(data_batches)} training data batches")
+            with timer("prepare_data", step_timer_dict):
+                data_batches, data_info = self._prepare_train_data(
+                    metadata_groups,
+                    self._train_worker_cfg.pack_max_length,
+                    raw_rewards_sum=raw_rewards_sum,
+                    raw_rewards_count=raw_rewards_count,
+                    rollout_state_groups=state_groups,
+                )
+            self.logger.info(f"Prepared {len(data_batches)} training data batches")
 
-        with timer("training", step_timer_dict):
-            workers_log_item: list[WorkerLogItem] = self.train_controller.fit(
-                data_batches,
-                pack_max_length=self._train_worker_cfg.pack_max_length,
-                rollout_idx=train_step,
-            )
+            with timer("training", step_timer_dict):
+                # Transitional handoff: keep the existing controller packing
+                # contract while the trainer consumes metadata and restores
+                # the complete state here. Worker-side context construction
+                # will replace this data-batch path in the next phase.
+                workers_log_item: list[WorkerLogItem] = self.train_controller.fit(
+                    data_batches,
+                    pack_max_length=self._train_worker_cfg.pack_max_length,
+                    rollout_idx=train_step,
+                )
 
-        self._release_trace_sessions_after_train_batch(train_batch)
-
-        return {
-            "data_info": data_info,
-            "workers_log_item": workers_log_item,
-        }
+            return {
+                "data_info": data_info,
+                "workers_log_item": workers_log_item,
+            }
+        finally:
+            try:
+                self._release_trace_sessions_after_train_batch(state_groups)
+            finally:
+                self._release_restored_rollout_batch(metadata_groups, state_groups)
 
     async def _run_evaluation(self, train_step: int) -> dict[str, float]:
+        eval_metadata: list[list[RolloutMetadata]] = []
         eval_batch: list[list[RolloutState]] = []
         try:
             eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
@@ -1063,11 +1160,10 @@ class BaseRLTrainer:
                 train_step=train_step,
                 model_step=train_step,
             )
+            rollout_groups = eval_produce_result.rollout_states
             if XTUNER_DETERMINISTIC:
-                eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
-                    eval_produce_result.rollout_states
-                )
-            eval_batch = eval_produce_result.rollout_states
+                rollout_groups = sort_rollout_state_for_deterministic(rollout_groups)
+            eval_metadata, eval_batch = self._restore_rollout_batch(rollout_groups)
             eval_metrics = self.evaluator.run(eval_batch)
             eval_trajectory_dir = self.exp_dir / "eval_rollout"
             eval_trajectory_dir.mkdir(parents=True, exist_ok=True)
@@ -1076,18 +1172,29 @@ class BaseRLTrainer:
             self.logger.info(f"Train step {train_step} eval trajectories saved to {eval_trajectory_path}")
             return eval_metrics
         finally:
-            self._release_trace_sessions(_trace_session_ids(eval_batch))
+            try:
+                self._release_trace_sessions(_trace_session_ids(eval_batch))
+            finally:
+                self._release_restored_rollout_batch(eval_metadata, eval_batch)
 
-    def _save_debug_rollout_batch(self, train_batch: list[list[RolloutState]], train_step: int) -> None:
+    def _save_debug_rollout_batch(
+        self,
+        train_batch: list[list[RolloutMetadata | RolloutState]],
+        train_step: int,
+    ) -> None:
         assert self._debug_rollout_dir is not None
+        metadata_groups, state_groups = self._restore_rollout_batch(train_batch)
         self._debug_rollout_dir.mkdir(parents=True, exist_ok=True)
         save_path = self._debug_rollout_dir / f"debug_rollout_{train_step}.pt"
-        serializable_batch = [
-            [cast(RolloutState, _snapshot_nested_objectrefs(rollout_state)) for rollout_state in group]
-            for group in train_batch
-        ]
-        torch.save(serializable_batch, save_path)
-        self.logger.info(f"Debug rollout batch for step {train_step} saved to {save_path}")
+        try:
+            serializable_batch = [
+                [cast(RolloutState, _snapshot_nested_objectrefs(rollout_state)) for rollout_state in group]
+                for group in state_groups
+            ]
+            torch.save(serializable_batch, save_path)
+            self.logger.info(f"Debug rollout batch for step {train_step} saved to {save_path}")
+        finally:
+            self._release_restored_rollout_batch(metadata_groups, state_groups)
 
     def _list_debug_rollout_files(self, debug_rollout_dir: Path) -> dict[int, Path]:
         debug_files = {
@@ -1113,11 +1220,23 @@ class BaseRLTrainer:
     # TODO: simplify with Packer.pack_pad_dispatch()
     def _prepare_train_data(
         self,
-        data_groups: list[list[RolloutState]],
+        data_groups: list[list[RolloutMetadata | RolloutState]],
         pack_max_length: int,
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
+        rollout_state_groups: list[list[RolloutState]] | None = None,
     ):
+        """Build the current controller input from metadata-owned rollouts.
+
+        ``metadata_groups`` is the lifecycle source of truth. The complete
+        states are restored only for the raw fields that the current
+        trainer-side conversion and packing path still consumes.
+        """
+        if rollout_state_groups is None:
+            metadata_groups, rollout_state_groups = self._restore_rollout_batch(data_groups)
+        else:
+            metadata_groups = cast(list[list[RolloutMetadata]], data_groups)
+
         rewards_list = []
         # Per-session rewards for distribution metrics. Agentic sessions may split into several
         # trainable segments that share one reward; counting that reward once per session keeps
@@ -1131,9 +1250,9 @@ class BaseRLTrainer:
 
         data_batches = []
 
-        for j, group in enumerate(data_groups):
+        for j, (metadata_group, group) in enumerate(zip(metadata_groups, rollout_state_groups)):
             if not is_valid_for_training(group, self.logger):
-                self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
+                self.logger.error(f"Skip one data group {metadata_group} due to rollout failed or empty response.")
                 continue
 
             prompt_ids = None
@@ -1152,28 +1271,27 @@ class BaseRLTrainer:
             # Compute the group advantage once per session, then broadcast it back to each segment.
             cluster_index_by_key: dict[Any, int] = {}
             cluster_rewards: list[float] = []
-            cluster_representatives: list[RolloutState] = []
+            cluster_representatives: list[RolloutMetadata] = []
             sample_cluster_indices: list[int] = []
-            for data in group:
-                assert data.reward is not None and "score" in data.reward, (
-                    f"Reward is missing or does not contain 'score' key in data: {data}"
+            for metadata in metadata_group:
+                assert metadata.reward is not None and "score" in metadata.reward, (
+                    f"Reward is missing or does not contain 'score' key in data: {metadata}"
                 )
-                reward = float(data.reward["score"])
+                reward = float(metadata.reward["score"])
                 rewards.append(reward)
                 # session_id is only set by agentic loops / XTUNER_DETERMINISTIC; plain RL falls back
                 # to rollout_id, which the sampler always assigns. Segments of one session share a key.
-                cluster_key = data.session_id if data.session_id is not None else data.rollout_id
+                cluster_key = metadata.session_id if metadata.session_id is not None else metadata.rollout_id
                 cluster_index = cluster_index_by_key.get(cluster_key)
                 if cluster_index is None:
                     cluster_index = len(cluster_rewards)
                     cluster_index_by_key[cluster_key] = cluster_index
                     cluster_rewards.append(reward)
-                    cluster_representatives.append(data)
+                    cluster_representatives.append(metadata)
                 sample_cluster_indices.append(cluster_index)
                 # 有可能有重复，但是没有其他更好办法
-                turns = data.extra_fields.get("agent_tool_turns")
-                if isinstance(turns, int):
-                    tool_turns_list.append(turns)
+                if metadata.tool_turns is not None:
+                    tool_turns_list.append(metadata.tool_turns)
 
             rewards_list.extend(rewards)
             cluster_rewards_list.extend(cluster_rewards)
@@ -1197,15 +1315,23 @@ class BaseRLTrainer:
                             f"{len(input_logprobs)} vs {len(raw_input_ids)}, data: {group[i]}"
                         )
                         rollout_logprobs: torch.Tensor | None = torch.tensor(
-                            input_logprobs[1:], dtype=torch.float32
+                            input_logprobs, dtype=torch.float32
                         ).unsqueeze(0)
                     else:
                         raise ValueError(f"Logprobs cannot be None when input_ids is provided: {group[i]}")
 
-                    input_ids = raw_input_ids[:-1]
-                    shifted_labels = labels[1:]
-                    prompt_len = sum(label == -100 for label in shifted_labels)
-                    response_len = len(shifted_labels) - prompt_len
+                    # Agent-loop preparation already produces the final
+                    # next-token-aligned layout. Keep the old response-based
+                    # branch below as the compatibility path for states that
+                    # do not carry prepared input_ids/labels.
+                    input_ids = raw_input_ids
+                    shifted_labels = labels
+                    prompt_len = metadata_group[i].prompt_len
+                    if prompt_len is None:
+                        prompt_len = sum(label == -100 for label in shifted_labels)
+                    response_len = metadata_group[i].response_len
+                    if response_len is None:
+                        response_len = len(shifted_labels) - prompt_len
                     prompt_len_list.append(prompt_len)
                     response_len_list.append(response_len)
 
@@ -1265,8 +1391,8 @@ class BaseRLTrainer:
                 # 返回的 routed_experts 不包括 eos 的值，实际上也不需要，需要减一
                 input_ids = prompt_ids + response_ids[:-1]
 
-                prompt_len_list.append(len(prompt_ids))
-                response_len_list.append(len(response_ids))
+                prompt_len_list.append(metadata_group[i].prompt_len or len(prompt_ids))
+                response_len_list.append(metadata_group[i].response_len or len(response_ids))
 
                 # 根据 response_mask 计算 response_ids 对应的shifted_labels
                 if group[i].response_mask is None:
