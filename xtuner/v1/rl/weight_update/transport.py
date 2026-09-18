@@ -1001,6 +1001,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineAdapter]):
         # 0. Drop previous train checkpoint to limit pinned host memory.
         if self._checkpoint_name is not None:
             self._ps.unregister_checkpoint(self._checkpoint_name)
+            self._checkpoint_name = None
 
         # 1. Collect named tensors from weight iterator
         all_tensors = self._collect_named_tensors(weight_iterator, local_keys=self._local_checkpoint_keys)
@@ -1029,6 +1030,7 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineAdapter]):
                 DEVICE_MODULE.synchronize()
             self._checkpoint_name = name
         except Exception as e:
+            self._checkpoint_name = None
             raise RuntimeError(f"[checkpoint_engine] register_checkpoint failed rank={self.rank} name={name}") from e
 
     def _make_req_func(self, targets: Sequence[RolloutWeightUpdateTarget]):
