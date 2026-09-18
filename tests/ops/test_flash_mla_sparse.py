@@ -1,7 +1,7 @@
 """FlashMLA SparseMLA 后端的数值正确性测试。
 
 TestFlashMLASparse
-    test_softmax_lse_is_natural_log: 前向导出的 softmax_lse 是自然对数 LSE。
+    test_softmax_lse_is_natural_log: 前向输出和导出的 softmax_lse 与参考实现一致。
     test_backward_matches_reference: 反向梯度与 PyTorch 稠密参考实现一致。
 
 回归背景：FlashMLA 返回的 LSE 是自然对数，而 TileLang 反向核消费的是 log2 空间的 LSE。
@@ -58,8 +58,9 @@ class TestFlashMLASparse:
         scaling = _HEAD_DIM**-0.5
 
         actual = flash_mla_sparse_mla(q, kv, indices, scaling, value_dim=_VALUE_DIM)
-        _, expected_lse = _reference(q, kv, indices, scaling)
+        expected_output, expected_lse = _reference(q, kv, indices, scaling)
 
+        torch.testing.assert_close(actual.raw_output.float(), expected_output, rtol=1e-3, atol=1e-3)
         torch.testing.assert_close(actual.softmax_lse, expected_lse, rtol=1e-3, atol=1e-3)
         assert not torch.allclose(actual.softmax_lse, expected_lse * math.log2(math.e), rtol=1e-2)
 
