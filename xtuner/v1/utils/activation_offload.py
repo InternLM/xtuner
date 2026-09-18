@@ -207,36 +207,21 @@ class OffloadManager(metaclass=SingletonMeta):
         # Populated only when async_save_on_cpu is constructed with reserve_pin_memory=True;
         # buffer is reused across iterations as long as shape and dtype still match.
         self.pin_memory_cache: dict = {}
-        # Streams are registered by each saved-tensor hook so a step boundary can
-        # wait for pending asynchronous copies before dropping runtime references.
-        # A registered stream may be owned by an external subsystem (e.g. the
-        # FSDP all-gather stream in qwen3vl_text.py); the manager only
-        # synchronizes it and never manages its lifecycle.
-        self.offload_streams: dict[str, list[torch.cuda.Stream]] = {}
-
-    def register_stream(self, group: str, stream: torch.cuda.Stream) -> None:
-        """Register a stream used by an offload group.
-
-        Args:
-            group (str): Offload group associated with the stream.
-            stream (torch.cuda.Stream): CUDA stream used for asynchronous copies.
-        """
-        streams = self.offload_streams.setdefault(group, [])
-        if not any(stream is registered for registered in streams):
-            streams.append(stream)
 
     def clear_step(self, group: str | None = None) -> None:
-        """Synchronize pending offload copies and release runtime state at a
-        step boundary.
+        """Release saved-tensor offload state at a training-step boundary.
 
         Pinned CPU buffers stay cached for reuse; GPU tensors and per-step counters are released.
 
         Args:
             group (str | None): Optional group to clear. If omitted, clear all groups.
         """
-        streams = self.offload_streams.values() if group is None else [self.offload_streams.get(group, [])]
-        for stream in (s for group_streams in streams for s in group_streams):
-            stream.synchronize()
+        if not (self.items or self.may_npu_tensors):
+            return
+        # Offload copies run on streams this manager does not own. Drain the device before
+        # dropping references: launch_d2h reads tensor on the d2h stream without record_stream,
+        # and prefetch_launch_h2d reads the pinned CPU buffer, which record_stream cannot cover.
+        torch.cuda.synchronize()
         self.clear(group=group)
 
     def get_cnt(self, block_idx, group="default"):
@@ -347,7 +332,6 @@ class OffloadManager(metaclass=SingletonMeta):
                 if item_key.startswith(prefix):
                     self.may_npu_tensors.pop(item_key, None)
             self.getcnt.pop(group, None)
-            self.offload_streams.pop(group, None)
             if clear_pin_memory_cache:
                 for item_key in list(self.pin_memory_cache.keys()):
                     if item_key.startswith(prefix):
@@ -357,7 +341,6 @@ class OffloadManager(metaclass=SingletonMeta):
         self.items.clear()
         self.may_npu_tensors.clear()
         self.getcnt.clear()
-        self.offload_streams.clear()
         if clear_pin_memory_cache:
             self.pin_memory_cache.clear()
 
@@ -388,9 +371,6 @@ class async_save_on_cpu(saved_tensors_hooks):
         prefetch=True,
         reserve_pin_memory: bool = False,
     ) -> None:
-        OffloadManager().register_stream(group, h2d_stream)
-        OffloadManager().register_stream(group, d2h_stream)
-
         def _pack_to_cpu(tensor):
             if not base_check_fn(tensor):
                 return tensor
