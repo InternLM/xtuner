@@ -284,10 +284,22 @@ def get_train_seq_ctx(
     seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
     position_ids = _to_cpu_tensor(position_ids, dtype=torch.long)
     if position_ids is not None and len(position_ids.shape) == 3:
-        # VLM 位置编码需要补 response 段。
-        max_value = position_ids.max(dim=-1).values  # (3,1)
-        response_position_ids = max_value.unsqueeze(-1).expand(-1, -1, len_response_ids) + torch.arange(
-            1, len_response_ids + 1, device=max_value.device
+        # Match get_rope_index_3: response text continues from a single global
+        # max(T, H, W), not per-axis maxima. Per-axis max diverges when the
+        # prompt ends on image tokens (T≈0 while H/W are large).
+        max_value = position_ids.amax()
+        response_position_ids = (
+            (
+                torch.arange(
+                    1,
+                    len_response_ids + 1,
+                    device=position_ids.device,
+                    dtype=position_ids.dtype,
+                )
+                + max_value
+            )
+            .view(1, 1, -1)
+            .expand(3, 1, -1)
         )
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
         seq_ctx.position_ids = position_ids  # type: ignore[assignment]

@@ -5,6 +5,7 @@
 - 文本样本的 input_ids、shifted_labels、rollout_logprobs、advantage 布局。
 - 同一个 prompt 下多个 response 各自使用对应 reward / advantage。
 - VLM 样本使用 train_prompt_ids，并保留 multimodal 训练字段。
+- VLM M-RoPE：get_train_seq_ctx 用 global amax 续写 response position（对齐 SFT get_rope_index_3）。
 - 无效 rollout group 会被跳过。
 - 缺失 reward、logprob/mask 长度不一致、pack_max_length 过小时 fail fast。
 - 多条样本 pack 成一条序列后，input_ids/shifted_labels/advantages/rollout_logprobs（及 teacher 字段）
@@ -12,6 +13,7 @@
 """
 
 import unittest
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -21,7 +23,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets, r
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
 from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
-from xtuner.v1.train.rl_trainer import BaseRLTrainer
+from xtuner.v1.train.rl_trainer import BaseRLTrainer, get_train_seq_ctx
 
 
 class _FakeAdvantageEstimator:
@@ -225,6 +227,46 @@ class TestPrepareTrainData(unittest.TestCase):
         self.assertIs(seq_ctx.pixel_values, pixel_values)
         self.assertEqual(seq_ctx.image_grid_thw.dtype, torch.long)
         self.assertEqual(seq_ctx.image_grid_thw.tolist(), [[1, 2, 3]])
+
+    def test_get_train_seq_ctx_mrope_continues_from_global_amax(self):
+        """RL 只拿 prompt 的 3D position，续写 response 须用 global amax（对齐 SFT get_rope_index_3）。
+
+        Fixture 等价于：prompt 以 image tokens 结尾（grid 1x4x4, merge=2 → 2x2），
+        此时 T 轴 max=2、H/W 轴 max=3，per-axis max 会在 T 轴分叉；SFT 用 max(T,H,W)+1 续写。
+        不直接 import get_rope_index_3：本文件走 lightweight datasets stub。
+        """
+        # prompt positions from get_rope_index_3([text, vision_start, 4 img tokens])
+        prompt_position_ids = np.array(
+            [
+                [[0, 1, 2, 2, 2, 2]],  # T
+                [[0, 1, 2, 2, 3, 3]],  # H
+                [[0, 1, 2, 3, 2, 3]],  # W
+            ],
+            dtype=np.int64,
+        )
+        response_ids = [20, 21, 22]
+        full_ids = torch.tensor([[10, 11, 12, 13, 14, 15] + response_ids], dtype=torch.long)
+        # SFT get_rope_index_3 整段结果：response 从 global amax(=3)+1 起
+        expected = torch.tensor(
+            [
+                [[0, 1, 2, 2, 2, 2, 4, 5, 6]],
+                [[0, 1, 2, 2, 3, 3, 4, 5, 6]],
+                [[0, 1, 2, 3, 2, 3, 4, 5, 6]],
+            ],
+            dtype=torch.long,
+        )
+
+        seq_ctx = get_train_seq_ctx(
+            cast(torch.LongTensor, full_ids),
+            prompt_position_ids,
+            len_response_ids=len(response_ids),
+        )
+        rl_position_ids = seq_ctx.position_ids
+        assert rl_position_ids is not None
+        self.assertEqual(tuple(rl_position_ids.shape), (3, 1, 9))
+        torch.testing.assert_close(rl_position_ids, expected)
+        # 回归：若误用 per-axis max，T 轴会变成 3,4,5 而非 4,5,6
+        self.assertFalse(torch.equal(rl_position_ids[0, 0, -3:], torch.tensor([3, 4, 5])))
 
     def test_mixed_agentic_and_vlm_reasoning_use_3d_position_ids(self):
         trainer = self._build_trainer([0.5])
