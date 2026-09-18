@@ -5,8 +5,6 @@ Original License: MIT
 Modifications: To enable compatibility on both GPU and NPU, replace all torch.npu with torch.cuda, and then use the transfer_to_npu interface
 """
 
-from typing import Any
-
 import torch
 from torch.autograd.graph import saved_tensors_hooks
 
@@ -211,57 +209,34 @@ class OffloadManager(metaclass=SingletonMeta):
         self.pin_memory_cache: dict = {}
         # Streams are registered by each saved-tensor hook so a step boundary can
         # wait for pending asynchronous copies before dropping runtime references.
-        self.offload_streams: dict[str, list[Any]] = {}
+        # A registered stream may be owned by an external subsystem (e.g. the
+        # FSDP all-gather stream in qwen3vl_text.py); the manager only
+        # synchronizes it and never manages its lifecycle.
+        self.offload_streams: dict[str, list[torch.cuda.Stream]] = {}
 
-    def register_stream(self, group: str, stream: Any) -> None:
+    def register_stream(self, group: str, stream: torch.cuda.Stream) -> None:
         """Register a stream used by an offload group.
 
         Args:
             group (str): Offload group associated with the stream.
-            stream (Any): CUDA stream used for asynchronous copies.
+            stream (torch.cuda.Stream): CUDA stream used for asynchronous copies.
         """
         streams = self.offload_streams.setdefault(group, [])
-        if all(stream is not registered_stream for registered_stream in streams):
+        if not any(stream is registered for registered in streams):
             streams.append(stream)
 
-    def has_runtime_state(self, group: str | None = None) -> bool:
-        """Return whether the manager holds live runtime offload entries.
-
-        Args:
-            group (str | None): Optional group to inspect.
-
-        Returns:
-            bool: Whether the selected group has runtime entries.
-        """
-        collections = (self.items, self.may_npu_tensors)
-        if group is None:
-            return any(collections_item for collections_item in collections)
-        prefix = f"{group}_"
-        return any(key.startswith(prefix) for collection in collections for key in collection)
-
-    def synchronize(self, group: str | None = None) -> None:
-        """Wait for asynchronous copies belonging to an offload group.
-
-        Args:
-            group (str | None): Optional group whose streams should be synchronized.
-        """
-        groups = self.offload_streams if group is None else {group: self.offload_streams.get(group, [])}
-        for streams in groups.values():
-            for stream in streams:
-                stream.synchronize()
-
     def clear_step(self, group: str | None = None) -> None:
-        """Synchronize and clear runtime state at the end of a training step.
+        """Synchronize pending offload copies and release runtime state at a
+        step boundary.
 
-        Pinned CPU buffers remain cached unless explicitly cleared, while GPU tensors and per-step counters are
-        released.
+        Pinned CPU buffers stay cached for reuse; GPU tensors and per-step counters are released.
 
         Args:
             group (str | None): Optional group to clear. If omitted, clear all groups.
         """
-        if not self.has_runtime_state(group):
-            return
-        self.synchronize(group)
+        streams = self.offload_streams.values() if group is None else [self.offload_streams.get(group, [])]
+        for stream in (s for group_streams in streams for s in group_streams):
+            stream.synchronize()
         self.clear(group=group)
 
     def get_cnt(self, block_idx, group="default"):
@@ -372,6 +347,7 @@ class OffloadManager(metaclass=SingletonMeta):
                 if item_key.startswith(prefix):
                     self.may_npu_tensors.pop(item_key, None)
             self.getcnt.pop(group, None)
+            self.offload_streams.pop(group, None)
             if clear_pin_memory_cache:
                 for item_key in list(self.pin_memory_cache.keys()):
                     if item_key.startswith(prefix):
@@ -381,6 +357,7 @@ class OffloadManager(metaclass=SingletonMeta):
         self.items.clear()
         self.may_npu_tensors.clear()
         self.getcnt.clear()
+        self.offload_streams.clear()
         if clear_pin_memory_cache:
             self.pin_memory_cache.clear()
 

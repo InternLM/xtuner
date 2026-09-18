@@ -208,6 +208,11 @@ class TestGlm52CompiledMTPCheckpoint(DeterministicDDPTestCase):
             ]
             assert pinned_ids and all(tensor.is_pinned() for tensor in pinned_ids)
             assert any(torch.equal(tensor, expected_ids) for tensor in pinned_ids)
+            # Step boundary contract: runtime entries are released after
+            # train_step, while pinned buffers stay cached for reuse.
+            assert not offload_manager.items
+            assert not offload_manager.may_npu_tensors
+            assert not offload_manager.getcnt
         finally:
             hook.remove()
             offload_manager.clear(group="text", clear_pin_memory_cache=True)
