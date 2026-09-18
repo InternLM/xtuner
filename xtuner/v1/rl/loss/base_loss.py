@@ -94,6 +94,10 @@ class BaseRLLossConfig(CELossConfig):
     def _loss_kwargs_cls(self) -> type["BaseRLLossKwargs"]:
         raise NotImplementedError
 
+    def finalize_metrics(self, extra_info_dict: dict[str, Any], device: str | torch.device) -> dict[str, Any]:
+        """Finalize metrics emitted by the policy loss."""
+        return finalize_train_policy_metrics(extra_info_dict, device)
+
     def build(
         self,
         data: dict,
