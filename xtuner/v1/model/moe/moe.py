@@ -73,6 +73,8 @@ from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
     MoEDecoderLayerOutput,
     MoEGate,
 )
+from xtuner.v1.module.dispatcher import EPExecutionRuntime, build_ep_execution_runtime
+from xtuner.v1.module.dispatcher.moonep_capability import check_config, check_fsdp_policy
 from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
 from xtuner.v1.utils import (
     get_device,
@@ -159,7 +161,18 @@ class MoEConfig(TransformerConfig):
     moe_intermediate_size: Annotated[int, Parameter(group="moe")]
     ep_size: Annotated[int, Parameter(group="moe")] = 1
     expert_tp_size: Annotated[int, Parameter(group="moe")] = 1
-    dispatcher: Annotated[Literal["deepep", "all2all", "agrs"] | None, Parameter(group="moe")] = None
+    dispatcher: Annotated[Literal["deepep", "all2all", "agrs", "moonep"] | None, Parameter(group="moe")] = None
+    # Staging keeps the native FSDP unsharded tensor and copies its BF16 home
+    # experts into MoonEP VMM after AllGather. It is an explicit bring-up path;
+    # production direct landing is installed by the later FSDP adapter.
+    moonep_staging_reference: bool = False
+    # MoonEP reserves this many SMs for its communication kernels.  The
+    # H200 acceptance workload is measurably faster at 64 than its upstream
+    # default of 32; keep it model-scoped so other deployments can tune it.
+    moonep_num_sms: int = 64
+    # TrainEngine resolves this scalar before model build. MoonEP uses it to
+    # size per-invocation resources without depending on TrainerConfig.
+    intra_layer_micro_batch: int = 1
     router: GreedyRouterConfig | NoAuxRouterConfig
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: ZLossConfig | None = None
@@ -208,7 +221,9 @@ class MoE(BaseModel):
 
     def __init__(self, config: MoEConfig):
         # Concrete MoE configs override build(), so validate dispatcher support
-        # at the shared model-construction boundary.
+        # at the shared model-construction boundary. MoonEP's config-only
+        # capability checks live in one entry point.
+        check_config(config)
         if config.dispatcher == "agrs":
             if config.expert_tp_size > 1:
                 raise NotImplementedError("AGRS with ExpertTP is not supported")
@@ -253,6 +268,11 @@ class MoE(BaseModel):
             self.ep_mesh = None
             self.expert_tp_mesh = None
             self.ep_tp_mesh = None
+
+        # Optional model-scoped EP execution runtime (MoonEP today, a no-op
+        # Adapter otherwise). Its four lifecycle boundaries are called
+        # unconditionally below.
+        self._ep_runtime: EPExecutionRuntime = build_ep_execution_runtime(config, self.ep_mesh)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, type=config.rms_norm_type)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
@@ -522,6 +542,13 @@ class MoE(BaseModel):
             assert isinstance(loss_ctx, list) and len(loss_ctx) == len(seq_ctx), (
                 "seq_ctx_list and loss_ctx_list must be lists of the same length"
             )
+            # The configured width is the exact number of forwards co-scheduled
+            # in one layer call, not EP world size or the number of MTP layers.
+            if len(seq_ctx) != self.config.intra_layer_micro_batch:
+                raise ValueError(
+                    f"intra-layer micro-batch width {len(seq_ctx)} does not match "
+                    f"configured width {self.config.intra_layer_micro_batch}"
+                )
             if loss_ctx is None:
                 raise NotImplementedError("loss_ctx must be provided for intra-layer bsz > 1")
 
@@ -1156,6 +1183,8 @@ class MoE(BaseModel):
                     ep_mesh=self.ep_mesh,
                     expert_tp_mesh=self.expert_tp_mesh,
                     ep_tp_mesh=self.ep_tp_mesh,
+                    ep_runtime=self._ep_runtime,
+                    layer_fqn=f"layers.{layer_idx}.experts",
                 )
                 if self.config.freeze_routers:
                     layers[str(layer_idx)].gate.requires_grad_(False)
@@ -1223,6 +1252,8 @@ class MoE(BaseModel):
                 ep_mesh=self.ep_mesh,
                 expert_tp_mesh=self.expert_tp_mesh,
                 ep_tp_mesh=self.ep_tp_mesh,
+                ep_runtime=self._ep_runtime,
+                layer_fqn=f"mtp_block.layers.{i}.decoder_layer.experts",
             )
 
             # Wrap decoder layer in MTPLayer
@@ -1263,6 +1294,8 @@ class MoE(BaseModel):
     ) -> Self:
         if fsdp_config.hsdp_sharding_size is not None and self.config.expert_tp_size > 1:
             raise NotImplementedError("HSDP with ExpertTP is not supported")
+        check_fsdp_policy(self.config, fsdp_config)
+        self._ep_runtime.validate_before_fsdp(fsdp_config)
 
         self.fsdp_config = fsdp_config
         assert self.fsdp_config.ep_size == self.config.ep_size
@@ -1410,7 +1443,30 @@ class MoE(BaseModel):
 
         self._init_load_spec()
         self._to_empty_meta()
+        self._ep_runtime.install_after_fsdp(
+            fsdp_root=self,
+            execution_order=self.expert_bearing_layers_in_execution_order(),
+        )
         return self
+
+    def expert_bearing_layers_in_execution_order(self) -> list[str]:
+        """FQNs of the routed-expert modules in FSDP execution order.
+
+        This is the single source the MoonEP install cross-checks against its
+        construction-order registration: main decoder layers first (skipping
+        the dense prefix), then the MTP physical layers. It is derived from the
+        module structure, not a stored list, so a drift from construction order
+        (or a single-layer + MTP model) fails loudly here.
+        """
+        order = [
+            f"layers.{layer_idx}.experts"
+            for layer_idx, layer in self.layers.items()
+            if isinstance(getattr(layer, "_checkpoint_wrapped_module", layer), MoEDecoderLayer)
+        ]
+        if self.mtp_block is not None and self.config.mtp_config is not None:
+            num_physical = 1 if self.config.mtp_config.share_weights else self.config.mtp_config.num_layers
+            order += [f"mtp_block.layers.{i}.decoder_layer.experts" for i in range(num_physical)]
+        return order
 
     @property
     @override
@@ -1418,6 +1474,10 @@ class MoE(BaseModel):
         if use_moe_ep_compile_cfg(self.config):
             return MOE_EP_COMPILE_CFG
         return MOE_NON_EP_COMPILE_CFG
+
+    def close_ep_runtime(self) -> None:
+        """Release optional dynamic-EP resources before PG teardown."""
+        self._ep_runtime.close()
 
     @property
     def need_update_bias(self) -> bool:

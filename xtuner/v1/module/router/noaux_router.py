@@ -133,20 +133,22 @@ class NoAuxRouter(nn.Module, RouterProtocol):
             topk_weight = topk_weight / denominator
         topk_weight = topk_weight * self.router_scaling_factor  # must multiply the scaling factor
 
-        # TODO: (yehaochen) `Dispatcher` calculate the distribution duplicatedly
+        # An explicit histogram range avoids bincount's output-size readback
+        # while preserving the integer count contract consumed by dispatchers.
+        histogram_ids = topk_ids if topk_ids.device.type == "cuda" else topk_ids.float()
         tokens_per_expert = torch.histc(
-            topk_ids.float(),
+            histogram_ids,
             bins=self.n_routed_experts,
             min=0,
             max=self.n_routed_experts,
-        )  # .view(self.ep_mesh.size(), -1)
+        ).to(torch.int64)
 
         return {
             "logits": logits,
             "router_weights": scores_for_choice,
             "topk_weights": topk_weight,
             "topk_ids": topk_ids,
-            "topkens_per_expert": tokens_per_expert,
+            "tokens_per_expert": tokens_per_expert,
         }
 
 
@@ -225,17 +227,18 @@ class NoAuxGroupedRouter(NoAuxRouter):
             topk_weight = topk_weight / denominator
         topk_weight = topk_weight * self.router_scaling_factor  # must multiply the scaling factor
 
+        histogram_ids = topk_ids if topk_ids.device.type == "cuda" else topk_ids.float()
         tokens_per_expert = torch.histc(
-            topk_ids.float(),
+            histogram_ids,
             bins=self.n_routed_experts,
             min=0,
             max=self.n_routed_experts,
-        )  # .view(self.ep_mesh.size(), -1)
+        ).to(torch.int64)
 
         return {
             "logits": logits,
             "router_weights": scores_for_choice,
             "topk_weights": topk_weight,
             "topk_ids": topk_ids,
-            "topkens_per_expert": tokens_per_expert,
+            "tokens_per_expert": tokens_per_expert,
         }

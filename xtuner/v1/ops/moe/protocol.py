@@ -9,6 +9,8 @@ class GroupGemmProtocol(Protocol):
         x: torch.Tensor,
         weights: torch.Tensor,
         split_sizes: torch.Tensor,
+        *,
+        grad_weight_out: torch.Tensor | None = None,
     ) -> torch.Tensor: ...
 
 
@@ -33,7 +35,10 @@ def cpu_group_gemm(
     x: torch.Tensor,
     weights: torch.Tensor,
     split_sizes: torch.Tensor,
+    *,
+    grad_weight_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    del grad_weight_out
     raise NotImplementedError("CPU GroupGemm is not implemented yet.")
 
 

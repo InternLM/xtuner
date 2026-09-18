@@ -12,6 +12,7 @@ from itertools import chain
 from math import prod
 from pathlib import Path
 from shutil import copy, copytree, rmtree
+from types import MethodType
 from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, NamedTuple, Sequence, cast
 
 import torch
@@ -48,6 +49,7 @@ from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeParametersConfig, RopeScalingConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, log_rank0, profile_time_and_memory
 from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_compile
+from xtuner.v1.utils.fsdp import set_requires_gradient_sync
 from xtuner.v1.utils.load_spec import (
     HFSavePlan,
     LoadSpec,
@@ -610,6 +612,10 @@ class BaseModel(nn.Module):
 
         return cal_grad_norm(grads, dtype=dtype)
 
+    def close_ep_runtime(self) -> None:
+        """Release optional dynamic-EP resources at a coordinated boundary."""
+        return
+
     def to_hf_key_list(self, key: str) -> list[str]:
         raise NotImplementedError()
 
@@ -728,6 +734,10 @@ class BaseModel(nn.Module):
             offload_policy=offload_policy,
             ignored_params=ignored_params if ignored_params else None,
         )
+        # Apply the policy to every FSDP unit, including direct layer callers.
+        # Delayed RS retains full gradients for all layers and can also retain
+        # MoonEP's reusable VMM slots. Keep PyTorch's global class untouched.
+        setattr(target, "set_requires_gradient_sync", MethodType(set_requires_gradient_sync, target))
 
     def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, safetensors_prefix: str = "model"):
         # Save may be called without `fully_shard`; refresh from the current runtime layout.

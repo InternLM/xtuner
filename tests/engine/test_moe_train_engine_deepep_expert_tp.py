@@ -291,6 +291,7 @@ class TestMoETrainEngineDeepEPExpertTP(DeterministicDDPTestCase):
             expert_tp_size=expert_tp_size,
             intra_layer_micro_batch=2,
         )
+        assert engine_domino.model.config.intra_layer_micro_batch == 2
         engine_domino.init_model_weights()
         _copy_matching_engine_weights(engine_ref, engine_domino)
         dist.barrier()
