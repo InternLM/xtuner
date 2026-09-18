@@ -21,6 +21,7 @@ from xtuner.v1.ops.sparse_mla import (
     SparseMLABackend,
     SparseMLAProtocol,
     ensure_cudnn_dsa_runtime_available,
+    ensure_flashmla_runtime_available,
     ensure_tilelang_runtime_available,
     get_dsa_topk_indices,
     get_sparse_mla,
@@ -219,16 +220,20 @@ class DSAMLAConfig(MLAConfig):
     ) -> "DSAMultiLatentAttention":
         if not self.freeze_dsa_indexer:
             raise ValueError("freeze_dsa_indexer=False is not supported until the indexer has a differentiable output")
-        indexer_backend = self.indexer_backend or self.sparse_mla_backend
+        indexer_backend = self.indexer_backend or (
+            "tilelang" if self.sparse_mla_backend == "flashmla" else self.sparse_mla_backend
+        )
         _validate_indexer_backend_config(
             indexer_backend,
             index_head_dim=self.index_head_dim,
             index_n_heads=self.index_n_heads,
         )
-        if self.sparse_mla_backend in ("tilelang", "cudnn_dsa"):
+        if self.sparse_mla_backend in ("tilelang", "cudnn_dsa", "flashmla"):
             ensure_tilelang_runtime_available()
         if self.sparse_mla_backend == "cudnn_dsa":
             ensure_cudnn_dsa_runtime_available()
+        if self.sparse_mla_backend == "flashmla":
+            ensure_flashmla_runtime_available()
 
         return DSAMultiLatentAttention(
             **self.model_dump(),
@@ -281,7 +286,9 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         self.indexer_rope_interleave = indexer_rope_interleave
         self.indexer_types = indexer_types
         self.sparse_mla_backend = sparse_mla_backend
-        self.indexer_backend = indexer_backend or sparse_mla_backend
+        self.indexer_backend = indexer_backend or (
+            "tilelang" if sparse_mla_backend == "flashmla" else sparse_mla_backend
+        )
         self.freeze_dsa_indexer = freeze_dsa_indexer
         self.sparse_mla_func: SparseMLAProtocol = get_sparse_mla(sparse_mla_backend)
 

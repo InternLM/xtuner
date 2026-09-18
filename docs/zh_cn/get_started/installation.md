@@ -41,6 +41,20 @@ pip install git+https://github.com/InternLM/AdaptiveGEMM.git@main
 
 此外，XTuner 推荐安装 flash-attn，RL 推荐安装 flash-attn-3，能够显著提升训练速度。可以参考[官方文档](https://github.com/Dao-AILab/flash-attention)进行安装。
 
+如果需要使用 DSA Sparse MLA 的 FlashMLA 后端，可以安装精度对齐后的 FlashMLA 分支：
+
+```{code-block} shell
+:caption: 安装 FlashMLA
+
+git clone -b precise-flashmla https://github.com/DeepLink-org/flashmla-optimization.git
+cd flashmla-optimization
+git submodule update --init --recursive
+FLASH_MLA_DISABLE_SM100=1 MAX_JOBS=8 NVCC_THREADS=2 pip install -v --no-build-isolation --no-deps .
+```
+
+其中 `FLASH_MLA_DISABLE_SM100=1` 用于在 H200 / CUDA 12.8 环境下只编译 SM90 kernel。
+启用 XTuner 的 FlashMLA 后端时，设置 `sparse_mla_backend="flashmla"`。
+
 
 如果想抢先体验 RL 相关功能，则需要执行下述命令来安装 RL 部分依赖。除此之外，需要安装你选择的推理引擎。以LMDeploy为例，可参考[官网文档](https://github.com/InternLM/lmdeploy/)进行安装。
 
