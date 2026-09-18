@@ -4,6 +4,8 @@ import re
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayerOutput
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayerOutput
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 
 from .moe import MoELossContextDict, MoEModelOutputs
@@ -35,22 +37,8 @@ class Qwen3VLTextMoE(Qwen3MoE):
         else:
             return [key]
 
-    def safetensors_to_params(
-        self,
-        safetensors: list[torch.Tensor],
-        local_tensor: torch.Tensor,
-        param_name: str,
-        start: int | None,
-        end: int | None,
-        dim: int | None,
-    ):
-        if len(safetensors) > 1:
-            assert dim is not None, "Internal Error dim must not be None when len(safetensors) > 1"
-            loaded_tensor = torch.cat(safetensors, dim=dim)
-        else:
-            loaded_tensor = safetensors[0]
-
-        if "fused_w1w3.weight" in param_name:
+    def hf_tensor_to_canonical(self, name: str, loaded_tensor: torch.Tensor) -> torch.Tensor:
+        if "fused_w1w3.weight" in name:
             # hf: num_experts, hidden_size, 2 * expert_dim
             # xtuner: num_experts * 2 * expert_dim, hidden_size
             num_experts, hidden_size = loaded_tensor.shape[:2]
@@ -58,25 +46,12 @@ class Qwen3VLTextMoE(Qwen3MoE):
             # num_experts * 2 * expert_dim, hidden_size
             loaded_tensor = loaded_tensor.reshape(-1, hidden_size)
 
-        elif "fused_w2.weight" in param_name:
+        elif "fused_w2.weight" in name:
             # hf: num_experts, expert_dim, hidden_size
             # xtuner: num_experts * hidden_size, expert_dim
             loaded_tensor = loaded_tensor.transpose(1, 2).flatten(0, 1)
 
-        if start is not None and end is not None:
-            start = min(start, loaded_tensor.shape[self.FSDP_SHARD_DIM])
-            end = min(end, loaded_tensor.shape[self.FSDP_SHARD_DIM])
-            loaded_tensor_slice = loaded_tensor.index_select(
-                dim=self.FSDP_SHARD_DIM, index=torch.arange(start, end, dtype=torch.int64, device=loaded_tensor.device)
-            )
-            non_pad_len = end - start
-            local_tensor[:non_pad_len].copy_(loaded_tensor_slice)
-
-            if non_pad_len < local_tensor.shape[self.FSDP_SHARD_DIM]:
-                assert self.config.float8_cfg is not None
-                local_tensor[non_pad_len:].copy_(0.0)  # type: ignore  # padded part must be set to 0
-        else:
-            local_tensor.copy_(loaded_tensor)
+        return loaded_tensor
 
     def param_to_safetensor(
         self,
@@ -157,11 +132,12 @@ class Qwen3VLTextMoE(Qwen3MoE):
 
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
-                hidden_states = decoder_layer(
+                dense_results: DenseDecoderLayerOutput = decoder_layer(
                     hidden_states,
                     position_embeddings=position_embeddings,
                     seq_ctx=seq_ctx,
                 )
+                hidden_states = dense_results["hidden_states"]
             else:
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
                     offload_stream = decoder_layer._get_fsdp_state()._comm_ctx.all_gather_stream
@@ -172,25 +148,29 @@ class Qwen3VLTextMoE(Qwen3MoE):
                         depth=len(self.layers),
                         custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
                     ):
-                        hidden_states, router_results, router_weights, router_topk_ids = decoder_layer(
+                        layer_results: MoEDecoderLayerOutput = decoder_layer(
                             hidden_states,
                             position_embeddings=position_embeddings,
                             seq_ctx=seq_ctx,
                         )
 
                 else:
-                    hidden_states, router_results, router_weights, router_topk_ids = decoder_layer(
+                    layer_results = decoder_layer(
                         hidden_states,
                         position_embeddings=position_embeddings,
                         seq_ctx=seq_ctx,
                     )
+                hidden_states = layer_results["hidden_states"]
+                router_logits = layer_results["router_logits"]
+                router_weights = layer_results["router_weights"]
+                router_topk_ids = layer_results["router_topk_ids"]
 
                 if keep_router:
-                    output["router_logits"][f"layer{idx}"] = router_results
+                    output["router_logits"][f"layer{idx}"] = router_logits
                     output["router_weights"][f"layer{idx}"] = router_weights
                 hidden_states = self.aux_loss.accumulate(
                     selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
-                    selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
+                    selected_router_logits=router_logits.index_select(0, nonpad_indices).contiguous().float(),
                     selected_experts=router_topk_ids.index_select(0, nonpad_indices).contiguous(),
                     hidden_states=hidden_states,
                     balancing_ctx=balancing_ctx,

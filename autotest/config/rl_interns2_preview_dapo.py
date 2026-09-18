@@ -9,6 +9,7 @@ Need env: WORK_DIR, MODEL_PATH, DATA_PATH, EVAL_DATA_PATH
 import os
 
 import ray
+
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
@@ -70,7 +71,7 @@ rollout_config = RolloutConfig(
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
     skip_load_weights=True,
-    gpu_memory_utilization=0.8,
+    gpu_memory_utilization=0.5,
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=True,
     extra_rollout_config=dict(
@@ -183,7 +184,6 @@ def group_sample_filter_func(group_samples):
 produce_strategy_config = AsyncProduceStrategyConfig(
     over_sample_threshold=1,
     enable_partial_rollout=1,
-    is_valid_sample_fn=group_sample_filter_func,
     max_staleness=1000000,
 )
 agent_loop_manager_cfg = AgentLoopManagerConfig(
@@ -191,6 +191,7 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
         task_name="train_task",
         agent_loop_config=agent_loop_config,
         judger_config=judger_config,
+        is_valid_sample_fn=group_sample_filter_func,
         produce_strategy_config=produce_strategy_config,
         sampler_config=sampler_config,
     ),

@@ -39,6 +39,7 @@ from xtuner.v1.model.base import (
     ModelOutputs,
     XTunerBaseModelConfig,
 )
+from xtuner.v1.patch import InterleavedShardLoadPlanner, InterleavedShardSavePlanner
 from xtuner.v1.patch.xtuner_storage import XtunerCacheWriter, _get_async_dcp_save_timeout
 from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.utils import (
@@ -261,7 +262,7 @@ class TrainEngine:
 
         trainable_params = [p for _, p in self.model.trainable_parameters()]
         all_grads = [p.grad for p in trainable_params if p.grad is not None]
-        total_grad_norm, grouped_all_grads = cal_grad_norm(all_grads, dtype=dtype)
+        total_grad_norm, grouped_all_grads = self.model.cal_grad_norm(all_grads, dtype=dtype)
 
         if do_clip:
             clip_param_ids = {
@@ -387,6 +388,7 @@ class TrainEngine:
             dcp.save(
                 state_dict,
                 checkpoint_id=weights_dir,
+                planner=InterleavedShardSavePlanner(),
             )
 
     def _get_async_checkpoint_pg(self) -> dist.ProcessGroup:
@@ -439,6 +441,7 @@ class TrainEngine:
                 return cast(Any, dcp.async_save)(
                     state_dict,
                     checkpoint_id=incomplete_dir,
+                    planner=InterleavedShardSavePlanner(),
                     storage_writer=storage_writer,
                     process_group=async_checkpoint_pg,
                     **async_save_kwargs,
@@ -535,7 +538,11 @@ class TrainEngine:
             set_options = StateDictOptions(cpu_offload=True, strict=True)
 
         with profile_time_and_memory(f"[Load DCP from {weights_dir}]"):
-            dcp.load(state_dict=state_dict, checkpoint_id=weights_dir)
+            dcp.load(
+                state_dict=state_dict,
+                checkpoint_id=weights_dir,
+                planner=InterleavedShardLoadPlanner(),
+            )
 
             set_model_state_dict(self.model, state_dict["model"], options=set_options)
 

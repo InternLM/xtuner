@@ -312,9 +312,11 @@ class ProberList:
                 hidden_states = kwargs["hidden_states"]
             ProberList.before_layer(name, hidden_states)
             outputs = forward(*args, **kwargs)
-            if isinstance(outputs, tuple):  # for MoEDecoderLayer
+            if isinstance(outputs, dict):
+                hidden_states = outputs["hidden_states"]
+            elif isinstance(outputs, tuple):  # for legacy decoder layers
                 hidden_states = outputs[0]
-            else:  # for DenseDecoderLayer
+            else:
                 hidden_states = outputs
             ProberList.after_layer(name, hidden_states)
             return outputs

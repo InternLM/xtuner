@@ -3,7 +3,7 @@ import os
 import shutil
 from typing import Any
 
-from utils.check_metric import check_result, check_rl_result
+from utils.check_metric import RL_STEP_SUMMARY_MARKER, check_result, check_rl_result
 from utils.run_cmd import run_cmd
 
 
@@ -158,12 +158,20 @@ def _snapshot_path(run_id: str | None, case_name: str, train_type: str) -> str:
     return os.path.join(snapshot_dir, FIRST_RUN_TRACKER_SNAPSHOT)
 
 
-def _write_first_run_segment(src: str, dst: str) -> None:
+def _is_rl_step_summary_line(line: str) -> bool:
+    if not line.strip():
+        return False
+    return RL_STEP_SUMMARY_MARKER in json.loads(line)
+
+
+def _write_first_run_segment(src: str, dst: str, train_type: str) -> None:
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     seen_steps: set[Any] = set()
     with open(src, encoding="utf-8") as fin, open(dst, "w", encoding="utf-8") as fout:
         for line in fin:
             if not line.strip():
+                continue
+            if train_type == "rl" and not _is_rl_step_summary_line(line):
                 continue
             step = json.loads(line).get("step")
             if step in seen_steps:
@@ -172,13 +180,33 @@ def _write_first_run_segment(src: str, dst: str) -> None:
             fout.write(line if line.endswith("\n") else f"{line}\n")
 
 
-def _has_duplicate_steps(tracker_path: str) -> bool:
+def _has_duplicate_steps(tracker_path: str, train_type: str) -> bool:
     steps: list[Any] = []
     with open(tracker_path, encoding="utf-8") as f:
         for line in f:
-            if line.strip():
-                steps.append(json.loads(line).get("step"))
+            if not line.strip():
+                continue
+            if train_type == "rl" and not _is_rl_step_summary_line(line):
+                continue
+            steps.append(json.loads(line).get("step"))
     return len(steps) != len(set(steps))
+
+
+def _rl_summary_step_count(tracker_path: str) -> int:
+    count = 0
+    with open(tracker_path, encoding="utf-8") as f:
+        for line in f:
+            if _is_rl_step_summary_line(line):
+                count += 1
+    return count
+
+
+def _tracker_snapshot_is_usable(snapshot: str, train_type: str) -> bool:
+    if not os.path.isfile(snapshot) or os.path.getsize(snapshot) == 0:
+        return False
+    if train_type == "rl":
+        return _rl_summary_step_count(snapshot) > 0
+    return True
 
 
 def resolve_tracker_path(
@@ -195,7 +223,7 @@ def resolve_tracker_path(
         snapshot = _snapshot_path(run_id, case_name, train_type)
 
     if phase == "first":
-        if snapshot and os.path.isfile(snapshot):
+        if snapshot and _tracker_snapshot_is_usable(snapshot, train_type):
             return snapshot
 
         subdirs = list_timestamp_subdirs(work_dir)
@@ -205,9 +233,9 @@ def resolve_tracker_path(
             exp_dir = os.path.join(work_dir, subdirs[-1]) if subdirs else None
         live_tracker = _tracker_path(exp_dir, train_type)
 
-        if snapshot and os.path.isfile(live_tracker) and _has_duplicate_steps(live_tracker):
-            _write_first_run_segment(live_tracker, snapshot)
-            if os.path.isfile(snapshot) and os.path.getsize(snapshot) > 0:
+        if snapshot and os.path.isfile(live_tracker) and _has_duplicate_steps(live_tracker, train_type):
+            _write_first_run_segment(live_tracker, snapshot, train_type)
+            if _tracker_snapshot_is_usable(snapshot, train_type):
                 return snapshot
         return live_tracker
 

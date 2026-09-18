@@ -97,6 +97,17 @@ if [ "$ACCELERATOR" = "GPU" ]; then
     export XTUNER_RL_MEM_DIR="${WORK_DIR}/mem_${current_time}"
 fi
 
+# Head 训练结束后会通过 close_ray() 关闭 GCS，worker 侧 ray start --block 会以
+# 非零码退出。这里统一把 worker 的正常收尾视为成功退出。
+exit_ray_worker_after_block() {
+  local block_exit="${1:-0}"
+  if [ "$block_exit" -ne 0 ]; then
+    echo "Ray worker block exited with code ${block_exit}; treating as cluster shutdown on rank ${RAY_RANK}."
+  fi
+  ray stop --force || true
+  exit 0
+}
+
 # 2. Launch Ray cluster
 # 根据 NODE_COUNT 分配 num_cpus, 防止内存OOM
 node_count=${NODE_COUNT:-1}
@@ -126,7 +137,11 @@ if [ "$ACCELERATOR" = "GPU" ]; then
             sleep 2
             fi
         done
+        set +e
         ray start --address="$RAY_MASTER_ADDR:$RAY_HEAD_PORT" --block --disable-usage-stats
+        block_exit=$?
+        set -e
+        exit_ray_worker_after_block "$block_exit"
     fi
 
     while true; do
@@ -145,9 +160,13 @@ if [ "$ACCELERATOR" = "GPU" ]; then
     cp "$CONFIG_PATH" "${WORK_DIR}/config.py"
     LOG_FILE="${WORK_DIR}/training_log_${current_time}.txt"
 
+    set +e
     python xtuner/v1/train/cli/rl.py \
         --config $CONFIG_PATH \
         2>&1 | tee -a "${WORK_DIR}/training_log_${current_time}.txt"
+    train_exit=${PIPESTATUS[0]}
+    set -e
+    exit "$train_exit"
 elif [ "$ACCELERATOR" = "NPU" ]; then
     if [ "$RAY_RANK" -eq 0 ]; then
       RAY_memory_monitor_refresh_ms=0 ray start --head \
@@ -170,10 +189,14 @@ elif [ "$ACCELERATOR" = "NPU" ]; then
         export RAY_gcs_rpc_server_reconnect_timeout_s=600
         export RAY_gcs_grpc_max_reconnect_attempts=100
         export RAY_rpc_grpc_timeout_ms=30000
+        set +e
         RAY_memory_monitor_refresh_ms=0 ray start --address="$RAY_RESOLVED_IP:$RAY_HEAD_PORT" \
                     --node-ip-address="$(hostname -i)" \
                     --block \
                     --disable-usage-stats
+        block_exit=$?
+        set -e
+        exit_ray_worker_after_block "$block_exit"
     fi
 
     sleep 10
@@ -198,11 +221,15 @@ elif [ "$ACCELERATOR" = "NPU" ]; then
             }
             }"
 
+        set +e
         ray job submit --address="http://127.0.0.1:$RAY_DASHBOARD_PORT" \
             --runtime-env-json="$RUNTIME_ENV_JSON" \
             -- python xtuner/v1/train/cli/rl.py \
             --config $CONFIG_PATH \
             2>&1 | tee -a "${WORK_DIR}/training_log.txt"
+        train_exit=${PIPESTATUS[0]}
+        set -e
         echo "训练任务提交完成。日志文件: ${WORK_DIR}/training_log.txt"
+        exit "$train_exit"
     fi
 fi

@@ -143,6 +143,8 @@ def tilelang_dsa_topk_indices(
     index_head_dim: int,
     index_topk: int,
 ) -> torch.Tensor:
+    _, _, index_n_heads, _ = q.shape
+
     if q.dtype != torch.bfloat16 or k.dtype != torch.bfloat16:
         raise RuntimeError("TileLang DSA indexer requires bfloat16 q and k tensors.")
     if not q.is_cuda or not k.is_cuda or not weights.is_cuda:
@@ -150,7 +152,8 @@ def tilelang_dsa_topk_indices(
 
     q = q.squeeze(0).contiguous()
     k = k.squeeze(0).contiguous()
-    weights = (weights.squeeze(0) * (index_head_dim**-0.5)).contiguous()
+    weights = weights.squeeze(0) * (index_n_heads**-0.5)
+    weights = (weights * (index_head_dim**-0.5)).contiguous()
     starts, ends = seq_ctx.packed_causal_query_ranges(q.shape[0], q.device)
     return _tilelang_dsa_topk_indices_from_ranges(q, k, weights, starts, ends, index_topk)
 

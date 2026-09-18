@@ -1,7 +1,7 @@
 """RLDisaggregatedTrainer 的 public 行为测试。
 
 Good Tests:
-- 通过 fit()、update_weights()、同步周期校验和资源布局不变量验证行为。
+- 通过 fit()、weight_update()、同步周期校验和资源布局不变量验证行为。
 - 用 _FakeManager 和轻量 controller 替代真实 Ray worker。
 - 只断言 step 递进、producer 恢复 model_step、checkpoint 文件等可观察结果。
 - 对 async producer/consumer 只验证最终业务结果；内部任务编排放到 AgentLoopManager 测试中。
@@ -16,7 +16,7 @@ Bad Tests:
 - disaggregated fit 遇到空 EXPIRED_BATCH 时重试同一个 train_step，不推进 _cur_step。
 - 非空 EXPIRED_BATCH 仍会训练，并用当前完成的 model_step 恢复 producer。
 - checkpoint 保存发生在 fit 完成的 model_step 上，且 manager.save 为 async 调用。
-- eval 在 producer 恢复前运行；update_weights 本身不直接 pause/continue rollout controller。
+- eval 在 producer 恢复前运行；weight_update 本身不直接 pause/continue rollout controller。
 - sync/checkpoint/eval interval 必须是 sync_weights_interval 的整数倍，资源布局必须 fail fast。
 - 前台训练 batch 阻塞时，后台 producer 仍能在事件循环中继续推进。
 """
@@ -35,6 +35,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     ProduceBatchResult,
     ProduceBatchStatus,
 )
+from xtuner.v1.rl.distillation import DistillationTrainerAdapter
 from xtuner.v1.train.rl_trainer import RLDisaggregatedTrainer, _validate_sync_intervals
 
 
@@ -120,6 +121,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._benchmark_training_samples = 0
         trainer._benchmark_training_tokens = 0
         trainer._cpu_resource_manager = None
+        trainer._distillation = DistillationTrainerAdapter(None)
         trainer._train_worker_cfg = SimpleNamespace(pack_max_length=16)
         trainer._rollout_config = SimpleNamespace(weight_update_host=None, weight_update_port=30000)
         trainer._meta = SimpleNamespace(
@@ -145,15 +147,16 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             fit=MagicMock(return_value=[{"train_metrics": [], "sft_train_metrics": {}}]),
             onload=MagicMock(return_value="onload"),
             offload=MagicMock(return_value="offload"),
-            update_weights=MagicMock(return_value="update"),
+            weight_update=MagicMock(return_value="update"),
         )
         trainer.rollout_controller = SimpleNamespace(
-            check_and_shutdown_inactive_workers=SimpleNamespace(
+            shutdown_inactive_workers=SimpleNamespace(
                 remote=MagicMock(return_value="rollout_inactive_workers_shutdown")
             ),
             restart_inactive_workers=SimpleNamespace(remote=MagicMock(return_value="rollout_restarted")),
             pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause")),
             continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue")),
+            offload=SimpleNamespace(remote=MagicMock(return_value="offload")),
             onload_weights=SimpleNamespace(remote=MagicMock(return_value="onload_weights")),
             onload_kvcache=SimpleNamespace(remote=MagicMock(return_value="onload_kvcache")),
             validate_registered_workers_to_proxy=SimpleNamespace(remote=AsyncMock(return_value=None)),
@@ -266,6 +269,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
         with (
             patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
             patch("xtuner.v1.train.rl_trainer.bind_train_rollout") as bind_train_rollout_mock,
         ):
             trainer.fit()
@@ -274,9 +278,6 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             train_controller=trainer.train_controller,
             rollout_controller=trainer.rollout_controller,
             rollout_config=trainer._rollout_config,
-            weight_transport_type="nccl",
-            weight_update_host="10.0.0.1",
-            weight_update_port=23456,
         )
 
     def test_fit_keeps_background_producer_running_while_training_blocks(self):
@@ -473,13 +474,62 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertAlmostEqual(scalars["throughput/rollout_sgs"], 0.5)
         self.assertAlmostEqual(scalars["throughput/rollout_tgs"], 15.0)
 
+    def test_log_step_records_every_teacher_timing_and_distillation_metric(self):
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer._log_step = RLDisaggregatedTrainer._log_step.__get__(trainer, RLDisaggregatedTrainer)
+        train_info = self._minimal_train_info(training_samples=2, training_tokens=8)
+        train_info["workers_log_item"] = [
+            {
+                "rollout_is_metrics": {},
+                "mismatch_metrics": {},
+                "rollout_entropy": 0.0,
+                "train_entropy": 0.0,
+                "teacher_timings": {
+                    "teacher_a": {"compute": 1.0, "onload": 2.0, "offload": 3.0},
+                    "teacher_b": {"compute": 3.0, "onload": 4.0, "offload": 5.0},
+                },
+                "train_metrics": [
+                    {"actor_distillation_kl": 0.5, "sampled_opd_loss": 0.25, "policy_loss": 1.0}
+                ],
+                "sft_train_metrics": {},
+            },
+            {
+                "teacher_timings": {
+                    "teacher_a": {"compute": 4.0, "onload": 1.0, "offload": 2.0},
+                    "teacher_b": {"compute": 2.0, "onload": 3.0, "offload": 4.0},
+                },
+                "train_entropy": 0.0,
+                "train_metrics": [],
+                "sft_train_metrics": {},
+            },
+        ]
+
+        trainer._log_step(
+            train_step=1,
+            step_timer_dict={},
+            produce_result=ProduceBatchResult(rollout_states=[]),
+            train_info=train_info,
+            eval_info={},
+        )
+
+        scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
+        self.assertEqual(scalars["time/train_teacher/teacher_a/compute"], 4.0)
+        self.assertEqual(scalars["time/train_teacher/teacher_a/onload"], 2.0)
+        self.assertEqual(scalars["time/train_teacher/teacher_a/offload"], 3.0)
+        self.assertEqual(scalars["time/train_teacher/teacher_b/compute"], 3.0)
+        self.assertEqual(scalars["time/train_teacher/total/compute"], 6.0)
+        self.assertEqual(scalars["time/train_teacher_compute"], 6.0)
+        self.assertNotIn("distillation/actor_distillation_kl", scalars)
+        self.assertNotIn("distillation/sampled_opd_loss", scalars)
+        self.assertNotIn("distillation/policy_loss", scalars)
+
     def test_update_weights_pauses_generation_without_onloading_rollout(self):
         manager = _FakeManager([])
         trainer = self._make_trainer(manager)
 
         with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
-            trainer.update_weights = RLDisaggregatedTrainer.update_weights.__get__(trainer, RLDisaggregatedTrainer)
-            trainer.update_weights()
+            trainer.weight_update = RLDisaggregatedTrainer.weight_update.__get__(trainer, RLDisaggregatedTrainer)
+            trainer.weight_update()
 
         trainer.rollout_controller.pause_generation.remote.assert_not_called()
         trainer.rollout_controller.continue_generation.remote.assert_not_called()
@@ -508,7 +558,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             resume=AsyncMock(side_effect=manager_resume),
             continue_produce=AsyncMock(side_effect=manager_continue_produce),
         )
-        trainer.update_weights = MagicMock(side_effect=lambda: events.append("update_weights"))
+        trainer.weight_update = MagicMock(side_effect=lambda: events.append("update_weights"))
 
         train_state_path = Path(self.temp_dir.name) / trainer._SAVE_TRAIN_STATE_PATH
         train_state_path.write_text('{"cur_step": 3}')

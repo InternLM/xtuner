@@ -27,6 +27,12 @@ def _get_autotune_configs():
 
 
 @triton.jit
+def _batch_offset(batch_idx, batch_stride):
+    """Compute a batch offset without overflowing 32-bit integer arithmetic."""
+    return batch_idx.to(tl.int64) * batch_stride
+
+
+@triton.jit
 def _pid_to_block(
     pid,
     M,
@@ -92,8 +98,8 @@ def ns_line_1_kernel(
         return
 
     # Index into one matrix of batch
-    A_ptr += batch_idx * a_stride_b
-    C_ptr += batch_idx * c_stride_b
+    A_ptr += _batch_offset(batch_idx, a_stride_b)
+    C_ptr += _batch_offset(batch_idx, c_stride_b)
 
     # Create pointer arrays for A and A.T
     offs_m = (m_idx + tl.arange(0, BLOCK_SIZE_M)) % M
@@ -199,8 +205,8 @@ def ns_line_2_kernel(
         return
 
     # Index into one matrix of batch
-    A_ptr += batch_idx * a_stride_b
-    C_ptr += batch_idx * c_stride_b
+    A_ptr += _batch_offset(batch_idx, a_stride_b)
+    C_ptr += _batch_offset(batch_idx, c_stride_b)
 
     # Create pointer arrays for A and A.T
     offs_m = (m_idx + tl.arange(0, BLOCK_SIZE_M)) % M

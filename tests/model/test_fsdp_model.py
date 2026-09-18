@@ -1,5 +1,10 @@
+import json
+import tempfile
+from pathlib import Path
+
 import torch
 import torch.distributed as dist
+from safetensors import safe_open
 from torch import nn
 from torch.distributed.tensor import DTensor
 
@@ -7,7 +12,7 @@ from xtuner._testing.testcase import DeterministicDDPTestCase
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss.ce_loss import CELossConfig
-from xtuner.v1.model.base import BaseModel, ModelOutputs, XTunerBaseModelConfig
+from xtuner.v1.model.base import BaseModel, HFSaveCfg, ModelOutputs, XTunerBaseModelConfig
 from xtuner.v1.module import LMHead
 
 
@@ -126,3 +131,60 @@ class TestFSDPModel(DeterministicDDPTestCase):
 
         for name, ref_param in ref_model.state_dict().items():
             torch.testing.assert_close(_full_tensor(model.state_dict()[name]), ref_param)
+
+    def _save_hf_with_bucket(self, tmpdir: str, bucket_size: int) -> tuple[ToyModel, Path]:
+        self.create_pg("cuda")
+
+        config = ToyModelConfig(
+            compile_cfg=False,
+            hf_save_cfg=HFSaveCfg(bucket_size=bucket_size, worker_per_rank=1),
+        )
+        model = config.build().to("cuda")
+        model.fully_shard(
+            FSDPConfig(
+                param_dtype=torch.float32,
+                reduce_dtype=torch.float32,
+                torch_compile=False,
+            )
+        )
+
+        shared_tmpdir = [tmpdir]
+        dist.broadcast_object_list(shared_tmpdir, src=0)
+        source_dir = Path(shared_tmpdir[0]) / "source"
+        saved_dir = Path(shared_tmpdir[0]) / "saved"
+        if dist.get_rank() == 0:
+            source_dir.mkdir()
+            (source_dir / "config.json").write_text("{}")
+        dist.barrier()
+
+        model.set_hf(source_dir)
+        model.save_hf(saved_dir)
+        return model, saved_dir
+
+    def test_save_hf_respects_global_bucket_size(self):
+        bucket_size = 1100
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model, saved_dir = self._save_hf_with_bucket(tmpdir, bucket_size)
+            if dist.get_rank() == 0:
+                safetensor_paths = list(saved_dir.glob("*.safetensors"))
+                assert safetensor_paths
+
+                # Check the reconstruction bucket bound.
+                for safetensor_path in safetensor_paths:
+                    with safe_open(safetensor_path, framework="pt") as reader:
+                        tensors = [reader.get_tensor(key) for key in reader.keys()]
+                    shard_size = sum(tensor.numel() * tensor.element_size() for tensor in tensors)
+                    assert shard_size <= bucket_size or len(tensors) == 1
+
+                # Independently check that save_hf produced a complete checkpoint.
+                expected_keys = set(model.state_dict())
+                index = json.loads((saved_dir / "model.safetensors.index.json").read_text())
+                assert set(index["weight_map"]) == expected_keys
+                assert {path.name for path in safetensor_paths} == set(index["weight_map"].values())
+
+                saved_keys = set()
+                for safetensor_path in safetensor_paths:
+                    with safe_open(safetensor_path, framework="pt") as reader:
+                        saved_keys.update(reader.keys())
+                assert saved_keys == expected_keys
+            dist.barrier()
