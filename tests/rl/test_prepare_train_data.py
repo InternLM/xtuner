@@ -12,9 +12,7 @@
   与输入位置逐一对齐（regression: advantage 曾比 input_ids 长 1 导致 pack 后整体错位）。
 """
 
-import importlib.util
 import unittest
-from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -22,22 +20,11 @@ import numpy as np
 import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets, reset_rollout_response
+from xtuner.v1.datasets.mllm_tokenize_fn.qwenvl_rope2d import get_rope_index_3
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
 from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.train.rl_trainer import BaseRLTrainer, get_train_seq_ctx
-
-
-def _load_get_rope_index_3():
-    """Load get_rope_index_3 without going through xtuner.v1.datasets (lightweight stub)."""
-    rope2d_path = (
-        Path(__file__).resolve().parents[2] / "xtuner" / "v1" / "datasets" / "mllm_tokenize_fn" / "qwenvl_rope2d.py"
-    )
-    spec = importlib.util.spec_from_file_location("_qwenvl_rope2d_for_test", rope2d_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.get_rope_index_3
 
 
 class _FakeAdvantageEstimator:
@@ -246,9 +233,8 @@ class TestPrepareTrainData(unittest.TestCase):
         """RL 只拿 prompt 的 3D position，续写 response 后须与 SFT get_rope_index_3 一致。
 
         Fixture：prompt 以 image tokens 结尾（grid 1x4x4, merge=2 → 2x2），使 per-axis max
-        与 global amax 分叉。get_rope_index_3 经文件路径加载，绕过 lightweight datasets stub。
+        与 global amax 分叉。
         """
-        get_rope_index_3 = _load_get_rope_index_3()
         image_token_id = 151655
         vision_start_token_id = 151652
         prompt_ids = [10, vision_start_token_id, image_token_id, image_token_id, image_token_id, image_token_id]
