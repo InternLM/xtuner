@@ -41,6 +41,21 @@ For Hopper architecture GPUs, you can additionally install fa3 and enable it thr
 
 In addition, XTuner recommends installing flash-attn, and RL recommends installing flash-attn-3, which can significantly improve training speed. You can refer to the [official documentation](https://github.com/Dao-AILab/flash-attention) for installation.
 
+To use the FlashMLA backend for DSA Sparse MLA, install the numerically aligned
+FlashMLA branch:
+
+```{code-block} shell
+:caption: Install FlashMLA
+
+git clone -b precise-flashmla https://github.com/DeepLink-org/flashmla-optimization.git
+cd flashmla-optimization
+git submodule update --init --recursive
+FLASH_MLA_DISABLE_SM100=1 MAX_JOBS=8 NVCC_THREADS=2 pip install -v --no-build-isolation --no-deps .
+```
+
+`FLASH_MLA_DISABLE_SM100=1` compiles only the SM90 kernels for H200 / CUDA 12.8.
+Set `sparse_mla_backend="flashmla"` to enable this backend in XTuner.
+
 
 If you want to experience RL-related features in advance, you need to execute the following command to install RL-related dependencies. In addition, you need to install the inference engine of your choice. Taking LMDeploy as an example, you can refer to the [official documentation](https://github.com/InternLM/lmdeploy/) for installation.
 
