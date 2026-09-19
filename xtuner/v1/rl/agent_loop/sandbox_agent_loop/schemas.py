@@ -18,7 +18,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -219,7 +219,15 @@ class AgentRolloutItem(BaseModel):
 
 
 class SandboxSpec(BaseModel):
-    """Sandbox runtime config shared by infer and isolated-judger sandboxes."""
+    """Sandbox runtime config shared by infer and isolated-judger sandboxes.
+
+    A top-level spec describes the primary sandbox returned by
+    :class:`SandboxPool`. ``dependencies`` are private members of the same
+    lifecycle group: the pool creates them in declaration order, creates the
+    primary last, then calls the optional async ``provisioner`` with
+    ``(primary_client, dependency_clients)``. Dependency specs are deliberately
+    limited to one level.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -230,6 +238,19 @@ class SandboxSpec(BaseModel):
     resources: dict[str, Any] = Field(default_factory=dict)
     key: str | None = None
     cluster_name: str | None = None
+    dependencies: dict[str, SandboxSpec] = Field(default_factory=dict)
+    provisioner: Any | None = None
+
+    @model_validator(mode="after")
+    def validate_dependency_depth(self) -> SandboxSpec:
+        for name, dependency in self.dependencies.items():
+            if not name:
+                raise ValueError("sandbox dependency names must not be empty")
+            if dependency.dependencies:
+                raise ValueError(f"sandbox dependency {name!r} must not have dependencies")
+            if dependency.provisioner is not None:
+                raise ValueError(f"sandbox dependency {name!r} must not have a provisioner")
+        return self
 
 
 class AgentSpec(BaseModel):
