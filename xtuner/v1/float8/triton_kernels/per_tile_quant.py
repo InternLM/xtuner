@@ -8,6 +8,7 @@ from torch import Tensor
 from torch.profiler import ProfilerActivity, profile
 
 from xtuner.v1.float8.float8_utils import to_fp8_saturated
+from xtuner.v1.float8.triton_kernels.quantization import quantize_per_row
 
 
 def get_cuda_autotune_config():
@@ -89,12 +90,8 @@ def per_tile_quant_kernel(
     a_ptrs = a_ptr + m_offs[:, None].to(tl.int64) * stride_am + k_offs[None, :].to(tl.int64) * stride_ak
     o_ptrs = out_ptr + m_offs[:, None].to(tl.int64) * stride_om + k_offs[None, :].to(tl.int64) * stride_ok
     s_ptr = scale_ptr + m_offs * stride_sm + group_id * stride_sg
-    rfp8_max = 1 / fp8_max
     a = tl.load(a_ptrs, mask=mk_mask, other=0.0).to(tl.float32)
-    scale = tl.max(tl.abs(a), 1) * rfp8_max
-    scale = tl.clamp(scale, 1e-12, 3e38)
-    out = a / scale[:, None]
-    out = tl.clamp(out, fp8_min, fp8_max)
+    out, scale = quantize_per_row(a, fp8_min, fp8_max)
     out = out.to(out_ptr.dtype.element_ty)
     tl.store(o_ptrs, out, mask=mk_mask)
     tl.store(s_ptr, scale, mask=m_mask)

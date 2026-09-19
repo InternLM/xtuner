@@ -30,6 +30,10 @@ class Float8Config(BaseModel):
             Parameter(help="Scaling granularity for grouped GEMM operations. Currently only TILEWISE is supported"),
         ]
     ] = None
+    enable_fused_moe_activation: Annotated[
+        bool,
+        Parameter(help="Whether to enable fused FP8 quantization and SwiGLU kernels for tile-wise FP8 MoE"),
+    ] = False
     model_config = ConfigDict(extra="forbid")
 
     @property
