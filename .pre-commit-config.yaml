@@ -16,6 +16,8 @@ repos:
     rev: v2.2.1
     hooks:
       - id: codespell
+        # ``te`` / ``TE`` are intentional Transformer Engine backend names.
+        args: ["--ignore-words-list=te,TE"]
   - repo: https://github.com/executablebooks/mdformat
     rev: 0.7.9
     hooks:

@@ -28,6 +28,8 @@ from xtuner.v1.module import (
 from xtuner.v1.module.dispatcher import (
     CombineResult,
     DispatchResult,
+    EPExecutionRuntime,
+    ExpertWeightLayout,
     PostDispatchResult,
     PreCombineResult,
     PreDispatchResult,
@@ -227,10 +229,32 @@ class MoEBlock(nn.Module):
         )
         self.moe_act = moe_act_fn_cfg.build()
 
-    def forward(self, x, tokens_per_expert, decoding):
-        gate_up_out = self.fused_w1w3(x, tokens_per_expert, decoding)
+    def forward(
+        self,
+        x,
+        tokens_per_expert,
+        decoding,
+        tokens_per_expert_cpu=None,
+        *,
+        weight_layout: ExpertWeightLayout | None = None,
+    ):
+        layout = weight_layout or ExpertWeightLayout()
+        trainable = layout.trainable_weights or (None, None)
+        gate_up_out = self.fused_w1w3(
+            x,
+            tokens_per_expert,
+            decoding,
+            tokens_per_expert_cpu,
+            trainable_weight=trainable[0],
+        )
         out = self.moe_act(gate_up_out, split_dim=-1)
-        res = self.fused_w2(out, tokens_per_expert, decoding)
+        res = self.fused_w2(
+            out,
+            tokens_per_expert,
+            decoding,
+            tokens_per_expert_cpu,
+            trainable_weight=trainable[1],
+        )
         return res
 
 
@@ -267,6 +291,7 @@ class MoEDecoderLayer(nn.Module):
         ep_mesh: DeviceMesh | None = None,
         expert_tp_mesh: DeviceMesh | None = None,
         ep_tp_mesh: DeviceMesh | None = None,
+        ep_runtime: EPExecutionRuntime | None = None,
     ):
         super().__init__()
         self.ep_mesh = ep_mesh
@@ -339,6 +364,9 @@ class MoEDecoderLayer(nn.Module):
             ep_tp_group=ep_tp_group,
             training_dtype="fp8" if float8_cfg is not None else "bf16",
             generate_dtype=generate_config.dtype if generate_config is not None else "bf16",
+            ep_runtime=ep_runtime,
+            layer_id=layer_idx,
+            projections=(self.experts.fused_w1w3, self.experts.fused_w2),
         )
 
     def forward(
@@ -438,6 +466,9 @@ class MoEDecoderLayer(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_kwargs: dict[str, object] | None = None,
     ) -> MoEDecoderLayerOutput:
+        layer_inputs, layer_states = self.dispatcher.prepare_layer_inputs([hidden_states])
+        hidden_states, layer_state = layer_inputs[0], layer_states[0]
+        hidden_states = self.dispatcher.prepare_microbatch_input(hidden_states, layer_state)
         residual, hidden_states, router_results, attn_outputs = self._pre_moe_forward(
             hidden_states=hidden_states,
             seq_ctx=seq_ctx,
@@ -456,6 +487,7 @@ class MoEDecoderLayer(nn.Module):
             hidden_states=hidden_states.view(-1, hidden_states.shape[-1]),
             topk_ids=router_results["topk_ids"],
             topk_weights=router_results["topk_weights"],
+            layer_state=layer_state,
         )
         dispatched = self.dispatcher.dispatch(
             pre_dispatched=pre_dispatched,
@@ -474,14 +506,14 @@ class MoEDecoderLayer(nn.Module):
         #     dispatched["topk_weights"],
         # )
         if self.ep_mesh is not None:
-            # MoEBlock is fullgraph-compiled and shared by all decoder layers. Only the routed-token
-            # dimension varies, so make it dynamic before entering the compile boundary to keep one
-            # AOT Autograd save plan across the original forward and checkpoint replay.
+            # Keep the dynamic-token compile contract for the shared MoEBlock.
             torch._dynamo.mark_dynamic(post_dispatched["hidden_states"], 0)
         experts_out = self.experts(
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
             decoding=False,
+            tokens_per_expert_cpu=post_dispatched.get("tokens_per_expert_cpu"),
+            weight_layout=post_dispatched.get("expert_weight_layout"),
         )
         # ProberList.before_combine(
         #     self.layer_idx,
@@ -511,8 +543,7 @@ class MoEDecoderLayer(nn.Module):
             pre_combined=pre_combined,
             combined=combined,
         )
-        combined_hidden_states = post_combined["hidden_states"]
-        combined_hidden_states = combined_hidden_states.view(*origin_shape)
+        combined_hidden_states = post_combined["hidden_states"].view(*origin_shape)
 
         # debug for aligning with hf implementation.
         # combined_hidden_states = self._hf_expert_forward_for_debug(hidden_states, router_results, origin_shape)
@@ -573,18 +604,23 @@ class MoEDecoderLayer(nn.Module):
         dispatched_list: list[DispatchResult] = []
         pre_moe_forward_out_list: list[torch.Tensor] = []
 
+        hidden_states_list, layer_states = self.dispatcher.prepare_layer_inputs(hidden_states_list)
+
         # Attention + gate + pre-dispatch
         for (
             hidden_states,
+            layer_state,
             attention_kwargs,
             seq_ctx,
             position_embeddings,
         ) in zip(
             hidden_states_list,
+            layer_states,
             attention_kwargs_list,
             seq_ctx_list,
             position_embeddings_list,
         ):
+            hidden_states = self.dispatcher.prepare_microbatch_input(hidden_states, layer_state)
             residual, hidden_states, router_results, attn_outputs = self._pre_moe_forward(
                 hidden_states=hidden_states,
                 seq_ctx=seq_ctx,
@@ -598,6 +634,7 @@ class MoEDecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 topk_ids=router_results["topk_ids"],
                 topk_weights=router_results["topk_weights"],
+                layer_state=layer_state,
                 async_op=True,
             )
             pre_dispatched_list.append(pre_dispatched)
@@ -633,6 +670,8 @@ class MoEDecoderLayer(nn.Module):
                 post_dispatched["hidden_states"],
                 post_dispatched["tokens_per_expert"],
                 decoding=False,
+                tokens_per_expert_cpu=post_dispatched.get("tokens_per_expert_cpu"),
+                weight_layout=post_dispatched.get("expert_weight_layout"),
             )
 
             pre_combined = self.dispatcher.combine_preprocess(

@@ -15,6 +15,7 @@ from shutil import rmtree
 from typing import (
     Annotated,
     Callable,
+    Iterator,
     Literal,
     Protocol,
     Sequence,
@@ -79,6 +80,19 @@ from xtuner.v1.utils.internal_metrics import (
 )
 
 from .toy_tokenizer import UTF8ByteTokenizer
+
+
+@contextmanager
+def _nsys_step_range(step: int) -> Iterator[None]:
+    """Optional low-overhead NVTX boundaries for step-level Nsight traces."""
+    enabled = os.getenv("XTUNER_NSYS_STEP_NVTX", "0") == "1" and torch.cuda.is_available()
+    if enabled:
+        torch.cuda.nvtx.range_push(f"xtuner_step_{step}")
+    try:
+        yield
+    finally:
+        if enabled:
+            torch.cuda.nvtx.range_pop()
 
 
 # TODO: Move DEVICE to `xtuner.utils.device`
@@ -860,7 +874,7 @@ class Trainer:
             ProberList.set_step(self._cur_step + 1)
             DEVICE_MODULE.reset_peak_memory_stats()
 
-            with self._maybe_profiling():
+            with _nsys_step_range(self._cur_step + 1), self._maybe_profiling():
                 engine_input = self._prepare_model_input(data_batch)
                 train_step_info = self._engine.train_step(engine_input)
                 hooks = self.hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)
@@ -924,11 +938,9 @@ class Trainer:
 
         if self._async_hf_export:
             self._wait_for_pending_async_hf()
-            self._engine.model.destroy_async_hf_resources()
 
         if self._async_checkpoint:
             self._wait_for_pending_checkpoint()
-            self._engine.destroy_async_checkpoint_pg()
 
         # TODO: Should use flush rather than close
         if self._async_hf_export or self._async_checkpoint:
@@ -937,7 +949,10 @@ class Trainer:
         if self._metrics_recorder:
             self._metrics_recorder.close()
         log_rank0.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
+        # Engine teardown may include EP-group work. Enter it only after
+        # every rank has finished training and async saves are quiescent.
         dist.barrier()
+        self._engine.close()
 
     def _prepare_model_input(self, data_batch) -> list[ModelItem]:
         seq_ctx_list: list[SequenceContext] = []
@@ -2141,6 +2156,7 @@ class Trainer:
             "XTUNER_DISPATCHER_DEBUG": os.getenv("XTUNER_DISPATCHER_DEBUG"),
             "XTUNER_ROUTER_DEBUG": os.getenv("XTUNER_ROUTER_DEBUG"),
             "XTUNER_DECORD_VIDEO_THREADS": os.getenv("XTUNER_DECORD_VIDEO_THREADS"),
+            "XTUNER_GROUP_GEMM": os.getenv("XTUNER_GROUP_GEMM"),
             "XTUNER_USE_CUTLASS_GROUP_GEMM": os.getenv("XTUNER_USE_CUTLASS_GROUP_GEMM"),
             "GROUPED_GEMM_USE_CUTLASS": os.getenv("GROUPED_GEMM_USE_CUTLASS"),
             "XTUNER_USE_NATIVE_RMSNORM": os.getenv("XTUNER_USE_NATIVE_RMSNORM"),

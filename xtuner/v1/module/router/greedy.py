@@ -11,6 +11,12 @@ from torch.nn import functional as F
 from .protocol import RouterProtocol, RouterResults
 
 
+def _apply_random_logits(logits: torch.Tensor) -> torch.Tensor:
+    """Apply the force-balanced benchmark proxy to router logits."""
+    random_logits = torch.randn_like(logits)
+    return logits + (random_logits - logits).detach()
+
+
 class GreedyRouterConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     scoring_func: Annotated[Literal["sigmoid", "softmax"], Parameter(group="router")]
@@ -18,6 +24,7 @@ class GreedyRouterConfig(BaseModel):
     norm_topk_prob: Annotated[bool, Parameter(group="router")]
     use_grouped_router: bool = False
     router_n_groups: int | None = None
+    force_load_balance: bool = False
 
     def build(
         self,
@@ -53,6 +60,7 @@ class GreedyRouter(nn.Module, RouterProtocol):
         norm_topk_prob: bool = True,
         scoring_func: Literal["sigmoid", "softmax"] = "softmax",
         router_scaling_factor: float = 1.0,
+        force_load_balance: bool = False,
     ):
         super().__init__()
         self.n_routed_experts = n_routed_experts
@@ -60,11 +68,15 @@ class GreedyRouter(nn.Module, RouterProtocol):
         self.norm_topk_prob = norm_topk_prob
         self.scoring_func = scoring_func
         self.router_scaling_factor = router_scaling_factor
+        self.force_load_balance = force_load_balance
 
     def forward(self, logits: torch.Tensor, rollout_routed_experts: torch.Tensor | None = None) -> RouterResults:
         if os.getenv("XTUNER_ROUTER_DEBUG") == "true":
             noise = torch.randn_like(logits) * 50
             logits = logits + noise
+
+        if self.force_load_balance:
+            logits = _apply_random_logits(logits)
 
         # TODO: (yehaochen) Support sigmoid
         if self.scoring_func == "sigmoid":
@@ -87,7 +99,7 @@ class GreedyRouter(nn.Module, RouterProtocol):
 
         # moe forward
         # (e, )
-        tokens_per_expert = torch.histc(topk_ids, bins=self.n_routed_experts, min=0, max=self.n_routed_experts)
+        tokens_per_expert = torch.histc(topk_ids.float(), bins=self.n_routed_experts, min=0, max=self.n_routed_experts)
 
         return {
             "logits": logits,
@@ -108,6 +120,7 @@ class GreedyGroupedRouter(GreedyRouter):
         norm_topk_prob: bool = True,
         scoring_func: Literal["sigmoid", "softmax"] = "softmax",
         router_scaling_factor: float = 1.0,
+        force_load_balance: bool = False,
     ):
         super().__init__(
             n_routed_experts=n_routed_experts,
@@ -115,6 +128,7 @@ class GreedyGroupedRouter(GreedyRouter):
             norm_topk_prob=norm_topk_prob,
             scoring_func=scoring_func,
             router_scaling_factor=router_scaling_factor,
+            force_load_balance=force_load_balance,
         )
         self.router_n_groups = router_n_groups
 
@@ -122,6 +136,9 @@ class GreedyGroupedRouter(GreedyRouter):
         if os.getenv("XTUNER_ROUTER_DEBUG") == "true":
             noise = torch.randn_like(logits) * 50
             logits = logits + noise
+
+        if self.force_load_balance:
+            logits = _apply_random_logits(logits)
 
         # TODO: (yehaochen) Support sigmoid
         if self.scoring_func == "sigmoid":
@@ -163,7 +180,7 @@ class GreedyGroupedRouter(GreedyRouter):
 
         # moe forward
         # (e, )
-        tokens_per_expert = torch.histc(topk_ids, bins=self.n_routed_experts, min=0, max=self.n_routed_experts)
+        tokens_per_expert = torch.histc(topk_ids.float(), bins=self.n_routed_experts, min=0, max=self.n_routed_experts)
 
         return {
             "logits": logits,

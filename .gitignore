@@ -10,6 +10,7 @@ __pycache__/
 
 # C extensions
 *.so
+.te_grouped_gemm_cuda_build/
 
 # Distribution / packaging
 .Python
