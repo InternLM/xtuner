@@ -4,12 +4,12 @@ import importlib
 import json
 import os
 import socket
-from abc import ABC, abstractmethod
+from abc import ABC
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, Generic, Protocol, Sequence, TypeVar, cast
+from typing import Any, Generic, Protocol, Sequence, TypeVar, cast
 
 import requests
 import torch
@@ -71,21 +71,33 @@ class WeightTransport(ABC, Generic[AdapterT]):
         self.rollout_tp = self.rollout_info.tp
         self._adapter: AdapterT | None = None
 
-        self.rollout_url = self.rollout_info.rollout_url
-
     def reset_rollout_info(self, rollout_info: RolloutWeightUpdateInfo):
         self.rollout_info = rollout_info
-        self.rollout_url = rollout_info.rollout_url
 
     @staticmethod
-    def post_json(url: str, endpoint: str, payload: dict, *, api_key=None) -> dict:
+    def post_json(
+        url: str,
+        endpoint: str,
+        payload: dict[str, Any],
+        *,
+        api_key: list[str] | str | None = None,
+        timeout: float | int | None = None,
+    ) -> dict[str, Any]:
         headers = {"Content-Type": "application/json"}
         # TODO move api key to init
         if api_key is not None:
-            headers["Authorization"] = f"Bearer {api_key}"
-        response = requests.post(f"{url}/{endpoint}", headers=headers, json=payload)
+            token = api_key[0] if isinstance(api_key, list) else api_key
+            headers["Authorization"] = f"Bearer {token}"
+        response = requests.post(
+            f"{url.rstrip('/')}/{endpoint}",
+            headers=headers,
+            json=payload,
+            timeout=timeout,
+        )
         assert response.status_code == 200, f"response.status_code = {response.status_code}"
         response.raise_for_status()
+        if not response.content:
+            return {}
         return response.json()
 
     def update(self, weight_iterator: Any, **_: Any) -> None:
@@ -96,15 +108,14 @@ class WeightTransport(ABC, Generic[AdapterT]):
         try:
             for batches in weight_iterator.iter_batch_groups():
                 for batch in batches:
-                    self.send(batch)
+                    self._send(batch)
                 self.after_update_per_group()
                 DEVICE_MODULE.empty_cache()
         finally:
             self.after_update_all_groups()
             DEVICE_MODULE.empty_cache()
 
-    @abstractmethod
-    def send(self, batch: WeightUpdateBatch) -> None:
+    def _send(self, batch: WeightUpdateBatch) -> None:
         raise NotImplementedError
 
     def after_update_all_groups(self) -> None:
@@ -116,6 +127,9 @@ class WeightTransport(ABC, Generic[AdapterT]):
     def teardown(self) -> None:
         return
 
+    def has_registered_checkpoint(self) -> bool:
+        return False
+
 
 class IPCBackendAdapter:
     # def __init__(self, *, rollout_info: RolloutWeightUpdateInfo):
@@ -124,9 +138,6 @@ class IPCBackendAdapter:
         # self.rollout_info = rollout_info
 
     def before_update(self) -> None:
-        return
-
-    def after_update(self) -> None:
         return
 
     def build_request(
@@ -473,17 +484,15 @@ class IPCWeightTransport(WeightTransport[IPCBackendAdapter]):
 
     def after_update_all_groups(self) -> None:
         self._adapter.after_update_all_groups()
-        DEVICE_MODULE.empty_cache()
 
     def after_update_per_group(self) -> None:
         dist.barrier()
 
-    def send(self, batch: WeightUpdateBatch) -> None:
+    def _send(self, batch: WeightUpdateBatch) -> None:
         ipc_update_target = self.rollout_info._ipc_update_target
         assert ipc_update_target is not None, "IPC rollout target for current train rank is not resolved."
         rollout_url = ipc_update_target.server_url
 
-        DEVICE_MODULE.empty_cache()
         try:
             serialized_data = self._adapter.serialize(
                 batch,
@@ -555,9 +564,9 @@ class SGLangNCCLBackendAdapter(NCCLBackendAdapter):
             flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=list(zip(weight_names, weight_tensors)))
             flattened_tensor = flattened_tensor_bucket.get_flattened_tensor()
 
-            return payload, flattened_tensor, weight_names
+            return payload, flattened_tensor
         else:
-            return None, None, None
+            return None, None
 
     def build_request(
         self,
@@ -597,7 +606,7 @@ class LMDeployNCCLBackendAdapter(NCCLBackendAdapter):
             flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=list(zip(weight_names, weight_tensors)))
             flattened_tensor = flattened_tensor_bucket.get_flattened_tensor()
 
-            return payload, flattened_tensor, weight_names
+            return payload, flattened_tensor
         else:
             # finalize-only request: no tensors to broadcast, just trigger the
             # rollout side's mod.weight_update() finalization hooks.
@@ -609,7 +618,7 @@ class LMDeployNCCLBackendAdapter(NCCLBackendAdapter):
                 "load_format": "flattened_bucket",
                 "finished": True,
             }
-            return payload, None, None
+            return payload, None
 
     def build_request(
         self,
@@ -627,7 +636,6 @@ class NCCLWeightTransport(WeightTransport[NCCLBackendAdapter]):
         self.group_name: str | None = None
         self.executor: ThreadPoolExecutor | None = None
         self.train_update_sync_group: dist.ProcessGroup | None = None
-        self.hook_compare_test_sent_and_received_weight_hash: Callable[..., None] = lambda result, **kwargs: None
 
         self.engine_urls: list[str] = []
         self.external_group_world_size: int | None = None
@@ -727,7 +735,7 @@ class NCCLWeightTransport(WeightTransport[NCCLBackendAdapter]):
         self.group_name = group_name
         self.engine_urls = [url for _, url, _ in engine_info]
 
-    def send(self, batch: WeightUpdateBatch) -> None:
+    def _send(self, batch: WeightUpdateBatch) -> None:
         train_sync_group = self.get_train_update_sync_group()
         head_rank = 0
         # Only train rank 0 drives the disaggregated NCCL update. Other train
@@ -745,7 +753,7 @@ class NCCLWeightTransport(WeightTransport[NCCLBackendAdapter]):
 
         assert self.executor is not None
         assert self.group_name is not None
-        payload, flattened_tensor, weight_names = self._adapter.build_weight_update_payload(batch, self.group_name)
+        payload, flattened_tensor = self._adapter.build_weight_update_payload(batch, self.group_name)
         if payload is not None:
             request = self._adapter.build_request(payload)
             # Notify rollout engines first so they can join the external NCCL group and
@@ -769,10 +777,6 @@ class NCCLWeightTransport(WeightTransport[NCCLBackendAdapter]):
             # backend-specific update results.
             for update_future in update_futures:
                 result = update_future.result()
-                self.hook_compare_test_sent_and_received_weight_hash(
-                    result,
-                    names=weight_names,
-                )
                 assert result.get("success", True), (
                     f"update_weights_from_distributed failed: {result.get('message', result)}"
                 )
@@ -851,14 +855,20 @@ class NCCLWeightTransport(WeightTransport[NCCLBackendAdapter]):
 class CheckpointEngineAdapter:
     """Build adapter for CheckpointEngine."""
 
-    def __init__(self, *, rank: int):
-        self.rank = rank
+    def before_update(self) -> None:
+        return
 
-    def build_update_url(self, server_url: str) -> str:
-        return f"{server_url.rstrip('/')}/update_weights_from_ipc"
+    def after_update_all_groups(self) -> None:
+        return
+
+    def build_request(
+        self,
+        payload: dict[str, Any],
+    ) -> WeightUpdateRequest:
+        return WeightUpdateRequest(endpoint="update_weights_from_ipc", body=payload)
 
 
-class CheckpointEngineWeightTransport:
+class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineAdapter]):
     """In-process Checkpoint Engine transport via ParameterServer.
 
     Each train rank owns a PS and collectively register / gather_metas / update.
@@ -875,18 +885,12 @@ class CheckpointEngineWeightTransport:
     ):
         """Build PS and split weight keys in HF json file."""
 
-        self.rollout_info = rollout_info
-        self.logger = logger
-        self.rank = rank
-        self.backend = self.rollout_info.backend
-        self.rollout_ep = self.rollout_info.ep
-        self.rollout_tp = self.rollout_info.tp
-        self.rollout_url = self.rollout_info.rollout_url
+        super().__init__(rank=rank, logger=logger, rollout_info=rollout_info)
 
         assert dist.is_initialized(), "Checkpoint Engine requires an initialized torch.distributed process group."
         self.ps_world_size = dist.get_world_size()
 
-        self._adapter = CheckpointEngineAdapter(rank=rank)
+        self._adapter = CheckpointEngineAdapter()
         # record the update counter of PS
         self._update_counter = 0
         self._checkpoint_path = self.rollout_info.rollout_config.model_path
@@ -896,13 +900,15 @@ class CheckpointEngineWeightTransport:
         # record the checkpoint name of PS and will use it to register the checkpoint and unregister the previous checkpoint
         self._checkpoint_name: str | None = None
 
-        self._ps = self.build_parameter_server()
+        self._ps = self._build_parameter_server()
         self._p2p_available = self._check_checkpoint_engine_p2p_available()
         # record the local checkpoint keys per PS-rank
 
-        self._local_checkpoint_keys = self.split_tensors_for_rank(self._checkpoint_path, self.ps_world_size, self.rank)
+        self._local_checkpoint_keys = self._split_tensors_for_rank(
+            self._checkpoint_path, self.ps_world_size, self.rank
+        )
 
-    def build_parameter_server(self):
+    def _build_parameter_server(self) -> Any:
         """Build the Checkpoint Engine ParameterServer.
 
         The world size is the same as the train world size. The ParameterServer is built with auto_pg=False, so the
@@ -934,7 +940,7 @@ class CheckpointEngineWeightTransport:
             return False
         return True
 
-    def split_tensors_for_rank(self, checkpoint_path: str | Path, world_size: int, rank: int) -> set[str]:
+    def _split_tensors_for_rank(self, checkpoint_path: str | Path, world_size: int, rank: int) -> set[str]:
         """Split an HF keys for each ParameterServer."""
 
         path = Path(checkpoint_path)
@@ -954,23 +960,23 @@ class CheckpointEngineWeightTransport:
         )
         return local_keys
 
-    def _collect_named_tensors(self, weight_iterator, local_keys=None):
+    def _collect_named_tensors(self, weight_iterator: Any, local_keys: set[str]) -> dict[str, torch.Tensor]:
         """Collect all train weights from the iterator onto CPU."""
-        named = {}
+        named: dict[str, torch.Tensor] = {}
         named_total_bytes = 0
+        DEVICE_MODULE.empty_cache()
         for batches in weight_iterator.iter_batch_groups():
             for batch in batches:
                 sd = batch.state_dict
                 if not sd:
                     continue
                 # batch 级快路径：完全无交集可跳过
-                if local_keys is not None and sd.keys().isdisjoint(local_keys):
+                if sd.keys().isdisjoint(local_keys):
                     sd.clear()
                     del sd, batch
-                    DEVICE_MODULE.empty_cache()
                     continue
                 for key, tensor in list(sd.items()):
-                    if local_keys is not None and key not in local_keys:
+                    if key not in local_keys:
                         sd.pop(key)
                         del tensor
                         continue
@@ -981,21 +987,21 @@ class CheckpointEngineWeightTransport:
                     named_total_bytes += named[key].numel() * named[key].element_size()
                 sd.clear()
                 del sd, batch
-                DEVICE_MODULE.empty_cache()
             DEVICE_MODULE.empty_cache()
-        if local_keys is not None:
-            self.logger.info(
-                f"[checkpoint_engine] collect matched local keys rank={self.rank} "
-                f"parameter server shard total={named_total_bytes / 1024**3:.3f}GiB "
-            )
+        DEVICE_MODULE.empty_cache()
+        self.logger.info(
+            f"[checkpoint_engine] collect matched local keys rank={self.rank} "
+            f"parameter server shard total={named_total_bytes / 1024**3:.3f}GiB "
+        )
         return named
 
-    def register_checkpoint_from_train_engine(self, weight_iterator: Any) -> None:
+    def _register_checkpoint_from_train_engine(self, weight_iterator: Any) -> None:
         """Register current train engine weights into Checkpoint Engine PS."""
 
         # 0. Drop previous train checkpoint to limit pinned host memory.
         if self._checkpoint_name is not None:
             self._ps.unregister_checkpoint(self._checkpoint_name)
+            self._checkpoint_name = None
 
         # 1. Collect named tensors from weight iterator
         all_tensors = self._collect_named_tensors(weight_iterator, local_keys=self._local_checkpoint_keys)
@@ -1022,9 +1028,10 @@ class CheckpointEngineWeightTransport:
             self._ps.register_checkpoint(name, files=[], named_tensors=shard, use_shared_memory_pool=True)
             if self._sync_after_register:
                 DEVICE_MODULE.synchronize()
-        except Exception:
-            self.logger.error(f"[checkpoint_engine] register_checkpoint failed rank={self.rank} name={name}")
-        self._checkpoint_name = name
+            self._checkpoint_name = name
+        except Exception as e:
+            self._checkpoint_name = None
+            raise RuntimeError(f"[checkpoint_engine] register_checkpoint failed rank={self.rank} name={name}") from e
 
     def _make_req_func(self, targets: Sequence[RolloutWeightUpdateTarget]):
         """Build CE ``req_func``: source rank POSTs IPC update to its SGLang
@@ -1047,20 +1054,20 @@ class CheckpointEngineWeightTransport:
             src = min(target.update_ranks)
             if rank != src:
                 return
-            update_url = adapter.build_update_url(target.server_url)
             rank_to_socket = dict(enumerate(socket_paths))
             payload = {
                 "zmq_handles": dict(rank_to_socket[r] for r in target.update_ranks),
                 "flush_cache": True,
             }
-            headers = {"Content-Type": "application/json"}
-            api_key = self.rollout_info.api_key
-            if api_key is not None:
-                token = api_key[0] if isinstance(api_key, list) else api_key
-                headers["Authorization"] = f"Bearer {token}"
-            response = requests.post(update_url, headers=headers, json=payload, timeout=self._timeout)
-            response.raise_for_status()
-            self.logger.info(f"[checkpoint_engine] rank{rank} updated {update_url}")
+            request = adapter.build_request(payload)
+            self.post_json(
+                target.server_url,
+                request.endpoint,
+                request.body,
+                api_key=self.rollout_info.api_key,
+                timeout=self._timeout,
+            )
+            self.logger.info(f"[checkpoint_engine] rank{rank} updated {target.server_url}/{request.endpoint}")
 
         return req_func
 
@@ -1111,10 +1118,9 @@ class CheckpointEngineWeightTransport:
         if not use_broadcast and not self._p2p_available:
             self.logger.warning(
                 "Checkpoint Engine partial weight update requires P2P, but mooncake "
-                "TransferEngine is unavailable. update_ranks=%s world_size=%s. "
-                "Install mooncake TransferEngine or fall back to full broadcast update.",
-                update_ranks,
-                self.ps_world_size,
+                f"TransferEngine is unavailable. update_ranks={update_ranks} "
+                f"world_size={self.ps_world_size}. "
+                "Install mooncake TransferEngine or fall back to full broadcast update."
             )
         req_func = self._make_req_func(targets)
         self.logger.info(
@@ -1125,7 +1131,13 @@ class CheckpointEngineWeightTransport:
         self._ps.gather_metas(self._checkpoint_name)
         self._ps.update(self._checkpoint_name, req_func, ranks=ranks)
 
-    def update(self, weight_iterator: Any, **kwargs: Any) -> None:
+    def update(
+        self,
+        weight_iterator: Any,
+        need_register: bool = True,
+        need_update: bool = True,
+        **kwargs: Any,
+    ) -> None:
         """Update rollout engine weights through the checkpoint parameter
         server.
 
@@ -1145,9 +1157,6 @@ class CheckpointEngineWeightTransport:
             can reduce peak GPU memory usage under memory pressure.
         """
 
-        need_register = kwargs.pop("need_register", True)
-        need_update = kwargs.pop("need_update", True)
-
         assert need_register or need_update, (
             "At least one of need_register or need_update must be True when use checkpoint engine update."
         )
@@ -1156,7 +1165,7 @@ class CheckpointEngineWeightTransport:
 
         # 1. Register checkpoint from train engine
         if need_register:
-            self.register_checkpoint_from_train_engine(weight_iterator)
+            self._register_checkpoint_from_train_engine(weight_iterator)
 
         # 2. Broadcast checkpoint to engines
         if need_update:
@@ -1164,10 +1173,6 @@ class CheckpointEngineWeightTransport:
 
     def has_registered_checkpoint(self) -> bool:
         return self._checkpoint_name is not None
-
-    def reset_rollout_info(self, rollout_info: RolloutWeightUpdateInfo):
-        self.rollout_info = rollout_info
-        self.rollout_url = rollout_info.rollout_url
 
     def teardown(self) -> None:
         if self._ps is None:
