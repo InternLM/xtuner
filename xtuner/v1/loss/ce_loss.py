@@ -246,12 +246,14 @@ class LMHeadLossContext(BaseLossContext):
             bs, seq, dim = hidden_states.shape
             hidden_states = hidden_states.reshape(bs * seq, dim)
             shifted_labels = shifted_labels.flatten()
+            mask = loss_weight != 0
+            valid_count = mask.sum()
             # liger kernel dont support reduction=="none"
             # step 2.b in the loss calculation: sum the loss over all tokens, then multiply the loss weight (i.e. divide by the global_denominator)
             loss = self.liger_loss_fct(head_weight, hidden_states, shifted_labels)
             # ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
-            mask = loss_weight != 0
-            w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
+            # Clamp an all-ignore denominator on device to avoid both 0/0 and a host synchronization.
+            w = loss_weight.sum() / valid_count.clamp_min(1)  # w equals to 1/global_denominator
             loss = loss * w
             return loss, (None, {})
 
