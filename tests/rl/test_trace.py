@@ -4,6 +4,9 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest import mock
+from urllib.request import urlopen
 
 
 def _run_trace_utils(repo_root: Path, command: str) -> dict:
@@ -22,6 +25,220 @@ def _run_trace_utils(repo_root: Path, command: str) -> dict:
 
 
 class TestTrace(unittest.TestCase):
+    def test_external_collector_skips_local_collector_and_propagates_endpoint(self):
+        from xtuner.v1.rl.trace import runtime as trace_runtime
+
+        class Provider:
+            def shutdown(self):
+                return None
+
+        with TemporaryDirectory() as temp_dir:
+            config = trace_runtime.TraceConfig(
+                enabled=True,
+                output_dir=temp_dir,
+                external_otlp_endpoint="http://otel-collector.namespace.svc:4317",
+            )
+            handle = trace_runtime._build_trace_runtime_handle(config)
+
+            self.assertFalse(handle.start_local_collector)
+            self.assertIsNone(handle.collector_port)
+            self.assertIsNone(handle.runtime.trace_jsonl_path)
+            self.assertEqual(
+                handle.env_vars["OTEL_EXPORTER_OTLP_ENDPOINT"],
+                "http://otel-collector.namespace.svc:4317",
+            )
+            self.assertNotIn("XTUNER_OTEL_JSONL_PATH", handle.env_vars)
+
+            with (
+                mock.patch.object(trace_runtime._OTelCollector, "start") as start_collector,
+                mock.patch.object(trace_runtime, "_configure_tracer_provider", return_value=Provider()),
+            ):
+                handle.start()
+                handle.close()
+            start_collector.assert_not_called()
+            trace_runtime.clear_trace_env()
+
+    def test_local_collector_remains_the_default(self):
+        from xtuner.v1.rl.trace import runtime as trace_runtime
+
+        with TemporaryDirectory() as temp_dir:
+            with mock.patch.object(trace_runtime, "find_free_ports", return_value=[4317]):
+                handle = trace_runtime._build_trace_runtime_handle(
+                    trace_runtime.TraceConfig(enabled=True, output_dir=temp_dir)
+                )
+
+            self.assertTrue(handle.start_local_collector)
+            self.assertIsNotNone(handle.collector_port)
+            self.assertIsNotNone(handle.runtime.trace_jsonl_path)
+            self.assertTrue(handle.runtime.trace_jsonl_path.is_file())
+            self.assertTrue(handle.endpoint.startswith("http://127.0.0.1:"))
+
+    def test_external_trace_jsonl_is_owned_by_collector_and_not_propagated(self):
+        from xtuner.v1.rl.trace import runtime as trace_runtime
+
+        with TemporaryDirectory() as temp_dir:
+            trace_path = Path(temp_dir) / "shared" / "traces.jsonl"
+            handle = trace_runtime._build_trace_runtime_handle(
+                trace_runtime.TraceConfig(
+                    enabled=True,
+                    output_dir=Path(temp_dir) / "runs",
+                    external_otlp_endpoint="http://otel-collector.namespace.svc:4317",
+                    external_trace_jsonl_path=trace_path,
+                    xtuner_viewer_enabled=True,
+                )
+            )
+
+            self.assertEqual(handle.runtime.trace_jsonl_path, trace_path)
+            self.assertNotIn("XTUNER_OTEL_JSONL_PATH", handle.env_vars)
+            self.assertFalse(trace_path.parent.exists())
+            self.assertFalse(trace_path.exists())
+
+    def test_external_viewer_lazily_loads_trace_jsonl(self):
+        from recipe.trace.viewer.server import start_rollout_trace_viewer
+
+        with TemporaryDirectory() as temp_dir:
+            trace_path = Path(temp_dir) / "shared" / "traces.jsonl"
+            viewer = start_rollout_trace_viewer(
+                None,
+                service_name="xtuner-rollout",
+                run_id="run-1",
+                trace_jsonl_path=trace_path,
+                host="127.0.0.1",
+                port=0,
+                train_step="all",
+            )
+            try:
+                self.assertTrue(viewer.thread.is_alive())
+                self.assertFalse(trace_path.exists())
+
+                trace_path.parent.mkdir(parents=True)
+                trace_path.write_text(
+                    json.dumps(
+                        {
+                            "traceID": "trace-1",
+                            "processes": {
+                                "p1": {
+                                    "serviceName": "xtuner-rollout",
+                                    "tags": [{"key": "run.id", "value": "run-1"}],
+                                }
+                            },
+                            "spans": [
+                                {
+                                    "traceID": "trace-1",
+                                    "spanID": "span-1",
+                                    "operationName": "rollout.generate",
+                                    "processID": "p1",
+                                    "startTime": 1_000,
+                                    "duration": 2_000,
+                                    "tags": [{"key": "xtuner.rollout_id", "value": "rollout-1"}],
+                                }
+                            ],
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                with urlopen(f"{viewer.url}/api/trace?train_step=all", timeout=2) as response:
+                    payload = json.load(response)
+
+                self.assertEqual(payload["sample_count"], 1)
+                self.assertEqual(payload["samples"][0]["rollout_id"], "rollout-1")
+            finally:
+                viewer.close()
+
+    def test_external_viewer_process_starts_before_trace_jsonl_exists(self):
+        from xtuner.v1.rl.trace import runtime as trace_runtime
+
+        class Provider:
+            def shutdown(self):
+                return None
+
+        with TemporaryDirectory() as temp_dir:
+            trace_path = Path(temp_dir) / "shared" / "traces.jsonl"
+            handle = trace_runtime._build_trace_runtime_handle(
+                trace_runtime.TraceConfig(
+                    enabled=True,
+                    output_dir=Path(temp_dir) / "runs",
+                    external_otlp_endpoint="http://otel-collector.namespace.svc:4317",
+                    external_trace_jsonl_path=trace_path,
+                    xtuner_viewer_enabled=True,
+                    xtuner_viewer_port=0,
+                )
+            )
+            try:
+                with mock.patch.object(trace_runtime, "_configure_tracer_provider", return_value=Provider()):
+                    handle.start()
+                self.assertIsNotNone(handle.xtuner_viewer_process)
+                self.assertIsNone(handle.xtuner_viewer_process.poll())
+                self.assertFalse(trace_path.exists())
+            finally:
+                handle.close()
+                trace_runtime.clear_trace_env()
+
+    def test_ray_child_inherits_external_endpoint_without_trace_jsonl(self):
+        from xtuner.v1.rl.trace import runtime as trace_runtime
+
+        class Provider:
+            def shutdown(self):
+                return None
+
+        with TemporaryDirectory() as temp_dir:
+            trace_path = Path(temp_dir) / "shared" / "traces.jsonl"
+            driver_handle = trace_runtime._build_trace_runtime_handle(
+                trace_runtime.TraceConfig(
+                    enabled=True,
+                    output_dir=Path(temp_dir) / "runs",
+                    external_otlp_endpoint="http://otel-collector.namespace.svc:4317",
+                    external_trace_jsonl_path=trace_path,
+                )
+            )
+
+            with (
+                mock.patch.object(trace_runtime, "_RUNTIME", None),
+                mock.patch.object(trace_runtime, "register_atexit_once"),
+                mock.patch.object(trace_runtime._OTelCollector, "start") as start_collector,
+                mock.patch.object(trace_runtime, "_configure_tracer_provider", return_value=Provider()) as configure,
+                mock.patch.dict(os.environ, driver_handle.env_vars, clear=True),
+            ):
+                self.assertTrue(trace_runtime.ensure_trace_runtime_from_env())
+                runtime = trace_runtime.current_trace_runtime()
+                self.assertIsNotNone(runtime)
+                self.assertEqual(runtime.mode, "inherited")
+                self.assertIsNone(runtime.trace_jsonl_path)
+                self.assertNotIn("XTUNER_OTEL_JSONL_PATH", trace_runtime.get_trace_env_vars())
+                configure.assert_called_once_with(
+                    service_name="xtuner-rollout",
+                    run_id=driver_handle.runtime.run_id,
+                    endpoint="http://otel-collector.namespace.svc:4317",
+                    protocol="grpc",
+                )
+                start_collector.assert_not_called()
+                trace_runtime.close_trace()
+
+    def test_external_viewer_requires_shared_trace_jsonl(self):
+        from pydantic import ValidationError
+
+        from xtuner.v1.rl.trace import runtime as trace_runtime
+
+        with self.assertRaisesRegex(ValidationError, "external_trace_jsonl_path"):
+            trace_runtime.TraceConfig(
+                enabled=True,
+                external_otlp_endpoint="http://otel-collector.namespace.svc:4317",
+                xtuner_viewer_enabled=True,
+            )
+
+    def test_external_trace_jsonl_requires_external_endpoint(self):
+        from pydantic import ValidationError
+
+        from xtuner.v1.rl.trace import runtime as trace_runtime
+
+        with self.assertRaisesRegex(ValidationError, "external_otlp_endpoint"):
+            trace_runtime.TraceConfig(
+                enabled=True,
+                external_trace_jsonl_path="/shared/traces.jsonl",
+            )
+
     def test_trace_span_records_attributes_events_and_errors(self):
         repo_root = Path(__file__).resolve().parents[2]
         output = _run_trace_utils(repo_root, "record-span")
