@@ -313,8 +313,8 @@ class DeepEPDispatcher(
         self._local_experts = n_routed_experts // self._ep_size
         # Virtual expert count seen by DeepEP. Per-rank count
         # (= virtual_n_experts / process_group.size()) stays equal to ``_local_experts`` —
-        # downstream ``permute`` / ``group_gemm`` consume ``num_recv_tokens_per_expert_list`` of
-        # that fixed length and no aggregation is needed.
+        # downstream ``permute`` / ``group_gemm`` still operate on local-expert ids of
+        # that fixed length.
         self._virtual_n_experts = n_routed_experts * tp_size
 
     @override
@@ -459,10 +459,28 @@ class DeepEPDispatcher(
             assert dispatched["forward_finished_event"] is not None, "Please use `async_op=True` for dispatch!"
             dispatched["forward_finished_event"].current_stream_wait()
 
-        num_recv_tokens_per_expert_list = dispatched["num_recv_tokens_per_expert_list"]
-        num_out_tokens = sum(dispatched["num_recv_tokens_per_expert_list"])
         recv_topk_idx_numel = dispatched["topk_ids"].numel()
-        num_neg_one_idx = recv_topk_idx_numel - num_out_tokens
+        num_neg_one_idx = int((dispatched["topk_ids"] == -1).sum().item())
+        num_out_tokens = recv_topk_idx_numel - num_neg_one_idx
+
+        # DeepEP's expert-count list may not match the assignments expanded by
+        # ``topk_ids``. Derive group GEMM's split sizes from the same ids used by
+        # ``permute`` so both operations agree on the expert layout.
+        non_negative_topk_ids = dispatched["topk_ids"][dispatched["topk_ids"] >= 0]
+        if non_negative_topk_ids.numel() > 0:
+            assert non_negative_topk_ids.max() < self._local_experts, (
+                "DeepEP returned an expert id outside the local expert range: "
+                f"max={non_negative_topk_ids.max().item()}, local_experts={self._local_experts}"
+            )
+        tokens_per_expert_from_topk = torch.bincount(
+            non_negative_topk_ids.reshape(-1),
+            minlength=self._local_experts,
+        )
+        assert tokens_per_expert_from_topk.sum().item() == num_out_tokens, (
+            "`tokens_per_expert` must match the number of assignments expanded by `topk_ids`: "
+            f"tokens_per_expert={tokens_per_expert_from_topk.sum().item()}, "
+            f"num_out_tokens={num_out_tokens}"
+        )
 
         permuted_hidden_states, row_ids_map = permute(
             dispatched["hidden_states"],
@@ -482,11 +500,7 @@ class DeepEPDispatcher(
         # is safe because the caching allocator refuses to recycle a pinned
         # block until the CUDA events referencing it have completed — a
         # guarantee a manually held buffer does not get.
-        tokens_per_expert = torch.tensor(
-            num_recv_tokens_per_expert_list,
-            dtype=torch.long,
-            pin_memory=True,
-        )
+        tokens_per_expert = tokens_per_expert_from_topk.cpu().pin_memory().to(dtype=torch.long)
         # `non_blocking=True` is only safe because every downstream consumer of
         # `tokens_per_expert` (group GEMM, FP8 quant kernels, prober) runs on
         # the current CUDA stream, so stream ordering covers the H2D. If
