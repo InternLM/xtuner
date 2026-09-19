@@ -5,6 +5,7 @@
 - 文本样本的 input_ids、shifted_labels、rollout_logprobs、advantage 布局。
 - 同一个 prompt 下多个 response 各自使用对应 reward / advantage。
 - VLM 样本使用 train_prompt_ids，并保留 multimodal 训练字段。
+- VLM M-RoPE：get_train_seq_ctx 用 global amax 续写 response position（对齐 SFT get_rope_index_3）。
 - 无效 rollout group 会被跳过。
 - 缺失 reward、logprob/mask 长度不一致、pack_max_length 过小时 fail fast。
 - 多条样本 pack 成一条序列后，input_ids/shifted_labels/advantages/rollout_logprobs（及 teacher 字段）
@@ -12,16 +13,18 @@
 """
 
 import unittest
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets, reset_rollout_response
+from xtuner.v1.datasets.mllm_tokenize_fn.qwenvl_rope2d import get_rope_index_3
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
 from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
-from xtuner.v1.train.rl_trainer import BaseRLTrainer
+from xtuner.v1.train.rl_trainer import BaseRLTrainer, get_train_seq_ctx
 
 
 class _FakeAdvantageEstimator:
@@ -225,6 +228,40 @@ class TestPrepareTrainData(unittest.TestCase):
         self.assertIs(seq_ctx.pixel_values, pixel_values)
         self.assertEqual(seq_ctx.image_grid_thw.dtype, torch.long)
         self.assertEqual(seq_ctx.image_grid_thw.tolist(), [[1, 2, 3]])
+
+    def test_get_train_seq_ctx_mrope_continues_from_global_amax(self):
+        """RL 只拿 prompt 的 3D position，续写 response 后须与 SFT get_rope_index_3 一致。
+
+        Fixture：prompt 以 image tokens 结尾（grid 1x4x4, merge=2 → 2x2），使 per-axis max
+        与 global amax 分叉。
+        """
+        image_token_id = 151655
+        vision_start_token_id = 151652
+        prompt_ids = [10, vision_start_token_id, image_token_id, image_token_id, image_token_id, image_token_id]
+        response_ids = [20, 21, 22]
+        full_ids = torch.tensor([prompt_ids + response_ids], dtype=torch.long)
+        image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long)
+
+        sft_position_ids = get_rope_index_3(
+            full_ids,
+            image_grid_thw=image_grid_thw,
+            spatial_merge_size=2,
+        )
+        prompt_position_ids = get_rope_index_3(
+            torch.tensor([prompt_ids], dtype=torch.long),
+            image_grid_thw=image_grid_thw,
+            spatial_merge_size=2,
+        )
+
+        seq_ctx = get_train_seq_ctx(
+            cast(torch.LongTensor, full_ids),
+            prompt_position_ids.numpy(),
+            len_response_ids=len(response_ids),
+        )
+        rl_position_ids = seq_ctx.position_ids
+        assert rl_position_ids is not None
+        self.assertEqual(tuple(rl_position_ids.shape), tuple(sft_position_ids.shape))
+        torch.testing.assert_close(rl_position_ids, sft_position_ids)
 
     def test_mixed_agentic_and_vlm_reasoning_use_3d_position_ids(self):
         trainer = self._build_trainer([0.5])
