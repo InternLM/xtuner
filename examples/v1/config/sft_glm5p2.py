@@ -108,10 +108,15 @@ elif optimizer == "adamw":
 else:
     raise ValueError(f"Unsupported OPTIMIZER={optimizer!r}. Use adamw or muon.")
 lr_cfg = LRConfig(lr_type=os.environ.get("LR_TYPE", "cosine"), warmup_ratio=float(os.environ.get("WARMUP_RATIO", "0")))
+hsdp_sharding_size = os.environ.get("HSDP_SHARDING_SIZE")
 fsdp_cfg = FSDPConfig(
     cpu_offload=_get_bool_env("CPU_OFFLOAD", False),
     ep_size=ep_size,
     torch_compile=_get_bool_env("TORCH_COMPILE", False),
+    # DECOUPLE_EP_FSDP=1: dp2ep layout — dense params sharded over the full FSDP mesh instead of
+    # being replicated `ep_size` times; experts sharded `dp_shard / ep_size` ways on top of EP.
+    decouple_ep_fsdp=_get_bool_env("DECOUPLE_EP_FSDP", False),
+    hsdp_sharding_size=int(hsdp_sharding_size) if hsdp_sharding_size else None,
 )
 
 trainer = TrainerConfig(
