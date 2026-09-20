@@ -4,6 +4,7 @@ from typing import Any, Literal, TypedDict
 
 import ray
 import torch
+from typing_extensions import NotRequired
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.compose.base import BaseComposeConfig
@@ -22,6 +23,22 @@ class ColateItem(TypedDict):
     shifted_labels: torch.Tensor
     advantage: float
     rollout_logprobs: torch.Tensor | None
+    teacher_logprobs: NotRequired[torch.Tensor | None]
+    target_token_ids: NotRequired[torch.Tensor | None]
+    teacher_indices: NotRequired[torch.Tensor | None]
+
+
+class PackedBatch(TypedDict):
+    """Output of ``TrainingController._packing``: samples concatenated into one
+    sequence."""
+
+    seq_ctx: SequenceContext
+    shifted_labels: torch.Tensor
+    advantages: torch.Tensor
+    rollout_logprobs: torch.Tensor | None
+    teacher_logprobs: torch.Tensor | None
+    target_token_ids: torch.Tensor | None
+    teacher_indices: torch.Tensor | None
 
 
 def _summarize_process_group_results(results: list[dict[str, Any]]) -> str:
@@ -45,6 +62,25 @@ def _summarize_process_group_results(results: list[dict[str, Any]]) -> str:
     if result_errors:
         summary += f", errors={len(result_errors)}, first_error={result_errors[0]}"
     return summary
+
+
+def _verify_packed_alignment(packed_batch: PackedBatch) -> None:
+    # Position-wise fields must stay aligned with input_ids; a mismatch would silently shift
+    # the element-wise policy loss or crash on shape mismatch in the loss function.
+    assert packed_batch["seq_ctx"].input_ids is not None
+    seq_len = packed_batch["seq_ctx"].input_ids.shape[1]
+    shifted_labels = packed_batch["shifted_labels"]
+    advantages = packed_batch["advantages"]
+    assert shifted_labels.shape[1] == seq_len, f"{shifted_labels.shape[1]} vs {seq_len}"
+    assert advantages.shape[1] == seq_len, f"{advantages.shape[1]} vs {seq_len}"
+    for field_name, optional_field in (
+        ("rollout_logprobs", packed_batch["rollout_logprobs"]),
+        ("teacher_logprobs", packed_batch["teacher_logprobs"]),
+        ("target_token_ids", packed_batch["target_token_ids"]),
+        ("teacher_indices", packed_batch["teacher_indices"]),
+    ):
+        if optional_field is not None:
+            assert optional_field.shape[1] == seq_len, f"{field_name}: {optional_field.shape[1]} vs {seq_len}"
 
 
 class TrainingController:
@@ -99,9 +135,7 @@ class TrainingController:
         )
         packed_data_batches = []
 
-        is_qwen3_vl = False
-        if len(data_batches[0]["seq_ctx"].position_ids.shape) == 3:
-            is_qwen3_vl = True
+        is_qwen3_vl = any(data["seq_ctx"].position_ids.ndim == 3 for data in data_batches)
 
         has_rollout_routed_experts = False
         if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:
@@ -120,6 +154,18 @@ class TrainingController:
             rollout_logprobs_list = None
             if "rollout_logprobs" in data_batches[0] and data_batches[0]["rollout_logprobs"] is not None:
                 rollout_logprobs_list = [data_batches[i]["rollout_logprobs"] for i in indices]
+
+            teacher_logprobs_list = None
+            if "teacher_logprobs" in data_batches[0] and data_batches[0]["teacher_logprobs"] is not None:
+                teacher_logprobs_list = [data_batches[i]["teacher_logprobs"] for i in indices]
+
+            target_token_ids_list = None
+            if "target_token_ids" in data_batches[0] and data_batches[0]["target_token_ids"] is not None:
+                target_token_ids_list = [data_batches[i]["target_token_ids"] for i in indices]
+
+            teacher_indices_list = None
+            if "teacher_indices" in data_batches[0] and data_batches[0]["teacher_indices"] is not None:
+                teacher_indices_list = [data_batches[i]["teacher_indices"] for i in indices]
 
             if pad_len > 0:
                 # Reduce the attn calculation time by using multiple short sequence packs
@@ -162,6 +208,30 @@ class TrainingController:
                         device=data_batches[0]["shifted_labels"].device,
                     )
                     rollout_logprobs_list.append(pad_rollout_logprobs)
+                if teacher_logprobs_list is not None:
+                    teacher_logprobs_shape = data_batches[0]["teacher_logprobs"].shape[2:]
+                    pad_teacher_logprobs = torch.zeros(
+                        (1, pad_len, *teacher_logprobs_shape),
+                        dtype=data_batches[0]["teacher_logprobs"].dtype,
+                        device=data_batches[0]["shifted_labels"].device,
+                    )
+                    teacher_logprobs_list.append(pad_teacher_logprobs)
+                if target_token_ids_list is not None:
+                    target_token_ids_shape = data_batches[0]["target_token_ids"].shape[2:]
+                    pad_target_token_ids = torch.zeros(
+                        (1, pad_len, *target_token_ids_shape),
+                        dtype=data_batches[0]["target_token_ids"].dtype,
+                        device=data_batches[0]["shifted_labels"].device,
+                    )
+                    target_token_ids_list.append(pad_target_token_ids)
+                if teacher_indices_list is not None:
+                    pad_teacher_indices = torch.full(
+                        (1, pad_len),
+                        -1,
+                        dtype=data_batches[0]["teacher_indices"].dtype,
+                        device=data_batches[0]["teacher_indices"].device,
+                    )
+                    teacher_indices_list.append(pad_teacher_indices)
 
             seq_ctx = SequenceContext.cat(seq_ctx_list)
             shifted_labels = torch.cat(label_list, dim=1)  # (1, max_len)
@@ -172,14 +242,29 @@ class TrainingController:
             if rollout_logprobs_list is not None:
                 rollout_logprobs = torch.cat(rollout_logprobs_list, dim=1)  # (1, max_len)
 
-            packed_data_batches.append(
-                {
-                    "seq_ctx": seq_ctx,
-                    "shifted_labels": shifted_labels,
-                    "advantages": advantages,
-                    "rollout_logprobs": rollout_logprobs,
-                }
-            )
+            teacher_logprobs = None
+            if teacher_logprobs_list is not None:
+                teacher_logprobs = torch.cat(teacher_logprobs_list, dim=1)  # (1, max_len)
+
+            target_token_ids = None
+            if target_token_ids_list is not None:
+                target_token_ids = torch.cat(target_token_ids_list, dim=1)
+
+            teacher_indices = None
+            if teacher_indices_list is not None:
+                teacher_indices = torch.cat(teacher_indices_list, dim=1)  # (1, max_len)
+
+            packed_batch = {
+                "seq_ctx": seq_ctx,
+                "shifted_labels": shifted_labels,
+                "advantages": advantages,
+                "rollout_logprobs": rollout_logprobs,
+                "teacher_logprobs": teacher_logprobs,
+                "target_token_ids": target_token_ids,
+                "teacher_indices": teacher_indices,
+            }
+            _verify_packed_alignment(packed_batch)
+            packed_data_batches.append(packed_batch)
         return packed_data_batches
 
     def _grouped_by_max_length(self, packed_data_batches):
@@ -260,11 +345,38 @@ class TrainingController:
                 pad_rollout_logprobs = torch.zeros(
                     1, pack_max_length, dtype=packed_data_batches[0]["rollout_logprobs"].dtype, device="cpu"
                 )
+            pad_teacher_logprobs = None
+            if "teacher_logprobs" in packed_data_batches[0] and packed_data_batches[0]["teacher_logprobs"] is not None:
+                teacher_logprobs_shape = packed_data_batches[0]["teacher_logprobs"].shape[2:]
+                pad_teacher_logprobs = torch.zeros(
+                    (1, pack_max_length, *teacher_logprobs_shape),
+                    dtype=packed_data_batches[0]["teacher_logprobs"].dtype,
+                    device="cpu",
+                )
+            pad_target_token_ids = None
+            if "target_token_ids" in packed_data_batches[0] and packed_data_batches[0]["target_token_ids"] is not None:
+                target_token_ids_shape = packed_data_batches[0]["target_token_ids"].shape[2:]
+                pad_target_token_ids = torch.zeros(
+                    (1, pack_max_length, *target_token_ids_shape),
+                    dtype=packed_data_batches[0]["target_token_ids"].dtype,
+                    device="cpu",
+                )
+            pad_teacher_indices = None
+            if "teacher_indices" in packed_data_batches[0] and packed_data_batches[0]["teacher_indices"] is not None:
+                pad_teacher_indices = torch.full(
+                    (1, pack_max_length),
+                    -1,
+                    dtype=packed_data_batches[0]["teacher_indices"].dtype,
+                    device="cpu",
+                )
             pad_data = {
                 "seq_ctx": pad_seq_ctx,
                 "shifted_labels": pad_shifted_labels,
                 "advantages": pad_advantages,
                 "rollout_logprobs": pad_rollout_logprobs,
+                "teacher_logprobs": pad_teacher_logprobs,
+                "target_token_ids": pad_target_token_ids,
+                "teacher_indices": pad_teacher_indices,
             }
             pad_data_samples = [pad_data for _ in range(pad_num)]
             packed_data_batches = packed_data_batches + pad_data_samples

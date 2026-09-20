@@ -21,6 +21,7 @@ from xtuner.v1.ops.sparse_mla import (
     SparseMLABackend,
     SparseMLAProtocol,
     ensure_cudnn_dsa_runtime_available,
+    ensure_flash_mla_runtime_available,
     ensure_tilelang_runtime_available,
     get_dsa_topk_indices,
     get_sparse_mla,
@@ -225,10 +226,12 @@ class DSAMLAConfig(MLAConfig):
             index_head_dim=self.index_head_dim,
             index_n_heads=self.index_n_heads,
         )
-        if self.sparse_mla_backend in ("tilelang", "cudnn_dsa"):
+        if self.sparse_mla_backend in ("tilelang", "cudnn_dsa", "flash_mla"):
             ensure_tilelang_runtime_available()
         if self.sparse_mla_backend == "cudnn_dsa":
             ensure_cudnn_dsa_runtime_available()
+        if self.sparse_mla_backend == "flash_mla":
+            ensure_flash_mla_runtime_available()
 
         return DSAMultiLatentAttention(
             **self.model_dump(),
