@@ -208,6 +208,22 @@ class OffloadManager(metaclass=SingletonMeta):
         # buffer is reused across iterations as long as shape and dtype still match.
         self.pin_memory_cache: dict = {}
 
+    def clear_step(self, group: str | None = None) -> None:
+        """Release saved-tensor offload state at a training-step boundary.
+
+        Pinned CPU buffers stay cached for reuse; GPU tensors and per-step counters are released.
+
+        Args:
+            group (str | None): Optional group to clear. If omitted, clear all groups.
+        """
+        if not (self.items or self.may_npu_tensors):
+            return
+        # Offload copies run on streams this manager does not own. Drain the device before
+        # dropping references: launch_d2h reads tensor on the d2h stream without record_stream,
+        # and prefetch_launch_h2d reads the pinned CPU buffer, which record_stream cannot cover.
+        torch.cuda.synchronize()
+        self.clear(group=group)
+
     def get_cnt(self, block_idx, group="default"):
         if group not in self.getcnt:
             self.getcnt[group] = GetCnt()

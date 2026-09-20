@@ -33,6 +33,7 @@ class WeightIterator:
         self._engine = engine
         self.rollout_info = rollout_info
         self._global_hf_keys_mapping_cache = global_hf_keys_mapping_cache
+        self.ep_gather_count = 0
 
     def iter_batch_groups(self):
         # Export path depends on rollout protocol: turbomind consumes layer-wise batches,
@@ -77,8 +78,8 @@ class WeightIterator:
         preserved_fused_shard_group = None
         target_fused_key_partition = None
         if fused_params and self.rollout_info.transport_type == "ipc" and self.rollout_info.ep > 1:
-            target_rank = self.rollout_info.ipc_engine_parallel_rank
-            target_size = self.rollout_info.ipc_engine_parallel_size
+            target_rank = self.rollout_info.inference_engine_parallel_rank
+            target_size = self.rollout_info.inference_engine_parallel_size
             assert target_rank is not None, "IPC rollout target for current train rank is not resolved."
             assert target_size is not None, "IPC rollout target size for current train rank is not resolved."
 
@@ -88,6 +89,7 @@ class WeightIterator:
             if ep_group is not None and target_size == ep_mesh.size() and target_rank == dist.get_rank(ep_group):
                 preserved_fused_shard_group = ep_group
             else:
+                self.ep_gather_count += 1
                 target_fused_key_partition = (target_rank, target_size)
 
         fused_gen = model._get_hf_param(

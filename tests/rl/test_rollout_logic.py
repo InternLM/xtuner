@@ -257,7 +257,7 @@ class TestRolloutTopologyAPI(unittest.TestCase):
             ((0, (0, 1)),),
         )
 
-    def test_lmdeploy_tp16_weight_update_targets_match_legacy_mesh_and_url_semantics(self):
+    def test_lmdeploy_tp16_weight_update_targets_match_topology(self):
         config = self._rollout_config(tp=16, ep=1, num_gpus_per_engine=16)
         topology = LMDeployWorker.build_rollout_topology(
             config,
@@ -271,11 +271,7 @@ class TestRolloutTopologyAPI(unittest.TestCase):
             ((0, tuple(range(16))),),
         )
         self.assertEqual(
-            self._rollout_info(config=config, targets=targets, train_rank=0).rollout_url, "http://worker-0"
-        )
-        self.assertIsNone(self._rollout_info(config=config, targets=targets, train_rank=1).rollout_url)
-        self.assertEqual(
-            self._rollout_info(config=config, targets=targets, train_rank=1).ipc_rank_mesh,
+            self._rollout_info(config=config, targets=targets, train_rank=0).ipc_rank_mesh,
             (tuple(range(16)),),
         )
 
@@ -293,18 +289,11 @@ class TestRolloutTopologyAPI(unittest.TestCase):
             tuple((rank, (rank,)) for rank in range(16)),
         )
         self.assertEqual(
-            self._rollout_info(config=config, targets=targets, train_rank=0).rollout_url, "http://worker-0"
-        )
-        self.assertEqual(
-            self._rollout_info(config=config, targets=targets, train_rank=15).rollout_url,
-            "http://worker-15",
-        )
-        self.assertEqual(
             self._rollout_info(config=config, targets=targets, train_rank=0).ipc_rank_mesh,
             tuple((rank,) for rank in range(16)),
         )
 
-    def test_sglang_tp16_cross_node_weight_update_targets_match_legacy_mesh_and_url_semantics(self):
+    def test_sglang_tp16_cross_node_weight_update_targets_match_topology(self):
         config = self._rollout_config(tp=16, ep=1, num_gpus_per_engine=16, gpus_per_node=8)
         topology = SGLangWorker.build_rollout_topology(
             config,
@@ -319,13 +308,43 @@ class TestRolloutTopologyAPI(unittest.TestCase):
             ((0, tuple(range(16))),),
         )
         self.assertEqual(
-            self._rollout_info(config=config, targets=targets, train_rank=0).rollout_url, "http://worker-0"
-        )
-        self.assertIsNone(self._rollout_info(config=config, targets=targets, train_rank=8).rollout_url)
-        self.assertEqual(
-            self._rollout_info(config=config, targets=targets, train_rank=8).ipc_rank_mesh,
+            self._rollout_info(config=config, targets=targets, train_rank=0).ipc_rank_mesh,
             (tuple(range(16)),),
         )
+
+    def test_rollout_info_without_matching_ipc_target_sets_target_to_none(self):
+        config = self._rollout_config(tp=1, ep=1, num_gpus_per_engine=2)
+        topology = RolloutTopology(
+            engines=(
+                RolloutEngine(
+                    engine_ranks=(0, 1),
+                    dist_init_addr="host0:25000",
+                    server_processes=(
+                        RolloutServerProcess(
+                            worker_rank=0,
+                            placement_group_bundle_idxs=(0,),
+                            accepts_rollout_requests=True,
+                            weight_update_ranks=(0,),
+                        ),
+                        RolloutServerProcess(
+                            worker_rank=1,
+                            placement_group_bundle_idxs=(1,),
+                            accepts_rollout_requests=False,
+                            weight_update_ranks=(1,),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        # Build a valid topology first, then model a runtime target snapshot that
+        # does not include the current train rank.
+        targets = self._weight_update_targets(topology)[:1]
+
+        rollout_info = self._rollout_info(config=config, targets=targets, train_rank=1)
+
+        self.assertIsNone(rollout_info._ipc_update_target)
+        self.assertIsNone(rollout_info.inference_engine_parallel_rank)
+        self.assertIsNone(rollout_info.inference_engine_parallel_size)
 
 
 class TestRolloutController(unittest.IsolatedAsyncioTestCase):
@@ -638,6 +657,7 @@ class TestRolloutWorkerRegistry(unittest.TestCase):
                     placement_group_bundle_idxs=tuple(range(len(engine_ranks))),
                     accepts_rollout_requests=True,
                     weight_update_ranks=tuple(engine_ranks),
+                    inference_engine_ranks=tuple(engine_ranks),
                 ),
             )
         dist_init_addr_owner_rank = server_processes[0].worker_rank
