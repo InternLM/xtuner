@@ -2,7 +2,7 @@
 
 Coverage:
 - value_head models reject MTP
-- Qwen3.5-VL value-head HF keys stay at repo root (value_head.weight)
+- Qwen3.5-VL value-head HF keys are top-level (value_head.weight, no language_model. prefix)
 - SFT value loss (returns only): forward, loss value, and backward
 - PPO critic value loss (returns + old_values): forward, loss value, and backward
 - load a Qwen3.5-VL actor HF checkpoint into a critic, save_hf, and reload
@@ -141,7 +141,7 @@ class TestCriticSFT(DeterministicDDPTestCase):
             pass
 
     def test_critic_qwen35_value_head_hf_keys(self):
-        """Qwen3.5-VL maps runtime lm_head.weight to value_head.weight at repo root."""
+        """Qwen3.5-VL maps runtime lm_head.weight to top-level value_head.weight."""
         pg = self.create_pg(str(DEVICE))
         with torch.device("meta"):
             model = _critic_model_cfg().build()
