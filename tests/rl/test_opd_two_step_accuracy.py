@@ -4,11 +4,22 @@ The smoke launchers (recipe/on_policy_distillation/scripts/run_smoke_*.sh)
 keep the e2e models, batch size 128, seed 1234, and 1024/2048 sequence
 lengths, but stop after ``TOTAL_TRAIN_STEPS=2`` with eval disabled. Data
 order is seed-deterministic, so the smoke run's step-1/2 metrics must
-reproduce the first two steps of the reference 50-step clusterx runs within
-per-tag tolerances:
+reproduce the first two steps of the reference 50-step runs within
+per-tag tolerances.
 
-- topk: work_dirs/opd_e2e/qwen3-vl-2b-train-teacher-topk-clusterx-20260917-063709
-- mopd: work_dirs/opd_e2e/qwen3-vl-2b-mopd-clusterx-20260916-120028
+Golden baselines (headline values; full precision in the constants below):
+
+  topk (train-teacher forward_kl_topk):
+    distillation/reduced_topk_opd_kl      step1=0.3049  step2=0.3286
+    response/rewards/mean                 step1=0.3828  step2=0.3633
+  mopd (sampled-token k1 rollout teachers):
+    distillation/reduced_distillation_kl  step1=0.3442  step2=0.3924
+    response/rewards/mean                 step1=0.4477  step2=0.4703
+
+``TOPK_GOLDEN`` / ``MOPD_GOLDEN`` below are the authoritative baselines.
+They are self-contained constants in this file and do not reference any
+external run directory, so the check keeps working after old WORK_DIRs
+are cleaned up.
 
 Workflow:
 
